@@ -96,12 +96,17 @@ fn generate(
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().unwrap_or_else(|| {
-        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N] [--timing] [--spec N]");
+        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N] [--timing] [--spec N] [--speed-only]");
         std::process::exit(2);
     });
     let mut max_new = 24usize;
     let mut slots = 4u32;
     let mut timing = false;
+    // Run ONLY the speed gate. The correctness gates take minutes and gate 3
+    // is prompt luck across widths (see the runbook), so a perf question
+    // should not have to survive them to get an answer. It is a filter on
+    // which gates run, never a relaxation of any of them.
+    let mut speed_only = false;
     let mut rest: Vec<String> = args.collect();
     let mut index = 0;
     while index < rest.len() {
@@ -122,6 +127,10 @@ fn main() {
             }
             "--timing" => {
                 timing = true;
+                index += 1;
+            }
+            "--speed-only" => {
+                speed_only = true;
                 index += 1;
             }
             "--spec" => {
@@ -149,6 +158,19 @@ fn main() {
         eprintln!("vocab: {e}");
         std::process::exit(1);
     });
+
+    if speed_only {
+        match solo_speed_floor(&model, &vocab, slots, PER_SLOT_CONTEXT, max_new.max(64)) {
+            Ok(()) => {
+                println!("PASS: a solo turn through the executor keeps the session's rate");
+                return;
+            }
+            Err(e) => {
+                eprintln!("FAIL (solo speed): {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     eprintln!("solo reference: 1 slot, {PER_SLOT_CONTEXT} context");
     let (solo_tokens, solo_logits, solo_arena) =
