@@ -3765,6 +3765,15 @@ impl Renderer {
         self.gpu_baker.mode()
     }
 
+    /// `(regions done, regions in the kick)` while the static lighting is
+    /// still filling in over successive frames, `None` once it has settled.
+    /// A big world is playable from its first frame in flat light; this is
+    /// what lets an app say so instead of leaving the player wondering why
+    /// the shadows are missing.
+    pub fn lightmap_bake_progress(&self) -> Option<(usize, usize)> {
+        self.gpu_baker.bake_progress()
+    }
+
     /// Configure the device-local Realtime cascaded-shadow budget. This is
     /// presentation-only and cannot affect the shared simulation. Explicit
     /// `MAKEPAD_CSM_RES` / `MAKEPAD_CSM_FAR` launch overrides take final

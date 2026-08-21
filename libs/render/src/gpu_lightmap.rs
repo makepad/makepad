@@ -40,7 +40,13 @@
 //!
 //! The ATLAS is static-only and mode-independent: one camera-blind bake per
 //! dirty kick (world edit / explicit sun change, settle-debounced by the
-//! renderer), identical bytes in both modes. What differs is how DYNAMIC
+//! renderer), identical bytes in both modes. The bake is AMORTIZED — a kick
+//! queues every region and each frame encodes at most [`DEFAULT_BAKE_BUDGET`]
+//! of them, so a world appears immediately in flat light and its shadows
+//! land over the next frames instead of behind a multi-second freeze. The
+//! caller keeps drawing (a game view always does); [`GpuLightmapBaker::bake_progress`]
+//! says whether lighting is still filling in, for an app that wants to tell
+//! the player. What differs between modes is how DYNAMIC
 //! casters shadow and where SUN visibility comes from at shade time:
 //!
 //! [`GpuLightmapMode::OnChange`] (default everywhere, the slow-GPU tier):
@@ -199,28 +205,55 @@ pub fn dynamic_shadow_tiers(mode: GpuLightmapMode) -> DynamicShadowTiers {
     }
 }
 
+/// Regions one frame may bake before the rest wait for the next frame. A
+/// city of 3285 lit props is 13k passes: encoded in one frame that is a
+/// four-second freeze on first load, and the world does not appear at all
+/// until it ends. Encoded a slice at a time, the world is on screen from
+/// frame one in flat light and its shadows land over the following second.
+/// `MAKEPAD_GPU_LM_BAKE_BUDGET=0` restores the everything-at-once bake (the
+/// honest choice for an offline capture, where a settled frame matters and
+/// no one is watching it arrive).
+const DEFAULT_BAKE_BUDGET: usize = 24;
+
 /// The ATLAS scheduling decision, pure and mode-independent: the dirty bit
 /// — set only by a realized job (a world edit's settle kick), never by
-/// routine mover or replication traffic — bakes ALL regions once,
-/// camera-blind, and a clean bit encodes ZERO atlas passes. Realtime's
-/// per-frame work is the CASCADES, never the atlas (the invariant the
-/// tests below pin for both modes).
+/// routine mover or replication traffic — queues ALL regions once,
+/// camera-blind, and a clean bit with a drained queue encodes ZERO atlas
+/// passes. Realtime's per-frame work is the CASCADES, never the atlas (the
+/// invariant the tests below pin for both modes).
+///
+/// The queue is what makes the bake amortizable: a kick fills it, every
+/// frame drains at most `budget` of it (0 = no budget, the whole kick in
+/// one frame), and the atlas is correct-so-far the whole way — each
+/// region's chain writes only its own rect of the persistent atlas, so a
+/// half-drained queue is a world whose remaining props are still flat, not
+/// a world whose lighting is wrong.
 ///
 /// `only_region` is the MAKEPAD_GPU_LM_ONLY_REGION debug pin (stage
 /// dumps).
 fn schedule_regions(
     dirty: &mut bool,
+    queue: &mut std::collections::VecDeque<usize>,
     region_count: usize,
     only_region: Option<usize>,
+    budget: usize,
 ) -> Vec<usize> {
-    if !*dirty {
-        return Vec::new();
+    if *dirty {
+        *dirty = false;
+        // A fresh kick supersedes whatever the last one had left: the
+        // layout it was baking is gone.
+        queue.clear();
+        match only_region.filter(|only| *only < region_count) {
+            Some(only) => queue.push_back(only),
+            None => queue.extend(0..region_count),
+        }
     }
-    *dirty = false;
-    match only_region.filter(|only| *only < region_count) {
-        Some(only) => vec![only],
-        None => (0..region_count).collect(),
-    }
+    let take = if budget == 0 {
+        queue.len()
+    } else {
+        budget.min(queue.len())
+    };
+    queue.drain(..take).collect()
 }
 
 /// One caster the depth passes rasterize.
@@ -515,10 +548,24 @@ pub struct GpuLightmapBaker {
     /// frames where the atlas encodes nothing, and both chains hang off the
     /// 3D pass independently.
     csm_pool: Vec<BakePass>,
-    /// The whole dirt model, both modes: the next run re-bakes ALL atlas
-    /// regions in one frame. Set only by a realized job — the atlas is
+    /// The whole dirt model, both modes: the next run queues ALL atlas
+    /// regions for re-bake. Set only by a realized job — the atlas is
     /// static-only and mode-independent, so mode switches never touch it.
     dirty: bool,
+    /// Regions of the current kick still to bake, drained `bake_budget` at
+    /// a time. Non-empty means "the lighting is still filling in".
+    bake_queue: std::collections::VecDeque<usize>,
+    /// Regions in the kick that filled `bake_queue` — the denominator of
+    /// [`Self::bake_progress`].
+    bake_total: usize,
+    /// Regions per frame (0 = the whole kick at once); see
+    /// [`DEFAULT_BAKE_BUDGET`].
+    bake_budget: usize,
+    /// This kick's accumulated cost, so the finish can report the whole
+    /// bake instead of one slice of it.
+    bake_frames: u32,
+    bake_passes: usize,
+    bake_us: u64,
     /// This frame's fitted cascades (Realtime), for the renderer's material
     /// uniforms. None in OnChange.
     csm_last: Option<CsmFrame>,
@@ -542,11 +589,27 @@ impl Default for GpuLightmapBaker {
             csm_res: DEFAULT_CSM_CONFIG.tile_resolution,
             csm_pool: Vec::new(),
             dirty: false,
+            bake_queue: std::collections::VecDeque::new(),
+            bake_total: 0,
+            bake_budget: bake_budget_from_env(),
+            bake_frames: 0,
+            bake_passes: 0,
+            bake_us: 0,
             csm_last: None,
             rt_frames: 0,
             rt_us: 0,
         }
     }
+}
+
+/// `MAKEPAD_GPU_LM_BAKE_BUDGET` regions per frame, else the default. Read
+/// once per baker rather than per frame: this is a launch policy, and a
+/// bake that changed budget halfway through would report nonsense progress.
+fn bake_budget_from_env() -> usize {
+    std::env::var("MAKEPAD_GPU_LM_BAKE_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BAKE_BUDGET)
 }
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
@@ -779,6 +842,13 @@ impl GpuLightmapBaker {
         self.pending = None;
         self.state = None;
         self.dirty = false;
+        // Regions of a realm that no longer exists must never be baked into
+        // the next one's atlas.
+        self.bake_queue.clear();
+        self.bake_total = 0;
+        self.bake_frames = 0;
+        self.bake_passes = 0;
+        self.bake_us = 0;
         self.csm_last = None;
         self.rt_frames = 0;
         self.rt_us = 0;
@@ -833,8 +903,25 @@ impl GpuLightmapBaker {
 
     /// True when a realized layout exists and nothing is queued: the atlas
     /// content is complete as of the previous frame (debug dumps read here).
+    /// A half-drained bake queue is NOT idle — the atlas is correct so far
+    /// but not finished, and a dump taken there would show flat props.
     pub fn is_idle(&self) -> bool {
-        self.state.is_some() && self.pending.is_none() && !self.dirty
+        self.state.is_some()
+            && self.pending.is_none()
+            && !self.dirty
+            && self.bake_queue.is_empty()
+    }
+
+    /// How far the static bake has got: `(regions done, regions in the
+    /// kick)` while lighting is still filling in, `None` once it has
+    /// settled. The app's own status line is the honest place to say
+    /// "baking lighting…" — the engine only reports.
+    pub fn bake_progress(&self) -> Option<(usize, usize)> {
+        let left = self.bake_queue.len();
+        if left == 0 {
+            return None;
+        }
+        Some((self.bake_total.saturating_sub(left), self.bake_total))
     }
 
     /// This frame's cascade binding for the material shaders: the fitted
@@ -1148,7 +1235,28 @@ impl GpuLightmapBaker {
                 let only_region = std::env::var("MAKEPAD_GPU_LM_ONLY_REGION")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok());
-                schedule_regions(&mut self.dirty, state.regions.len(), only_region)
+                let kick = self.dirty;
+                let batch = schedule_regions(
+                    &mut self.dirty,
+                    &mut self.bake_queue,
+                    state.regions.len(),
+                    only_region,
+                    self.bake_budget,
+                );
+                if kick {
+                    self.bake_total = batch.len() + self.bake_queue.len();
+                    self.bake_frames = 0;
+                    self.bake_passes = 0;
+                    self.bake_us = 0;
+                    if !self.bake_queue.is_empty() {
+                        log!(
+                            "gpu lightmap: baking {} regions, {} per frame — the world lights flat until it settles",
+                            self.bake_total,
+                            self.bake_budget
+                        );
+                    }
+                }
+                batch
             }
             None => Vec::new(),
         };
@@ -1197,15 +1305,32 @@ impl GpuLightmapBaker {
         let us = t0.elapsed().as_micros() as u64;
         self.csm_last = csm;
         if !batch.is_empty() {
-            let state = self.state.as_ref().unwrap();
-            log!(
-                "gpu lightmap: {}px atlas, {} regions, {} lamps — {} passes encoded in {}us (CPU-side submission; GPU renders in-frame)",
-                state.size,
-                state.regions.len(),
-                state.lights.len(),
-                passes,
-                us
-            );
+            self.bake_frames += 1;
+            self.bake_passes += passes;
+            self.bake_us += us;
+            // One line per BAKE, not per frame: an amortized city is a
+            // hundred frames, and a hundred identical log lines is noise
+            // that hides the number that matters.
+            if self.bake_queue.is_empty() {
+                let state = self.state.as_ref().unwrap();
+                log!(
+                    "gpu lightmap: {}px atlas, {} regions, {} lamps — {} passes encoded over {} frame(s) in {}us (CPU-side submission; GPU renders in-frame)",
+                    state.size,
+                    state.regions.len(),
+                    state.lights.len(),
+                    self.bake_passes,
+                    self.bake_frames,
+                    self.bake_us
+                );
+            } else if std::env::var_os("MAKEPAD_GPU_LM_PERF").is_some() {
+                log!(
+                    "gpu lightmap: {} of {} regions baked ({} passes in {}us this frame)",
+                    self.bake_total - self.bake_queue.len(),
+                    self.bake_total,
+                    passes,
+                    us
+                );
+            }
         } else if std::env::var_os("MAKEPAD_GPU_LM_PERF").is_some() {
             self.rt_frames += 1;
             self.rt_us += us;
@@ -2169,15 +2294,18 @@ mod tests {
     #[test]
     fn steady_state_encodes_zero_atlas_passes() {
         let mut dirty = true;
-        // The kick: all regions.
-        let first = schedule_regions(&mut dirty, 4, None);
+        let mut queue = std::collections::VecDeque::new();
+        // The kick: all regions, and a world smaller than the budget still
+        // bakes in ONE frame (the small-scene picture is unchanged).
+        let first = schedule_regions(&mut dirty, &mut queue, 4, None, DEFAULT_BAKE_BUDGET);
         assert_eq!(first, vec![0, 1, 2, 3]);
         assert!(!dirty, "the kick must consume the dirty bit");
+        assert!(queue.is_empty());
         // Steady state: N frames, nothing edits the world — nothing bakes.
         // The scheduler is mode-blind by construction, so this covers
         // Realtime's "zero lightmap sun passes" mirror too.
         for frame in 0..600 {
-            let batch = schedule_regions(&mut dirty, 4, None);
+            let batch = schedule_regions(&mut dirty, &mut queue, 4, None, DEFAULT_BAKE_BUDGET);
             assert!(
                 batch.is_empty(),
                 "atlas re-baked at steady-state frame {frame}: {batch:?}"
@@ -2186,8 +2314,103 @@ mod tests {
         // The debug pin narrows a kick to one region without unconsuming
         // the bit.
         dirty = true;
-        assert_eq!(schedule_regions(&mut dirty, 4, Some(2)), vec![2]);
-        assert!(schedule_regions(&mut dirty, 4, Some(2)).is_empty());
+        assert_eq!(
+            schedule_regions(&mut dirty, &mut queue, 4, Some(2), DEFAULT_BAKE_BUDGET),
+            vec![2]
+        );
+        assert!(
+            schedule_regions(&mut dirty, &mut queue, 4, Some(2), DEFAULT_BAKE_BUDGET).is_empty()
+        );
+    }
+
+    /// The amortization contract: one kick still bakes every region exactly
+    /// once, in order, but spread over frames — a city of thousands of lit
+    /// props must not encode thousands of passes in the frame the player is
+    /// waiting on. And it still ENDS: after the queue drains, steady state
+    /// is zero passes forever, budget or no budget.
+    #[test]
+    fn a_big_kick_is_spread_over_frames_and_still_bakes_everything_once() {
+        let mut dirty = true;
+        let mut queue = std::collections::VecDeque::new();
+        let regions = 3285; // the city that froze for four seconds
+        let budget = 24;
+        let mut baked = Vec::new();
+        let mut frames = 0;
+        loop {
+            let batch = schedule_regions(&mut dirty, &mut queue, regions, None, budget);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(
+                batch.len() <= budget,
+                "frame {frames} encoded {} regions, over the {budget} budget",
+                batch.len()
+            );
+            frames += 1;
+            baked.extend(batch);
+        }
+        assert_eq!(baked, (0..regions).collect::<Vec<_>>());
+        assert_eq!(frames, regions.div_ceil(budget));
+        for _ in 0..600 {
+            assert!(schedule_regions(&mut dirty, &mut queue, regions, None, budget).is_empty());
+        }
+
+        // Budget 0 is the offline escape hatch: the whole kick at once.
+        dirty = true;
+        assert_eq!(
+            schedule_regions(&mut dirty, &mut queue, regions, None, 0).len(),
+            regions
+        );
+
+        // A NEW kick supersedes a half-drained queue: the layout the old
+        // regions indexed is gone, and baking them into the new atlas would
+        // light the wrong rects.
+        dirty = true;
+        let _ = schedule_regions(&mut dirty, &mut queue, 100, None, 10);
+        assert_eq!(queue.len(), 90);
+        dirty = true;
+        let batch = schedule_regions(&mut dirty, &mut queue, 5, None, 10);
+        assert_eq!(batch, vec![0, 1, 2, 3, 4]);
+        assert!(queue.is_empty());
+    }
+
+    /// Progress is what an app puts in front of a player who is looking at a
+    /// flat-lit world: it counts up, and it stops existing the moment the
+    /// lighting has settled.
+    #[test]
+    fn bake_progress_reports_only_while_the_lighting_is_filling_in() {
+        let mut baker = GpuLightmapBaker::default();
+        baker.bake_budget = 10;
+        assert!(baker.bake_progress().is_none(), "nothing scheduled, nothing to report");
+
+        baker.dirty = true;
+        let batch = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        baker.bake_total = batch.len() + baker.bake_queue.len();
+        assert_eq!(baker.bake_progress(), Some((10, 25)));
+        assert!(!baker.is_idle(), "a half-baked atlas is not settled content");
+
+        let _ = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        assert_eq!(baker.bake_progress(), Some((20, 25)));
+        let _ = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        assert!(baker.bake_progress().is_none());
     }
 
     #[test]
@@ -2198,6 +2421,8 @@ mod tests {
         baker.set_mode(GpuLightmapMode::Realtime);
         baker.set_csm_config(1024, 48.0);
         baker.dirty = true;
+        baker.bake_queue.extend([0, 1, 2]);
+        baker.bake_total = 3;
         baker.rt_frames = 9;
         baker.rt_us = 42;
         // A pass cannot be constructed without a draw context, but an empty
@@ -2219,6 +2444,10 @@ mod tests {
         assert!(baker.state.is_none());
         assert!(baker.csm_last.is_none());
         assert!(!baker.dirty);
+        assert!(
+            baker.bake_queue.is_empty() && baker.bake_progress().is_none(),
+            "regions of the realm we just left must never bake into the next one"
+        );
         assert_eq!(baker.rt_frames, 0);
         assert_eq!(baker.rt_us, 0);
         assert_eq!(baker.pool.capacity(), pool_capacity);
