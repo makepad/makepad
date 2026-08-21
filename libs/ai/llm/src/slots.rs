@@ -17,6 +17,7 @@
 //! Design of record: `local/agent_state/qwen-parallel/batched-session-design.md`.
 
 use crate::error::{LlamaError, Result};
+use crate::runtime::HybridDecodeBatchLayout;
 
 /// Widths a decode step is allowed to take.
 ///
@@ -78,6 +79,10 @@ pub struct Slot {
     /// Next M-RoPE position. Tracks `fill` for pure text; falls behind after an
     /// image span, whose n_pos is max(tokens_w, tokens_h), not its token count.
     rope_pos_next: i64,
+    /// Which of the slot's own recurrent rows is live, as an offset inside its
+    /// block. Always 0 without speculation; with it, the verify batch
+    /// checkpoints into the slot's other rows and this follows the live one.
+    live_state_offset: usize,
 }
 
 impl Slot {
@@ -95,6 +100,12 @@ impl Slot {
     /// verify-batch position.
     pub fn state_base(&self) -> usize {
         self.state_base
+    }
+
+    /// The recurrent row the non-speculative graphs read and write for this
+    /// slot. Always inside the slot's own block.
+    pub fn live_state_row(&self) -> usize {
+        self.state_base + self.live_state_offset
     }
 
     pub fn index(&self) -> usize {
@@ -148,6 +159,8 @@ pub struct SlotStep {
     pub key_lower_bound: usize,
     /// Within-slot position, for RoPE.
     pub position: usize,
+    /// Recurrent row this slot reads and writes this step.
+    pub state_row: usize,
 }
 
 /// The decode step to run next.
@@ -170,6 +183,84 @@ impl StepPlan {
     /// Columns this step spends, against [`COLUMN_BUDGET`].
     pub fn columns(&self) -> usize {
         self.width * (self.draft_depth + 1)
+    }
+
+    /// Turn the plan into the decode batch layout the graph is fed.
+    ///
+    /// One token per slot, one logit row per slot, in plan order — so logit row
+    /// `i` belongs to `self.slots[i].slot`.
+    ///
+    /// `positions` stay WITHIN-slot (they drive RoPE), while
+    /// `attention_write_indices` are absolute arena rows. For a single sequence
+    /// on slot 0 those coincide, and the lower-bound vector is left empty, so
+    /// this produces byte-for-byte the layout a single-sequence decode produces
+    /// today. That is what keeps one active client on today's numbers.
+    pub fn to_batch_layout(&self) -> Result<HybridDecodeBatchLayout> {
+        if self.slots.is_empty() {
+            return Err(LlamaError::format(
+                "a decode step plan needs at least one slot",
+            ));
+        }
+        let as_i32 = |value: usize, what: &str| -> Result<i32> {
+            i32::try_from(value)
+                .map_err(|_| LlamaError::format(format!("{what} {value} does not fit in i32")))
+        };
+
+        let positions = self
+            .slots
+            .iter()
+            .map(|step| as_i32(step.position, "slot position"))
+            .collect::<Result<Vec<_>>>()?;
+        let attention_write_indices = self
+            .slots
+            .iter()
+            .map(|step| as_i32(step.write_row, "slot write row"))
+            .collect::<Result<Vec<_>>>()?;
+        let recurrent_state_rows = self
+            .slots
+            .iter()
+            .map(|step| as_i32(step.state_row, "slot state row"))
+            .collect::<Result<Vec<_>>>()?;
+        let output_ids = (0..self.slots.len())
+            .map(|index| as_i32(index, "slot output id"))
+            .collect::<Result<Vec<_>>>()?;
+        // All-zero bounds mean "one sequence from row 0", and the mask builder
+        // has a dedicated path for that. Keeping the vector empty there is what
+        // makes the solo lane byte-identical rather than merely equivalent.
+        let attention_key_lower_bounds = if self
+            .slots
+            .iter()
+            .all(|step| step.key_lower_bound == 0)
+        {
+            Vec::new()
+        } else {
+            self.slots
+                .iter()
+                .map(|step| as_i32(step.key_lower_bound, "slot key lower bound"))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let layout = HybridDecodeBatchLayout {
+            positions,
+            attention_write_indices,
+            attention_key_count: self.attention_key_count,
+            recurrent_state_rows,
+            output_ids,
+            rope_positions: None,
+            hidden_read_rows: Vec::new(),
+            hidden_write_rows: Vec::new(),
+            attention_key_lower_bounds,
+        };
+        layout.validate()?;
+        if let Some(&highest) = layout.attention_write_indices.iter().max() {
+            if usize::try_from(highest).unwrap_or(usize::MAX) >= self.attention_key_count {
+                return Err(LlamaError::format(format!(
+                    "step plan writes cache row {} but only spans {} keys",
+                    highest, self.attention_key_count
+                )));
+            }
+        }
+        Ok(layout)
     }
 }
 
@@ -214,6 +305,7 @@ impl SlotTable {
                 phase: SlotPhase::Idle,
                 fill: 0,
                 rope_pos_next: 0,
+                live_state_offset: 0,
             })
             .collect();
         Ok(Self {
@@ -274,6 +366,7 @@ impl SlotTable {
         slot.phase = SlotPhase::Prefilling { cursor: 0 };
         slot.fill = 0;
         slot.rope_pos_next = 0;
+        slot.live_state_offset = 0;
         Some(index)
     }
 
@@ -283,6 +376,7 @@ impl SlotTable {
         slot.phase = SlotPhase::Idle;
         slot.fill = 0;
         slot.rope_pos_next = 0;
+        slot.live_state_offset = 0;
         Ok(())
     }
 
@@ -344,6 +438,7 @@ impl SlotTable {
                 write_row: slot.next_write_row(),
                 key_lower_bound: slot.kv_base,
                 position: slot.fill,
+                state_row: slot.live_state_row(),
             })
             .collect();
         if slots.is_empty() {
@@ -493,6 +588,7 @@ mod tests {
                 write_row: 10,
                 key_lower_bound: 0,
                 position: 10,
+                state_row: 0,
             }]
         );
     }
@@ -552,12 +648,14 @@ mod tests {
                     write_row: 5,
                     key_lower_bound: 0,
                     position: 5,
+                    state_row: 0,
                 },
                 SlotStep {
                     slot: 1,
                     write_row: 130,
                     key_lower_bound: 100,
                     position: 30,
+                    state_row: 1,
                 },
             ]
         );
@@ -602,6 +700,106 @@ mod tests {
                 step.slot
             );
         }
+    }
+
+    #[test]
+    fn a_solo_plan_builds_todays_single_sequence_layout() {
+        // End of the byte-identity chain: a solo client on slot 0 must produce
+        // a layout indistinguishable from single-sequence decode, INCLUDING an
+        // empty lower-bound vector so the mask takes its single-sequence path.
+        let mut table = table();
+        table.admit().expect("admit");
+        table.advance(0, 12).expect("advance");
+        table.begin_decoding(0).expect("decode");
+
+        let layout = table
+            .plan_step()
+            .expect("plan")
+            .to_batch_layout()
+            .expect("layout");
+        assert_eq!(layout.positions, vec![12]);
+        assert_eq!(layout.attention_write_indices, vec![12]);
+        assert_eq!(
+            layout.attention_write_indices, layout.positions,
+            "on slot 0 the write row IS the position"
+        );
+        assert!(
+            layout.attention_key_lower_bounds.is_empty(),
+            "an all-zero bound list must stay empty, not become zeros"
+        );
+        assert!(layout.attention_key_lower_bounds().is_none());
+        assert_eq!(layout.recurrent_state_rows, vec![0]);
+        assert_eq!(layout.output_ids, vec![0]);
+        assert_eq!(layout.attention_key_count, 13);
+    }
+
+    #[test]
+    fn a_batched_plan_keeps_rope_within_slot_and_writes_absolute() {
+        // The distinction the whole layout rests on: positions are within-slot
+        // (they drive RoPE), write rows are absolute arena rows.
+        let mut table = SlotTable::new(4, 100, 3, 2).expect("table");
+        for _ in 0..2 {
+            table.admit().expect("admit");
+        }
+        table.advance(0, 4).expect("advance");
+        table.advance(1, 9).expect("advance");
+        table.begin_decoding(0).expect("decode");
+        table.begin_decoding(1).expect("decode");
+
+        let layout = table
+            .plan_step()
+            .expect("plan")
+            .to_batch_layout()
+            .expect("layout");
+        assert_eq!(layout.positions, vec![4, 9], "RoPE stays within the slot");
+        assert_eq!(
+            layout.attention_write_indices,
+            vec![4, 109],
+            "cache writes are absolute"
+        );
+        assert_eq!(layout.attention_key_lower_bounds, vec![0, 100]);
+        assert_eq!(
+            layout.recurrent_state_rows,
+            vec![0, 3],
+            "each slot reads its own recurrent block"
+        );
+        assert_eq!(
+            layout.output_ids,
+            vec![0, 1],
+            "one logit row per slot, in plan order"
+        );
+        layout.validate().expect("batched layout is valid");
+    }
+
+    #[test]
+    fn a_plan_that_outruns_its_key_span_is_refused() {
+        // A layout whose write row sits outside the mask would attend to
+        // nothing, which reads as a plausible-looking zero rather than an
+        // error, so it has to be caught here.
+        let plan = StepPlan {
+            slots: vec![SlotStep {
+                slot: 0,
+                write_row: 40,
+                key_lower_bound: 0,
+                position: 40,
+            state_row: 0,
+            }],
+            width: 1,
+            draft_depth: 0,
+            attention_key_count: 8,
+        };
+        assert!(plan.to_batch_layout().is_err());
+    }
+
+    #[test]
+    fn an_empty_plan_cannot_become_a_layout() {
+        let plan = StepPlan {
+            slots: Vec::new(),
+            width: 1,
+            draft_depth: 0,
+            attention_key_count: 8,
+        };
+        assert!(plan.to_batch_layout().is_err());
     }
 
     #[test]
