@@ -835,6 +835,9 @@ struct LoadedModel {
     /// in `geometry`: they move, so they are neither baked into the static
     /// lightmap nor part of the model's collider.
     anim_parts: Vec<LoadedAnimPart>,
+    /// Rigid parts whose complete model-space pose is supplied by each
+    /// ModelInstance (vehicle wheels are the first consumer).
+    driven_parts: Vec<LoadedDrivenPart>,
     /// The map's sky surfaces, drawn by view direction instead of lit. Also
     /// out of `geometry`: the bake must never see them (they would shadow
     /// the whole level from above) and the sun must never shade them.
@@ -866,6 +869,11 @@ struct LoadedAnimPart {
     draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
     /// Node-local collider boxes, derived once at load.
     collider: Vec<(Vec3f, Vec3f)>,
+}
+
+struct LoadedDrivenPart {
+    def: crate::model::DrivenPart,
+    draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
 }
 
 /// Whether a sky projection's layer images get a mip chain.
@@ -1114,6 +1122,29 @@ pub struct ModelInstance {
     /// (order * 1e-3 view-space scale) so the later-placed piece wins the
     /// z-tie. 0 for anything that never stacks (dynamics, lone props).
     pub depth_order: f32,
+    /// Optional complete model-space poses for externally-driven rigid parts,
+    /// keyed by their source-neutral connection name. Missing entries sit in
+    /// the authored rest pose, so generic viewers need no special handling.
+    pub part_poses: Vec<ModelPartPose>,
+}
+
+#[derive(Clone)]
+pub struct ModelPartPose {
+    pub connection: String,
+    pub transform: Mat4f,
+}
+
+/// Read-only connection metadata exposed to game object loaders. All values
+/// are in authored model space; callers apply the same uniform scale and
+/// model-to-body basis they use for the visible instance.
+#[derive(Clone, Debug)]
+pub struct DrivenPartInfo {
+    pub connection: String,
+    pub pivot: Vec3f,
+    pub anchor: Vec3f,
+    pub radius: f32,
+    pub width: f32,
+    pub rest_transform: Mat4f,
 }
 
 /// Stable FNV-1a signature for the subset of a placed-model frame that can
@@ -1276,6 +1307,7 @@ impl ModelInstance {
             transform: Mat4f::mul(frame, &local),
             dynamic: true,
             depth_order: 0.0,
+            part_poses: Vec::new(),
         }
     }
 }
@@ -2957,10 +2989,22 @@ impl Renderer {
         // way to reconstruct — so loading it is what makes the AO texture mean
         // anything. Absent or stale, the plain glb still renders, just unlit by
         // AO, which is the correct outcome for an unbaked library.
-        let model = aomesh
+        let baked = aomesh
             .and_then(StaticModel::from_aomesh)
-            .or_else(|| Self::load_aomesh(id))
-            .map_or_else(|| StaticModel::parse_glb(glb), Ok)?;
+            .or_else(|| Self::load_aomesh(id));
+        let model = match baked {
+            Some(mut body) if glb.windows(b"vehicle_wheel".len()).any(|w| w == b"vehicle_wheel") => {
+                // The AO sidecar intentionally serializes only the flattened
+                // body stream. Driven parts stay in the original GLB because
+                // their per-frame pose makes baked AO invalid. Reattach those
+                // definitions without giving up the body's baked chart.
+                let mut source = StaticModel::parse_glb(glb)?;
+                body.driven_parts = std::mem::take(&mut source.driven_parts);
+                body
+            }
+            Some(body) => body,
+            None => StaticModel::parse_glb(glb)?,
+        };
         self.load_model_parsed(cx, id, model, png, ao_png)
     }
 
@@ -2996,6 +3040,7 @@ impl Renderer {
         // everything after this point sees the model exactly as it did
         // before doors and skies existed.
         let anim_defs = std::mem::take(&mut model.anim_parts);
+        let driven_defs = std::mem::take(&mut model.driven_parts);
         let sky_def = model.sky.take();
         let triangles = model.triangle_count();
         let (min, max) = (model.min, model.max);
@@ -3233,6 +3278,60 @@ impl Renderer {
             }
             out
         };
+        let driven_parts: Vec<LoadedDrivenPart> = {
+            let mut out = Vec::with_capacity(driven_defs.len());
+            for def in driven_defs {
+                let mut draws = Vec::with_capacity(def.layers.len());
+                for (li, layer) in def.layers.iter().enumerate() {
+                    if layer.indices.len() < 3 {
+                        continue;
+                    }
+                    let resident = if multi {
+                        model
+                            .draw_layers
+                            .iter()
+                            .position(|l| l.texture_png == layer.texture_png)
+                            .and_then(|k| match k {
+                                0 => Some(texture.clone()),
+                                k => extra_draws.get(k - 1).map(|(_, t, _, _, _)| t.clone()),
+                            })
+                    } else if main_png.is_some() && main_png == layer.texture_png.as_deref() {
+                        Some(texture.clone())
+                    } else {
+                        None
+                    };
+                    let tex = match resident {
+                        Some(t) => t,
+                        None => match layer.texture_png.as_deref() {
+                            Some(bytes) => ImageBuffer::from_png(bytes)
+                                .map_err(|e| {
+                                    format!(
+                                        "{id}: driven part {} layer {li} atlas decode failed: {e:?}",
+                                        def.connection
+                                    )
+                                })?
+                                .into_new_mip_repeat_texture(cx),
+                            None => {
+                                let mut white = ImageBuffer::default();
+                                white.width = 1;
+                                white.height = 1;
+                                white.data = vec![0xFFFF_FFFF];
+                                white.into_new_texture(cx)
+                            }
+                        },
+                    };
+                    let (det, dscale) =
+                        self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
+                    let g = Geometry::new(cx);
+                    g.update(cx, layer.indices.clone(), layer.vertices.clone());
+                    draws.push((g, tex, det, dscale));
+                }
+                if !draws.is_empty() {
+                    out.push(LoadedDrivenPart { def, draws });
+                }
+            }
+            out
+        };
         // The map's sky faces: one geometry, up to two layer images. A
         // missing or undecodable layer falls back to a 1x1 rather than
         // failing the whole map — a wrong sky is a wrong sky, but no map is
@@ -3376,6 +3475,7 @@ impl Renderer {
                 collider_parts,
                 occluder_parts,
                 anim_parts,
+                driven_parts,
                 sky,
                 mesh_positions: lm_positions,
                 mesh_indices: lm_indices,
@@ -3932,6 +4032,24 @@ impl Renderer {
                     });
                 }
             }
+            for part in &m.driven_parts {
+                let local = inst
+                    .part_poses
+                    .iter()
+                    .find(|pose| pose.connection == part.def.connection)
+                    .map(|pose| pose.transform)
+                    .unwrap_or_else(|| part.def.rest_transform());
+                let pose = Mat4f::mul(&inst.transform, &local);
+                for (g, _, _, _) in &part.draws {
+                    out.push(crate::gpu_lightmap::GpuLmMover {
+                        geometry: g.geometry_id(),
+                        transform: pose,
+                        min: part.def.min,
+                        max: part.def.max,
+                        skin: None,
+                    });
+                }
+            }
             if !inst.dynamic {
                 continue;
             }
@@ -4331,6 +4449,29 @@ impl Renderer {
             .iter()
             .find(|(k, _)| k == id)
             .map(|(_, m)| (m.min, m.max))
+    }
+
+    /// Generic externally-driven connection points declared by this model.
+    /// Empty is a valid ordinary model; no source-pack naming is consulted.
+    pub fn model_driven_parts(&self, id: &str) -> Vec<DrivenPartInfo> {
+        self.static_models
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, model)| {
+                model
+                    .driven_parts
+                    .iter()
+                    .map(|part| DrivenPartInfo {
+                        connection: part.def.connection.clone(),
+                        pivot: part.def.pivot,
+                        anchor: part.def.anchor,
+                        radius: part.def.radius,
+                        width: part.def.width,
+                        rest_transform: part.def.rest_transform(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Advance the sky clock — what the scrolling layers of a Quake sky
@@ -4845,9 +4986,8 @@ impl Renderer {
             // from the realtime cascades, which see it as a mover.
             let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2])>)> = {
                 let m = &self.static_models[at].1;
-                if m.anim_parts.is_empty() {
-                    Vec::new()
-                } else {
+                let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
+                if !m.anim_parts.is_empty() {
                     let key = match lane {
                         WorldModelLane::Placed => ModelTarget::Instance(i),
                         // Attachments are not placed slots — a slot index
@@ -4855,9 +4995,7 @@ impl Renderer {
                         // parts follow the per-MODEL command only.
                         WorldModelLane::Attachment => ModelTarget::Model(inst.model.clone()),
                     };
-                    m.anim_parts
-                        .iter()
-                        .map(|p| {
+                    parts.extend(m.anim_parts.iter().map(|p| {
                             let (_, time, _) =
                                 self.model_anim_state.clock(&key, &inst.model, &p.def);
                             (
@@ -4870,9 +5008,26 @@ impl Renderer {
                                     })
                                     .collect(),
                             )
-                        })
-                        .collect()
+                        }));
                 }
+                parts.extend(m.driven_parts.iter().map(|part| {
+                    let pose = inst
+                        .part_poses
+                        .iter()
+                        .find(|pose| pose.connection == part.def.connection)
+                        .map(|pose| pose.transform)
+                        .unwrap_or_else(|| part.def.rest_transform());
+                    (
+                        pose,
+                        part.def.indices.len() / 3,
+                        part
+                            .draws
+                            .iter()
+                            .map(|(g, t, d, s)| (g.geometry_id(), t.clone(), d.clone(), *s))
+                            .collect(),
+                    )
+                }));
+                parts
             };
             for (pose, part_tris, part_draws) in &parts {
                 draw.base().transform = Mat4f::mul(&inst.transform, pose);
@@ -7073,6 +7228,7 @@ mod realm_lifecycle_tests {
             transform,
             dynamic,
             depth_order,
+            part_poses: Vec::new(),
         }
     }
 
@@ -8381,6 +8537,7 @@ mod anim_part_tests {
             transform,
             dynamic: false,
             depth_order: 0.0,
+            part_poses: Vec::new(),
         }]);
         assert!(renderer
             .model_anim_state
