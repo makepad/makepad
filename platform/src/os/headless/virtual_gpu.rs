@@ -10,13 +10,37 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     pub fn new(width: usize, height: usize) -> Self {
+        Self::with_depth(width, height, true)
+    }
+
+    /// `depth: false` leaves the depth buffer unallocated — for a pass with no
+    /// depth attachment, which is every data pass in a bake chain.
+    pub fn with_depth(width: usize, height: usize, depth: bool) -> Self {
         let pixels = width * height;
         Self {
             width,
             height,
             color: vec![[0.0; 4]; pixels],
-            depth: vec![1.0; pixels],
+            depth: if depth { vec![1.0; pixels] } else { Vec::new() },
         }
+    }
+
+    pub fn has_depth(&self) -> bool {
+        !self.depth.is_empty()
+    }
+
+    /// Allocate or release the depth buffer to match the pass's attachment.
+    pub fn set_has_depth(&mut self, depth: bool) {
+        match (depth, self.depth.is_empty()) {
+            (true, true) => self.depth = vec![1.0; self.width * self.height],
+            (false, false) => self.depth = Vec::new(),
+            _ => {}
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.color.len() * std::mem::size_of::<[f32; 4]>()
+            + self.depth.len() * std::mem::size_of::<f32>()
     }
 
     pub fn clear(&mut self, color: [f32; 4], depth: f32) {
@@ -32,6 +56,7 @@ impl Framebuffer {
         self.depth.fill(depth);
     }
 
+
     /// Reuse this buffer at a new size. Only reallocates when the size really
     /// changed — an offscreen pass that redraws every frame at a steady size
     /// keeps one allocation for the life of the process.
@@ -41,12 +66,15 @@ impl Framebuffer {
             return false;
         }
         let pixels = width * height;
+        let had_depth = !self.depth.is_empty();
         self.width = width;
         self.height = height;
         self.color.clear();
         self.color.resize(pixels, [0.0; 4]);
         self.depth.clear();
-        self.depth.resize(pixels, 1.0);
+        if had_depth {
+            self.depth.resize(pixels, 1.0);
+        }
         true
     }
 
@@ -115,6 +143,10 @@ pub struct RasterState {
     /// formats (`Bgra8NoBlend`, `Rf32`), where the fragment REPLACES the
     /// destination because alpha is payload, not opacity.
     pub blend: bool,
+    /// Whether the attachment has a depth buffer at all. A pass without a depth
+    /// attachment does no depth testing on a GPU — and here it also carries no
+    /// depth allocation, which is a fifth of a large data target's memory.
+    pub has_depth: bool,
     /// Whether fragments update the depth buffer.
     pub depth_write: bool,
     /// Clamp written components to [0,1] — what an 8-bit unorm attachment does
@@ -127,6 +159,7 @@ impl Default for RasterState {
     fn default() -> Self {
         Self {
             blend: true,
+            has_depth: true,
             depth_write: true,
             clamp_unorm: true,
         }
@@ -167,7 +200,7 @@ pub fn rasterize_triangle_rows<F>(
         return;
     }
     let expected_len = (row_end - row_start) * width;
-    if color.len() < expected_len || depth_buf.len() < expected_len {
+    if color.len() < expected_len || (state.has_depth && depth_buf.len() < expected_len) {
         return;
     }
     if vary0.len() != vary1.len() || vary1.len() != vary2.len() {
@@ -311,7 +344,7 @@ pub fn rasterize_triangle_rows<F>(
             let index = local_y * width + x as usize;
 
             // Depth test (less-or-equal for overlapping widgets with same zbias)
-            if depth > depth_buf[index] {
+            if state.has_depth && depth > depth_buf[index] {
                 continue;
             }
 
@@ -404,7 +437,7 @@ pub fn rasterize_triangle_rows<F>(
             // should not occlude subsequent geometry in depth. A data pass
             // has no such convention — its alpha is payload, so every
             // surviving fragment owns the depth slot.
-            if state.depth_write && (!state.blend || src_a > 0.02) {
+            if state.has_depth && state.depth_write && (!state.blend || src_a > 0.02) {
                 depth_buf[index] = depth;
             }
         }
