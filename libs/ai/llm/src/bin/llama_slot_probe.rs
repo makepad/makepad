@@ -343,6 +343,7 @@ fn run_shipping(
                 prompt_tokens: prompt,
                 reset_first: true,
                 max_new: BUDGET,
+                sampling: params,
             })
             .map_err(|r| format!("submit refused job {}", r.job))
     };
