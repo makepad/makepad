@@ -45,6 +45,10 @@ name = "llama-slot-probe"
 path = "src/bin/llama_slot_probe.rs"
 
 [[bin]]
+name = "llama-lane-spec-probe"
+path = "src/bin/llama_lane_spec_probe.rs"
+
+[[bin]]
 name = "llama-batch-probe"
 path = "src/bin/llama_batch_probe.rs"
 
