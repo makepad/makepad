@@ -1639,10 +1639,11 @@ fn run_mmvq_swiglu_case(
     let mut bench = Bench::new(32 << 20);
     let gw = bench.tensor("ffn_gate", TensorType::Q4K, &[k as i64, n as i64], gate);
     let uw = bench.tensor("ffn_up", TensorType::Q4K, &[k as i64, n as i64], up);
+    let m = acts.len() / k;
     let x = bench.tensor(
         "ffn_x",
         TensorType::F32,
-        &[k as i64, 1],
+        &[k as i64, m as i64],
         &as_bytes_f32(acts),
     );
     let g = bench
@@ -1662,26 +1663,58 @@ fn run_mmvq_swiglu_case(
     bytes_to_f32(&outputs[&out])
 }
 
+/// The fused gate+up+SwiGLU mat-vec, at every width decode takes.
+///
+/// This is the FFN of every decode step, and it was covered at `m = 1` only —
+/// which is how a whole speculative verify batch's FFN could change behaviour
+/// with nothing in the gate to notice. Two properties per width:
+///
+///   * fused == unfused, which is what the fusion promises, and
+///   * column 0 unchanged when the same column rides in a wider batch, which is
+///     what a speculative verify batch silently depends on: if a token's FFN
+///     output depends on how many drafts travelled with it, then accepting a
+///     draft is not the same thing as decoding it.
+///
+/// The second is reported rather than gated. It is a property of llama.cpp's
+/// kernel geometry, not a defect this port introduced, and pinning it to zero
+/// would gate on something upstream never promised — but it is the number that
+/// decides whether speculation is stream-lossless, so it belongs in the log.
 fn mmvq_swiglu_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     let (k, n) = (512usize, 257usize);
     let mut rng = Rng::new(0xF51E);
     let gate = quant_blocks(&mut rng, TensorType::Q4K, k, n);
     let up = quant_blocks(&mut rng, TensorType::Q4K, k, n);
-    let acts = f32s(&mut rng, k);
-    let fused = run_mmvq_swiglu_case(exec, &gate, &up, &acts, k, n, true);
-    let unfused = run_mmvq_swiglu_case(exec, &gate, &up, &acts, k, n, false);
-    let delta = error_stats(&fused, &unfused);
-    if delta.non_finite == 0 && delta.max <= 2e-4 {
-        println!(
-            "ok   mmvq_swiglu_fuse: fused/unfused max_delta {:.7}",
-            delta.max
-        );
-    } else {
-        *failures += 1;
-        println!(
-            "FAIL mmvq_swiglu_fuse: max_delta {:.7} non_finite {}",
-            delta.max, delta.non_finite
-        );
+    let widest = MMV_WIDTHS[MMV_WIDTHS.len() - 1];
+    let acts = f32s(&mut rng, k * widest);
+    let mut solo: Option<Vec<f32>> = None;
+    for m in MMV_WIDTHS {
+        if m > MMV_MAX_COLUMNS {
+            println!("SKIP mmvq_swiglu_fuse_m{m}: column cap is {MMV_MAX_COLUMNS}");
+            continue;
+        }
+        let cols = &acts[..k * m];
+        let fused = run_mmvq_swiglu_case(exec, &gate, &up, cols, k, n, true);
+        let unfused = run_mmvq_swiglu_case(exec, &gate, &up, cols, k, n, false);
+        let delta = error_stats(&fused, &unfused);
+        let drift = solo
+            .as_ref()
+            .map(|solo| error_stats(&fused[..n], solo).max)
+            .unwrap_or(0.0);
+        if solo.is_none() {
+            solo = Some(fused[..n].to_vec());
+        }
+        if delta.non_finite == 0 && delta.max <= 2e-4 {
+            println!(
+                "ok   mmvq_swiglu_fuse_m{m}: fused/unfused max_delta {:.7}, col0 vs solo {drift:.7}",
+                delta.max
+            );
+        } else {
+            *failures += 1;
+            println!(
+                "FAIL mmvq_swiglu_fuse_m{m}: max_delta {:.7} non_finite {}",
+                delta.max, delta.non_finite
+            );
+        }
     }
 }
 
