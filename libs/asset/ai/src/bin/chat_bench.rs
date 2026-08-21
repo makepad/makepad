@@ -53,7 +53,7 @@ fn main() {
     let base = args.next().unwrap_or_else(|| {
         eprintln!(
             "usage: chat-bench <http://box:8123> [--turns N] [--model ID] \
-             [--interleave] [--system-words N]"
+             [--interleave] [--as-a-game-client] [--system-words N]"
         );
         std::process::exit(2);
     });
@@ -61,6 +61,8 @@ fn main() {
     let mut turns = 3usize;
     let mut model = "qwen3.8-27b".to_string();
     let mut interleave = false;
+    // Behave like the real game client instead of echoing the reply back.
+    let mut as_a_game_client = false;
     // Words of taught context. The default is deliberately game-sized: a
     // bench with a one-line prompt does not test prefill at all.
     let mut system_words = 2000usize;
@@ -80,6 +82,10 @@ fn main() {
                 interleave = true;
                 index += 1;
             }
+            "--as-a-game-client" => {
+                as_a_game_client = true;
+                index += 1;
+            }
             "--system-words" => {
                 system_words = rest
                     .get(index + 1)
@@ -96,11 +102,11 @@ fn main() {
 
     println!(
         "chat-bench {base}  model={model}  turns={turns}  interleave={interleave}  \
-         system~{system_words} words"
+         game-client={as_a_game_client}  system~{system_words} words"
     );
     let mut failures: Vec<String> = Vec::new();
-    let mut main_chat = Conversation::new("bench-primary", system_words);
-    let mut other_chat = Conversation::new("bench-interleaved", system_words);
+    let mut main_chat = Conversation::new("bench-primary", system_words, as_a_game_client);
+    let mut other_chat = Conversation::new("bench-interleaved", system_words, as_a_game_client);
 
     for turn in 1..=turns {
         // The interleaved arm runs BETWEEN the primary's turns, which is the
@@ -245,15 +251,18 @@ struct Conversation {
     /// prompts, not the same one twice.
     system: String,
     messages: Vec<(String, String)>,
+    /// Store replies the way the game client stores them — reasoning removed —
+    /// and carry tool results between turns.
+    as_a_game_client: bool,
 }
 
 impl Conversation {
-    fn new(id: &'static str, system_words: usize) -> Self {
+    fn new(id: &'static str, system_words: usize, as_a_game_client: bool) -> Self {
         let mut system = long_system_prompt(system_words);
         // Two conversations must not share a prompt, or "both stayed warm"
         // could be one lane serving both.
         system.push_str(id);
-        Self { id, system, messages: Vec::new() }
+        Self { id, system, messages: Vec::new(), as_a_game_client }
     }
 
     fn next_question(&self) -> String {
@@ -265,7 +274,12 @@ impl Conversation {
             "Name one thing that changes at high resolution.",
             "Summarise this conversation in one line.",
         ];
-        QUESTIONS[(self.messages.len() / 2) % QUESTIONS.len()].to_string()
+        let asked = self
+            .messages
+            .iter()
+            .filter(|(role, text)| role == "user" && !text.starts_with("<tool_response>"))
+            .count();
+        QUESTIONS[asked % QUESTIONS.len()].to_string()
     }
 }
 
@@ -299,10 +313,17 @@ fn run_turn(
         // First VISIBLE text, not first token: everything before the think
         // block closes is reasoning the user never sees.
         if first_visible.is_none() {
-            if let Some(after) = partial.split("</think>").nth(1) {
-                if !after.trim().is_empty() {
-                    first_visible = Some(started.elapsed());
-                }
+            // A reply that never opens a think block is visible from its first
+            // character. Waiting for `</think>` in that case reports "never"
+            // for the fastest turns there are — which is how a brief-think run
+            // came back reading like a broken one.
+            let visible = if partial.contains("<think>") {
+                partial.split("</think>").nth(1).unwrap_or("")
+            } else {
+                partial.as_str()
+            };
+            if !visible.trim().is_empty() {
+                first_visible = Some(started.elapsed());
             }
         }
         last = status.clone();
@@ -317,7 +338,31 @@ fn run_turn(
     }
     let total = started.elapsed();
     let text = field_str(&last, "partial_text").unwrap_or_default();
-    chat.messages.push(("assistant".to_string(), text.clone()));
+    // What the CLIENT stores, which is not always what the model wrote.
+    //
+    // `--as-a-game-client` reproduces `libs/asset/chat/src/qwen.rs`: reasoning
+    // is stripped before the reply is kept, and the closing tag is put back on
+    // the way out because the service opens a block on every assistant turn it
+    // renders. Feeding the reply back VERBATIM — this bench's original
+    // behaviour — is the one shape in which warmth could hit, so a bench that
+    // only does that will report a warm box while every real conversation is
+    // cold. That is exactly what happened.
+    let stored = if chat.as_a_game_client {
+        let visible = text.rsplit("</think>").next().unwrap_or(&text).trim_start();
+        format!("\n</think>\n\n{visible}")
+    } else {
+        text.clone()
+    };
+    chat.messages.push(("assistant".to_string(), stored));
+    // A game turn is a tool call and its result, not two lines of prose. The
+    // client wraps tool outcomes as user-role `<tool_response>`, so that is
+    // what the next prompt carries.
+    if chat.as_a_game_client {
+        chat.messages.push((
+            "user".to_string(),
+            format!("<tool_response>\nok, applied ({} chars)\n</tool_response>", text.len()),
+        ));
+    }
 
     Ok(TurnResult {
         turn,
