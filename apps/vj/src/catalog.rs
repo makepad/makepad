@@ -806,26 +806,14 @@ impl<C: Clone> BrowseModel<C> {
         self.pump_resolves()
     }
 
-    /// An asset left the catalog (retired/quarantined): drop its tile NOW,
-    /// compacting the grid — the keep-your-cell refresh merge would
-    /// otherwise preserve it as a dead hole forever.
-    pub fn event_remove(&mut self, asset: AssetId) {
-        if self.index.remove(&asset).is_none()
-            && !self.order.contains(&asset)
-            && !self.pending.contains(&asset)
-        {
-            return;
-        }
-        self.order.retain(|a| *a != asset);
-        self.pending.retain(|a| *a != asset);
-        self.tiles.retain(|tile| tile.asset != asset);
-        // Rebuild the index over the compacted tile list.
-        self.index = self
-            .tiles
-            .iter()
-            .enumerate()
-            .map(|(i, tile)| (tile.asset, i))
-            .collect();
+    /// An asset left the catalog (retired/quarantined): schedule a full
+    /// re-sorted refresh. The server's listing no longer contains it, and
+    /// the resort path rebuilds order/tiles/index together — dropping the
+    /// dead tile AND closing its hole without hand-surgery on invariants
+    /// (a surgical compaction here once left duplicate tiles scattered on
+    /// an 8-stride; rebuild beats scalpel).
+    pub fn event_remove(&mut self, _asset: AssetId) {
+        self.resort = true;
         self.refresh_wanted = true;
     }
 
