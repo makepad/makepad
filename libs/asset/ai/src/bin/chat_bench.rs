@@ -147,6 +147,13 @@ fn main() {
 /// One turn's outcome, in the units a person experiences.
 struct TurnResult {
     turn: usize,
+    /// Generated tokens per second between the first and last poll that carried
+    /// any — the client meter's own arithmetic.
+    meter: Option<f64>,
+    /// Longest wall gap between two polls that carried tokens.
+    biggest_gap: f64,
+    /// How many polls carried tokens at all.
+    deltas: usize,
     /// Wall time until the first character the user could READ — after the
     /// think block, not after the first token.
     first_visible: Option<Duration>,
@@ -178,15 +185,22 @@ fn report(result: &TurnResult, prefix: &str) {
         .first_visible
         .map(|d| format!("{:.2}s", d.as_secs_f64()))
         .unwrap_or_else(|| "never".to_string());
+    let meter = result
+        .meter
+        .map(|r| format!("{r:.1}"))
+        .unwrap_or_else(|| "n/a".to_string());
     println!(
         "{prefix}turn {}: {warmth}  ttf-visible {ttfv}  total {:.2}s  \
-         visible {:.1} tok/s ({} tok)  all {:.1} tok/s (think {})",
+         visible {:.1} tok/s ({} tok)  all {:.1} tok/s (think {})  \
+         METER {meter} tok/s ({} deltas, worst gap {:.2}s)",
         result.turn,
         result.total.as_secs_f64(),
         result.visible_rate(),
         result.visible_tokens,
         result.total_rate(),
         result.think_tokens,
+        result.deltas,
+        result.biggest_gap,
     );
 }
 
@@ -335,6 +349,14 @@ fn run_turn(
 
     let mut first_visible = None;
     let mut last = String::new();
+    // THE METER, measured the way the client computes it: generated-token
+    // deltas over the wall time between the polls that carried them. A
+    // service-side round rate says what the GPU did; this says what the person
+    // watching the number sees, and the two came apart by a factor of two on
+    // the live box.
+    let mut meter_first: Option<(Instant, u64)> = None;
+    let mut meter_last: Option<(Instant, u64)> = None;
+    let mut meter_gaps: Vec<(f64, u64)> = Vec::new();
     loop {
         if started.elapsed() > TURN_TIMEOUT {
             return Err(format!("turn {turn} did not finish in {TURN_TIMEOUT:?}"));
@@ -357,6 +379,18 @@ fn run_turn(
             if !visible.trim().is_empty() {
                 first_visible = Some(started.elapsed());
             }
+        }
+        if let Some(gen) = field_u64(&status, "gen_tokens") {
+            let now = Instant::now();
+            if meter_first.is_none() && gen > 0 {
+                meter_first = Some((now, gen));
+            }
+            if let Some((prev_at, prev_gen)) = meter_last {
+                if gen > prev_gen {
+                    meter_gaps.push((now.duration_since(prev_at).as_secs_f64(), gen - prev_gen));
+                }
+            }
+            meter_last = Some((now, gen));
         }
         last = status.clone();
         match field_str(&status, "state").as_deref() {
@@ -396,8 +430,26 @@ fn run_turn(
         ));
     }
 
+    // Sustained rate between the first delta that carried tokens and the last,
+    // which is what a meter averaging over its window converges to. The
+    // per-delta spread is reported too: a burst of 24 tokens every 270 ms and a
+    // steady trickle read the same on average and feel nothing alike.
+    let meter = match (meter_first, meter_last) {
+        (Some((a, ga)), Some((b, gb))) if gb > ga && b > a => {
+            Some((gb - ga) as f64 / b.duration_since(a).as_secs_f64())
+        }
+        _ => None,
+    };
+    let biggest_gap = meter_gaps
+        .iter()
+        .map(|(secs, _)| *secs)
+        .fold(0.0f64, f64::max);
+    let deltas = meter_gaps.len();
     Ok(TurnResult {
         turn,
+        meter,
+        biggest_gap,
+        deltas,
         first_visible,
         total,
         visible_tokens: field_u64(&last, "visible_tokens").unwrap_or(0),
