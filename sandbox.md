@@ -335,11 +335,18 @@ and they already work — the games panel went 10→13 live over the
 subscription when the showcases published, no restart. Verified surface
 (store `host/events.rs` + `routes_control.rs`):
 
-- every games mutation emits a first-class kind — `game_published` /
-  `game_quarantined` (each carries namespace + game_id + the REVISION,
-  so per-edit revisions announce themselves) and `game_alias_set` /
-  `game_alias_cleared`; the journal appends inside the same state-thread
-  closure as the commit, so event order IS commit order;
+- the `/v1/games` container routes emit first-class kinds —
+  `game_published` / `game_quarantined` (each carries namespace +
+  game_id + the REVISION, so per-edit revisions announce themselves)
+  and `game_alias_set` / `game_alias_cleared`. NOTE the path actually
+  live today: create/import publishes games as `AssetKind::Game` assets
+  through the GENERIC publish route (`games_import::publish_game`), so
+  those mutations ride `asset_published` / `alias_set` — the verified
+  journal entries above were exactly that. The `game_*` kinds become
+  the observed vocabulary when the container-role work moves game
+  mutations onto the games routes. Either way the journal appends
+  inside the same state-thread closure as the commit, so event order
+  IS commit order;
 - the sandbox panel already uses the subscription as THE update path
   (no polling): any event not provably non-game sets refresh_pending →
   one re-query; alias_set events with revisions invalidate resident
@@ -359,6 +366,67 @@ game + per-edit-revision publish path is contract-level), then the
 sandbox-side part split (assembled eval), then the store-facing half
 (roles, per-edit revisions, undo). Local slots are DEAD as a design —
 do not build them.
+
+## 4.7 The scene/script split — the clean architecture (design law,
+2026-08-21)
+
+The Godot analogy is the target model, confirmed by the user: "there you
+have a very nice separation between a scene structure and the
+godotscript — we should aim for something similar."
+
+**SCENE — the spawn list.** All static world content lives in a pure
+DATA structure, not in code: a flat-serialized tree (Godot .tscn shape)
+of nodes `{id, parent?, kind: group|model|marker, asset?, local
+transform (metres), tags, props}` — parents precede children, groups
+carry inherited transforms, JSONL on disk (line-diffs per revision,
+append-safe, streamable). STABLE IDS are load-bearing: assigned at
+creation (deterministic from seed+group+ordinal for generated content),
+never reused, survive revisions — scripts reference nodes by id, users
+delete by them, undo keys on them. The scene is the container's SPAWNS
+role and versions with it.
+
+**SCRIPT — splash.** Game logic only: objectives, handlers, HUD, and
+dynamic runtime spawning (waves, projectiles — runtime children, not
+persisted). Scripts address scene nodes BY ID (get_node-equivalent) for
+triggers and behaviors. A binding to a deleted node degrades honestly
+(reports missing, never crashes) — the missing-model law generalized.
+
+**ONE EDITING SURFACE, every author.** The user's chat verbs, the
+user's direct UI edits (select + delete at minimum), the AI's freehand
+placements, and the procgen algorithms all produce/edit THE SAME list —
+distinguished only by group identity (`user:…`, `addon:…`, `gen:…`).
+Same remove-by-name, same revision history, same validation, same
+loader for one car or a 900-node city. "It ends up in the same place as
+the user spawning a car."
+
+**PRODUCERS.** Procgen verbs run in a sandbox-app WORKER (client-
+executed tools: broker parks, app computes off-thread, placements land
+as a scene subtree). The worker queries the asset server itself for
+compatible pieces (socket/facet SQL) — the LLM names a verb + params +
+kit; it never shuttles asset lists through its context. Auto-placement:
+any placement without explicit user coordinates routes through the
+placement solver (collision-free, context-valid, connected) built on
+the same geometry the validator asserts.
+
+**SOCKETS — the lego contract.** Every kit piece carries machine-
+readable connection points, one vocabulary regardless of producer:
+`sock-<kind>-<edge>[@cx,cz]` facets (edges n/e/s/w, unrotated model
+frame, cell coords on multi-cell pieces), `geo-` prefixed for
+footprint-derived facts extracted at import, `vlm-` for vision-derived
+semantics (front/door/chain/approach). The jigsaw/fitter algorithms
+consume sockets; the socket index is versioned facet data like every
+annotation.
+
+**THE AI'S LENS — token-frugal scene tools.** The model queries and
+edits the scene in tens of tokens, never reading the raw list:
+`scene.list` answers with grouped counts and subtree summaries;
+`scene.get` serves one subtree compactly; `scene.delete/move/spawn`
+are the same list operations the UI and verbs use. The list is the
+data; the tools are its lens. ("That spawn thing should be queryable
+and editable by the AI in minimal tokens.")
+
+Migration: the flat assembled splash remains the transition form —
+worlds load either way while verbs and container roles retarget.
 
 ## 5. Phase 2 — delegation (later)
 
