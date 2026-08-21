@@ -783,6 +783,208 @@ mod llama_worker {
     /// the 9B (see libs/converse qwen_filter.rs).
     const PREFILL_BATCH: usize = 64;
 
+    /// Concurrent decode lanes. 1 keeps the single-lane worker, which is the
+    /// path every existing deployment runs; >1 selects the batched worker.
+    ///
+    /// A box-level decision (VRAM and card), so it is an env knob rather than
+    /// a per-request one: `MAKEPAD_ASSET_AI_LLM_LANES`.
+    fn lane_count() -> usize {
+        std::env::var("MAKEPAD_ASSET_AI_LLM_LANES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 8)
+    }
+
+    /// Context each lane may hold. The arena is `lanes * this`, so the total
+    /// stays put as lanes are added rather than multiplying VRAM.
+    fn context_per_lane() -> u32 {
+        MAX_CONTEXT / lane_count() as u32
+    }
+
+    /// One session, N conversations, jobs joining and leaving at chunk
+    /// boundaries.
+    ///
+    /// The scheduler decides, the executor performs, and this only moves work
+    /// in and events out. Solo turns route to the speculative path inside the
+    /// executor, so a lone client keeps today's speed.
+    fn run_lane_worker(
+        session: makepad_ai_llm::LlamaSession,
+        model_id: String,
+        rx: mpsc::Receiver<WorkerMsg>,
+    ) {
+        use makepad_ai_llm::{LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler};
+
+        struct JobLane {
+            events: mpsc::Sender<WorkerEvent>,
+            cancel: CancelToken,
+            token_ids: Vec<i32>,
+            streamed: String,
+            max_tokens: usize,
+        }
+
+        let lanes = lane_count();
+        let table = match session.new_slot_table() {
+            Ok(table) => table,
+            Err(err) => {
+                eprintln!("[llm-worker] lane table: {err:?}");
+                return;
+            }
+        };
+        let queue_max = std::env::var("MAKEPAD_ASSET_AI_LLM_QUEUE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8);
+        let scheduler = LaneScheduler::new(table, queue_max);
+        let advert_model = model_id.clone();
+        let mut exec = LaneExecutor::new(session, scheduler, LlamaSamplingParams::default())
+            .on_counts(move |counts| {
+                let _ = &advert_model;
+                crate::lane_advert::set_live(
+                    counts.slots_claimed as u64,
+                    counts.lanes_active as u64,
+                );
+            });
+
+        let mut jobs: std::collections::HashMap<u64, JobLane> = std::collections::HashMap::new();
+        let mut next_job: u64 = 1;
+        eprintln!("[llm-worker] batched worker: {lanes} lanes, queue {queue_max}");
+
+        loop {
+            // Take new work. Block only when there is genuinely nothing to do,
+            // so an idle box costs no CPU and a busy one never stalls.
+            loop {
+                let msg = if exec.is_idle() {
+                    match rx.recv() {
+                        Ok(msg) => Some(msg),
+                        Err(_) => return,
+                    }
+                } else {
+                    match rx.try_recv() {
+                        Ok(msg) => Some(msg),
+                        Err(mpsc::TryRecvError::Empty) => None,
+                        Err(mpsc::TryRecvError::Disconnected) => return,
+                    }
+                };
+                let Some(WorkerMsg::Expand(job, cancel, events)) = msg else {
+                    break;
+                };
+                let tokens = match exec.session().vocab().tokenize(&job.prompt_text, true, true) {
+                    Ok(mut tokens) => {
+                        // ChatML already ends the turn; a gguf with
+                        // add_eos_token would make the first decode EOS.
+                        if tokens.last().copied() == exec.session().vocab().eos_token_id() {
+                            tokens.pop();
+                        }
+                        tokens
+                    }
+                    Err(err) => {
+                        let _ = events.send(WorkerEvent::Done(Err(format!("tokenize: {err:?}"))));
+                        continue;
+                    }
+                };
+                let id = next_job;
+                next_job += 1;
+                let request = LaneRequest {
+                    job: id,
+                    session: job.kind.clone(),
+                    prompt_tokens: tokens,
+                    // Phase 1 always re-ingests. Prefix reuse across lanes is
+                    // phase 2 work, and reusing state a DIFFERENT conversation
+                    // left in the lane is the one thing worse than paying for
+                    // the prefill.
+                    reset_first: true,
+                    max_new: job.max_tokens.max(1) as usize,
+                    sampling: LlamaSamplingParams {
+                        temperature: job.temperature.max(0.0),
+                        top_p: 0.95,
+                        top_k: 0,
+                        seed: job.seed,
+                    },
+                };
+                if let Err(refused) = exec.scheduler().submit(request) {
+                    let _ = events.send(WorkerEvent::Done(Err(format!(
+                        "queue full ({queue_max}); {} lanes busy",
+                        lanes
+                    ))));
+                    let _ = refused;
+                    continue;
+                }
+                jobs.insert(
+                    id,
+                    JobLane {
+                        events,
+                        cancel,
+                        token_ids: Vec::new(),
+                        streamed: String::new(),
+                        max_tokens: job.max_tokens.max(1) as usize,
+                    },
+                );
+            }
+
+            // Cancellations are honoured at the boundary, never mid-step.
+            let cancelled: Vec<u64> = jobs
+                .iter()
+                .filter(|(_, lane)| lane.cancel.is_cancelled())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in cancelled {
+                exec.scheduler().cancel(id);
+            }
+
+            let events = match exec.step() {
+                Ok(events) => events,
+                Err(err) => {
+                    // A step failure is not one job's problem: the batch is
+                    // shared, so every lane in flight hears about it rather
+                    // than hanging on a reply that will never come.
+                    eprintln!("[llm-worker] step: {err}");
+                    for (_, lane) in jobs.drain() {
+                        let _ = lane.events.send(WorkerEvent::Done(Err(err.clone())));
+                    }
+                    continue;
+                }
+            };
+
+            for event in events {
+                match event {
+                    LaneEvent::Token { job, token, produced } => {
+                        let Some(lane) = jobs.get_mut(&job) else { continue };
+                        lane.token_ids.push(token);
+                        let _ =
+                            lane.events
+                                .send(WorkerEvent::Token(produced as u32, lane.max_tokens as u32));
+                        // Decode the WHOLE sequence: byte-level BPE can split
+                        // a character across a chunk edge, so per-chunk
+                        // decodes do not concatenate cleanly.
+                        if let Ok(decoded) =
+                            exec.session().vocab().decode_tokens(&lane.token_ids)
+                        {
+                            if let Some(snapshot) =
+                                super::next_stream_snapshot(&lane.streamed, &decoded)
+                            {
+                                lane.streamed = snapshot.clone();
+                                let _ = lane.events.send(WorkerEvent::Text(snapshot));
+                            }
+                        }
+                    }
+                    LaneEvent::Finished { job, outcome, .. } => {
+                        let Some(lane) = jobs.remove(&job) else { continue };
+                        let result = match outcome {
+                            LaneOutcome::Cancelled => Err("cancelled".to_string()),
+                            LaneOutcome::Complete => exec
+                                .session()
+                                .vocab()
+                                .decode_tokens(&lane.token_ids)
+                                .map_err(|e| format!("detokenize: {e:?}")),
+                        };
+                        let _ = lane.events.send(WorkerEvent::Done(result));
+                    }
+                }
+            }
+        }
+    }
+
     /// Streamed back to the blocked caller while a job runs on the session
     /// thread: per-token progress, then exactly one Done.
     enum WorkerEvent {
@@ -823,7 +1025,8 @@ mod llama_worker {
                 .name("llm-expander".to_string())
                 .spawn(move || {
                     let config = LlamaSessionConfig {
-                        max_context: Some(MAX_CONTEXT),
+                        max_context: Some(context_per_lane()),
+                        max_sequences: lane_count() as u32,
                         prefill_batch_size: PREFILL_BATCH,
                         // MTP speculative decoding (nextn draft head). 3 is
                         // the measured sweet spot on served chat (Blackwell
@@ -862,18 +1065,23 @@ mod llama_worker {
                     // shipping the protocol once rather than in stages.
                     crate::lane_advert::publish(crate::lane_advert::LaneFacts::idle(
                         model_id.clone(),
-                        1,
-                        u64::from(MAX_CONTEXT),
+                        lane_count() as u64,
+                        u64::from(context_per_lane()),
                     ));
-                    let mut prefix = super::PrefixCache::default();
-                    while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
-                        // A turn occupies its lane for its duration. Claimed
-                        // survives the turn — the conversation's KV stays
-                        // resident and its next turn should come back here.
-                        crate::lane_advert::lane_entered();
-                        let result = run_expand(&mut session, &mut prefix, &job, &cancel, &events);
-                        crate::lane_advert::lane_left();
-                        let _ = events.send(WorkerEvent::Done(result));
+                    if lane_count() > 1 {
+                        run_lane_worker(session, model_id.clone(), rx);
+                    } else {
+                        let mut prefix = super::PrefixCache::default();
+                        while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
+                            // A turn occupies its lane for its duration.
+                            // Claimed survives the turn — the conversation's KV
+                            // stays resident and its next turn comes back here.
+                            crate::lane_advert::lane_entered();
+                            let result =
+                                run_expand(&mut session, &mut prefix, &job, &cancel, &events);
+                            crate::lane_advert::lane_left();
+                            let _ = events.send(WorkerEvent::Done(result));
+                        }
                     }
                     crate::lane_advert::clear();
                     // Sender dropped -> backend dropped: session unloads here.
