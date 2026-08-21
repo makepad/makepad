@@ -1035,7 +1035,20 @@ mod llama_worker {
 
         let mut jobs: std::collections::HashMap<u64, JobLane> = std::collections::HashMap::new();
         let mut next_job: u64 = 1;
-        eprintln!("[llm-worker] batched worker: {lanes} lanes, queue {queue_max}");
+        // Speculation counters at the last turn boundary, so each turn can
+        // report its OWN acceptance rather than a running average since boot.
+        //
+        // Worth a line because acceptance is the whole economics of
+        // speculation and it is invisible from outside: at the measured
+        // 4-column verify cost, acceptance 0.9 is the difference between ~120
+        // tok/s and ~70, and nothing above the session can tell which one the
+        // box is getting. A rate that looks "a bit slow" and a draft head
+        // feeding on the wrong hidden state look identical from the client.
+        let mut spec_mark = exec.session().speculative_stats();
+        eprintln!(
+            "[llm-worker] batched worker: {lanes} lanes, queue {queue_max}, speculation depth {}",
+            exec.session().speculation_depth()
+        );
 
         loop {
             // Take new work. Block only when there is genuinely nothing to do,
@@ -1251,6 +1264,34 @@ mod llama_worker {
                         // failed turn leaves the KV somewhere the committed
                         // text does not describe, and claiming it would hand
                         // the next turn a prefix that is not there.
+                        {
+                            let now = exec.session().speculative_stats();
+                            if let (Some(now), Some(then)) = (now, spec_mark) {
+                                let rounds = now.rounds.saturating_sub(then.rounds);
+                                let drafted = now.drafted.saturating_sub(then.drafted);
+                                let accepted = now.accepted.saturating_sub(then.accepted);
+                                if rounds > 0 {
+                                    let ms = |a: u64, b: u64| {
+                                        a.saturating_sub(b) as f64 / rounds as f64 / 1e6
+                                    };
+                                    eprintln!(
+                                        "[llm-worker] turn {job}: {rounds} rounds, {:.2} \
+                                         tok/round, acceptance {:.2}, per round draft {:.1} ms \
+                                         + verify {:.1} ms + catch-up {:.1} ms",
+                                        (accepted + rounds) as f64 / rounds as f64,
+                                        if drafted > 0 {
+                                            accepted as f64 / drafted as f64
+                                        } else {
+                                            0.0
+                                        },
+                                        ms(now.draft_nanos, then.draft_nanos),
+                                        ms(now.verify_nanos, then.verify_nanos),
+                                        ms(now.catchup_nanos, then.catchup_nanos),
+                                    );
+                                }
+                            }
+                            spec_mark = now;
+                        }
                         match (&result, lane.commit_as) {
                             (Ok(text), Some((owner, mut committed, suffix))) => {
                                 committed.push_str(text);
