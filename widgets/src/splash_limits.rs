@@ -56,6 +56,13 @@ const WINDOW: Duration = Duration::from_secs(1);
 /// embedder ([`set_frame_target`]); 60Hz until it says otherwise.
 const DEFAULT_FRAME_TARGET: f64 = 1.0 / 60.0;
 
+/// How much of a window mini-apps must collectively be using before a missed
+/// frame is treated as THEIR contention. Below this the machine is slow for
+/// reasons trimming an app cannot fix — a software rasteriser, another
+/// process, a cold cache — and squeezing apps would be punishing them for
+/// someone else's problem.
+const APP_BLAME_FRACTION: f64 = 0.2;
+
 /// How far past the target the smoothed frame interval must drift before the
 /// system counts as contended. Frames are noisy, and trimming apps over a
 /// single late frame would be a controller chasing its own tail.
@@ -272,21 +279,28 @@ impl Default for CpuWindow {
 }
 
 impl CpuWindow {
-    /// Whether the thing that owns the frame is losing it.
+    /// Whether the thing that owns the frame is losing it, AND the apps are
+    /// why.
     ///
-    /// This is the whole contention signal, and it deliberately measures the
-    /// LAUNCHER rather than the apps. The launcher draws every app's pixels,
-    /// so if it cannot make its deadline nothing else on screen matters —
-    /// which is why it does not sit in the same weighted pool as the apps.
-    /// It is not given a reserved slice either: a reservation would be an
-    /// arbitrary tax whenever it has nothing to draw. It simply gets first
-    /// call, and apps are trimmed exactly when, and only while, it is short.
+    /// Both halves are load-bearing. The first measures the LAUNCHER rather
+    /// than the apps: it draws every app's pixels, so if it cannot make its
+    /// deadline nothing else on screen matters — which is why it does not sit
+    /// in the same weighted pool, and is not given a reserved slice either. It
+    /// gets first call on the time it actually needs.
+    ///
+    /// The second stops that becoming a tax on apps for someone else's
+    /// slowness. A machine can miss frames because the renderer is slow, the
+    /// display is software-rasterised, or another process is thrashing — none
+    /// of which an app can fix by being trimmed, and all of which would
+    /// otherwise leave every app permanently squeezed. So apps are only
+    /// blamed when they are actually using a meaningful part of the window.
     fn contended(&self) -> bool {
-        match self.frame_ema {
+        let frames_late = match self.frame_ema {
             // Nothing is drawing. Nobody is being kept waiting.
             None => false,
             Some(ema) => ema > self.frame_target * CONTENTION_FACTOR,
-        }
+        };
+        frames_late && self.total.as_secs_f64() >= WINDOW.as_secs_f64() * APP_BLAME_FRACTION
     }
 
     fn note_frame(&mut self, interval_s: f64) {
@@ -734,8 +748,16 @@ mod tests {
         Duration::from_millis(SplashLimits::default().entry_time_ms)
     }
 
-    /// Frames arriving late enough, often enough, to count as contention.
+    /// Frames arriving late enough, often enough, to count as contention —
+    /// AND apps using enough of the window to be the reason.
     fn frames_are_slipping() {
+        WINDOW_STATE.with(|w| {
+            let mut w = w.borrow_mut();
+            let blame = WINDOW.mul_f64(APP_BLAME_FRACTION * 1.5);
+            if w.total < blame {
+                w.total = blame;
+            }
+        });
         for _ in 0..20 {
             note_frame(DEFAULT_FRAME_TARGET * 4.0);
         }
@@ -757,7 +779,23 @@ mod tests {
         frames_are_fine();
         assert!(!is_contended(), "frames on time, nobody is waiting");
         frames_are_slipping();
-        assert!(is_contended(), "the launcher is losing its frame");
+        assert!(is_contended(), "the launcher is losing its frame to the apps");
+    }
+
+    /// A slow machine is not the apps' fault. Frames can be late because the
+    /// renderer is slow or another process is thrashing, and trimming an app
+    /// fixes none of that — it just punishes it for someone else's problem.
+    #[test]
+    fn missed_frames_alone_do_not_blame_the_apps() {
+        reset();
+        set_limits_for_heap(A, Some(SplashLimits::default()));
+        // Frames are dreadful, but the apps have barely run.
+        charge_cpu(A, Duration::from_millis(5));
+        for _ in 0..20 {
+            note_frame(DEFAULT_FRAME_TARGET * 6.0);
+        }
+        assert!(!is_contended(), "the apps are not what is slow");
+        assert_eq!(cpu_allowance(A), Some(full()), "so nothing is taken from them");
     }
 
     /// One late frame is not a verdict.
@@ -835,6 +873,13 @@ mod tests {
         charge_cpu(1, Duration::from_millis(50));
         // Only just slipping: deep pressure would floor both slices and the
         // comparison below would be measuring the floor, not the share.
+        WINDOW_STATE.with(|w| {
+            let mut w = w.borrow_mut();
+            let blame = WINDOW.mul_f64(APP_BLAME_FRACTION * 1.5);
+            if w.total < blame {
+                w.total = blame;
+            }
+        });
         frames_are_fine();
         for _ in 0..4 {
             note_frame(DEFAULT_FRAME_TARGET * 3.0);
