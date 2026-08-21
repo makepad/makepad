@@ -130,6 +130,21 @@ impl SessionGraphParams {
         }
     }
 
+    /// A verify batch spanning `n_seqs` lanes, `n_tokens / n_seqs` tokens each.
+    ///
+    /// At one lane this reduces to `Self::verify(n_tokens, ..)` exactly, so the
+    /// solo speculative path keys and reuses the graph it always did rather
+    /// than compiling a twin of it.
+    fn verify_batched(n_seqs: usize, n_tokens: usize, attention_key_count: usize) -> Self {
+        Self {
+            kind: SessionGraphKind::MainVerify,
+            n_tokens,
+            n_outputs: n_tokens,
+            attention_key_count,
+            n_seqs,
+        }
+    }
+
     fn greedy_embeddings(n_tokens: usize, attention_key_count: usize) -> Self {
         let mut params = Self::greedy(n_tokens, attention_key_count);
         params.kind = SessionGraphKind::MainEmbeddings;
@@ -151,6 +166,26 @@ impl SessionGraphParams {
             kind: SessionGraphKind::MtpDraft,
             n_tokens,
             n_outputs: 1,
+            attention_key_count,
+            n_seqs: 1,
+        }
+    }
+
+    /// One draft step for each of `width` lanes: `width` columns, `width`
+    /// logit rows.
+    ///
+    /// `n_seqs` stays 1 and that is not an oversight. The draft head is a
+    /// single ATTENTION layer with a dense FFN (`qwen35_mtp_decode_spec`) — no
+    /// recurrent scan, so nothing in its graph needs the sequence count. Lane
+    /// separation is carried entirely by the per-token write rows and the mask
+    /// lower bounds, the same way a slot prefill carries it.
+    ///
+    /// At width 1 this is `Self::mtp_draft(1, ..)` exactly.
+    fn mtp_draft_batched(width: usize, attention_key_count: usize) -> Self {
+        Self {
+            kind: SessionGraphKind::MtpDraft,
+            n_tokens: width,
+            n_outputs: width,
             attention_key_count,
             n_seqs: 1,
         }
@@ -2335,47 +2370,39 @@ impl LlamaSession {
         let mtp = self
             .mtp
             .ok_or_else(|| LlamaError::format("verify batch without an MTP head"))?;
-        let start = self.token_ids.len();
         let batch_size = tokens.len();
-        self.ensure_capacity(batch_size)?;
-        let cache_tokens = start + batch_size;
-        let params =
-            SessionGraphParams::verify(batch_size, self.graph_key_count(cache_tokens));
-        self.ensure_compiled_graph(params)?;
-
-        let positions = (start..start + batch_size)
-            .map(|position| {
-                i32::try_from(position)
-                    .map_err(|_| LlamaError::format("verify position does not fit in i32"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let output_ids = (0..batch_size)
-            .map(|index| {
-                i32::try_from(index)
-                    .map_err(|_| LlamaError::format("verify output id does not fit in i32"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // `[resume_row, w_0 .. w_n]`: the scan resumes from the committed row
-        // and parks a checkpoint after every token.
-        let mut state_rows = Vec::with_capacity(batch_size + 1);
-        state_rows.push(mtp.state_row);
-        for index in 0..batch_size {
-            state_rows.push(index as i32);
+        if batch_size == 0 {
+            return Err(LlamaError::format("a verify batch needs at least one token"));
         }
-        let hidden_write_rows = self.carry_rows_for_positions(start, batch_size);
-
-        let compiled = self
-            .graphs
-            .graph_for_mut(params)
-            .ok_or_else(|| LlamaError::format("compiled verify graph params were not cached"))?;
-        let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
-            &positions,
-            cache_tokens,
-            &output_ids,
-        )?;
-        layout.recurrent_state_rows = state_rows;
-        layout.hidden_write_rows = hidden_write_rows;
-        compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)
+        self.ensure_capacity(batch_size)?;
+        // ONE verify implementation, driven here as a single lane.
+        //
+        // The single-stream path used to build its own layout beside the
+        // batched one. Two copies of a layout this fiddly — positions, write
+        // rows, checkpoint rows, hidden rows — is two chances to disagree, and
+        // the one that matters most is the one nobody can test on a Mac:
+        // recurrent checkpoints do not exist on Metal, so a divergence here
+        // only ever shows up on a box.
+        //
+        // Driven as a lane at base 0, this reduces to what it built by hand:
+        // `kv_base` and `state_base` are 0 so positions equal write rows, the
+        // lower-bound vector stays empty and takes the mask builder's
+        // single-sequence path, `checkpointed_state_rows` yields
+        // `[resume, 0..n-1]`, and the hidden rows are lane 0's ring. Same
+        // graph key, same layout, same bytes.
+        let tokens_owned = self.token_ids.clone();
+        let lane = SpecLane {
+            lane: 0,
+            kv_base: 0,
+            state_base: 0,
+            live_state_offset: usize::try_from(mtp.state_row)
+                .map_err(|_| LlamaError::format("committed checkpoint row is negative"))?,
+            fill: self.token_ids.len(),
+            mtp_filled: mtp.mtp_filled,
+            tokens: &tokens_owned,
+            first: tokens[0],
+        };
+        self.run_slot_verify_batch(&[lane], tokens, batch_size)
     }
 
     /// Run the draft head over the tokens the main model has already consumed
@@ -2480,6 +2507,648 @@ const MTP_PREFILL_CHUNK: usize = 512;
 
 fn reuse_draft_kv() -> bool {
     std::env::var_os("MKLLM_MTP_REUSE_DRAFT_KV").is_some()
+}
+
+/// One lane's facts for a batched speculative round.
+///
+/// Every one of them arrives as an argument, exactly as it does for
+/// [`LlamaSession::prefill_slot_chunk`] and [`LlamaSession::step_slots`]. The
+/// session keeps its single-sequence state for the solo path and learns
+/// nothing about lanes; the durable per-lane facts live where `fill` and the
+/// cache bases already live, in the slot table.
+///
+/// That split is the point. A lane's history, its draft-head fill and its
+/// resume row are exactly the things two conversations must not share, and the
+/// four bugs this lane has already caught were all one owner short.
+#[derive(Clone, Copy, Debug)]
+pub struct SpecLane<'a> {
+    /// Slot index. Addresses this lane's hidden-carry block, so it must be the
+    /// slot's own index and not its position in the batch.
+    pub lane: usize,
+    /// First absolute attention-cache row the lane owns.
+    pub kv_base: usize,
+    /// First recurrent-state row the lane owns.
+    pub state_base: usize,
+    /// Offset INSIDE the lane's recurrent block that the scan resumes from —
+    /// the checkpoint its last round committed at.
+    pub live_state_offset: usize,
+    /// Tokens the lane's attention KV already holds; the within-lane position
+    /// its next token takes.
+    pub fill: usize,
+    /// Tokens the DRAFT head's KV holds for this lane. Lags `fill` until the
+    /// catch-up runs, and is per lane for the same reason the ring is.
+    pub mtp_filled: usize,
+    /// The lane's token history, `fill` long. Only `mtp_filled..fill` is read,
+    /// but the slice is the lane's own and is never another lane's.
+    pub tokens: &'a [i32],
+    /// The token this round starts from: sampled from the lane's own last
+    /// logits, by the lane's own stream.
+    pub first: i32,
+}
+
+/// What a batched speculative round produced for one lane.
+#[derive(Clone, Debug, Default)]
+pub struct SpecRoundOutcome {
+    /// Tokens committed this round, in order. At least one.
+    pub committed: Vec<i32>,
+    /// The token the lane starts its NEXT round from. Already drawn from this
+    /// round's logits by this lane's stream, so nothing has to be re-sampled.
+    pub next: i32,
+    /// Offset inside the lane's recurrent block the next round resumes from.
+    pub live_state_offset: usize,
+    /// Draft-head KV fill after the round.
+    pub mtp_filled: usize,
+    /// Draft tokens proposed and accepted, for the acceptance EMA the
+    /// allocator spends columns on.
+    pub drafted: usize,
+    pub accepted: usize,
+    /// Set when a committed token, or the bonus, is a stop token.
+    pub stop_reason: Option<LlamaStopReason>,
+}
+
+impl LlamaSession {
+    /// One speculative round for every lane in `lanes`, at a UNIFORM draft
+    /// depth, in one verify batch.
+    ///
+    /// Uniform because the recurrent scan reshapes the batch as
+    /// `[w, n_tokens / n_seqs, n_seqs]`, so every lane in one batch must
+    /// contribute the same token count. Per-lane depths would need padded
+    /// columns, and a padded column costs exactly the column it is trying to
+    /// save — so the allocator picks ONE depth for the step rather than one per
+    /// lane. That is a real narrowing of the design's allocator and it is
+    /// recorded as such, not slipped in.
+    ///
+    /// `params[i]` and `samplers[i]` belong to `lanes[i]`. Both are the
+    /// caller's: sampling settings ride the request, and an RNG stream that
+    /// two lanes shared would make one chat's output depend on when the other
+    /// one drew.
+    ///
+    /// `attention_key_count` is the arena span the graph must cover, from the
+    /// slot table — one past the highest occupied absolute row.
+    pub fn speculative_round_slots(
+        &mut self,
+        lanes: &[SpecLane<'_>],
+        depth: usize,
+        params: &[LlamaSamplingParams],
+        samplers: &mut [LlamaSamplerState],
+    ) -> Result<Vec<SpecRoundOutcome>> {
+        let mtp = self
+            .mtp
+            .ok_or_else(|| LlamaError::format("batched speculative round without an MTP head"))?;
+        let width = lanes.len();
+        if width == 0 {
+            return Err(LlamaError::format(
+                "a batched speculative round needs at least one lane",
+            ));
+        }
+        if params.len() != width || samplers.len() != width {
+            return Err(LlamaError::format(format!(
+                "batched speculative round has {} lanes but {} sampling params and {} streams",
+                width,
+                params.len(),
+                samplers.len()
+            )));
+        }
+        if depth > mtp.draft_max {
+            return Err(LlamaError::format(format!(
+                "batched speculative round asked for depth {} past the session's {}",
+                depth, mtp.draft_max
+            )));
+        }
+        for lane in lanes {
+            if lane.tokens.len() != lane.fill {
+                return Err(LlamaError::format(format!(
+                    "lane {} holds {} tokens but its cache fill is {}",
+                    lane.lane,
+                    lane.tokens.len(),
+                    lane.fill
+                )));
+            }
+            if lane.mtp_filled > lane.fill {
+                return Err(LlamaError::format(format!(
+                    "lane {} has a draft head ahead of the model: {} > {}",
+                    lane.lane, lane.mtp_filled, lane.fill
+                )));
+            }
+            if lane.live_state_offset >= self.state_rows_per_slot() {
+                return Err(LlamaError::format(format!(
+                    "lane {} resumes from offset {} past its {}-row block",
+                    lane.lane,
+                    lane.live_state_offset,
+                    self.state_rows_per_slot()
+                )));
+            }
+            if lane.fill + depth + 1 > self.max_context {
+                return Err(LlamaError::format(format!(
+                    "lane {} would run past its {}-token context",
+                    lane.lane, self.max_context
+                )));
+            }
+        }
+
+        // The draft head lags the model until this runs, and it lags PER LANE.
+        let mut mtp_filled: Vec<usize> = Vec::with_capacity(width);
+        for lane in lanes {
+            mtp_filled.push(self.catch_up_slot_draft_head(lane)?);
+        }
+
+        // Draft: `depth` forwards, each one column per lane, so the draft head
+        // reads its ~46 MB restricted LM head once per DEPTH rather than once
+        // per lane per depth.
+        let mut drafts: Vec<Vec<i32>> = vec![Vec::with_capacity(depth); width];
+        let mut draft_probs: Vec<Vec<Vec<(u32, f32)>>> = vec![Vec::with_capacity(depth); width];
+        let mut fed: Vec<i32> = lanes.iter().map(|lane| lane.first).collect();
+        for step in 0..depth {
+            let read_rows: Vec<i32> = lanes
+                .iter()
+                .map(|lane| {
+                    if step > 0 {
+                        // The draft chain's own hidden, from this lane's
+                        // scratch row. Its own, or one lane would draft on
+                        // another's hidden state.
+                        self.carry_scratch_row_for(&mtp, lane.lane)
+                    } else if lane.fill == 0 {
+                        self.carry_zero_row_for(&mtp, lane.lane)
+                    } else {
+                        self.carry_lane_base(&mtp, lane.lane)
+                            + ((lane.fill - 1) % mtp.carry_ring) as i32
+                    }
+                })
+                .collect();
+            let started = std::time::Instant::now();
+            let rows = self.run_slot_draft_step(lanes, &fed, step, &read_rows)?;
+            if let Some(mtp) = self.mtp.as_mut() {
+                mtp.draft_nanos += started.elapsed().as_nanos() as u64;
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let (drafted, proposal) =
+                    self.draft_proposal(row, params[index], &mut samplers[index].rng)?;
+                fed[index] = drafted;
+                drafts[index].push(drafted);
+                draft_probs[index].push(proposal);
+            }
+        }
+
+        // Verify: ONE batch across every lane. Lane `i`'s tokens are
+        // `batch[i * per_lane .. (i+1) * per_lane]` — sequence-major, which is
+        // the order the recurrent scan reshapes.
+        let per_lane = depth + 1;
+        let mut batch: Vec<i32> = Vec::with_capacity(width * per_lane);
+        for (index, lane) in lanes.iter().enumerate() {
+            batch.push(lane.first);
+            batch.extend_from_slice(&drafts[index]);
+        }
+        let started = std::time::Instant::now();
+        let run = self.run_slot_verify_batch(lanes, &batch, per_lane)?;
+        if let Some(mtp) = self.mtp.as_mut() {
+            mtp.verify_nanos += started.elapsed().as_nanos() as u64;
+        }
+        let rows = split_run_logits(run, width * per_lane)?;
+
+        let mut outcomes = Vec::with_capacity(width);
+        for (index, lane) in lanes.iter().enumerate() {
+            let rows = &rows[index * per_lane..(index + 1) * per_lane];
+            outcomes.push(self.commit_slot_round(
+                lane,
+                &batch[index * per_lane..(index + 1) * per_lane],
+                &drafts[index],
+                &draft_probs[index],
+                rows,
+                params[index],
+                &mut samplers[index].rng,
+            )?);
+        }
+        if let Some(mtp) = self.mtp.as_mut() {
+            mtp.rounds += 1;
+            for outcome in &outcomes {
+                mtp.drafted += outcome.drafted as u64;
+                mtp.accepted += outcome.accepted as u64;
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Recurrent rows one slot owns: the live row plus one checkpoint per
+    /// verify-batch position when speculating, else 1.
+    fn state_rows_per_slot(&self) -> usize {
+        match self.mtp {
+            Some(mtp) if mtp.draft_max > 0 => mtp.draft_max + 2,
+            _ => 1,
+        }
+    }
+
+    /// Accept or reject one lane's drafts and decide what it committed.
+    ///
+    /// Byte-for-byte the accept test the single-stream round runs; the only
+    /// difference is that every piece of state it reads is this lane's.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_slot_round(
+        &self,
+        lane: &SpecLane<'_>,
+        batch: &[i32],
+        drafts: &[i32],
+        draft_probs: &[Vec<(u32, f32)>],
+        rows: &[Vec<f32>],
+        params: LlamaSamplingParams,
+        rng: &mut Xorshift64,
+    ) -> Result<SpecRoundOutcome> {
+        let mut accepted = 0usize;
+        let mut bonus = None;
+        for index in 0..drafts.len() {
+            let target = sampling_probabilities(&rows[index], params)?;
+            let drafted = drafts[index] as usize;
+            let q = draft_probs[index]
+                .iter()
+                .find(|(token, _)| *token as usize == drafted)
+                .map(|(_, probability)| *probability)
+                .unwrap_or(0.0);
+            let p = target.get(drafted).copied().unwrap_or(0.0);
+            if rng.next_f32() < speculative_acceptance(p, q) {
+                accepted += 1;
+                continue;
+            }
+            let residual = speculative_residual(&target, &draft_probs[index]);
+            bonus = Some(sample_from(&residual, rng)?);
+            break;
+        }
+        let bonus = match bonus {
+            Some(token) => token,
+            None => {
+                let target = sampling_probabilities(&rows[accepted], params)?;
+                sample_from(&target, rng)?
+            }
+        };
+
+        let mut commit = accepted;
+        let mut stop_reason = None;
+        for (index, &drafted) in drafts[..accepted].iter().enumerate() {
+            if let Some(reason) = self.stop_reason_for(drafted) {
+                commit = index;
+                stop_reason = Some(reason);
+                break;
+            }
+        }
+        if stop_reason.is_none() {
+            stop_reason = self.stop_reason_for(bonus);
+        }
+
+        let committed = batch[..=commit].to_vec();
+        let start = lane.fill;
+        // The draft head ingested exactly the positions it DRAFTED from:
+        // `start .. start + drafts.len()`. Without KV reuse only the first of
+        // those is trustworthy — it is `first`, which is always committed —
+        // and beyond it the draft chain's own tokens may have been rejected.
+        //
+        // Bounded by `drafts.len()` rather than assumed to be one. At depth 0
+        // the draft head ingested NOTHING, and claiming a position it never
+        // saw would leave a hole its next catch-up skips over: the draft head
+        // would then be conditioned on a token it never read, and the only
+        // symptom is worse proposals.
+        let ingested = draft_head_fill_after(drafts.len(), committed.len(), reuse_draft_kv());
+        Ok(SpecRoundOutcome {
+            live_state_offset: commit,
+            mtp_filled: start + ingested,
+            drafted: drafts.len(),
+            accepted,
+            committed,
+            next: bonus,
+            stop_reason,
+        })
+    }
+
+    /// Bring one lane's draft-head KV up to its model KV, in chunks.
+    ///
+    /// Returns the lane's new draft fill. Per lane and never shared: the draft
+    /// head's cache lives in the same arena as the model's, at the same
+    /// `kv_base`, so a lane catching up against another lane's fill would
+    /// ingest its neighbour's tokens.
+    fn catch_up_slot_draft_head(&mut self, lane: &SpecLane<'_>) -> Result<usize> {
+        let Some(mtp) = self.mtp else {
+            return Ok(lane.fill);
+        };
+        let mut filled = lane.mtp_filled;
+        if filled >= lane.fill {
+            return Ok(filled);
+        }
+        let started = std::time::Instant::now();
+        while filled < lane.fill {
+            let chunk = MTP_PREFILL_CHUNK.min(mtp.carry_ring.saturating_sub(1)).max(1);
+            let end = (filled + chunk).min(lane.fill);
+            self.run_slot_draft_prefill_chunk(lane, filled, end)?;
+            filled = end;
+        }
+        if let Some(mtp) = self.mtp.as_mut() {
+            mtp.catchup_nanos += started.elapsed().as_nanos() as u64;
+        }
+        Ok(filled)
+    }
+
+    /// One draft-head catch-up chunk for a lane: its tokens `start..end`.
+    fn run_slot_draft_prefill_chunk(
+        &mut self,
+        lane: &SpecLane<'_>,
+        start: usize,
+        end: usize,
+    ) -> Result<()> {
+        let mtp = self
+            .mtp
+            .ok_or_else(|| LlamaError::format("draft catch-up without an MTP head"))?;
+        let batch = end - start;
+        if batch == 0 {
+            return Ok(());
+        }
+        let positions: Vec<i32> = (start..end)
+            .map(|position| {
+                i32::try_from(position)
+                    .map_err(|_| LlamaError::format("draft catch-up position does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let write_indices: Vec<i32> = (start..end)
+            .map(|position| {
+                i32::try_from(lane.kv_base + position).map_err(|_| {
+                    LlamaError::format("draft catch-up cache row does not fit in i32")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Row `i` consumes the model's hidden at `i - 1`; the lane's first
+        // token has none and reads its own never-written zero row.
+        let zero_row = self.carry_zero_row_for(&mtp, lane.lane);
+        let base = self.carry_lane_base(&mtp, lane.lane);
+        let read_rows: Vec<i32> = (start..end)
+            .map(|index| {
+                if index == 0 {
+                    zero_row
+                } else {
+                    base + ((index - 1) % mtp.carry_ring) as i32
+                }
+            })
+            .collect();
+        let scratch_row = self.carry_scratch_row_for(&mtp, lane.lane);
+        let key_count = self.slot_key_count(lane.kv_base + end)?;
+        let graph_params = SessionGraphParams::mtp_draft(batch, key_count);
+        self.ensure_compiled_graph(graph_params)?;
+        let lower = i32::try_from(lane.kv_base)
+            .map_err(|_| LlamaError::format("lane kv_base does not fit in i32"))?;
+        let compiled = self
+            .graphs
+            .graph_for_mut(graph_params)
+            .ok_or_else(|| LlamaError::format("compiled draft catch-up graph was not cached"))?;
+        let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+            &positions,
+            key_count,
+            &[(batch - 1) as i32],
+        )?;
+        layout.attention_write_indices = write_indices;
+        if lower != 0 {
+            layout.attention_key_lower_bounds = vec![lower; batch];
+        }
+        layout.recurrent_state_rows.clear();
+        layout.hidden_read_rows = read_rows;
+        layout.hidden_write_rows = vec![scratch_row; batch];
+        compiled.execute_logits_only_with_layout(
+            LogitsProbeInput::TokenIds(&lane.tokens[start..end]),
+            &layout,
+        )?;
+        Ok(())
+    }
+
+    /// One draft step across every lane: `lanes.len()` columns, one logit row
+    /// each.
+    ///
+    /// `fed[i]` is the token lane `i` drafts from, `step` is how far into the
+    /// draft chain it is, and `read_rows[i]` is the hidden row it consumes.
+    fn run_slot_draft_step(
+        &mut self,
+        lanes: &[SpecLane<'_>],
+        fed: &[i32],
+        step: usize,
+        read_rows: &[i32],
+    ) -> Result<Vec<Vec<f32>>> {
+        let mtp = self
+            .mtp
+            .ok_or_else(|| LlamaError::format("draft step without an MTP head"))?;
+        let width = lanes.len();
+        let positions: Vec<i32> = lanes
+            .iter()
+            .map(|lane| {
+                i32::try_from(lane.fill + step)
+                    .map_err(|_| LlamaError::format("draft position does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let write_indices: Vec<i32> = lanes
+            .iter()
+            .map(|lane| {
+                i32::try_from(lane.kv_base + lane.fill + step)
+                    .map_err(|_| LlamaError::format("draft cache row does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let span = lanes
+            .iter()
+            .map(|lane| lane.kv_base + lane.fill + step + 1)
+            .max()
+            .unwrap_or(1);
+        let key_count = self.slot_key_count(span)?;
+        let graph_params = SessionGraphParams::mtp_draft_batched(width, key_count);
+        self.ensure_compiled_graph(graph_params)?;
+        let scratch_rows: Vec<i32> = lanes
+            .iter()
+            .map(|lane| self.carry_scratch_row_for(&mtp, lane.lane))
+            .collect();
+        let lower_bounds = slot_lower_bounds(lanes)?;
+        let output_ids: Vec<i32> = (0..width)
+            .map(|index| {
+                i32::try_from(index)
+                    .map_err(|_| LlamaError::format("draft output id does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let compiled = self
+            .graphs
+            .graph_for_mut(graph_params)
+            .ok_or_else(|| LlamaError::format("compiled draft graph was not cached"))?;
+        let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+            &positions,
+            key_count,
+            &output_ids,
+        )?;
+        layout.attention_write_indices = write_indices;
+        layout.attention_key_lower_bounds = lower_bounds;
+        layout.recurrent_state_rows.clear();
+        layout.hidden_read_rows = read_rows.to_vec();
+        layout.hidden_write_rows = scratch_rows;
+        let run =
+            compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(fed), &layout)?;
+        split_run_logits(run, width)
+    }
+
+    /// The verify forward across every lane: `per_lane` positions each, logits
+    /// for all of them.
+    ///
+    /// `batch` is sequence-major — lane `i`'s tokens at
+    /// `i * per_lane .. (i+1) * per_lane` — because that is how the recurrent
+    /// scan reshapes a batch. The state-row vector is NOT in that order; see
+    /// [`checkpointed_state_rows`].
+    fn run_slot_verify_batch(
+        &mut self,
+        lanes: &[SpecLane<'_>],
+        batch: &[i32],
+        per_lane: usize,
+    ) -> Result<HybridDecodeRun> {
+        // Guard only: a verify graph exists only alongside a draft head, and
+        // the hidden rows below are the draft head's to read.
+        self.mtp
+            .ok_or_else(|| LlamaError::format("verify batch without an MTP head"))?;
+        let width = lanes.len();
+        let n_tokens = width * per_lane;
+        if batch.len() != n_tokens {
+            return Err(LlamaError::format(format!(
+                "verify batch has {} tokens for {} lanes of {}",
+                batch.len(),
+                width,
+                per_lane
+            )));
+        }
+        let mut positions = Vec::with_capacity(n_tokens);
+        let mut write_indices = Vec::with_capacity(n_tokens);
+        let mut hidden_write_rows = Vec::with_capacity(n_tokens);
+        for lane in lanes {
+            for offset in 0..per_lane {
+                positions.push(i32::try_from(lane.fill + offset).map_err(|_| {
+                    LlamaError::format("verify position does not fit in i32")
+                })?);
+                write_indices.push(
+                    i32::try_from(lane.kv_base + lane.fill + offset).map_err(|_| {
+                        LlamaError::format("verify cache row does not fit in i32")
+                    })?,
+                );
+            }
+            hidden_write_rows.extend(self.carry_rows_for_lane_positions(
+                lane.lane,
+                lane.fill,
+                per_lane,
+            ));
+        }
+        let resume: Vec<i32> = lanes
+            .iter()
+            .map(|lane| {
+                i32::try_from(lane.state_base + lane.live_state_offset)
+                    .map_err(|_| LlamaError::format("lane resume row does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bases: Vec<i32> = lanes
+            .iter()
+            .map(|lane| {
+                i32::try_from(lane.state_base)
+                    .map_err(|_| LlamaError::format("lane state base does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let state_rows = crate::runtime::checkpointed_state_rows(&resume, &bases, per_lane)?;
+        // Two different key counts, and they are not interchangeable.
+        //
+        // The GRAPH is compiled at a bucketed width so a long generation does
+        // not compile a new graph per token. The LAYOUT carries the EXACT
+        // occupancy, because that is what the mask builder is told: keys past
+        // it are -inf'd at full graph width. Handing the layout the bucketed
+        // number instead would be describing cache rows that are not there.
+        // The single-stream path has always passed the exact count here, and
+        // this is that behaviour kept rather than re-derived.
+        let span = usize::try_from(write_indices.iter().copied().max().unwrap_or(0) + 1)
+            .map_err(|_| LlamaError::format("verify span does not fit in usize"))?;
+        let key_count = self.slot_key_count(span)?;
+        let graph_params = SessionGraphParams::verify_batched(width, n_tokens, key_count);
+        self.ensure_compiled_graph(graph_params)?;
+        let output_ids: Vec<i32> = (0..n_tokens)
+            .map(|index| {
+                i32::try_from(index)
+                    .map_err(|_| LlamaError::format("verify output id does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let lower_bounds = slot_lower_bounds_per_token(lanes, per_lane)?;
+        let compiled = self
+            .graphs
+            .graph_for_mut(graph_params)
+            .ok_or_else(|| LlamaError::format("compiled verify graph was not cached"))?;
+        let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+            &positions,
+            span,
+            &output_ids,
+        )?;
+        layout.attention_write_indices = write_indices;
+        layout.attention_key_lower_bounds = lower_bounds;
+        layout.recurrent_state_rows = state_rows;
+        layout.hidden_write_rows = hidden_write_rows;
+        compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(batch), &layout)
+    }
+
+    /// Bucket an absolute arena span into a compiled graph's key count.
+    ///
+    /// Against the ARENA, not one slot's context: the span is an absolute row
+    /// count across slots. At one slot the arena IS the context, so a solo
+    /// session buckets exactly as it does today.
+    fn slot_key_count(&self, span: usize) -> Result<usize> {
+        if span == 0 {
+            return Err(LlamaError::format("a batch must span at least one key"));
+        }
+        if span > self.attention_arena_rows {
+            return Err(LlamaError::format(format!(
+                "batch spans {} cache rows past the {}-row arena",
+                span, self.attention_arena_rows
+            )));
+        }
+        Ok(if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+            span
+        } else {
+            span.next_multiple_of(GRAPH_KEY_BUCKET)
+                .min(self.attention_arena_rows)
+        })
+    }
+}
+
+/// How far the draft head's KV is trustworthy after a round, as a count of
+/// positions past the round's start.
+///
+/// The draft head ingested exactly the positions it DRAFTED from — `drafted`
+/// of them. Without KV reuse only the first is trustworthy: that one is
+/// `first`, which is always committed, while the draft chain's own tokens may
+/// have been rejected.
+///
+/// Bounded by `drafted` and not assumed to be one. At depth 0 the draft head
+/// ingested NOTHING, and claiming a position it never saw leaves a hole its
+/// next catch-up skips straight over — after which the draft head is
+/// conditioned on a token it never read, and the only symptom is proposals
+/// quietly getting worse.
+fn draft_head_fill_after(drafted: usize, committed: usize, reuse: bool) -> usize {
+    drafted.min(if reuse { committed } else { 1 })
+}
+
+/// One lower bound per lane, or empty when every lane is at row 0.
+///
+/// Empty is not an optimisation: an all-zero vector and an absent one take
+/// DIFFERENT paths through the mask builder, and only the absent one is the
+/// single-sequence path a solo lane must stay on.
+fn slot_lower_bounds(lanes: &[SpecLane<'_>]) -> Result<Vec<i32>> {
+    if lanes.iter().all(|lane| lane.kv_base == 0) {
+        return Ok(Vec::new());
+    }
+    lanes
+        .iter()
+        .map(|lane| {
+            i32::try_from(lane.kv_base)
+                .map_err(|_| LlamaError::format("lane kv_base does not fit in i32"))
+        })
+        .collect()
+}
+
+/// The same bounds, repeated for every token a lane contributes.
+fn slot_lower_bounds_per_token(lanes: &[SpecLane<'_>], per_lane: usize) -> Result<Vec<i32>> {
+    let bounds = slot_lower_bounds(lanes)?;
+    if bounds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(bounds.len() * per_lane);
+    for bound in bounds {
+        out.extend(std::iter::repeat(bound).take(per_lane));
+    }
+    Ok(out)
 }
 
 fn resolve_max_context(model: &LlamaModel, config: LlamaSessionConfig) -> Result<u32> {
@@ -2872,8 +3541,9 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mtp_carry_ring, sample_from, sampling_probabilities, speculative_acceptance,
-        speculative_residual, LlamaSamplerState, LlamaSamplingParams, Xorshift64,
+        draft_head_fill_after, mtp_carry_ring, sample_from, sampling_probabilities,
+        slot_lower_bounds, slot_lower_bounds_per_token, speculative_acceptance,
+        speculative_residual, LlamaSamplerState, LlamaSamplingParams, SpecLane, Xorshift64,
     };
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
@@ -3069,6 +3739,79 @@ mod tests {
 
     /// The verify batch writes `draft_max + 1` carry rows starting one past the
     /// last committed row, so the ring must never wrap back onto that row.
+    /// The lane facts a batched speculative round is driven by, at base 0 —
+    /// which is what the single-stream verify now delegates as.
+    fn solo_lane(tokens: &[i32], resume: usize) -> SpecLane<'_> {
+        SpecLane {
+            lane: 0,
+            kv_base: 0,
+            state_base: 0,
+            live_state_offset: resume,
+            fill: tokens.len(),
+            mtp_filled: tokens.len(),
+            tokens,
+            first: 1,
+        }
+    }
+
+    #[test]
+    fn a_solo_lane_asks_the_mask_builder_for_its_single_sequence_path() {
+        // Empty is not an optimisation. An all-zero lower-bound vector and an
+        // ABSENT one take different paths through the mask builder, and only
+        // the absent one is the path a single-stream decode has always taken.
+        // A solo lane that started emitting zeros would still be correct and
+        // would stop being byte-identical, which is the one promise this lane
+        // makes about solo.
+        let tokens = [7, 8, 9];
+        let lane = solo_lane(&tokens, 0);
+        assert!(slot_lower_bounds(&[lane]).expect("bounds").is_empty());
+        assert!(slot_lower_bounds_per_token(&[lane], 4)
+            .expect("bounds")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_lane_above_zero_bounds_every_token_it_contributes() {
+        let a = [1, 2];
+        let b = [3, 4];
+        let lanes = [
+            solo_lane(&a, 0),
+            SpecLane {
+                lane: 1,
+                kv_base: 8192,
+                state_base: 5,
+                ..solo_lane(&b, 0)
+            },
+        ];
+        assert_eq!(slot_lower_bounds(&lanes).expect("bounds"), vec![0, 8192]);
+        // Per token, in the batch's own sequence-major order: lane 0's tokens
+        // then lane 1's. A bound that drifted out of step with the tokens
+        // would let a lane read below its own base, into whatever the
+        // neighbour beneath it is holding.
+        assert_eq!(
+            slot_lower_bounds_per_token(&lanes, 3).expect("bounds"),
+            vec![0, 0, 0, 8192, 8192, 8192]
+        );
+    }
+
+    #[test]
+    fn the_draft_head_never_claims_a_position_it_did_not_ingest() {
+        // Depth 0: nothing was drafted, so nothing was ingested. Claiming one
+        // leaves a hole the next catch-up skips, after which the draft head is
+        // conditioned on a token it never read — and the only symptom is
+        // proposals quietly getting worse.
+        assert_eq!(draft_head_fill_after(0, 1, false), 0);
+        assert_eq!(draft_head_fill_after(0, 1, true), 0);
+        // The shipped default: only `first` is trustworthy, because the draft
+        // chain's own tokens may have been rejected.
+        assert_eq!(draft_head_fill_after(3, 4, false), 1);
+        assert_eq!(draft_head_fill_after(1, 2, false), 1);
+        // With reuse the accepted prefix is trustworthy, but never past what
+        // was actually drafted.
+        assert_eq!(draft_head_fill_after(3, 2, true), 2);
+        assert_eq!(draft_head_fill_after(2, 4, true), 2);
+    }
+
     #[test]
     fn carry_ring_always_clears_a_verify_batch() {
         for prefill in [1usize, 32, 256, 4096] {
