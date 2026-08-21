@@ -3646,17 +3646,23 @@ struct BuiltDeltaNetRecurrentDecode {
 
 /// The state-cache rows every checkpoint of this batch writes: elements
 /// `1..=n_tokens` of the `[resume_row, w_0..w_n]` vector.
+/// Per-token checkpoint write rows: everything after the `n_seqs` resume rows.
 fn state_write_rows_all(
     ctx: &mut Context,
     input_state_rows: TensorId,
     recurrent_checkpoints: bool,
+    n_seqs: i64,
 ) -> Result<TensorId> {
     if !recurrent_checkpoints {
         return Ok(input_state_rows);
     }
     let rows = require_tensor(ctx, input_state_rows)?.ne[0];
-    ctx.view_1d(input_state_rows, rows - 1, row_size(TensorType::I32, 1)?)
-        .map_err(LlamaError::format)
+    ctx.view_1d(
+        input_state_rows,
+        rows - n_seqs,
+        row_size(TensorType::I32, n_seqs)?,
+    )
+    .map_err(LlamaError::format)
 }
 
 
@@ -4234,26 +4240,39 @@ fn build_delta_net_recurrent_decode_from_hidden(
     input_embed: TensorId,
     n_tokens: usize,
     recurrent_checkpoints: bool,
+    n_seqs: usize,
     prefix: &str,
 ) -> Result<BuiltDeltaNetRecurrentDecode> {
     let block = &spec.block;
     let n_tokens_i64 =
         i64::try_from(n_tokens).map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
-    // Checkpointing repurposes the state-row input as `[resume_row, w_0..w_n]`
-    // for a single sequence, so the row count no longer encodes n_seqs.
-    let n_seqs = if recurrent_checkpoints {
+    let n_seqs = i64::try_from(n_seqs)
+        .map_err(|_| LlamaError::format("n_seqs does not fit in i64"))?;
+    // The state-row input carries BOTH roles, and the sequence count is an
+    // explicit argument rather than something inferred from its length.
+    //
+    // It used to be inferred, which forced checkpointing to a single sequence:
+    // with checkpoints the vector is `[resume, w_0..w_n]`, so its length is
+    // `n_tokens + 1` and stops encoding the lane count entirely. That is the
+    // one structural conflict between speculation and batching. The layout is
+    // now `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]` — one resume row per
+    // lane, then one write row per token — which expresses both at any lane
+    // count.
+    {
         let rows = require_tensor(ctx, input_state_rows)?.ne[0];
-        if rows != n_tokens_i64 + 1 {
+        let expected = if recurrent_checkpoints {
+            n_seqs + n_tokens_i64
+        } else {
+            n_seqs
+        };
+        if rows != expected {
             return Err(LlamaError::format(format!(
-                "checkpointed delta-net decode expects {} state rows, got {}",
-                n_tokens_i64 + 1,
-                rows
+                "delta-net decode expects {} state rows for {} sequences and {} tokens \
+                 (checkpoints {}), got {}",
+                expected, n_seqs, n_tokens_i64, recurrent_checkpoints, rows
             )));
         }
-        1
-    } else {
-        require_tensor(ctx, input_state_rows)?.ne[0]
-    };
+    }
     if n_seqs <= 0 {
         return Err(LlamaError::format(
             "delta-net recurrent decode requires at least one active sequence",
@@ -4546,8 +4565,10 @@ fn build_delta_net_recurrent_decode_from_hidden(
     // element 0 is the row the scan resumes from and elements `1..=n_tokens`
     // receive the state after each token, so undoing a rejected speculative
     // draft is a change of resume row rather than a re-forward.
+    // Resume rows: the first `n_seqs` entries, one per lane. Without
+    // checkpoints the whole vector already IS that.
     let state_read_rows = if recurrent_checkpoints {
-        ctx.view_1d(input_state_rows, 1, 0)
+        ctx.view_1d(input_state_rows, n_seqs, 0)
             .map_err(LlamaError::format)?
     } else {
         input_state_rows
@@ -4622,7 +4643,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(conv_states_rows, format!("{prefix}.last_conv_states_rows"))
             .map_err(LlamaError::format)?;
-        let write_rows = state_write_rows_all(ctx, input_state_rows, recurrent_checkpoints)?;
+        let write_rows = state_write_rows_all(ctx, input_state_rows, recurrent_checkpoints, n_seqs)?;
         r_cache_updates.push(
             ctx.set_rows(r_cache, conv_states_rows, write_rows, BufferUsage::State)
                 .map_err(LlamaError::format)?,
@@ -4856,7 +4877,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
                 .map_err(LlamaError::format)?;
             ctx.set_tensor_name(planes, format!("{prefix}.state_checkpoints"))
                 .map_err(LlamaError::format)?;
-            let write_rows = state_write_rows_all(ctx, input_state_rows, true)?;
+            let write_rows = state_write_rows_all(ctx, input_state_rows, true, n_seqs)?;
             vec![ctx
                 .set_rows(s_cache, planes, write_rows, BufferUsage::State)
                 .map_err(LlamaError::format)?]
@@ -5157,6 +5178,7 @@ pub fn build_delta_net_recurrent_decode_graph(
         input_embed,
         n_tokens,
         false,
+        1,
         "recur_decode",
     )?;
     let result_output = built.result_output;
@@ -6521,16 +6543,11 @@ fn build_hybrid_decode_graph_impl(
             n_tokens, n_seqs
         )));
     }
-    // Checkpointing repurposes the state-row vector as `[resume, w_0..w_n]`
-    // for ONE sequence, so its length no longer encodes the sequence count.
-    // The two cannot be combined until that overload is unpicked; fail loud
-    // rather than silently decode every slot against slot 0's state.
-    if spec.recurrent_checkpoints && n_seqs > 1 {
-        return Err(LlamaError::format(format!(
-            "recurrent checkpointing is single-sequence only, got {} sequences",
-            n_seqs
-        )));
-    }
+    // Checkpointing and multi-lane decode compose now: the state-row vector is
+    // `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]`, so it expresses a resume
+    // row per lane AND a write row per token at any lane count. It used to be
+    // `[resume, w_0..w_n]` for one sequence, which is why the two were
+    // mutually exclusive.
     if n_outputs == 0 || n_outputs > n_tokens {
         return Err(LlamaError::format(format!(
             "hybrid decode graph requires 1 <= n_outputs <= n_tokens, got n_outputs={} n_tokens={}",
@@ -6675,12 +6692,12 @@ fn build_hybrid_decode_graph_impl(
     // element 0 is the row the scan starts from, elements 1..=n_tokens are
     // the rows the per-token states are written to, so a rejected draft is
     // rolled back by simply reading a different row next step.
-    // Without checkpointing the vector's LENGTH is the sequence count — that
-    // is how `build_delta_net_recurrent_decode` learns how many slots are in
-    // this batch, so sizing this tensor is the whole of the n_seqs plumbing.
+    // `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]` when checkpointing, else one
+    // resume row per lane. The sequence count reaches the scan as an explicit
+    // argument now, so this only has to size the tensor, not encode anything.
     let state_row_count = if recurrent_checkpoints {
-        n_tokens
-            .checked_add(1)
+        n_seqs
+            .checked_add(n_tokens)
             .ok_or_else(|| LlamaError::format("overflow computing recurrent state row count"))?
     } else {
         n_seqs
@@ -7087,6 +7104,7 @@ fn build_hybrid_decode_graph_impl(
                     hidden,
                     n_tokens,
                     recurrent_checkpoints,
+                    n_seqs,
                     &format!("{prefix}.recur"),
                 )?;
                 state_updates.extend(recur.r_cache_updates.iter().copied());
@@ -9284,30 +9302,37 @@ mod tests {
     }
 
     #[test]
-    fn checkpointing_refuses_more_than_one_sequence() {
-        // The B2 structural conflict, failing LOUD. Checkpointing overloads the
-        // state-row vector as [resume, w_0..w_n] for one sequence, so its
-        // length stops encoding the slot count. Silently accepting it would
-        // decode every slot against slot 0's recurrent state — plausible
-        // output, wrong conversation.
+    fn checkpointing_now_composes_with_multiple_sequences() {
+        // This used to be the one structural conflict between speculation and
+        // batching: the state-row vector was `[resume, w_0..w_n]` for ONE
+        // sequence, so its length could not also encode a lane count and
+        // checkpointing was refused outright above n_seqs 1.
+        //
+        // The layout is now `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]`, so
+        // both are expressible together. What the builder checks is the ROW
+        // COUNT, and it must reject a vector sized for the old layout rather
+        // than reading a write row as a resume row.
         let spec = guard_only_spec(true);
         let message = build_with_sequences(&spec, 4, 4)
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            message.contains("single-sequence"),
-            "expected the checkpointing guard, got {message}"
+            !message.contains("single-sequence"),
+            "checkpointing must no longer refuse a lane count outright, got {message}"
         );
-        // Single-sequence checkpointing is the shipped speculative path and
-        // must still be reachable.
+
+        // Single-sequence checkpointing — the shipped speculative path —
+        // still works, and now wants n_seqs + n_tokens rows rather than
+        // n_tokens + 1. At one sequence those are the same number, which is
+        // exactly why the old path keeps running unchanged.
         let message = build_with_sequences(&spec, 4, 1)
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            !message.contains("single-sequence"),
-            "n_seqs=1 must not trip the checkpointing guard, got {message}"
+            !message.contains("state rows"),
+            "n_seqs=1 checkpointing must still size correctly, got {message}"
         );
     }
 
