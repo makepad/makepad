@@ -3327,6 +3327,37 @@ script_mod! {
     // one lamp's contribution with alpha 0 (pure add under premul blending).
     // The lamp math mirrors lightmap.rs's lamp loop: N.L x (1-d/r)^2 x
     // cone^2 with SPILL = 0.35, visibility from the 6-face depth scratch.
+    // Region-scoped hard zero of a persistent bake target. The quad covers
+    // one region's rect plus its reserved pad ring (LmRect::padded), and
+    // blending is OFF — this is a real clear, not another accumulation. The
+    // lamp accumulator loads its own previous contents (a batch touches only
+    // its own regions), so a re-bake MUST start from this, not from the
+    // coverage prepass's chart-shaped marks.
+    mod.draw.DrawLmZero = mod.std.set_type_default() do #(DrawLmZero::script_shader(vm)){
+        alpha_blend: false
+        backface_culling: false
+        color_format: @Bgra8NoBlend
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let tp = self.quad_a.xy + self.geom.pos * self.quad_a.zw
+            self.vertex_pos = vec4(tp.x * 2.0 - 1.0, 1.0 - 2.0 * tp.y, 0.5, 1.0)
+        }
+
+        pixel: fn() {
+            return self.fill_a
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel()
+        }
+    }
+
     mod.draw.DrawLmLampGatherMesh = mod.std.set_type_default() do #(DrawLmLampGatherMesh::script_shader(vm)){
         alpha_blend: true
         backface_culling: false
@@ -4901,6 +4932,20 @@ pub struct DrawLmChamfer {
     pub rect_px: Vec4f,
     #[live(vec4(1.0, 0.0, 0.0, 0.0))]
     pub misc_a: Vec4f,
+}
+
+/// Region-scoped hard zero of a persistent bake target. `quad_a` = the
+/// region's padded rect in atlas uv, `fill_a` = the value every texel of it
+/// becomes.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLmZero {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live(vec4(0.0, 0.0, 1.0, 1.0))]
+    pub quad_a: Vec4f,
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub fill_a: Vec4f,
 }
 
 /// Lamp gather over a mesh region's chart at 1x. `lamp_a` = (pos, radius),
