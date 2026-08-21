@@ -642,10 +642,13 @@ impl GenModel {
         // The video model has no native loop mode; the loop pipe steers the
         // motion instead. The row's title stays the operator's own words.
         let body_prompt = if pipe.loop_video {
+            // NEVER ask for "flowing back into the first" — H3 obliges by
+            // animating a literal boomerang and the clip rewinds on screen.
+            // A loop is made by the PLAYER's jump cut; the prompt only has
+            // to keep the motion steady so the cut lands soft.
             format!(
-                "{prompt} — a seamless perfectly looping clip: continuous cyclic \
-                 motion, no cuts, no camera jumps, the final frame flowing back \
-                 into the first"
+                "{prompt} — continuous one-directional motion at a steady pace, \
+                 no reversal, no boomerang, no rewind, no cuts, no camera jumps"
             )
         } else {
             prompt.clone()
@@ -1123,7 +1126,10 @@ mod tests {
         assert_eq!(tags.iter().filter_map(Value::as_str).collect::<Vec<_>>(), vec!["loop"]);
         let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
         assert!(prompt.starts_with("neon tunnel"), "{prompt}");
-        assert!(prompt.contains("looping"), "{prompt}");
+        // The steering must forbid reversal — asking for a clip that "flows
+        // back into the first frame" made H3 animate literal boomerangs.
+        assert!(prompt.contains("no reversal"), "{prompt}");
+        assert!(prompt.contains("one-directional"), "{prompt}");
         assert_eq!(m.jobs().next().unwrap().title, "neon tunnel");
         assert_eq!(m.jobs().next().unwrap().profile_label, "expand → video loop");
     }
