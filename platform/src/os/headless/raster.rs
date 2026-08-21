@@ -1,6 +1,6 @@
 use super::virtual_gpu::{
-    rasterize_setup_rows, setup_triangle, Framebuffer, RasterScratch, RasterState,
-    TriSetup, TriangleDerivatives,
+    quantize_color_unorm8, rasterize_setup_rows, setup_triangle, Framebuffer, RasterScratch,
+    RasterState, TriSetup, TriangleDerivatives,
 };
 use crate::{
     cx::Cx,
@@ -266,8 +266,8 @@ fn render_target_budget_bytes() -> usize {
 struct PassRaster {
     /// Clip space maps onto this rect, anchored top-left in the attachment.
     viewport: (usize, usize),
-    /// The attachment is 8-bit unorm, so writes clamp to [0,1].
-    clamp_unorm: bool,
+    /// The attachment is 8-bit unorm, so writes clamp and quantize.
+    unorm8: bool,
     /// The pass has a depth attachment (so fragments depth-test).
     has_depth: bool,
 }
@@ -833,7 +833,11 @@ impl Cx {
                     fb.resize(width, height);
                     fb.set_has_depth(true);
                     let clear = self.passes[*draw_pass_id].clear_color;
-                    fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    // The window's swapchain image is 8-bit unorm.
+                    fb.clear(
+                        quantize_color_unorm8([clear.x, clear.y, clear.z, clear.w]),
+                        1.0,
+                    );
 
                     self.headless_draw_pass(
                         *draw_pass_id,
@@ -842,7 +846,7 @@ impl Cx {
                         PassRaster {
                             viewport: (width, height),
                             // The window's swapchain image is 8-bit unorm.
-                            clamp_unorm: true,
+                            unorm8: true,
                             has_depth: true,
                         },
                         &mut texture_cache,
@@ -1028,7 +1032,7 @@ impl Cx {
             viewport: (viewport_width.min(width), viewport_height.min(height)),
             // Only the 8-bit attachments quantize; the float formats exist
             // precisely so a data pass can store a value outside [0,1].
-            clamp_unorm: matches!(
+            unorm8: matches!(
                 self.textures[texture_id].format,
                 TextureFormat::RenderBGRAu8 { .. } | TextureFormat::RenderCubeBGRAu8 { .. }
             ),
@@ -1061,7 +1065,12 @@ impl Cx {
             }
         };
         if let Some(c) = clear_color {
-            fb.clear_color([c.x, c.y, c.z, c.w]);
+            let c = [c.x, c.y, c.z, c.w];
+            fb.clear_color(if pass_raster.unorm8 {
+                quantize_color_unorm8(c)
+            } else {
+                c
+            });
         }
         let clear_depth = match self.passes[draw_pass_id].clear_depth {
             DrawPassClearDepth::ClearWith(depth) => Some(depth),
@@ -1461,7 +1470,7 @@ impl Cx {
             let state = RasterState {
                 blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm),
                 depth_write,
-                clamp_unorm: pass_raster.clamp_unorm,
+                unorm8: pass_raster.unorm8,
                 has_depth: pass_raster.has_depth,
             };
             let viewport = pass_raster.viewport;
