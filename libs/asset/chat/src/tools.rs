@@ -627,6 +627,35 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "world.add_addon",
+            api_name: "world_add_addon",
+            description: "ADD MANY things in ONE call: append a small self-contained \
+                          splash chunk (loops welcome) to the running world under a \
+                          named addon marker — THE way to do 'make me a forest', 'add \
+                          a crowd', or a primitive build the library lacks. The chunk \
+                          evaluates against the LIVE world: nothing resets, nothing \
+                          else changes, and world.remove({tag: name}) undoes it. The \
+                          chunk may not re-declare the world (no game.terrain / \
+                          game.sky / game.map / game.player_character) — those are \
+                          world.set_source territory.",
+            args_doc: r#"{"name": "forest", "src": "for i in 0..12 {\n  game.model(\"kenney/nature-kit/tree_oak\", {pos: vec3(i * 3, 0, 8), scale: 2})\n}"}"#,
+            parameters: schema_object(
+                vec![
+                    ("name", schema_ident("short addon name (also its remove tag)")),
+                    (
+                        "src",
+                        schema_string_len(
+                            "self-contained splash lines to append",
+                            1,
+                            MAX_ADDON_SRC_BYTES as i64,
+                        ),
+                    ),
+                ],
+                &["name", "src"],
+                Some(false),
+            ),
+        },
+        ToolDef {
             name: "world.tune",
             api_name: "world_tune",
             description: "Adjust a WORLD knob on the running level in ONE cheap call — \
@@ -702,6 +731,11 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
 /// Most bytes of splash source `world.set_source` accepts (the tool wire
 /// caps whole argument objects at 16 KiB; escaping needs headroom).
 pub const MAX_WORLD_SOURCE_BYTES: usize = 12_000;
+
+/// An addon is a SMALL self-contained chunk by design — a bulk add is
+/// 10-30 lines. Anything larger is a level, and levels go through
+/// `world.set_source` with its own cap.
+pub const MAX_ADDON_SRC_BYTES: usize = 4_000;
 
 fn schema_world_place_item() -> Value {
     schema_object(
@@ -801,6 +835,7 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_set_player_model" => Some("world.set_player_model"),
         "world_spawn" => Some("world.spawn"),
         "world_tune" => Some("world.tune"),
+        "world_add_addon" => Some("world.add_addon"),
         _ => None,
     }
 }
@@ -1201,6 +1236,12 @@ pub enum ContentToolCall {
     /// splash setters, so the tune rides the addon lane — nothing resets.
     /// Currently: `time` (0-24 local hours).
     WorldTune { time: Option<f64> },
+    /// Append one self-contained splash chunk to the running world under a
+    /// named `// @addon:` marker (the §4.5 GENERAL verb; sandbox sessions
+    /// only). Bulk adds and primitive builds land as ONE 10-30 line chunk —
+    /// no source echo, addon-lane eval, removable by name. The client
+    /// refuses chunks that re-declare the world.
+    WorldAddAddon { name: String, src: String },
 }
 
 /// The spawn form override of [`ContentToolCall::WorldSpawn`]. Absent, the
@@ -1304,6 +1345,7 @@ impl ContentToolCall {
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
             ContentToolCall::WorldSpawn { .. } => "world.spawn",
             ContentToolCall::WorldTune { .. } => "world.tune",
+            ContentToolCall::WorldAddAddon { .. } => "world.add_addon",
         }
     }
 
@@ -1670,6 +1712,18 @@ impl ContentToolCall {
                     }
                 };
                 Ok(ContentToolCall::WorldSpawn { model, pos, form, tag })
+            }
+            "world.add_addon" => {
+                check_known(args, &["name", "src"], "world.add_addon argument")?;
+                let name = need_str(args, "name", 48)?;
+                if !ident_ok(&name) {
+                    return Err("name must be a short lowercase identifier".to_string());
+                }
+                let src = need_str(args, "src", MAX_ADDON_SRC_BYTES)?;
+                if src.trim().is_empty() {
+                    return Err("src must carry the splash lines to append".to_string());
+                }
+                Ok(ContentToolCall::WorldAddAddon { name, src })
             }
             other => Err(format!("unknown tool '{}'", bounded(other, 32))),
         }
@@ -2300,6 +2354,10 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
+        ContentToolCall::WorldAddAddon { name, src } => json::obj(vec![
+            ("name", json::s(name.clone())),
+            ("src", json::s(src.clone())),
+        ]),
     }
 }
 

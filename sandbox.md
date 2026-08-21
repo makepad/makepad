@@ -197,9 +197,16 @@ scored in the benchmarks, not an afterthought.
   scope against the LIVE world. Every entity it creates is tagged with the
   addon's identity (the placed.rs marker mechanism, generalized from
   single placements to script units).
-- Tools: `world.add_addon(name, src)` · `replace_addon(name, src)` ·
-  `remove_addon(name)` · `list_addons()`. `world.place` remains the
-  degenerate single-object addon.
+- **SHIPPED verb set** (each a `// @addon:` marked chunk on the host's
+  append lane): `world.spawn({model})` — single catalog thing, the game
+  picks form/ground/scale · `world.set_player_model({model})` — the
+  become swap · `world.tune({time})` — idempotent world knobs ·
+  `world.add_addon({name, src})` — the GENERAL verb: bulk adds and
+  primitive builds as ONE 10-30 line chunk (loops welcome), no source
+  echo · `world.remove({tag|ids})` — undoes spawns, places and addons by
+  name/tag. `world.place` remains the degenerate single-object addon.
+  Still designed-not-built: `replace_addon` · `list_addons` (world.list
+  covers placements today).
 - **The state law**: the base NEVER re-evals on an addon op — so player
   transform, score, and entity state survive every edit structurally, not
   by carefulness. Replace despawns exactly that addon's entities and
@@ -219,11 +226,12 @@ as distinct patterns, with a worked multi-turn example:
    `ambulance`: one vehicle spawned NEAR A ROAD read from the base's
    grid. ~50 tokens. Nothing else changes.
 3. "make it drive around the block" → `replace_addon("ambulance", …)`
-   with a waypoint loop. Only the ambulance blinks.
+   with a waypoint loop. Only the ambulance blinks. (replace_addon is the
+   remaining unbuilt verb; today this walks the source path.)
 4. "make the ambulance driveable" → `replace_addon("ambulance", …)`
    wiring the vehicle rig / drive-mode entity (same verb the base's cars
    use) — an addon can change WHAT something is, not just add things.
-5. "remove it" → `remove_addon("ambulance")`.
+5. "remove it" → `world.remove({tag: "ambulance"})` (shipped).
 
 **Why executable chunks, not diffs.** Two ways a background model can
 return an edit: a DIFF against the current source, or a self-contained
