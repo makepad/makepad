@@ -178,6 +178,10 @@ impl ExecRuntime {
         shared_buffers: &ExecContextBuffers,
         n_tokens: usize,
         n_outputs: usize,
+        // `attention_key_base` is the first arena row the attention window
+        // starts at: 0 for every graph that attends over the cache from its
+        // first row, which is every graph except a slot's own prefill.
+        attention_key_base: usize,
         attention_key_count: usize,
         n_seqs: usize,
     ) -> Result<CompiledHybridDecode> {
@@ -192,6 +196,7 @@ impl ExecRuntime {
                         buffers,
                         n_tokens,
                         n_outputs,
+                        attention_key_base,
                         attention_key_count,
                         n_seqs,
                     )?,
@@ -205,6 +210,7 @@ impl ExecRuntime {
                     arena,
                     n_tokens,
                     n_outputs,
+                    attention_key_base,
                     attention_key_count,
                     n_seqs,
                 )?))

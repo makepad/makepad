@@ -1874,7 +1874,9 @@ fn run_shared_hybrid_graph(
         &env.shared_main_buffer,
         token_ids.len(),
         output_ids.len(),
+        0,
         cache_tokens,
+        1,
     )?;
     let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
         positions,

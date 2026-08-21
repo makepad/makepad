@@ -837,6 +837,7 @@ impl Runtime {
         arena: &Arena,
         n_tokens: usize,
         n_outputs: usize,
+        attention_key_base: usize,
         attention_key_count: usize,
         n_seqs: usize,
     ) -> Result<Compiled> {
@@ -852,6 +853,7 @@ impl Runtime {
             shared_cache.as_ref(),
             n_tokens,
             n_outputs,
+            attention_key_base,
             attention_key_count,
             n_seqs,
         )?;
