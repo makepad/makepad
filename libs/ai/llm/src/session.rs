@@ -397,6 +397,12 @@ pub struct LlamaSession {
     draft_vocab: Option<DraftVocab>,
     config: LlamaSessionConfig,
     max_context: usize,
+    /// Rows in the shared attention arena: `max_sequences * max_context`.
+    /// Equals `max_context` for a single-slot session, which is every session
+    /// that exists today.
+    attention_arena_rows: usize,
+    /// Next token each slot will decode, set by the caller after sampling.
+    slot_tokens: BTreeMap<usize, i32>,
     context_extra_bytes: usize,
     weights: LoadedGgufWeights,
     graphs: SessionGraphSet,
@@ -448,6 +454,101 @@ impl LlamaSession {
 
     pub fn max_context(&self) -> usize {
         self.max_context
+    }
+
+    /// Slots this session was built for. 1 for every single-stream session.
+    pub fn slot_count(&self) -> usize {
+        self.config.max_sequences as usize
+    }
+
+    /// Rows in the shared attention arena, `slot_count * max_context`.
+    pub fn attention_arena_rows(&self) -> usize {
+        self.attention_arena_rows
+    }
+
+    /// A slot table matching this session's cache geometry exactly.
+    ///
+    /// Built here rather than by the caller so the table's bases and the
+    /// caches they index can never disagree — a slot whose `kv_base` did not
+    /// match its cache region would read another conversation's history and
+    /// produce fluent, wrong text.
+    pub fn new_slot_table(&self) -> Result<crate::slots::SlotTable> {
+        let draft_max = self.mtp.map(|_| self.config.spec_draft_max).unwrap_or(0);
+        let state_rows_per_slot = if draft_max > 0 { draft_max + 2 } else { 1 };
+        crate::slots::SlotTable::new(
+            self.slot_count(),
+            self.max_context,
+            state_rows_per_slot,
+            draft_max,
+        )
+    }
+
+    /// Run one multi-slot decode step: one token per active slot, one logit row
+    /// per active slot, in plan order.
+    ///
+    /// Returns the logits for each slot in `plan.slots` order. The caller owns
+    /// sampling (one `LlamaSamplerState` per slot) and is responsible for
+    /// telling the slot table what was produced.
+    pub fn step_slots(&mut self, plan: &crate::slots::StepPlan) -> Result<Vec<Vec<f32>>> {
+        if plan.slots.is_empty() {
+            return Err(LlamaError::format("a decode step needs at least one slot"));
+        }
+        let width = plan.slots.len();
+        if width > self.slot_count() {
+            return Err(LlamaError::format(format!(
+                "step plan has {} slots but the session was built for {}",
+                width,
+                self.slot_count()
+            )));
+        }
+        let layout = plan.to_batch_layout()?;
+        // Bucketed exactly as the single-stream path buckets, but against the
+        // ARENA rather than one slot's context, because the key span is an
+        // absolute row count across slots.
+        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+            layout.attention_key_count
+        } else {
+            layout
+                .attention_key_count
+                .next_multiple_of(GRAPH_KEY_BUCKET)
+                .min(self.attention_arena_rows)
+        };
+        let graph_params = SessionGraphParams::batched(width, attention_key_count);
+        self.ensure_compiled_graph(graph_params)?;
+
+        let token_ids: Vec<i32> = plan
+            .slots
+            .iter()
+            .map(|step| {
+                self.slot_token(step.slot)
+                    .ok_or_else(|| LlamaError::format(format!("slot {} has no token", step.slot)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut layout = layout;
+        layout.attention_key_count = attention_key_count;
+        let run = {
+            let compiled = self
+                .graphs
+                .graph_for_mut(graph_params)
+                .ok_or_else(|| LlamaError::format("compiled batched graph was not cached"))?;
+            compiled.execute_logits_only_with_layout(
+                LogitsProbeInput::TokenIds(&token_ids),
+                &layout,
+            )?
+        };
+        split_run_logits(run, width)
+    }
+
+    /// The token a slot feeds into the next step. Set by the caller through
+    /// [`Self::set_slot_token`].
+    fn slot_token(&self, slot: usize) -> Option<i32> {
+        self.slot_tokens.get(&slot).copied()
+    }
+
+    /// Queue the token a slot will decode on the next step.
+    pub fn set_slot_token(&mut self, slot: usize, token_id: i32) {
+        self.slot_tokens.insert(slot, token_id);
     }
 
     pub fn remaining_context(&self) -> usize {
@@ -781,9 +882,22 @@ impl LlamaSession {
         let vocab = LlamaVocab::from_model(&model)?;
         let plan = model.execution_plan()?;
         let max_context = resolve_max_context(&model, config)?;
+        // `max_context` is PER SLOT. Slots share one flat attention arena of
+        // `slots * per_slot_context` rows, and the slot index is folded into
+        // the CONTEXT dimension rather than becoming a sequence dimension —
+        // so `n_seq_max` stays 1 and every downstream shape is unchanged.
+        // That is what keeps `set_rows` at ne[2] == 1, keeps the flash op at
+        // q.ne[3] == 1, and keeps the mask 2-D: slot membership lives in the
+        // mask VALUES, so no CUDA kernel has to learn about slots.
+        let attention_arena_rows = u32::try_from(config.max_sequences)
+            .ok()
+            .and_then(|slots| max_context.checked_mul(slots))
+            .ok_or_else(|| {
+                LlamaError::format("session attention arena overflows: slots x max_context")
+            })?;
         let cache_shape = HybridCacheShape {
-            n_ctx_seq: max_context,
-            n_seq_max: config.max_sequences,
+            n_ctx_seq: attention_arena_rows,
+            n_seq_max: 1,
         };
         let cache_types = HybridCacheTypes {
             attention_k_type: config.attention_k_type,
@@ -825,9 +939,14 @@ impl LlamaSession {
         };
         // The verify batch checkpoints the recurrent state after every token,
         // so the r/s caches need one row per batch position plus the live row.
+        // Each slot owns a contiguous block of recurrent rows: the live row
+        // plus one checkpoint per verify-batch position when speculating.
         let recurrent_rows = if draft_max > 0 {
-            let rows = u32::try_from(draft_max + 2)
-                .map_err(|_| LlamaError::format("spec_draft_max is too large"))?;
+            let rows = usize::from(config.max_sequences > 0)
+                .checked_mul(config.max_sequences as usize)
+                .and_then(|slots| slots.checked_mul(draft_max + 2))
+                .and_then(|rows| u32::try_from(rows).ok())
+                .ok_or_else(|| LlamaError::format("spec_draft_max is too large"))?;
             for layer in spec.layers.iter_mut() {
                 if let HybridLayerSpec::Recurrent { decode, .. } = layer {
                     decode.cache.max_sequences = rows;
@@ -971,6 +1090,10 @@ impl LlamaSession {
             draft_vocab,
             config,
             max_context: max_context_usize,
+            attention_arena_rows: usize::try_from(attention_arena_rows).map_err(|_| {
+                LlamaError::format("session attention arena does not fit in usize")
+            })?,
+            slot_tokens: BTreeMap::new(),
             context_extra_bytes,
             weights,
             graphs,
@@ -2471,6 +2594,28 @@ fn argmax_token_id(logits: &[f32]) -> Result<i32> {
             .unwrap_or(0);
     }
     i32::try_from(best_index).map_err(|_| LlamaError::format("argmax index does not fit in i32"))
+}
+
+/// Split a multi-row decode run into one logits vector per output row.
+fn split_run_logits(run: HybridDecodeRun, rows: usize) -> Result<Vec<Vec<f32>>> {
+    let vocab = run.vocab_size;
+    if vocab == 0 {
+        return Err(LlamaError::format("decode run reported a zero vocabulary"));
+    }
+    if run.logits.len() < rows * vocab {
+        return Err(LlamaError::format(format!(
+            "batched decode produced {} logits, need {} for {} slots",
+            run.logits.len(),
+            rows * vocab,
+            rows
+        )));
+    }
+    Ok(run
+        .logits
+        .chunks(vocab)
+        .take(rows)
+        .map(|row| row.to_vec())
+        .collect())
 }
 
 fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
