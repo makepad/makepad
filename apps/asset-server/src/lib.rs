@@ -103,6 +103,12 @@ pub struct HostConfig {
     pub chat_fleet_bases: Vec<String>,
     /// Named fleet the chat broker talks to. Empty = `default`.
     pub chat_fleet: String,
+    /// Live chat sessions this server will hold at once, and how many any
+    /// one principal may hold. A box that serves several parallel chat
+    /// slots wants these raised; the defaults (32 / 8) match the library.
+    /// 0 = keep the library default.
+    pub chat_max_sessions: usize,
+    pub chat_max_sessions_per_owner: usize,
     /// Log to stderr.
     pub log: bool,
 }
@@ -128,6 +134,8 @@ impl HostConfig {
             work_root,
             chat_fleet_bases: Vec::new(),
             chat_fleet: String::new(),
+            chat_max_sessions: 0,
+            chat_max_sessions_per_owner: 0,
             log: true,
         }
     }
@@ -205,6 +213,12 @@ impl Host {
         cfg.discovery = config.beacon.then(DiscoveryConfig::lan_default);
         cfg.chat.fleet_bases = config.chat_fleet_bases.clone();
         cfg.chat.fleet = config.chat_fleet.clone();
+        if config.chat_max_sessions > 0 {
+            cfg.chat.max_sessions = config.chat_max_sessions;
+        }
+        if config.chat_max_sessions_per_owner > 0 {
+            cfg.chat.max_sessions_per_owner = config.chat_max_sessions_per_owner;
+        }
         cfg.log = config.log;
         let server = AssetServer::start(cfg).map_err(|error| format!("asset server: {error}"))?;
 

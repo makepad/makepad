@@ -42,6 +42,11 @@ Options:
   --chat-fleet <url>      Local Qwen fleet node for the chat broker
                           (repeatable; default: LAN fleet discovery)
   --chat-fleet-name <n>   Named fleet the chat broker talks to
+  --chat-max-sessions <n> Live chat sessions this server holds at once
+                          (default 32)
+  --chat-max-sessions-per-owner <n>
+                          Live chat sessions one principal may hold
+                          (default 8)
   --quiet                 No stderr logging
   --help                  This text
 ";
@@ -107,6 +112,8 @@ fn parse_config() -> HostConfig {
     let mut work: Option<PathBuf> = None;
     let mut chat_fleet_bases: Vec<String> = Vec::new();
     let mut chat_fleet = String::new();
+    let mut chat_max_sessions = 0usize;
+    let mut chat_max_sessions_per_owner = 0usize;
     let mut log = true;
 
     let value_of = |name: &str, args: &mut dyn Iterator<Item = String>| -> String {
@@ -142,6 +149,24 @@ fn parse_config() -> HostConfig {
                 chat_fleet_bases.push(value);
             }
             "--chat-fleet-name" => chat_fleet = value_of("--chat-fleet-name", &mut args),
+            "--chat-max-sessions" => {
+                let value = value_of("--chat-max-sessions", &mut args);
+                chat_max_sessions = value
+                    .parse()
+                    .unwrap_or_else(|_| fail("malformed --chat-max-sessions"));
+                if chat_max_sessions == 0 {
+                    fail("--chat-max-sessions must be at least 1");
+                }
+            }
+            "--chat-max-sessions-per-owner" => {
+                let value = value_of("--chat-max-sessions-per-owner", &mut args);
+                chat_max_sessions_per_owner = value
+                    .parse()
+                    .unwrap_or_else(|_| fail("malformed --chat-max-sessions-per-owner"));
+                if chat_max_sessions_per_owner == 0 {
+                    fail("--chat-max-sessions-per-owner must be at least 1");
+                }
+            }
             "--quiet" => log = false,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -181,6 +206,8 @@ fn parse_config() -> HostConfig {
     }
     config.chat_fleet_bases = chat_fleet_bases;
     config.chat_fleet = chat_fleet;
+    config.chat_max_sessions = chat_max_sessions;
+    config.chat_max_sessions_per_owner = chat_max_sessions_per_owner;
     config.log = log;
     config
 }
