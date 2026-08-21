@@ -130,6 +130,63 @@ pub fn lamp_photometry(mount: f32) -> (f32, f32) {
     (radius, strength)
 }
 
+/// The ground light at which a lamp pool has COMPLETELY drowned the sun's
+/// shadow inside it — a quarter of [`LM_LAMP_GROUND_PEAK`].
+///
+/// Not taste: the peak itself is only reached directly under the bulb, a
+/// patch the fixture's own housing largely hides. Measured on the shipped
+/// Kenney lantern at ×2 (bulb 2.74 m up, 10.7 m reach), full-peak light
+/// stops 4 cm from the pole while the pool's visible disc runs to 6 m — so
+/// filling only at the peak leaves the shadow standing across the whole part
+/// of the pool anyone looks at, which was exactly the reported symptom. A
+/// quarter of the peak is still on the ground 3.1 m out and gone by 5.5 m:
+/// the fill covers the pool's bright core and tapers away with the pool's own
+/// falloff, well inside its 8 m rim. It scales with the fixture like
+/// everything else here — a lamp on a taller pole spreads its pool wider and
+/// fills wider with it.
+pub const LM_LAMP_SHADOW_FILL_AT: f32 = 0.25 * LM_LAMP_GROUND_PEAK;
+
+/// How much of the SUN's shadow a local light standing in it fills back in.
+///
+/// A shadow is only the absence of SUN light, and every composite in
+/// `shaders.rs` has always honoured that: the shadow term gates the DIRECT
+/// sun and nothing else, while the lamp term (baked atlas RGB plus the
+/// per-frame `dl_sum`) is added unshadowed on top. Additive light alone,
+/// though, cannot DROWN a shadow — it only lifts its floor. At
+/// [`LM_LAMP_GROUND_PEAK`] against the noon sun's 0.72 direct term, the streak
+/// a street lamp's own pole throws across its own pool survives at better than
+/// 2:1 contrast, which is the thing that reads wrong: a pool bright enough to
+/// paint the road is somehow not bright enough to erase a shadow inside it.
+///
+/// So the pool's own strength lifts the sun's visibility term as well:
+///
+/// ```text
+/// fill       = clamp(lamp / LM_LAMP_SHADOW_FILL_AT, 0, 1)
+/// sun_filled = sun_vis + (1 - sun_vis) * fill
+/// ```
+///
+/// Over the pool's bright core the shadow inside it is gone; past
+/// [`LM_LAMP_SHADOW_FILL_AT`] the fill tapers with the pool's own falloff, so
+/// the filled region is a lit region and never a hard-edged disc; away from
+/// every lamp `lamp` is 0, so sun, sky, AO and the cascades are untouched by
+/// construction.
+///
+/// **It cannot blow anything out.** A filled fragment reads
+/// `ambient + direct + lamp` — precisely what the SAME fragment reads standing
+/// in open sun, which is a value the composite already produces wherever a
+/// pool falls on unshadowed ground. The ceiling of the sum is therefore
+/// unchanged, and with it every guarantee [`cap_lamp_pool`] and
+/// [`LM_LAMP_CEIL`] make about it. `fill` saturates at 1, so a lamp can put
+/// the sun back and never more than back.
+///
+/// This is the CPU twin of the four `sun_filled` shader functions; the shaders
+/// are the authority and the constant is pinned into their source by
+/// `every_composite_fills_the_sun_shadow_from_the_same_constant`.
+pub fn lamp_shadow_fill(lamp: f32, sun_vis: f32) -> f32 {
+    let fill = (lamp / LM_LAMP_SHADOW_FILL_AT).clamp(0.0, 1.0);
+    sun_vis + (1.0 - sun_vis) * fill
+}
+
 /// How close to a bulb the bake stops believing occluders, as the lamp depth
 /// pass's near plane. Bounds for [`lamp_clearance`]; the low end is the value
 /// the pass used before it learned to scale.
@@ -578,6 +635,109 @@ mod tests {
             lamp_saturated_ground_texels(mount, 8.0, blown.color.x, 1.0, tpu)
                 <= LM_LAMP_SAT_TEXELS * 1.001,
             "cap left the pool over budget"
+        );
+    }
+
+    /// The lamp-fill law: a pool erases the sun's shadow over its bright core,
+    /// an unlit fragment is untouched, and the two ends are joined
+    /// monotonically by the pool's own falloff — never a hard disc edge.
+    #[test]
+    fn a_pool_drowns_the_sun_shadow_and_darkness_changes_nothing() {
+        // Deep in a building's shadow (sun_vis 0), under the pole.
+        assert!(
+            (lamp_shadow_fill(LM_LAMP_GROUND_PEAK, 0.0) - 1.0).abs() < 1e-6,
+            "a pool at its own peak must put the whole sun back"
+        );
+        // No lamp anywhere: sun, sky, AO and the cascades untouched.
+        for vis in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(lamp_shadow_fill(0.0, vis), vis, "an unlit fragment moved");
+        }
+        // Open sun stays open sun — the fill has nothing to give back.
+        assert_eq!(lamp_shadow_fill(LM_LAMP_GROUND_PEAK, 1.0), 1.0);
+        // And it saturates: brighter than the fill point cannot go past "lit".
+        assert_eq!(lamp_shadow_fill(LM_LAMP_GROUND_PEAK * 4.0, 0.0), 1.0);
+
+        // Across a real pool the fill follows the pool, so the filled region
+        // IS a lit region — no hard-edged disc of restored sunlight. The
+        // numbers in LM_LAMP_SHADOW_FILL_AT's doc are these, measured.
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        let fill_at = |rho: f32| {
+            lamp_shadow_fill(lamp_ground_light(mount, rho, radius, strength, 1.0), 0.0)
+        };
+        let mut prev = 2.0f32;
+        for step in 0..=64 {
+            let rho = LM_LAMP_POOL_RADIUS * step as f32 / 64.0;
+            let v = fill_at(rho);
+            assert!(v <= prev + 1e-6, "fill rose again {rho} m out: {prev} -> {v}");
+            assert!((0.0..=1.0).contains(&v), "fill left [0,1] at {rho} m: {v}");
+            prev = v;
+        }
+        assert_eq!(fill_at(3.0), 1.0, "the pool's bright core stopped filling");
+        assert!(fill_at(5.5) < 0.35, "the fill reached too far: {}", fill_at(5.5));
+        assert!(prev < 0.15, "the pool's rim still erased the shadow: {prev}");
+    }
+
+    /// The fill may not blow anything out, and the argument is exact rather
+    /// than a matter of taste: a FILLED fragment reads what the very same
+    /// fragment reads standing in open sun with the same pool on it, which is
+    /// a value the composite already produced before the fill existed. The
+    /// ceiling of the sum is therefore unchanged, and [`cap_lamp_pool`] and
+    /// [`LM_LAMP_CEIL`] keep bounding exactly what they bounded.
+    #[test]
+    fn filling_a_shadow_never_beats_standing_in_the_open_sun() {
+        // shaders.rs light units: hemisphere ambient + sun DIRECT = 1.0 lit.
+        const AMBIENT: f32 = 0.28;
+        const DIRECT: f32 = 0.72;
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        for step in 0..=32 {
+            let rho = LM_LAMP_POOL_RADIUS * step as f32 / 32.0;
+            let lamp = lamp_ground_light(mount, rho, radius, strength, 1.0);
+            // What a fragment in the open reads: the pre-existing ceiling.
+            let open = AMBIENT + DIRECT + lamp;
+            for vis in [0.0f32, 0.2, 0.5, 0.8, 1.0] {
+                let filled = AMBIENT + DIRECT * lamp_shadow_fill(lamp, vis) + lamp;
+                assert!(
+                    filled <= open + 1e-6,
+                    "{rho} m out at vis {vis}: filled {filled} beat open sun {open}"
+                );
+                // And it is never darker than it was without the fill, or the
+                // shadow would have got deeper for standing near a lamp.
+                let unfilled = AMBIENT + DIRECT * vis + lamp;
+                assert!(
+                    filled >= unfilled - 1e-6,
+                    "{rho} m out at vis {vis}: fill darkened {unfilled} to {filled}"
+                );
+            }
+        }
+    }
+
+    /// The four shader composites solve the same fill against the same
+    /// constant. The number lives twice — once as [`LM_LAMP_SHADOW_FILL_AT`],
+    /// once as a literal in each `sun_filled`, because a shader function
+    /// cannot read a Rust const — so pin them together: a lamp that fills to a
+    /// different depth on terrain than on a wall is the bug this catches.
+    #[test]
+    fn every_composite_fills_the_sun_shadow_from_the_same_constant() {
+        let src = include_str!("shaders.rs");
+        let at = format!("/ {LM_LAMP_SHADOW_FILL_AT:.3}, 0.0, 1.0)");
+        assert_eq!(
+            src.matches(&at).count(),
+            4,
+            "expected 4 sun_filled bodies dividing by {at}"
+        );
+        assert_eq!(
+            src.matches("sun_filled: fn(sun_vis: float, local: vec3) -> float").count(),
+            4,
+            "a sun_filled declaration appeared or vanished"
+        );
+        // DrawSceneCube, DrawSceneSkinned, DrawScenePbr (inherited),
+        // DrawSceneSkinnedGpu and DrawSceneTerrain each call it once.
+        assert_eq!(
+            src.matches("self.sun_filled(").count(),
+            5,
+            "a composite stopped filling the sun shadow, or gained a call"
         );
     }
 
