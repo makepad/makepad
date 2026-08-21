@@ -1629,6 +1629,7 @@ fn opcheck_q6k_mmq() -> i32 {
 
 fn run_mmvq_swiglu_case(
     exec: &CudaExecRuntime,
+    ty: TensorType,
     gate: &[u8],
     up: &[u8],
     acts: &[f32],
@@ -1636,9 +1637,10 @@ fn run_mmvq_swiglu_case(
     n: usize,
     fuse: bool,
 ) -> Vec<f32> {
-    let mut bench = Bench::new(32 << 20);
-    let gw = bench.tensor("ffn_gate", TensorType::Q4K, &[k as i64, n as i64], gate);
-    let uw = bench.tensor("ffn_up", TensorType::Q4K, &[k as i64, n as i64], up);
+    let bytes = gate.len() + up.len() + acts.len() * 4 + n * (acts.len() / k) * 12 + (32 << 20);
+    let mut bench = Bench::new(bytes);
+    let gw = bench.tensor("ffn_gate", ty, &[k as i64, n as i64], gate);
+    let uw = bench.tensor("ffn_up", ty, &[k as i64, n as i64], up);
     let m = acts.len() / k;
     let x = bench.tensor(
         "ffn_x",
@@ -1693,8 +1695,8 @@ fn mmvq_swiglu_canary(exec: &CudaExecRuntime, failures: &mut usize) {
             continue;
         }
         let cols = &acts[..k * m];
-        let fused = run_mmvq_swiglu_case(exec, &gate, &up, cols, k, n, true);
-        let unfused = run_mmvq_swiglu_case(exec, &gate, &up, cols, k, n, false);
+        let fused = run_mmvq_swiglu_case(exec, TensorType::Q4K, &gate, &up, cols, k, n, true);
+        let unfused = run_mmvq_swiglu_case(exec, TensorType::Q4K, &gate, &up, cols, k, n, false);
         let delta = error_stats(&fused, &unfused);
         let drift = solo
             .as_ref()
@@ -2016,6 +2018,9 @@ fn parse_usize_list(text: &str) -> Option<Vec<usize>> {
 fn mmvq_error_report(args: &[String]) -> i32 {
     let mut ks: Vec<usize> = DEFAULT_REPORT_K.to_vec();
     let mut n = DEFAULT_REPORT_N;
+    let mut width_only = false;
+    let mut fused = false;
+    let mut types: Vec<TensorType> = vec![TensorType::Q4K, TensorType::Q5K, TensorType::Q6K];
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -2033,9 +2038,35 @@ fn mmvq_error_report(args: &[String]) -> i32 {
                     return 2;
                 }
             },
+            "--type" => match it.next().map(|v| v.as_str()) {
+                Some("q4_K") => types = vec![TensorType::Q4K],
+                Some("q5_K") => types = vec![TensorType::Q5K],
+                Some("q6_K") => types = vec![TensorType::Q6K],
+                _ => {
+                    eprintln!("mmvq-error: --type wants q4_K, q5_K or q6_K");
+                    return 2;
+                }
+            },
+            // The reference is an f64 dot per output element, so it costs
+            // n*m*k and the CPU dequant costs n*k floats. At the LM head
+            // (n = 248320, k = 5120) that is 5 GB of host mirror and ten
+            // billion multiply-adds — hours, for a column the question does
+            // not need. `rel_width` is GPU against GPU: the same activation
+            // column run alone and run in a batch. Drop the references and
+            // that shape becomes seconds.
+            "--width-only" => width_only = true,
+            // Same question, asked of the fused gate+up+SwiGLU mat-vec rather
+            // than a bare one. Decode's FFN runs fused, and `opcheck` gates it
+            // at k = 512 — which the head experiment shows is exactly the k
+            // where the width effect disappears, so that gate was asking at
+            // the one shape that cannot answer.
+            "--fused" => fused = true,
             other => {
                 eprintln!("mmvq-error: unknown argument {other}");
-                eprintln!("usage: llama-cuda-canary mmvq-error [--k 512,2048] [--n 257]");
+                eprintln!(
+                    "usage: llama-cuda-canary mmvq-error [--k 512,2048] [--n 257] \
+                     [--type q6_K] [--width-only]"
+                );
                 return 2;
             }
         }
@@ -2056,6 +2087,9 @@ fn mmvq_error_report(args: &[String]) -> i32 {
     println!("device: {}", exec.device_description());
     println!("column cap: MMV_MAX_COLUMNS = {MMV_MAX_COLUMNS}");
     println!("shapes: n = {n}, k = {ks:?}");
+    if width_only {
+        return mmvq_width_report(&exec, &types, &ks, n, fused);
+    }
     println!(
         "\ncolumns: nmse_* = sum(err^2)/sum(ref^2) against the Q8_1-modelled \
          reference, the full-f32 reference, and the f32-activation KERNEL.\n\
@@ -2082,11 +2116,8 @@ fn mmvq_error_report(args: &[String]) -> i32 {
 
     let mut failures = 0usize;
     let mut rng = Rng::new(0x5151_4d4d_0e11);
-    for (ty, tag) in [
-        (TensorType::Q4K, "q4_K"),
-        (TensorType::Q5K, "q5_K"),
-        (TensorType::Q6K, "q6_K"),
-    ] {
+    for ty in types.iter().copied() {
+        let tag = quant_type_tag(ty);
         let kind = quant_kind_of(ty);
         for k in ks.iter().copied() {
             let weights = quant_blocks(&mut rng, ty, k, n);
@@ -2189,6 +2220,97 @@ fn mmvq_error_report(args: &[String]) -> i32 {
     i32::from(failures != 0)
 }
 
+fn quant_type_tag(ty: TensorType) -> &'static str {
+    match ty {
+        TensorType::Q4K => "q4_K",
+        TensorType::Q5K => "q5_K",
+        TensorType::Q6K => "q6_K",
+        TensorType::Q8_0 => "q8_0",
+        other => unreachable!("quant_type_tag: {other:?}"),
+    }
+}
+
+/// Width consistency only: does one activation column get the same answer alone
+/// as it does inside a batch?
+///
+/// GPU against GPU, no CPU reference, so it runs at shapes the reference cannot
+/// reach — which is the point. The LM head is `n = 248320`, and it is the one
+/// mat-vec whose column count IS `n_outputs`, so a speculative verify batch
+/// changes its width by definition. If a token's logits depend on how many
+/// drafts travelled with it, this is where it would happen.
+fn mmvq_width_report(
+    exec: &CudaExecRuntime,
+    types: &[TensorType],
+    ks: &[usize],
+    n: usize,
+    fused: bool,
+) -> i32 {
+    println!(
+        "\ncolumn 0 of an m-wide batch against the same column run alone.\n\
+         kernel = {}.\n\
+         abs = max |difference|; rel = that over |value|; rows compared = n.",
+        if fused {
+            "fused gate+up+SwiGLU mat-vec"
+        } else {
+            "plain mat-vec"
+        }
+    );
+    println!(
+        "\n{:<6} {:<8} {:>6} {:>3} {:>9} {:>12} {:>12} {:>10}",
+        "type", "acts", "k", "m", "rows", "max_abs", "max_rel", "differing",
+    );
+    println!("{}", "-".repeat(78));
+
+    let mut rng = Rng::new(0x5151_4d4d_0e11);
+    for ty in types.iter().copied() {
+        let tag = quant_type_tag(ty);
+        let kind = quant_kind_of(ty);
+        for k in ks.iter().copied() {
+            let weights = quant_blocks(&mut rng, ty, k, n);
+            let up_weights = fused.then(|| quant_blocks(&mut rng, ty, k, n));
+            let run = |acts: &[f32], m: usize| -> Vec<f32> {
+                match &up_weights {
+                    Some(up) => run_mmvq_swiglu_case(exec, ty, &weights, up, acts, k, n, true),
+                    None => run_quant_mul_mat(exec, ty, &weights, acts, k, n, m, false),
+                }
+            };
+            for (acts_tag, outlier) in [("uniform", false), ("outlier", true)] {
+                let widest = MMV_WIDTHS[MMV_WIDTHS.len() - 1];
+                let wide = if outlier {
+                    acts_outlier(&mut rng, k * widest)
+                } else {
+                    acts_uniform(&mut rng, k * widest)
+                };
+                let solo = run(&wide[..k], 1);
+                for m in MMV_WIDTHS {
+                    if m == 1 || route_act_format(kind, m) != ActFormat::Q81 {
+                        continue;
+                    }
+                    let got = run(&wide[..k * m], m);
+                    let mut max_abs = 0.0f32;
+                    let mut max_rel = 0.0f32;
+                    let mut differing = 0usize;
+                    for (g, s) in got[..n].iter().zip(&solo) {
+                        let d = (g - s).abs();
+                        if d > 0.0 {
+                            differing += 1;
+                        }
+                        max_abs = max_abs.max(d);
+                        if s.abs() > 0.0 {
+                            max_rel = max_rel.max(d / s.abs());
+                        }
+                    }
+                    println!(
+                        "{tag:<6} {acts_tag:<8} {k:>6} {m:>3} {n:>9} {max_abs:>12.3e} {max_rel:>12.3e} {differing:>10}",
+                    );
+                }
+            }
+        }
+    }
+    println!("\nmmvq-error --width-only: report only, no gate");
+    0
+}
+
 /// One `mul_mat` through the planner, optionally with the official Q8_1
 /// mat-vec route switched off so the hand-written f32-activation kernel runs.
 fn run_quant_mul_mat(
@@ -2202,7 +2324,11 @@ fn run_quant_mul_mat(
     force_f32_acts: bool,
 ) -> Vec<f32> {
     let _disable = force_f32_acts.then(|| ScopedEnv::set("MKLLM_DISABLE_Q81_MMVQ", "1"));
-    let mut bench = Bench::new(512 << 20);
+    // Size the arena to the data. The LM head is a gigabyte of Q6_K on its
+    // own, so a fixed 512 MB context cannot hold the shape the open question
+    // is actually about.
+    let bytes = weights.len() + acts.len() * 4 + n * m * 4 + (64 << 20);
+    let mut bench = Bench::new(bytes);
     let w = bench.tensor("w", ty, &[k as i64, n as i64], weights);
     let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(acts));
     let out = bench
