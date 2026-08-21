@@ -48,11 +48,13 @@ fn start() -> (AssetServer, String) {
                     },
                     ScriptedTurn::Text("Here is the turret Grok drafted.".into()),
                 ],
+                ..Default::default()
             },
             openai: ScriptedLane {
                 available: false,
                 model: String::new(),
                 turns: Vec::new(),
+                ..Default::default()
             },
             grok: ScriptedLane {
                 available: true,
@@ -61,7 +63,9 @@ fn start() -> (AssetServer, String) {
                     ScriptedTurn::Text("fn spawn_turret() {}".into()),
                     ScriptedTurn::Text("Grok primary reply.".into()),
                 ],
+                ..Default::default()
             },
+            ..Default::default()
         }),
     };
     let server = AssetServer::start(cfg).expect("server start");

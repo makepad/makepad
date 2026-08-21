@@ -29,17 +29,21 @@ fn scripted_cfg() -> impl FnOnce(&mut makepad_asset_store::ServerConfig) {
                         },
                         ScriptedTurn::Text("Here is the quarry arena Grok drafted.".into()),
                     ],
+                    ..Default::default()
                 },
                 openai: ScriptedLane {
                     available: true,
                     model: "gpt-scripted".into(),
                     turns: vec![ScriptedTurn::Text("OpenAI primary reply.".into())],
+                    ..Default::default()
                 },
                 grok: ScriptedLane {
                     available: true,
                     model: "grok-scripted".into(),
                     turns: vec![ScriptedTurn::Text("fn spawn_quarry_arena() {}".into())],
+                    ..Default::default()
                 },
+                ..Default::default()
             }),
         };
     }
@@ -218,9 +222,11 @@ fn game_session_queries_the_catalog_and_round_trips_a_world_tool() {
                         ),
                         ScriptedTurn::Text("The level is live.".into()),
                     ],
+                    ..Default::default()
                 },
                 openai: ScriptedLane::default(),
                 grok: ScriptedLane::default(),
+                ..Default::default()
             }),
         };
     });
