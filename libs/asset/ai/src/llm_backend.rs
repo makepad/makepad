@@ -983,6 +983,16 @@ mod llama_worker {
                 }
             };
 
+            // Collect first, publish once. A step on the solo speculative path
+            // returns a whole 24-token CHUNK at once, and a text snapshot is
+            // the entire reply so far: publishing per token detokenises the
+            // whole sequence 24 times per chunk, allocates 24 growing strings,
+            // and takes the job-store mutex 24 times — each of which
+            // `notify_all`s every worker waiting on it. One waiter today; one
+            // per chat lane once the dispatcher lands, which is a thundering
+            // herd per token. The single-lane worker has always published once
+            // per chunk; this is the lane worker catching up to it.
+            let mut touched: Vec<u64> = Vec::new();
             for event in events {
                 match event {
                     LaneEvent::Token { job, token, produced } => {
@@ -991,21 +1001,12 @@ mod llama_worker {
                         let _ =
                             lane.events
                                 .send(WorkerEvent::Token(produced as u32, lane.max_tokens as u32));
-                        // Decode the WHOLE sequence: byte-level BPE can split
-                        // a character across a chunk edge, so per-chunk
-                        // decodes do not concatenate cleanly.
-                        if let Ok(decoded) =
-                            exec.session().vocab().decode_tokens(&lane.token_ids)
-                        {
-                            if let Some(snapshot) =
-                                super::next_stream_snapshot(&lane.streamed, &decoded)
-                            {
-                                lane.streamed = snapshot.clone();
-                                let _ = lane.events.send(WorkerEvent::Text(snapshot));
-                            }
+                        if !touched.contains(&job) {
+                            touched.push(job);
                         }
                     }
                     LaneEvent::Finished { job, outcome, .. } => {
+                        touched.retain(|id| *id != job);
                         let Some(lane) = jobs.remove(&job) else { continue };
                         let result = match outcome {
                             LaneOutcome::Cancelled => Err("cancelled".to_string()),
@@ -1017,6 +1018,19 @@ mod llama_worker {
                         };
                         let _ = lane.events.send(WorkerEvent::Done(result));
                     }
+                }
+            }
+            for job in touched {
+                let Some(lane) = jobs.get_mut(&job) else { continue };
+                // Decode the WHOLE sequence: byte-level BPE can split a
+                // character across a chunk edge, so per-chunk decodes do not
+                // concatenate cleanly.
+                let Ok(decoded) = exec.session().vocab().decode_tokens(&lane.token_ids) else {
+                    continue;
+                };
+                if let Some(snapshot) = super::next_stream_snapshot(&lane.streamed, &decoded) {
+                    lane.streamed = snapshot.clone();
+                    let _ = lane.events.send(WorkerEvent::Text(snapshot));
                 }
             }
         }
