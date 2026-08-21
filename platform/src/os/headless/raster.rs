@@ -1,11 +1,11 @@
 use super::virtual_gpu::{
-    rasterize_triangle_rows, Framebuffer, RasterScratch, TriangleDerivatives,
+    rasterize_triangle_rows, Framebuffer, RasterScratch, RasterState, TriangleDerivatives,
 };
 use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
     draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderColorFormat},
     makepad_live_id::*,
     makepad_math::*,
     texture::TextureFormat,
@@ -132,27 +132,33 @@ pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>
 
 /// Offscreen render targets for the software raster path.
 ///
-/// A child `DrawPass` renders into its own [`Framebuffer`], kept here across
-/// frames and keyed by pass id (a parent that repaints while its child stayed
-/// clean must still see the child's last contents — exactly like a GPU texture
-/// that was not re-rendered). `texture_pass` maps the pass's colour-attachment
-/// texture back to that framebuffer, which is what makes a composite quad
-/// sampling the texture find real pixels instead of an empty slot.
+/// One [`Framebuffer`] per colour-attachment TEXTURE — the framebuffer *is*
+/// the texture, so several passes writing the same attachment accumulate into
+/// it the way they do on a GPU, and a sampler resolves a render texture by
+/// looking up its own index.
 ///
-/// Buffers are reused in place (see [`Framebuffer::resize`]), so a 3D pane that
-/// repaints every frame costs one allocation, not one per frame.
+/// Kept across frames: a parent that repaints while its child stayed clean must
+/// still see the child's last contents, exactly like a GPU texture that was not
+/// re-rendered. Buffers are reused in place (see [`Framebuffer::resize`]), so a
+/// pane-sized 3D pass costs one allocation, not one per frame.
 #[derive(Default)]
 pub(crate) struct HeadlessRenderTargets {
-    /// draw pass id -> the framebuffer that pass renders into.
     framebuffers: HashMap<usize, Framebuffer>,
-    /// colour texture index -> draw pass id that renders into it.
-    texture_pass: HashMap<usize, usize>,
+}
+
+/// Attachment-level raster state: what the render pass descriptor fixes for
+/// every draw call inside the pass.
+#[derive(Clone, Copy)]
+struct PassRaster {
+    /// Clip space maps onto this rect, anchored top-left in the attachment.
+    viewport: (usize, usize),
+    /// The attachment is 8-bit unorm, so writes clamp to [0,1].
+    clamp_unorm: bool,
 }
 
 impl HeadlessRenderTargets {
     fn color_target(&self, texture_index: usize) -> Option<&Framebuffer> {
-        let pass_id = self.texture_pass.get(&texture_index)?;
-        let fb = self.framebuffers.get(pass_id)?;
+        let fb = self.framebuffers.get(&texture_index)?;
         if fb.width == 0 || fb.height == 0 || fb.color.is_empty() {
             return None;
         }
@@ -398,6 +404,8 @@ fn rasterize_instances_rows(
     depth_chunk: &mut [f32],
     width: usize,
     height: usize,
+    viewport: (usize, usize),
+    state: RasterState,
     row_start: usize,
     row_end: usize,
     indices: &[u32],
@@ -572,6 +580,8 @@ fn rasterize_instances_rows(
                 rasterize_triangle_rows(
                     width,
                     height,
+                    viewport,
+                    state,
                     row_start,
                     row_end,
                     color_chunk,
@@ -623,6 +633,8 @@ fn rasterize_instances_rows(
                 rasterize_triangle_rows(
                     width,
                     height,
+                    viewport,
+                    state,
                     row_start,
                     row_end,
                     color_chunk,
@@ -712,6 +724,11 @@ impl Cx {
                         render_threads,
                         parallel_min_tris,
                         &mut fb,
+                        PassRaster {
+                            viewport: (width, height),
+                            // The window's swapchain image is 8-bit unorm.
+                            clamp_unorm: true,
+                        },
                         &mut texture_cache,
                         &render_targets,
                         if profile_enabled {
@@ -773,17 +790,16 @@ impl Cx {
         results
     }
 
-    /// Drop framebuffers for passes that no longer exist, so a churn of
-    /// short-lived offscreen passes cannot grow the cache without bound.
+    /// Drop framebuffers whose texture slot is gone or has been recycled into
+    /// something that is not a render target, so a churn of short-lived
+    /// offscreen targets cannot grow the store without bound.
     fn headless_prune_render_targets(&mut self, render_targets: &mut HeadlessRenderTargets) {
-        let live_passes = self.passes.id_iter().count();
-        render_targets
-            .framebuffers
-            .retain(|pass_id, _| *pass_id < live_passes);
-        let framebuffers = &render_targets.framebuffers;
-        render_targets
-            .texture_pass
-            .retain(|_, pass_id| framebuffers.contains_key(pass_id));
+        let pool = &self.textures.0.pool;
+        render_targets.framebuffers.retain(|texture_index, _| {
+            pool.get(*texture_index)
+                .map(|slot| slot.item.format.as_render_alloc(1, 1).is_some())
+                .unwrap_or(false)
+        });
     }
 
     /// Render one offscreen pass into the framebuffer that backs its colour
@@ -825,8 +841,9 @@ impl Cx {
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
             return;
         }
-        // Same arithmetic the GPU backends use to size the attachment: the
-        // viewport is dpi * pass rect, and `TextureSize::Fixed` overrides it.
+        // Same arithmetic the GPU backends use: the viewport is dpi * pass rect
+        // anchored at the attachment's top-left corner, while the attachment
+        // itself may be larger when `TextureSize::Fixed` pins it.
         let viewport_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
         let viewport_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
         let (width, height) = {
@@ -841,6 +858,15 @@ impl Cx {
                 _ => (viewport_width, viewport_height),
             }
         };
+        let pass_raster = PassRaster {
+            viewport: (viewport_width.min(width), viewport_height.min(height)),
+            // Only the 8-bit attachments quantize; the float formats exist
+            // precisely so a data pass can store a value outside [0,1].
+            clamp_unorm: matches!(
+                self.textures[texture_id].format,
+                TextureFormat::RenderBGRAu8 { .. } | TextureFormat::RenderCubeBGRAu8 { .. }
+            ),
+        };
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
             self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
@@ -848,11 +874,11 @@ impl Cx {
         self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
         self.passes[draw_pass_id].set_time(time as f32);
 
-        // Taking the framebuffer out of the map lets the raster below sample
+        // Taking the framebuffer out of the store lets the raster below sample
         // every *other* offscreen target while writing into this one.
         let mut fb = render_targets
             .framebuffers
-            .remove(&draw_pass_id.0)
+            .remove(&texture_id.0)
             .unwrap_or_else(|| Framebuffer::new(width, height));
         let discarded = fb.resize(width, height);
 
@@ -891,15 +917,13 @@ impl Cx {
             render_threads,
             parallel_min_tris,
             &mut fb,
+            pass_raster,
             texture_cache,
             render_targets,
             profile,
         );
 
-        render_targets.framebuffers.insert(draw_pass_id.0, fb);
-        render_targets
-            .texture_pass
-            .insert(texture_id.0, draw_pass_id.0);
+        render_targets.framebuffers.insert(texture_id.0, fb);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -909,6 +933,7 @@ impl Cx {
         render_threads: usize,
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
+        pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
         render_targets: &HeadlessRenderTargets,
         mut profile: Option<&mut RenderProfile>,
@@ -929,6 +954,7 @@ impl Cx {
             render_threads,
             parallel_min_tris,
             fb,
+            pass_raster,
             texture_cache,
             render_targets,
             profile.as_deref_mut(),
@@ -945,6 +971,7 @@ impl Cx {
         render_threads: usize,
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
+        pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
         render_targets: &HeadlessRenderTargets,
         mut profile: Option<&mut RenderProfile>,
@@ -980,6 +1007,7 @@ impl Cx {
                     render_threads,
                     parallel_min_tris,
                     fb,
+                    pass_raster,
                     texture_cache,
                     render_targets,
                     profile.as_deref_mut(),
@@ -1004,7 +1032,9 @@ impl Cx {
             };
 
             let shader_id = draw_call.draw_shader_id;
+            let depth_write = draw_call.options.depth_write;
             let sh = &self.draw_shaders.shaders[shader_id.index];
+            let color_format = sh.mapping.color_format;
             let os_shader_id = match sh.os_shader_id {
                 Some(id) => id,
                 None => continue,
@@ -1260,6 +1290,17 @@ impl Cx {
             let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
             let uses_derivatives = os_shader.uses_derivatives;
             let row_chunks = compute_row_chunks(fb.height, render_threads);
+            // Same pipeline state the GPU backends build from the shader: the
+            // data-pass colour formats disable blending (their alpha channel is
+            // payload — an SDF byte, a depth — and a premultiplied over blend
+            // can only ever grow it), and `depth_write: false` shaders must not
+            // touch the depth buffer.
+            let state = RasterState {
+                blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm),
+                depth_write,
+                clamp_unorm: pass_raster.clamp_unorm,
+            };
+            let viewport = pass_raster.viewport;
             let use_parallel = row_chunks.len() > 1
                 && tri_count.saturating_mul(instance_count) >= parallel_min_tris
                 && self.os.render_pool.is_some();
@@ -1340,6 +1381,8 @@ impl Cx {
                             depth_chunk,
                             width,
                             height,
+                            viewport,
+                            state,
                             row_start,
                             row_end,
                             indices,
@@ -1377,6 +1420,8 @@ impl Cx {
                     fb.depth.as_mut_slice(),
                     fb.width,
                     fb.height,
+                    viewport,
+                    state,
                     0,
                     fb.height,
                     indices,
