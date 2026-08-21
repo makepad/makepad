@@ -1402,14 +1402,20 @@ pub struct JobRowEntry {
 }
 
 impl JobRowEntry {
-    pub fn from_job(job: &GenJob, now_ms: u64) -> JobRowEntry {
+    pub fn from_job(job: &GenJob, now_ms: u64, queue_ahead: Option<usize>) -> JobRowEntry {
         let display = job.display(now_ms);
         let progress = display.progress_permille.map(|value| value as f32 / 1000.0);
         let progress_text = match display.progress_permille {
             Some(value) => format!("{:.1}%", value as f32 / 10.0),
             None => match &job.state {
                 GenJobState::Submitting => "SENDING".to_string(),
-                GenJobState::Pending => "WAITING".to_string(),
+                // A busy fleet is not a broken one: say WHERE the job
+                // stands instead of a vague wait.
+                GenJobState::Pending => match queue_ahead {
+                    Some(0) => "NEXT".to_string(),
+                    Some(n) => format!("#{}", n + 1),
+                    None => "QUEUED".to_string(),
+                },
                 GenJobState::CancelRequested => "STOPPING".to_string(),
                 GenJobState::Failed(_) => "FAILED".to_string(),
                 GenJobState::Cancelled => "CANCELLED".to_string(),
