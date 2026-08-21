@@ -216,12 +216,11 @@ pub fn take_limit_events() -> Vec<SplashLimitEvent> {
     EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()))
 }
 
-/// Whether this isolate has any CPU allowance left in the current window, and
-/// how much of one entry's wall-clock it may use.
+/// How much wall-clock this isolate's next entry may use, given what it has
+/// already spent in the current window.
 ///
-/// Returns `None` when the isolate is out of allowance — the caller skips the
-/// entry entirely. That is the point of a cumulative budget: a script that
-/// spends its second can be refused the frame, not merely trimmed.
+/// Always some time: see the floor below for why an over-budget isolate is
+/// throttled rather than starved.
 pub(crate) fn cpu_allowance(heap_key: usize) -> Option<Duration> {
     LIMITS.with(|l| {
         let mut l = l.borrow_mut();
@@ -234,13 +233,17 @@ pub(crate) fn cpu_allowance(heap_key: usize) -> Option<Duration> {
             state.cpu_spent = Duration::ZERO;
         }
         let budget = Duration::from_millis(limits.cpu_per_window_ms);
-        if state.cpu_spent >= budget {
-            return None;
-        }
-        // Never hand out more than one entry's worth, nor more than what is
-        // left of the window.
         let entry = Duration::from_millis(limits.entry_time_ms);
-        Some(entry.min(budget - state.cpu_spent))
+        // An over-budget isolate is THROTTLED, not starved. Handing out a
+        // sliver would leave every entry bailing part-way through its own
+        // work, which is a broken app rather than a slow one — and a script
+        // cut in half mid-loop leaves worse state behind than one that never
+        // ran. The floor is small enough to be a real penalty (a tight loop
+        // gets a fraction of what it wants) and large enough that ordinary
+        // callbacks still finish.
+        let floor = (entry / 8).max(Duration::from_millis(8));
+        let left = budget.saturating_sub(state.cpu_spent);
+        Some(entry.min(left).max(floor))
     })
 }
 
@@ -370,22 +373,36 @@ mod tests {
     }
 
     /// The cumulative window is the thing per-entry budgets cannot express:
-    /// enough entries and the isolate is refused the next one outright.
+    /// spend it and later entries are cut down to a throttled slice.
     #[test]
     fn cpu_runs_out_across_many_entries() {
         reset();
         set_limits_for_heap(H, Some(SplashLimits::default()));
         let entry = Duration::from_millis(64);
-        let mut entries = 0;
-        while cpu_allowance(H).is_some() {
+        // Three full entries fit in the 250ms window; the fourth is trimmed to
+        // what is left of it (58ms), which is the budget doing its job.
+        for _ in 0..3 {
+            assert_eq!(cpu_allowance(H), Some(entry), "an unspent window pays in full");
             charge_cpu(H, entry);
-            entries += 1;
-            assert!(entries < 100, "the window must close");
         }
-        // 250ms of allowance at 64ms an entry.
-        assert_eq!(entries, 4);
-        let events = take_limit_events();
-        assert!(events.iter().any(|e| e.kind == SplashLimitKind::Cpu));
+        assert_eq!(cpu_allowance(H), Some(Duration::from_millis(58)), "trimmed to the remainder");
+        charge_cpu(H, entry);
+        // Now the window is spent, and what is left is the throttle floor.
+        let throttled = cpu_allowance(H).expect("throttled, never starved");
+        assert!(throttled < entry, "an over-budget isolate is cut down");
+        assert_eq!(throttled, Duration::from_millis(8));
+        assert!(take_limit_events().iter().any(|e| e.kind == SplashLimitKind::Cpu));
+    }
+
+    /// Throttled is not starved: an ordinary callback still has room to run,
+    /// or the app is broken rather than slowed.
+    #[test]
+    fn an_over_budget_isolate_is_throttled_not_starved() {
+        reset();
+        set_limits_for_heap(H, Some(SplashLimits { cpu_per_window_ms: 10, ..Default::default() }));
+        charge_cpu(H, Duration::from_millis(500));
+        let slice = cpu_allowance(H).expect("always some time");
+        assert!(slice >= Duration::from_millis(8));
     }
 
     /// One entry never gets more than its own share, even with a full window.
