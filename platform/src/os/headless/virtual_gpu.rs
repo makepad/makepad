@@ -638,9 +638,15 @@ pub fn quantize_color_unorm8(c: [f32; 4]) -> [f32; 4] {
 }
 
 /// Store one component the way an 8-bit unorm attachment does.
+///
+/// Divides rather than multiplying by the reciprocal: hardware decodes a unorm
+/// byte as `byte / 255.0`, and `x * (1.0/255.0)` is a different number for some
+/// codes (byte 3 lands one ulp high). That would make the round trip
+/// byte → float → byte unstable, and the lightmap bake pushes its distance field
+/// through five of those round trips before anything samples it.
 #[inline]
 fn quantize_unorm8(v: f32) -> f32 {
-    (v.clamp(0.0, 1.0) * 255.0).round() * (1.0 / 255.0)
+    (v.clamp(0.0, 1.0) * 255.0).round() / 255.0
 }
 
 #[inline]
@@ -652,4 +658,213 @@ fn blend_premul_src_over(src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
         src[2] + dst[2] * inv_src_a,
         src[3] + dst[3] * inv_src_a,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit quad's worth of clip-space positions, as the vertex stage emits them.
+    fn positions() -> Vec<[f32; 4]> {
+        vec![
+            [-0.8, -0.7, 0.2, 1.0],
+            [0.9, -0.6, 0.4, 1.0],
+            [0.1, 0.85, 0.3, 1.0],
+            // A second, perspective-divided triangle sharing a vertex.
+            [-0.4, 0.5, 0.9, 2.0],
+        ]
+    }
+
+    /// Two varying slots per vertex: one flat, one interpolated.
+    fn varyings(vary_len: usize) -> Vec<f32> {
+        let mut v = Vec::new();
+        for i in 0..4 {
+            for s in 0..vary_len {
+                v.push(i as f32 * 10.0 + s as f32);
+            }
+        }
+        v
+    }
+
+    fn shade(
+        tri: &TriSetup,
+        width: usize,
+        height: usize,
+        bands: &[(usize, usize)],
+        vary_len: usize,
+        flat_slots: usize,
+        derivatives: bool,
+    ) -> Framebuffer {
+        let mut fb = Framebuffer::new(width, height);
+        fb.clear([0.0, 0.0, 0.0, 0.0], 1.0);
+        let vary = varyings(vary_len);
+        let state = RasterState::default();
+        for &(lo, hi) in bands {
+            let color = &mut fb.color[lo * width..hi * width];
+            let depth = &mut fb.depth[lo * width..hi * width];
+            let mut scratch = RasterScratch::default();
+            // Colour encodes the interpolated varyings, so a mismatch anywhere in
+            // the interpolation shows up as a pixel difference.
+            let mut frag = |v: &[f32], _d: &TriangleDerivatives, _lx: u32, _ly: u32, _x: i32, _y: i32| {
+                Some([v[0] * 0.01, v[vary_len - 1] * 0.01, 0.25, 1.0])
+            };
+            rasterize_setup_rows(
+                tri,
+                width,
+                state,
+                lo,
+                hi,
+                color,
+                depth,
+                &vary,
+                vary_len,
+                flat_slots,
+                derivatives,
+                &mut scratch,
+                &mut frag,
+            );
+        }
+        fb
+    }
+
+    /// Splitting the rows across bands is the whole basis of the threaded path:
+    /// it may not change a single pixel.
+    #[test]
+    fn band_split_is_pixel_identical_to_one_pass() {
+        let (w, h) = (61, 64);
+        let pos = positions();
+        for (vary_len, flat_slots, derivs) in [(4usize, 0usize, false), (6, 2, true)] {
+            let tri = setup_triangle(w, h, (w, h), &pos, 0, 1, 2).expect("triangle is visible");
+            let whole = shade(&tri, w, h, &[(0, h)], vary_len, flat_slots, derivs);
+            // Deliberately uneven bands, including ones the triangle misses.
+            for bands in [
+                vec![(0, 16), (16, 32), (32, 48), (48, h)],
+                vec![(0, 5), (5, 7), (7, 40), (40, h)],
+                vec![(0, 1), (1, h)],
+            ] {
+                let split = shade(&tri, w, h, &bands, vary_len, flat_slots, derivs);
+                assert_eq!(
+                    whole.color, split.color,
+                    "colour differs for bands {bands:?} (vary_len={vary_len}, derivs={derivs})"
+                );
+                assert_eq!(whole.depth, split.depth, "depth differs for bands {bands:?}");
+            }
+        }
+    }
+
+    /// The row span is an optimization, never a coverage decision: every pixel
+    /// the exact edge test accepts has to be inside it.
+    #[test]
+    fn row_span_never_drops_a_covered_pixel() {
+        let (w, h) = (61, 64);
+        let pos = positions();
+        for (a, b, c) in [(0u32, 1, 2), (0, 2, 1), (3, 1, 2), (2, 3, 0)] {
+            let Some(tri) = setup_triangle(w, h, (w, h), &pos, a, b, c) else {
+                continue;
+            };
+            for y in tri.min_y..=tri.max_y {
+                let py = y as f32 + 0.5;
+                let px0 = tri.min_x as f32 + 0.5;
+                let e = [
+                    edge(tri.sx[1], tri.sy[1], tri.sx[2], tri.sy[2], px0, py),
+                    edge(tri.sx[2], tri.sy[2], tri.sx[0], tri.sy[0], px0, py),
+                    edge(tri.sx[0], tri.sy[0], tri.sx[1], tri.sy[1], px0, py),
+                ];
+                let span = row_span(tri.min_x, tri.max_x, e, tri.e_dx);
+                for x in tri.min_x..=tri.max_x {
+                    let px = x as f32 + 0.5;
+                    let covered = edge_pass(
+                        edge(tri.sx[1], tri.sy[1], tri.sx[2], tri.sy[2], px, py),
+                        tri.top_left[0],
+                    ) && edge_pass(
+                        edge(tri.sx[2], tri.sy[2], tri.sx[0], tri.sy[0], px, py),
+                        tri.top_left[1],
+                    ) && edge_pass(
+                        edge(tri.sx[0], tri.sy[0], tri.sx[1], tri.sy[1], px, py),
+                        tri.top_left[2],
+                    );
+                    if covered {
+                        let (lo, hi) = span.unwrap_or_else(|| {
+                            panic!("row {y} reported empty but pixel {x} is covered")
+                        });
+                        assert!(
+                            x >= lo && x <= hi,
+                            "pixel ({x},{y}) is covered but outside span {lo}..={hi}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn setup_rejects_degenerate_and_offscreen_triangles() {
+        // Zero area.
+        let flat = vec![[0.0, 0.0, 0.0, 1.0], [0.5, 0.5, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0]];
+        assert!(setup_triangle(32, 32, (32, 32), &flat, 0, 1, 2).is_none());
+        // Entirely off to one side.
+        let away = vec![
+            [-9.0, -9.0, 0.0, 1.0],
+            [-8.0, -9.0, 0.0, 1.0],
+            [-9.0, -8.0, 0.0, 1.0],
+        ];
+        assert!(setup_triangle(32, 32, (32, 32), &away, 0, 1, 2).is_none());
+        // Out-of-range vertex index.
+        assert!(setup_triangle(32, 32, (32, 32), &flat, 0, 1, 99).is_none());
+        // A zero-sized target has nowhere to put pixels.
+        assert!(setup_triangle(0, 0, (0, 0), &positions(), 0, 1, 2).is_none());
+    }
+
+    /// Winding is normalized so one top-left rule serves every triangle: the
+    /// same three corners in either order must cover the same pixels.
+    #[test]
+    fn winding_is_normalized() {
+        let pos = positions();
+        let cw = setup_triangle(64, 64, (64, 64), &pos, 0, 1, 2).expect("cw");
+        let ccw = setup_triangle(64, 64, (64, 64), &pos, 0, 2, 1).expect("ccw");
+        assert!(cw.inv_area > 0.0 && ccw.inv_area > 0.0, "area must be positive");
+        assert_eq!((cw.min_x, cw.max_x), (ccw.min_x, ccw.max_x));
+        assert_eq!((cw.min_y, cw.max_y), (ccw.min_y, ccw.max_y));
+    }
+
+    /// An 8-bit attachment stores 1/255 steps, clamped — see [`RasterState::unorm8`].
+    #[test]
+    fn unorm8_quantization_matches_eight_bit_storage() {
+        for byte in 0..=255u32 {
+            let v = byte as f32 / 255.0;
+            assert_eq!(
+                quantize_unorm8(v),
+                v,
+                "an exact 8-bit value must survive unchanged (byte {byte})"
+            );
+        }
+        // Halfway between codes rounds to a code, and nothing escapes [0,1].
+        assert_eq!(quantize_unorm8(0.5 / 255.0), 1.0 / 255.0);
+        assert_eq!(quantize_unorm8(-3.0), 0.0);
+        assert_eq!(quantize_unorm8(7.0), 1.0);
+        assert_eq!(quantize_unorm8(f32::NAN.max(0.0)), 0.0);
+        // Every output is a whole number of 255ths.
+        for i in 0..1000 {
+            let v = i as f32 / 999.0;
+            let steps = quantize_unorm8(v) * 255.0;
+            assert!(
+                (steps - steps.round()).abs() < 1e-3,
+                "{v} quantized to a non-integral code {steps}"
+            );
+        }
+    }
+
+    /// A viewport smaller than the attachment must not let pixels escape it —
+    /// a `TextureSize::Fixed` target is larger than the pass rect that draws it.
+    #[test]
+    fn viewport_bounds_the_triangle() {
+        let pos = vec![
+            [-1.0, -1.0, 0.0, 1.0],
+            [1.0, -1.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0],
+        ];
+        let tri = setup_triangle(128, 128, (40, 30), &pos, 0, 1, 2).expect("visible");
+        assert!(tri.min_x >= 0 && tri.max_x <= 39, "x escaped the viewport: {tri:?}", tri = (tri.min_x, tri.max_x));
+        assert!(tri.min_y >= 0 && tri.max_y <= 29, "y escaped the viewport: {tri:?}", tri = (tri.min_y, tri.max_y));
+    }
 }
