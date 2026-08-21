@@ -5008,8 +5008,22 @@ fn build_delta_net_recurrent_decode_from_hidden(
     ctx.set_tensor_name(gated_output, format!("{prefix}.gated_output"))
         .map_err(LlamaError::format)?;
 
+    // Keep the output projection's input FLAT across the matmul.
+    //
+    // This used to reshape to `[w, n_seq_tokens, n_seqs]`, run the projection,
+    // and immediately flatten the result straight back to
+    // `[embedding_length, n_seq_tokens * n_seqs]`. The 3-D shape bought the
+    // matmul nothing — the projection is a per-token linear with one shared
+    // weight, so batching over dim 2 and running one flat matmul give the same
+    // values — but it did make the activation 3-D, which is exactly what the
+    // CUDA executor refuses as a "batched quantized matmul"
+    // (`cuda_exec/real.rs`). With one sequence ne[2] is 1 and nothing noticed;
+    // at n_seqs > 1 it made multi-slot decode unrunnable on CUDA.
+    //
+    // Flattening here is byte-identical at n_seqs == 1 (same memory, same
+    // dims) and is what lets slots share the recurrent path at all.
     let final_output = ctx
-        .reshape(gated_output, &[value_hidden_size, n_seq_tokens, n_seqs])
+        .reshape(gated_output, &[value_hidden_size, n_seq_tokens * n_seqs])
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(final_output, format!("{prefix}.final_output"))
         .map_err(LlamaError::format)?;

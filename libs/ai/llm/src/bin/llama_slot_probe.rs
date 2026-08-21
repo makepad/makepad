@@ -15,6 +15,14 @@
 
 use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab, SlotTable};
 
+/// Graph activations grow with the slot count: wider batches mean wider
+/// intermediates, and the arena the attention mask spans grows too. The 512 MiB
+/// default is sized for one sequence, and at 8 slots it is not enough — the
+/// session dies allocating a graph tensor before it can run anything.
+fn activation_reserve(slots: u32) -> usize {
+    (512 + 192 * slots.max(1) as usize) << 20
+}
+
 /// First index of the maximum, tie-broken low — llama.cpp's greedy ordering.
 fn argmax_token_id(logits: &[f32]) -> Option<i32> {
     let mut best: Option<(usize, f32)> = None;
@@ -41,6 +49,7 @@ fn generate(
         LlamaSessionConfig {
             max_context: Some(max_context),
             max_sequences: slots,
+            extra_activation_bytes: activation_reserve(slots),
             ..LlamaSessionConfig::default()
         },
     )
@@ -358,6 +367,7 @@ fn build_session(
         LlamaSessionConfig {
             max_context: Some(per_slot_context),
             max_sequences: slots,
+            extra_activation_bytes: activation_reserve(slots),
             ..LlamaSessionConfig::default()
         },
     )
