@@ -66,6 +66,12 @@ pub struct StaticModel {
     /// node, which is every model that existed before this lane, so the
     /// static stream and every derived product are byte-identical for them.
     pub anim_parts: Vec<AnimPart>,
+    /// Rigid sub-meshes whose pose is supplied by their owning game object
+    /// every frame. The GLB declares a source-neutral connection name and
+    /// measured pivot; the renderer never recognizes vendor node names.
+    /// Vehicle wheels are the first consumer, but the lane is intentionally
+    /// generic enough for any externally-driven rigid attachment.
+    pub driven_parts: Vec<DrivenPart>,
     /// The map's sky surfaces, out of the static stream and drawn
     /// direction-mapped. `None` for anything with no `extras.kind == "sky"`
     /// node — again, every model that existed before this lane.
@@ -324,6 +330,44 @@ impl AnimPart {
         } else {
             boxes
         }
+    }
+}
+
+/// One externally-driven rigid sub-mesh of a [`StaticModel`].
+///
+/// # GLB contract
+///
+/// A node whose `extras.kind` is `vehicle_wheel` leaves the flattened static
+/// stream and must also declare:
+///
+/// * `connection`: stable engine-facing socket name,
+/// * `pivot`: rotation centre in the marked node's local coordinates,
+/// * `anchor`: the same centre in model coordinates,
+/// * positive `radius` and `width`, in model units.
+///
+/// Where those values came from is an asset-import concern. Runtime code only
+/// consumes this generic contract and supplies a complete model-space pose.
+pub struct DrivenPart {
+    pub connection: String,
+    pub pivot: Vec3f,
+    pub anchor: Vec3f,
+    pub radius: f32,
+    pub width: f32,
+    /// Model-space matrix of everything above the marked node.
+    pub parent: Mat4f,
+    /// Authored local pose of the marked node.
+    pub rest: NodeTrs,
+    /// Packed node-local geometry, outside the static/AO stream.
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub layers: Vec<StaticDrawLayer>,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+impl DrivenPart {
+    pub fn rest_transform(&self) -> Mat4f {
+        Mat4f::mul(&self.parent, &trs_to_mat4(&self.rest))
     }
 }
 
@@ -971,6 +1015,28 @@ impl StaticModel {
                 .collect()
         };
 
+        // Externally-driven rigid nodes use the same ownership rule as an
+        // animated door, but their pose comes from the owning ModelInstance
+        // rather than from a clip. The contract is source-neutral metadata
+        // authored before the GLB reaches this crate.
+        let driven_defs = collect_driven_nodes(node_vals)?;
+        let driven_owner: Vec<Option<usize>> = if driven_defs.is_empty() {
+            Vec::new()
+        } else {
+            (0..node_vals.len())
+                .map(|n| {
+                    let mut at = Some(n);
+                    while let Some(i) = at {
+                        if let Some(k) = driven_defs.iter().position(|d| d.node == i) {
+                            return Some(k);
+                        }
+                        at = parents[i];
+                    }
+                    None
+                })
+                .collect()
+        };
+
         // Sky surfaces (see [`SkyPart`]) leave the static stream the same
         // way, and for the same reason: they are shaded by view direction,
         // not by the world's light. A node under a sky node inherits it.
@@ -1026,6 +1092,7 @@ impl StaticModel {
             // Geometry under an animated node is that part's, not the level's,
             // and geometry under a sky node is the sky's.
             if anim_owner.get(node_index).copied().flatten().is_some()
+                || driven_owner.get(node_index).copied().flatten().is_some()
                 || sky_owner.get(node_index).copied().unwrap_or(false)
             {
                 continue;
@@ -1225,6 +1292,20 @@ impl StaticModel {
                 &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner,
             )?
         };
+        let driven_parts = if driven_defs.is_empty() {
+            Vec::new()
+        } else {
+            build_driven_parts(
+                &json,
+                &acc,
+                bin_chunk,
+                node_vals,
+                &rests,
+                &parents,
+                driven_defs,
+                &driven_owner,
+            )?
+        };
         let sky = if sky_owner.is_empty() {
             None
         } else {
@@ -1255,6 +1336,22 @@ impl StaticModel {
                 }
             }
         }
+        for part in &driven_parts {
+            let m = part.rest_transform();
+            for cx in [part.min.x, part.max.x] {
+                for cy in [part.min.y, part.max.y] {
+                    for cz in [part.min.z, part.max.z] {
+                        let p = mat4_mul_point(&m, Vec3f { x: cx, y: cy, z: cz });
+                        min.x = min.x.min(p.x);
+                        min.y = min.y.min(p.y);
+                        min.z = min.z.min(p.z);
+                        max.x = max.x.max(p.x);
+                        max.y = max.y.max(p.y);
+                        max.z = max.z.max(p.z);
+                    }
+                }
+            }
+        }
         // Sky faces are part of the model's silhouette too — they are the
         // furthest thing in the level, so culling them with wrong bounds
         // punches a hole straight through to the clear colour.
@@ -1266,7 +1363,7 @@ impl StaticModel {
             max.y = max.y.max(s.max.y);
             max.z = max.z.max(s.max.z);
         }
-        if vertices.is_empty() && anim_parts.is_empty() && sky.is_none() {
+        if vertices.is_empty() && anim_parts.is_empty() && driven_parts.is_empty() && sky.is_none() {
             return Err("no mesh primitives found".into());
         }
 
@@ -1393,6 +1490,7 @@ impl StaticModel {
             detail_scale,
             prelit,
             anim_parts,
+            driven_parts,
             sky,
             pbr,
         })
@@ -1517,6 +1615,15 @@ struct AnimNodeDef {
     numbers: BTreeMap<String, f32>,
     strings: BTreeMap<String, String>,
     clip: RigidClip,
+}
+
+struct DrivenNodeDef {
+    node: usize,
+    connection: String,
+    pivot: Vec3f,
+    anchor: Vec3f,
+    radius: f32,
+    width: f32,
 }
 
 /// A node's model-space matrix from the rest transforms alone.
@@ -1735,6 +1842,68 @@ fn collect_anim_nodes(
             numbers,
             strings,
             clip,
+        });
+    }
+    Ok(out)
+}
+
+fn extras_vec3(extras: &Val, name: &str) -> Option<Vec3f> {
+    let value = extras.get(name)?;
+    Some(Vec3f {
+        x: value.idx(0).and_then(Val::f64)? as f32,
+        y: value.idx(1).and_then(Val::f64)? as f32,
+        z: value.idx(2).and_then(Val::f64)? as f32,
+    })
+}
+
+/// Nodes carrying the generic externally-driven vehicle-wheel contract.
+/// Source node names are intentionally ignored; `connection` is the only
+/// stable handle that survives import.
+fn collect_driven_nodes(node_vals: &[Val]) -> Result<Vec<DrivenNodeDef>, String> {
+    let mut out = Vec::new();
+    for (node, value) in node_vals.iter().enumerate() {
+        let Some(extras) = value.get("extras") else {
+            continue;
+        };
+        if extras.get("kind").and_then(Val::str) != Some("vehicle_wheel") {
+            continue;
+        }
+        let connection = extras
+            .get("connection")
+            .and_then(Val::str)
+            .filter(|s| !s.is_empty())
+            .ok_or("vehicle wheel missing connection")?
+            .to_string();
+        if out.iter().any(|part: &DrivenNodeDef| part.connection == connection) {
+            return Err(format!("duplicate driven part connection {connection}"));
+        }
+        let pivot = extras_vec3(extras, "pivot")
+            .ok_or_else(|| format!("vehicle wheel {connection} has invalid pivot"))?;
+        let anchor = extras_vec3(extras, "anchor")
+            .ok_or_else(|| format!("vehicle wheel {connection} has invalid anchor"))?;
+        let radius = extras
+            .get("radius")
+            .and_then(Val::f64)
+            .unwrap_or(0.0) as f32;
+        let width = extras
+            .get("width")
+            .and_then(Val::f64)
+            .unwrap_or(0.0) as f32;
+        let finite = [
+            pivot.x, pivot.y, pivot.z, anchor.x, anchor.y, anchor.z, radius, width,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite || radius <= 0.0 || width <= 0.0 {
+            return Err(format!("vehicle wheel {connection} has invalid dimensions"));
+        }
+        out.push(DrivenNodeDef {
+            node,
+            connection,
+            pivot,
+            anchor,
+            radius,
+            width,
         });
     }
     Ok(out)
@@ -2161,6 +2330,55 @@ fn build_anim_parts(
                 .unwrap_or_else(Mat4f::identity),
             rest: rests[def.node],
             clip: def.clip,
+            vertices: stream.vertices,
+            indices: stream.indices,
+            layers,
+            min: stream.min,
+            max: stream.max,
+        });
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_driven_parts(
+    json: &Val,
+    acc: &Accessors,
+    bin: &[u8],
+    node_vals: &[Val],
+    rests: &[NodeTrs],
+    parents: &[Option<usize>],
+    defs: Vec<DrivenNodeDef>,
+    owner_of: &[Option<usize>],
+) -> Result<Vec<DrivenPart>, String> {
+    let mut out = Vec::with_capacity(defs.len());
+    for (part_index, def) in defs.into_iter().enumerate() {
+        let mut stream = PartStream::new();
+        for (node_index, node) in node_vals.iter().enumerate() {
+            if owner_of.get(node_index).copied().flatten() != Some(part_index) {
+                continue;
+            }
+            let local = node_local_under(node_index, def.node, parents, rests);
+            let mirrored = node_is_mirrored(node_index, parents, rests);
+            pack_node_stream(json, acc, node, &local, mirrored, &mut stream)?;
+        }
+        if !stream.is_drawable() {
+            return Err(format!(
+                "driven part {} has no drawable geometry",
+                def.connection
+            ));
+        }
+        let layers = stream.layers(json, bin);
+        out.push(DrivenPart {
+            connection: def.connection,
+            pivot: def.pivot,
+            anchor: def.anchor,
+            radius: def.radius,
+            width: def.width,
+            parent: parents[def.node]
+                .map(|p| node_world(p, parents, rests))
+                .unwrap_or_else(Mat4f::identity),
+            rest: rests[def.node],
             vertices: stream.vertices,
             indices: stream.indices,
             layers,
@@ -2728,6 +2946,7 @@ impl StaticModel {
             // Carrying them would mean versioning the format for a lane that
             // does not use it.
             anim_parts: Vec::new(),
+            driven_parts: Vec::new(),
             sky: None,
             pbr: PbrMaterial::default(),
         })
@@ -2741,6 +2960,7 @@ mod sidecar_tests {
     fn sample() -> StaticModel {
         StaticModel {
             anim_parts: Vec::new(),
+            driven_parts: Vec::new(),
             sky: None,
             vertices: (0..MODEL_VERTEX_FLOATS as u32 * 3).map(|i| i as f32 * 0.25).collect(),
             indices: vec![0, 1, 2],
@@ -3449,6 +3669,7 @@ pub(crate) mod tests {
     fn collider_parts_keep_structure_and_drop_trim() {
         let model = StaticModel {
             anim_parts: Vec::new(),
+            driven_parts: Vec::new(),
             sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -3486,6 +3707,7 @@ pub(crate) mod tests {
     fn collider_parts_keep_posts_and_drop_hanging_trim() {
         let model = StaticModel {
             anim_parts: Vec::new(),
+            driven_parts: Vec::new(),
             sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -3525,6 +3747,7 @@ pub(crate) mod tests {
         }
         let model = StaticModel {
             anim_parts: Vec::new(),
+            driven_parts: Vec::new(),
             sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),

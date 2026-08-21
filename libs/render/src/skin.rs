@@ -256,6 +256,44 @@ impl Default for NodeTrs {
 /// One sampled skeleton pose: local TRS per glTF node.
 pub type PoseBuffer = Vec<NodeTrs>;
 
+/// Source-neutral collider attached to one skeleton node. Coordinates are in
+/// that node's local bind frame and model units; a game scales them with the
+/// same character instance scale used for the visible skin.
+#[derive(Clone, Debug)]
+pub enum RagdollCollider {
+    Capsule { point_a: Vec3f, point_b: Vec3f, radius: f32 },
+    Sphere { center: Vec3f, radius: f32 },
+    Box { center: Vec3f, half_extents: Vec3f },
+}
+
+/// One generic articulated body parsed from `extras.kind="ragdoll_body"`.
+/// `parent` indexes [`RagdollRig::bodies`], not glTF nodes.
+#[derive(Clone, Debug)]
+pub struct RagdollBody {
+    pub connection: String,
+    pub node: usize,
+    pub parent: Option<usize>,
+    pub collider: RagdollCollider,
+    pub mass_fraction: f32,
+    pub cone_angle: f32,
+    pub twist_min: f32,
+    pub twist_max: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct RagdollRig {
+    pub bodies: Vec<RagdollBody>,
+}
+
+/// Current world-space skeleton-node frame used to seed or draw an
+/// articulation. The connection id is the only lookup handle exposed to the
+/// game; source bone names never leave the importer.
+#[derive(Clone, Debug)]
+pub struct RagdollBodyPose {
+    pub connection: String,
+    pub transform: Mat4f,
+}
+
 struct Node {
     name: String,
     parent: Option<usize>,
@@ -349,6 +387,7 @@ pub struct SkinnedModel {
     /// every vertex it moves stays within its rest radius of the joint, and a
     /// blended vertex stays inside the union of its joints' spheres.
     joint_bounds: Vec<(Vec3f, f32)>,
+    ragdoll: Option<RagdollRig>,
 }
 
 /// Pre-render deformation audit over animation samples. This observes the
@@ -605,6 +644,204 @@ impl<'a> Accessors<'a> {
 
 // ------------------------------------------------------------------ parse
 
+fn ragdoll_vec3(value: Option<&Val>) -> Option<Vec3f> {
+    let value = value?;
+    let out = Vec3f {
+        x: value.idx(0).and_then(Val::f64)? as f32,
+        y: value.idx(1).and_then(Val::f64)? as f32,
+        z: value.idx(2).and_then(Val::f64)? as f32,
+    };
+    out.x.is_finite().then_some(())?;
+    out.y.is_finite().then_some(())?;
+    out.z.is_finite().then_some(())?;
+    Some(out)
+}
+
+fn parse_ragdoll(
+    json: &Val,
+    node_vals: &[Val],
+    nodes: &[Node],
+    joint_nodes: &[usize],
+) -> Result<Option<RagdollRig>, String> {
+    struct Raw {
+        connection: String,
+        parent_connection: Option<String>,
+        root: bool,
+        node: usize,
+        collider: RagdollCollider,
+        mass_fraction: f32,
+        cone_angle: f32,
+        twist_min: f32,
+        twist_max: f32,
+    }
+
+    let mut raw = Vec::new();
+    for (node, value) in node_vals.iter().enumerate() {
+        let Some(extras) = value.get("extras") else { continue };
+        if extras.get("kind").and_then(Val::str) != Some("ragdoll_body") {
+            continue;
+        }
+        if !joint_nodes.contains(&node) {
+            return Err(format!("ragdoll node {node} is not in the skin"));
+        }
+        let connection = extras
+            .get("connection")
+            .and_then(Val::str)
+            .filter(|value| !value.is_empty())
+            .ok_or("ragdoll body missing connection")?
+            .to_string();
+        if raw.iter().any(|body: &Raw| body.connection == connection) {
+            return Err(format!("duplicate ragdoll connection {connection}"));
+        }
+        let root = matches!(extras.get("root"), Some(Val::Bool(true)));
+        let parent_connection = extras
+            .get("parent_connection")
+            .and_then(Val::str)
+            .map(str::to_string);
+        let positive = |name: &str| -> Result<f32, String> {
+            let value = extras.get(name).and_then(Val::f64).unwrap_or(0.0) as f32;
+            if value.is_finite() && value > 0.0 {
+                Ok(value)
+            } else {
+                Err(format!("ragdoll {connection} has invalid {name}"))
+            }
+        };
+        let collider = match extras.get("shape").and_then(Val::str) {
+            Some("capsule") => RagdollCollider::Capsule {
+                point_a: ragdoll_vec3(extras.get("point_a"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid point_a"))?,
+                point_b: ragdoll_vec3(extras.get("point_b"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid point_b"))?,
+                radius: positive("radius")?,
+            },
+            Some("sphere") => RagdollCollider::Sphere {
+                center: ragdoll_vec3(extras.get("position"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid position"))?,
+                radius: positive("radius")?,
+            },
+            Some("box") => RagdollCollider::Box {
+                center: ragdoll_vec3(extras.get("position"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid position"))?,
+                half_extents: {
+                    let half = ragdoll_vec3(extras.get("half_extents"))
+                        .ok_or_else(|| format!("ragdoll {connection} has invalid half_extents"))?;
+                    if half.x <= 0.0 || half.y <= 0.0 || half.z <= 0.0 {
+                        return Err(format!("ragdoll {connection} has non-positive half_extents"));
+                    }
+                    half
+                },
+            },
+            Some(other) => return Err(format!("ragdoll {connection} has unknown shape {other}")),
+            None => return Err(format!("ragdoll {connection} is missing shape")),
+        };
+        let mass_fraction = positive("mass_fraction")?;
+        let (cone_angle, twist_min, twist_max) = if root {
+            (0.0, 0.0, 0.0)
+        } else {
+            let cone = positive("cone_angle")?;
+            let lower = extras.get("twist_min").and_then(Val::f64).unwrap_or(f64::NAN) as f32;
+            let upper = extras.get("twist_max").and_then(Val::f64).unwrap_or(f64::NAN) as f32;
+            if !cone.is_finite()
+                || cone > std::f32::consts::PI
+                || !lower.is_finite()
+                || !upper.is_finite()
+                || lower > upper
+            {
+                return Err(format!("ragdoll {connection} has invalid joint limits"));
+            }
+            (cone, lower, upper)
+        };
+        raw.push(Raw {
+            connection,
+            parent_connection,
+            root,
+            node,
+            collider,
+            mass_fraction,
+            cone_angle,
+            twist_min,
+            twist_max,
+        });
+    }
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.iter().filter(|body| body.root).count() != 1 {
+        return Err("ragdoll rig must have exactly one root".into());
+    }
+
+    // Every skin in a multi-mesh character must use the same joint set. A
+    // body rig bound to the torso skin but not the head skin is a partial rig,
+    // not something runtime can safely guess around.
+    for skin in json.get("skins").map(Val::arr).unwrap_or(&[]) {
+        let joints: Vec<usize> = skin
+            .get("joints")
+            .map(|value| value.arr().iter().filter_map(Val::usize).collect())
+            .unwrap_or_default();
+        if joints != joint_nodes {
+            return Err("ragdoll character skins use incompatible joint sets".into());
+        }
+    }
+
+    let mut bodies = Vec::with_capacity(raw.len());
+    for body in &raw {
+        if body.root != body.parent_connection.is_none() {
+            return Err(format!(
+                "ragdoll {} root/parent declaration is inconsistent",
+                body.connection
+            ));
+        }
+        let parent = body
+            .parent_connection
+            .as_deref()
+            .map(|parent| {
+                raw.iter()
+                    .position(|candidate| candidate.connection == parent)
+                    .ok_or_else(|| format!("ragdoll {} has unresolved parent {parent}", body.connection))
+            })
+            .transpose()?;
+
+        // The declared graph must match the skeleton graph after skipping
+        // ordinary socket/group nodes. This makes it impossible for metadata
+        // to attach an arm constraint to the wrong physical body.
+        let mut ancestor = nodes[body.node].parent;
+        let mut actual_parent = None;
+        for _ in 0..nodes.len() {
+            let Some(node) = ancestor else { break };
+            if let Some(index) = raw.iter().position(|candidate| candidate.node == node) {
+                actual_parent = Some(index);
+                break;
+            }
+            ancestor = nodes[node].parent;
+        }
+        if actual_parent != parent {
+            return Err(format!("ragdoll {} parent does not match skeleton", body.connection));
+        }
+        bodies.push(RagdollBody {
+            connection: body.connection.clone(),
+            node: body.node,
+            parent,
+            collider: body.collider.clone(),
+            mass_fraction: body.mass_fraction,
+            cone_angle: body.cone_angle,
+            twist_min: body.twist_min,
+            twist_max: body.twist_max,
+        });
+    }
+    // Parent chains must terminate at the one root rather than cycle.
+    for start in 0..bodies.len() {
+        let mut at = Some(start);
+        for depth in 0..=bodies.len() {
+            let Some(index) = at else { break };
+            if depth == bodies.len() {
+                return Err("ragdoll parent graph contains a cycle".into());
+            }
+            at = bodies[index].parent;
+        }
+    }
+    Ok(Some(RagdollRig { bodies }))
+}
+
 impl SkinnedModel {
     pub fn parse_glb(bytes: &[u8]) -> Result<SkinnedModel, String> {
         if bytes.len() < 12 || &bytes[0..4] != b"glTF" {
@@ -703,6 +940,7 @@ impl SkinnedModel {
             }
             None => vec![Mat4f::identity(); joint_nodes.len()],
         };
+        let ragdoll = parse_ragdoll(&json, node_vals, &nodes, &joint_nodes)?;
 
         // All skinned mesh primitives, concatenated (they share skin 0).
         let mut vertices = Vec::new();
@@ -892,11 +1130,93 @@ impl SkinnedModel {
             clips,
             skipped_unskinned,
             joint_bounds,
+            ragdoll,
         })
     }
 
     pub fn joint_count(&self) -> usize {
         self.joint_nodes.len()
+    }
+
+    pub fn ragdoll_rig(&self) -> Option<&RagdollRig> {
+        self.ragdoll.as_ref()
+    }
+
+    /// Bounds of vertices predominantly controlled by `node`, expressed in
+    /// that skeleton node's local bind frame. Asset importers use this generic
+    /// measurement to fit colliders; no vendor naming lives here.
+    pub fn dominant_joint_local_bounds(&self, node: usize) -> Option<(Vec3f, Vec3f)> {
+        let joint = self.joint_nodes.iter().position(|candidate| *candidate == node)? as u16;
+        let rest = self.rest_pose();
+        let bone_in_mesh = self.node_mesh_transform(&rest, node)?;
+        let mesh_in_bone = bone_in_mesh.invert();
+        let mut min = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
+        let mut max = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
+        let mut count = 0usize;
+        for vertex in &self.vertices {
+            let mut dominant = 0usize;
+            for lane in 1..4 {
+                if vertex.weights[lane] > vertex.weights[dominant] {
+                    dominant = lane;
+                }
+            }
+            if vertex.joints[dominant] != joint || vertex.weights[dominant] <= 0.0 {
+                continue;
+            }
+            let point = mat4_mul_point(&mesh_in_bone, vertex.pos);
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            min.z = min.z.min(point.z);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+            max.z = max.z.max(point.z);
+            count += 1;
+        }
+        (count >= 3).then_some((min, max))
+    }
+
+    /// World-space node frames for seeding the physics articulation from the
+    /// exact animation pose visible in the previous frame.
+    pub fn ragdoll_body_poses(
+        &self,
+        pose: &PoseBuffer,
+        model_world: &Mat4f,
+    ) -> Vec<RagdollBodyPose> {
+        let Some(rig) = &self.ragdoll else { return Vec::new() };
+        rig.bodies
+            .iter()
+            .filter_map(|body| {
+                self.node_mesh_transform(pose, body.node).map(|node| RagdollBodyPose {
+                    connection: body.connection.clone(),
+                    transform: Mat4f::mul(model_world, &node),
+                })
+            })
+            .collect()
+    }
+
+    /// Replace ordinary animation palette entries with authoritative
+    /// world-space ragdoll body frames. The renderer still consumes the same
+    /// palette format; it never needs a second skinned draw path.
+    pub fn palette_from_ragdoll(
+        &self,
+        base_pose: &PoseBuffer,
+        model_world: &Mat4f,
+        bodies: &[RagdollBodyPose],
+        out: &mut Vec<Mat4f>,
+    ) {
+        self.palette(base_pose, out);
+        let Some(rig) = &self.ragdoll else { return };
+        let model_from_world = model_world.invert();
+        for body in &rig.bodies {
+            let Some(pose) = bodies.iter().find(|pose| pose.connection == body.connection) else {
+                continue;
+            };
+            let Some(joint) = self.joint_nodes.iter().position(|node| *node == body.node) else {
+                continue;
+            };
+            let bone_in_mesh = Mat4f::mul(&model_from_world, &pose.transform);
+            out[joint] = Mat4f::mul(&bone_in_mesh, &self.inverse_bind[joint]);
+        }
     }
 
     /// Resolve an animated glTF node by its authored name.
@@ -2847,6 +3167,7 @@ mod tests {
             }],
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 
@@ -2890,6 +3211,7 @@ mod tests {
             clips: Vec::new(),
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 
@@ -2935,6 +3257,7 @@ mod tests {
             }],
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 
