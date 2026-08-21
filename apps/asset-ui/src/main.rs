@@ -4044,7 +4044,7 @@ impl App {
         }
         self.discovered = Some(makepad_asset_ai::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
-        self.maybe_connect_chat();
+        self.maybe_connect_chat(cx);
         self.fleet_timer = cx.start_interval(3.0);
         self.job_timer = cx.start_interval(0.25);
         self.audio_timer = cx.start_interval(0.1);
@@ -9567,11 +9567,16 @@ impl App {
     /// The chat lives on the STORE's chat broker — the server picks the
     /// serving box and executes the catalog/operation tools itself — so all
     /// this app has to do is hand over the session once it is up.
-    fn maybe_connect_chat(&mut self) {
+    fn maybe_connect_chat(&mut self, cx: &mut Cx) {
         if !self.chat.is_linked() {
             if let Some(endpoints) = self.store.endpoints {
                 let cache = session_config_from_env().cache_parent.join("cache-chat");
                 self.chat.connect(endpoints, self.store.token.clone(), cache);
+                // The pane says "waiting for the asset server" until
+                // something redraws it, and the feed only marks itself
+                // dirty once a turn runs — so the line would sit there
+                // lying until the user typed.
+                self.refresh_chat_ui(cx);
             }
         }
         self.push_fleet_view();
@@ -13720,7 +13725,7 @@ impl AppMain for App {
             } else if self.import_page.preview_dirty && self.surface == Surface::Import {
                 self.refresh_import_ui(cx);
             }
-            self.maybe_connect_chat();
+            self.maybe_connect_chat(cx);
             self.drain_chat_jobs(cx);
             if self.chat.take_dirty() {
                 self.refresh_chat_ui(cx);
@@ -13783,7 +13788,7 @@ impl AppMain for App {
                 }
                 fleet.poll(cx);
             }
-            self.maybe_connect_chat();
+            self.maybe_connect_chat(cx);
         }
         if self.job_timer.is_event(event).is_some() {
             // Admission is re-evaluated for every stage, not just the first:
