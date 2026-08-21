@@ -806,6 +806,29 @@ impl<C: Clone> BrowseModel<C> {
         self.pump_resolves()
     }
 
+    /// An asset left the catalog (retired/quarantined): drop its tile NOW,
+    /// compacting the grid — the keep-your-cell refresh merge would
+    /// otherwise preserve it as a dead hole forever.
+    pub fn event_remove(&mut self, asset: AssetId) {
+        if self.index.remove(&asset).is_none()
+            && !self.order.contains(&asset)
+            && !self.pending.contains(&asset)
+        {
+            return;
+        }
+        self.order.retain(|a| *a != asset);
+        self.pending.retain(|a| *a != asset);
+        self.tiles.retain(|tile| tile.asset != asset);
+        // Rebuild the index over the compacted tile list.
+        self.index = self
+            .tiles
+            .iter()
+            .enumerate()
+            .map(|(i, tile)| (tile.asset, i))
+            .collect();
+        self.refresh_wanted = true;
+    }
+
     /// A committed catalog event touched this surface's kind (or an unknown
     /// kind): schedule a debounced refresh.
     pub fn event_touch(&mut self, content_kind: Option<AssetKind>) {
