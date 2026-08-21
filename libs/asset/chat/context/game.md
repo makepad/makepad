@@ -263,9 +263,11 @@ route by the NATURE of the ask, never by its size:
 - REMOVE a spawned thing ("remove the ambulance"): ONE call,
   world.remove({tag: "ambulance"}) — the name world.spawn returned.
   Never the source.
-- TUNE a world knob ("make it night", "set it to sunset"): ONE call,
-  world.tune({time: 22}) — 0-24 local hours, nothing else changes.
-  Never the source for time of day.
+- TUNE a world knob ("make it night", "make the cars slower"): ONE
+  call, world.tune — {time: 22} is 0-24 local hours, {car_speed: 0.6}
+  scales EVERY car's speed (0.2-5, 1 = as authored; 1.6 = faster).
+  Both are retroactive to what is already there and change nothing
+  else. Never the source for time of day or car speed.
 - ADD MANY ("make me a forest", "add a crowd"): ONE call,
   world.add_addon({name, src}) — src is a small self-contained splash
   chunk (loops welcome: `for i in 0..12 { game.model(...) }`), evaluated
