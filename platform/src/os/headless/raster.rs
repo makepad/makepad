@@ -4,7 +4,7 @@ use super::virtual_gpu::{
 use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
-    draw_pass::{CxDrawPassParent, DrawPassId},
+    draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
     makepad_live_id::*,
     makepad_math::*,
@@ -130,7 +130,67 @@ pub(crate) struct CachedTextureConversion {
 
 pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
 
+/// Offscreen render targets for the software raster path.
+///
+/// A child `DrawPass` renders into its own [`Framebuffer`], kept here across
+/// frames and keyed by pass id (a parent that repaints while its child stayed
+/// clean must still see the child's last contents — exactly like a GPU texture
+/// that was not re-rendered). `texture_pass` maps the pass's colour-attachment
+/// texture back to that framebuffer, which is what makes a composite quad
+/// sampling the texture find real pixels instead of an empty slot.
+///
+/// Buffers are reused in place (see [`Framebuffer::resize`]), so a 3D pane that
+/// repaints every frame costs one allocation, not one per frame.
+#[derive(Default)]
+pub(crate) struct HeadlessRenderTargets {
+    /// draw pass id -> the framebuffer that pass renders into.
+    framebuffers: HashMap<usize, Framebuffer>,
+    /// colour texture index -> draw pass id that renders into it.
+    texture_pass: HashMap<usize, usize>,
+}
+
+impl HeadlessRenderTargets {
+    fn color_target(&self, texture_index: usize) -> Option<&Framebuffer> {
+        let pass_id = self.texture_pass.get(&texture_index)?;
+        let fb = self.framebuffers.get(pass_id)?;
+        if fb.width == 0 || fb.height == 0 || fb.color.is_empty() {
+            return None;
+        }
+        Some(fb)
+    }
+}
+
 fn headless_texture_info(
+    texture_index: usize,
+    cxtexture: &crate::texture::CxTexture,
+    cache: &mut TextureConversionCache,
+    render_targets: &HeadlessRenderTargets,
+) -> Option<[usize; 4]> {
+    match &cxtexture.format {
+        // Render-to-texture attachments carry no CPU-side vec: their pixels
+        // live in the child pass's framebuffer. Point the sampler straight at
+        // it — the child pass always rendered before its parent, and the
+        // framebuffer is not touched again while the parent rasterizes.
+        // (`[f32;4]` is four contiguous f32 so the colour buffer *is* an RGBA
+        // f32 image; a single-channel Rf32 target reads back through .x, which
+        // is the component every Rf32 consumer uses.)
+        TextureFormat::RenderBGRAu8 { .. }
+        | TextureFormat::RenderRGBAf16 { .. }
+        | TextureFormat::RenderRGBAf32 { .. }
+        | TextureFormat::RenderRf32 { .. } => {
+            let fb = render_targets.color_target(texture_index)?;
+            Some([
+                fb.color.as_ptr() as usize,
+                fb.color.len() * 4,
+                fb.width,
+                fb.height,
+            ])
+        }
+        _ => headless_vec_texture_info(texture_index, cxtexture, cache),
+    }
+}
+
+fn headless_vec_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
     cache: &mut TextureConversionCache,
@@ -619,6 +679,9 @@ impl Cx {
 
         let mut results = Vec::new();
         let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
+        // Taken out of `self.os` so a pass can hold `&mut` its own framebuffer
+        // while the sampler reads its already-rendered siblings.
+        let mut render_targets = std::mem::take(&mut self.os.render_targets);
 
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].paint_dirty = false;
@@ -650,6 +713,7 @@ impl Cx {
                         parallel_min_tris,
                         &mut fb,
                         &mut texture_cache,
+                        &render_targets,
                         if profile_enabled {
                             Some(&mut profile)
                         } else {
@@ -658,15 +722,32 @@ impl Cx {
                     );
                     results.push((window_id.id(), fb));
                 }
-                CxDrawPassParent::DrawPass(_dep_pass_id) => {
-                    // TODO: render-to-texture passes
+                // Render-to-texture. `CxDrawPassParent::None` is a texture pass
+                // too (the GPU backends treat both the same way): it just has no
+                // parent that composites it back.
+                CxDrawPassParent::DrawPass(_) | CxDrawPassParent::None => {
+                    self.headless_draw_pass_to_texture(
+                        *draw_pass_id,
+                        time,
+                        render_threads,
+                        parallel_min_tris,
+                        &mut texture_cache,
+                        &mut render_targets,
+                        if profile_enabled {
+                            Some(&mut profile)
+                        } else {
+                            None
+                        },
+                    );
                 }
-                _ => {}
+                CxDrawPassParent::Xr => {}
             }
         }
 
         // Hand the conversions back for the next frame to reuse.
         self.os.texture_conversions = texture_cache;
+        self.headless_prune_render_targets(&mut render_targets);
+        self.os.render_targets = render_targets;
 
         let elapsed = frame_start.elapsed();
         if profile_enabled {
@@ -692,6 +773,136 @@ impl Cx {
         results
     }
 
+    /// Drop framebuffers for passes that no longer exist, so a churn of
+    /// short-lived offscreen passes cannot grow the cache without bound.
+    fn headless_prune_render_targets(&mut self, render_targets: &mut HeadlessRenderTargets) {
+        let live_passes = self.passes.id_iter().count();
+        render_targets
+            .framebuffers
+            .retain(|pass_id, _| *pass_id < live_passes);
+        let framebuffers = &render_targets.framebuffers;
+        render_targets
+            .texture_pass
+            .retain(|_, pass_id| framebuffers.contains_key(pass_id));
+    }
+
+    /// Render one offscreen pass into the framebuffer that backs its colour
+    /// attachment, and publish that framebuffer so parent passes sampling the
+    /// texture find the pixels. The GPU backends do exactly this with a render
+    /// pass descriptor; here the "texture" is the framebuffer itself.
+    #[allow(clippy::too_many_arguments)]
+    fn headless_draw_pass_to_texture(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        time: f64,
+        render_threads: usize,
+        parallel_min_tris: usize,
+        texture_cache: &mut TextureConversionCache,
+        render_targets: &mut HeadlessRenderTargets,
+        profile: Option<&mut RenderProfile>,
+    ) {
+        if self.passes[draw_pass_id].main_draw_list_id.is_none() {
+            return;
+        }
+        // A pass with no colour attachment has nowhere to render (and nothing
+        // could sample it) — the GPU backends log an invalid render target.
+        let Some(color_texture) = self.passes[draw_pass_id].color_textures.first().cloned() else {
+            return;
+        };
+        // Cube faces need six framebuffers behind one texture; not modelled.
+        if color_texture.cube_face.is_some() {
+            return;
+        }
+        let texture_id = color_texture.texture.texture_id();
+
+        let dpi_factor = match self.passes[draw_pass_id].dpi_factor {
+            Some(dpi) => dpi,
+            None => self.get_delegated_dpi_factor(draw_pass_id),
+        };
+        let Some(pass_rect) = self.get_pass_rect(draw_pass_id, dpi_factor) else {
+            return;
+        };
+        if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
+            return;
+        }
+        // Same arithmetic the GPU backends use to size the attachment: the
+        // viewport is dpi * pass rect, and `TextureSize::Fixed` overrides it.
+        let viewport_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
+        let viewport_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
+        let (width, height) = {
+            let cxtexture = &mut self.textures[texture_id];
+            cxtexture.alloc_render(viewport_width, viewport_height);
+            match cxtexture
+                .alloc
+                .as_ref()
+                .map(|alloc| (alloc.width, alloc.height))
+            {
+                Some((w, h)) if w > 0 && h > 0 => (w, h),
+                _ => (viewport_width, viewport_height),
+            }
+        };
+
+        if !self.passes[draw_pass_id].keep_camera_matrix {
+            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        }
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
+        self.passes[draw_pass_id].set_time(time as f32);
+
+        // Taking the framebuffer out of the map lets the raster below sample
+        // every *other* offscreen target while writing into this one.
+        let mut fb = render_targets
+            .framebuffers
+            .remove(&draw_pass_id.0)
+            .unwrap_or_else(|| Framebuffer::new(width, height));
+        let discarded = fb.resize(width, height);
+
+        // Load actions, mirroring the GPU backends: ClearWith always clears,
+        // InitWith clears only the first time the attachment is used. A resize
+        // threw the old contents away, so a "load" there has to clear anyway.
+        let clear_color = match color_texture.clear_color {
+            DrawPassClearColor::ClearWith(color) => Some(color),
+            DrawPassClearColor::InitWith(color) => {
+                let initial = self.textures[texture_id].take_initial();
+                (initial || discarded).then_some(color)
+            }
+        };
+        if let Some(c) = clear_color {
+            fb.clear_color([c.x, c.y, c.z, c.w]);
+        }
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::ClearWith(depth) => Some(depth),
+            DrawPassClearDepth::InitWith(depth) => {
+                let initial = match &self.passes[draw_pass_id].depth_texture {
+                    Some(texture) => {
+                        let texture_id = texture.texture_id();
+                        self.textures[texture_id].take_initial()
+                    }
+                    None => true,
+                };
+                (initial || discarded).then_some(depth)
+            }
+        };
+        if let Some(depth) = clear_depth {
+            fb.clear_depth(depth);
+        }
+
+        self.headless_draw_pass(
+            draw_pass_id,
+            render_threads,
+            parallel_min_tris,
+            &mut fb,
+            texture_cache,
+            render_targets,
+            profile,
+        );
+
+        render_targets.framebuffers.insert(draw_pass_id.0, fb);
+        render_targets
+            .texture_pass
+            .insert(texture_id.0, draw_pass_id.0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn headless_draw_pass(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -699,6 +910,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        render_targets: &HeadlessRenderTargets,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_list_id = match self.passes[draw_pass_id].main_draw_list_id {
@@ -718,10 +930,12 @@ impl Cx {
             parallel_min_tris,
             fb,
             texture_cache,
+            render_targets,
             profile.as_deref_mut(),
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn headless_render_view(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -732,6 +946,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        render_targets: &HeadlessRenderTargets,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
@@ -766,6 +981,7 @@ impl Cx {
                     parallel_min_tris,
                     fb,
                     texture_cache,
+                    render_targets,
                     profile.as_deref_mut(),
                 );
                 continue;
@@ -905,7 +1121,8 @@ impl Cx {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
                     let __tex_t0 = std::time::Instant::now();
-                    let __info = headless_texture_info(texture_id.0, cxtexture, texture_cache);
+                    let __info =
+                        headless_texture_info(texture_id.0, cxtexture, texture_cache, render_targets);
                     if let Some(p) = profile.as_deref_mut() {
                         p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
                     }
