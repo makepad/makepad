@@ -74,6 +74,11 @@ pub struct CxOs {
     /// draw, which cost more than rasterising the window did. Entries carry a
     /// signature and are redone when the texture reports pending updates.
     pub(crate) texture_conversions: crate::os::headless::raster::TextureConversionCache,
+    /// Offscreen (render-to-texture) pass framebuffers, kept ACROSS frames:
+    /// a parent pass that repaints while its child stayed clean must still
+    /// sample the child's last contents, and reusing the buffers keeps a
+    /// window-sized 3D pass to one allocation instead of one per frame.
+    pub(crate) render_targets: crate::os::headless::raster::HeadlessRenderTargets,
 }
 
 impl Default for CxOs {
@@ -89,6 +94,7 @@ impl Default for CxOs {
             render_pool: None,
             render_pool_threads: 0,
             texture_conversions: Default::default(),
+            render_targets: Default::default(),
         }
     }
 }

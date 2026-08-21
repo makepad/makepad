@@ -24,6 +24,32 @@ impl Framebuffer {
         self.depth.fill(depth);
     }
 
+    pub fn clear_color(&mut self, color: [f32; 4]) {
+        self.color.fill(color);
+    }
+
+    pub fn clear_depth(&mut self, depth: f32) {
+        self.depth.fill(depth);
+    }
+
+    /// Reuse this buffer at a new size. Only reallocates when the size really
+    /// changed — an offscreen pass that redraws every frame at a steady size
+    /// keeps one allocation for the life of the process.
+    /// Returns true when the contents were discarded by the resize.
+    pub fn resize(&mut self, width: usize, height: usize) -> bool {
+        if self.width == width && self.height == height {
+            return false;
+        }
+        let pixels = width * height;
+        self.width = width;
+        self.height = height;
+        self.color.clear();
+        self.color.resize(pixels, [0.0; 4]);
+        self.depth.clear();
+        self.depth.resize(pixels, 1.0);
+        true
+    }
+
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
         for (i, c) in self.color.iter().enumerate() {
