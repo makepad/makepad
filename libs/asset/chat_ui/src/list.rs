@@ -279,7 +279,11 @@ impl Widget for AssetChatList {
                     // dots with the phase text muted beside them (a
                     // full-size "waiting for the model..." bubble reads as
                     // a stalled reply). Tokens replace the row instantly.
-                    if data.streaming_text.is_empty() {
+                    // WHITESPACE is not text: `strip_marker` leaves a
+                    // newline behind after a tool line, and drawing that as
+                    // an assistant bubble put an empty grey box on screen
+                    // that reads as broken.
+                    if data.streaming_text.trim().is_empty() {
                         let widget = list.item(cx, item_id, id!(Thinking));
                         // Before the first serving facts arrive there is no
                         // phase to name and no reasoning yet — but a bubble
