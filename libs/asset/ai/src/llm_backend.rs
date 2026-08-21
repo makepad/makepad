@@ -878,6 +878,57 @@ fn llm_generate_streamed(
         Ok(artifacts)
 }
 
+/// Per-lane context from `MAKEPAD_ASSET_AI_LLM_CONTEXT`, in tokens.
+///
+/// `None` when unset, so the caller keeps its own default rather than this
+/// function inventing one.
+pub fn configured_context_per_lane() -> Option<u32> {
+    std::env::var("MAKEPAD_ASSET_AI_LLM_CONTEXT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|per_lane| *per_lane > 0)
+}
+
+/// Tokens held back from a prompt so there is room to answer it.
+///
+/// A prompt that exactly fills the context leaves nowhere for the reply, and
+/// the failure lands at the first decode rather than at admission.
+pub(crate) const DECODE_HEADROOM: usize = 512;
+
+/// Drop the oldest non-system turn from a rendered ChatML prompt.
+///
+/// Returns `None` when there is nothing left to drop — the system block and
+/// the trailing assistant opener are never candidates. The taught context IS
+/// the assistant's instructions, so dropping it would change who the model is
+/// rather than what it remembers.
+///
+/// Works on the rendered text because that is what the worker has. The format
+/// is `<|im_start|>role\n...<|im_end|>\n` repeated, ending with an
+/// `<|im_start|>assistant\n` opener with no terminator — so the blocks are
+/// found by their delimiters and the opener is whatever follows the last one.
+pub(crate) fn drop_oldest_turn(prompt: &str) -> Option<String> {
+    const START: &str = "<|im_start|>";
+    const END: &str = "<|im_end|>\n";
+    // The system block is the first, and it stays.
+    let first = prompt.find(START)?;
+    let after_system = prompt[first..].find(END).map(|at| first + at + END.len())?;
+    // The oldest droppable turn starts here.
+    let rest = &prompt[after_system..];
+    if !rest.starts_with(START) {
+        return None;
+    }
+    let end = rest.find(END)? + END.len();
+    // Never drop the trailing opener: it has no terminator, so if this block
+    // ran to the end of the prompt there was no complete turn to remove.
+    if after_system + end >= prompt.len() {
+        return None;
+    }
+    let mut out = String::with_capacity(prompt.len() - end);
+    out.push_str(&prompt[..after_system]);
+    out.push_str(&rest[end..]);
+    Some(out)
+}
+
 /// Chat lanes this box is configured for.
 ///
 /// The service reads it to size the chat admission class and the number of
@@ -925,10 +976,21 @@ mod llama_worker {
         super::configured_lane_count()
     }
 
-    /// Context each lane may hold. The arena is `lanes * this`, so the total
-    /// stays put as lanes are added rather than multiplying VRAM.
+    /// Context each lane may hold. The arena is `lanes * this`.
+    ///
+    /// `MAKEPAD_ASSET_AI_LLM_CONTEXT` sets it directly, in tokens PER LANE —
+    /// which is the unit people actually reason in ("64k per chat") and the
+    /// unit `/health` advertises. Unset, it falls back to dividing the built-in
+    /// budget, which is exactly what every box did before the knob existed.
+    ///
+    /// A knob rather than a constant because the right answer is per BOX: the
+    /// same number that fits comfortably on a 96 GB card is an
+    /// out-of-memory-at-load on a 32 GB one, and a hardcoded const has to be
+    /// wrong for one of them.
     fn context_per_lane() -> u32 {
-        context_for_lanes(MAX_CONTEXT, lane_count())
+        super::configured_context_per_lane().unwrap_or_else(|| {
+            context_for_lanes(MAX_CONTEXT, lane_count())
+        })
     }
 
     /// Split a total context budget across lanes.
@@ -987,6 +1049,10 @@ mod llama_worker {
             token_ids: Vec<i32>,
             streamed: String,
             max_tokens: usize,
+            /// How the lane's prompt was ingested: (tokens, resumed). The
+            /// scheduler's verdict, not a guess — this is what tells a client
+            /// its conversation stayed warm.
+            warm: Option<(usize, bool)>,
             /// Tokens generated before `</think>` closed, i.e. tokens the user
             /// never sees.
             ///
@@ -997,28 +1063,8 @@ mod llama_worker {
             /// seat, with a wait before ANY text appears. Without this number
             /// that looks exactly like a slow box.
             think_tokens: Option<usize>,
-            /// What the session's KV will hold if this turn completes on the
-            /// solo path: prompt + reply + suffix. `None` for a turn that did
-            /// not take that path, and therefore left the session untouched.
-            commit_as: Option<(super::PrefixOwner, String, String)>,
         }
 
-        // Prefix reuse for the SOLO path, which is the common case and the one
-        // the user measures.
-        //
-        // The lane worker shipped without this, re-ingesting the whole
-        // conversation on every turn ("phase 1 always re-ingests"). On a long
-        // chat that is thousands of tokens of pure rework per turn — the
-        // runbook prices it at ~2.6 s at 8k — and it lands inside the number a
-        // client reads as tok/s. The pre-lanes worker never paid it.
-        //
-        // It is deliberately SOLO-only. The cache describes the session's own
-        // single-sequence state, which only the session-native path uses; a
-        // turn that decodes through a slot leaves that state untouched but
-        // changes nothing about it, so the entry stays valid. What does
-        // invalidate it is the solo path itself running with a reset, or a
-        // turn failing part-way, and both are handled below.
-        let mut prefix = super::PrefixCache::default();
 
         let lanes = lane_count();
         let table = match session.new_slot_table() {
@@ -1055,9 +1101,22 @@ mod llama_worker {
         // box is getting. A rate that looks "a bit slow" and a draft head
         // feeding on the wrong hidden state look identical from the client.
         let mut spec_mark = exec.session().speculative_stats();
+        // The geometry this box actually allocated, in the units a sizing
+        // decision is made in. Reported rather than derived, because per-token
+        // KV cost is a property of the MODEL's attention shape — how many
+        // layers actually have attention, their head dims, the cache types —
+        // and a hybrid model's is nothing like a full-attention model's.
+        // Sizing a card from a guess is how a context knob becomes an
+        // out-of-memory at load, on the box, after a swap.
+        let per_token = exec.session().attention_cache_bytes_per_token().unwrap_or(0);
+        let kv_bytes = exec.session().attention_cache_bytes().unwrap_or(0);
         eprintln!(
-            "[llm-worker] batched worker: {lanes} lanes, queue {queue_max}, speculation depth {}",
-            exec.session().speculation_depth()
+            "[llm-worker] batched worker: {lanes} lanes x {} tok, queue {queue_max}, \
+             speculation depth {}, attention KV {:.2} GiB ({} B/token/lane)",
+            context_per_lane(),
+            exec.session().speculation_depth(),
+            kv_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            per_token,
         );
 
         loop {
@@ -1096,7 +1155,7 @@ mod llama_worker {
             // into slot 0 with an empty queue, which is precisely the
             // condition the executor tests for the session-native path.
             let alone = was_idle && arrivals.len() == 1;
-            for (job, cancel, events) in arrivals {
+            'arrival: for (job, cancel, events) in arrivals {
                 {
                 let tokens = match exec.session().vocab().tokenize(&job.prompt_text, true, true) {
                     Ok(mut tokens) => {
@@ -1114,63 +1173,68 @@ mod llama_worker {
                 };
                 let id = next_job;
                 next_job += 1;
-                // A hit means this prompt literally EXTENDS the text the
-                // session's KV already holds, so only the delta needs
-                // ingesting. Anything else re-ingests: reusing state a
-                // DIFFERENT conversation left behind is the one thing worse
-                // than paying for the prefill.
-                //
-                // Only offered when the lane is free and unqueued, because
-                // only then will the executor take the session-native path
-                // that this cache describes. Deciding it here, at submit,
-                // matches how the executor decides it at the step boundary:
-                // both ask whether this turn is alone.
-                let (outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
-                let hit = alone && outcome == super::PrefixOutcome::Hit;
-                let (tokens, reset_first) = if hit {
-                    let committed = prefix.committed().len();
-                    match exec.session().vocab().tokenize(
-                        &job.prompt_text[committed..],
-                        false,
-                        true,
-                    ) {
-                        Ok(delta) if !delta.is_empty() => (delta, false),
-                        // An empty or unusable delta is not a hit worth having:
-                        // a lane must ingest at least one token to have a
-                        // token to decode from.
-                        _ => (tokens, true),
-                    }
-                } else {
-                    (tokens, true)
-                };
-                if reset_first {
-                    prefix.invalidate();
+                // COMPACT rather than overflow. A conversation that outgrows its
+                // lane used to reach the first decode and come back as
+                // "gguf format error: session context overflow" — a message
+                // from four layers down, in a game chat, about a number the
+                // player never chose. Dropping the oldest turns is what a chat
+                // client would do, and the taught context is never a
+                // candidate: it is who the assistant IS, not what it recalls.
+                let budget = (context_per_lane() as usize).saturating_sub(super::DECODE_HEADROOM);
+                let mut prompt_text = job.prompt_text.clone();
+                let mut tokens = tokens;
+                let mut dropped = 0usize;
+                while tokens.len() > budget {
+                    let Some(shorter) = super::drop_oldest_turn(&prompt_text) else {
+                        break;
+                    };
+                    prompt_text = shorter;
+                    dropped += 1;
+                    tokens = match exec.session().vocab().tokenize(&prompt_text, true, true) {
+                        Ok(mut t) => {
+                            if t.last().copied() == exec.session().vocab().eos_token_id() {
+                                t.pop();
+                            }
+                            t
+                        }
+                        Err(err) => {
+                            let _ = events
+                                .send(WorkerEvent::Done(Err(format!("tokenize: {err:?}"))));
+                            continue 'arrival;
+                        }
+                    };
                 }
-                // Keep the classifier's memory current so a returning
-                // conversation reads as Interleaved rather than Cold. The
-                // elapsed argument is zero because this worker does not time
-                // the prefill separately — it happens inside a scheduler step
-                // — so the waste report's SECONDS are not attributed here; its
-                // token counts still are.
-                prefix.record(outcome, &owner, tokens.len(), std::time::Duration::ZERO);
-                eprintln!(
-                    "[llm-worker] turn {id}: prefix={outcome:?} alone={alone} ingest={} tok \
-                     (of {} in the prompt)",
-                    tokens.len(),
-                    job.prompt_text.len() / 4,
-                );
-                let committed_text = {
-                    let mut text = String::with_capacity(
-                        job.prompt_text.len() + job.commit_suffix.len() + 64,
+                if tokens.len() > budget {
+                    // Only reachable when the system block alone does not fit,
+                    // which is a configuration problem and says so.
+                    let _ = events.send(WorkerEvent::Done(Err(format!(
+                        "this conversation's system prompt alone needs {} tokens, more than the \
+                         {budget} a lane can hold (raise MAKEPAD_ASSET_AI_LLM_CONTEXT or lower \
+                         MAKEPAD_ASSET_AI_LLM_LANES)",
+                        tokens.len()
+                    ))));
+                    continue;
+                }
+                if dropped > 0 {
+                    eprintln!(
+                        "[llm-worker] turn {id}: compacted {dropped} oldest turn(s) to fit \
+                         {} tokens in a {budget}-token budget",
+                        tokens.len()
                     );
-                    text.push_str(&job.prompt_text);
-                    text
-                };
+                }
+                // The SCHEDULER owns prefix reuse now: it holds each lane's own
+                // token history and matches against it. The worker's job is to
+                // hand over the FULL prompt and get out of the way — sending a
+                // delta here would be a second opinion about a lane's contents,
+                // and the two disagreeing means ingesting a delta at position 0
+                // of a lane that holds none of the history.
                 let request = LaneRequest {
                     job: id,
                     session: job.kind.clone(),
                     prompt_tokens: tokens,
-                    reset_first,
+                    // Never a veto from here: the scheduler decides whether a
+                    // lane can be resumed, and it is the only thing that knows.
+                    reset_first: false,
                     max_new: job.max_tokens.max(1) as usize,
                     sampling: LlamaSamplingParams {
                         temperature: job.temperature.max(0.0),
@@ -1195,14 +1259,12 @@ mod llama_worker {
                         token_ids: Vec::new(),
                         streamed: String::new(),
                         max_tokens: job.max_tokens.max(1) as usize,
+                        warm: None,
                         think_tokens: None,
                         // Only a turn that went in ALONE can leave the
                         // session's own state describing it. One that joined a
                         // batch decodes through a slot and leaves that state
                         // where it was, so it must not claim it.
-                        commit_as: alone.then(|| {
-                            (owner, committed_text, job.commit_suffix.clone())
-                        }),
                     },
                 );
                 }
@@ -1225,9 +1287,6 @@ mod llama_worker {
                     // shared, so every lane in flight hears about it rather
                     // than hanging on a reply that will never come.
                     eprintln!("[llm-worker] step: {err}");
-                    // Whatever the session's state was, it is not what the
-                    // committed text says any more.
-                    prefix.invalidate();
                     for (_, lane) in jobs.drain() {
                         let _ = lane.events.send(WorkerEvent::Done(Err(err.clone())));
                     }
@@ -1247,6 +1306,15 @@ mod llama_worker {
             let mut touched: Vec<u64> = Vec::new();
             for event in events {
                 match event {
+                    LaneEvent::Prefilled { job, ingested, resumed } => {
+                        eprintln!(
+                            "[llm-worker] turn {job}: prefill {} {ingested} tok",
+                            if resumed { "RESUMED, ingested only" } else { "cold, ingested" }
+                        );
+                        if let Some(lane) = jobs.get_mut(&job) {
+                            lane.warm = Some((ingested, resumed));
+                        }
+                    }
                     LaneEvent::Token { job, token, produced } => {
                         let Some(lane) = jobs.get_mut(&job) else { continue };
                         lane.token_ids.push(token);
@@ -1312,14 +1380,6 @@ mod llama_worker {
                                 }
                             }
                             spec_mark = now;
-                        }
-                        match (&result, lane.commit_as) {
-                            (Ok(text), Some((owner, mut committed, suffix))) => {
-                                committed.push_str(text);
-                                committed.push_str(&suffix);
-                                prefix.commit(&owner, committed);
-                            }
-                            _ => prefix.invalidate(),
                         }
                         let _ = lane.events.send(WorkerEvent::Done(result));
                     }
@@ -1698,6 +1758,81 @@ mod llama_worker {
 // ---------------------------------------------------------------------------
 // Tests (stubbed generation — this is what CI exercises)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::{drop_oldest_turn, DECODE_HEADROOM};
+
+    fn prompt(turns: &[(&str, &str)]) -> String {
+        let mut out = String::from("<|im_start|>system\nTAUGHT<|im_end|>\n");
+        for (role, text) in turns {
+            out.push_str("<|im_start|>");
+            out.push_str(role);
+            out.push('\n');
+            out.push_str(text);
+            out.push_str("<|im_end|>\n");
+        }
+        out.push_str("<|im_start|>assistant\n<think>\n");
+        out
+    }
+
+    #[test]
+    fn compaction_drops_the_oldest_turn_and_keeps_the_taught_context() {
+        // The system block is who the assistant IS, not what it remembers.
+        // Dropping it to save room would change the character rather than its
+        // memory, which is the one thing compaction must never do.
+        let full = prompt(&[("user", "one"), ("assistant", "two"), ("user", "three")]);
+        let once = drop_oldest_turn(&full).expect("a turn to drop");
+        assert!(once.starts_with("<|im_start|>system\nTAUGHT<|im_end|>\n"));
+        assert!(!once.contains("one"), "the oldest turn is gone");
+        assert!(once.contains("two") && once.contains("three"));
+        assert!(once.ends_with("<|im_start|>assistant\n<think>\n"));
+
+        let twice = drop_oldest_turn(&once).expect("another turn to drop");
+        assert!(!twice.contains("two"));
+        assert!(twice.contains("three"));
+    }
+
+    #[test]
+    fn compaction_stops_rather_than_eating_the_system_block() {
+        // Nothing left but the taught context and the opener: there is no
+        // turn to drop, and saying so lets the caller report a configuration
+        // problem instead of looping.
+        let bare = prompt(&[]);
+        assert!(drop_oldest_turn(&bare).is_none());
+        // One turn left, then none.
+        let one = prompt(&[("user", "only")]);
+        let dropped = drop_oldest_turn(&one).expect("one to drop");
+        assert!(!dropped.contains("only"));
+        assert!(drop_oldest_turn(&dropped).is_none());
+    }
+
+    #[test]
+    fn compaction_never_eats_the_trailing_assistant_opener() {
+        // The opener has no `<|im_end|>`, so a naive block walk would treat it
+        // as the next droppable turn and hand the model a prompt with nothing
+        // to continue.
+        for turns in 0..4 {
+            let built: Vec<(&str, &str)> = (0..turns).map(|_| ("user", "x")).collect();
+            let mut text = prompt(&built);
+            while let Some(next) = drop_oldest_turn(&text) {
+                text = next;
+            }
+            assert!(
+                text.ends_with("<|im_start|>assistant\n<think>\n"),
+                "the opener must survive every drop"
+            );
+        }
+    }
+
+    #[test]
+    fn the_decode_headroom_is_not_zero() {
+        // A prompt that exactly fills the context leaves nowhere for the
+        // reply, and the failure then lands at the first decode rather than at
+        // admission where it can be handled.
+        assert!(DECODE_HEADROOM >= 128);
+    }
+}
 
 #[cfg(test)]
 mod tests {
