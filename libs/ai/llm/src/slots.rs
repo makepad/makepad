@@ -471,6 +471,13 @@ pub struct Slot {
     /// block. Always 0 without speculation; with it, the verify batch
     /// checkpoints into the slot's other rows and this follows the live one.
     live_state_offset: usize,
+    /// Tokens of this slot's history the DRAFT head's KV holds.
+    ///
+    /// Lags `fill` — the draft head only ever ingests what it drafted from,
+    /// and a rejected draft is not something it may keep. Per slot for the
+    /// same reason everything else here is: two conversations sharing one
+    /// number would each catch the draft head up over the other's tokens.
+    mtp_filled: usize,
 }
 
 impl Slot {
@@ -494,6 +501,21 @@ impl Slot {
     /// slot. Always inside the slot's own block.
     pub fn live_state_row(&self) -> usize {
         self.state_base + self.live_state_offset
+    }
+
+    /// Offset inside the slot's recurrent block that the next scan resumes
+    /// from. Set from a speculative round's commit point.
+    pub fn set_live_state_offset(&mut self, offset: usize) {
+        self.live_state_offset = offset;
+    }
+
+    /// Tokens of this slot's history the draft head's KV holds.
+    pub fn mtp_filled(&self) -> usize {
+        self.mtp_filled
+    }
+
+    pub fn set_mtp_filled(&mut self, filled: usize) {
+        self.mtp_filled = filled;
     }
 
     pub fn index(&self) -> usize {
@@ -694,6 +716,7 @@ impl SlotTable {
                 fill: 0,
                 rope_pos_next: 0,
                 live_state_offset: 0,
+                mtp_filled: 0,
             })
             .collect();
         Ok(Self {
@@ -755,16 +778,61 @@ impl SlotTable {
         slot.fill = 0;
         slot.rope_pos_next = 0;
         slot.live_state_offset = 0;
+        // The draft head's rows for this slot describe whoever had it last.
+        // Admission is the moment that stops being true.
+        slot.mtp_filled = 0;
         Some(index)
     }
 
-    /// Release a slot. Pure bookkeeping: nothing on the device is touched.
+    /// Claim a SPECIFIC slot, cleared. Used when the scheduler has already
+    /// chosen which slot a conversation gets — sticky affinity picks by who
+    /// was there, not by who is lowest.
+    pub fn admit_at(&mut self, index: usize) -> Result<()> {
+        let slot = self.require_mut(index)?;
+        slot.phase = SlotPhase::Prefilling { cursor: 0 };
+        slot.fill = 0;
+        slot.rope_pos_next = 0;
+        slot.live_state_offset = 0;
+        slot.mtp_filled = 0;
+        Ok(())
+    }
+
+    /// Release a slot AND forget what it held. Pure bookkeeping: nothing on the
+    /// device is touched, but the next occupant starts from position 0.
     pub fn retire(&mut self, index: usize) -> Result<()> {
         let slot = self.require_mut(index)?;
         slot.phase = SlotPhase::Idle;
         slot.fill = 0;
         slot.rope_pos_next = 0;
         slot.live_state_offset = 0;
+        slot.mtp_filled = 0;
+        Ok(())
+    }
+
+    /// Release a slot but KEEP its cache state, so the conversation that was
+    /// here can come back and append instead of re-ingesting itself.
+    ///
+    /// The rows are still there — nothing was ever erased, retirement only
+    /// ever reset counters — so parking is exactly "do not reset the counters".
+    /// What makes it safe to resume from is that the recurrent state, which
+    /// cannot be rewound, is left describing precisely `fill` tokens.
+    ///
+    /// The caller must only resume a parked slot for a prompt that extends its
+    /// ENTIRE history. Attention rows could be truncated; the delta-net scan
+    /// cannot, and resuming a parked slot at anything short of `fill` would
+    /// decode against a recurrent state from a future the tokens no longer
+    /// contain.
+    pub fn park(&mut self, index: usize) -> Result<()> {
+        let slot = self.require_mut(index)?;
+        slot.phase = SlotPhase::Idle;
+        Ok(())
+    }
+
+    /// Prepare a parked slot to be resumed: it decodes again with everything
+    /// it already holds.
+    pub fn resume(&mut self, index: usize) -> Result<()> {
+        let slot = self.require_mut(index)?;
+        slot.phase = SlotPhase::Prefilling { cursor: slot.fill };
         Ok(())
     }
 
