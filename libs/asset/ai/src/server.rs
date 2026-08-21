@@ -657,14 +657,30 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             .serialize_json(),
         ),
         Err(refused @ (AssetAiError::Busy | AssetAiError::QueueFull(_))) => {
-            let body = GenerateResponseJson {
-                job_id: None,
-                error: Some(refused.to_string()),
-            };
-            json_response(409, body.serialize_json())
+            generate_refused(&refused)
         }
         Err(e) => error_json(500, e.to_string()),
     }
+}
+
+/// The one answer a client gets when this box will not take more work.
+///
+/// 409, `job_id: null`, and the reason in `error`: a status a caller can
+/// retry on and a body it can show a person. Never a hang and never a
+/// silently dropped request — a chat client with several agents talking at
+/// once has to be able to tell "come back in a moment" from "broken", and it
+/// can only do that if saturation has ONE shape.
+///
+/// A function rather than four inline lines so a test can hold that shape.
+fn generate_refused(refused: &AssetAiError) -> HttpServerResponse {
+    json_response(
+        409,
+        GenerateResponseJson {
+            job_id: None,
+            error: Some(refused.to_string()),
+        }
+        .serialize_json(),
+    )
 }
 
 /// `POST /realtime` — admits a live session exactly like `POST /generate`
@@ -2111,6 +2127,126 @@ mod lifecycle_tests {
         let models = shared.models.lock().unwrap();
         assert!(matches!(models.get("old-a"), Some(ModelTrack::Ready)));
         assert!(matches!(models.get("old-b"), Some(ModelTrack::Ready)));
+    }
+
+    /// What several agents talking at once are entitled to when the box fills
+    /// up: an answer. Never a hang, never a silently dropped request.
+    ///
+    /// The real workload is a game chat, an asset-ui chat, an eval rig and a
+    /// handful of probes, all pointed at the same box. When the queue is full
+    /// the ONLY acceptable outcome is a status the caller can retry on with a
+    /// reason it can show, and the shape has to be the same every time or a
+    /// client cannot tell saturation from a fault.
+    #[test]
+    fn a_full_queue_refuses_with_a_retryable_409_and_says_why() {
+        let shared = fixture_shared(&[]);
+        let limit = shared.jobs.with(|store| {
+            store.set_queue_limit(4);
+            store.queue_limit()
+        });
+        for _ in 0..limit {
+            shared
+                .jobs
+                .with(|store| {
+                    store.submit_as(
+                        crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params(
+                            "qwen",
+                        )),
+                        crate::jobs::QueuePolicy::Queue,
+                        crate::jobs::JobClass::Chat,
+                    )
+                })
+                .expect("the queue takes work up to its limit");
+        }
+        let refused = shared
+            .jobs
+            .with(|store| {
+                store.submit_as(
+                    crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params("qwen")),
+                    crate::jobs::QueuePolicy::Queue,
+                    crate::jobs::JobClass::Chat,
+                )
+            })
+            .expect_err("past the limit the box must refuse, not accept and forget");
+        assert!(matches!(refused, AssetAiError::QueueFull(n) if n == limit));
+        let response = generate_refused(&refused);
+        assert!(
+            response.header.starts_with("HTTP/1.1 409"),
+            "saturation is a 409 a client retries on, got {:?}",
+            response.header.lines().next()
+        );
+        let body = String::from_utf8(response.body).expect("json body");
+        // No job id: there is nothing to poll, and a client that invents one
+        // would poll forever.
+        assert!(!body.contains("\"job_id\":\""), "no job id on a refusal: {body}");
+        assert!(body.contains("queue full"), "the reason is in the body: {body}");
+        assert!(body.contains(&limit.to_string()), "and it names the limit: {body}");
+
+        // `queue_policy=reject` is the other way to be told no, and it lands
+        // in the same shape rather than a second one.
+        let busy = generate_refused(&AssetAiError::Busy);
+        assert!(busy.header.starts_with("HTTP/1.1 409"));
+        assert!(String::from_utf8(busy.body).unwrap().contains("busy"));
+    }
+
+    /// The ordinary case, which must NOT be a refusal: more chat turns than
+    /// lanes. They wait, they keep their job ids, and they say where they are
+    /// in the line — that is the difference between a busy box and a lost
+    /// request, and a client polling a job id can see it.
+    #[test]
+    fn chat_turns_past_the_lanes_wait_in_the_queue_instead_of_vanishing() {
+        let shared = fixture_shared(&[]);
+        shared.jobs.with(|store| store.set_chat_slots(2));
+        let ids: Vec<String> = (0..4)
+            .map(|_| {
+                shared
+                    .jobs
+                    .with(|store| {
+                        store.submit_as(
+                            crate::jobs::JobParams::Generate(
+                                crate::jobs::tests::generate_params("qwen"),
+                            ),
+                            crate::jobs::QueuePolicy::Queue,
+                            crate::jobs::JobClass::Chat,
+                        )
+                    })
+                    .expect("four turns on a two-lane box are all admitted")
+            })
+            .collect();
+        // Two lanes, two runners, and the other two still queued rather than
+        // dropped on the floor.
+        for _ in 0..2 {
+            assert!(shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat))
+                .is_some());
+        }
+        assert!(
+            shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat))
+                .is_none(),
+            "a third turn must not start on a two-lane box"
+        );
+        let waiting = shared.jobs.with(|store| {
+            store
+                .status_json(&ids[3])
+                .expect("a queued turn is still a job with an id")
+        });
+        assert_eq!(waiting.state, crate::protocol::JOB_STATE_QUEUED);
+        assert!(
+            waiting.stage.unwrap_or_default().contains("ahead"),
+            "a queued turn says how many are in front of it"
+        );
+        // And the line moves when a lane frees.
+        shared.jobs.with(|store| store.finish(&ids[0], Vec::new()));
+        assert_eq!(
+            shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat)),
+            Some(ids[2].clone()),
+            "the next turn in the line takes the freed lane"
+        );
     }
 
     #[test]

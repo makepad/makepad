@@ -954,6 +954,307 @@ pub fn configured_lane_count() -> usize {
         .clamp(1, 8)
 }
 
+/// Repetition mitigation for every turn this box serves, read once per
+/// request from `MAKEPAD_ASSET_AI_LLM_{PRESENCE_PENALTY,FREQUENCY_PENALTY,
+/// PENALTY_WINDOW}`.
+///
+/// The serving sampler had none at all, and a Q4 27B at long context on
+/// numeric or tabular history enters a self-reinforcing loop that neither
+/// temperature nor top-p can end — it runs to `max_tokens` emitting
+/// `66.67.68|66|660 / 67.68.69|67|670 ...`, reproduced on .165 over two turns
+/// at speculative acceptance 0.91-0.96 against 0.41-0.53 for ordinary prose.
+/// Acceptance that high IS the loop: the draft head predicts a repeating
+/// sequence almost perfectly.
+///
+/// The shape is frequency-dominant on purpose. A loop uses the same token ten
+/// to thirty times inside a 64-token window and gets crushed; ordinary prose
+/// reuses a common word two or three times and is barely touched. Presence
+/// hits a word used once exactly as hard as one used twenty times, which is a
+/// tax on normal English, so it defaults to 0 and stays a knob.
+///
+/// One helper rather than two literals, because the lane path and the solo
+/// path must sample identically: a box whose answers change depending on
+/// whether anyone else was talking is a bug nobody can reproduce.
+fn sampling_penalties() -> (f32, f32, usize) {
+    fn env_f32(key: &str, default: f32) -> f32 {
+        // Garbage reads as the default rather than as zero: a typo must not
+        // silently switch the mitigation off, which is the failure this whole
+        // helper exists to prevent.
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(default)
+    }
+    (
+        env_f32("MAKEPAD_ASSET_AI_LLM_PRESENCE_PENALTY", 0.0),
+        env_f32("MAKEPAD_ASSET_AI_LLM_FREQUENCY_PENALTY", 0.25),
+        std::env::var("MAKEPAD_ASSET_AI_LLM_PENALTY_WINDOW")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(64),
+    )
+}
+
+#[cfg(test)]
+mod penalty_tests {
+    use super::sampling_penalties;
+
+    #[test]
+    fn the_penalty_knobs_default_frequency_dominant() {
+        // The defaults ARE the mitigation: a box that sets nothing must still
+        // be protected from the loop, and it must be protected by the
+        // frequency term rather than the presence one.
+        //
+        // Env is process-global and the suite runs threaded, so this reads the
+        // defaults rather than setting anything — a `set_var` here would
+        // change what every other test in this process sees.
+        for key in [
+            "MAKEPAD_ASSET_AI_LLM_PRESENCE_PENALTY",
+            "MAKEPAD_ASSET_AI_LLM_FREQUENCY_PENALTY",
+            "MAKEPAD_ASSET_AI_LLM_PENALTY_WINDOW",
+        ] {
+            if std::env::var(key).is_ok() {
+                return;
+            }
+        }
+        let (presence, frequency, window) = sampling_penalties();
+        assert_eq!(presence, 0.0, "presence taxes ordinary prose; off by default");
+        assert!(frequency > 0.0, "a box that sets nothing is still protected");
+        assert!(frequency < 1.0, "and not so hard it rewrites normal English");
+        assert!(window >= 32, "a window too short cannot see a loop at all");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stall watchdog: no turn holds a lane or a queue slot without moving
+// ---------------------------------------------------------------------------
+
+/// What a turn is waiting on.
+///
+/// Which one it is decides what "progress" even means for it, and it is the
+/// first thing a person reading a stall line has to know: a turn stuck in
+/// prefill and a turn stuck in decode are two different faults on two
+/// different code paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnPhase {
+    /// Submitted, with no lane of its own yet — queued behind other turns, or
+    /// on a lane the worker could not attribute. It holds a queue slot and
+    /// nothing else, and what it is waiting for is the turns ahead of it
+    /// moving, so the clock it is judged on is the BOX's rather than its own.
+    Waiting,
+    /// Ingesting its prompt on a known lane. Progress is tokens ingested.
+    Prefill,
+    /// Generating. Progress is tokens produced.
+    Decode,
+}
+
+impl TurnPhase {
+    /// How the phase reads in a log line and in the client's error.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            TurnPhase::Waiting => "waiting for a lane",
+            TurnPhase::Prefill => "prefill",
+            TurnPhase::Decode => "decode",
+        }
+    }
+}
+
+/// How long a turn may make no progress at all before the watchdog takes its
+/// lane back, in seconds. `MAKEPAD_ASSET_AI_LLM_STALL_SECS` overrides it and
+/// 0 turns the watchdog off.
+///
+/// 300 s, derived from the two prefill rates this box has actually been
+/// measured at rather than from a feeling about how long is too long.
+///
+/// The finest progress signal a turn has is one prefill CHUNK — 512 tokens,
+/// which is 1.13 s at the 454 tok/s the live box ingested a 34,074-token cold
+/// prompt at (the 75-second turn that was escalated as a wedge and was not
+/// one), and 2.77 s at 185 tok/s, the slowest prefill rate the box has ever
+/// been measured at. A healthy turn is therefore never quiet for more than
+/// about three seconds.
+///
+/// The budget is not three seconds, because the signal is not always that
+/// fine. A turn the worker could not attribute to a lane says nothing at all
+/// until its whole prompt is in, and a full 131,072-token lane at that same
+/// 454 tok/s is 289 s of entirely legitimate silence. 300 s clears that worst
+/// case, clears the incident four times over, and is still short enough that
+/// an operator gets an answer instead of a frozen row.
+pub(crate) const DEFAULT_STALL_SECS: u64 = 300;
+
+/// The watchdog's budget, in one place so the decision and the log agree.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StallPolicy {
+    budget: std::time::Duration,
+}
+
+impl StallPolicy {
+    pub(crate) fn seconds(secs: u64) -> Self {
+        Self {
+            budget: std::time::Duration::from_secs(secs),
+        }
+    }
+
+    /// The configured budget. An unparseable value reads as the default
+    /// rather than as "off": a typo must not quietly disarm the watchdog.
+    pub(crate) fn from_env() -> Self {
+        Self::seconds(
+            std::env::var("MAKEPAD_ASSET_AI_LLM_STALL_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(DEFAULT_STALL_SECS),
+        )
+    }
+
+    pub(crate) fn budget(&self) -> std::time::Duration {
+        self.budget
+    }
+
+    pub(crate) fn is_off(&self) -> bool {
+        self.budget.is_zero()
+    }
+}
+
+/// A turn that has stopped moving, and the two facts every report of it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stalled {
+    pub(crate) phase: TurnPhase,
+    pub(crate) idle: std::time::Duration,
+}
+
+/// The watchdog's whole decision, over facts a test can hand it.
+///
+/// Separated from the worker loop on purpose: the loop it guards runs on a
+/// GPU, and a rule that can only be exercised there is a rule nobody checks.
+/// Everything the decision needs is here — which phase the turn is in, when it
+/// last moved, what time it is now, and the budget.
+pub(crate) fn stall_verdict(
+    phase: TurnPhase,
+    last_progress: std::time::Instant,
+    now: std::time::Instant,
+    policy: &StallPolicy,
+) -> Option<Stalled> {
+    if policy.is_off() {
+        return None;
+    }
+    // `saturating_duration_since` rather than subtraction: a clock that
+    // appears to run backwards must read as "no idle time", not panic inside
+    // the loop that serves every conversation on the box.
+    let idle = now.saturating_duration_since(last_progress);
+    (idle >= policy.budget).then_some(Stalled { phase, idle })
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::{stall_verdict, StallPolicy, TurnPhase, DEFAULT_STALL_SECS};
+    use std::time::{Duration, Instant};
+
+    /// The incident this watchdog was written after: a 34,074-token cold
+    /// prefill that held its lane for 75 seconds, finished normally, and was
+    /// escalated as a wedge because nothing about it moved. A watchdog that
+    /// reaps THAT turn has replaced a confusing wait with a broken one.
+    #[test]
+    fn a_seventy_five_second_cold_prefill_is_not_a_stall() {
+        let policy = StallPolicy::seconds(DEFAULT_STALL_SECS);
+        let started = Instant::now();
+        for phase in [TurnPhase::Waiting, TurnPhase::Prefill, TurnPhase::Decode] {
+            assert_eq!(
+                stall_verdict(phase, started, started + Duration::from_secs(75), &policy),
+                None,
+                "{phase:?}: the 34k-token prefill from the incident must survive"
+            );
+        }
+        // And the worst legitimate case the budget was sized for: a full
+        // 131,072-token lane at the same measured 454 tok/s, seen by a turn
+        // whose only signal is the prefill finishing.
+        let worst = Duration::from_secs_f64(131_072.0 / 454.0);
+        assert!(
+            worst < policy.budget(),
+            "a full-lane cold prefill ({worst:?}) must fit inside the budget"
+        );
+        assert_eq!(
+            stall_verdict(TurnPhase::Prefill, started, started + worst, &policy),
+            None
+        );
+    }
+
+    #[test]
+    fn silence_past_the_budget_is_a_stall_and_names_its_phase() {
+        let policy = StallPolicy::seconds(30);
+        let started = Instant::now();
+        // One tick under is still hope; the budget itself is not.
+        assert_eq!(
+            stall_verdict(
+                TurnPhase::Decode,
+                started,
+                started + Duration::from_secs(29),
+                &policy
+            ),
+            None
+        );
+        let verdict = stall_verdict(
+            TurnPhase::Decode,
+            started,
+            started + Duration::from_secs(31),
+            &policy,
+        )
+        .expect("31 s of silence on a 30 s budget is a stall");
+        // The phase rides along because the log line and the client's error
+        // both have to say which half of the turn stopped.
+        assert_eq!(verdict.phase, TurnPhase::Decode);
+        assert_eq!(verdict.phase.name(), "decode");
+        assert!(verdict.idle >= Duration::from_secs(31));
+        // A queued turn is judged the same way, on the box's clock: if
+        // NOTHING anywhere has moved for the budget, the box is wedged and a
+        // client waiting on it deserves an answer rather than a hang.
+        assert!(stall_verdict(
+            TurnPhase::Waiting,
+            started,
+            started + Duration::from_secs(31),
+            &policy
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn a_zero_budget_disarms_the_watchdog_entirely() {
+        // The escape hatch for a box doing something this file cannot predict
+        // — a 300k-token ingest, a deliberately paused session. Off means off,
+        // at any idle time, in any phase.
+        let off = StallPolicy::seconds(0);
+        let started = Instant::now();
+        for phase in [TurnPhase::Waiting, TurnPhase::Prefill, TurnPhase::Decode] {
+            assert_eq!(
+                stall_verdict(phase, started, started + Duration::from_secs(86_400), &off),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_clock_that_appears_to_run_backwards_is_not_a_stall() {
+        // `now` before `last_progress` is unreachable in the loop, but the
+        // arithmetic that assumes it cannot happen is a panic on the thread
+        // that serves every conversation on the box.
+        let policy = StallPolicy::seconds(30);
+        let now = Instant::now();
+        assert_eq!(
+            stall_verdict(TurnPhase::Prefill, now + Duration::from_secs(10), now, &policy),
+            None
+        );
+    }
+
+    #[test]
+    fn the_default_budget_clears_the_measured_worst_case() {
+        // Guards the constant itself: the numbers in its doc comment are the
+        // reason it is 300 and not 30, and a later edit that trims it has to
+        // fail here rather than on the box.
+        let policy = StallPolicy::seconds(DEFAULT_STALL_SECS);
+        assert!(policy.budget() >= Duration::from_secs(289));
+        assert!(!policy.is_off());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Real generation: LlamaSession on a keep-alive worker thread (feature llm)
 // ---------------------------------------------------------------------------
@@ -1086,7 +1387,11 @@ mod llama_worker {
         model_id: String,
         rx: mpsc::Receiver<WorkerMsg>,
     ) {
-        use makepad_ai_llm::{LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler};
+        use super::{StallPolicy, TurnPhase};
+        use makepad_ai_llm::{
+            LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler, SlotPhase,
+        };
+        use std::time::Instant;
 
         struct JobLane {
             events: mpsc::Sender<WorkerEvent>,
@@ -1094,6 +1399,33 @@ mod llama_worker {
             token_ids: Vec<i32>,
             streamed: String,
             max_tokens: usize,
+            /// Prompt tokens this turn handed the scheduler. The denominator
+            /// of its prefill meter, and the only place that number exists —
+            /// the scheduler reports an ingest ONCE, when the whole prompt is
+            /// in, which on a cold 34k-token prompt is 75 seconds after the
+            /// question was asked.
+            prompt_tokens: usize,
+            /// The slot this turn landed on, when the worker could tell.
+            ///
+            /// The scheduler picks the slot and there is no event for
+            /// "admitted", so the only way to learn it from outside is to
+            /// submit one request and admit it on its own: the lane that
+            /// lights up is that request's. When a backlog makes that
+            /// ambiguous this stays `None`, the turn reports its phase without
+            /// a token count, and the watchdog judges it on the box's clock —
+            /// an honest gap rather than a guessed lane, because the watchdog
+            /// CANCELS what it judges and cancelling a stranger's turn is
+            /// worse than any stall.
+            lane: Option<usize>,
+            phase: TurnPhase,
+            /// Tokens of this turn's prompt already ingested, as last seen.
+            ingested: usize,
+            /// The last stage string published for this turn. The sink takes
+            /// the job-store mutex and wakes everything waiting on it, so a
+            /// number that has not changed must not be republished.
+            stage: String,
+            /// When this turn last moved. What the watchdog measures.
+            last_progress: Instant,
             /// How the lane's prompt was ingested: (tokens, resumed). The
             /// scheduler's verdict, not a guess — this is what tells a client
             /// its conversation stayed warm.
@@ -1138,6 +1470,23 @@ mod llama_worker {
 
         let mut jobs: std::collections::HashMap<u64, JobLane> = std::collections::HashMap::new();
         let mut next_job: u64 = 1;
+        // Read once for the life of the worker, so every turn on this box
+        // samples the same way and a mid-session env change cannot make two
+        // conversations disagree about what the model is.
+        let (presence_penalty, frequency_penalty, penalty_last_n) = super::sampling_penalties();
+        let stall = StallPolicy::from_env();
+        // The box's own clock, for turns that have no lane of their own to be
+        // judged on. It is fed by ANY movement anywhere — a chunk ingested on
+        // any lane, a token produced on any lane, a lane retiring — because
+        // that is exactly what a queued turn is waiting for. If this stops,
+        // nothing on the box is moving and everything in flight is stuck
+        // together, which is when a queued turn deserves an answer instead of
+        // a wait that will never end.
+        let mut box_progress = Instant::now();
+        // Per-slot ingest position at the last boundary. The one signal that
+        // separates a prefill that is working from one that has stopped, and
+        // the scheduler emits no event for it.
+        let mut ingested_at: Vec<usize> = vec![0; lanes];
         // Speculation counters at the last turn boundary, so each turn can
         // report its OWN acceptance rather than a running average since boot.
         //
@@ -1170,9 +1519,14 @@ mod llama_worker {
         };
         eprintln!(
             "[llm-worker] batched worker: {lanes} lanes x {} tok, queue {queue_max}, \
-             speculation depth {}, {geometry}",
+             speculation depth {}, {geometry}, stall watchdog {}",
             context_per_lane(),
             exec.session().speculation_depth(),
+            if stall.is_off() {
+                "OFF".to_string()
+            } else {
+                format!("{}s", stall.budget().as_secs())
+            },
         );
 
         loop {
@@ -1205,6 +1559,13 @@ mod llama_worker {
                     break;
                 };
                 arrivals.push((job, cancel, events));
+            }
+            // An idle box has no clock to run. The loop blocks in `recv` while
+            // nothing is in flight, so without this the mark would still say
+            // "last movement" from before a quiet night and the first turn of
+            // the morning would read as stalled the instant it arrived.
+            if was_idle {
+                box_progress = Instant::now();
             }
             // A turn is alone only if the box had nothing and this drain
             // brought exactly one thing. Then `next_step` admits that one job
@@ -1284,6 +1645,7 @@ mod llama_worker {
                 // delta here would be a second opinion about a lane's contents,
                 // and the two disagreeing means ingesting a delta at position 0
                 // of a lane that holds none of the history.
+                let prompt_tokens = tokens.len();
                 let request = LaneRequest {
                     job: id,
                     session: job.kind.clone(),
@@ -1297,12 +1659,21 @@ mod llama_worker {
                         top_p: 0.95,
                         top_k: 0,
                         seed: job.seed,
+                        presence_penalty,
+                        frequency_penalty,
+                        penalty_last_n,
                     },
                 };
+                // The queue this refuses on is the SESSION's, not the job
+                // store's — the store already refused at admission with a 409
+                // long before a turn could reach here, so this is the last
+                // honest answer rather than the first. Say the numbers and say
+                // to retry: a client that cannot tell "full right now" from
+                // "broken" retries neither.
                 if let Err(refused) = exec.scheduler().submit(request) {
                     let _ = events.send(WorkerEvent::Done(Err(format!(
-                        "queue full ({queue_max}); {} lanes busy",
-                        lanes
+                        "busy: all {lanes} lanes are serving and {queue_max} more turns are \
+                         already waiting, so this turn was never started - retry it"
                     ))));
                     let _ = refused;
                     continue;
@@ -1315,6 +1686,12 @@ mod llama_worker {
                         token_ids: Vec::new(),
                         streamed: String::new(),
                         max_tokens: job.max_tokens.max(1) as usize,
+                        prompt_tokens,
+                        lane: None,
+                        phase: TurnPhase::Waiting,
+                        ingested: 0,
+                        stage: String::new(),
+                        last_progress: Instant::now(),
                         warm: None,
                         think_tokens: None,
                         // Only a turn that went in ALONE can leave the
@@ -1336,6 +1713,12 @@ mod llama_worker {
                 exec.scheduler().cancel(id);
             }
 
+            // Which lanes were taken before this step, so the ones the step
+            // admits can be told apart from the ones it did not.
+            let claimed_before: Vec<bool> = (0..lanes)
+                .map(|index| exec.scheduler().is_lane_claimed(index))
+                .collect();
+
             let events = match exec.step() {
                 Ok(events) => events,
                 Err(err) => {
@@ -1350,6 +1733,48 @@ mod llama_worker {
                 }
             };
 
+            // Learn which lane each turn landed on.
+            //
+            // The scheduler picks the slot and emits no "admitted" event — only
+            // `Prefilled`, which on a cold 34k-token prompt arrives 75 seconds
+            // after the turn started, long after the meter needed to move. So
+            // the mapping is read off the step instead: admission happens at
+            // the start of a step and retirement at its end, so a lane cannot
+            // be freed and re-taken inside one, and a lane that lit up across
+            // this step took the work the step admitted.
+            //
+            // One lane lighting up while one turn is waiting is one fact. Two
+            // of either is a guess, and this must not guess: the watchdog
+            // CANCELS what it judges, and cancelling a stranger's turn is worse
+            // than any stall. Read before the events below are applied, because
+            // a prompt short enough to fit one chunk is admitted and prefilled
+            // in the same step, and would otherwise have left the candidate set
+            // before anyone looked at it.
+            {
+                let lit: Vec<usize> = (0..lanes)
+                    .filter(|index| {
+                        !claimed_before[*index] && exec.scheduler().is_lane_claimed(*index)
+                    })
+                    .collect();
+                // Candidates are turns that have not been admitted yet, which
+                // is what `Waiting` means — a turn that was admitted without
+                // being attributed leaves the set the moment its prompt is in,
+                // so one unattributable turn does not poison the mapping for
+                // every turn after it.
+                let waiting: Vec<u64> = jobs
+                    .iter()
+                    .filter(|(_, lane)| lane.phase == TurnPhase::Waiting)
+                    .map(|(id, _)| *id)
+                    .collect();
+                if let ([index], [id]) = (lit.as_slice(), waiting.as_slice()) {
+                    if let Some(lane) = jobs.get_mut(id) {
+                        lane.lane = Some(*index);
+                        lane.phase = TurnPhase::Prefill;
+                        lane.last_progress = Instant::now();
+                    }
+                }
+            }
+
             // Collect first, publish once. A step on the solo speculative path
             // returns a whole 24-token CHUNK at once, and a text snapshot is
             // the entire reply so far: publishing per token detokenises the
@@ -1360,6 +1785,9 @@ mod llama_worker {
             // herd per token. The single-lane worker has always published once
             // per chunk; this is the lane worker catching up to it.
             let mut touched: Vec<u64> = Vec::new();
+            if !events.is_empty() {
+                box_progress = Instant::now();
+            }
             for event in events {
                 match event {
                     LaneEvent::Prefilled { job, ingested, resumed } => {
@@ -1380,6 +1808,11 @@ mod llama_worker {
                         }
                         if let Some(lane) = jobs.get_mut(&job) {
                             lane.warm = Some((ingested, resumed));
+                            // The prompt is in, so this turn is judged on the
+                            // tokens it produces from here on.
+                            lane.phase = TurnPhase::Decode;
+                            lane.ingested = ingested;
+                            lane.last_progress = Instant::now();
                             let _ = lane.events.send(WorkerEvent::Serving(
                                 crate::backend::ServingUpdate::Prefill {
                                     tokens: ingested,
@@ -1390,6 +1823,7 @@ mod llama_worker {
                     }
                     LaneEvent::Token { job, token, produced } => {
                         let Some(lane) = jobs.get_mut(&job) else { continue };
+                        lane.last_progress = Instant::now();
                         lane.token_ids.push(token);
                         let _ =
                             lane.events
@@ -1541,6 +1975,154 @@ mod llama_worker {
                     lane.streamed = snapshot.clone();
                     let _ = lane.events.send(WorkerEvent::Text(snapshot));
                 }
+            }
+
+            // What a turn ingesting its prompt looks like from outside.
+            //
+            // Read off the slot table, because that is the only thing that
+            // moves during a prefill: the scheduler ingests in chunks and
+            // reports ONCE, at the end, so a 34,074-token cold prompt used to
+            // leave its job sitting on `starting`, at 2%, for 75 seconds. That
+            // is indistinguishable from a hang, it was escalated as one, and
+            // it was not one. `fill - cursor` is this TURN's ingest — the
+            // cursor is where the slot stood when the turn took it, so a
+            // resumed lane counts its delta and a cold one counts everything.
+            let queued = exec.scheduler().queue_depth();
+            // Box-wide first, and attribution-independent: whether a chunk
+            // landed ANYWHERE is a different question from which turn it
+            // belonged to, and the watchdog below needs the first answer even
+            // when the second one is unknown.
+            let mut ingest_moved = false;
+            for index in 0..lanes {
+                let fill = match exec.scheduler().slot(index).map(|s| (s.phase(), s.fill())) {
+                    Some((SlotPhase::Prefilling { .. }, fill)) => fill,
+                    _ => 0,
+                };
+                if fill > ingested_at[index] {
+                    ingest_moved = true;
+                }
+                ingested_at[index] = fill;
+            }
+            for (_, lane) in jobs.iter_mut() {
+                let ingesting = lane.lane.and_then(|index| {
+                    exec.scheduler().slot(index).and_then(|slot| match slot.phase() {
+                        SlotPhase::Prefilling { cursor } => {
+                            Some((slot.fill().saturating_sub(cursor), cursor))
+                        }
+                        _ => None,
+                    })
+                });
+                let stage = match ingesting {
+                    Some((done, cursor)) => {
+                        if done > lane.ingested {
+                            lane.ingested = done;
+                        }
+                        // NOT "decode k/n", and it must never be mistaken for
+                        // it: `libs/asset/chat/src/qwen.rs::parse_decode_tokens`
+                        // reads a generated-token count off any stage that
+                        // starts with `decode`, and a client meter is wired to
+                        // it. This starts with `prefill`, so that parser sees
+                        // `None` and the meter stays a decode meter.
+                        format!(
+                            "prefill {done}/{} tok",
+                            lane.prompt_tokens.saturating_sub(cursor).max(done)
+                        )
+                    }
+                    // No lane of its own to read. Say what is true anyway: with
+                    // an empty scheduler queue every submitted turn is on a
+                    // lane, so this one is ingesting and only its numerator is
+                    // missing; with turns queued, name the queue. "Queued, not
+                    // stuck" is the first thing anyone asks about a slow turn.
+                    None if lane.phase == TurnPhase::Waiting => {
+                        if queued == 0 {
+                            "prefill".to_string()
+                        } else {
+                            format!("queued behind {queued} turn(s)")
+                        }
+                    }
+                    None => continue,
+                };
+                if stage != lane.stage {
+                    lane.stage = stage.clone();
+                    let _ = lane.events.send(WorkerEvent::Stage(stage));
+                }
+            }
+            // A prefill blocks every other lane BY DESIGN: `next_step` serves
+            // any lane that still needs its prompt before it plans a decode
+            // step at all, so a 34k-token ingest on lane 2 stops lanes 0 and 1
+            // dead for its whole duration. A turn starved by that is not
+            // stalled — it is waiting on work that is visibly happening — and
+            // reaping it would kill the conversation that was behaving. So a
+            // chunk landing anywhere feeds every turn's clock, and only a box
+            // where NOTHING ingests and nothing decodes runs the clock down.
+            if ingest_moved {
+                let now = Instant::now();
+                box_progress = now;
+                for (_, lane) in jobs.iter_mut() {
+                    lane.last_progress = now;
+                }
+            }
+
+            // The watchdog. A turn that is not moving is holding a lane the
+            // rest of the box needs, and the only thing worse than a stall is
+            // a stall nobody is told about.
+            let now = Instant::now();
+            let stalled: Vec<(u64, super::Stalled)> = jobs
+                .iter()
+                .filter_map(|(id, lane)| {
+                    // A turn with no lane of its own is judged on the box's
+                    // clock: what it is waiting for is the turns ahead of it
+                    // moving, and punishing it for their stall would kill the
+                    // one turn that was behaving.
+                    let clock = match lane.phase {
+                        TurnPhase::Waiting => box_progress,
+                        _ => lane.last_progress,
+                    };
+                    super::stall_verdict(lane.phase, clock, now, &stall)
+                        .map(|verdict| (*id, verdict))
+                })
+                .collect();
+            for (id, verdict) in stalled {
+                let Some(lane) = jobs.remove(&id) else { continue };
+                let on_lane = match lane.lane {
+                    Some(index) => format!("lane {index}"),
+                    None => "no lane (queued)".to_string(),
+                };
+                let progress = match lane.phase {
+                    TurnPhase::Decode => {
+                        format!("{} tokens generated", lane.token_ids.len())
+                    }
+                    _ => format!("{}/{} tok ingested", lane.ingested, lane.prompt_tokens),
+                };
+                // ONE line, and it names everything the next question needs:
+                // which turn, which lane, which phase, how long, and how far it
+                // had got. Written for somebody reading a box log at speed
+                // while a fleet view shows a frozen row.
+                eprintln!(
+                    "[llm-worker] turn {id}: STALLED in {} on {on_lane} - no progress for \
+                     {:.1}s ({progress}). Cancelling the turn and freeing the lane. Raise \
+                     MAKEPAD_ASSET_AI_LLM_STALL_SECS (now {}s) if this box legitimately \
+                     needs longer.",
+                    verdict.phase.name(),
+                    verdict.idle.as_secs_f64(),
+                    stall.budget().as_secs(),
+                );
+                // Cancel FIRST, then answer. `cancel` marks the lane done in
+                // whatever phase it is in — including a turn that never got
+                // past its first prefill chunk — and `step` reaps every done
+                // lane at the end of every step, so the slot is back before
+                // the next turn is admitted.
+                exec.scheduler().cancel(id);
+                // A failure, not a cancellation: nobody asked for this and the
+                // client has to be able to tell the two apart. Its `Finished`
+                // event arrives a step later for a job that is no longer in the
+                // map, and is ignored there.
+                let _ = lane.events.send(WorkerEvent::Done(Err(format!(
+                    "the box stopped making progress on this turn: nothing moved for {:.0}s \
+                     during {} ({progress}). The lane has been freed - retry the turn.",
+                    verdict.idle.as_secs_f64(),
+                    verdict.phase.name(),
+                ))));
             }
         }
     }
@@ -1823,11 +2405,18 @@ mod llama_worker {
         // progress event, partial-text snapshot — every ~4 speculative
         // rounds.
         let max = job.max_tokens.max(1) as usize;
+        // The SAME penalties the lane worker applies. A box whose answers
+        // depend on whether it happened to be configured for lanes is a
+        // difference nobody can reproduce from the outside.
+        let (presence_penalty, frequency_penalty, penalty_last_n) = super::sampling_penalties();
         let sampling = LlamaSamplingParams {
             temperature: job.temperature.max(0.0),
             top_p: 0.95,
             top_k: 0,
             seed: job.seed,
+            presence_penalty,
+            frequency_penalty,
+            penalty_last_n,
         };
         const CHUNK: usize = 24;
         // ONE RNG stream for the whole reply. `continue_sampled` seeds from

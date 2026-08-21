@@ -136,3 +136,12 @@ path = "src/main.rs"
 [[bin]]
 name = "chat-bench"
 path = "src/bin/chat_bench.rs"
+
+# The standing "where does a long conversation go insane, and which subsystem
+# did it?" gate. Two arms per rung — one cold request at depth against the same
+# content grown turn by turn — so a failure names the incremental path or the
+# position/arena math instead of just saying "long contexts are bad". Std-only
+# for the same reason chat-bench is.
+[[bin]]
+name = "context-ladder"
+path = "src/bin/context_ladder.rs"
