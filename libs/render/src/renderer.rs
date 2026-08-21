@@ -3962,7 +3962,16 @@ impl Renderer {
         csm_view: Option<&crate::shadow_csm::CsmView>,
         eye: Vec3f,
     ) {
-        if !self.gpu_baker.has_state() {
+        // A realized atlas is not a precondition for the cascade tier. In
+        // Realtime the cascades ARE the dynamic-shadow contract, and worlds
+        // that own no static lightmap at all — a flat starter terrain with
+        // no props, so `kick_lightmap_bake` finds no AO mesh and no receiver
+        // box and never schedules a job — must still get them. Gating this
+        // on `has_state` is what made F8 read as "realtime deletes every
+        // dynamic shadow" in exactly those worlds.
+        if !self.gpu_baker.has_state()
+            && !crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode()).csm
+        {
             return;
         }
         // DEBUG (macOS): MAKEPAD_GPU_LM_DUMP=<prefix> writes the settled
