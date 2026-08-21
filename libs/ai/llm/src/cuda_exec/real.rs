@@ -48,7 +48,7 @@ use crate::{
     GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
 };
 
-use super::CudaDeviceFeatures;
+use super::{CudaDeviceFeatures, ScratchEpoch};
 use crate::error::{LlamaError, Result};
 use crate::runtime::{
     build_hybrid_decode_graph_with_attention_key_count, build_hybrid_decode_writes,
@@ -151,6 +151,33 @@ impl HostSplit {
 
 thread_local! {
     static HOST_SPLIT: RefCell<HostSplit> = RefCell::new(HostSplit::default());
+    /// Set while a CUDA graph capture is open on this thread's stream. A
+    /// device allocation there is illegal (and would move a pointer the
+    /// capture is recording), so `Scratch::ensure` refuses to grow while it is
+    /// set. The device state is `Rc` and the stream is per-thread, so a
+    /// thread-local is exactly the right scope.
+    static GRAPH_CAPTURE_OPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+fn graph_capture_open() -> bool {
+    GRAPH_CAPTURE_OPEN.with(|open| open.get())
+}
+
+/// Marks a capture as open for its lifetime, and closes it on drop so an
+/// early return through the `?` in the capture body cannot leave it stuck on.
+struct GraphCaptureGuard;
+
+impl GraphCaptureGuard {
+    fn open() -> Self {
+        GRAPH_CAPTURE_OPEN.with(|open| open.set(true));
+        Self
+    }
+}
+
+impl Drop for GraphCaptureGuard {
+    fn drop(&mut self) {
+        GRAPH_CAPTURE_OPEN.with(|open| open.set(false));
+    }
 }
 
 pub fn host_split_reset() {
@@ -342,11 +369,27 @@ struct DeviceState {
 struct Scratch {
     ptr: *mut c_void,
     size: usize,
+    /// Bumped on every realloc — see [`ScratchEpoch`]. This buffer is shared
+    /// by every `Compiled`, and each `Compiled` may hold a CUDA graph with
+    /// this pointer baked in, so a growth here invalidates all of them.
+    epoch: ScratchEpoch,
 }
 
 impl Scratch {
     fn ensure(&mut self, size: usize, what: &str) -> Result<*mut c_void> {
         if self.size < size {
+            // cudaMalloc on a capturing stream is illegal, and anything the
+            // capture already recorded would point at the buffer we are about
+            // to free. The pre-capture reserves exist precisely so this cannot
+            // happen; if it ever does, say so instead of corrupting a graph.
+            if graph_capture_open() {
+                return Err(LlamaError::format(format!(
+                    "{what}: device scratch must grow {} -> {size} bytes DURING CUDA graph \
+                     capture. Raise the pre-capture reserve (GRAPH_ACT_SCRATCH / \
+                     GRAPH_WEIGHT_SCRATCH) so the buffer is already large enough.",
+                    self.size
+                )));
+            }
             unsafe {
                 if !self.ptr.is_null() {
                     cudaFree(self.ptr);
@@ -358,6 +401,7 @@ impl Scratch {
                 self.ptr = ptr;
                 self.size = size;
             }
+            self.epoch.bump();
         }
         Ok(self.ptr)
     }
@@ -388,6 +432,18 @@ impl HostScratch {
             }
         }
         Ok(self.ptr as *mut u8)
+    }
+}
+
+impl DeviceState {
+    /// The combined pointer-stability epoch of both device scratch buffers.
+    /// Changes whenever either one is re-allocated, which is exactly when
+    /// every previously captured CUDA graph goes stale.
+    fn scratch_epoch(&self) -> (ScratchEpoch, ScratchEpoch) {
+        (
+            self.scratch_weights.borrow().epoch,
+            self.scratch_acts.borrow().epoch,
+        )
     }
 }
 
@@ -583,10 +639,12 @@ impl Runtime {
                     scratch_weights: RefCell::new(Scratch {
                         ptr: std::ptr::null_mut(),
                         size: 0,
+                        epoch: ScratchEpoch::default(),
                     }),
                     scratch_acts: RefCell::new(Scratch {
                         ptr: std::ptr::null_mut(),
                         size: 0,
+                        epoch: ScratchEpoch::default(),
                     }),
                     scratch_host: RefCell::new(HostScratch {
                         ptr: std::ptr::null_mut(),
@@ -814,6 +872,7 @@ impl Runtime {
             decode,
             plan,
             graph_exec: RefCell::new(None),
+            graph_scratch_epoch: Cell::new(Default::default()),
             graph_disabled: Cell::new(
                 std::env::var_os("MKLLM_DISABLE_CUDA_GRAPH")
                     .map(|v| v == "1")
@@ -2233,6 +2292,11 @@ pub(super) struct Compiled {
     decode: HybridDecodeGraph,
     plan: GraphPlan,
     graph_exec: RefCell<Option<CudaGraphExec>>,
+    /// The scratch epoch `graph_exec` was captured at. The scratch buffers are
+    /// shared with every other `Compiled` on the same `DeviceState` and their
+    /// pointers are baked into the capture, so a capture from before a scratch
+    /// realloc must never be replayed. Meaningless while `graph_exec` is None.
+    graph_scratch_epoch: Cell<(ScratchEpoch, ScratchEpoch)>,
     graph_disabled: Cell<bool>,
     // ggml-cuda.cu:4125-4133: first matching call is eager so cuBLAS can
     // allocate workspace; the next identical call is captured.
@@ -2357,6 +2421,34 @@ impl Compiled {
             .borrow_mut()
             .ensure(GRAPH_WEIGHT_SCRATCH, "graph weight scratch")?;
         let stream = self.state.stream;
+
+        // The scratch buffers are shared by every compiled shape on this
+        // device state, but a captured CUDA graph is per-shape and has their
+        // pointers baked in. If any other shape grew a scratch buffer since
+        // this graph was captured, the pointers in it were freed — replaying
+        // would read (and write) released device memory, silently. Throw the
+        // capture away instead; the branch below re-captures it against the
+        // live pointers on this very call.
+        let scratch_epoch = self.state.scratch_epoch();
+        let captured_at = self.graph_scratch_epoch.get();
+        let stale_capture = {
+            let guard = self.graph_exec.borrow();
+            guard.is_some()
+                && (scratch_epoch.0.is_stale(captured_at.0)
+                    || scratch_epoch.1.is_stale(captured_at.1))
+        };
+        if stale_capture {
+            // Nothing may still be reading the old capture when it is
+            // destroyed, and the re-capture below dispatches on this stream.
+            check(
+                unsafe { cudaStreamSynchronize(stream) },
+                "graph recapture drain",
+            )?;
+            *self.graph_exec.borrow_mut() = None;
+            eprintln!(
+                "cuda.graph: device scratch moved since capture; re-capturing this shape"
+            );
+        }
         let t_launch = split.then(Instant::now);
         let replayed = {
             let guard = self.graph_exec.borrow();
@@ -2396,12 +2488,17 @@ impl Compiled {
                 self.state.last_q81_m.set(0);
                 begin_stream_capture(stream, CUDA_STREAM_CAPTURE_MODE_RELAXED)
                     .map_err(|err| LlamaError::format(format!("cuda graph begin capture: {err}")))?;
+                // Refuses a scratch realloc for as long as the capture is open
+                // (see `Scratch::ensure`); cleared on every exit path.
+                let capture_guard = GraphCaptureGuard::open();
                 let dispatch = view.dispatch_all(None);
                 if let Err(err) = dispatch {
                     let _ = end_stream_capture(stream);
                     return Err(err);
                 }
-                match end_stream_capture(stream).and_then(makepad_ai_cuda::CudaGraph::instantiate) {
+                let capture = end_stream_capture(stream);
+                drop(capture_guard);
+                match capture.and_then(makepad_ai_cuda::CudaGraph::instantiate) {
                     Ok(exec) => {
                         exec.launch(stream).map_err(|err| {
                             LlamaError::format(format!("cuda graph first launch: {err}"))
@@ -2459,6 +2556,9 @@ impl Compiled {
                             extras,
                             glu_prev
                         );
+                        // Record which scratch pointers this capture baked in,
+                        // so a later realloc by another shape invalidates it.
+                        self.graph_scratch_epoch.set(self.state.scratch_epoch());
                         *self.graph_exec.borrow_mut() = Some(exec);
                     }
                     Err(err) => {
