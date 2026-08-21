@@ -557,8 +557,8 @@ pub struct StepPlan {
     /// Slots contributing a token, in batch order. Logit row `i` belongs to
     /// `slots[i]`.
     pub slots: Vec<SlotStep>,
-    /// Graph width: `slots.len()` padded up to a [`BATCH_WIDTHS`] entry. Any
-    /// column past `slots.len()` is dead and its output is discarded.
+    /// Graph width — the exact number of contributing slots. Every column is
+    /// live; there are no dead columns to reason about.
     pub width: usize,
     /// Speculative draft depth this step can afford, from [`draft_depth_for`].
     pub draft_depth: usize,
@@ -832,7 +832,13 @@ impl SlotTable {
         if slots.is_empty() {
             return None;
         }
-        let width = pad_batch_width(slots.len());
+        // EXACT active width, not padded. Padding to {1,2,4} would save one
+        // compiled-graph family at N=4, but a dead column has to point its KV
+        // write and state row SOMEWHERE, and every cheap answer either
+        // double-writes a live slot's cache row or needs a scratch row the
+        // graph would still scan. One extra graph family is the cheaper trade;
+        // `pad_batch_width` stays available if shape pressure ever appears.
+        let width = slots.len();
         // The span must cover the rows this step WRITES, not just the rows
         // already occupied — the highest writer may be a slot that is one token
         // ahead of everyone else.
@@ -1301,7 +1307,7 @@ mod tests {
         for index in 0..3 {
             table.begin_decoding(index).expect("decode");
         }
-        assert_eq!(table.plan_step().expect("plan").width, 4);
+        assert_eq!(table.plan_step().expect("plan").width, 3);
 
         table.retire(1).expect("retire");
         table.retire(2).expect("retire");
@@ -1355,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn three_active_slots_pad_to_four_and_drop_a_draft_rung() {
+    fn three_active_slots_run_three_wide() {
         let mut table = table();
         for _ in 0..3 {
             table.admit().expect("admit");
@@ -1366,9 +1372,9 @@ mod tests {
         }
         let plan = table.plan_step().expect("plan");
         assert_eq!(plan.slots.len(), 3);
-        assert_eq!(plan.width, 4, "3 runs as 4 with one dead column");
+        assert_eq!(plan.width, 3, "every column is live");
         assert_eq!(plan.draft_depth, 1);
-        assert_eq!(plan.columns(), 8);
+        assert_eq!(plan.columns(), 6);
         assert!(plan.columns() <= COLUMN_BUDGET);
     }
 
