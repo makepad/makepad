@@ -307,7 +307,8 @@ script_mod! {
                 self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_c),
                 self.csm_p.x
             )
-            let lamps = lm.xyz * (2.0 * has_lm)
+            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.5 * has_lm)
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
             let c = self.lit_color.xyz + self.v_direct * sun_vis
                 + self.color.xyz * (lamps + dl)
@@ -1004,8 +1005,9 @@ script_mod! {
         // the thing the atlas exists to escape.
         ao_map: texture_2d(float)
         // The scene's baked-light atlas (lightmap.rs): A = sun-visibility
-        // SDF, RGB = lamp light x0.5. Every static draw binds it (a 1x1
-        // "fully lit" stand-in before the first bake delivers).
+        // SDF, RGB = lamp light / lightmap::LM_LAMP_CEIL. Every static draw
+        // binds it (a 1x1 "fully lit" stand-in before the first bake
+        // delivers).
         light_map: texture_2d(float)
         // The ground field's shadow-top plane (R8, same uv as the ground
         // region): the ABSOLUTE height each shadowed texel's sun ray was
@@ -1352,7 +1354,8 @@ script_mod! {
                 self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
-            let lamps = lm.xyz * (2.0 * has_lm)
+            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.5 * has_lm)
             let analytic = self.v_ambient * ao
                 + self.v_direct * (ao_direct * sun_all)
                 + (lamps + self.v_dl) * ao_direct
@@ -1474,7 +1477,8 @@ script_mod! {
                 self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
-            let lamps = lm.xyz * (2.0 * has_lm)
+            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.5 * has_lm)
 
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
             // a factors-only material so the sample folds out to 1.
@@ -2430,7 +2434,8 @@ script_mod! {
                 self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_t),
                 self.csm_p.x
             )
-            let lamps = lm.xyz * (2.0 * has_lm)
+            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.5 * has_lm)
             if self.lm_debug > 0.5 {
                 return vec4(
                     mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_vis) + lamps,
@@ -3271,7 +3276,8 @@ script_mod! {
                 let cone = clamp((dot(dir * -1.0, self.lamp_c.xyz) + 0.35) / 1.35, 0.0, 1.0)
                 s = s * (cone * cone * self.lamp_b.w + (1.0 - self.lamp_b.w))
             }
-            return vec4(self.lamp_b.xyz * (s * 0.5), 0.0)
+            // 2.0 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
+            return vec4(self.lamp_b.xyz * (s * 2.0), 0.0)
         }
 
         vertex: fn() {
@@ -3404,7 +3410,8 @@ script_mod! {
                 let cone = clamp((dot(dir * -1.0, self.lamp_c.xyz) + 0.35) / 1.35, 0.0, 1.0)
                 s = s * (cone * cone * self.lamp_b.w + (1.0 - self.lamp_b.w))
             }
-            return vec4(self.lamp_b.xyz * (s * 0.5), 0.0)
+            // 2.0 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
+            return vec4(self.lamp_b.xyz * (s * 2.0), 0.0)
         }
 
         vertex: fn() {

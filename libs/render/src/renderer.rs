@@ -3454,10 +3454,32 @@ impl Renderer {
     }
 
     /// Street lights from the placed props: any static model whose id reads
-    /// as a lamp gets a warm point light at its head — the bulb sits near
-    /// the top of the model, so the anchor is measured from its bounds
-    /// rather than assumed.
+    /// as a lamp gets a warm downlight at its head — the bulb sits near the
+    /// top of the model, so the anchor is measured from its bounds rather
+    /// than assumed.
+    ///
+    /// # Photometry comes from the FIXTURE, not from the mesh scale
+    ///
+    /// Only the bulb's POSITION follows the placement transform: the mesh was
+    /// scaled, so the bulb really did move. Strength and reach are solved
+    /// from the mount height instead
+    /// ([`lamp_photometry`](crate::lightmap::lamp_photometry)) so the pool on
+    /// the street is the same size and the same brightness whether the kit
+    /// was placed at ×1, ×2 or the road kits' canonical ×8.
+    ///
+    /// The flat `color: 2.0, radius: 8.0` this replaced looked
+    /// scale-independent and was not: the gather's falloff is
+    /// `(1 - d/radius)²`, so pinning the reach while the transform lifted the
+    /// bulb made delivered brightness a function of mesh scale. A 1.56 m
+    /// lantern at ×2 put 0.87 on the ground — MORE than the noon sun's 0.72
+    /// direct term — which is the white plaza pool this rewrite fixes; the
+    /// same lantern at ×8 lit nothing at all, its bulb hanging outside its
+    /// own 8 m reach.
     fn harvest_lamps(&self) -> Vec<crate::lightmap::LmLight> {
+        use crate::lightmap::lamp_photometry;
+        /// Warm street-lamp tint, normalised so its brightest component is 1
+        /// — `lamp_photometry` supplies the strength it is scaled by.
+        const TINT: Vec3f = Vec3f { x: 1.0, y: 0.775, z: 0.475 };
         let mut out = Vec::new();
         for inst in &self.placed_models {
             if inst.dynamic {
@@ -3472,30 +3494,60 @@ impl Renderer {
                 continue;
             };
             let m = &self.static_models[at].1;
-            let head = vec3f(
-                (m.min.x + m.max.x) * 0.5,
-                m.max.y - (m.max.y - m.min.y) * 0.12,
-                (m.min.z + m.max.z) * 0.5,
-            );
-            let p = inst
-                .transform
-                .transform_vec4(Vec4f { x: head.x, y: head.y, z: head.z, w: 1.0 })
-                .to_vec3f();
+            let mid_x = (m.min.x + m.max.x) * 0.5;
+            let mid_z = (m.min.z + m.max.z) * 0.5;
+            let head = m.max.y - (m.max.y - m.min.y) * 0.12;
+            let at_world = |y: f32| {
+                inst.transform
+                    .transform_vec4(Vec4f { x: mid_x, y, z: mid_z, w: 1.0 })
+                    .to_vec3f()
+            };
+            let p = at_world(head);
+            // The pole's own foot IS the ground it stands on, whatever the
+            // terrain does — measured under the same transform, so the mount
+            // height is exact for any scale, yaw or tilt.
+            let mount = p.y - at_world(m.min.y).y;
+            let (radius, strength) = lamp_photometry(mount);
             out.push(crate::lightmap::LmLight {
                 pos: p,
-                // A proper bright warm spot. Components CAP at 2.0: the
-                // atlas encodes ×127.5, so anything above 2.0 clips in the
-                // bake — and the analytic per-frame term uses the same
-                // values so statics and vertex-lit dynamics match.
-                color: vec3f(2.0, 1.55, 0.95),
-                radius: 8.0,
+                color: TINT * strength,
+                radius,
                 // A street light is a downlight: full spot kills the glow
                 // it was painting on the roof BESIDE its own head.
                 dir: vec3f(0.0, -1.0, 0.0),
                 spot: 1.0,
             });
         }
+        Self::rail_lamp_pools(&mut out);
         out
+    }
+
+    /// The sanity rail on static lights, applied wherever a lamp list is
+    /// built so the baked atlas and the analytic per-frame term never
+    /// disagree: no single light may clip the light atlas over more than
+    /// [`LM_LAMP_SAT_TEXELS`](crate::lightmap::LM_LAMP_SAT_TEXELS) ground
+    /// texels. `harvest_lamps` sizes its fixtures so this never fires;
+    /// hand-set lights (`set_static_lights`) go through no such solve, and
+    /// one of those must still not be able to paint a plaza white.
+    ///
+    /// A light's implied mount is what its reach leaves over the pool it is
+    /// meant to cover — exact for anything `lamp_photometry` sized.
+    fn rail_lamp_pools(lights: &mut [crate::lightmap::LmLight]) {
+        use crate::lightmap::{cap_lamp_pool, LM_LAMP_POOL_RADIUS, LM_LAMP_SAT_DENSITY};
+        let mut capped = 0usize;
+        for l in lights.iter_mut() {
+            let mount = (l.radius - LM_LAMP_POOL_RADIUS).max(0.25);
+            if cap_lamp_pool(l, mount, LM_LAMP_SAT_DENSITY) < 1.0 {
+                capped += 1;
+            }
+        }
+        if capped > 0 {
+            log!(
+                "lamp bake: {capped} of {} static lights dimmed — their pool clipped the light atlas over more than {} texels",
+                lights.len(),
+                crate::lightmap::LM_LAMP_SAT_TEXELS as u32
+            );
+        }
     }
 
     /// Transient lights for THIS frame, on top of the per-frame list the
@@ -3515,7 +3567,11 @@ impl Renderer {
             self.lamp_cache = if self.lm_lights.is_empty() {
                 self.harvest_lamps()
             } else {
-                self.lm_lights.clone()
+                let mut l = self.lm_lights.clone();
+                // Same rail the bake applies, so a hand-set light lights
+                // dynamics with exactly the strength it baked into statics.
+                Self::rail_lamp_pools(&mut l);
+                l
             };
             self.lamp_cache_rev = Some(self.models_rev);
             // The static-light selection grid lives and dies with the lamp
@@ -3681,11 +3737,14 @@ impl Renderer {
             self.lm_top = None;
             return;
         }
-        let lights = if self.lm_lights.is_empty() {
+        let mut lights = if self.lm_lights.is_empty() {
             self.harvest_lamps()
         } else {
             self.lm_lights.clone()
         };
+        // Idempotent for a harvested list (already railed) — it is here for
+        // the hand-set `lm_lights` path, which nothing else guards.
+        Self::rail_lamp_pools(&mut lights);
         let scene = crate::lightmap::LmScene {
             meshes,
             planars,
@@ -7537,9 +7596,9 @@ mod light_tests {
         LmLight::omni(vec3f(x, y, z), vec3f(intensity, intensity, intensity), radius)
     }
 
-    /// The village's own numbers: its fixed sun and one harvested street
-    /// lamp (renderer.rs harvest_lamps — color 2.0 warm, radius 8, spot,
-    /// bulb at ~2.82 on a 3.2-unit pole).
+    /// The village's own numbers: its fixed midday sun and one harvested
+    /// street lamp — bulb at ~2.82 on a 3.2-unit pole, photometry solved by
+    /// `lightmap::lamp_photometry` exactly as `harvest_lamps` does it.
     fn village_sun() -> crate::sun::SunLight {
         crate::sun::SunLight {
             dir: vec3f(0.55, 0.56, 0.62).normalize(),
@@ -7547,11 +7606,21 @@ mod light_tests {
         }
     }
 
+    /// The same village at the hour a street lamp is FOR: sun on its way
+    /// down, a few degrees up.
+    fn dusk_sun() -> crate::sun::SunLight {
+        crate::sun::SunLight {
+            dir: vec3f(0.55, 0.1, 0.62).normalize(),
+            ..Default::default()
+        }
+    }
+
     fn street_lamp() -> LmLight {
+        let (radius, strength) = crate::lightmap::lamp_photometry(2.82);
         LmLight {
             pos: vec3f(0.0, 2.82, 0.0),
-            color: vec3f(2.0, 1.55, 0.95),
-            radius: 8.0,
+            color: vec3f(strength, strength * 0.775, strength * 0.475),
+            radius,
             dir: vec3f(0.0, -1.0, 0.0),
             spot: 1.0,
         }
@@ -7587,23 +7656,28 @@ mod light_tests {
         assert_eq!(y, 0.3);
     }
 
-    /// Standing 1.5 units from a street lamp in the DAY village, the lamp
-    /// must visibly own the shadow: the LEAN points along the anti-lamp
-    /// azimuth by a readable amount (sub-0.2-unit leans read as nothing —
-    /// the report this pins), the shadow darkens — and the ROOT stays at
-    /// the boots, because a lean redirects the silhouette's body, never
-    /// its contact. This is the live scene's exact arithmetic, so if a
-    /// tuning change makes the lean invisible again, this fails before a
-    /// user says it.
+    /// Standing 1.5 units from a lit street lamp at DUSK, the lamp must
+    /// visibly own the shadow: the LEAN points along the anti-lamp azimuth
+    /// by a readable amount (sub-0.2-unit leans read as nothing — the report
+    /// this pins), the shadow darkens — and the ROOT stays at the boots,
+    /// because a lean redirects the silhouette's body, never its contact.
+    /// This is the live scene's exact arithmetic, so if a tuning change makes
+    /// the lean invisible again, this fails before a user says it.
+    ///
+    /// Dusk, not noon: ownership is decided by which source is actually
+    /// lighting the character, and once a lamp emits what a lamp emits
+    /// (`lightmap::LM_LAMP_GROUND_PEAK`, well under the sun's 0.72 direct
+    /// term) it takes the shadow as the sun goes down — never at midday.
+    /// `the_midday_sun_keeps_the_shadow_from_a_lamp` pins the other half.
     #[test]
-    fn a_day_street_lamp_visibly_leans_a_nearby_shadow() {
+    fn a_dusk_street_lamp_visibly_leans_a_nearby_shadow() {
         let lights = [street_lamp()];
         let feet = vec3f(1.5, 0.0, 0.0);
-        let a = character_shadow_anchor(feet, &flat(), &village_sun(), &lights)
+        let a = character_shadow_anchor(feet, &flat(), &dusk_sun(), &lights)
             .expect("grounded character must have a shadow");
         assert!(
             a.lamp_w > 0.5,
-            "beside the pole in daylight the lamp should dominate, lamp_w = {}",
+            "beside the pole at dusk the lamp should dominate, lamp_w = {}",
             a.lamp_w
         );
         assert!(
@@ -7622,7 +7696,7 @@ mod light_tests {
             a.root
         );
         // Darkened over the plain sun shadow at the same spot.
-        let plain = character_shadow_anchor(feet, &flat(), &village_sun(), &[])
+        let plain = character_shadow_anchor(feet, &flat(), &dusk_sun(), &[])
             .expect("baseline");
         assert!(a.alpha > plain.alpha, "a dominant lamp must darken the fan");
         assert_eq!(plain.lamp_w, 0.0);
@@ -7638,19 +7712,26 @@ mod light_tests {
         assert!((plain.size_mul - 1.0).abs() < 1.0e-6);
     }
 
-    /// Directly under the bulb: no direction to lean, so lean AND root
-    /// stay pinned at the feet — but the lamp owns the shadow outright, so
-    /// it must be strongly compressed and darkened, never the sun's long
-    /// dusk silhouette parked under a lamp (the report this pins).
+    /// Directly under the bulb after sundown: no direction to lean, so lean
+    /// AND root stay pinned at the feet — but the lamp owns the shadow
+    /// outright, so it must be strongly compressed and darkened, never the
+    /// sun's long dusk silhouette parked under a lamp (the report this pins).
     #[test]
     fn under_the_bulb_the_shadow_pins_small_at_the_feet() {
         let lights = [street_lamp()];
         let feet = vec3f(0.1, 0.0, 0.0);
-        for sun in [village_sun(), {
-            let mut s = village_sun();
-            s.dir = vec3f(0.55, 0.02, 0.62).normalize();
-            s
-        }] {
+        for sun in [
+            {
+                let mut s = village_sun();
+                s.dir = vec3f(0.55, 0.05, 0.62).normalize();
+                s
+            },
+            {
+                let mut s = village_sun();
+                s.dir = vec3f(0.55, 0.02, 0.62).normalize();
+                s
+            },
+        ] {
             let a = character_shadow_anchor(feet, &flat(), &sun, &lights)
                 .expect("anchor");
             assert!(a.lamp_w > 0.85, "under the bulb lamp_w = {}", a.lamp_w);
@@ -7669,6 +7750,37 @@ mod light_tests {
                 a.size_mul < 0.55,
                 "the shadow must compress under the bulb, size_mul = {}",
                 a.size_mul
+            );
+        }
+    }
+
+    /// The other half of the ownership contract, and the one the overbright
+    /// bake used to get wrong: at MIDDAY the sun keeps the shadow. A street
+    /// lamp emits a fraction of daylight (`lightmap::LM_LAMP_GROUND_PEAK`
+    /// against the sun's 0.72 direct term), so a character beside a pole at
+    /// noon casts ONE shadow, pointing away from the sun.
+    ///
+    /// This failed before the photometry rewrite: the harvested lamp was
+    /// pinned at the atlas's 2.0 encode ceiling, which put 0.87 on the ground
+    /// — brighter than noon — and let a lamp swing shadows in broad daylight.
+    #[test]
+    fn the_midday_sun_keeps_the_shadow_from_a_lamp() {
+        let lights = [street_lamp()];
+        let sun = village_sun();
+        for feet in [vec3f(1.5, 0.0, 0.0), vec3f(0.1, 0.0, 0.0)] {
+            let a = character_shadow_anchor(feet, &flat(), &sun, &lights).expect("anchor");
+            assert!(
+                a.lamp_w < 0.35,
+                "a lamp must not own a noon shadow, lamp_w = {} at {feet:?}",
+                a.lamp_w
+            );
+            // Still the sun's own silhouette: pointing anti-sun, full size.
+            let plain = character_shadow_anchor(feet, &flat(), &sun, &[]).expect("baseline");
+            assert!(
+                (a.size_mul - plain.size_mul).abs() < 0.35,
+                "the noon silhouette must keep its size, {} vs {}",
+                a.size_mul,
+                plain.size_mul
             );
         }
     }

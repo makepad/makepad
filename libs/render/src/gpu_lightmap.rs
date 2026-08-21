@@ -1,8 +1,8 @@
 //! GPU-resident world lightmap bake: the CPU ray bake's per-texel work as
 //! fragment-shader passes, ZERO CPU readback. The output is bit-compatible
 //! with lightmap.rs's atlas conventions (A = sun SDF with 128 the edge,
-//! RGB = lamp light x0.5, plus the R8-style shadow-top plane), so the
-//! material shaders consume it unchanged.
+//! RGB = lamp light / lightmap::LM_LAMP_CEIL, plus the R8-style shadow-top
+//! plane), so the material shaders consume it unchanged.
 //!
 //! # Pass pipeline (all raster, per dirty region)
 //!
@@ -74,7 +74,6 @@ use makepad_draw::*;
 /// Mirrors lightmap.rs's private constants — the GPU passes must agree with
 /// the CPU conventions the material shaders were tuned against.
 const RAY_OFFSET: f32 = 0.02;
-const LIGHT_CLEARANCE: f32 = 0.25;
 
 /// How the baker schedules work. Pure runtime policy — no platform
 /// conditionals; switchable live via [`Renderer::set_gpu_lightmap_mode`].
@@ -1647,6 +1646,9 @@ impl GpuLightmapBaker {
         // gather over every batch region in radius.
         for li in &lamps {
             let light = &state.lights[*li];
+            // A fixture must not shadow its own bulb, at any placed scale
+            // (lightmap::lamp_clearance).
+            let clearance = crate::lightmap::lamp_clearance(light);
             {
                 let idx = seq.open(
                     cx,
@@ -1662,7 +1664,7 @@ impl GpuLightmapBaker {
                     Some(&state.tex.lamp_depth_z)
                 );
                 let lamp_range = Vec4f {
-                    x: LIGHT_CLEARANCE,
+                    x: clearance,
                     y: light.radius,
                     z: 0.0,
                     w: 0.0,
@@ -1723,7 +1725,7 @@ impl GpuLightmapBaker {
                     w: 1.0, // lamp mode
                 };
                 let lamp_d = Vec4f {
-                    x: LIGHT_CLEARANCE,
+                    x: clearance,
                     y: light.radius,
                     z: 0.06,
                     w: RAY_OFFSET,
