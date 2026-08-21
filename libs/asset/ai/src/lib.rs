@@ -43,8 +43,6 @@ pub mod h3_backend;
 pub mod http_client;
 pub mod jobs;
 pub mod lane_advert;
-#[cfg(feature = "llm")]
-pub mod llm_lanes;
 pub mod indextts_backend;
 pub mod kokoro_backend;
 pub mod llm_backend;

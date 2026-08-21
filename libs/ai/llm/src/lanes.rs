@@ -1,4 +1,4 @@
-//! Scheduling policy for a multi-lane LLM worker.
+//! Scheduling policy for a multi-lane worker.
 //!
 //! One session serves N conversations. This module owns the *decisions* — who
 //! is admitted, what the next step should be, when a lane retires — and knows
@@ -11,11 +11,16 @@
 //! boundaries, retirement, the advert counters — is unit-testable everywhere,
 //! and the GPU window is spent on numerics rather than on bookkeeping bugs.
 //!
+//! It lives beside [`crate::slots`] rather than in a service crate because it
+//! is slot scheduling, not service logic — and because keeping it here lets the
+//! `llama-slot-probe` gates drive the ACTUAL shipping scheduler on real
+//! hardware instead of replicating its call sequence.
+//!
 //! Design of record: `local/agent_state/qwen-parallel/batched-session-design.md`.
 
 use std::collections::VecDeque;
 
-use makepad_ai_llm::{SlotTable, StepPlan};
+use crate::slots::{SlotTable, StepPlan};
 
 /// Tokens a lane generates before the scheduler re-examines the world.
 ///
@@ -293,10 +298,32 @@ impl LaneScheduler {
         events
     }
 
-    /// Publish the current counters to `/health`.
-    pub fn publish_advert(&self) {
-        crate::lane_advert::set_live(self.slots_claimed() as u64, self.lanes_active() as u64);
+    /// Everything an observer needs to describe this worker's capacity.
+    pub fn counts(&self) -> LaneCounts {
+        LaneCounts {
+            slots_total: self.slots_total(),
+            slots_claimed: self.slots_claimed(),
+            slots_free: self.slots_free(),
+            lanes_active: self.lanes_active(),
+            queue_depth: self.queue_depth(),
+        }
     }
+}
+
+/// A snapshot of lane occupancy, for whatever wants to advertise it.
+///
+/// The scheduler reports; it does not know what `/health` is. That keeps this
+/// module free of any service dependency, which is what lets it live next to
+/// the slot table and be driven by the on-hardware gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaneCounts {
+    pub slots_total: usize,
+    /// Lanes holding a conversation's KV, generating or not.
+    pub slots_claimed: usize,
+    pub slots_free: usize,
+    /// Lanes generating right now — the contention signal.
+    pub lanes_active: usize,
+    pub queue_depth: usize,
 }
 
 /// Drives a real batched session from the scheduler's decisions.
@@ -306,21 +333,28 @@ impl LaneScheduler {
 /// CUDA-only, so this half cannot be exercised on a dev Mac — keeping it free
 /// of policy is what stops that gap from mattering.
 pub struct LaneExecutor {
-    session: makepad_ai_llm::LlamaSession,
+    session: crate::LlamaSession,
     scheduler: LaneScheduler,
     /// One sampler stream per lane. Per-lane rather than per-session because
     /// interleaved lanes would otherwise draw from one stream in an order that
     /// depends on who else was talking — the same bug the per-chunk re-seed
     /// had, one level up.
-    samplers: Vec<Option<makepad_ai_llm::LlamaSamplerState>>,
-    params: makepad_ai_llm::LlamaSamplingParams,
+    samplers: Vec<Option<crate::LlamaSamplerState>>,
+    params: crate::LlamaSamplingParams,
+    /// Invoked with fresh counts after every step.
+    ///
+    /// A callback rather than "the caller remembers to ask": a forgotten
+    /// publish leaves `/health` advertising stale occupancy, which is a silent
+    /// failure — the box keeps claiming free lanes it no longer has, and a
+    /// scheduler believes it.
+    on_counts: Option<Box<dyn FnMut(LaneCounts) + Send>>,
 }
 
 impl LaneExecutor {
     pub fn new(
-        session: makepad_ai_llm::LlamaSession,
+        session: crate::LlamaSession,
         scheduler: LaneScheduler,
-        params: makepad_ai_llm::LlamaSamplingParams,
+        params: crate::LlamaSamplingParams,
     ) -> Self {
         let samplers = vec![None; scheduler.slots_total()];
         Self {
@@ -328,7 +362,14 @@ impl LaneExecutor {
             scheduler,
             samplers,
             params,
+            on_counts: None,
         }
+    }
+
+    /// Report lane occupancy after every step. The service wires `/health` here.
+    pub fn on_counts(mut self, sink: impl FnMut(LaneCounts) + Send + 'static) -> Self {
+        self.on_counts = Some(Box::new(sink));
+        self
     }
 
     pub fn scheduler(&mut self) -> &mut LaneScheduler {
@@ -360,7 +401,7 @@ impl LaneExecutor {
                 // A lane's stream is seeded once, when it is admitted, and
                 // carried for the whole generation.
                 let sampler = self.samplers[lane].get_or_insert_with(|| {
-                    makepad_ai_llm::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
+                    crate::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
                 });
                 let first = sampler
                     .sample_logits(&logits, self.params)
@@ -376,7 +417,7 @@ impl LaneExecutor {
                 for (row, step) in rows.iter().zip(&plan.slots) {
                     let lane = step.slot;
                     let sampler = self.samplers[lane].get_or_insert_with(|| {
-                        makepad_ai_llm::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
+                        crate::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
                     });
                     sampled.push(
                         sampler
@@ -395,7 +436,9 @@ impl LaneExecutor {
             }
             events.push(event);
         }
-        self.scheduler.publish_advert();
+        if let Some(sink) = self.on_counts.as_mut() {
+            sink(self.scheduler.counts());
+        }
         Ok(events)
     }
 }
