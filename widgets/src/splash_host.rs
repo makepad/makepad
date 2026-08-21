@@ -152,7 +152,18 @@ pub fn splash_host_respond(
     let Some(vm_id) = crate::widget_async::vm_for_heap(cx, heap_key) else {
         return SplashRespondOutcome::IsolateGone;
     };
+    let mut delivered = true;
     cx.with_script_vm_id(vm_id, |vm| {
+        // Prove we landed in the heap this request came from before minting
+        // anything in it. `vm_id` is looked up through a map; if that map is
+        // ever wrong, building the answer object here would plant one heap's
+        // values in another and the fault would surface later, in the GC, with
+        // nothing left to point at the cause. One compare turns that into an
+        // undeliverable answer, which callers already handle.
+        if vm.bx.heap.heap_key() != heap_key {
+            delivered = false;
+            return;
+        }
         let (ok, data, error) = match result {
             Ok(json) => {
                 let mut parser = makepad_script::json::JsonParserThread::default();
@@ -171,6 +182,9 @@ pub fn splash_host_respond(
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
     });
+    if !delivered {
+        return SplashRespondOutcome::IsolateGone;
+    }
     SplashRespondOutcome::Delivered
 }
 
