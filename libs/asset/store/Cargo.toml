@@ -44,6 +44,10 @@ name = "http_chat_client_e2e"
 path = "tests/http/chat_client_e2e.rs"
 
 [[test]]
+name = "http_chat_concurrency"
+path = "tests/http/chat_concurrency.rs"
+
+[[test]]
 name = "http_client_e2e"
 path = "tests/http/client_e2e.rs"
 
