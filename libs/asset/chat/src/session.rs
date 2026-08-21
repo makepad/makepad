@@ -391,7 +391,8 @@ impl Session {
         if matches!(self.phase, Phase::AwaitingClientTool { .. }) {
             return;
         }
-        for ev in self.provider.poll() {
+        let events = self.provider.poll();
+        for ev in events {
             match ev {
                 ProviderEvent::Status { note, permille } => {
                     self.emit(ChatEventBody::ToolProgress {
@@ -401,9 +402,9 @@ impl Session {
                     });
                 }
                 ProviderEvent::Serving(facts) => {
-                    // Held for the delta it describes: the wire carries
-                    // these facts ON a delta, so a round that produces no
-                    // more text simply never reports them.
+                    // Held for the delta it describes — these facts ride ON a
+                    // delta, so they normally arrive with the text they
+                    // describe.
                     self.pending_serving = Some(facts);
                 }
                 ProviderEvent::Delta(text) => {
@@ -449,6 +450,9 @@ impl Session {
                     return;
                 }
                 ProviderEvent::Done { text } => {
+                    // Whatever the last facts were, they belong to this turn
+                    // and there is no further delta to carry them.
+                    self.flush_serving();
                     let full = if text.is_empty() {
                         match &self.phase {
                             Phase::Streaming { collected } => collected.clone(),
@@ -461,6 +465,28 @@ impl Session {
                     return;
                 }
             }
+        }
+        // A SILENT phase still has news. The model spends the start of every
+        // turn inside its think block, and if that reasoning is not being
+        // streamed as text there is no delta for the facts to ride on — so a
+        // client would see nothing at all during precisely the wait it most
+        // wants explained, and its rate readout would freeze at whatever the
+        // last text carried.
+        //
+        // An empty-text delta is the vehicle because the alternative — a new
+        // event tag — is a refusal on older clients, and the whole point of
+        // this block is that it is additive. Receivers append text and render
+        // facts; appending "" is a no-op by construction.
+        self.flush_serving();
+    }
+
+    /// Emit any held serving facts on their own, with no text.
+    fn flush_serving(&mut self) {
+        if let Some(serving) = self.pending_serving.take() {
+            self.emit(ChatEventBody::Delta {
+                text: String::new(),
+                serving: Some(serving),
+            });
         }
     }
 

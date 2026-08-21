@@ -128,3 +128,11 @@ makepad-video = { path = "../../../platform/video" }
 [[bin]]
 name = "makepad-asset-ai"
 path = "src/main.rs"
+
+# The standing "is chat slow right now?" check. Its own code is std-only —
+# no HTTP or JSON crate — so what it measures is the box, not a client
+# library, and it keeps working when the wire grows fields it has never
+# heard of.
+[[bin]]
+name = "chat-bench"
+path = "src/bin/chat_bench.rs"

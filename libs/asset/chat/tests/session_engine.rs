@@ -882,3 +882,40 @@ fn session_ids_are_unique_and_parseable() {
     assert_eq!(a.origin().principal, "p");
     assert_eq!(a.origin().session.as_str(), a.id().as_str());
 }
+
+
+/// A turn spends its opening inside the model's think block. If that reasoning
+/// is not streamed as text there is no delta for the serving facts to ride on
+/// — and the client would see nothing during precisely the wait it most wants
+/// explained, with its rate readout frozen at whatever the last text carried.
+#[test]
+fn serving_facts_reach_the_client_even_when_no_text_does() {
+    let facts = ServingFacts {
+        gen_tokens: 24,
+        think_tokens: Some(24),
+        ..Default::default()
+    };
+    // A poll that reports progress and NO text: the box is generating, the
+    // user can read none of it yet.
+    let provider = Scripted::new(vec![vec![ProviderEvent::Serving(facts)]]);
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
+    let mut session = Session::new("prin_test", Box::new(provider));
+    session.send("hi", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+
+    let deltas: Vec<(String, Option<ServingFacts>)> = session
+        .drain_events()
+        .iter()
+        .filter_map(|e| match &e.body {
+            ChatEventBody::Delta { text, serving } => Some((text.clone(), *serving)),
+            _ => None,
+        })
+        .collect();
+    let (text, serving) = deltas
+        .last()
+        .expect("a silent phase must still report the facts");
+    assert_eq!(text, "", "carried on an EMPTY delta, which appends nothing");
+    let serving = serving.expect("the facts are the whole point of the event");
+    assert_eq!(serving.gen_tokens, 24);
+    assert_eq!(serving.think_tokens, Some(24));
+}
