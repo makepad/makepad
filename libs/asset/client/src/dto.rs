@@ -1852,9 +1852,25 @@ pub enum ChatToolOutcomeDto {
     Failed { message: String },
 }
 
+/// PRESENTATION-ONLY facts a chat service may attach to a `delta` (see the
+/// chat wire's `ServingFacts`). Optional and additive: a service that
+/// predates it sends nothing and every field here stays `None`.
+///
+/// `gen_tokens` is cumulative WITHIN the current provider round and
+/// restarts at 0 each round, so a consumer computing a rate must read a
+/// decrease as a restart. The lane pair is the serving box's advertised
+/// decode contention at probe time — stale by construction, and absent
+/// entirely when the box advertises no lanes (which means one lane).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatServingDto {
+    pub gen_tokens: u32,
+    pub lanes_active: Option<u32>,
+    pub slots_total: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEventBodyDto {
-    Delta { text: String },
+    Delta { text: String, serving: Option<ChatServingDto> },
     ToolCall { id: String, name: String, args: Value },
     ToolProgress { id: String, permille: u16, note: String },
     ToolResult { id: String, outcome: ChatToolOutcomeDto },
@@ -1971,11 +1987,29 @@ pub fn parse_chat_events(v: &Value) -> ClientResult<ChatEventsPageDto> {
     Ok(ChatEventsPageDto { events, cursor })
 }
 
+/// Same ceilings the chat wire clamps to; implausible values are pinned,
+/// never refused (see [`ChatServingDto`]).
+fn parse_chat_serving(v: &Value) -> Option<ChatServingDto> {
+    if !matches!(v, Value::Obj(_)) {
+        return None;
+    }
+    let lane = |key: &str| v.get(key).and_then(Value::as_u64).map(|n| n.min(1024) as u32);
+    Some(ChatServingDto {
+        gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(10_000_000) as u32,
+        lanes_active: lane("lanes_active"),
+        slots_total: lane("slots_total"),
+    })
+}
+
 fn parse_chat_event_body(v: &Value) -> ClientResult<ChatEventBodyDto> {
     match need_str(v, "type", 32, "chat event type")? {
         "delta" => {
             let text = need_str(v, "text", MAX_CHAT_DELTA, "chat delta")?.to_string();
-            Ok(ChatEventBodyDto::Delta { text })
+            // Lenient on purpose: this block is a readout, and a garbled
+            // counter must never take down a live turn that is otherwise
+            // perfectly readable.
+            let serving = v.get("serving").and_then(parse_chat_serving);
+            Ok(ChatEventBodyDto::Delta { text, serving })
         }
         "tool_call" => {
             let id = need_str(v, "id", MAX_CHAT_TOOL_ID, "chat tool id")?.to_string();
@@ -2498,7 +2532,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.events.len(), 2);
-        assert!(matches!(page.events[0].body, ChatEventBodyDto::Delta { .. }));
+        // A delta from a service that predates the serving block parses
+        // exactly as before, with nothing invented.
+        assert_eq!(
+            page.events[0].body,
+            ChatEventBodyDto::Delta { text: "hi".into(), serving: None }
+        );
+        // With the block, the counters come through; a broken block costs
+        // the readout, never the delta.
+        let page = parse_chat_events(
+            &json::parse(
+                br#"{"events":[
+                    {"seq":0,"type":"delta","text":"a","serving":{"gen_tokens":40,"lanes_active":2,"slots_total":4}},
+                    {"seq":1,"type":"delta","text":"b","serving":{"lanes_active":2}},
+                    {"seq":2,"type":"delta","text":"c","serving":7}
+                ],"cursor":2}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            page.events[0].body,
+            ChatEventBodyDto::Delta {
+                text: "a".into(),
+                serving: Some(ChatServingDto {
+                    gen_tokens: 40,
+                    lanes_active: Some(2),
+                    slots_total: Some(4),
+                }),
+            }
+        );
+        assert_eq!(
+            page.events[1].body,
+            ChatEventBodyDto::Delta { text: "b".into(), serving: None },
+            "a block with no token count is no count at all"
+        );
+        assert_eq!(
+            page.events[2].body,
+            ChatEventBodyDto::Delta { text: "c".into(), serving: None }
+        );
         assert!(parse_chat_events(
             &json::parse(br#"{"events":[{"seq":0,"type":"explode"}],"cursor":0}"#).unwrap(),
         )

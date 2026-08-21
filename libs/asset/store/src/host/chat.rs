@@ -1265,6 +1265,9 @@ impl SessionTools<'_> {
                     ProviderEvent::Status { note, permille } => {
                         progress(permille.min(999), &note);
                     }
+                    // A consult has no stream to hang a readout on; its
+                    // serving facts are simply not interesting to anyone.
+                    ProviderEvent::Serving(_) => {}
                     ProviderEvent::Delta(text) => {
                         if collected.len().saturating_add(text.len()) > MAX_MESSAGE_BYTES {
                             provider.cancel();

@@ -32,7 +32,7 @@
 
 use crate::fleet_http;
 use crate::provider::{ChatProvider, ProviderEvent, TurnInput};
-use crate::wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind};
+use crate::wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ServingFacts};
 use makepad_asset_client::json::{self, Value};
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,9 @@ struct ActiveJob {
     delivered: usize,
     finished: bool,
     last_note: String,
+    /// Tokens the box reports having generated for THIS job, read off its
+    /// `decode k/n` stage. Per job, so it restarts every tool round.
+    gen_tokens: u32,
     /// Consecutive failed polls. A single dropped TCP connect must not
     /// kill a long generation turn; the job keeps running server-side.
     poll_fails: u8,
@@ -117,6 +120,12 @@ pub struct FleetPickCache {
 struct PickState {
     pick: Option<CachedPick>,
     dead_until: Vec<(String, Instant)>,
+    /// Decode lanes the last probed node advertised on `/health`, keyed by
+    /// its base URL: `(base, (lanes_active, slots_total))`. One heavy
+    /// resident per box means one set of lane facts at a time, so a single
+    /// slot is the whole story. Absent for a box that advertises no lanes
+    /// — which that protocol defines as ONE lane, never as "unknown".
+    lanes: Option<(String, (u32, u32))>,
 }
 
 impl FleetPickCache {
@@ -167,6 +176,20 @@ impl FleetPickCache {
 
     fn last_base(&self) -> Option<String> {
         self.lock().pick.as_ref().map(|p| p.base.clone())
+    }
+
+    /// Record what `base`'s `/health` said about its decode lanes (`None`
+    /// clears an earlier advert: a box that stopped advertising is a box
+    /// with nothing to say, not one that kept its old numbers).
+    fn remember_lanes(&self, base: &str, lanes: Option<(u32, u32)>) {
+        self.lock().lanes = lanes.map(|l| (base.to_string(), l));
+    }
+
+    /// Lane facts for `base`, if that is the box the last probe read.
+    fn lanes_for(&self, base: &str) -> Option<(u32, u32)> {
+        let state = self.lock();
+        let (probed, lanes) = state.lanes.as_ref()?;
+        (probed == base).then_some(*lanes)
     }
 
     /// Take the stale pick for the scan's last-resort fallback.
@@ -296,6 +319,10 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             .and_then(Value::as_arr)
             .map(|caps| caps.iter().any(|c| c.as_str() == Some("chat")))
             .unwrap_or(false);
+        // Lane contention rides along with the probe we already pay for —
+        // never its own request. Absence is meaningful (one lane), so it is
+        // recorded as absence.
+        self.picks.remember_lanes(base, parse_lanes(&health));
         let models = match self.get_json_retry(&format!("{base}/models")) {
             Ok(v) => v,
             Err(e) => {
@@ -480,6 +507,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             delivered: 0,
             finished: false,
             last_note: String::new(),
+            gen_tokens: 0,
             poll_fails: 0,
         });
         Ok(())
@@ -516,6 +544,29 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 events.push(ProviderEvent::Status { note, permille });
             }
         }
+        // The box counts generated tokens in its `decode k/n` stage; the
+        // delta below is a `partial_text` DIFF at this poll's cadence, so
+        // without this the only tok/s a client could compute is a guess
+        // from byte counts. Emitted BEFORE the delta it describes.
+        let generated = status
+            .get("stage")
+            .and_then(Value::as_str)
+            .and_then(parse_decode_tokens);
+        if let Some(generated) = generated {
+            if generated != active.gen_tokens {
+                active.gen_tokens = generated;
+                let base = active.base.clone();
+                let lanes = self.picks.lanes_for(&base);
+                events.push(ProviderEvent::Serving(ServingFacts {
+                    gen_tokens: generated,
+                    lanes_active: lanes.map(|(active, _)| active),
+                    slots_total: lanes.map(|(_, total)| total),
+                }));
+            }
+        }
+        let Some(active) = &mut self.active else {
+            return events;
+        };
         let partial = status.get("partial_text").and_then(Value::as_str).unwrap_or("");
         if partial.len() > active.delivered {
             events.push(ProviderEvent::Delta(partial[active.delivered..].to_string()));
@@ -575,6 +626,29 @@ fn job_status_note(status: &Value) -> Option<(String, u16)> {
         _ => return None,
     };
     Some((note, permille))
+}
+
+/// Tokens generated so far, off an asset-ai LLM job's `decode k/n` stage.
+/// Anything else — prefill, load, download, a stage string this service
+/// does not have — is not a token count and reads as `None`.
+fn parse_decode_tokens(stage: &str) -> Option<u32> {
+    let rest = stage.trim().strip_prefix("decode")?;
+    let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// `(lanes_active, slots_total)` from an asset-ai `/health.lanes` block.
+/// The block's ABSENCE is that protocol's way of saying "one lane"; this
+/// returns `None` there too, so a consumer shows nothing rather than a
+/// meaningless "1/1".
+fn parse_lanes(health: &Value) -> Option<(u32, u32)> {
+    let lanes = health.get("lanes")?;
+    let total = lanes.get("slots_total").and_then(Value::as_u64)?;
+    let active = lanes.get("lanes_active").and_then(Value::as_u64)?;
+    if total == 0 {
+        return None;
+    }
+    Some((active.min(u32::MAX as u64) as u32, total.min(u32::MAX as u64) as u32))
 }
 
 fn is_active_download(stage: &str, permille: u16) -> bool {

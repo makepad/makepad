@@ -170,7 +170,7 @@ fn typed_client_can_choose_external_primary() {
     let text: String = events
         .iter()
         .filter_map(|e| match &e.body {
-            ChatEventBodyDto::Delta { text } => Some(text.as_str()),
+            ChatEventBodyDto::Delta { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();

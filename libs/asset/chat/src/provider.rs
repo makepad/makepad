@@ -15,7 +15,7 @@
 //!   what the session engine checks before every send. There is no
 //!   fallback path anywhere below this trait.
 
-use crate::wire::{ChatMessage, ProviderAvailability, ProviderKind};
+use crate::wire::{ChatMessage, ProviderAvailability, ProviderKind, ServingFacts};
 
 /// Everything a provider needs for one turn. `system` carries the tool
 /// protocol, live capabilities and attachment bindings; `messages` is the
@@ -44,6 +44,11 @@ pub enum ProviderEvent {
     Delta(String),
     /// Job/load progress (prefill, token count, queued). Not assistant text.
     Status { note: String, permille: u16 },
+    /// Presentation-only serving facts for the deltas that follow (how many
+    /// tokens the box has generated this round, lane contention when it
+    /// advertises lanes). Providers that know none of it never emit it, and
+    /// no consumer may depend on it arriving.
+    Serving(ServingFacts),
     /// A native function call. `arguments` is the raw JSON string; the
     /// session parses it to an object and remains the security boundary.
     FunctionCall { call_id: String, name: String, arguments: String },

@@ -207,6 +207,10 @@ pub struct Session {
     /// recorded into the assistant history entry by `tool_round` (textual
     /// lane only).
     last_call_trained: Option<String>,
+    /// Serving facts the provider reported, waiting for the next delta to
+    /// ride out on. Presentation only — dropping it changes nothing but a
+    /// readout.
+    pending_serving: Option<crate::wire::ServingFacts>,
 }
 
 impl Session {
@@ -235,6 +239,7 @@ impl Session {
             pending_clean: String::new(),
             budget_final: false,
             last_call_trained: None,
+            pending_serving: None,
         }
     }
 
@@ -395,6 +400,12 @@ impl Session {
                         note,
                     });
                 }
+                ProviderEvent::Serving(facts) => {
+                    // Held for the delta it describes: the wire carries
+                    // these facts ON a delta, so a round that produces no
+                    // more text simply never reports them.
+                    self.pending_serving = Some(facts);
+                }
                 ProviderEvent::Delta(text) => {
                     if let Phase::Streaming { collected } = &mut self.phase {
                         collected.push_str(&text);
@@ -408,8 +419,14 @@ impl Session {
                             return;
                         }
                     }
-                    for chunk in split_delta_text(&text) {
-                        self.emit(ChatEventBody::Delta { text: chunk });
+                    // The facts describe the END of this text, so only the
+                    // last chunk of a split carries them.
+                    let chunks = split_delta_text(&text);
+                    let last = chunks.len().saturating_sub(1);
+                    for (i, chunk) in chunks.into_iter().enumerate() {
+                        let serving =
+                            if i == last { self.pending_serving.take() } else { None };
+                        self.emit(ChatEventBody::Delta { text: chunk, serving });
                     }
                 }
                 ProviderEvent::FunctionCall { call_id, name, arguments } => {
