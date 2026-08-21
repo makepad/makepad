@@ -229,10 +229,10 @@ script_mod! {
 
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
         // See lightmap::lamp_shadow_fill for the law and why it cannot blow
-        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
-            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
@@ -316,8 +316,8 @@ script_mod! {
                 self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_c),
                 self.csm_p.x
             )
-            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.5 * has_lm)
+            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.9 * has_lm)
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
             // The lamps light this fragment WITHOUT the sun's shadow (a shadow
             // is the absence of sun, not of light), and a strong enough pool
@@ -1220,10 +1220,10 @@ script_mod! {
 
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
         // See lightmap::lamp_shadow_fill for the law and why it cannot blow
-        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete. Inherited by DrawScenePbr.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
-            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
@@ -1376,8 +1376,8 @@ script_mod! {
                 self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
-            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.5 * has_lm)
+            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.9 * has_lm)
             // Local light — baked pools plus the per-frame slots — reaches
             // this fragment WITHOUT the sun's shadow term, because a shadow
             // is the absence of SUN and of nothing else. Over its bright core
@@ -1507,8 +1507,8 @@ script_mod! {
                 self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
-            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.5 * has_lm)
+            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.9 * has_lm)
             // Unshadowed local light, and the sun gate a strong pool fills
             // back in — lightmap::lamp_shadow_fill, exactly as DrawSceneSkinned.
             let local = lamps + self.v_dl
@@ -1855,10 +1855,10 @@ script_mod! {
 
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
         // See lightmap::lamp_shadow_fill for the law and why it cannot blow
-        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
-            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
@@ -2364,10 +2364,10 @@ script_mod! {
 
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
         // See lightmap::lamp_shadow_fill for the law and why it cannot blow
-        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
         // strength at which the fill is complete.
         sun_filled: fn(sun_vis: float, local: vec3) -> float {
-            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.180, 0.0, 1.0)
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
@@ -2492,8 +2492,8 @@ script_mod! {
                 self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_t),
                 self.csm_p.x
             )
-            // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.5 * has_lm)
+            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
+            let lamps = lm.xyz * (0.9 * has_lm)
             // Local light reaches the ground WITHOUT the sun's shadow term,
             // and over its bright core a pool fills that shadow back in —
             // this is the surface a street lamp's own pole shadow lands on,
@@ -3176,6 +3176,27 @@ script_mod! {
             return vec2(s.x + w, s.y + w)
         }
 
+        // Coverage of the texel at `off`: (lit fraction, covered fraction),
+        // covered forced to 0 outside the region rect.
+        cvf: fn(off: vec2) -> vec2 {
+            let c = self.v_local + off
+            if c.x < 0.0 {
+                return vec2(0.0, 0.0)
+            }
+            if c.y < 0.0 {
+                return vec2(0.0, 0.0)
+            }
+            if c.x > self.rect_px.z {
+                return vec2(0.0, 0.0)
+            }
+            if c.y > self.rect_px.w {
+                return vec2(0.0, 0.0)
+            }
+            let uv = (self.rect_px.xy + c) * vec2(self.misc_a.x, self.misc_a.x)
+            let s = self.cov_tex.sample_nearest(uv)
+            return vec2(s.x, s.y)
+        }
+
         vertex: fn() {
             let tp = self.quad_a.xy + self.geom.pos * self.quad_a.zw
             self.v_local = self.geom.pos * self.rect_px.zw
@@ -3191,10 +3212,64 @@ script_mod! {
                 var dl = 1.0
                 var ds = 1.0
                 if c.y > 0.001 {
-                    if c.x >= 0.999 {
+                    var f = c.x
+                    if c.y < 0.996 {
+                        // Chart-edge texel: its lit fraction mixes another
+                        // face's lighting into this one's (the skirt steal
+                        // the lamp dilate repairs), so it must not place a
+                        // shadow edge. Seed from the fully-covered ring
+                        // when there is one; a chart thinner than a texel
+                        // keeps its own fraction — the best it has.
+                        var acc = 0.0
+                        var n = 0.0
+                        var s = self.cvf(vec2(-1.0, -1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(0.0, -1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(1.0, -1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(-1.0, 0.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(1.0, 0.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(-1.0, 1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(0.0, 1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        s = self.cvf(vec2(1.0, 1.0))
+                        if s.y > 0.996 {
+                            acc = acc + s.x
+                            n = n + 1.0
+                        }
+                        if n > 0.5 {
+                            f = acc / n
+                        }
+                    }
+                    if f >= 0.999 {
                         dl = 0.076923077
                     } else {
-                        if c.x <= 0.001 {
+                        if f <= 0.001 {
                             ds = 0.076923077
                         } else {
                             // The boundary texel: lit fraction f puts the
@@ -3202,8 +3277,8 @@ script_mod! {
                             // channels take the SIGNED offset — stored
                             // (d + 0.5)/6.5 these collapse to (1-f)/6.5
                             // and f/6.5.
-                            dl = (1.0 - c.x) * 0.153846154
-                            ds = c.x * 0.153846154
+                            dl = (1.0 - f) * 0.153846154
+                            ds = f * 0.153846154
                         }
                     }
                 }
@@ -3329,19 +3404,55 @@ script_mod! {
             let duv = vec2((col + tu) / 3.0, (row + tv) / 2.0)
             let blk01 = self.depth_tex.sample_nearest(duv).x
             let near = self.lamp_d.x
-            let blk = near + blk01 * max(self.lamp_d.y - near, 0.0001)
+            let range = max(self.lamp_d.y - near, 0.0001)
+            let blk = near + blk01 * range
             let scaled = fv.z * max(d - 0.25, 0.0) / d
-            if blk < scaled - self.lamp_d.z {
+            let bias = self.lamp_d.z
+            // The bulb is not a point: a lantern's glass is ~0.24 units
+            // across, so a blocker throws a penumbra that widens with the
+            // receiver's distance past it. 5-tap PCF whose radius follows
+            // the source-size geometry — a fixture's post melts into a
+            // soft wash on its own pool instead of a razor-edged bar,
+            // while a far wall's shadow stays sharp (radius ~ 1/blocker
+            // distance). Taps clamp inside the face tile so the test
+            // never reads a neighbouring cube face.
+            let pr = clamp((scaled - blk) / max(blk, 0.25), 0.0, 3.0) * 0.12
+            let du = pr * 0.5 / vz
+            var vis = 0.0
+            if blk >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tu1 = clamp(tu - du, 0.001, 0.999)
+            let b1 = near + self.depth_tex.sample_nearest(vec2((col + tu1) / 3.0, (row + tv) / 2.0)).x * range
+            if b1 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tu2 = clamp(tu + du, 0.001, 0.999)
+            let b2 = near + self.depth_tex.sample_nearest(vec2((col + tu2) / 3.0, (row + tv) / 2.0)).x * range
+            if b2 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tv1 = clamp(tv - du, 0.001, 0.999)
+            let b3 = near + self.depth_tex.sample_nearest(vec2((col + tu) / 3.0, (row + tv1) / 2.0)).x * range
+            if b3 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tv2 = clamp(tv + du, 0.001, 0.999)
+            let b4 = near + self.depth_tex.sample_nearest(vec2((col + tu) / 3.0, (row + tv2) / 2.0)).x * range
+            if b4 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            if vis < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             let att = 1.0 - d / self.lamp_a.w
-            var s = ndl * att * att
+            var s = ndl * att * att * (vis * 0.2)
             if self.lamp_b.w > 0.0 {
                 let cone = clamp((dot(dir * -1.0, self.lamp_c.xyz) + 0.35) / 1.35, 0.0, 1.0)
                 s = s * (cone * cone * self.lamp_b.w + (1.0 - self.lamp_b.w))
             }
-            // 2.0 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
-            return vec4(self.lamp_b.xyz * (s * 2.0), 0.0)
+            // 1.111111 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
+            return vec4(self.lamp_b.xyz * (s * 1.111111), 0.0)
         }
 
         vertex: fn() {
@@ -3463,19 +3574,55 @@ script_mod! {
             let duv = vec2((col + tu) / 3.0, (row + tv) / 2.0)
             let blk01 = self.depth_tex.sample_nearest(duv).x
             let near = self.lamp_d.x
-            let blk = near + blk01 * max(self.lamp_d.y - near, 0.0001)
+            let range = max(self.lamp_d.y - near, 0.0001)
+            let blk = near + blk01 * range
             let scaled = fv.z * max(d - 0.25, 0.0) / d
-            if blk < scaled - self.lamp_d.z {
+            let bias = self.lamp_d.z
+            // The bulb is not a point: a lantern's glass is ~0.24 units
+            // across, so a blocker throws a penumbra that widens with the
+            // receiver's distance past it. 5-tap PCF whose radius follows
+            // the source-size geometry — a fixture's post melts into a
+            // soft wash on its own pool instead of a razor-edged bar,
+            // while a far wall's shadow stays sharp (radius ~ 1/blocker
+            // distance). Taps clamp inside the face tile so the test
+            // never reads a neighbouring cube face.
+            let pr = clamp((scaled - blk) / max(blk, 0.25), 0.0, 3.0) * 0.12
+            let du = pr * 0.5 / vz
+            var vis = 0.0
+            if blk >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tu1 = clamp(tu - du, 0.001, 0.999)
+            let b1 = near + self.depth_tex.sample_nearest(vec2((col + tu1) / 3.0, (row + tv) / 2.0)).x * range
+            if b1 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tu2 = clamp(tu + du, 0.001, 0.999)
+            let b2 = near + self.depth_tex.sample_nearest(vec2((col + tu2) / 3.0, (row + tv) / 2.0)).x * range
+            if b2 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tv1 = clamp(tv - du, 0.001, 0.999)
+            let b3 = near + self.depth_tex.sample_nearest(vec2((col + tu) / 3.0, (row + tv1) / 2.0)).x * range
+            if b3 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            let tv2 = clamp(tv + du, 0.001, 0.999)
+            let b4 = near + self.depth_tex.sample_nearest(vec2((col + tu) / 3.0, (row + tv2) / 2.0)).x * range
+            if b4 >= scaled - bias {
+                vis = vis + 1.0
+            }
+            if vis < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             let att = 1.0 - d / self.lamp_a.w
-            var s = ndl * att * att
+            var s = ndl * att * att * (vis * 0.2)
             if self.lamp_b.w > 0.0 {
                 let cone = clamp((dot(dir * -1.0, self.lamp_c.xyz) + 0.35) / 1.35, 0.0, 1.0)
                 s = s * (cone * cone * self.lamp_b.w + (1.0 - self.lamp_b.w))
             }
-            // 2.0 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
-            return vec4(self.lamp_b.xyz * (s * 2.0), 0.0)
+            // 1.111111 = 1 / lightmap::LM_LAMP_CEIL — the atlas RGB encode.
+            return vec4(self.lamp_b.xyz * (s * 1.111111), 0.0)
         }
 
         vertex: fn() {
@@ -3739,6 +3886,27 @@ script_mod! {
                 eac = eac + self.exw(vec2(1.0, 1.0), 1.0)
                 return vec4(eac.xyz / max(eac.w, 0.5), 1.0)
             }
+            // EMPTY texel. A chart texel that holds part of a face but
+            // received no fragment lost the rasterization tie by an
+            // epsilon (a face edge exactly on its center): it is the very
+            // texel the face's outer edge SAMPLES, so fill it with the
+            // field's linear continuation, not the rim's plateau — the
+            // plateau displayed the strip's edge a half-texel inward and
+            // drew a faint dark line down the pool at x=-12.
+            if self.covf(vec2(0.0, 0.0)) > 0.001 {
+                var eac = vec4(0.0, 0.0, 0.0, 0.0)
+                eac = eac + self.exw(vec2(-1.0, -1.0), 1.0)
+                eac = eac + self.exw(vec2(0.0, -1.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, -1.0), 1.0)
+                eac = eac + self.exw(vec2(-1.0, 0.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, 0.0), 2.0)
+                eac = eac + self.exw(vec2(-1.0, 1.0), 1.0)
+                eac = eac + self.exw(vec2(0.0, 1.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, 1.0), 1.0)
+                if eac.w > 0.5 {
+                    return vec4(eac.xyz / eac.w, 1.0)
+                }
+            }
             var acc = vec4(0.0, 0.0, 0.0, 0.0)
             acc = acc + self.rg(vec2(-1.0, -1.0))
             acc = acc + self.rg(vec2(0.0, -1.0))
@@ -3799,15 +3967,26 @@ script_mod! {
             if self.misc_a.y > 0.5 {
                 return vec4(cov.xyz, cov.x * step(0.001, cov.y))
             }
+            // The encode band, in THIS region's texels, delivered by the
+            // baker as lightmap::LM_SUN_BAND_WORLD x the region's chart
+            // density — one world-space penumbra width for every region.
+            var band = self.misc_a.z
+            if band < 0.5 {
+                band = 4.0
+            }
             let dl = dt.x * 6.0
             let ds = dt.y * 6.0
             var sd = 0.0
             if dl <= ds {
-                sd = min(ds, 4.0)
+                sd = min(ds, band)
             } else {
-                sd = 0.0 - min(dl, 4.0)
+                sd = 0.0 - min(dl, band)
             }
-            if cov.y > 0.001 {
+            // Sub-texel edge nudge from the lit fraction — FULLY covered
+            // texels only. A chart-edge texel's fraction mixes the skirt's
+            // lighting into the top face's (the same steal the lamp dilate
+            // repairs), so its fraction places no edge.
+            if cov.y > 0.996 {
                 if cov.x > 0.001 {
                     if cov.x < 0.999 {
                         let c = (cov.x - 0.5) * 2.0
@@ -3816,7 +3995,7 @@ script_mod! {
                     }
                 }
             }
-            let a = clamp((128.0 + sd * 31.75) / 255.0, 0.0, 1.0)
+            let a = clamp((128.0 + sd * (127.0 / band)) / 255.0, 0.0, 1.0)
             return vec4(lamps.xyz, a)
         }
 

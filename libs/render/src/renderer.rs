@@ -3797,6 +3797,45 @@ impl Renderer {
                 }
                 continue;
             };
+            if std::env::var_os("MAKEPAD_GPU_LM_REGIONS").is_some() {
+                // TEMP instrumentation: name each region's model and give the
+                // exact chart uv -> world map of its two largest up-facing
+                // triangles, so an atlas dump's texels map back to world.
+                let k = meshes.len();
+                let mut tris: Vec<(f32, u32)> = Vec::new();
+                for t in 0..src.caster.tri_count() as u32 {
+                    let (a, b, c) = src.caster.triangle(t);
+                    let ab = b - a;
+                    let ac = c - a;
+                    let n = Vec3f {
+                        x: ab.y * ac.z - ab.z * ac.y,
+                        y: ab.z * ac.x - ab.x * ac.z,
+                        z: ab.x * ac.y - ab.y * ac.x,
+                    };
+                    let area2 = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+                    if area2 > 1e-9 && n.y / area2 > 0.9 {
+                        tris.push((area2, t));
+                    }
+                }
+                tris.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
+                for (_, t) in tris.iter().take(24) {
+                    let vs = src.caster.triangle_verts(*t);
+                    let (a, b, c) = src.caster.triangle(*t);
+                    let w = |p: Vec3f| {
+                        let q = inst.transform.transform_vec4(Vec4f { x: p.x, y: p.y, z: p.z, w: 1.0 });
+                        (q.x, q.y, q.z)
+                    };
+                    let uvs: Vec<[f32; 2]> =
+                        vs.iter().map(|i| src.ao_uv[*i as usize]).collect();
+                    let (wa, wb, wc) = (w(a), w(b), w(c));
+                    log!(
+                        "lmtri {} {} uv({:.4},{:.4})({:.4},{:.4})({:.4},{:.4}) w({:.2},{:.2},{:.2})({:.2},{:.2},{:.2})({:.2},{:.2},{:.2})",
+                        k, inst.model,
+                        uvs[0][0], uvs[0][1], uvs[1][0], uvs[1][1], uvs[2][0], uvs[2][1],
+                        wa.0, wa.1, wa.2, wb.0, wb.1, wb.2, wc.0, wc.1, wc.2,
+                    );
+                }
+            }
             meshes.push(crate::lightmap::LmMeshInstance {
                 source: src.clone(),
                 transform: inst.transform,
@@ -8027,8 +8066,18 @@ mod light_tests {
     /// — brighter than noon — and let a lamp swing shadows in broad daylight.
     #[test]
     fn the_midday_sun_keeps_the_shadow_from_a_lamp() {
-        let lights = [street_lamp()];
+        // The frame never shows an unrailed lamp: static_lights_for scales
+        // every baked light by the daylight headroom before anything —
+        // anchor weighting included — sees it. The night peak raise made
+        // railing here load-bearing: the raw 0.72-class strength would
+        // out-vote a noon sun no shipped frame ever pits it against.
         let sun = village_sun();
+        let mut lamp = street_lamp();
+        let s = crate::lightmap::lamp_daylight_scale(crate::lightmap::daylight_on_ground(
+            sun.dir, sun.color, sun.sky,
+        ));
+        lamp.color = lamp.color * s;
+        let lights = [lamp];
         for feet in [vec3f(1.5, 0.0, 0.0), vec3f(0.1, 0.0, 0.0)] {
             let a = character_shadow_anchor(feet, &flat(), &sun, &lights).expect("anchor");
             assert!(
