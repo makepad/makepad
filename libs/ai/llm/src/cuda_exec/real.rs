@@ -701,6 +701,11 @@ impl Runtime {
             shared_cache.as_ref(),
             n_tokens,
             n_outputs,
+            // The reserve is for the WIDEST graph the session might build, and
+            // a window that starts higher in the arena is never wider than one
+            // that starts at row 0. Sizing from base 0 therefore covers every
+            // slot's own window as well.
+            0,
             key_count,
         )?;
         let plan = plan_graph(&ctx, &decode)?;

@@ -1052,6 +1052,29 @@ mod llama_worker {
         }
     }
 
+    /// Say ONCE why a long conversation keeps prefilling cold.
+    ///
+    /// Once per process, not per turn: it is a property of how the box is
+    /// configured, so repeating it every message would bury the turn lines that
+    /// are actually per-turn facts.
+    fn warn_open_think_is_never_warm() {
+        use std::sync::Once;
+        static SAID: Once = Once::new();
+        if crate::protocol::chat_think_mode() == "brief" {
+            return;
+        }
+        SAID.call_once(|| {
+            eprintln!(
+                "[llm-worker] NOTE: a returning conversation cannot be warm while thinking is \
+                 open. The lane's cache holds <think> + the reasoning + the answer; a client \
+                 stores the answer alone, so its next prompt stops extending the cache at the \
+                 last token of the previous prompt and the whole history is re-ingested. \
+                 MAKEPAD_ASSET_AI_CHAT_THINK=brief makes the rendered history match what was \
+                 generated, and turns after the first become a delta."
+            );
+        });
+    }
+
     /// One session, N conversations, jobs joining and leaving at chunk
     /// boundaries.
     ///
@@ -1344,6 +1367,17 @@ mod llama_worker {
                             "[llm-worker] turn {job}: prefill {} {ingested} tok",
                             if resumed { "RESUMED, ingested only" } else { "cold, ingested" }
                         );
+                        // A big COLD ingest on a box that thinks out loud is
+                        // not a bug in the matcher, and the next person to read
+                        // this log should not have to derive that again. The
+                        // KV holds the reasoning; the client stores the reply
+                        // without it; so the prompt cannot extend what the lane
+                        // holds, and the divergence sits at the last token of
+                        // the previous prompt — which is why the whole
+                        // conversation is re-ingested rather than a tail of it.
+                        if !resumed && ingested > 1024 {
+                            warn_open_think_is_never_warm();
+                        }
                         if let Some(lane) = jobs.get_mut(&job) {
                             lane.warm = Some((ingested, resumed));
                             let _ = lane.events.send(WorkerEvent::Serving(
