@@ -328,6 +328,32 @@ new revision, panels update everywhere. LIVE co-presence (two players
 in one world at once) stays the LAN/rooms machinery — this is the
 CONTENT layer.
 
+**Observability** (user: "needs to be observable by other asset server
+clients — 'hey the global list has been updated' … a watchable resource
+or a subscribable SQL structure"): CATALOG EVENTS are that structure,
+and they already work — the games panel went 10→13 live over the
+subscription when the showcases published, no restart. Verified surface
+(store `host/events.rs` + `routes_control.rs`):
+
+- every games mutation emits a first-class kind — `game_published` /
+  `game_quarantined` (each carries namespace + game_id + the REVISION,
+  so per-edit revisions announce themselves) and `game_alias_set` /
+  `game_alias_cleared`; the journal appends inside the same state-thread
+  closure as the commit, so event order IS commit order;
+- the sandbox panel already uses the subscription as THE update path
+  (no polling): any event not provably non-game sets refresh_pending →
+  one re-query; alias_set events with revisions invalidate resident
+  content precisely;
+- the journal is a bounded ring with epoch'd cursors — a lagging or
+  restarted reader gets `gap: true` and resyncs, never a silent hole.
+
+Design consequences: "create game" must PUBLISH revision 1 immediately
+(an unpublished draft emits nothing — publishing the empty base world
+is what makes the new game appear on everyone's panel). Nice-to-have,
+contract-adjacent (clear with the coordinator): game events carry
+`content_kind: Some("game")` so clients can filter without the
+honest-None refresh.
+
 Sequencing: design confirmation with the coordinator first (the create-
 game + per-edit-revision publish path is contract-level), then the
 sandbox-side part split (assembled eval), then the store-facing half
