@@ -1586,38 +1586,56 @@ impl ProviderFactory for ScriptedFactory {
 /// Bounded parallelism for the scripted lane. Real serving tiers admit a
 /// finite number of generates at once; a fixture that ignores that cannot
 /// show fairness. Zero means unbounded.
+///
+/// Admission is FIFO by ticket, not "whoever the condvar wakes": a fairness
+/// assertion that depends on wakeup luck is a flaky test, and a fixture that
+/// can starve a session cannot prove the broker does not.
 struct TurnGate {
     capacity: usize,
-    state: Mutex<usize>,
+    state: Mutex<GateState>,
     room: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    next_ticket: u64,
+    queue: std::collections::VecDeque<u64>,
 }
 
 impl TurnGate {
     fn new(capacity: usize) -> TurnGate {
-        TurnGate { capacity, state: Mutex::new(0), room: std::sync::Condvar::new() }
+        TurnGate {
+            capacity,
+            state: Mutex::new(GateState::default()),
+            room: std::sync::Condvar::new(),
+        }
     }
 
-    fn enter(&self) {
+    fn enter(&self) -> u64 {
+        if self.capacity == 0 {
+            return 0;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        state.queue.push_back(ticket);
+        loop {
+            let position = state.queue.iter().position(|t| *t == ticket).unwrap_or(0);
+            if position < self.capacity {
+                return ticket;
+            }
+            state = self.room.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn leave(&self, ticket: u64) {
         if self.capacity == 0 {
             return;
         }
-        let mut in_flight = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while *in_flight >= self.capacity {
-            in_flight = self
-                .room
-                .wait(in_flight)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-        *in_flight += 1;
-    }
-
-    fn leave(&self) {
-        if self.capacity == 0 {
-            return;
-        }
-        let mut in_flight = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        *in_flight = in_flight.saturating_sub(1);
-        self.room.notify_one();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.queue.retain(|t| *t != ticket);
+        drop(state);
+        self.room.notify_all();
     }
 }
 
@@ -1651,11 +1669,11 @@ impl ChatProvider for ScriptedProvider {
         // Deliberately BLOCKING, like a synchronous provider: this is the
         // shape that used to freeze the whole broker.
         if !self.delay.is_zero() || self.gate.capacity > 0 {
-            self.gate.enter();
+            let ticket = self.gate.enter();
             if !self.delay.is_zero() {
                 std::thread::sleep(self.delay);
             }
-            self.gate.leave();
+            self.gate.leave(ticket);
         }
         let turn = self.turns.remove(0);
         let text = match turn {
