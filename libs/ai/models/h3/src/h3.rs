@@ -61,14 +61,29 @@ pub struct H3ShardedWeights {
     source: H3WeightSource,
 }
 
+/// Where one canonical tensor lives in the shard set.
+#[derive(Clone, Debug)]
+struct ShardEntry {
+    shard: usize,
+    /// The file-local spelling, which may differ from the canonical name.
+    file_name: String,
+    /// Set when our rows are not simply the file tensor's rows in order —
+    /// the video-VAE repack fuses `attn.to_qkv` and swaps `ff.w1`'s halves.
+    rows: Option<crate::h3_quant::H3RowMap>,
+    /// True when this name was SYNTHESIZED from a differently-spelled file
+    /// tensor rather than read off the file verbatim.
+    aliased: bool,
+}
+
 enum H3WeightSource {
     /// Safetensors shard dir or a single repack file. The map key is the
-    /// CANONICAL tensor name; the value carries the shard index and the
-    /// file-local spelling (the fp16 video-VAE repack stores its encoder
-    /// under LDM names — see `h3_quant::video_vae_repack_canonical_name`).
+    /// CANONICAL tensor name; the entry carries the shard index, the
+    /// file-local spelling and any row selection (the fp16 video-VAE repack
+    /// spells both its encoder and its decoder differently and fuses the
+    /// decoder's QKV — see `h3_quant::video_vae_repack_aliases`).
     Shards {
         shards: Vec<MlxSafetensorsHeader>,
-        map: HashMap<String, (usize, String)>,
+        map: HashMap<String, ShardEntry>,
     },
     Gguf(crate::h3_quant::H3GgufWeights),
     Nvfp4(crate::h3_quant::H3Nvfp4Weights),
@@ -103,14 +118,49 @@ impl H3ShardedWeights {
             )));
         }
         let mut shards = Vec::with_capacity(files.len());
-        let mut map = HashMap::new();
+        let mut map: HashMap<String, ShardEntry> = HashMap::new();
         for (index, path) in files.iter().enumerate() {
             let header = MlxSafetensorsHeader::load(path)
                 .map_err(|err| DiffusionError::model(format!("{}: {err}", path.display())))?;
             for name in header.tensors.keys() {
-                let canonical = crate::h3_quant::video_vae_repack_canonical_name(name)
-                    .unwrap_or_else(|| name.clone());
-                map.insert(canonical, (index, name.clone()));
+                // A canonical slot claimed by BOTH a verbatim name and an
+                // aliased one means two file tensors describe the same
+                // module in two spellings and one would be silently dropped.
+                // Fail closed either way round — `header.tensors` is a
+                // HashMap, so which of the two lands first is arbitrary and
+                // an order-dependent check would be a coin flip. Two
+                // verbatim names cannot collide (map keys are unique per
+                // file), so plain multi-shard loading is unaffected.
+                let aliases = crate::h3_quant::video_vae_repack_aliases(name);
+                let claims = if aliases.is_empty() {
+                    vec![(name.clone(), None, false)]
+                } else {
+                    aliases
+                        .into_iter()
+                        .map(|alias| (alias.canonical, alias.rows, true))
+                        .collect()
+                };
+                for (canonical, rows, aliased) in claims {
+                    if let Some(previous) = map.get(&canonical) {
+                        if previous.aliased || aliased {
+                            return Err(DiffusionError::model(format!(
+                                "h3 weights {}: '{name}' claims '{canonical}', already supplied \
+                                 by '{}'",
+                                path.display(),
+                                previous.file_name
+                            )));
+                        }
+                    }
+                    map.insert(
+                        canonical,
+                        ShardEntry {
+                            shard: index,
+                            file_name: name.clone(),
+                            rows,
+                            aliased,
+                        },
+                    );
+                }
             }
             shards.push(header);
         }
@@ -178,16 +228,16 @@ impl H3ShardedWeights {
         })
     }
 
-    fn shard_for(&self, name: &str) -> Result<(&MlxSafetensorsHeader, &str)> {
+    fn shard_entry(&self, name: &str) -> Result<(&MlxSafetensorsHeader, &ShardEntry)> {
         match &self.source {
             H3WeightSource::Shards { shards, map } => {
-                let (index, file_name) = map.get(name).ok_or_else(|| {
+                let entry = map.get(name).ok_or_else(|| {
                     DiffusionError::model(format!(
                         "h3 tensor '{name}' not found in {}",
                         self.dir.display()
                     ))
                 })?;
-                Ok((&shards[*index], file_name.as_str()))
+                Ok((&shards[entry.shard], entry))
             }
             _ => Err(DiffusionError::model(format!(
                 "h3 tensor '{name}': not a safetensors source"
@@ -207,11 +257,12 @@ impl H3ShardedWeights {
     pub fn tensor_disk_bytes(&self, name: &str) -> Result<u64> {
         match &self.source {
             H3WeightSource::Shards { .. } => {
-                let (shard, file_name) = self.shard_for(name)?;
-                let entry = shard.tensor(file_name).ok_or_else(|| {
+                let (shard, mapping) = self.shard_entry(name)?;
+                let entry = shard.tensor(&mapping.file_name).ok_or_else(|| {
                     DiffusionError::model(format!("h3 tensor '{name}' missing entry"))
                 })?;
-                Ok(entry.data_len_bytes())
+                let parts = mapping.rows.map(|rows| rows.parts()).unwrap_or(1);
+                Ok(entry.data_len_bytes() / parts)
             }
             H3WeightSource::Gguf(gguf) => gguf.tensor_disk_bytes(name),
             H3WeightSource::Nvfp4(weights) => weights.tensor_disk_bytes(name),
@@ -246,11 +297,26 @@ impl H3ShardedWeights {
     }
 
     pub fn tensor_dtype_shape(&self, name: &str) -> Result<(MlxDType, Vec<u64>)> {
-        let (shard, file_name) = self.shard_for(name)?;
+        let (shard, mapping) = self.shard_entry(name)?;
         let entry = shard
-            .tensor(file_name)
+            .tensor(&mapping.file_name)
             .ok_or_else(|| DiffusionError::model(format!("h3 tensor '{name}' missing entry")))?;
-        Ok((entry.dtype, entry.shape.clone()))
+        let mut shape = entry.shape.clone();
+        if let Some(rows) = mapping.rows {
+            let leading = shape.first_mut().ok_or_else(|| {
+                DiffusionError::model(format!(
+                    "h3 tensor '{name}': packed source '{}' is rank 0",
+                    mapping.file_name
+                ))
+            })?;
+            *leading = rows.validate(*leading).map_err(|why| {
+                DiffusionError::model(format!(
+                    "h3 tensor '{name}': packed source '{}' {why}",
+                    mapping.file_name
+                ))
+            })?;
+        }
+        Ok((entry.dtype, shape))
     }
 
     /// Raw on-disk bytes of one tensor. For quantized sources this is the
@@ -260,10 +326,34 @@ impl H3ShardedWeights {
     pub fn tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
         match &self.source {
             H3WeightSource::Shards { .. } => {
-                let (shard, file_name) = self.shard_for(name)?;
-                shard
-                    .read_tensor_bytes(file_name)
-                    .map_err(|err| DiffusionError::model(format!("h3 tensor '{name}': {err}")))
+                let (shard, mapping) = self.shard_entry(name)?;
+                let Some(row_map) = mapping.rows else {
+                    return shard
+                        .read_tensor_bytes(&mapping.file_name)
+                        .map_err(|err| DiffusionError::model(format!("h3 tensor '{name}': {err}")));
+                };
+                // Gather our rows run by run, in canonical order. Each run
+                // is one contiguous read, so this touches only our bytes.
+                let (_dtype, shape) = self.tensor_dtype_shape(name)?;
+                let rows = shape[0];
+                let run = row_map.run_len(rows).max(1);
+                let mut out = Vec::new();
+                let mut first = 0u64;
+                while first < rows {
+                    let take = run.min(rows - first);
+                    let chunk = shard
+                        .read_row_run_bytes(
+                            &mapping.file_name,
+                            row_map.file_row(first, rows),
+                            take,
+                        )
+                        .map_err(|err| {
+                            DiffusionError::model(format!("h3 tensor '{name}' rows at {first}: {err}"))
+                        })?;
+                    out.extend_from_slice(&chunk);
+                    first += take;
+                }
+                Ok(out)
             }
             H3WeightSource::Gguf(gguf) => gguf.linear_payload(name),
             H3WeightSource::Nvfp4(weights) => weights.linear_payload(name),
@@ -274,14 +364,28 @@ impl H3ShardedWeights {
     pub fn tensor_row_f32(&self, name: &str, row: u64) -> Result<Vec<f32>> {
         match &self.source {
             H3WeightSource::Shards { .. } => {
-                let (shard, file_name) = self.shard_for(name)?;
-                let entry = shard.tensor(file_name).ok_or_else(|| {
+                let (shard, mapping) = self.shard_entry(name)?;
+                let entry = shard.tensor(&mapping.file_name).ok_or_else(|| {
                     DiffusionError::model(format!("h3 tensor '{name}' missing entry"))
                 })?;
                 let dtype = entry.dtype;
-                let bytes = shard.read_rank2_row_bytes(file_name, row).map_err(|err| {
-                    DiffusionError::model(format!("h3 tensor '{name}' row {row}: {err}"))
-                })?;
+                let file_row = match mapping.rows {
+                    Some(row_map) => {
+                        let rows = self.tensor_dtype_shape(name)?.1[0];
+                        if row >= rows {
+                            return Err(DiffusionError::model(format!(
+                                "h3 tensor '{name}' row {row} out of range ({rows} rows)"
+                            )));
+                        }
+                        row_map.file_row(row, rows)
+                    }
+                    None => row,
+                };
+                let bytes = shard
+                    .read_rank2_row_bytes(&mapping.file_name, file_row)
+                    .map_err(|err| {
+                        DiffusionError::model(format!("h3 tensor '{name}' row {row}: {err}"))
+                    })?;
                 bytes_to_f32(&bytes, dtype, name)
             }
             H3WeightSource::Gguf(gguf) => gguf.tensor_row_f32(name, row),
@@ -1087,5 +1191,305 @@ mod tests {
         // t = 0: cos half all 1, sin half all 0.
         assert!(emb[..128].iter().all(|v| *v == 1.0));
         assert!(emb[128..256].iter().all(|v| *v == 0.0));
+    }
+
+    // -----------------------------------------------------------------
+    // Video-VAE naming conventions.
+    //
+    // The full 96GB tier ships a diffusers-converted VAE; the Q4/NVFP4
+    // tiers pin `minimax_h3_video_vae_fp16.safetensors`, which is the
+    // ORIGINAL MiniMax/LDM checkpoint under different names with a FUSED
+    // decoder QKV. `H3VaeDecoderPrepared`/`H3VaeEncoderPrepared` read one
+    // canonical (diffusers) name set, so both files must present the same
+    // tensors through `H3ShardedWeights`.
+    // -----------------------------------------------------------------
+
+    /// Minimal f32 safetensors writer: u64 LE header length, JSON header,
+    /// payload. `tensors` is (name, shape, values) in write order.
+    fn write_safetensors(path: &Path, tensors: &[(&str, Vec<u64>, Vec<f32>)]) {
+        let mut payload: Vec<u8> = Vec::new();
+        let mut entries: Vec<String> = Vec::new();
+        for (name, shape, values) in tensors {
+            let start = payload.len();
+            for value in values {
+                payload.extend_from_slice(&value.to_le_bytes());
+            }
+            let dims: Vec<String> = shape.iter().map(|dim| dim.to_string()).collect();
+            entries.push(format!(
+                "\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{}],\"data_offsets\":[{start},{}]}}",
+                dims.join(","),
+                payload.len()
+            ));
+        }
+        let header = format!("{{{}}}", entries.join(","));
+        let mut out = (header.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(&payload);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, out).unwrap();
+    }
+
+    const TEST_HEADS: usize = 2;
+    const TEST_COLS: usize = 8;
+    const TEST_DIM: usize = TEST_HEADS * H3_VAE_HEAD_DIM_FOR_TEST;
+    const H3_VAE_HEAD_DIM_FOR_TEST: usize = crate::h3_vae::H3_VAE_HEAD_DIM;
+
+    /// Distinct per (part, row, col) so a misplaced row is unmissable.
+    fn qkv_value(part: usize, row: usize, col: usize) -> f32 {
+        (part * 1_000_000 + row * 100 + col) as f32
+    }
+
+    fn part_rows(part: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(TEST_DIM * TEST_COLS);
+        for row in 0..TEST_DIM {
+            for col in 0..TEST_COLS {
+                out.push(qkv_value(part, row, col));
+            }
+        }
+        out
+    }
+
+    /// The repack's fused layout: HEAD-MAJOR, canonical row `head * 64 +
+    /// chan` sitting at fused row `head * 192 + part * 64 + chan`.
+    fn fused_rows() -> Vec<f32> {
+        let head_dim = H3_VAE_HEAD_DIM_FOR_TEST;
+        let mut out = vec![0.0f32; 3 * TEST_DIM * TEST_COLS];
+        for head in 0..TEST_HEADS {
+            for part in 0..3 {
+                for chan in 0..head_dim {
+                    let canonical = head * head_dim + chan;
+                    let fused = head * 3 * head_dim + part * head_dim + chan;
+                    for col in 0..TEST_COLS {
+                        out[fused * TEST_COLS + col] = qkv_value(part, canonical, col);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn fused_bias() -> Vec<f32> {
+        let head_dim = H3_VAE_HEAD_DIM_FOR_TEST;
+        let mut out = vec![0.0f32; 3 * TEST_DIM];
+        for head in 0..TEST_HEADS {
+            for part in 0..3 {
+                for chan in 0..head_dim {
+                    let canonical = head * head_dim + chan;
+                    out[head * 3 * head_dim + part * head_dim + chan] =
+                        qkv_value(part, canonical, 0);
+                }
+            }
+        }
+        out
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("h3-vae-names-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn video_vae_repack_and_diffusers_names_load_identically() {
+        let dir = scratch_dir("both");
+        let block = "decoder.transformer_blocks.0";
+        let dim = TEST_DIM as u64;
+        let cols = TEST_COLS as u64;
+        let bias = |part: usize| {
+            (0..TEST_DIM).map(|row| qkv_value(part, row, 0)).collect::<Vec<f32>>()
+        };
+        let small = vec![1.0f32; TEST_COLS];
+        // The SwiGLU projection: two halves with distinct contents, so the
+        // repack's [gate | value] vs diffusers' [value | gate] ordering is
+        // load-bearing here rather than invisible.
+        const FF_HALF: usize = 4;
+        let ff_half = |tag: usize| {
+            (0..FF_HALF)
+                .flat_map(|row| (0..TEST_COLS).map(move |col| (tag + row * 100 + col) as f32))
+                .collect::<Vec<f32>>()
+        };
+        let (ff_value, ff_gate) = (ff_half(700_000), ff_half(900_000));
+        let mut ff_diffusers = ff_value.clone(); // [value | gate]
+        ff_diffusers.extend_from_slice(&ff_gate);
+        let mut ff_repack = ff_gate.clone(); // [gate | value]
+        ff_repack.extend_from_slice(&ff_value);
+        let ff_rows = 2 * FF_HALF as u64;
+
+        // The diffusers convention (the working 96GB tier).
+        let diffusers = dir.join("diffusers.safetensors");
+        write_safetensors(
+            &diffusers,
+            &[
+                (&format!("{block}.attn.to_q.weight"), vec![dim, cols], part_rows(0)),
+                (&format!("{block}.attn.to_k.weight"), vec![dim, cols], part_rows(1)),
+                (&format!("{block}.attn.to_v.weight"), vec![dim, cols], part_rows(2)),
+                (&format!("{block}.attn.to_q.bias"), vec![dim], bias(0)),
+                (&format!("{block}.attn.to_k.bias"), vec![dim], bias(1)),
+                (&format!("{block}.attn.to_v.bias"), vec![dim], bias(2)),
+                (&format!("{block}.attn.to_out.0.weight"), vec![cols], small.clone()),
+                (
+                    &format!("{block}.ff.net.0.proj.weight"),
+                    vec![ff_rows, cols],
+                    ff_diffusers.clone(),
+                ),
+                (&format!("{block}.ff.net.2.weight"), vec![cols], small.clone()),
+                (&format!("{block}.norm1.weight"), vec![cols], small.clone()),
+                ("decoder.proj_in.weight", vec![cols], small.clone()),
+                ("decoder.register_tokens", vec![cols], small.clone()),
+                (
+                    "encoder.down_blocks.1.resnets.0.conv_shortcut.weight",
+                    vec![cols],
+                    small.clone(),
+                ),
+                (
+                    "encoder.down_blocks.2.downsamplers.0.conv.bias",
+                    vec![cols],
+                    small.clone(),
+                ),
+                ("quant_conv.weight", vec![cols], small.clone()),
+            ],
+        );
+
+        // The unsloth repack convention (the Q4/NVFP4 tiers).
+        let repack = dir.join("repack.safetensors");
+        write_safetensors(
+            &repack,
+            &[
+                (
+                    &format!("{block}.attn.to_qkv.weight"),
+                    vec![3 * dim, cols],
+                    fused_rows(),
+                ),
+                (&format!("{block}.attn.to_qkv.bias"), vec![3 * dim], fused_bias()),
+                (&format!("{block}.attn.to_out.weight"), vec![cols], small.clone()),
+                (&format!("{block}.ff.w1.weight"), vec![ff_rows, cols], ff_repack.clone()),
+                (&format!("{block}.ff.w2.weight"), vec![cols], small.clone()),
+                (&format!("{block}.norm1.weight"), vec![cols], small.clone()),
+                ("decoder.x_embedder.weight", vec![cols], small.clone()),
+                ("decoder.register_tokens", vec![cols], small.clone()),
+                ("encoder.down.1.block.0.nin_shortcut.weight", vec![cols], small.clone()),
+                ("encoder.down.2.downsample.conv.bias", vec![cols], small.clone()),
+                ("quant_conv.weight", vec![cols], small.clone()),
+            ],
+        );
+
+        let full = H3ShardedWeights::load(&diffusers).unwrap();
+        let q4 = H3ShardedWeights::load(&repack).unwrap();
+
+        // Same canonical inventory, tensor for tensor.
+        let mut full_names = full.tensor_names();
+        let mut q4_names = q4.tensor_names();
+        full_names.sort();
+        q4_names.sort();
+        assert_eq!(full_names, q4_names, "the two conventions expose the same names");
+
+        // ...and byte-identical contents through it, INCLUDING the three
+        // that only exist fused in the repack.
+        for name in &full_names {
+            assert_eq!(
+                full.tensor_dtype_shape(name).unwrap(),
+                q4.tensor_dtype_shape(name).unwrap(),
+                "shape of {name}"
+            );
+            assert_eq!(
+                full.tensor_f32(name).unwrap(),
+                q4.tensor_f32(name).unwrap(),
+                "values of {name}"
+            );
+        }
+
+        // The fused split is HEAD-MAJOR, not three contiguous blocks. Under
+        // a contiguous cut, to_k row 0 would be fused row `dim` (128) and
+        // to_v row 0 fused row `2 * dim` (256); the true layout puts them at
+        // 64 and 128. Assert the true placement AND that the contiguous
+        // reading is a different tensor, so a regression to the plain
+        // 3-way cut cannot pass.
+        let head_dim = H3_VAE_HEAD_DIM_FOR_TEST;
+        let fused = fused_rows();
+        let row_of = |row: usize| fused[row * TEST_COLS..(row + 1) * TEST_COLS].to_vec();
+        let to_k = q4.tensor_f32(&format!("{block}.attn.to_k.weight")).unwrap();
+        let to_v = q4.tensor_f32(&format!("{block}.attn.to_v.weight")).unwrap();
+        assert_eq!(to_k[..TEST_COLS].to_vec(), row_of(head_dim));
+        assert_eq!(to_v[..TEST_COLS].to_vec(), row_of(2 * head_dim));
+        assert_ne!(to_k[..TEST_COLS].to_vec(), row_of(TEST_DIM));
+        assert_ne!(to_v[..TEST_COLS].to_vec(), row_of(2 * TEST_DIM));
+        // Head 1 too — one head would pass either way.
+        assert_eq!(
+            to_k[head_dim * TEST_COLS..(head_dim + 1) * TEST_COLS].to_vec(),
+            row_of(3 * head_dim + head_dim)
+        );
+
+        // The SwiGLU halves come back EXCHANGED, so both files present the
+        // diffusers [value | gate] order that gpu_swiglu_value_gate wants.
+        // Reading the repack's rows straight through would silently feed the
+        // decoder gate-as-value — a bug no shape or name check can see.
+        let ff = q4.tensor_f32(&format!("{block}.ff.net.0.proj.weight")).unwrap();
+        assert_eq!(ff, ff_diffusers, "w1's halves must be swapped into place");
+        assert_ne!(ff, ff_repack, "the file's own order must NOT reach the decoder");
+        assert_eq!(&ff[..TEST_COLS], &ff_value[..TEST_COLS]);
+        assert_eq!(
+            &ff[FF_HALF * TEST_COLS..(FF_HALF + 1) * TEST_COLS],
+            &ff_gate[..TEST_COLS]
+        );
+        assert_eq!(
+            q4.tensor_dtype_shape(&format!("{block}.ff.net.0.proj.weight")).unwrap().1,
+            vec![ff_rows, cols],
+            "a half swap keeps the tensor's full size"
+        );
+
+        // A part's shape/disk size is the fused tensor divided by 3.
+        let (dtype, shape) = q4.tensor_dtype_shape(&format!("{block}.attn.to_q.weight")).unwrap();
+        assert_eq!(dtype, MlxDType::F32);
+        assert_eq!(shape, vec![dim, cols]);
+        assert_eq!(
+            q4.tensor_disk_bytes(&format!("{block}.attn.to_q.weight")).unwrap(),
+            dim * cols * 4
+        );
+        // Rank-1 fused bias splits on the same rule.
+        assert_eq!(
+            q4.tensor_dtype_shape(&format!("{block}.attn.to_q.bias")).unwrap().1,
+            vec![dim]
+        );
+        // Single-row reads follow the selection too.
+        assert_eq!(
+            q4.tensor_row_f32(&format!("{block}.attn.to_v.weight"), 1).unwrap(),
+            full.tensor_row_f32(&format!("{block}.attn.to_v.weight"), 1).unwrap()
+        );
+
+        // Names shared by both conventions are never rewritten.
+        assert!(q4.has_tensor("quant_conv.weight"));
+        assert!(q4.has_tensor("decoder.register_tokens"));
+        assert!(q4.has_tensor(&format!("{block}.norm1.weight")));
+        // ...and the repack's own spellings are gone, replaced by canonical.
+        assert!(!q4.has_tensor("decoder.x_embedder.weight"));
+        assert!(!q4.has_tensor(&format!("{block}.attn.to_qkv.weight")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn colliding_video_vae_aliases_fail_closed() {
+        let dir = scratch_dir("collide");
+        let block = "decoder.transformer_blocks.0";
+        let small = vec![1.0f32; 4];
+        let path = dir.join("mixed.safetensors");
+        // Both spellings of to_out in one file: one would silently win.
+        write_safetensors(
+            &path,
+            &[
+                (&format!("{block}.attn.to_out.weight"), vec![4], small.clone()),
+                (&format!("{block}.attn.to_out.0.weight"), vec![4], small.clone()),
+            ],
+        );
+        let err = match H3ShardedWeights::load(&path) {
+            Ok(_) => panic!("both spellings of to_out in one file must fail closed"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("already supplied"),
+            "expected an alias collision error, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

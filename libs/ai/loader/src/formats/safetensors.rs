@@ -329,6 +329,50 @@ impl MlxSafetensorsHeader {
         })
     }
 
+    /// Bytes of a contiguous RUN of rows along a tensor's leading axis.
+    ///
+    /// For loaders that must carve several canonical tensors out of one
+    /// FUSED checkpoint tensor (a packed `to_qkv`, say). A "row" is one
+    /// index of `shape[0]`, so this works for any rank >= 1 — rank 1 gives
+    /// single elements. Only the requested byte range is read.
+    pub fn read_row_run_bytes(&self, name: &str, first_row: u64, rows: u64) -> Result<Vec<u8>> {
+        let entry = self
+            .tensor(name)
+            .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("tensor {} not found in header", name),
+            })?;
+        let Some(&leading) = entry.shape.first() else {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("tensor {} is rank 0, it has no rows", name),
+            });
+        };
+        if first_row.saturating_add(rows) > leading {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "tensor {} rows {}..{} out of range (leading axis {})",
+                    name,
+                    first_row,
+                    first_row + rows,
+                    leading
+                ),
+            });
+        }
+        let row_bytes = entry.shape[1..].iter().product::<u64>() * entry.dtype.byte_width();
+        let file_offsets = entry.file_offsets(self.payload_base_offset());
+        let start = file_offsets[0] + first_row * row_bytes;
+        let len = rows * row_bytes;
+        if start + len > file_offsets[1] {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("tensor {} row run extends past tensor payload", name),
+            });
+        }
+        self.read_file_range(start, len as usize)
+    }
+
     pub fn read_rank2_row_bytes(&self, name: &str, row: u64) -> Result<Vec<u8>> {
         let entry = self
             .tensor(name)
