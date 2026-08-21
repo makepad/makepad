@@ -195,6 +195,36 @@ fn world_source_tools_roundtrip_and_bound() {
     .unwrap();
     let re = ContentToolCall::parse("world.spawn", &encode_args(&call)).unwrap();
     assert_eq!(re, call);
+    // world.tune: the world-knob verb (§4.5 tune slice). Both knobs are
+    // optional, at least one is required, and each has its own band.
+    let call = parse("world.tune", obj(r#"{"car_speed": 0.6}"#)).unwrap();
+    assert_eq!(
+        call,
+        ContentToolCall::WorldTune { time: None, car_speed: Some(0.6) }
+    );
+    let re = ContentToolCall::parse("world.tune", &encode_args(&call)).unwrap();
+    assert_eq!(re, call);
+    let call = parse("world.tune", obj(r#"{"time": 22, "car_speed": 2}"#)).unwrap();
+    assert_eq!(
+        call,
+        ContentToolCall::WorldTune { time: Some(22.0), car_speed: Some(2.0) }
+    );
+    let re = ContentToolCall::parse("world.tune", &encode_args(&call)).unwrap();
+    assert_eq!(re, call);
+    assert!(parse("world.tune", obj(r#"{}"#)).is_err(), "one knob required");
+    assert!(
+        parse("world.tune", obj(r#"{"car_speed": 0}"#)).is_err(),
+        "a frozen fleet is out of band"
+    );
+    assert!(
+        parse("world.tune", obj(r#"{"car_speed": 12}"#)).is_err(),
+        "an uncatchable fleet is out of band"
+    );
+    assert!(
+        parse("world.tune", obj(r#"{"speed": 2}"#)).is_err(),
+        "unknown knobs refuse rather than silently doing nothing"
+    );
+
     assert!(parse("world.spawn", obj(r#"{}"#)).is_err(), "model required");
     assert!(
         parse("world.spawn", obj(r#"{"model": "x", "form": "banana"}"#)).is_err(),

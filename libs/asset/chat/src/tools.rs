@@ -660,12 +660,20 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             api_name: "world_tune",
             description: "Adjust a WORLD knob on the running level in ONE cheap call — \
                           nothing else changes, nothing resets. Knobs: time (0-24 local \
-                          hours; 0 midnight, 12 noon, 22 night). THE way to do 'make it \
-                          night / morning / sunset'. Other tuning still uses the source \
-                          path.",
-            args_doc: r#"{"time": 22}"#,
+                          hours; 0 midnight, 12 noon, 22 night) and car_speed (scale on \
+                          EVERY car's speed, 0.2-5, 1 = as authored). THE way to do \
+                          'make it night / morning / sunset' and 'make the cars faster / \
+                          slower' (0.6 slower, 1.6 faster). Other tuning still uses the \
+                          source path.",
+            args_doc: r#"{"time": 22} or {"car_speed": 0.6}"#,
             parameters: schema_object(
-                vec![("time", schema_number("local hour 0-24"))],
+                vec![
+                    ("time", schema_number("local hour 0-24")),
+                    (
+                        "car_speed",
+                        schema_number("speed scale for every car, 0.2-5 (1 = as authored)"),
+                    ),
+                ],
                 &[],
                 Some(false),
             ),
@@ -1234,8 +1242,10 @@ pub enum ContentToolCall {
     /// Adjust a WORLD knob on the running level in one cheap call (§4.5
     /// tune slice; sandbox sessions only). World knobs are idempotent
     /// splash setters, so the tune rides the addon lane — nothing resets.
-    /// Currently: `time` (0-24 local hours).
-    WorldTune { time: Option<f64> },
+    /// Knobs: `time` (0-24 local hours) and `car_speed` (0.2-5 around the
+    /// authored speed — "make the cars faster/slower" for the whole fleet).
+    /// At least one must be present; both may arrive in one call.
+    WorldTune { time: Option<f64>, car_speed: Option<f64> },
     /// Append one self-contained splash chunk to the running world under a
     /// named `// @addon:` marker (the §4.5 GENERAL verb; sandbox sessions
     /// only). Bulk adds and primitive builds land as ONE 10-30 line chunk —
@@ -1670,25 +1680,31 @@ impl ContentToolCall {
                 Ok(ContentToolCall::WorldSetPlayerModel { model })
             }
             "world.tune" => {
-                check_known(args, &["time"], "world.tune argument")?;
-                let time = match args.get("time") {
-                    None => None,
-                    Some(v) => {
-                        let t = match v {
-                            Value::F64(f) => *f,
-                            Value::Int(i) => *i as f64,
-                            _ => return Err("time must be a number".to_string()),
-                        };
-                        if !(0.0..=24.0).contains(&t) {
-                            return Err("time must be 0..=24 local hours".to_string());
+                check_known(args, &["time", "car_speed"], "world.tune argument")?;
+                let knob = |key: &str, lo: f64, hi: f64| -> Result<Option<f64>, String> {
+                    match args.get(key) {
+                        None => Ok(None),
+                        Some(v) => {
+                            let n = match v {
+                                Value::F64(f) => *f,
+                                Value::Int(i) => *i as f64,
+                                _ => return Err(format!("{key} must be a number")),
+                            };
+                            if !(lo..=hi).contains(&n) {
+                                return Err(format!("{key} must be {lo}..={hi}"));
+                            }
+                            Ok(Some(n))
                         }
-                        Some(t)
                     }
                 };
-                if time.is_none() {
-                    return Err("world.tune needs at least one knob (time)".to_string());
+                let time = knob("time", 0.0, 24.0)?;
+                let car_speed = knob("car_speed", 0.2, 5.0)?;
+                if time.is_none() && car_speed.is_none() {
+                    return Err(
+                        "world.tune needs at least one knob (time, car_speed)".to_string()
+                    );
                 }
-                Ok(ContentToolCall::WorldTune { time })
+                Ok(ContentToolCall::WorldTune { time, car_speed })
             }
             "world.spawn" => {
                 check_known(args, &["model", "pos", "form", "tag"], "world.spawn argument")?;
@@ -2329,10 +2345,13 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         ContentToolCall::WorldSetPlayerModel { model } => {
             json::obj(vec![("model", json::s(model.clone()))])
         }
-        ContentToolCall::WorldTune { time } => {
+        ContentToolCall::WorldTune { time, car_speed } => {
             let mut pairs = Vec::new();
             if let Some(t) = time {
                 pairs.push(("time", Value::F64(*t)));
+            }
+            if let Some(s) = car_speed {
+                pairs.push(("car_speed", Value::F64(*s)));
             }
             json::obj(pairs)
         }
