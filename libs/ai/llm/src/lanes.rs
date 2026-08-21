@@ -2527,10 +2527,26 @@ mod tests {
             .adopt_native_state(0, rows, 2)
             .expect_err("one past the block is the next slot's state");
         assert!(error.contains("another slot's state"), "{error}");
-        let ahead = sched
+        // A draft head that looks AHEAD of the model is handled, not refused,
+        // and the difference matters: the resume row above changes what the
+        // model computes, while the draft fill only changes how often a
+        // proposal survives. Speculative rejection sampling emits exactly the
+        // target distribution whatever the drafter says.
+        //
+        // This used to assert an error. It reached a player as
+        // `slot 0 would put its draft head at 8366 tokens, ahead of the
+        // model's 1024` on every ~20k prompt, because a slot changing hands
+        // carries the previous occupant's fill across. Restarting the draft
+        // head costs one catch-up; failing the turn costs the turn.
+        sched
             .adopt_native_state(0, 0, 99)
-            .expect_err("a draft head cannot be ahead of the model");
-        assert!(ahead.contains("ahead of the model"), "{ahead}");
+            .expect("a stale draft fill must not fail the handover");
+        assert_eq!(
+            sched.slot(0).expect("slot").mtp_filled(),
+            0,
+            "restart from zero, not from the model's fill: the rows below it \
+             hold the previous occupant's tokens too"
+        );
     }
 
     #[test]
