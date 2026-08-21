@@ -909,6 +909,63 @@ pub struct HybridDecodeBatchLayout {
     pub attention_key_lower_bounds: Vec<i32>,
 }
 
+/// The recurrent state-row vector a checkpointed batch needs:
+/// `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]`.
+///
+/// `resume_rows[s]` is the cache row sequence `s` resumes its scan from, and
+/// `checkpoint_bases[s]` is the first row of the block its checkpoints are
+/// written into — so sequence `s`'s state after its token `t` lands in
+/// `checkpoint_bases[s] + t`.
+///
+/// The tail is in **checkpoint-plane order** (`t * n_seqs + s`), not in the
+/// batch's sequence-major token order. See [`state_write_rows_all`]: the fused
+/// delta-net kernel emits all sequences' planes for one token together, so this
+/// is the kernel's layout rather than a preference. Both cache writes read the
+/// same vector, so getting it wrong writes one lane's state into another lane's
+/// row — fluent output built on a neighbour's conversation, with nothing to
+/// see in a log.
+///
+/// At one sequence this is `[resume, base+0 .. base+t-1]` — exactly the vector
+/// the single-stream speculative path has always built.
+pub fn checkpointed_state_rows(
+    resume_rows: &[i32],
+    checkpoint_bases: &[i32],
+    tokens_per_seq: usize,
+) -> Result<Vec<i32>> {
+    if resume_rows.is_empty() {
+        return Err(LlamaError::format(
+            "a checkpointed batch needs at least one sequence",
+        ));
+    }
+    if resume_rows.len() != checkpoint_bases.len() {
+        return Err(LlamaError::format(format!(
+            "checkpointed batch has {} resume rows but {} checkpoint bases",
+            resume_rows.len(),
+            checkpoint_bases.len()
+        )));
+    }
+    if tokens_per_seq == 0 {
+        return Err(LlamaError::format(
+            "a checkpointed batch needs at least one token per sequence",
+        ));
+    }
+    let n_seqs = resume_rows.len();
+    let mut rows = Vec::with_capacity(n_seqs + n_seqs * tokens_per_seq);
+    rows.extend_from_slice(resume_rows);
+    for token in 0..tokens_per_seq {
+        for base in checkpoint_bases {
+            let row = i32::try_from(token)
+                .ok()
+                .and_then(|token| base.checked_add(token))
+                .ok_or_else(|| {
+                    LlamaError::format("checkpoint row does not fit in i32")
+                })?;
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
 impl HybridDecodeBatchLayout {
     pub fn from_contiguous_positions(
         positions: &[i32],
@@ -3644,9 +3701,21 @@ struct BuiltDeltaNetRecurrentDecode {
     result_output: TensorId,
 }
 
-/// The state-cache rows every checkpoint of this batch writes: elements
-/// `1..=n_tokens` of the `[resume_row, w_0..w_n]` vector.
-/// Per-token checkpoint write rows: everything after the `n_seqs` resume rows.
+/// The state-cache rows every checkpoint of this batch writes: everything
+/// after the `n_seqs` resume rows of
+/// `[resume_0..resume_{s-1}] ++ [w_0..w_{t-1}]`.
+///
+/// **The tail is in CHECKPOINT-PLANE order, which is TOKEN-major**, not in the
+/// batch's own sequence-major token order: entry `t * n_seqs + s` is the cache
+/// row sequence `s`'s state after its token `t`. That is not a choice — it is
+/// the layout the fused kernel emits, whose per-token stride is
+/// `sv*sv*h*n_seqs` (`kernels.cu`, `state_ckpt_stride`), so all sequences'
+/// planes for one token sit together. Both cache writes (conv states into
+/// `r_cache`, delta-net states into `s_cache`) are shaped to match it, so one
+/// vector addresses both.
+///
+/// At one sequence the two orders are the same vector, which is why the
+/// shipped single-stream speculative path is unaffected by any of this.
 fn state_write_rows_all(
     ctx: &mut Context,
     input_state_rows: TensorId,
@@ -4611,33 +4680,66 @@ fn build_delta_net_recurrent_decode_from_hidden(
     // `conv_input` ending at that token, so every checkpoint is a view at a
     // different offset — no extra compute, only the row write.
     // Every conv-state checkpoint is the same `conv_prefix`-wide window of
-    // `conv_input` shifted by one token, so all of them are one strided view:
-    // dim2 walks the checkpoints with a stride of a single element. That keeps
-    // the checkpointed graph at ONE cont + ONE set_rows per layer instead of
-    // one pair per token.
+    // `conv_input` shifted by one token, so all of them are one strided view.
+    // That keeps the checkpointed graph at ONE cont + ONE set_rows per layer
+    // instead of one pair per token.
     let mut r_cache_updates = Vec::with_capacity(1);
     {
         let element = row_size(conv_input_tensor.desc.ty, 1)?;
-        let (rows, offset, checkpoint_stride) = if recurrent_checkpoints {
-            (n_tokens as i64, element, element)
-        } else {
-            (
+        let rows = if recurrent_checkpoints { n_tokens as i64 } else { n_seqs };
+        let conv_states_at = if !recurrent_checkpoints {
+            // One window per sequence: the last `conv_prefix` columns.
+            ctx.view_3d(
+                conv_input,
+                conv_prefix,
+                qkv_dim,
                 n_seqs,
-                row_size(conv_input_tensor.desc.ty, n_seq_tokens)?,
+                conv_input_tensor.nb[1],
                 conv_input_tensor.nb[2],
+                row_size(conv_input_tensor.desc.ty, n_seq_tokens)?,
             )
-        };
-        let conv_states_at = ctx
-            .view_3d(
+            .map_err(LlamaError::format)?
+        } else if n_seqs == 1 {
+            // Today's shipped speculative shape, kept EXACTLY: dim2 walks the
+            // checkpoints one element at a time. Held apart from the batched
+            // form below so the solo graph is unchanged by construction rather
+            // than by argument.
+            ctx.view_3d(
                 conv_input,
                 conv_prefix,
                 qkv_dim,
                 rows,
                 conv_input_tensor.nb[1],
-                checkpoint_stride,
-                offset,
+                element,
+                element,
             )
-            .map_err(LlamaError::format)?;
+            .map_err(LlamaError::format)?
+        } else {
+            // `conv_input` is `[conv_prefix + n_seq_tokens, qkv_dim, n_seqs]`,
+            // so a sliding window may only slide WITHIN one sequence. The
+            // single-stride 3-D view above cannot say that: past token
+            // `n_seq_tokens` it walks off the end of one sequence and into the
+            // next one's columns — inside the allocation, so nothing fires, and
+            // a lane's conv checkpoint is built partly from its neighbour's
+            // activations. Split the two walks into their own dimensions
+            // instead: dim2 picks the sequence, dim3 slides the window.
+            //
+            // Sequence before token deliberately: flattened, that yields
+            // `t * n_seqs + s` — checkpoint-plane order, the order
+            // `state_write_rows_all` documents and the `s_cache` planes use.
+            ctx.view_4d(
+                conv_input,
+                conv_prefix,
+                qkv_dim,
+                n_seqs,
+                n_seq_tokens,
+                conv_input_tensor.nb[1],
+                conv_input_tensor.nb[2],
+                element,
+                element,
+            )
+            .map_err(LlamaError::format)?
+        };
         let conv_states_rows = ctx
             .cont_2d(conv_states_at, r_width, rows)
             .map_err(LlamaError::format)?;
@@ -4864,13 +4966,20 @@ fn build_delta_net_recurrent_decode_from_hidden(
         ctx.set_tensor_name(new_state, format!("{prefix}.output_state"))
             .map_err(LlamaError::format)?;
         let checkpoint_updates = if recurrent_checkpoints {
-            // The n state planes are contiguous right after the outputs, so
-            // they are one `[s_width, n_tokens]` view and one `set_rows`.
+            // Every state plane is contiguous right after the outputs, so they
+            // are one `[s_width, n_tokens]` view and one `set_rows`.
+            //
+            // `n_tokens`, not `n_seq_tokens`: the kernel emits a plane per
+            // (token, SEQUENCE) pair, `sv*sv*h*n_seqs` floats apart, so the
+            // region holds all of them and its flat index is `t*n_seqs + s` —
+            // checkpoint-plane order, which is what `state_write_rows_all`
+            // documents its tail to be. At one sequence the two counts are the
+            // same number and this is today's view unchanged.
             let planes = ctx
                 .view_2d(
                     gated_delta,
                     s_width,
-                    n_seq_tokens,
+                    n_tokens_i64,
                     row_size(TensorType::F32, s_width)?,
                     row_size(TensorType::F32, value_hidden_size * n_seq_tokens * n_seqs)?,
                 )
@@ -9334,6 +9443,39 @@ mod tests {
             !message.contains("state rows"),
             "n_seqs=1 checkpointing must still size correctly, got {message}"
         );
+    }
+
+    #[test]
+    fn a_solo_checkpoint_vector_is_the_one_the_shipped_path_builds() {
+        // The single-stream speculative path builds `[resume, 0, 1, .., n-1]`
+        // by hand (`session.rs`, `run_verify_batch`). One sequence on slot 0
+        // has checkpoint base 0, so the shared builder must produce exactly
+        // that vector — the solo determinism gate is this equality.
+        let rows = checkpointed_state_rows(&[2], &[0], 4).expect("rows");
+        assert_eq!(rows, vec![2, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn checkpoint_rows_interleave_by_token_because_the_kernel_does() {
+        // Plane order, not token order. The fused kernel's per-token stride is
+        // `sv*sv*h*n_seqs`, so all sequences' planes for token `t` sit
+        // together and the flat plane index is `t*n_seqs + s`. A vector in the
+        // batch's own sequence-major token order would write lane 1's state
+        // into lane 0's rows for every token but the first — plausible text,
+        // wrong conversation.
+        let rows = checkpointed_state_rows(&[0, 8], &[0, 8], 3).expect("rows");
+        assert_eq!(rows, vec![0, 8, /* t0 */ 0, 8, /* t1 */ 1, 9, /* t2 */ 2, 10]);
+        assert_eq!(rows.len(), 2 + 2 * 3);
+    }
+
+    #[test]
+    fn a_checkpoint_vector_refuses_a_shape_it_cannot_mean() {
+        assert!(checkpointed_state_rows(&[], &[], 2).is_err());
+        assert!(
+            checkpointed_state_rows(&[0, 8], &[0], 2).is_err(),
+            "one base for two sequences must be refused"
+        );
+        assert!(checkpointed_state_rows(&[0], &[0], 0).is_err());
     }
 
     #[test]
