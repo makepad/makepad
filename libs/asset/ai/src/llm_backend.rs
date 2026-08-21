@@ -52,6 +52,208 @@ fn next_stream_snapshot(prev: &str, decoded: &str) -> Option<String> {
     (trimmed.len() > prev.len() && trimmed.starts_with(prev)).then(|| trimmed.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// KV prefix cache (pure bookkeeping; the worker owns the session)
+// ---------------------------------------------------------------------------
+
+/// Which conversation the resident KV belongs to.
+///
+/// There is no session id on the `/generate` wire, so the identity is derived
+/// from the prompt: a ChatML transcript for one conversation always opens with
+/// the same system turn and the same FIRST user turn, and every later turn of
+/// that conversation repeats them verbatim. Hashing the prompt through the end
+/// of the first user turn therefore groups the turns of one conversation and
+/// separates different ones.
+///
+/// It is a heuristic in exactly one direction: two genuinely different
+/// conversations that open identically hash the same. That can only mislabel a
+/// statistic — the reuse decision itself is still the literal text-prefix test,
+/// which is sound whatever this returns.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PrefixOwner {
+    kind: String,
+    opening: u64,
+}
+
+impl PrefixOwner {
+    fn new(kind: &str, prompt_text: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            opening: fnv1a(conversation_opening(prompt_text).as_bytes()),
+        }
+    }
+
+    fn short(&self) -> String {
+        format!("{}/{:04x}", self.kind, self.opening & 0xffff)
+    }
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+/// The prompt through the end of its first `user` turn — the part every turn
+/// of one conversation repeats. Falls back to the whole prompt when the
+/// transcript has no complete user turn yet (single-shot expander jobs).
+fn conversation_opening(prompt_text: &str) -> &str {
+    const USER_OPEN: &str = "<|im_start|>user\n";
+    const TURN_END: &str = "<|im_end|>";
+    let Some(user_at) = prompt_text.find(USER_OPEN) else {
+        return prompt_text;
+    };
+    let after = user_at + USER_OPEN.len();
+    match prompt_text[after..].find(TURN_END) {
+        Some(end) => &prompt_text[..after + end + TURN_END.len()],
+        None => prompt_text,
+    }
+}
+
+/// Why a job could not reuse the resident KV.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrefixOutcome {
+    /// The prompt extends the resident prefix: prefill only the delta.
+    Hit,
+    /// This conversation has been served before, and something else has taken
+    /// the KV since. The whole re-prefill is waste that a second resident
+    /// sequence would have avoided.
+    Interleaved,
+    /// First turn of this conversation (or a context-full restart). The
+    /// prefill is real work, not waste.
+    Cold,
+}
+
+/// The worker's KV prefix cache. **One entry, by construction** — the session
+/// holds exactly one KV cache and one recurrent state, so exactly one
+/// conversation's prefix can be resident.
+///
+/// N-way prefix caching is not reachable from here. Two conversations would
+/// need two resident sequences (`LlamaSessionConfig::max_sequences > 1` plus a
+/// slot table), and a partial rewind is not an escape hatch either: the 48
+/// GatedDeltaNet layers carry a recurrent state that is only defined at the
+/// position the session is standing on, so "rewind to the common prefix" has
+/// no state to rewind to. Running two `LlamaSession`s instead is worse — each
+/// owns its own device copy of the 16 GB arena. That is why this stayed a
+/// one-entry cache and why the continuous-batching lane subsumes it.
+///
+/// So what this type adds is not more cache: it is knowing, and saying, what
+/// the single entry costs. Every miss is classified and the interleave share
+/// is accumulated, which turns "two chats re-prefill each other" from a
+/// modelled ~2.6 s/turn into a measured number from production traffic.
+#[derive(Default)]
+pub(crate) struct PrefixCache {
+    /// Prompt + reply + suffix the resident KV corresponds to.
+    committed: String,
+    /// Whose it is. `None` when the KV holds nothing usable.
+    live: Option<PrefixOwner>,
+    /// Conversations served since the worker started, most recent first, so a
+    /// miss can be told apart from a cold start. Bounded: this is a classifier,
+    /// not a cache.
+    seen: std::collections::VecDeque<PrefixOwner>,
+    stats: PrefixStats,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub(crate) struct PrefixStats {
+    pub hits: u64,
+    pub cold: u64,
+    pub interleaved: u64,
+    /// Tokens re-prefilled purely because another conversation took the KV.
+    pub interleaved_tokens: u64,
+    pub interleaved_millis: u64,
+}
+
+impl PrefixCache {
+    /// How many conversations to remember for miss classification. Larger than
+    /// any plausible number of chats sharing one box, small enough to stay a
+    /// linear scan.
+    const SEEN_MAX: usize = 32;
+
+    /// Classify this job against the resident prefix, WITHOUT changing the
+    /// reuse rule: a hit is still "the new prompt literally extends the
+    /// committed text", which is exactly the condition under which the
+    /// resident KV is the prompt's own prefix.
+    pub(crate) fn classify(&self, kind: &str, prompt_text: &str) -> (PrefixOutcome, PrefixOwner) {
+        let owner = PrefixOwner::new(kind, prompt_text);
+        // A different ChatML family must never extend the previous prefix even
+        // if the bytes happen to line up: the systems differ, and a stale hit
+        // is the expand->chat contamination path.
+        let same_family = self.live.as_ref().is_some_and(|live| live.kind == kind);
+        if same_family && !self.committed.is_empty() && prompt_text.starts_with(&self.committed) {
+            return (PrefixOutcome::Hit, owner);
+        }
+        let outcome = if self.seen.contains(&owner) {
+            PrefixOutcome::Interleaved
+        } else {
+            PrefixOutcome::Cold
+        };
+        (outcome, owner)
+    }
+
+    /// Record what the job actually cost. `tokens`/`elapsed` are the re-prefill
+    /// the miss forced; on a hit they are the delta, which is real work.
+    pub(crate) fn record(
+        &mut self,
+        outcome: PrefixOutcome,
+        owner: &PrefixOwner,
+        tokens: usize,
+        elapsed: std::time::Duration,
+    ) {
+        match outcome {
+            PrefixOutcome::Hit => self.stats.hits += 1,
+            PrefixOutcome::Cold => self.stats.cold += 1,
+            PrefixOutcome::Interleaved => {
+                self.stats.interleaved += 1;
+                self.stats.interleaved_tokens += tokens as u64;
+                self.stats.interleaved_millis += elapsed.as_millis() as u64;
+            }
+        }
+        self.seen.retain(|seen| seen != owner);
+        self.seen.push_front(owner.clone());
+        self.seen.truncate(Self::SEEN_MAX);
+    }
+
+    /// The KV now holds nothing usable (reset, or a failed prefill).
+    pub(crate) fn invalidate(&mut self) {
+        self.committed.clear();
+        self.live = None;
+    }
+
+    /// The KV now corresponds exactly to `text`, for `owner`.
+    pub(crate) fn commit(&mut self, owner: &PrefixOwner, text: String) {
+        self.committed = text;
+        self.live = Some(owner.clone());
+    }
+
+    pub(crate) fn committed(&self) -> &str {
+        &self.committed
+    }
+
+    pub(crate) fn stats(&self) -> PrefixStats {
+        self.stats
+    }
+
+    /// One honest line about what the single-entry cache is costing. Empty
+    /// until an interleave has actually happened.
+    pub(crate) fn waste_report(&self) -> String {
+        let s = self.stats;
+        if s.interleaved == 0 {
+            return String::new();
+        }
+        format!(
+            "interleave waste so far: {} turns, {} tok, {:.1}s re-prefilled because another \
+             conversation held the only resident KV",
+            s.interleaved,
+            s.interleaved_tokens,
+            s.interleaved_millis as f64 / 1000.0,
+        )
+    }
+}
+
 fn parse_prefill_counts(stage: &str) -> Option<(f64, f64)> {
     // "prefill 32/256 tok" or "kv reuse 8/8 tok"
     let mut nums = stage
@@ -645,18 +847,9 @@ mod llama_worker {
                             return;
                         }
                     };
-                    let mut committed = String::new();
-                    let mut last_kind = String::new();
+                    let mut prefix = super::PrefixCache::default();
                     while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
-                        if job.kind != last_kind {
-                            // Different ChatML family (expand vs chat, or a
-                            // different expander domain): never extend the
-                            // previous prefix, always reprefill from reset.
-                            committed.clear();
-                            last_kind = job.kind.clone();
-                        }
-                        let result =
-                            run_expand(&mut session, &mut committed, &job, &cancel, &events);
+                        let result = run_expand(&mut session, &mut prefix, &job, &cancel, &events);
                         let _ = events.send(WorkerEvent::Done(result));
                     }
                     // Sender dropped -> backend dropped: session unloads here.
@@ -705,11 +898,12 @@ mod llama_worker {
 
     fn run_expand(
         session: &mut LlamaSession,
-        committed: &mut String,
+        prefix: &mut super::PrefixCache,
         job: &ExpandJob,
         cancel: &CancelToken,
         events: &mpsc::Sender<WorkerEvent>,
     ) -> Result<String, String> {
+        use super::PrefixOutcome;
         let cancelled = || "cancelled".to_string();
         // Chat turns send a prompt that extends the previous prompt+reply.
         // Reuse the live KV (weights already resident) and prefill only the
@@ -728,23 +922,36 @@ mod llama_worker {
             }
             Ok::<Vec<i32>, String>(tokens)
         };
-        let reuse = !committed.is_empty() && job.prompt_text.starts_with(committed.as_str());
+        let (outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
+        let committed_len = prefix.committed().len();
         eprintln!(
-            "[llm-worker] job start: reuse={reuse} committed={}B prompt={}B max_tokens={} temp={} suffix={:?}",
-            committed.len(),
+            "[llm-worker] job start: session={} prefix={outcome:?} committed={committed_len}B \
+             prompt={}B max_tokens={} temp={} suffix={:?}",
+            owner.short(),
             job.prompt_text.len(),
             job.max_tokens,
             job.temperature,
             job.commit_suffix,
         );
-        if reuse {
-            let delta = &job.prompt_text[committed.len()..];
+        // Everything below charges its prefill to `outcome`: on a hit only the
+        // delta is prefilled (real work), on an interleaved miss the entire
+        // history is re-prefilled purely because another conversation took the
+        // one resident KV (waste).
+        let started = std::time::Instant::now();
+        let mut prefilled = 0usize;
+        // A context-full restart is a cold prefill however we got here: the
+        // history no longer fits, so no slot count would have saved it.
+        let mut outcome = outcome;
+        if outcome == PrefixOutcome::Hit {
+            let delta = job.prompt_text[committed_len..].to_string();
             if !delta.is_empty() {
-                let extra = tokenize_prompt(session, delta, false)?;
+                let extra = tokenize_prompt(session, &delta, false)?;
                 if session.remaining_context() < extra.len() + DECODE_RESERVE {
                     session.reset().map_err(|e| format!("reset: {e:?}"))?;
-                    committed.clear();
+                    prefix.invalidate();
+                    outcome = PrefixOutcome::Cold;
                     let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
+                    prefilled = tokens.len();
                     let _ = events.send(WorkerEvent::Stage(format!(
                         "prefill {} tok (context full)",
                         tokens.len()
@@ -757,6 +964,7 @@ mod llama_worker {
                         })
                         .map_err(|e| format!("prefill: {e:?}"))?;
                 } else {
+                    prefilled = extra.len();
                     session
                         .append_tokens_with_progress(&extra, &mut |done, total| {
                             let _ = events.send(WorkerEvent::Stage(format!(
@@ -770,13 +978,32 @@ mod llama_worker {
             }
         } else {
             session.reset().map_err(|e| format!("reset: {e:?}"))?;
-            committed.clear();
+            prefix.invalidate();
             let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
+            prefilled = tokens.len();
+            // Say WHY in the stage string: a user watching a turn take three
+            // seconds should see that it is a session switch, not the model.
+            let why = if outcome == PrefixOutcome::Interleaved {
+                " (session switch)"
+            } else {
+                ""
+            };
             session
                 .append_tokens_with_progress(&tokens, &mut |done, total| {
-                    let _ = events.send(WorkerEvent::Stage(format!("prefill {done}/{total} tok")));
+                    let _ = events
+                        .send(WorkerEvent::Stage(format!("prefill {done}/{total} tok{why}")));
                 })
                 .map_err(|e| format!("prefill: {e:?}"))?;
+        }
+        prefix.record(outcome, &owner, prefilled, started.elapsed());
+        if outcome == PrefixOutcome::Interleaved {
+            eprintln!(
+                "[llm-worker] prefix MISS (interleave): {} re-prefilled {prefilled} tok in \
+                 {:.2}s because another conversation held the resident KV; {}",
+                owner.short(),
+                started.elapsed().as_secs_f64(),
+                prefix.waste_report(),
+            );
         }
         if cancel.is_cancelled() {
             return Err(cancelled());
@@ -849,17 +1076,25 @@ mod llama_worker {
             .vocab()
             .decode_tokens(&token_ids)
             .map_err(|e| format!("detokenize: {e:?}"))?;
+        let stats = prefix.stats();
         eprintln!(
-            "[llm-worker] job end: decoded={} tok first={:?} eos={:?} session_tokens={}",
+            "[llm-worker] job end: decoded={} tok first={:?} eos={:?} session_tokens={} \
+             prefix={}hit/{}cold/{}interleave",
             token_ids.len(),
             token_ids.first(),
             session.vocab().eos_token_id(),
             session.token_count(),
+            stats.hits,
+            stats.cold,
+            stats.interleaved,
         );
-        committed.clear();
+        let mut committed = String::with_capacity(
+            job.prompt_text.len() + text.len() + job.commit_suffix.len(),
+        );
         committed.push_str(&job.prompt_text);
         committed.push_str(&text);
         committed.push_str(&job.commit_suffix);
+        prefix.commit(&owner, committed);
         Ok(text)
     }
 
@@ -1279,5 +1514,121 @@ mod tests {
             streamed.is_empty(),
             "stub path streams nothing; only the llama worker emits snapshots"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // KV prefix cache
+    // -----------------------------------------------------------------------
+
+    fn chat_turns(system: &str, turns: &[(&str, &str)]) -> Vec<String> {
+        // Prefix-stable ChatML, exactly as `assemble_chat_prompt` builds it:
+        // prompt_n + reply + CHAT_COMMIT_SUFFIX is a prefix of prompt_{n+1}.
+        let mut out = Vec::new();
+        let mut base = format!("<|im_start|>system\n{system}<|im_end|>\n");
+        for (user, reply) in turns {
+            base.push_str(&format!("<|im_start|>user\n{user}<|im_end|>\n"));
+            out.push(format!("{base}<|im_start|>assistant\n"));
+            base.push_str(&format!("<|im_start|>assistant\n{reply}<|im_end|>\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn a_conversation_keeps_one_identity_across_its_turns() {
+        let turns = chat_turns("SYS", &[("hello", "hi"), ("more", "sure"), ("again", "ok")]);
+        let first = PrefixOwner::new("chat", &turns[0]);
+        for turn in &turns[1..] {
+            assert_eq!(PrefixOwner::new("chat", turn), first, "{turn:?}");
+        }
+        // A different opening user turn is a different conversation...
+        let other = chat_turns("SYS", &[("goodbye", "bye")]);
+        assert_ne!(PrefixOwner::new("chat", &other[0]), first);
+        // ...and so is the same text under a different ChatML family.
+        assert_ne!(PrefixOwner::new("expand:image", &turns[0]), first);
+    }
+
+    /// Turns of ONE conversation hit; that is the case the cache was built for
+    /// and it must not regress.
+    #[test]
+    fn consecutive_turns_of_one_conversation_reuse_the_kv() {
+        let turns = chat_turns("SYS", &[("hello", "hi"), ("more", "sure")]);
+        let mut cache = PrefixCache::default();
+
+        let (outcome, owner) = cache.classify("chat", &turns[0]);
+        assert_eq!(outcome, PrefixOutcome::Cold);
+        cache.record(outcome, &owner, 40, std::time::Duration::ZERO);
+        cache.commit(&owner, format!("{}hi<|im_end|>\n", turns[0]));
+
+        let (outcome, _) = cache.classify("chat", &turns[1]);
+        assert_eq!(outcome, PrefixOutcome::Hit);
+        assert_eq!(cache.stats().interleaved, 0);
+    }
+
+    /// The §2 finding, as a test: two chats alternating on one worker miss on
+    /// every alternation, and the miss is attributed to the interleave rather
+    /// than counted as an ordinary cold prefill.
+    #[test]
+    fn two_interleaved_conversations_miss_on_every_alternation() {
+        let a = chat_turns("SYS", &[("a1", "ra1"), ("a2", "ra2"), ("a3", "ra3")]);
+        let b = chat_turns("SYS", &[("b1", "rb1"), ("b2", "rb2"), ("b3", "rb3")]);
+        let mut cache = PrefixCache::default();
+
+        let mut serve = |cache: &mut PrefixCache, prompt: &str, reply: &str| {
+            let (outcome, owner) = cache.classify("chat", prompt);
+            cache.record(outcome, &owner, 4000, std::time::Duration::from_millis(1300));
+            cache.commit(&owner, format!("{prompt}{reply}<|im_end|>\n"));
+            outcome
+        };
+
+        // a1, b1: both cold — nothing was evicted, these are first turns.
+        assert_eq!(serve(&mut cache, &a[0], "ra1"), PrefixOutcome::Cold);
+        assert_eq!(serve(&mut cache, &b[0], "rb1"), PrefixOutcome::Cold);
+        // From here every turn re-prefills a history that WAS resident.
+        for (prompt, reply) in [
+            (&a[1], "ra2"),
+            (&b[1], "rb2"),
+            (&a[2], "ra3"),
+            (&b[2], "rb3"),
+        ] {
+            assert_eq!(serve(&mut cache, prompt, reply), PrefixOutcome::Interleaved);
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0, "alternation never hits");
+        assert_eq!(stats.cold, 2);
+        assert_eq!(stats.interleaved, 4);
+        assert_eq!(stats.interleaved_tokens, 16_000);
+        assert_eq!(stats.interleaved_millis, 5_200);
+        assert!(cache.waste_report().contains("4 turns"), "{}", cache.waste_report());
+
+        // The SAME six turns served one conversation at a time: 2 cold
+        // prefills and 4 hits. Identical work, different order.
+        let mut serial = PrefixCache::default();
+        for (turns, replies) in [(&a, ["ra1", "ra2", "ra3"]), (&b, ["rb1", "rb2", "rb3"])] {
+            for (prompt, reply) in turns.iter().zip(replies) {
+                assert_eq!(serve(&mut serial, prompt, reply) == PrefixOutcome::Hit, prompt != &turns[0]);
+            }
+        }
+        assert_eq!(serial.stats().hits, 4);
+        assert_eq!(serial.stats().interleaved, 0);
+        assert_eq!(serial.stats().cold, 2);
+    }
+
+    /// A different ChatML family must never extend the resident prefix, even
+    /// when the bytes happen to line up (the expand->chat contamination path).
+    #[test]
+    fn a_different_chatml_family_never_extends_the_prefix() {
+        let mut cache = PrefixCache::default();
+        let owner = PrefixOwner::new("expand:image", "<|im_start|>user\nx<|im_end|>\n");
+        cache.commit(&owner, "<|im_start|>user\nx<|im_end|>\n".to_string());
+        let (outcome, _) = cache.classify("chat", "<|im_start|>user\nx<|im_end|>\nmore");
+        assert_eq!(outcome, PrefixOutcome::Cold);
+    }
+
+    #[test]
+    fn a_prompt_without_a_complete_user_turn_still_has_an_identity() {
+        // Single-shot expander prompts may not carry a closed user turn.
+        let owner = PrefixOwner::new("expand:mesh", "Intent: a rusty cannon");
+        assert_eq!(owner, PrefixOwner::new("expand:mesh", "Intent: a rusty cannon"));
+        assert_ne!(owner, PrefixOwner::new("expand:mesh", "Intent: a shiny cannon"));
     }
 }
