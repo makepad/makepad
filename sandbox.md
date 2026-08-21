@@ -258,6 +258,69 @@ untouched on additive edits), tokens per edit, wallclock. Sessions are
 judged, not turns — a model that creates well but trashes the world on
 turn two fails the requirement.
 
+## 4.6 Worlds are store assets with revision chains (design, 2026-08-21)
+
+The user's design session closed the loop the thin-client law always
+implied: the current `local/sandbox/current/game.splash` file as the
+source of truth is an app-owned-content violation waiting to be felt —
+and it was felt the moment "New game" was requested ("so I don't mess
+with the maps you've been iterating on").
+
+1. **A game in the games list is a TEMPLATE asset in the store.** Play
+   INSTANTIATES from it; playing never mutates the template.
+2. **The player's modifications are a REVISION CHAIN on a store asset.**
+   The store already has the machinery (head revisions, `arev_` ids,
+   history, trim-history maintenance). Playing a published game forks a
+   per-player game asset whose provenance parent is the template; every
+   chat edit advances its head.
+3. **UNDO = step the head back one revision** (a store-side op). The
+   §4.5 addon architecture composes perfectly: an edit IS a small chunk,
+   so revisions are cheap and their diffs readable — an edit's revision
+   is essentially its addon.
+4. **The local game.splash becomes a CACHE of the head revision**, not
+   the truth (digest-keyed caches are legal; durable content is not).
+5. **History depth is a store policy knob per kind** — the trim-history
+   maintenance ("keep newest N") must not eat game lineages; game-kind
+   assets likely want deeper or user-controlled history. Contract-level:
+   coordinate before schema changes.
+
+**The container structure** (user: "a kinda container structure for a
+map — its spawns, its code 'game logic' and so on"): the game asset is
+a MULTI-FILE container using the store's declared file roles (the
+stems/lyrics side-channels proved the pattern — append-only role tags,
+no schema bump, all-or-none groups, validated at publish+admission):
+
+- role **MAP/BASE** — the base level source (terrain, structures,
+  roads; procgen output lands here with its seed+params recorded);
+- role **ADDONS** — the ordered addon chunks (spawns, bulk adds; the
+  user's ambulance lives here);
+- role **LOGIC** — game-logic source (objectives, handlers, HUD) — what
+  logic-edits rewrite;
+- role **KNOBS** — declared tunables + current values (the tune verb's
+  target);
+- role **META** — already exists (title/description/thumbnail).
+
+One asset revision captures the whole container consistently (one head
+= one coherent world state); an edit touches ONE part but mints a
+container revision — cheap diffs, readable history, undo = head
+rollback. The flat game.splash becomes the ASSEMBLED form
+(base → knobs → addons → logic); eval consumes the assembly, and
+get_source can serve per-part (a logic edit fetches only LOGIC — the
+model reads less). Each §4.5 verb owns a part by construction.
+**Persistence invariant** (user: spawned objects are serialized level
+state, not session ephemera): every mutating verb lands in the
+persisted source — pinned by the harness's
+`every_mutating_verb_survives_a_reload` (kill + reload from head ⇒
+spawn/addon/tune/swap/remove all survive). LEVEL state (placements,
+addons, knobs, player body) is the revision chain; RUNTIME state
+(score, mid-walk positions) stays save_data territory.
+
+Sequencing: the UI half (a "New game" slot + per-game current state,
+switching without loss) lands first on local slots; the sandbox-side
+part split (parts on disk, assembled eval) next; the store-facing
+half (roles, per-edit revisions, undo) after contract review with the
+coordinator.
+
 ## 5. Phase 2 — delegation (later)
 
 The chat LLM gains a toolcall to hand Part B + the task to a heavyweight
