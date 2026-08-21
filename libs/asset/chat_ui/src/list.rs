@@ -281,9 +281,16 @@ impl Widget for AssetChatList {
                     // a stalled reply). Tokens replace the row instantly.
                     if data.streaming_text.is_empty() {
                         let widget = list.item(cx, item_id, id!(Thinking));
-                        widget
-                            .label(cx, ids!(phase_text))
-                            .set_text(cx, &data.activity);
+                        // Before the first serving facts arrive there is no
+                        // phase to name and no reasoning yet — but a bubble
+                        // with nothing in it reads as broken, not as
+                        // waiting. It always says what it is doing.
+                        let phase = if data.activity.is_empty() {
+                            "thinking…"
+                        } else {
+                            data.activity.as_str()
+                        };
+                        widget.label(cx, ids!(phase_text)).set_text(cx, phase);
                         // Tail of the live reasoning: the last few clauses,
                         // single-spaced, so the porthole reads as thought
                         // scrolling by rather than a growing log.
