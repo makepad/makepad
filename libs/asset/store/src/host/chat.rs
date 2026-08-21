@@ -225,6 +225,15 @@ struct Inner {
     closed: bool,
 }
 
+impl Inner {
+    /// Drop one create-in-flight reservation.
+    fn release(&mut self, owner: &PrincipalId) {
+        if let Some(i) = self.creating.iter().position(|o| o == owner) {
+            self.creating.remove(i);
+        }
+    }
+}
+
 struct Registry {
     endpoints: ApiEndpoints,
     cfg: ChatConfig,
@@ -266,13 +275,6 @@ impl Registry {
         }
         inner.creating.push(owner);
         Ok(())
-    }
-
-    fn release(&self, owner: &PrincipalId) {
-        let mut inner = self.inner();
-        if let Some(i) = inner.creating.iter().position(|o| o == owner) {
-            inner.creating.remove(i);
-        }
     }
 
     /// Join every worker that already finished; called from the supervisor.
@@ -384,9 +386,9 @@ impl ChatHandle {
         profile: ClientProfile,
     ) -> Result<SessionView, ChatFail> {
         self.reg.reserve(owner)?;
-        let outcome = self.spawn_session(owner, namespace, token, provider, profile);
-        self.reg.release(&owner);
-        outcome
+        // Every exit of spawn_session releases the reservation, together
+        // with whatever it does to the session map.
+        self.spawn_session(owner, namespace, token, provider, profile)
     }
 
     fn spawn_session(
@@ -417,7 +419,11 @@ impl ChatHandle {
         match ready_rx.recv_timeout(CALL_TIMEOUT) {
             Ok(Ok(shared)) => {
                 let view = shared.view();
+                // Land the session and drop the reservation in ONE lock
+                // acquisition: a gap between them would count this owner
+                // twice and could refuse a concurrent create that fits.
                 let mut inner = self.reg.inner();
+                inner.release(&owner);
                 if inner.closed {
                     drop(inner);
                     let _ = shared.tx.send(SessionCmd::Shutdown);
@@ -428,13 +434,16 @@ impl ChatHandle {
                 Ok(view)
             }
             Ok(Err(fail)) => {
+                self.reg.inner().release(&owner);
                 let _ = join.join();
                 Err(fail)
             }
             Err(_) => {
                 // The worker is wedged in its own connect; let the
                 // supervisor reap it rather than blocking this request.
-                self.reg.inner().graveyard.push(join);
+                let mut inner = self.reg.inner();
+                inner.release(&owner);
+                inner.graveyard.push(join);
                 Err(ChatFail::Down)
             }
         }

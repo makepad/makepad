@@ -235,6 +235,7 @@ fn interleaved_sessions_never_cross_streams() {
                 assert_eq!(call_id, "tc_1_1", "the ids are shared on purpose");
                 // Hold the park a moment so all sessions are parked at once.
                 std::thread::sleep(Duration::from_millis(150));
+                let at = Instant::now();
                 let r = c.post_json(
                     &format!("/v1/chat/sessions/{session}/tool-result"),
                     &jobj(vec![
@@ -249,6 +250,13 @@ fn interleaved_sessions_never_cross_streams() {
                     ]),
                 );
                 assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+                // The route answers from the session's own parked worker,
+                // never from behind another session's provider round.
+                assert!(
+                    at.elapsed() < Duration::from_secs(1),
+                    "tool-result waited {:?} with {SESSIONS} sessions parked",
+                    at.elapsed()
+                );
                 wait_done(&mut c, &session, cursor, Duration::from_secs(20));
                 let events = all_events(&mut c, &session);
                 (session, tag, events)
