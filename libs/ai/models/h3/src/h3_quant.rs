@@ -91,6 +91,12 @@ struct GgufMappedTensor {
     ggml_type: u32,
     byte_offset: u64,
     byte_len: u64,
+    /// The source stores this tensor's two row halves in the OTHER order:
+    /// a GATED FFN projection written `[gate | value]` where our
+    /// `gpu_swiglu_value_gate` reads `[value | gate]`. Read the halves
+    /// exchanged. Exact for K-quants: rows quantize independently, and the
+    /// half boundary is a whole number of rows, so it is a block boundary.
+    swap_halves: bool,
 }
 
 struct GgufImp {
@@ -422,6 +428,9 @@ impl H3GgufWeights {
         file.read_exact(&mut bytes).map_err(|err| {
             model_error(format!("h3 GGUF read '{canonical}' ({len} bytes): {err}"))
         })?;
+        if mapped.swap_halves {
+            return swap_row_halves(bytes, canonical);
+        }
         Ok(bytes)
     }
 }
@@ -469,6 +478,7 @@ fn insert_direct(
     canonical: String,
     source: &GgufTensorInfo,
     dims_override: Option<Vec<usize>>,
+    swap_halves: bool,
 ) -> Result<()> {
     let dims = match dims_override {
         Some(dims) => dims,
@@ -480,6 +490,7 @@ fn insert_direct(
         ggml_type: source.tensor_type.ggml_type(),
         byte_offset: 0,
         byte_len: source.size_bytes,
+        swap_halves,
     };
     if tensors.insert(canonical.clone(), mapped).is_some() {
         return Err(model_error(format!(
@@ -536,6 +547,7 @@ fn insert_qkv_split(
             ggml_type: ty,
             byte_offset: byte_offset as u64,
             byte_len: byte_len as u64,
+            swap_halves: false,
         };
         if tensors.insert(canonical.clone(), mapped).is_some()
             || linears
@@ -681,7 +693,7 @@ fn map_dit_gguf(
                 continue;
             }
             let canonical = map_dit_tail(&prefix, tail);
-            insert_direct(tensors, canonical.clone(), source, None)?;
+            insert_direct(tensors, canonical.clone(), source, None, gated_ffn_proj(tail))?;
             if is_linear_name(&canonical, &usize_dims(source)?) {
                 insert_linear_for_mapped(tensors, linears, &canonical)?;
             }
@@ -691,12 +703,40 @@ fn map_dit_gguf(
             // `rope.inv_freq` is generated analytically by our pipeline.
             continue;
         };
-        insert_direct(tensors, canonical.clone(), source, None)?;
+        insert_direct(tensors, canonical.clone(), source, None, false)?;
         if is_linear_name(&canonical, &usize_dims(source)?) {
             insert_linear_for_mapped(tensors, linears, &canonical)?;
         }
     }
     Ok(())
+}
+
+/// Exchange a payload's two contiguous halves — see `swap_halves`.
+fn swap_row_halves(bytes: Vec<u8>, canonical: &str) -> Result<Vec<u8>> {
+    let len = bytes.len();
+    if len % 2 != 0 {
+        return Err(model_error(format!(
+            "h3 GGUF '{canonical}' has {len} bytes, which is not two equal halves"
+        )));
+    }
+    let mut swapped = Vec::with_capacity(len);
+    swapped.extend_from_slice(&bytes[len / 2..]);
+    swapped.extend_from_slice(&bytes[..len / 2]);
+    Ok(swapped)
+}
+
+/// True for the DiT block's GATED FFN input projection.
+///
+/// `mlp.fc1` produces `2 * ffn_dim` rows and the reference consumes them as
+/// `silu(chunk0) * chunk1` — i.e. `[gate | value]` (sd.cpp minimax_h3.hpp
+/// `MLP::forward`). Our `gpu_swiglu_value_gate` reads `[value | gate]`,
+/// which is the order the diffusers checkpoint the bf16 tier loads already
+/// stores. So the sd.cpp-convention checkpoints need their halves exchanged
+/// on the way in. This is the SAME convention gap as the video VAE's
+/// `ff.w1` (see `video_vae_repack_aliases`), and it is invisible to every
+/// name and shape check — it only shows up as a wrong picture.
+fn gated_ffn_proj(tail: &str) -> bool {
+    tail == "mlp.fc1.weight" || tail == "mlp.fc1.bias"
 }
 
 fn map_te_gguf(
@@ -721,7 +761,7 @@ fn map_te_gguf(
         } else {
             None
         };
-        insert_direct(tensors, canonical.clone(), source, dims_override)?;
+        insert_direct(tensors, canonical.clone(), source, dims_override, false)?;
         let dims = &tensors[&canonical].dims;
         if is_linear_name(&canonical, dims) {
             insert_linear_for_mapped(tensors, linears, &canonical)?;
@@ -1708,6 +1748,8 @@ fn nv_validation_map(
                     ggml_type,
                     byte_offset: 0,
                     byte_len: tensor.disk_bytes,
+                    // this view describes already-canonical tensors
+                    swap_halves: false,
                 },
             )
         })
@@ -2269,10 +2311,174 @@ fn nv_mapped_kn(mapped: &NvMappedTensor, name: &str) -> Result<(usize, usize)> {
     }
 }
 
-/// Canonical spelling for the fp16 video-VAE repack's LDM-style encoder
-/// names. Decoder/quant-conv names already match and return `None`.
-pub fn video_vae_repack_canonical_name(file_name: &str) -> Option<String> {
-    let rest = file_name.strip_prefix("encoder.down.")?;
+// ---------------------------------------------------------------------------
+// Video-VAE repack alias map.
+//
+// The tier-pinned `minimax_h3_video_vae_fp16.safetensors` (unsloth) is the
+// ORIGINAL MiniMax/LDM checkpoint in f16, not a diffusers conversion — same
+// 562 tensors, same architecture, different spelling on BOTH sides of the
+// model. Our loader is written against the diffusers module tree (that is
+// what the full 96GB tier ships), so the repack's names are aliased to it at
+// open time. Aliasing is per KEY, never a whole-file convention flag: none
+// of the repack spellings collide with a diffusers spelling, so a checkpoint
+// in either convention — or a future one mixing them — loads unchanged.
+// ---------------------------------------------------------------------------
+
+/// How a canonical tensor's rows are laid out inside the file tensor that
+/// carries them. Both variants exist because the repack packs two different
+/// things two different ways, and BOTH are invisible to shape checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum H3RowMap {
+    /// This canonical tensor is `part` of `parts` FUSED along the file
+    /// tensor's leading axis, interleaved in runs of `run` rows: canonical
+    /// row `i` is file row `(i / run) * run * parts + part * run + i % run`.
+    Select { part: usize, parts: usize, run: usize },
+    /// The whole tensor, with its two contiguous halves EXCHANGED.
+    SwapHalves,
+}
+
+impl H3RowMap {
+    /// How many canonical tensors share the file tensor — the factor its
+    /// leading axis shrinks by.
+    pub fn parts(&self) -> u64 {
+        match self {
+            Self::Select { parts, .. } => *parts as u64,
+            Self::SwapHalves => 1,
+        }
+    }
+
+    /// Rows per contiguous run, given the canonical row count.
+    pub fn run_len(&self, rows: u64) -> u64 {
+        match self {
+            Self::Select { run, .. } => *run as u64,
+            Self::SwapHalves => rows / 2,
+        }
+    }
+
+    /// File row holding canonical row `row` of a `rows`-row tensor.
+    pub fn file_row(&self, row: u64, rows: u64) -> u64 {
+        match self {
+            Self::Select { part, parts, run } => {
+                let run = *run as u64;
+                (row / run) * run * *parts as u64 + *part as u64 * run + row % run
+            }
+            Self::SwapHalves => (row + rows / 2) % rows,
+        }
+    }
+
+    /// Canonical row counts this map can carve out of `file_rows`.
+    pub fn validate(&self, file_rows: u64) -> std::result::Result<u64, String> {
+        match self {
+            Self::Select { parts, run, .. } => {
+                let group = *parts as u64 * *run as u64;
+                if group == 0 || file_rows % group != 0 {
+                    return Err(format!(
+                        "{file_rows} rows is not a multiple of {parts} parts x {run}-row runs"
+                    ));
+                }
+                Ok(file_rows / *parts as u64)
+            }
+            Self::SwapHalves => {
+                if file_rows % 2 != 0 {
+                    return Err(format!("{file_rows} rows cannot be split into two halves"));
+                }
+                Ok(file_rows)
+            }
+        }
+    }
+}
+
+/// One canonical name a repack tensor supplies, and which of its rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct H3VaeAlias {
+    pub canonical: String,
+    /// `None` = the whole tensor, in order, under a different name.
+    pub rows: Option<H3RowMap>,
+}
+
+fn alias(canonical: String) -> H3VaeAlias {
+    H3VaeAlias { canonical, rows: None }
+}
+
+/// Canonical spellings for one video-VAE repack tensor name. Empty when the
+/// name is already canonical (the diffusers-convention tiers hit this for
+/// every tensor, so they load byte-identically to before this map existed).
+///
+/// The one 1-to-MANY entry is the decoder's fused `attn.to_qkv`, which
+/// supplies `to_q`/`to_k`/`to_v`. Its rows are HEAD-MAJOR INTERLEAVED, not
+/// three contiguous blocks: the reference reshapes the 6144 outputs to
+/// `(num_head, 3 * head_dim)` before chunking (sd.cpp minimax_h3_vae.hpp
+/// DecoderAttention — note its DiT twin chunks the flat axis instead, which
+/// is why `insert_qkv_split` above is a plain 3-way cut and this is not).
+/// So fused row `head * 192 + part * 64 + chan` is canonical row
+/// `head * 64 + chan`. VERIFIED numerically against the 96GB tier's
+/// diffusers checkpoint: per-row mean|w| of block 0 matches to 6 significant
+/// figures for `to_q` at fused row 0, `to_k` at 64, `to_v` at 128 — and
+/// matches nothing at fused row 2048, where a contiguous cut would put
+/// `to_k`.
+pub fn video_vae_repack_aliases(file_name: &str) -> Vec<H3VaeAlias> {
+    if let Some(rest) = file_name.strip_prefix("encoder.down.") {
+        return encoder_down_alias(rest).into_iter().collect();
+    }
+    if let Some(suffix) = file_name.strip_prefix("decoder.x_embedder.") {
+        return vec![alias(format!("decoder.proj_in.{suffix}"))];
+    }
+    let Some(rest) = file_name.strip_prefix("decoder.transformer_blocks.") else {
+        // conv_in/conv_out/norm_out/register_tokens/proj_out/quant_conv/
+        // post_quant_conv/latents_* are spelled the same in both.
+        return Vec::new();
+    };
+    let Some((layer, tail)) = rest.split_once('.') else {
+        return Vec::new();
+    };
+    if layer.parse::<usize>().is_err() {
+        return Vec::new();
+    }
+    let prefix = format!("decoder.transformer_blocks.{layer}");
+    // `attn.to_out.weight`, NOT diffusers' `attn.to_out.0.weight`.
+    for field in ["weight", "bias"] {
+        if tail == format!("attn.to_out.{field}") {
+            return vec![alias(format!("{prefix}.attn.to_out.0.{field}"))];
+        }
+        if tail == format!("ff.w1.{field}") {
+            // SwiGLU halves are ordered the OTHER WAY round. LDM computes
+            // `silu(chunk0) * chunk1`, so `w1` is [gate | value]; diffusers'
+            // GEGLU-shaped `net.0.proj` is [value | gate], which is what
+            // `gpu_swiglu_value_gate` consumes. The conversion physically
+            // exchanged the halves, so the alias must too. VERIFIED: the
+            // repack's `w1` rows 0.. match the full tier's `net.0.proj` rows
+            // 8192.. (and vice versa) to 6 significant figures.
+            return vec![H3VaeAlias {
+                canonical: format!("{prefix}.ff.net.0.proj.{field}"),
+                rows: Some(H3RowMap::SwapHalves),
+            }];
+        }
+        if tail == format!("ff.w2.{field}") {
+            return vec![alias(format!("{prefix}.ff.net.2.{field}"))];
+        }
+        if tail == format!("attn.to_qkv.{field}") {
+            return ["to_q", "to_k", "to_v"]
+                .into_iter()
+                .enumerate()
+                .map(|(part, name)| H3VaeAlias {
+                    canonical: format!("{prefix}.attn.{name}.{field}"),
+                    rows: Some(H3RowMap::Select {
+                        part,
+                        parts: 3,
+                        run: crate::h3_vae::H3_VAE_HEAD_DIM,
+                    }),
+                })
+                .collect();
+        }
+    }
+    // norm1/norm2/scale1/scale2 need no alias.
+    Vec::new()
+}
+
+/// `encoder.down.{i}.block.{j}.X` -> `encoder.down_blocks.{i}.resnets.{j}.X`
+/// (`nin_shortcut` -> `conv_shortcut`), `encoder.down.{i}.downsample.conv.X`
+/// -> `encoder.down_blocks.{i}.downsamplers.0.conv.X`.
+fn encoder_down_alias(rest: &str) -> Option<H3VaeAlias> {
     let (level, rest) = rest.split_once('.')?;
     if level.parse::<usize>().is_err() {
         return None;
@@ -2286,12 +2492,14 @@ pub fn video_vae_repack_canonical_name(file_name: &str) -> Option<String> {
             .strip_prefix("nin_shortcut.")
             .map(|suffix| format!("conv_shortcut.{suffix}"))
             .unwrap_or_else(|| tail.to_string());
-        return Some(format!(
+        return Some(alias(format!(
             "encoder.down_blocks.{level}.resnets.{block}.{tail}"
-        ));
+        )));
     }
     rest.strip_prefix("downsample.conv.").map(|suffix| {
-        format!("encoder.down_blocks.{level}.downsamplers.0.conv.{suffix}")
+        alias(format!(
+            "encoder.down_blocks.{level}.downsamplers.0.conv.{suffix}"
+        ))
     })
 }
 
@@ -2341,6 +2549,29 @@ mod tests {
             map_dit_tail("transformer_blocks.7", "mlp.fc1.weight"),
             "transformer_blocks.7.ff.net.0.proj.weight"
         );
+        // ...and fc1 is the GATED projection, so its halves are exchanged on
+        // the way in. The sd.cpp-convention checkpoints store [gate | value]
+        // (`silu(chunk0) * chunk1`); gpu_swiglu_value_gate reads
+        // [value | gate]. Without the swap the whole DiT silently computes
+        // `gate * silu(value)` and the tier renders noise — the only symptom
+        // is a wrong picture, so pin it here.
+        assert!(gated_ffn_proj("mlp.fc1.weight"));
+        assert!(gated_ffn_proj("mlp.fc1.bias"));
+        for tail in [
+            "mlp.fc2.weight",
+            "attn.qkv_proj.weight",
+            "attn.out_proj.weight",
+            "norm1.weight",
+        ] {
+            assert!(!gated_ffn_proj(tail), "{tail} is not the gated projection");
+        }
+        // The exchange itself, on a payload whose halves are distinguishable.
+        let bytes: Vec<u8> = (0u8..8).collect();
+        assert_eq!(
+            swap_row_halves(bytes, "fc1").unwrap(),
+            vec![4, 5, 6, 7, 0, 1, 2, 3]
+        );
+        assert!(swap_row_halves(vec![1, 2, 3], "fc1").is_err());
         assert_eq!(
             top_level_dit_name("final_layer.adaln_proj.linear.weight").as_deref(),
             Some("norm_out.linear.weight")
@@ -2377,18 +2608,100 @@ mod tests {
     }
 
     #[test]
-    fn video_vae_encoder_aliases_are_exact() {
+    fn video_vae_aliases_are_exact() {
+        let only = |name: &str| {
+            let aliases = video_vae_repack_aliases(name);
+            assert_eq!(aliases.len(), 1, "{name} should alias to exactly one name");
+            assert!(aliases[0].rows.is_none(), "{name} rows are taken in order");
+            aliases[0].canonical.clone()
+        };
+        // Encoder (LDM spelling).
         assert_eq!(
-            video_vae_repack_canonical_name("encoder.down.1.block.0.nin_shortcut.weight")
-                .as_deref(),
-            Some("encoder.down_blocks.1.resnets.0.conv_shortcut.weight")
+            only("encoder.down.1.block.0.nin_shortcut.weight"),
+            "encoder.down_blocks.1.resnets.0.conv_shortcut.weight"
         );
         assert_eq!(
-            video_vae_repack_canonical_name("encoder.down.2.downsample.conv.bias").as_deref(),
-            Some("encoder.down_blocks.2.downsamplers.0.conv.bias")
+            only("encoder.down.2.downsample.conv.bias"),
+            "encoder.down_blocks.2.downsamplers.0.conv.bias"
         );
-        assert!(video_vae_repack_canonical_name("decoder.norm_out.weight").is_none());
-        assert!(video_vae_repack_canonical_name("encoder.down.bad.block.0.weight").is_none());
+        // Decoder (the four families the gate tripped on, plus x_embedder).
+        assert_eq!(only("decoder.x_embedder.weight"), "decoder.proj_in.weight");
+        assert_eq!(
+            only("decoder.transformer_blocks.7.attn.to_out.bias"),
+            "decoder.transformer_blocks.7.attn.to_out.0.bias"
+        );
+        // ff.w1 aliases to net.0.proj but with the SwiGLU halves swapped,
+        // so it is not a plain `only(...)` rename.
+        let w1 = video_vae_repack_aliases("decoder.transformer_blocks.7.ff.w1.weight");
+        assert_eq!(w1.len(), 1);
+        assert_eq!(
+            w1[0].canonical,
+            "decoder.transformer_blocks.7.ff.net.0.proj.weight"
+        );
+        assert_eq!(w1[0].rows.unwrap(), H3RowMap::SwapHalves);
+        assert_eq!(
+            only("decoder.transformer_blocks.35.ff.w2.bias"),
+            "decoder.transformer_blocks.35.ff.net.2.bias"
+        );
+        // Already-canonical names are left alone — that is what keeps the
+        // diffusers-convention tiers loading unchanged.
+        for name in [
+            "decoder.norm_out.weight",
+            "decoder.register_tokens",
+            "decoder.proj_out.weight",
+            "decoder.transformer_blocks.0.norm1.weight",
+            "decoder.transformer_blocks.0.scale1",
+            "decoder.transformer_blocks.0.attn.to_out.0.weight",
+            "decoder.transformer_blocks.0.attn.to_q.weight",
+            "decoder.transformer_blocks.0.ff.net.0.proj.weight",
+            "encoder.conv_in.weight",
+            "encoder.down_blocks.1.resnets.0.conv1.weight",
+            "quant_conv.weight",
+            "post_quant_conv.bias",
+            "latents_mean",
+            "encoder.down.bad.block.0.weight",
+            "decoder.transformer_blocks.bad.ff.w1.weight",
+        ] {
+            assert!(
+                video_vae_repack_aliases(name).is_empty(),
+                "{name} must not be aliased"
+            );
+        }
+    }
+
+    #[test]
+    fn video_vae_fused_qkv_is_head_major_not_contiguous() {
+        let aliases =
+            video_vae_repack_aliases("decoder.transformer_blocks.3.attn.to_qkv.weight");
+        assert_eq!(aliases.len(), 3);
+        let head_dim = crate::h3_vae::H3_VAE_HEAD_DIM;
+        for (part, name) in ["to_q", "to_k", "to_v"].into_iter().enumerate() {
+            assert_eq!(
+                aliases[part].canonical,
+                format!("decoder.transformer_blocks.3.attn.{name}.weight")
+            );
+            let select = aliases[part].rows.unwrap();
+            assert_eq!(select, H3RowMap::Select { part, parts: 3, run: head_dim });
+            // Canonical row `head * 64 + chan` is fused row
+            // `head * 192 + part * 64 + chan` — NOT `part * 2048 + row`.
+            for head in 0..4u64 {
+                for chan in [0u64, 1, 63] {
+                    let canonical = head * head_dim as u64 + chan;
+                    assert_eq!(
+                        select.file_row(canonical, 2048),
+                        head * 3 * head_dim as u64 + part as u64 * head_dim as u64 + chan
+                    );
+                }
+            }
+        }
+        // The bias fuses the same way.
+        let bias = video_vae_repack_aliases("decoder.transformer_blocks.3.attn.to_qkv.bias");
+        assert_eq!(bias.len(), 3);
+        assert_eq!(bias[2].canonical, "decoder.transformer_blocks.3.attn.to_v.bias");
+        assert_eq!(
+            bias[2].rows.unwrap(),
+            H3RowMap::Select { part: 2, parts: 3, run: head_dim }
+        );
     }
 
     #[test]
