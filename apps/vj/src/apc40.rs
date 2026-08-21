@@ -63,6 +63,9 @@ pub enum ApcAction {
 pub struct Apc40State {
     pub surface: ApcSurface,
     pub bank: usize,
+    /// Which hardware is talking, so pad presses translate with the same
+    /// per-model mapping the LEDs are lit with.
+    pub model: ApcModel,
 }
 
 impl Apc40State {
@@ -72,13 +75,19 @@ impl Apc40State {
         let pressed = status == 0x9 && data[2] != 0;
         if is_note {
             let note = data[1];
-            if (note as usize) < PAD_COUNT {
+            if let Some(pad) = self.model.pad_index(note) {
                 return Some(ApcAction::Pad {
                     surface: self.surface,
-                    pad: note as usize,
-                    index: self.bank.saturating_add(note as usize),
+                    pad,
+                    index: self.bank.saturating_add(pad),
                     pressed,
                 });
+            }
+            if (note as usize) < 64 {
+                // A grid note outside the mapped surface (the mini's dark
+                // bottom rows): swallow it rather than misread it as a
+                // transport button.
+                return None;
             }
             if !pressed {
                 return None;
@@ -235,18 +244,39 @@ impl ApcModel {
 
     /// Note number for VJ pad `index` (0 = top-left of the 5×8 surface).
     ///
-    /// The APC40 mkII's 5×8 clip grid is notes 0..39 in reading order. The
-    /// mini mk2's 8×8 grid numbers rows BOTTOM-up (note 0 = bottom-left,
-    /// 56 = top-left), so the VJ's five rows are laid on its top five and
-    /// the bottom three stay dark.
+    /// BOTH devices number their clip-grid rows BOTTOM-up (Ableton session
+    /// convention): the mkII's 5×8 grid has note 0 at bottom-left and 32 at
+    /// top-left; the mini mk2's 8×8 grid has note 0 bottom-left and 56
+    /// top-left (the VJ's five rows sit on its top five, bottom three stay
+    /// dark). Mapping the mkII top-down mirrored the whole surface — a
+    /// press on the top row lit and triggered the bottom one.
     pub fn pad_note(self, index: usize) -> u8 {
+        let (row, col) = (index / 8, index % 8);
         match self {
-            Self::Apc40Mk2 => index as u8,
-            Self::ApcMiniMk2 => {
-                let (row, col) = (index / 8, index % 8);
-                ((7 - row.min(7)) * 8 + col) as u8
-            }
+            Self::Apc40Mk2 => ((4 - row.min(4)) * 8 + col) as u8,
+            Self::ApcMiniMk2 => ((7 - row.min(7)) * 8 + col) as u8,
         }
+    }
+
+    /// Inverse of [`Self::pad_note`]: the VJ pad index a grid note lands
+    /// on, `None` for notes off the mapped surface.
+    pub fn pad_index(self, note: u8) -> Option<usize> {
+        let (nrow, col) = ((note / 8) as usize, (note % 8) as usize);
+        let row = match self {
+            Self::Apc40Mk2 => {
+                if note >= 40 {
+                    return None;
+                }
+                4 - nrow
+            }
+            Self::ApcMiniMk2 => {
+                if note >= 64 || nrow < 3 {
+                    return None;
+                }
+                7 - nrow
+            }
+        };
+        Some(row * 8 + col)
     }
 
     /// Only the mini mk2 protocol defines the RGB SysEx; the APC40 mkII has
@@ -615,12 +645,14 @@ mod tests {
     #[test]
     fn pad_press_release_and_banking_are_exact() {
         let mut state = Apc40State::default();
+        // Note 39 = the mkII's TOP-right pad (rows number bottom-up:
+        // notes 32..39 are the top row) = VJ pad 7.
         assert_eq!(
             state.decode([0x90, 39, 127]),
             Some(ApcAction::Pad {
                 surface: ApcSurface::Video,
-                pad: 39,
-                index: 39,
+                pad: 7,
+                index: 7,
                 pressed: true,
             })
         );
@@ -691,6 +723,8 @@ mod tests {
     #[test]
     fn pad_action_captures_surface_before_later_batch_messages() {
         let mut state = Apc40State::default();
+        // Note 7 is the mkII's BOTTOM-row col 7 (rows number bottom-up):
+        // VJ pad 39.
         let pad = state.decode([0x90, 7, 127]);
         assert_eq!(
             state.decode([0x90, NOTE_SENDS, 127]),
@@ -700,8 +734,8 @@ mod tests {
             pad,
             Some(ApcAction::Pad {
                 surface: ApcSurface::Video,
-                pad: 7,
-                index: 7,
+                pad: 39,
+                index: 39,
                 pressed: true,
             })
         );
@@ -713,12 +747,13 @@ mod tests {
         let mut frame = LedFrame::default();
         frame.pads[3] = PadLed::Ready;
         frame.pads[4] = PadLed::Live;
+        // VJ top-row pads 3/4 sit on the mkII's TOP row: notes 35/36.
         let first = diff.update(frame.clone());
-        assert!(first.contains(&[0x90, 3, 41]));
-        assert!(first.contains(&[0x98, 4, 21]));
+        assert!(first.contains(&[0x90, 35, 41]));
+        assert!(first.contains(&[0x98, 36, 21]));
         assert!(diff.update(frame.clone()).is_empty());
         frame.pads[3] = PadLed::Failed;
-        assert_eq!(diff.update(frame), vec![[0x90, 3, 5]]);
+        assert_eq!(diff.update(frame), vec![[0x90, 35, 5]]);
     }
 
     #[test]
@@ -731,9 +766,10 @@ mod tests {
         frame.pads[1] = PadLed::NextColor(21);
         frame.pads[2] = PadLed::LiveColor(21);
         let out = diff.update(frame.clone());
-        assert!(out.contains(&[0x90, 0, 21]), "solid on ch 0: {out:?}");
-        assert!(out.contains(&[0x9d, 1, 21]), "blink 1/8 on ch 13");
-        assert!(out.contains(&[0x98, 2, 21]), "pulse 1/8 on ch 8");
+        // VJ pads 0..2 = mkII top row, notes 32..34 (bottom-up hardware).
+        assert!(out.contains(&[0x90, 32, 21]), "solid on ch 0: {out:?}");
+        assert!(out.contains(&[0x9d, 33, 21]), "blink 1/8 on ch 13");
+        assert!(out.contains(&[0x98, 34, 21]), "pulse 1/8 on ch 8");
         // APC mini mk2: channel 0 is only 10 % brightness — a solid colour
         // has to go out on channel 6, and its grid numbers rows bottom-up.
         let mut diff = LedDiff::default();
@@ -745,7 +781,8 @@ mod tests {
         // Row 1 of the VJ surface is the mini's row 6 (notes 48..55).
         assert_eq!(ApcModel::ApcMiniMk2.pad_note(8), 48);
         assert_eq!(ApcModel::ApcMiniMk2.pad_note(39), 31);
-        assert_eq!(ApcModel::Apc40Mk2.pad_note(39), 39);
+        // mkII bottom-right: VJ pad 39 = note 7 (bottom row, col 7).
+        assert_eq!(ApcModel::Apc40Mk2.pad_note(39), 7);
     }
 
     #[test]
