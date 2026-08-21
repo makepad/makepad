@@ -106,6 +106,9 @@ pub struct GenJob {
     /// Prompt excerpt for the row.
     pub title: String,
     pub profile_label: String,
+    /// Job kind ("video.generate", …) — the row's copy names what the job
+    /// actually makes instead of promising VIDEO for everything.
+    pub kind: String,
     pub state: GenJobState,
     last_poll_ms: u64,
     /// Local wall-clock times. Elapsed UI uses these rather than the remote
@@ -128,6 +131,28 @@ pub struct GenJob {
     pub produced: Option<AssetId>,
     /// The produced asset appeared on the catalog event stream.
     pub published: bool,
+}
+
+/// The product a job kind makes, in a row's words.
+fn product_word(kind: &str) -> &'static str {
+    match kind.split('.').next().unwrap_or("") {
+        "video" => "video",
+        "image" => "image",
+        "music" => "music track",
+        "audio" => "sound",
+        "speech" => "speech clip",
+        "mesh" => "mesh",
+        "splat" => "splat scene",
+        _ => "result",
+    }
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 impl GenJob {
@@ -167,17 +192,18 @@ impl GenJob {
                 (stage, message, Some((*permille).min(1000)), GenJobTone::Active)
             }
             GenJobState::Succeeded => {
+                let product = product_word(&self.kind);
                 if self.published {
                     (
-                        "Video ready".to_string(),
-                        "Published to VIDEO — click its tile to cue it.".to_string(),
+                        format!("{} ready", capitalize(product)),
+                        format!("Published — the {product}'s tile is on its grid, click to cue it."),
                         Some(1000),
                         GenJobTone::Success,
                     )
                 } else {
                     (
                         "Generation complete — publishing".to_string(),
-                        "The result is being added to the VIDEO catalog.".to_string(),
+                        format!("The {product} is being added to the catalog."),
                         Some(1000),
                         GenJobTone::Success,
                     )
@@ -547,6 +573,7 @@ impl GenModel {
             job: None,
             title,
             profile_label: pipe.label.to_string(),
+            kind: pipe.kind.to_string(),
             state: GenJobState::Submitting,
             last_poll_ms: now_ms,
             submitted_ms: now_ms,
