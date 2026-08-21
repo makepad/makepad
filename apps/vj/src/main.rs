@@ -88,6 +88,7 @@ use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
     TrackStems,
     Mixer, TrackPcm, VideoTransitionError, VideoTransitionId, VideoTransitionPhase,
+    MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE,
 };
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
@@ -4599,16 +4600,33 @@ impl App {
     /// tempo drifts; silently free when there is no lock.
     fn apply_slot_beat_sync(&mut self, slot: SlotId) {
         let i = slot.index();
-        let beats = match self.slot_beat_sync[i] {
+        let bars = match self.slot_beat_sync[i] {
             true => self.slot_sync_beats[i],
             false => 0,
         };
         let period = self.current_beat().filter(|b| b.locked).map(|b| b.period.as_secs_f64());
         let Some(player) = self.players[i].as_mut() else { return };
-        let rate = match (beats, period) {
+        // ♪N means BARS (N × 4 beats): the WHOLE clip stretches to fill
+        // them and wraps with a jump cut. When the picked count would push
+        // the rate outside the musical range (a 5 s clip into one bar is a
+        // 3x chipmunk that clamps and then DRIFTS against the grid —
+        // reading as frantic scrubbing), the bar count doubles or halves
+        // until the clip plays near natural speed. Musical doublings keep
+        // the wrap on a bar boundary, so the fit is honest at every tempo.
+        let rate = match (bars, period) {
             (0, _) | (_, None) => 1.0,
             (n, Some(period)) if player.duration_secs > 0.0 && period > 0.0 => {
-                player.duration_secs / (n as f64 * period)
+                let mut span = n as f64 * 4.0 * period;
+                let mut rate = player.duration_secs / span;
+                while rate > MAX_VIDEO_PLAYBACK_RATE * 0.75 {
+                    span *= 2.0;
+                    rate = player.duration_secs / span;
+                }
+                while rate < MIN_VIDEO_PLAYBACK_RATE * 1.5 {
+                    span *= 0.5;
+                    rate = player.duration_secs / span;
+                }
+                rate
             }
             _ => 1.0,
         };
