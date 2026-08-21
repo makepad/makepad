@@ -186,10 +186,37 @@ fn preroll_status(
     PrerollStatus::WaitingAudio
 }
 
+/// How a video slot behaves at end of clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayMode {
+    Once = 0,
+    Loop = 1,
+    /// Forward-backward alternation from a decoded-frame cache. Falls back
+    /// to Loop while the cache is not yet complete (first pass) or when the
+    /// clip exceeds the cache budget. Ping-pong plays no audio — reversed
+    /// sound is not a thing a pad wants.
+    PingPong = 2,
+}
+
+impl PlayMode {
+    fn from_u8(v: u8) -> PlayMode {
+        match v {
+            1 => PlayMode::Loop,
+            2 => PlayMode::PingPong,
+            _ => PlayMode::Once,
+        }
+    }
+}
+
+/// Decoded-frame cache ceiling for ping-pong (RGB bytes). A 2.7 s loop at
+/// 640×352 is ~44 MB; the longest sanctioned clip at 960×544 is ~200 MB.
+const MAX_PINGPONG_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 struct SlotShared {
     stop: AtomicBool,
     paused: AtomicBool,
-    loop_on: AtomicBool,
+    mode: AtomicU8,
+    muted: AtomicBool,
     /// Pending seek target in 100ns units; negative = none.
     seek_100ns: AtomicI64,
     /// Presentation position (pts of the last frame handed to the UI).
@@ -241,7 +268,8 @@ impl SlotPlayer {
         let shared = Arc::new(SlotShared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(start_paused),
-            loop_on: AtomicBool::new(loop_on),
+            mode: AtomicU8::new(if loop_on { PlayMode::Loop } else { PlayMode::Once } as u8),
+            muted: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
             position_100ns: AtomicI64::new(0),
             video_ready: AtomicBool::new(false),
@@ -312,7 +340,17 @@ impl SlotPlayer {
     }
 
     pub fn set_loop(&mut self, loop_on: bool) {
-        self.shared.loop_on.store(loop_on, Ordering::Release);
+        self.set_mode(if loop_on { PlayMode::Loop } else { PlayMode::Once });
+    }
+
+    pub fn set_mode(&mut self, mode: PlayMode) {
+        self.shared.mode.store(mode as u8, Ordering::Release);
+    }
+
+    /// Drop this slot's audio at the source: no samples reach the mixer
+    /// while muted (the already-buffered lead drains first).
+    pub fn set_muted(&mut self, muted: bool) {
+        self.shared.muted.store(muted, Ordering::Release);
     }
 
     /// Set coherent picture/audio pacing for this video slot. No reverse or
@@ -415,6 +453,13 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     let mut audio_eos = !info.has_audio;
     let mut rgb_scratch = Vec::new();
     let preroll_deadline = Instant::now() + PREROLL_AUDIO_TIMEOUT;
+    // Ping-pong frame cache: filled during a full forward pass that runs
+    // with the mode set, complete only when the WHOLE clip fit the budget.
+    // Any seek or reopen restarts it (a partial cache must never bounce).
+    let mut pingpong_cache: Vec<Frame> = Vec::new();
+    let mut pingpong_cache_bytes: usize = 0;
+    let mut pingpong_cache_complete = false;
+    let mut pingpong_over_budget = false;
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -422,6 +467,9 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
+            pingpong_cache.clear();
+            pingpong_cache_bytes = 0;
+            pingpong_cache_complete = false;
             match VideoFileDecoder::open(&path) {
                 Ok(d) => {
                     decoder = d;
@@ -483,7 +531,9 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             // its source cursor.
             if shared.frames.lock().unwrap().is_empty() {
                 match decoder.next_frame() {
-                    Ok(Some(frame)) => push_frame(&shared, frame, &mut rgb_scratch),
+                    Ok(Some(frame)) => {
+                        push_frame(&shared, frame, &mut rgb_scratch);
+                    }
                     Ok(None) => {
                         shared.end_of_stream.store(true, Ordering::Release);
                         *shared.failure.lock().unwrap() =
@@ -528,9 +578,20 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             std::thread::sleep(Duration::from_millis(8));
             continue;
         }
-        // Keep this slot's mixer bus fed ~1s ahead.
+        // Keep this slot's mixer bus fed ~1s ahead. While muted, the
+        // chunks are decoded and DROPPED — the decoder must still advance
+        // in step with the picture, the room just hears nothing.
         if !audio_eos {
             while mixer.slot_buffered_secs(slot) < AUDIO_AHEAD_SECS {
+                if shared.muted.load(Ordering::Acquire) {
+                    match decoder.next_audio() {
+                        Ok(Some(_)) => continue,
+                        Ok(None) | Err(_) => {
+                            audio_eos = true;
+                        }
+                    }
+                    break;
+                }
                 match decoder.next_audio() {
                     Ok(Some(chunk)) => {
                         mixer.push_slot_audio(
@@ -553,7 +614,21 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         }
         match decoder.next_frame() {
             Ok(Some(frame)) => {
-                push_frame(&shared, frame, &mut rgb_scratch);
+                let cached = push_frame(&shared, frame, &mut rgb_scratch);
+                if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::PingPong
+                    && !pingpong_over_budget
+                    && !pingpong_cache_complete
+                {
+                    pingpong_cache_bytes += cached.bgra.len() * 4;
+                    if pingpong_cache_bytes > MAX_PINGPONG_CACHE_BYTES {
+                        pingpong_cache.clear();
+                        pingpong_cache_bytes = 0;
+                        pingpong_over_budget = true;
+                        eprintln!("vj-slot {slot:?}: clip exceeds the ping-pong cache budget; bouncing falls back to loop");
+                    } else {
+                        pingpong_cache.push(cached);
+                    }
+                }
                 if shared.preroll_status.load(Ordering::Acquire)
                     != PrerollStatus::Ready as u8
                 {
@@ -563,7 +638,22 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 }
             }
             Ok(None) => {
-                if shared.loop_on.load(Ordering::Acquire) {
+                if !pingpong_over_budget && !pingpong_cache.is_empty() {
+                    pingpong_cache_complete = true;
+                }
+                let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
+                if mode == PlayMode::PingPong && pingpong_cache_complete {
+                    // The whole clip is in memory: bounce it until the mode
+                    // changes, a seek lands, or the slot stops. Returns to
+                    // the decoder path when it exits.
+                    pingpong_playback(&shared, &pingpong_cache);
+                    // Playback exited: a seek is pending, the mode changed,
+                    // or the slot stops — the ordinary paths below all
+                    // handle those; the cache survives for a later bounce.
+                    continue;
+                }
+                let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
+                if mode != PlayMode::Once {
                     match VideoFileDecoder::open(&path) {
                         Ok(d) => {
                             decoder = d;
@@ -588,12 +678,14 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     }
                     match decoder.next_audio() {
                         Ok(Some(chunk)) => {
-                            mixer.push_slot_audio(
-                                slot,
-                                &chunk.samples,
-                                chunk.channels,
-                                chunk.sample_rate,
-                            );
+                            if !shared.muted.load(Ordering::Acquire) {
+                                mixer.push_slot_audio(
+                                    slot,
+                                    &chunk.samples,
+                                    chunk.channels,
+                                    chunk.sample_rate,
+                                );
+                            }
                         }
                         Ok(None) | Err(_) => audio_eos = true,
                     }
@@ -605,7 +697,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     if shared.stop.load(Ordering::Acquire) {
                         return;
                     }
-                    if shared.loop_on.load(Ordering::Acquire) {
+                    if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::Once {
                         shared.end_of_stream.store(false, Ordering::Release);
                         break;
                     }
@@ -638,7 +730,7 @@ fn push_frame(
     shared: &Arc<SlotShared>,
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
     rgb_scratch: &mut Vec<u8>,
-) {
+) -> Frame {
     nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, rgb_scratch);
     let mut bgra = Vec::with_capacity((frame.width * frame.height) as usize);
     for px in rgb_scratch.chunks_exact(3) {
@@ -646,12 +738,70 @@ fn push_frame(
             0xff00_0000 | ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32,
         );
     }
+    let out = Frame { pts_100ns: frame.pts_100ns, bgra: bgra.clone() };
     shared
         .frames
         .lock()
         .unwrap()
         .push_back(Frame { pts_100ns: frame.pts_100ns, bgra });
     shared.video_ready.store(true, Ordering::Release);
+    out
+}
+
+/// Bounce a fully cached clip: forward then backward, endpoints not
+/// repeated, pts synthesized monotonically so the pacing clock never sees
+/// time run backwards. Exits when the mode leaves PingPong, a seek lands,
+/// or the slot stops — the decoder path takes over again.
+fn pingpong_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
+    if cache.len() < 2 {
+        return;
+    }
+    // Constant-fps clips: the median delta IS the frame duration.
+    let mut deltas: Vec<i64> = cache.windows(2).map(|w| w[1].pts_100ns - w[0].pts_100ns).collect();
+    deltas.sort_unstable();
+    let delta = deltas[deltas.len() / 2].max(1);
+    let mut synth_pts = cache.last().map(|f| f.pts_100ns).unwrap_or(0);
+    let n = cache.len();
+    // Index walk: n-2 .. 0, then 1 .. n-1, repeating.
+    let mut idx = n - 1;
+    let mut forward = false;
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            return;
+        }
+        if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
+            return;
+        }
+        if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::PingPong {
+            return;
+        }
+        if shared.paused.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(8));
+            continue;
+        }
+        if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        }
+        if forward {
+            if idx + 1 >= n {
+                forward = false;
+                continue;
+            }
+            idx += 1;
+        } else {
+            if idx == 0 {
+                forward = true;
+                continue;
+            }
+            idx -= 1;
+        }
+        synth_pts += delta;
+        shared.frames.lock().unwrap().push_back(Frame {
+            pts_100ns: synth_pts,
+            bgra: cache[idx].bgra.clone(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
