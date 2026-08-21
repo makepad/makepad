@@ -222,12 +222,152 @@ fn main() {
         }
     }
 
+    // Fifth gate: DYNAMIC JOIN/LEAVE. Gates 3 and 4 hold the lane set fixed
+    // for the whole run. Continuous batching is the claim that lanes may come
+    // and go MID-GENERATION without disturbing the conversations already in
+    // flight — which is the actual product promise, and nothing above tests it.
+    //
+    // Both runs follow the SAME width timeline (alone -> 3 wide -> 2 wide at
+    // the same steps) and differ only in WHO the neighbours are. Cross-width
+    // kernel effects are therefore common-mode and cancel, which matters
+    // because spec-on/off stream identity is structurally absent on the Q8_1
+    // route: a test that let the width timelines differ would be measuring the
+    // quantiser, not the scheduler.
+    match dynamic_join_leave(&model, &vocab, slots, PER_SLOT_CONTEXT) {
+        Ok(steps) => println!("PASS: lane 0 survived {steps} steps of neighbours joining and leaving"),
+        Err(e) => {
+            eprintln!("FAIL (dynamic join/leave): {e}");
+            std::process::exit(1);
+        }
+    }
+
     if timing {
         if let Err(e) = timing_sweep(&model, &vocab, slots, PER_SLOT_CONTEXT) {
             eprintln!("timing failed: {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// Run lane 0 through a fixed timeline of neighbours joining and leaving,
+/// returning lane 0's token stream and the neighbours' streams.
+///
+/// The timeline is identical between calls; only `neighbours` changes.
+fn run_timeline(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+    neighbours: &[&str],
+) -> Result<(Vec<i32>, Vec<Vec<i32>>), String> {
+    const SOLO_STEPS: usize = 3;
+    const WIDE_STEPS: usize = 4;
+    const AFTER_LEAVE_STEPS: usize = 3;
+
+    let mut session = build_session(model, slots, per_slot_context)?;
+    let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let mut next_token = vec![0i32; slots as usize];
+    let mut streams: Vec<Vec<i32>> = vec![Vec::new(); slots as usize];
+
+    let mut join = |session: &mut LlamaSession,
+                    table: &mut SlotTable,
+                    next_token: &mut Vec<i32>,
+                    text: &str|
+     -> Result<usize, String> {
+        let prompt = vocab.tokenize(text, true, true).map_err(|e| e.to_string())?;
+        let lane = table.admit().ok_or_else(|| "slot table full".to_string())?;
+        let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
+        let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
+        let logits = session
+            .prefill_slot_chunk(kv_base, state_row, 0, &prompt)
+            .map_err(|e| format!("lane {lane} prefill: {e}"))?;
+        table.advance(lane, prompt.len()).map_err(|e| e.to_string())?;
+        table.begin_decoding(lane).map_err(|e| e.to_string())?;
+        next_token[lane] = argmax_token_id(&logits).ok_or_else(|| "no argmax".to_string())?;
+        Ok(lane)
+    };
+
+    let mut decode_steps = |session: &mut LlamaSession,
+                            table: &mut SlotTable,
+                            next_token: &mut Vec<i32>,
+                            streams: &mut Vec<Vec<i32>>,
+                            count: usize|
+     -> Result<(), String> {
+        for _ in 0..count {
+            let plan = table.plan_step().ok_or_else(|| "nothing to plan".to_string())?;
+            let tokens: Vec<i32> = plan.slots.iter().map(|s| next_token[s.slot]).collect();
+            let rows = session
+                .step_slots(&plan, &tokens)
+                .map_err(|e| format!("step: {e}"))?;
+            for (row, step) in rows.iter().zip(&plan.slots) {
+                let lane = step.slot;
+                streams[lane].push(next_token[lane]);
+                next_token[lane] =
+                    argmax_token_id(row).ok_or_else(|| "no argmax".to_string())?;
+                table.advance(lane, 1).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    };
+
+    join(&mut session, &mut table, &mut next_token, LANE_PROMPTS[0])?;
+    decode_steps(&mut session, &mut table, &mut next_token, &mut streams, SOLO_STEPS)?;
+
+    let joined_a = join(&mut session, &mut table, &mut next_token, neighbours[0])?;
+    let _joined_b = join(&mut session, &mut table, &mut next_token, neighbours[1])?;
+    decode_steps(&mut session, &mut table, &mut next_token, &mut streams, WIDE_STEPS)?;
+
+    table.retire(joined_a).map_err(|e| e.to_string())?;
+    decode_steps(
+        &mut session,
+        &mut table,
+        &mut next_token,
+        &mut streams,
+        AFTER_LEAVE_STEPS,
+    )?;
+
+    let lane0 = streams[0].clone();
+    Ok((lane0, streams))
+}
+
+fn dynamic_join_leave(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+) -> Result<usize, String> {
+    if slots < 3 {
+        return Err("dynamic join/leave needs at least 3 lanes".to_string());
+    }
+    let (lane0_a, streams_a) = run_timeline(
+        model,
+        vocab,
+        slots,
+        per_slot_context,
+        &[LANE_PROMPTS[1], LANE_PROMPTS[2]],
+    )?;
+    let (lane0_b, streams_b) =
+        run_timeline(model, vocab, slots, per_slot_context, &[ALT_PROMPTS[1], ALT_PROMPTS[2]])?;
+
+    if lane0_a != lane0_b {
+        let at = lane0_a
+            .iter()
+            .zip(&lane0_b)
+            .position(|(x, y)| x != y)
+            .unwrap_or(0);
+        return Err(format!(
+            "lane 0 changed at index {at} when only its NEIGHBOURS changed\n               with A: {lane0_a:?}\n  with B: {lane0_b:?}\n               identical width timeline, so this is neighbour influence across a join/leave"
+        ));
+    }
+    if streams_a[1] == streams_b[1] {
+        return Err(format!(
+            "neighbour lane 1 produced the same stream for both prompt sets, so the \n               timeline did not actually vary: {:?}",
+            streams_a[1]
+        ));
+    }
+    println!("  lane 0 stable across a 1 -> 3 -> 2 lane timeline with different neighbours");
+    println!("  neighbour lane confirmed to differ between runs (experiment is live)");
+    Ok(lane0_a.len())
 }
 
 /// Steady-state decode rate at 1..N active lanes, from ONE session — which is
