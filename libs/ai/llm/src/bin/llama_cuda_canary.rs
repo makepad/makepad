@@ -824,6 +824,11 @@ fn route_act_format(kind: i32, m: usize) -> ActFormat {
 ///     `1e-6` is ~17 ulp of the summed magnitude: room for a 16-deep tree with
 ///     three orders to spare, and still four orders tighter than the ~1e-3
 ///     the Q8_1 format itself costs, which is the gap a real bug has to hide in.
+///     Part of that budget is spent on the *reference*, not the kernel:
+///     `dequant_row` builds each weight in f32, and for Q4_K/Q5_K that is a
+///     `d*sc*q - dmin*m` subtraction of two similar magnitudes, so its own
+///     rounding is what the measured margin is mostly made of — those two
+///     types sit at ~0.09x of budget where the mins-free Q6_K sits at ~0.015x.
 ///   * `Bf16` — the reference rounds both inputs to bf16, but the slab path
 ///     reduces through cuBLAS tiles whose intermediate rounding is not
 ///     modelled. `1e-4` is the bound the IQ cases were calibrated at: a correct
@@ -1952,6 +1957,11 @@ const UPSTREAM_MUL_MAT_NMSE: f64 = 5e-4;
 /// from "kernel merely acceptable".
 const Q81_MODEL_NMSE: f64 = 1e-9;
 
+/// Widths the report sweeps. 4 and 5 straddle `calc_nwarps`' step from four
+/// warps to two, which is where the width-consistency column earns its keep.
+/// Must stay ascending; the last entry sizes the shared activation block.
+const MMV_WIDTHS: [usize; 5] = [1, 2, 4, 5, 8];
+
 #[allow(clippy::too_many_lines)]
 fn mmvq_error_report() -> i32 {
     let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
@@ -1968,10 +1978,12 @@ fn mmvq_error_report() -> i32 {
         "\ncolumns: nmse_* = sum(err^2)/sum(ref^2) against the Q8_1-modelled \
          reference, the full-f32 reference, and the f32-activation KERNEL.\n\
          rel_* = |err| as a fraction of that dot's summed term magnitude \
-         (mean / p99 / max)."
+         (mean / p99 / max).\n\
+         rel_width = max change in column 0 when the SAME column rides in an \
+         m-wide batch instead of alone."
     );
     println!(
-        "\n{:<6} {:<8} {:>5} {:>3} {:>6} {:>10} {:>10} {:>10} {:>26} {:>26}",
+        "\n{:<6} {:<8} {:>5} {:>3} {:>6} {:>10} {:>10} {:>10} {:>26} {:>26} {:>10}",
         "type",
         "acts",
         "k",
@@ -1982,8 +1994,9 @@ fn mmvq_error_report() -> i32 {
         "nmse_f32k",
         "rel_q81 mean/p99/max",
         "rel_f32 mean/p99/max",
+        "rel_width",
     );
-    println!("{}", "-".repeat(120));
+    println!("{}", "-".repeat(131));
 
     let mut failures = 0usize;
     let mut rng = Rng::new(0x5151_4d4d_0e11);
@@ -2001,7 +2014,17 @@ fn mmvq_error_report() -> i32 {
                 .map(|row| dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k))
                 .collect();
             for (acts_tag, outlier) in [("uniform", false), ("outlier", true)] {
-                for m in [1usize, 2, 4, 8] {
+                // One activation block, sliced per width, so the first column
+                // is literally the same numbers at every m. That makes the
+                // width-consistency column below a measurement of the kernel's
+                // launch geometry and nothing else.
+                let wide = if outlier {
+                    acts_outlier(&mut rng, k * MMV_WIDTHS[MMV_WIDTHS.len() - 1])
+                } else {
+                    acts_uniform(&mut rng, k * MMV_WIDTHS[MMV_WIDTHS.len() - 1])
+                };
+                let solo = run_quant_mul_mat(&exec, ty, &weights, &wide[..k], k, n, 1, false);
+                for m in MMV_WIDTHS {
                     // The report is about the Q8_1 route; if the dispatcher
                     // would not take it at this width there is nothing here to
                     // measure, and silently reporting the other route's numbers
@@ -2010,11 +2033,7 @@ fn mmvq_error_report() -> i32 {
                         println!("SKIP {tag}/{acts_tag}/k{k}/m{m}: dispatch is not on mul_mat_vec_q");
                         continue;
                     }
-                    let acts = if outlier {
-                        acts_outlier(&mut rng, k * m)
-                    } else {
-                        acts_uniform(&mut rng, k * m)
-                    };
+                    let acts = wide[..k * m].to_vec();
                     let got = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, false);
                     let f32_kernel = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, true);
                     let (want_q81, mag_q81) =
@@ -2024,8 +2043,15 @@ fn mmvq_error_report() -> i32 {
                     let d_q81 = error_dist(&got, &want_q81, &mag_q81);
                     let d_f32 = error_dist(&got, &want_f32, &mag_f32);
                     let d_kernels = error_dist(&got, &f32_kernel, &mag_f32);
+                    // Same first column, different batch width. Any difference
+                    // here is the kernel's launch geometry: `calc_nwarps` gives
+                    // ncols_dst 1..4 four warps and 5..8 two, so the k reduction
+                    // splits differently and the sums land on different last
+                    // bits. Decode logits are therefore a function of the batch
+                    // a token happens to travel in.
+                    let d_width = error_dist(&got[..n], &solo, &mag_q81[..n]);
                     println!(
-                        "{tag:<6} {acts_tag:<8} {k:>5} {m:>3} {:>6} {:>10.2e} {:>10.2e} {:>10.2e} {:>26} {:>26}",
+                        "{tag:<6} {acts_tag:<8} {k:>5} {m:>3} {:>6} {:>10.2e} {:>10.2e} {:>10.2e} {:>26} {:>26} {:>10.2e}",
                         d_q81.count,
                         d_q81.nmse,
                         d_f32.nmse,
@@ -2038,6 +2064,7 @@ fn mmvq_error_report() -> i32 {
                             "{:.1e}/{:.1e}/{:.1e}",
                             d_f32.mean_rel, d_f32.p99_rel, d_f32.max_rel
                         ),
+                        d_width.max_rel,
                     );
                     let label = format!("{tag}/{acts_tag}/k{k}/m{m}");
                     if d_q81.non_finite > 0 || d_q81.nmse > Q81_MODEL_NMSE {
