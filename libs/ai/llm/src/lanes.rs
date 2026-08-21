@@ -583,6 +583,207 @@ impl LaneScheduler {
         events
     }
 
+    /// Everything a batched speculative round needs about the lanes in `plan`,
+    /// in plan order.
+    ///
+    /// Every fact is read from the lane or its slot and passed as an argument;
+    /// the session learns nothing about lanes and keeps its own single-sequence
+    /// state for the solo path. That split is the whole defence against the
+    /// bug class this lane keeps finding — a lane's history, its resume row and
+    /// its draft-head fill are exactly the things two conversations must not
+    /// share.
+    ///
+    /// Cross-checks the plan against the table rather than trusting it. A plan
+    /// built before something else advanced a slot would address the right
+    /// lane at the wrong position, which writes a token over a token and reads
+    /// a mask that is one row short — no error, just a conversation that starts
+    /// repeating itself.
+    pub fn spec_lanes(&self, plan: &StepPlan) -> Result<Vec<crate::SpecLane<'_>>, String> {
+        plan.slots
+            .iter()
+            .map(|step| {
+                let index = step.slot;
+                let lane = self
+                    .lanes
+                    .get(index)
+                    .and_then(|lane| lane.as_ref())
+                    .ok_or_else(|| {
+                        format!("lane {index} is in a decode plan but holds no conversation")
+                    })?;
+                let first = lane.next_token.ok_or_else(|| {
+                    format!("lane {index} is decoding with no token to decode")
+                })?;
+                let slot = self
+                    .table
+                    .slot(index)
+                    .ok_or_else(|| format!("lane {index} has no slot"))?;
+                if step.position != slot.fill() || step.key_lower_bound != slot.kv_base() {
+                    return Err(format!(
+                        "decode plan for lane {index} is stale: it says position {} base {}, \
+                         the slot says {} and {}",
+                        step.position,
+                        step.key_lower_bound,
+                        slot.fill(),
+                        slot.kv_base()
+                    ));
+                }
+                Ok(crate::SpecLane {
+                    lane: index,
+                    kv_base: slot.kv_base(),
+                    state_base: slot.state_base(),
+                    live_state_offset: slot.live_state_offset(),
+                    fill: slot.fill(),
+                    mtp_filled: slot.mtp_filled(),
+                    tokens: &lane.tokens,
+                    first,
+                })
+            })
+            .collect()
+    }
+
+    /// Report a batched speculative round: `outcomes[i]` belongs to
+    /// `plan.slots[i]`.
+    ///
+    /// A round commits between one and `depth + 1` tokens per lane, so this is
+    /// neither [`on_decoded`](Self::on_decoded) (exactly one, and it emits the
+    /// PREVIOUS one) nor [`on_generated`](Self::on_generated) (a whole chunk
+    /// with no follow-on token). The round's first committed token is the one
+    /// the lane was already decoding, and its `next` is drawn and carried
+    /// forward rather than re-sampled.
+    ///
+    /// **The history takes every committed token even past `max_new`.** The
+    /// tokens are in the lane's KV whatever the caller asked for, and a parked
+    /// lane's history has to describe its caches exactly — a conversation that
+    /// comes back and appends against a history one token short of its own
+    /// cache decodes the rest of its life at the wrong offset.
+    pub fn on_speculated(
+        &mut self,
+        plan: &StepPlan,
+        outcomes: &[crate::SpecRoundOutcome],
+    ) -> Result<Vec<LaneEvent>, String> {
+        if outcomes.len() != plan.slots.len() {
+            return Err(format!(
+                "a {}-lane round reported {} outcomes",
+                plan.slots.len(),
+                outcomes.len()
+            ));
+        }
+        let mut events = Vec::new();
+        let stop_tokens = &self.stop_tokens;
+        let lanes = &mut self.lanes;
+        let table = &mut self.table;
+        for (step, outcome) in plan.slots.iter().zip(outcomes) {
+            let index = step.slot;
+            let Some(lane) = lanes.get_mut(index).and_then(|lane| lane.as_mut()) else {
+                continue;
+            };
+            let expected = lane.next_token.ok_or_else(|| {
+                format!("lane {index} committed a round with no token to decode")
+            })?;
+            // The round's first committed token IS the token this lane was
+            // decoding. If it is not, the outcomes are out of step with the
+            // plan and every lane below this one is about to be given another
+            // conversation's tokens.
+            match outcome.committed.first() {
+                Some(&first) if first == expected => {}
+                Some(&first) => {
+                    return Err(format!(
+                        "lane {index} committed {first} while decoding {expected}: the round's \
+                         outcomes are out of step with the plan"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "lane {index} committed nothing; a round commits at least one token"
+                    ))
+                }
+            }
+            if let Some(stop) = outcome
+                .committed
+                .iter()
+                .find(|token| stop_tokens.contains(token))
+            {
+                return Err(format!(
+                    "lane {index} committed stop token {stop}: the round must end the turn \
+                     before it rather than emit it"
+                ));
+            }
+            for &token in &outcome.committed {
+                // History first and unconditionally: it describes the CACHE.
+                lane.tokens.push(token);
+                if lane.produced >= lane.request.max_new {
+                    continue;
+                }
+                lane.produced += 1;
+                events.push(LaneEvent::Token {
+                    job: lane.request.job,
+                    token,
+                    produced: lane.produced,
+                });
+            }
+            lane.next_token = Some(outcome.next);
+            table
+                .advance(index, outcome.committed.len())
+                .map_err(|e| format!("lane {index} advance: {e}"))?;
+            table
+                .adopt_state(index, outcome.live_state_offset, outcome.mtp_filled)
+                .map_err(|e| format!("lane {index}: {e}"))?;
+            if outcome.stop_reason.is_some()
+                || lane.produced >= lane.request.max_new
+                || stop_tokens.contains(&outcome.next)
+            {
+                lane.phase = LanePhase::Done(LaneOutcome::Complete);
+            }
+        }
+        Ok(events)
+    }
+
+    /// Forget every parked conversation, because the device state their caches
+    /// lived in has been cleared.
+    ///
+    /// [`crate::LlamaSession::reset`] zeroes the WHOLE shared cache — every
+    /// slot's attention rows, the entire recurrent arena and the carry tensor —
+    /// not just the sequence that asked for it. The solo path resets whenever a
+    /// conversation cannot append to what the session already holds, and at
+    /// that moment every parked lane's rows become zeros while this scheduler
+    /// still believes they are resumable.
+    ///
+    /// Left unsaid, the next returning conversation appends its delta onto a
+    /// cache full of zeros and answers a conversation that did not happen —
+    /// fluently, with no error anywhere. The cost of saying it is that a
+    /// conversation coming back after someone else's cold turn re-ingests
+    /// itself, which is what it did before per-lane caches existed.
+    pub fn invalidate_parked(&mut self) {
+        for index in 0..self.parked.len() {
+            if self.parked[index].take().is_some() {
+                let _ = self.table.retire(index);
+            }
+        }
+    }
+
+    /// Take over a lane's speculative bookkeeping from the session-native path.
+    ///
+    /// The solo path advances the session's own resume row and draft-head fill
+    /// every round and has no way to know it is sitting in a slot. Whatever
+    /// hands it over has to carry both across, or the first batched step
+    /// resumes lane 0 from a checkpoint belonging to a different number of
+    /// committed tokens.
+    pub fn adopt_native_state(
+        &mut self,
+        lane: usize,
+        live_state_offset: usize,
+        mtp_filled: usize,
+    ) -> Result<(), String> {
+        self.table
+            .adopt_state(lane, live_state_offset, mtp_filled)
+            .map_err(|e| format!("lane {lane} adopting session state: {e}"))
+    }
+
+    /// The slot a lane occupies, for callers that need its cache geometry.
+    pub fn slot(&self, lane: usize) -> Option<&crate::slots::Slot> {
+        self.table.slot(lane)
+    }
+
     /// Seed the token a lane will decode next.
     ///
     /// Needed when a lane hands over from the speculative path to the batched
@@ -727,6 +928,30 @@ pub struct LaneExecutor {
     /// occupant, and cleared the moment the batch widens — after which that
     /// turn finishes unspeculated and the next one re-establishes it.
     solo_native: bool,
+    /// Cost of a step of C columns and of one shared draft forward, for the
+    /// depth decision. Built once, and built knowing WHICH draft head this
+    /// session loaded: the restricted sidecar is ~3.3x cheaper per drafted
+    /// token at identical acceptance, which is exactly the term that decides
+    /// whether a deeper batched round pays for itself.
+    costs: crate::slots::StepCostModel,
+    config: crate::slots::SchedulerConfig,
+    /// `MAKEPAD_LLAMA_BATCH_SPEC_DEPTH`, when set: run every batched round at
+    /// this depth instead of the modelled one.
+    ///
+    /// Here so the depth curve can be MEASURED on a box rather than modelled
+    /// from one. The cost model is a lower bound taken from a synthetic sweep;
+    /// the only way to find out what a real multi-lane round costs is to run
+    /// each rung on the hardware, and a knob that needs a rebuild per rung is a
+    /// measurement that never happens.
+    forced_depth: Option<usize>,
+    /// Batched speculative rounds run since load, and the shape of the last
+    /// one.
+    ///
+    /// Not statistics: a gate has to be able to prove the path it is testing
+    /// actually ran. A two-lanes-both-speculating gate that silently fell back
+    /// to the unspeculated step would pass, and would be certifying nothing.
+    batched_spec_rounds: u64,
+    last_batched_spec: Option<(usize, usize)>,
     /// Invoked with fresh counts after every step.
     ///
     /// A callback rather than "the caller remembers to ask": a forgotten
@@ -770,14 +995,38 @@ impl LaneExecutor {
         // that causes is silent: a reply that runs past its own end-of-turn
         // token into a new one, and a lane that never retires.
         let scheduler = scheduler.with_stop_tokens(session.stop_tokens());
+        let costs = if session.has_restricted_draft_head() {
+            crate::slots::StepCostModel::measured_5090().with_restricted_draft_head()
+        } else {
+            crate::slots::StepCostModel::measured_5090()
+        };
+        let forced_depth = std::env::var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok());
         Self {
             session,
             scheduler,
             samplers,
             params,
             solo_native: false,
+            costs,
+            config: crate::slots::SchedulerConfig::default(),
+            forced_depth,
+            batched_spec_rounds: 0,
+            last_batched_spec: None,
             on_counts: None,
         }
+    }
+
+    /// Batched speculative rounds this executor has run.
+    pub fn batched_spec_rounds(&self) -> u64 {
+        self.batched_spec_rounds
+    }
+
+    /// `(width, uniform draft depth)` of the last batched speculative round, or
+    /// `None` if no step has run one.
+    pub fn last_batched_spec(&self) -> Option<(usize, usize)> {
+        self.last_batched_spec
     }
 
     /// Report lane occupancy after every step. The service wires `/health` here.
@@ -805,6 +1054,103 @@ impl LaneExecutor {
     /// Whether the next step will run the solo speculative path.
     pub fn is_speculating(&self) -> bool {
         self.solo_native && self.scheduler.is_solo(SOLO_LANE)
+    }
+
+    /// The uniform draft depth this step runs at, or 0 for a plain step.
+    ///
+    /// `plan.draft_depth` is the ladder's wall — what the column budget and the
+    /// session's allocation allow at this width. This narrows it to what the
+    /// measured cost curve says actually PAYS at this width, which at 3 and 4
+    /// lanes on a 5090 with the full draft head is nothing: an extra draft
+    /// column there buys fewer tokens than the wider verify batch costs.
+    ///
+    /// Clamped by every lane's remaining context too. A round writes
+    /// `depth + 1` rows per lane before anything is committed, and the lane
+    /// closest to its capacity is the one that decides how many rows the step
+    /// may write.
+    fn batched_depth(&self, plan: &StepPlan) -> usize {
+        if !self.session.speculative_enabled() || plan.draft_depth == 0 {
+            return 0;
+        }
+        let modelled = crate::slots::batched_draft_depth(
+            plan.width,
+            plan.draft_depth,
+            crate::slots::BATCHED_CHAT_ACCEPTANCE,
+            &self.config,
+            &self.costs,
+        );
+        let depth = self.forced_depth.unwrap_or(modelled).min(plan.draft_depth);
+        let room = plan
+            .slots
+            .iter()
+            .filter_map(|step| self.scheduler.slot(step.slot))
+            .map(|slot| slot.remaining_context())
+            .min()
+            .unwrap_or(0);
+        depth.min(room.saturating_sub(1))
+    }
+
+    /// One batched speculative round: every lane in `plan` drafts, and ONE
+    /// verify batch serves all of them.
+    fn speculative_batch(
+        &mut self,
+        plan: &StepPlan,
+        depth: usize,
+    ) -> Result<Vec<LaneEvent>, String> {
+        let params: Vec<crate::LlamaSamplingParams> = plan
+            .slots
+            .iter()
+            .map(|step| self.params_for(step.slot))
+            .collect();
+        // Taken OUT of the per-lane table and put back after, because the round
+        // needs them contiguous and mutable. A lane's stream is its own: two
+        // lanes drawing from one would make a chat's output depend on when the
+        // other one happened to sample.
+        let mut streams: Vec<crate::LlamaSamplerState> = plan
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                self.samplers[step.slot]
+                    .take()
+                    .unwrap_or_else(|| crate::LlamaSamplerState::new(params[index].seed))
+            })
+            .collect();
+        let round = {
+            let scheduler = &self.scheduler;
+            let session = &mut self.session;
+            let lanes = scheduler.spec_lanes(plan)?;
+            session.speculative_round_slots(&lanes, depth, &params, &mut streams)
+        };
+        // Put the streams back BEFORE the error is propagated. A round that
+        // failed must not also lose every participating conversation's RNG
+        // position — the next turn would silently re-seed from the request
+        // default and sample a different reply for the same seed.
+        for (stream, step) in streams.into_iter().zip(&plan.slots) {
+            self.samplers[step.slot] = Some(stream);
+        }
+        let outcomes = round.map_err(|e| format!("batched speculative round: {e}"))?;
+        self.batched_spec_rounds += 1;
+        self.last_batched_spec = Some((plan.width, depth));
+        self.scheduler.on_speculated(plan, &outcomes)
+    }
+
+    /// Carry the session's own speculative bookkeeping onto the solo lane's
+    /// slot.
+    ///
+    /// The session-native path moves its resume row and its draft-head fill
+    /// every round and cannot see the slot table. Whatever the lane does next —
+    /// a batched step because someone else joined, or a batched speculative
+    /// round — reads those two numbers FROM the slot, so they have to be true
+    /// there as well. A stale resume row does not fail: it decodes lane 0
+    /// against the recurrent state of a different number of tokens, fluently.
+    fn adopt_solo_state(&mut self) -> Result<(), String> {
+        if !self.session.speculative_enabled() {
+            return Ok(());
+        }
+        let offset = self.session.live_state_offset();
+        let filled = self.session.draft_head_fill();
+        self.scheduler.adopt_native_state(SOLO_LANE, offset, filled)
     }
 
     /// Perform one scheduler step. Returns the events to report to callers.
@@ -846,6 +1192,12 @@ impl LaneExecutor {
                 // Session-native ingest, so the speculative loop can run
                 // against it. `reset_first` is the worker's prefix decision.
                 if self.scheduler.reset_requested(lane) {
+                    // A reset clears the whole device cache, not this lane's
+                    // share of it, so every parked conversation's rows become
+                    // zeros. Say so before it happens: a parked lane that is
+                    // still believed resumable afterwards appends its next
+                    // delta onto zeros and answers fluently about nothing.
+                    self.scheduler.invalidate_parked();
                     self.session.reset().map_err(|e| format!("reset: {e}"))?;
                 }
                 self.session
@@ -872,6 +1224,7 @@ impl LaneExecutor {
                 };
                 self.solo_native = true;
                 events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
+                self.adopt_solo_state()?;
             }
             LaneStep::Prefill {
                 lane,
@@ -883,6 +1236,17 @@ impl LaneExecutor {
                 last,
             } => {
                 let _ = resumed;
+                // A fresh conversation on a used slot inherits the previous
+                // occupant's RECURRENT state — the scan resumes from the row it
+                // is given, and admission only resets counters. Attention rows
+                // are fine (the mask's lower/upper span excludes them exactly);
+                // the running state is not, and the symptom is a fluent reply
+                // conditioned on someone else's conversation.
+                if start == 0 {
+                    self.session
+                        .clear_slot_state(lane)
+                        .map_err(|e| format!("lane {lane} clear: {e}"))?;
+                }
                 let logits = self
                     .session
                     .prefill_slot_chunk(lane, kv_base, state_row, start, &tokens)
@@ -928,25 +1292,40 @@ impl LaneExecutor {
                     &generated.token_ids,
                     stopped,
                 ));
+                // The chunk moved the session's resume row and its draft-head
+                // fill. Slot 0's copies do not move on their own, and the next
+                // step may well be a batched one that reads them.
+                self.adopt_solo_state()?;
             }
             LaneStep::Decode { plan, tokens } => {
-                let rows = self
-                    .session
-                    .step_slots(&plan, &tokens)
-                    .map_err(|e| format!("batched decode: {e}"))?;
-                let mut sampled = Vec::with_capacity(rows.len());
-                for (row, step) in rows.iter().zip(&plan.slots) {
-                    let lane = step.slot;
-                    let params = self.params_for(lane);
-                    let sampler = self.samplers[lane]
-                        .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
-                    sampled.push(
-                        sampler
-                            .sample_logits(row, params)
-                            .map_err(|e| format!("lane {lane} sample: {e}"))?,
-                    );
+                // One depth for the whole step, or none at all. At depth 0 the
+                // speculative round degenerates to one column per lane — the
+                // same tokens the plain step produces, through a DIFFERENT
+                // graph family (checkpointed state rows, hidden write rows).
+                // Taking the plain step there keeps the byte-identity the
+                // existing gates rest on and compiles one graph family fewer.
+                let depth = self.batched_depth(&plan);
+                if depth > 0 {
+                    events.extend(self.speculative_batch(&plan, depth)?);
+                } else {
+                    let rows = self
+                        .session
+                        .step_slots(&plan, &tokens)
+                        .map_err(|e| format!("batched decode: {e}"))?;
+                    let mut sampled = Vec::with_capacity(rows.len());
+                    for (row, step) in rows.iter().zip(&plan.slots) {
+                        let lane = step.slot;
+                        let params = self.params_for(lane);
+                        let sampler = self.samplers[lane]
+                            .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
+                        sampled.push(
+                            sampler
+                                .sample_logits(row, params)
+                                .map_err(|e| format!("lane {lane} sample: {e}"))?,
+                        );
+                    }
+                    events.extend(self.scheduler.on_decoded(&plan, &sampled));
                 }
-                events.extend(self.scheduler.on_decoded(&plan, &sampled));
             }
         }
         for event in self.scheduler.reap() {
@@ -986,6 +1365,44 @@ mod tests {
     fn scheduler(slots: usize, queue_max: usize) -> LaneScheduler {
         let table = SlotTable::new(slots, 512, 1, 0).expect("table");
         LaneScheduler::new(table, queue_max).with_stop_tokens([EOS])
+    }
+
+    /// A scheduler whose slots are sized for speculation: `draft_max + 2`
+    /// recurrent rows each, so a round has checkpoint planes to commit into.
+    fn spec_scheduler(slots: usize, queue_max: usize) -> LaneScheduler {
+        let table = SlotTable::new(slots, 512, crate::slots::SOLO_DRAFT_MAX + 2, crate::slots::SOLO_DRAFT_MAX)
+            .expect("table");
+        LaneScheduler::new(table, queue_max).with_stop_tokens([EOS])
+    }
+
+    /// What a round handed back for one lane.
+    fn outcome(committed: &[i32], next: i32, resume: usize, filled: usize) -> crate::SpecRoundOutcome {
+        crate::SpecRoundOutcome {
+            committed: committed.to_vec(),
+            next,
+            live_state_offset: resume,
+            mtp_filled: filled,
+            drafted: committed.len().saturating_sub(1),
+            accepted: committed.len().saturating_sub(1),
+            stop_reason: None,
+        }
+    }
+
+    /// Prefill one job and return the decode plan its lane is part of.
+    fn prefilled(sched: &mut LaneScheduler, job: u64, prompt: &[i32], max_new: usize, first: i32) {
+        sched.submit(request(job, prompt, max_new)).expect("submit");
+        loop {
+            match sched.next_step() {
+                LaneStep::Prefill { lane, tokens, last, .. } => {
+                    let token = if last { first } else { 0 };
+                    sched.on_prefilled(lane, tokens.len(), token);
+                    if last {
+                        return;
+                    }
+                }
+                other => panic!("expected prefill for job {job}, got {other:?}"),
+            }
+        }
     }
 
     fn request(job: u64, prompt: &[i32], max_new: usize) -> LaneRequest {
@@ -1724,5 +2141,297 @@ mod tests {
         sched.admit_pending();
         assert_eq!(sched.slots_claimed(), 2, "only two lanes exist");
         assert_eq!(sched.queue_depth(), 4, "the rest wait honestly");
+    }
+
+    #[test]
+    fn a_speculative_round_emits_every_token_it_committed() {
+        // A round commits between one and depth+1 tokens per lane, and it
+        // commits the token the lane was ALREADY decoding first. Emitting the
+        // previous one instead — the batched path's contract — would drop the
+        // first token of every generation.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        prefilled(&mut sched, 2, &[20, 21], 16, 200);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        assert_eq!(plan.width, 2, "both lanes are decoding");
+        let events = sched
+            .on_speculated(
+                &plan,
+                &[
+                    outcome(&[100, 101, 102], 103, 2, 3),
+                    outcome(&[200], 201, 0, 3),
+                ],
+            )
+            .expect("round");
+        let lane_a: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                LaneEvent::Token { job: 1, token, .. } => Some(*token),
+                _ => None,
+            })
+            .collect();
+        let lane_b: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                LaneEvent::Token { job: 2, token, .. } => Some(*token),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lane_a, vec![100, 101, 102], "three tokens for one verify");
+        assert_eq!(lane_b, vec![200], "a lane whose drafts all missed still moves");
+
+        // And the next step feeds each lane the token its OWN round drew.
+        let LaneStep::Decode { plan, tokens } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let by_slot: Vec<(usize, i32)> = plan
+            .slots
+            .iter()
+            .zip(&tokens)
+            .map(|(step, token)| (step.slot, *token))
+            .collect();
+        assert_eq!(by_slot, vec![(0, 103), (1, 201)]);
+        assert_eq!(plan.slots[0].position, 5, "2 prompt + 3 committed");
+        assert_eq!(plan.slots[1].position, 3, "2 prompt + 1 committed");
+    }
+
+    #[test]
+    fn a_round_moves_the_resume_row_and_the_draft_head_of_its_own_lane() {
+        // Both are per-lane facts the next round reads back. A lane that took
+        // its neighbour's resume row would decode against a recurrent state
+        // belonging to a different conversation — fluently.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        prefilled(&mut sched, 2, &[20, 21], 16, 200);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched
+            .on_speculated(
+                &plan,
+                &[outcome(&[100, 101], 102, 1, 3), outcome(&[200], 201, 0, 3)],
+            )
+            .expect("round");
+        assert_eq!(sched.slot(0).expect("slot 0").live_state_offset(), 1);
+        assert_eq!(sched.slot(1).expect("slot 1").live_state_offset(), 0);
+        assert_eq!(sched.slot(0).expect("slot 0").mtp_filled(), 3);
+        assert_eq!(sched.slot(1).expect("slot 1").mtp_filled(), 3);
+        // The state row the NEXT plan hands the graph is inside each slot's own
+        // block, never the neighbour's.
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        assert_eq!(plan.slots[0].state_row, 1, "slot 0 resumes at its own offset 1");
+        assert_eq!(plan.slots[1].state_row, crate::slots::SOLO_DRAFT_MAX + 2);
+    }
+
+    #[test]
+    fn a_round_that_overruns_the_budget_still_records_what_the_cache_holds() {
+        // The tokens are in the KV whether or not the caller wanted them, and a
+        // parked lane's history has to describe its caches EXACTLY. One token
+        // short and the conversation comes back, appends at the wrong offset,
+        // and decodes the rest of its life one position out.
+        let mut sched = spec_scheduler(2, 4);
+        let mut req = request(1, &[10, 11], 2);
+        req.session = "player-1".to_string();
+        sched.submit(req).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let events = sched
+            .on_speculated(&plan, &[outcome(&[100, 101, 102], 103, 2, 3)])
+            .expect("round");
+        let emitted: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                LaneEvent::Token { token, .. } => Some(*token),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emitted, vec![100, 101], "the caller asked for two");
+        assert_eq!(
+            sched.slot(0).expect("slot").fill(),
+            5,
+            "but the cache holds all five"
+        );
+        sched.reap();
+
+        // Coming back, the history it must extend is the CACHE's, not the
+        // caller's: prompt + all three committed tokens.
+        let mut back = request(2, &[10, 11, 100, 101, 102, 55], 4);
+        back.session = "player-1".to_string();
+        back.reset_first = false;
+        sched.submit(back).expect("submit");
+        match sched.next_step() {
+            LaneStep::Prefill { lane, start, tokens, .. } => {
+                assert_eq!(lane, 0, "back to the lane holding its tokens");
+                assert_eq!(start, 5);
+                assert_eq!(tokens, vec![55], "ingesting only what is new");
+            }
+            other => panic!("expected a resumed prefill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_round_out_of_step_with_its_plan_is_refused() {
+        // Outcomes are matched to lanes positionally. If they ever slip, every
+        // lane below the slip is handed another conversation's tokens — so this
+        // fails loudly rather than emitting them.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let error = sched
+            .on_speculated(&plan, &[outcome(&[999], 1000, 0, 2)])
+            .expect_err("a round starting on the wrong token must be refused");
+        assert!(error.contains("out of step"), "{error}");
+        let short = sched
+            .on_speculated(&plan, &[])
+            .expect_err("an outcome per lane, or none of it is trustworthy");
+        assert!(short.contains("reported 0 outcomes"), "{short}");
+    }
+
+    #[test]
+    fn a_round_may_not_commit_a_stop_token() {
+        // The turn ends at the token BEFORE its end-of-turn marker; the round
+        // is supposed to have dropped it. If one arrives anyway, emitting it
+        // would print `<|im_end|>` into a player's chat.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let error = sched
+            .on_speculated(&plan, &[outcome(&[100, EOS], 101, 1, 3)])
+            .expect_err("a committed stop token must be refused");
+        assert!(error.contains("stop token"), "{error}");
+    }
+
+    #[test]
+    fn a_round_that_stopped_ends_the_turn_and_frees_the_lane() {
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let mut done = outcome(&[100, 101], EOS, 1, 3);
+        done.stop_reason = Some(crate::LlamaStopReason::EndOfSequence);
+        sched.on_speculated(&plan, &[done]).expect("round");
+        let events = sched.reap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LaneEvent::Finished { job: 1, .. })),
+            "a stopped round must retire its lane rather than decode past the turn"
+        );
+        assert_eq!(sched.lanes_active(), 0);
+    }
+
+    #[test]
+    fn a_reset_forgets_every_parked_conversation() {
+        // `LlamaSession::reset` clears the WHOLE device cache, not one
+        // sequence's share of it. A parked lane still believed resumable
+        // afterwards appends its next delta onto zeros and answers, fluently,
+        // about a conversation that did not happen.
+        let mut sched = spec_scheduler(2, 4);
+        let mut first = request(1, &[7, 8], 1);
+        first.session = "player-1".to_string();
+        sched.submit(first).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched.on_decoded(&plan, &[101]);
+        sched.reap();
+
+        sched.invalidate_parked();
+
+        let mut back = request(2, &[7, 8, 100, 55], 4);
+        back.session = "player-1".to_string();
+        back.reset_first = false;
+        sched.submit(back).expect("submit");
+        match sched.next_step() {
+            LaneStep::Prefill { start, tokens, .. } => {
+                assert_eq!(start, 0, "the caches it would have resumed are zeros now");
+                assert_eq!(tokens, vec![7, 8, 100, 55], "so it re-ingests everything");
+            }
+            other => panic!("expected a cold prefill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lane_cannot_adopt_a_resume_row_from_another_slot() {
+        // The solo path hands its resume row over by number. A number past the
+        // slot's own block is the neighbour's state, and reading it is silent.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        let rows = crate::slots::SOLO_DRAFT_MAX + 2;
+        sched
+            .adopt_native_state(0, rows - 1, 2)
+            .expect("the last row of its own block is its own");
+        let error = sched
+            .adopt_native_state(0, rows, 2)
+            .expect_err("one past the block is the next slot's state");
+        assert!(error.contains("another slot's state"), "{error}");
+        let ahead = sched
+            .adopt_native_state(0, 0, 99)
+            .expect_err("a draft head cannot be ahead of the model");
+        assert!(ahead.contains("ahead of the model"), "{ahead}");
+    }
+
+    #[test]
+    fn a_stale_decode_plan_is_refused_rather_than_decoded() {
+        // A plan built before something else advanced a slot addresses the
+        // right lane at the wrong position: it writes a token over a token and
+        // reads a mask one row short. No error, just a conversation that starts
+        // repeating itself.
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched
+            .on_speculated(&plan, &[outcome(&[100, 101], 102, 1, 3)])
+            .expect("round");
+        // The same plan again: the slot has moved on.
+        let error = sched
+            .spec_lanes(&plan)
+            .expect_err("a stale plan must be refused");
+        assert!(error.contains("stale"), "{error}");
+    }
+
+    #[test]
+    fn a_round_reads_each_lanes_own_history_and_geometry() {
+        let mut sched = spec_scheduler(2, 4);
+        prefilled(&mut sched, 1, &[10, 11], 16, 100);
+        prefilled(&mut sched, 2, &[20, 21, 22], 16, 200);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        let lanes = sched.spec_lanes(&plan).expect("lanes");
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0].tokens, &[10, 11]);
+        assert_eq!(lanes[1].tokens, &[20, 21, 22]);
+        assert_eq!(lanes[0].first, 100, "each lane starts from its own token");
+        assert_eq!(lanes[1].first, 200);
+        assert_eq!(lanes[0].kv_base, 0);
+        assert_eq!(lanes[1].kv_base, 512, "slot-major, one per-slot context apart");
+        assert_eq!(lanes[0].state_base, 0);
+        assert_eq!(lanes[1].state_base, crate::slots::SOLO_DRAFT_MAX + 2);
+        // The invariant a round validates for itself: a lane's history is
+        // exactly what its cache holds.
+        for lane in &lanes {
+            assert_eq!(lane.tokens.len(), lane.fill);
+        }
     }
 }
