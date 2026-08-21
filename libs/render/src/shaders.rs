@@ -3503,6 +3503,21 @@ script_mod! {
     // Lamp rim fill + smooth, mirroring dilate_rgb: mode 0/1 = one ring of
     // averaging into non-holding texels, mode 2 = the coverage-weighted
     // 4/2/1 smooth over holding texels. Alpha carries "holds light".
+    //
+    // PARTIAL-COVERAGE REPAIR (modes 0/1): a chart-EDGE texel — one the 4x
+    // coverage pass saw only partly inside the chart — is not trusted with
+    // its rasterized value. The AO charts put face edges exactly ON texel
+    // centers, so at 1x the edge texel goes to whichever face wins the
+    // rasterization tie; on a tile's max edge that is the 0.16-unit
+    // vertical SKIRT, whose near-horizontal normal takes ~0.4x the lamp
+    // light of the top face. The material shader samples that texel at FULL
+    // weight along the face's outer edge (edge uv = its center), which drew
+    // a hard dark line at every static-static boundary crossing a lamp pool
+    // (measured: the plaza tile's boundary row baked at a constant 0.43-0.49
+    // of the ground-region truth). The repair rebuilds such a texel as the
+    // LINEAR CONTINUATION of the fully-covered interior next to it — the
+    // value the smooth field actually has at that texel's world position —
+    // so both sides of a shared edge land on the same curve.
     mod.draw.DrawLmLampDilate = mod.std.set_type_default() do #(DrawLmLampDilate::script_shader(vm)){
         alpha_blend: false
         backface_culling: false
@@ -3514,6 +3529,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         lamp_tex: texture_2d(float)
+        cov_tex: texture_2d(float)
         v_local: varying(vec2f)
 
         rg: fn(off: vec2) -> vec4 {
@@ -3538,6 +3554,75 @@ script_mod! {
             return vec4(s.xyz, 1.0)
         }
 
+        // Chart coverage of the texel at `off` (cov G lane, 1.0 = the whole
+        // texel lies inside rasterized chart area). Outside the rect: 0.
+        covf: fn(off: vec2) -> float {
+            let c = self.v_local + off
+            if c.x < 0.0 {
+                return 0.0
+            }
+            if c.y < 0.0 {
+                return 0.0
+            }
+            if c.x > self.rect_px.z {
+                return 0.0
+            }
+            if c.y > self.rect_px.w {
+                return 0.0
+            }
+            let uv = (self.rect_px.xy + c) * vec2(self.misc_a.x, self.misc_a.x)
+            return self.cov_tex.sample_nearest(uv).y
+        }
+
+        // Max channel of a fully-covered holding neighbor, -1.0 when the
+        // texel at `off` is not trustworthy (partial, empty, outside).
+        mch: fn(off: vec2) -> float {
+            let s = self.rg(off)
+            if s.w < 0.5 {
+                return -1.0
+            }
+            if self.covf(off) < 0.99 {
+                return -1.0
+            }
+            return max(max(s.x, s.y), s.z)
+        }
+
+        // A fully-covered holding neighbor's LINEAR CONTINUATION onto self:
+        // value at off, extended by the gradient toward self when the texel
+        // one further out is also trustworthy. Clamped to [0, 2v] so a
+        // shadow edge cannot extrapolate negative or overshoot double.
+        exw: fn(off: vec2, w: float) -> vec4 {
+            let s = self.rg(off)
+            if s.w < 0.5 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            if self.covf(off) < 0.99 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            var e = s.xyz
+            let s2 = self.rg(off * 2.0)
+            if s2.w > 0.5 {
+                if self.covf(off * 2.0) > 0.99 {
+                    // Extrapolate only across a MONOTONE-ish stretch: when
+                    // the far texel has lost more than half the near one's
+                    // light there is a shadow edge between them, and the
+                    // difference is the shadow's, not the field's — 2a - s2
+                    // through the lamp post's umbra painted a 210 bright
+                    // spot on a 128 corner. Fall back to the plain value.
+                    let sm = max(max(s.x, s.y), s.z)
+                    let s2m = max(max(s2.x, s2.y), s2.z)
+                    if s2m >= sm * 0.5 {
+                        e = clamp(
+                            s.xyz * 2.0 - s2.xyz,
+                            vec3(0.0, 0.0, 0.0),
+                            s.xyz * 1.5
+                        )
+                    }
+                }
+            }
+            return vec4(e * w, w)
+        }
+
         sm: fn(off: vec2, w: float) -> vec4 {
             let s = self.rg(off)
             return vec4(s.xyz * w, s.w * w)
@@ -3556,6 +3641,12 @@ script_mod! {
                 if own.w < 0.5 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
+                // Partial-coverage texels carry the repaired boundary value;
+                // smoothing them against the (dimmer) outside rim would eat
+                // the repair back out — measured: a rebuilt 122 fell to 91.
+                if self.covf(vec2(0.0, 0.0)) < 0.99 {
+                    return vec4(own.xyz, 1.0)
+                }
                 var acc = vec4(own.xyz * 4.0, 4.0)
                 acc = acc + self.sm(vec2(-1.0, -1.0), 1.0)
                 acc = acc + self.sm(vec2(0.0, -1.0), 2.0)
@@ -3568,7 +3659,85 @@ script_mod! {
                 return vec4(acc.xyz / max(acc.w, 1.0), 1.0)
             }
             if own.w > 0.5 {
-                return vec4(own.xyz, 1.0)
+                if self.covf(vec2(0.0, 0.0)) > 0.99 {
+                    return vec4(own.xyz, 1.0)
+                }
+                // Chart-edge texel: find the DIMMEST trusted interior
+                // neighbor. The steal signature is a texel darker than
+                // EVERY fully-covered neighbor — the sub-texel skirt takes
+                // ~0.4x the top face's light, below anything around it. A
+                // texel within its neighbors' range IS the face's own
+                // sample (it won the rasterization tie, or it sits on a
+                // shadow edge only the raw sample gets right — measured: a
+                // correct half-shadowed texel rebuilt from its lit
+                // neighbors overshot 128 -> 242 beside the lamp post).
+                var minv = 100000.0
+                var cnt = 0.0
+                var m = self.mch(vec2(-1.0, -1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(0.0, -1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(1.0, -1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(-1.0, 0.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(1.0, 0.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(-1.0, 1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(0.0, 1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                m = self.mch(vec2(1.0, 1.0))
+                if m >= 0.0 {
+                    minv = min(minv, m)
+                    cnt = cnt + 1.0
+                }
+                if cnt < 0.5 {
+                    // No trusted interior in reach (a chart thinner than a
+                    // texel): the rasterized value is the best there is.
+                    return vec4(own.xyz, 1.0)
+                }
+                // 0.85: a texel on the dark side of a legitimate gradient
+                // sits up to ~one texel-step (~10-15%) below its dimmest
+                // interior neighbor and must be KEPT; the skirt steal sits
+                // at ~0.43x and must not be. Measured margins on the town:
+                // kept-correct 128 vs threshold 119, rebuilt-steal 57 vs
+                // threshold 57.8.
+                let om = max(max(own.x, own.y), own.z)
+                if om >= minv * 0.85 {
+                    return vec4(own.xyz, 1.0)
+                }
+                var eac = vec4(0.0, 0.0, 0.0, 0.0)
+                eac = eac + self.exw(vec2(-1.0, -1.0), 1.0)
+                eac = eac + self.exw(vec2(0.0, -1.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, -1.0), 1.0)
+                eac = eac + self.exw(vec2(-1.0, 0.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, 0.0), 2.0)
+                eac = eac + self.exw(vec2(-1.0, 1.0), 1.0)
+                eac = eac + self.exw(vec2(0.0, 1.0), 2.0)
+                eac = eac + self.exw(vec2(1.0, 1.0), 1.0)
+                return vec4(eac.xyz / max(eac.w, 0.5), 1.0)
             }
             var acc = vec4(0.0, 0.0, 0.0, 0.0)
             acc = acc + self.rg(vec2(-1.0, -1.0))

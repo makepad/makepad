@@ -795,6 +795,19 @@ fn report_bake_exposure(state: &BakeState, scene: &LmScene, trigger: BakeTrigger
         scale,
         LM_LAMP_GROUND_PEAK * scale,
     );
+    if std::env::var_os("MAKEPAD_GPU_LM_REGIONS").is_some() {
+        for (ri, r) in state.regions.iter().enumerate() {
+            let kind = if matches!(r.kind, RegionKind::Ground) { "ground" } else { "mesh" };
+            let sx = (r.max.x - r.min.x).max(1e-4);
+            let sz = (r.max.z - r.min.z).max(1e-4);
+            log!(
+                "lmreg {ri} {kind} rect {} {} {} {} world ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2}) dens {:.2}x{:.2}",
+                r.rect.x, r.rect.y, r.rect.w, r.rect.h,
+                r.min.x, r.min.y, r.min.z, r.max.x, r.max.y, r.max.z,
+                r.rect.w as f32 / sx, r.rect.h as f32 / sz,
+            );
+        }
+    }
     /// Per-region detail lines one bake may print before it summarizes: a
     /// city of thousands of props must stay readable.
     const DETAIL_LINES: usize = 8;
@@ -1198,6 +1211,8 @@ impl GpuLightmapBaker {
         };
         vec![
             (state.tex.cov.clone(), "cov"),
+            (state.tex.lamp_a.clone(), "lamp_a"),
+            (state.tex.lamp_b.clone(), "lamp_b"),
             (state.tex.dt_a.clone(), "dt_a"),
             (state.tex.dt_b.clone(), "dt_b"),
             (state.tex.mask_a.clone(), "mask_a"),
@@ -2052,6 +2067,11 @@ impl GpuLightmapBaker {
                     w: 0.0,
                 };
                 d.draw_vars.set_texture(0, src);
+                // Chart coverage (written by this batch's downsample passes,
+                // which run earlier in the sequence): the dilate distrusts
+                // partially-covered chart-edge texels and rebuilds them from
+                // the interior — see DrawLmLampDilate.
+                d.draw_vars.set_texture(1, &state.tex.cov);
                 if d.draw_vars.can_instance() {
                     cx.add_instance(&d.draw_vars);
                 }
