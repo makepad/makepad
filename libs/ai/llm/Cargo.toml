@@ -41,6 +41,10 @@ name = "llama-tokenize"
 path = "src/bin/llama_tokenize.rs"
 
 [[bin]]
+name = "llama-slot-probe"
+path = "src/bin/llama_slot_probe.rs"
+
+[[bin]]
 name = "llama-batch-probe"
 path = "src/bin/llama_batch_probe.rs"
 
