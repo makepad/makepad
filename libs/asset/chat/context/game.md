@@ -58,7 +58,9 @@ ALWAYS BUILD SOMETHING. The primitives (terrain, water, box, mover,
 character, labels, colors) need NO store content — when a query finds no
 matching models, build the level from primitives instead of ending your
 turn with an apology. Query the store when you want real artwork; missing
-artwork never blocks a level.
+artwork never blocks a level. Into a RUNNING world, build the substitute
+the ADD MANY way (world.get_source, append the primitive lines) — never
+replace the user's level to conjure one thing.
 
 Only kind 'mesh' (and rigged 'character') assets place with game.model.
 Catalog 'world' maps load with game.map — a WHOLE playable level in one
