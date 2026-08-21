@@ -41,6 +41,11 @@
 //! - `ASSET_UI_ASSET_BEACON=off` — start the embedded server WITHOUT its LAN
 //!   beacon. An instance on an isolated store root (`AI_CONTENT_ASSET_ROOT`)
 //!   must not advertise itself to peers hunting for the real one.
+//! - `ASSET_UI_ASSET_EMBED=never` — NEVER hold the root: attach only, and
+//!   wait rather than embed when nothing is serving it yet. This is the
+//!   setting for the recommended deployment, where `makepad-asset-server`
+//!   owns the store and every app is a client of it
+//!   (`apps/asset-server/README.md`).
 
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
@@ -230,6 +235,30 @@ pub enum HostLoops {
     Skip,
 }
 
+/// May this process start a server of its own on the store root?
+///
+/// The store is inherently multiplayer, and the recommended deployment runs
+/// `makepad-asset-server` as its own process so the catalog outlives every
+/// window (`apps/asset-server/README.md`). Against that deployment the app
+/// must never RACE the daemon for `<root>/server.lock`: whoever launches
+/// first would win it, and an app that won it puts the store back inside a
+/// window.
+///
+/// [`EmbedPolicy::Never`] is that promise — this instance is a client, full
+/// stop. It still watches the server it joined and still rejoins whoever
+/// holds the root next; it simply never becomes that holder. With no server
+/// there yet it discovers and retries like any other client instead of
+/// filling the vacancy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EmbedPolicy {
+    /// Embed when the root is free, attach when it is not (today's default,
+    /// and the transition mode while both deployments exist).
+    #[default]
+    Auto,
+    /// Never hold the root: attach only.
+    Never,
+}
+
 /// Sustained-loss detector for the server this process talks to.
 ///
 /// One failure is a blip; failures with no answer in between are a death.
@@ -413,6 +442,9 @@ pub struct AssetStore {
     library_dir: PathBuf,
     /// LAN presence for a server started here.
     beacon: Beacon,
+    /// Whether this instance may hold the root at all. `Never` makes it a
+    /// pure client of the standalone server — see [`EmbedPolicy`].
+    embed: EmbedPolicy,
     /// Whether a takeover also starts the publisher/job loops (tests: no).
     host_loops: HostLoops,
     /// The session policy `start` resolved from the environment, WITHOUT
@@ -463,48 +495,57 @@ impl AssetStore {
         self.library_dir = library_dir;
         self.server_root = default_asset_server_root();
         self.beacon = beacon_from_env();
+        self.embed = embed_policy_from_env();
         let mut config = session_config_from_env();
         // Kept pristine: a later succession re-opens a session with the same
         // POLICY, and overrides only the endpoints/identity/token of whoever
         // it ends up talking to.
         self.base_config = Some(config.clone());
         if config.endpoints.is_none() {
-            match start_embedded_asset_server_at(&self.server_root, self.beacon) {
-                Ok((server, token)) => {
-                    config.server_id = Some(server.server_id());
-                    if config.token.is_none() {
-                        config.token = Some(token.clone());
-                    }
-                    // Only the HOSTING process publishes the library. When
-                    // we merely attached to someone else's server, that
-                    // process owns its own library and this one must not
-                    // push a second copy of the same rows.
-                    self.begin_hosting(server, &token);
+            if self.embed == EmbedPolicy::Never {
+                // Attach-only: this process is a CLIENT of the standalone
+                // server and never a candidate to hold the root. A root with
+                // nothing on it yet is not an error — the connector
+                // discovers and retries, exactly as it would for a server
+                // that is still booting.
+                self.role = ServerRole::Attached;
+                if self.attach_to_root(&mut config) {
+                    log!("asset store: attach-only — joined the server holding {}", self.server_root.display());
+                } else {
+                    log!(
+                        "asset store: attach-only — nothing is serving {} yet; discovering",
+                        self.server_root.display()
+                    );
                 }
-                Err(error) => {
-                    // Another process already owns this catalog. Join it
-                    // instead of painting a fatal CONFIG ERROR — and from
-                    // here on, watch it: an attached instance whose host
-                    // dies must succeed it, not carry on serverless.
-                    if let Some(existing) = attach_running_asset_server_at(&self.server_root) {
-                        self.role = ServerRole::Attached;
-                        self.attached_endpoints = existing.endpoints;
-                        if config.endpoints.is_none() {
-                            config.endpoints = existing.endpoints;
-                        }
-                        if config.server_id.is_none() {
-                            config.server_id = existing.server_id;
-                        }
+            } else {
+                match start_embedded_asset_server_at(&self.server_root, self.beacon) {
+                    Ok((server, token)) => {
+                        config.server_id = Some(server.server_id());
                         if config.token.is_none() {
-                            config.token = existing.token;
+                            config.token = Some(token.clone());
                         }
-                        log!(
-                            "asset store: {error} — attaching to the running server, \
-                             with succession armed"
-                        );
-                    } else {
-                        self.start_error = Some(error);
-                        return;
+                        // Only the HOSTING process publishes the library. When
+                        // we merely attached to someone else's server, that
+                        // process owns its own library and this one must not
+                        // push a second copy of the same rows.
+                        self.begin_hosting(server, &token);
+                    }
+                    Err(error) => {
+                        // Another process already owns this catalog. Join it
+                        // instead of painting a fatal CONFIG ERROR — and from
+                        // here on, watch it: an attached instance whose host
+                        // dies must succeed it, not carry on serverless.
+                        self.role = ServerRole::Attached;
+                        if self.attach_to_root(&mut config) {
+                            log!(
+                                "asset store: {error} — attaching to the running server, \
+                                 with succession armed"
+                            );
+                        } else {
+                            self.role = ServerRole::External;
+                            self.start_error = Some(error);
+                            return;
+                        }
                     }
                 }
             }
@@ -668,7 +709,7 @@ impl AssetStore {
             return false;
         }
         self.next_takeover_ms = now_ms.saturating_add(TAKEOVER_RETRY_MS);
-        match takeover_at(&self.server_root, self.attached_endpoints, self.beacon) {
+        match takeover_at(&self.server_root, self.attached_endpoints, self.beacon, self.embed) {
             Takeover::Hosted { server, token } => {
                 let endpoints = localized_endpoints(&server);
                 let server_id = server.server_id();
@@ -710,6 +751,30 @@ impl AssetStore {
                 self.set_succession_note(format!("server lost — taking over… ({why})"))
             }
         }
+    }
+
+    /// Point `config` at whatever server holds [`Self::server_root`] right
+    /// now, reading the root's own `listen` / `server-id` / `admin-token`.
+    ///
+    /// Env-pinned values always win — an operator who named an address, an
+    /// identity or a token meant it. Returns false when the root advertises
+    /// nothing at all, which is the caller's cue: attach-only discovers and
+    /// waits, auto-embed reports why it could neither host nor join.
+    fn attach_to_root(&mut self, config: &mut SessionConfig) -> bool {
+        let Some(existing) = attach_running_asset_server_at(&self.server_root) else {
+            return false;
+        };
+        self.attached_endpoints = existing.endpoints;
+        if config.endpoints.is_none() {
+            config.endpoints = existing.endpoints;
+        }
+        if config.server_id.is_none() {
+            config.server_id = existing.server_id;
+        }
+        if config.token.is_none() {
+            config.token = existing.token;
+        }
+        true
     }
 
     /// Start the embedded server's background loops and become the host.
@@ -1423,6 +1488,34 @@ fn beacon_from_env() -> Beacon {
     }
 }
 
+/// `ASSET_UI_ASSET_EMBED=never` (`no`/`off`/`0`/`attach`/`client`) makes this
+/// instance a pure client of whatever server holds the store root — it never
+/// takes `<root>/server.lock`, at startup or in a succession. That is the
+/// recommended setting beside a standalone `makepad-asset-server`; see
+/// `apps/asset-server/README.md`.
+///
+/// Anything else (including unset) keeps today's behaviour: embed when the
+/// root is free, attach when it is not.
+pub fn embed_policy_from_env() -> EmbedPolicy {
+    embed_policy_from_value(env_alias(&["ASSET_UI_ASSET_EMBED", "AI_CONTENT_ASSET_EMBED"]).as_deref())
+}
+
+/// The parse on its own, so the vocabulary is testable without mutating
+/// process environment other tests in this binary also read.
+fn embed_policy_from_value(value: Option<&str>) -> EmbedPolicy {
+    match value {
+        Some(value)
+            if matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "never" | "no" | "off" | "0" | "false" | "attach" | "client"
+            ) =>
+        {
+            EmbedPolicy::Never
+        }
+        _ => EmbedPolicy::Auto,
+    }
+}
+
 /// A locally hosted server binds `0.0.0.0`; reach it the way its own
 /// `listen` file advertises it.
 fn localized_endpoints(server: &makepad_asset_store::AssetServer) -> ApiEndpoints {
@@ -1464,23 +1557,33 @@ enum Takeover {
 /// what keeps two attached instances racing for the same dead root from
 /// both rejoining a corpse: the loser reads the winner's freshly written
 /// file, not the stale one it already gave up on.
-fn takeover_at(root: &Path, silent: Option<ApiEndpoints>, beacon: Beacon) -> Takeover {
-    match start_embedded_asset_server_at(root, beacon) {
-        Ok((server, token)) => Takeover::Hosted { server, token },
-        Err(error) => {
-            let Some(running) = attach_running_asset_server_at(root) else {
-                return Takeover::Wait(error);
-            };
-            match (running.endpoints, silent) {
-                (Some(fresh), Some(dead)) if fresh.control == dead.control => {
-                    Takeover::Wait("the root still names the silent server".to_string())
-                }
-                (None, Some(_)) => {
-                    Takeover::Wait("the root names no server yet".to_string())
-                }
-                _ => Takeover::Rejoin(running),
-            }
+///
+/// Under [`EmbedPolicy::Never`] the lock is never even attempted: the whole
+/// ladder collapses to "re-read the root and rejoin whoever holds it next",
+/// which is what an app deployed beside `makepad-asset-server` must do while
+/// the daemon restarts.
+fn takeover_at(
+    root: &Path,
+    silent: Option<ApiEndpoints>,
+    beacon: Beacon,
+    embed: EmbedPolicy,
+) -> Takeover {
+    let refused = match embed {
+        EmbedPolicy::Never => "attach-only: waiting for a server to hold the root".to_string(),
+        EmbedPolicy::Auto => match start_embedded_asset_server_at(root, beacon) {
+            Ok((server, token)) => return Takeover::Hosted { server, token },
+            Err(error) => error,
+        },
+    };
+    let Some(running) = attach_running_asset_server_at(root) else {
+        return Takeover::Wait(refused);
+    };
+    match (running.endpoints, silent) {
+        (Some(fresh), Some(dead)) if fresh.control == dead.control => {
+            Takeover::Wait("the root still names the silent server".to_string())
         }
+        (None, Some(_)) => Takeover::Wait("the root names no server yet".to_string()),
+        _ => Takeover::Rejoin(running),
     }
 }
 
@@ -2515,14 +2618,15 @@ mod tests {
 
         // A live owner holds the lock, and the root still names it: nothing
         // to succeed, nothing new to trust.
-        match takeover_at(&root, Some(owned), Beacon::Silent) {
+        match takeover_at(&root, Some(owned), Beacon::Silent, EmbedPolicy::Auto) {
             Takeover::Wait(why) => assert!(why.contains("silent server"), "{why}"),
             Takeover::Hosted { .. } => panic!("a live owner must never be succeeded"),
             Takeover::Rejoin(_) => panic!("the root named the same server it always did"),
         }
 
         drop(owner);
-        let Takeover::Hosted { server, token } = takeover_at(&root, Some(owned), Beacon::Silent)
+        let Takeover::Hosted { server, token } =
+            takeover_at(&root, Some(owned), Beacon::Silent, EmbedPolicy::Auto)
         else {
             panic!("a free root lock must be taken");
         };
@@ -2551,7 +2655,7 @@ mod tests {
         // The race: a second attacher that also gave up on the dead address
         // must land on the WINNER, never back on the stale file it already
         // abandoned.
-        match takeover_at(&root, Some(owned), Beacon::Silent) {
+        match takeover_at(&root, Some(owned), Beacon::Silent, EmbedPolicy::Auto) {
             Takeover::Rejoin(running) => {
                 let rejoin = running.endpoints.expect("the winner's listen file");
                 assert_eq!(rejoin.control.port(), fresh.control.port());
@@ -2654,5 +2758,119 @@ mod tests {
         drop(store);
         drop(owner_token);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The recommended deployment: `makepad-asset-server` owns the root and
+    /// the app is a client. Even with the lock FREE — the daemon restarting,
+    /// or not up yet — an attach-only instance must never fill the vacancy,
+    /// because the daemon coming back would then find its own root taken by
+    /// a window.
+    #[test]
+    fn attach_only_never_takes_a_root_even_when_the_lock_is_free() {
+        let root = live_test_root("attach-only-free");
+        std::fs::create_dir_all(&root).expect("root");
+
+        // Nothing has ever served this root: no listen file, no lock holder.
+        match takeover_at(&root, None, Beacon::Silent, EmbedPolicy::Never) {
+            Takeover::Wait(why) => assert!(why.contains("attach-only"), "{why}"),
+            Takeover::Hosted { .. } => panic!("attach-only must never hold the root"),
+            Takeover::Rejoin(_) => panic!("there is nothing on this root to rejoin"),
+        }
+        assert!(
+            !root.join("server.lock").exists() || {
+                // A refused attempt must not have left a LOCKED file behind:
+                // the daemon has to be able to take this root immediately.
+                let (server, _) =
+                    start_embedded_asset_server_at(&root, Beacon::Silent).expect("root is free");
+                drop(server);
+                true
+            },
+            "attach-only left the root unusable"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// …and once a server IS there, attach-only joins it and, when it goes
+    /// silent and a NEW one takes the root, rejoins that one instead of
+    /// hosting.
+    #[test]
+    fn attach_only_rejoins_the_next_holder_of_the_root() {
+        let root = live_test_root("attach-only-rejoin");
+        let (first, _first_token) =
+            start_embedded_asset_server_at(&root, Beacon::Silent).expect("first server");
+        let joined = localized_endpoints(&first);
+
+        // A `start` under EmbedPolicy::Never learns the address from the
+        // root's own files, exactly like the auto path's attach branch.
+        let mut store = AssetStore::default();
+        store.server_root = root.clone();
+        store.embed = EmbedPolicy::Never;
+        let mut config = SessionConfig::new(live_test_root("attach-only-cache"));
+        assert!(store.attach_to_root(&mut config), "the root advertises a server");
+        assert_eq!(
+            config.endpoints.expect("listen").control.port(),
+            joined.control.port()
+        );
+        assert_eq!(config.server_id, Some(first.server_id()));
+        assert!(config.token.is_some(), "the root's admin token is readable");
+
+        // The one it joined goes silent while the lock stays held: wait.
+        match takeover_at(&root, store.attached_endpoints, Beacon::Silent, EmbedPolicy::Never) {
+            Takeover::Wait(why) => assert!(why.contains("silent server"), "{why}"),
+            other => panic!("a live holder must be waited on, got {}", takeover_name(&other)),
+        }
+
+        // It dies and a DIFFERENT process takes the root (the daemon
+        // restarting). Attach-only rejoins the newcomer.
+        drop(first);
+        let (second, second_token) =
+            start_embedded_asset_server_at(&root, Beacon::Silent).expect("second server");
+        let successor = localized_endpoints(&second);
+        match takeover_at(&root, Some(joined), Beacon::Silent, EmbedPolicy::Never) {
+            Takeover::Rejoin(running) => {
+                assert_eq!(
+                    running.endpoints.expect("listen").control.port(),
+                    successor.control.port()
+                );
+                assert_eq!(running.token.as_deref(), Some(second_token.as_str()));
+            }
+            other => panic!("expected a rejoin, got {}", takeover_name(&other)),
+        }
+
+        drop(second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn takeover_name(outcome: &Takeover) -> &'static str {
+        match outcome {
+            Takeover::Hosted { .. } => "Hosted",
+            Takeover::Rejoin(_) => "Rejoin",
+            Takeover::Wait(_) => "Wait",
+        }
+    }
+
+    #[test]
+    fn the_embed_policy_is_opt_in_and_only_the_named_words_turn_it_off() {
+        // Parsed from the same vocabulary the beacon switch uses, so an
+        // operator who knows one knows the other.
+        for value in ["never", "no", "off", "0", "false", "attach", "client", " NEVER "] {
+            assert_eq!(
+                embed_policy_from_value(Some(value)),
+                EmbedPolicy::Never,
+                "{value:?}"
+            );
+        }
+        for value in ["auto", "yes", "1", "host", ""] {
+            assert_eq!(
+                embed_policy_from_value(Some(value)),
+                EmbedPolicy::Auto,
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            embed_policy_from_value(None),
+            EmbedPolicy::Auto,
+            "unset keeps today's embedding behaviour"
+        );
     }
 }
