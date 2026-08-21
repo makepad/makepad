@@ -7767,6 +7767,13 @@ impl App {
         if labels != self.gen_profile_labels {
             self.gen_profile_labels = labels.clone();
             self.ui.drop_down(cx, ids!(gen_profile)).set_labels(cx, labels);
+            // The widget's own selection starts at row 0 no matter what the
+            // model defaults to; without this the box SHOWS "expand → image"
+            // while the model would run video, and the first click makes the
+            // lie true ("gimme a jumping rabbit" came back as a picture).
+            self.ui
+                .drop_down(cx, ids!(gen_profile))
+                .set_selected_item(cx, self.gen.selected);
         }
     }
 
