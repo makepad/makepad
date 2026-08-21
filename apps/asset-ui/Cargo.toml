@@ -29,6 +29,11 @@ makepad-asset-client = { path = "../../libs/asset/client" }
 makepad-asset-widgets = { path = "../../libs/asset/widgets", features = ["renderer"] }
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-chat = { path = "../../libs/asset/chat" }
+# The chat pane itself — ONE component, shared with the game sandbox: the
+# broker session + its worker channel, the transcript with its tool chips
+# and rate meter, and the list widget. This app supplies the personality
+# (namespace `gen`, client profile `gen`, its own client-executed tools).
+makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
 # Embedded catalog/chat broker for now: the app starts the real Asset
 # Server in-process instead of waiting for a LAN beacon.
 makepad-asset-store = { path = "../../libs/asset/store" }

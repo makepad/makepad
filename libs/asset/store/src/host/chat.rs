@@ -1078,27 +1078,16 @@ impl ToolExecutor for SessionTools<'_> {
     fn tool_definitions(&mut self) -> Vec<ToolDef> {
         match self.profile {
             ClientProfile::Game => tools::game_definitions(),
-            ClientProfile::General | ClientProfile::Vj => tools::definitions(),
+            ClientProfile::General | ClientProfile::Vj | ClientProfile::Gen => tools::definitions(),
         }
     }
 
-    /// Game sessions' world tools are executed by the connected app: the
+    /// Some profiles declare tools their own app executes (the game's
+    /// `world.*`, the asset UI's fleet generate/defaults tools): the
     /// session parks and the outcome arrives over the tool-result route.
+    /// The set lives with the profile, next to the context that teaches it.
     fn client_executes(&mut self, call: &ContentToolCall) -> bool {
-        self.profile.client_world_tools()
-            && matches!(
-                call,
-                ContentToolCall::WorldPlace { .. }
-                    | ContentToolCall::WorldRemove { .. }
-                    | ContentToolCall::WorldMove { .. }
-                    | ContentToolCall::WorldList
-                    | ContentToolCall::WorldGetSource
-                    | ContentToolCall::WorldSetSource { .. }
-                    | ContentToolCall::WorldSetPlayerModel { .. }
-                    | ContentToolCall::WorldSpawn { .. }
-                    | ContentToolCall::WorldTune { .. }
-                    | ContentToolCall::WorldAddAddon { .. }
-            )
+        self.profile.client_executes(call)
     }
 
     fn execute(
