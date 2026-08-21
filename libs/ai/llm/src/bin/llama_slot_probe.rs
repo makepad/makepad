@@ -19,6 +19,15 @@ use makepad_ai_llm::{
 };
 use std::collections::HashMap;
 
+/// Speculative draft depth for every session the probe builds. 0 keeps MTP out
+/// of the picture entirely; >0 loads the draft head and exercises the
+/// hidden-carry ring, which is the structure per-lane MTP repartitions.
+static SPEC_DRAFT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn spec_draft() -> usize {
+    SPEC_DRAFT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Graph activations grow with the slot count: wider batches mean wider
 /// intermediates, and the arena the attention mask spans grows too. The 512 MiB
 /// default is sized for one sequence, and at 8 slots it is not enough — the
@@ -54,10 +63,21 @@ fn generate(
             max_context: Some(max_context),
             max_sequences: slots,
             extra_activation_bytes: activation_reserve(slots),
+            spec_draft_max: spec_draft(),
             ..LlamaSessionConfig::default()
         },
     )
     .map_err(|e| e.to_string())?;
+    let active = session.speculation_depth();
+    if spec_draft() > 0 && active == 0 {
+        return Err(format!(
+            "--spec {} was requested but the draft head did not load (this gguf has no \n               nextn block). Every speculation assertion below would pass vacuously.",
+            spec_draft()
+        ));
+    }
+    if spec_draft() > 0 {
+        eprintln!("speculation ACTIVE: draft depth {active}");
+    }
     let arena = session.attention_arena_rows();
     let tokens = vocab
         .tokenize(PROMPT, true, true)
@@ -76,7 +96,7 @@ fn generate(
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().unwrap_or_else(|| {
-        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N] [--timing]");
+        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N] [--timing] [--spec N]");
         std::process::exit(2);
     });
     let mut max_new = 24usize;
@@ -103,6 +123,11 @@ fn main() {
             "--timing" => {
                 timing = true;
                 index += 1;
+            }
+            "--spec" => {
+                let depth = rest.get(index + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                SPEC_DRAFT.store(depth, std::sync::atomic::Ordering::Relaxed);
+                index += 2;
             }
             other => {
                 eprintln!("unknown argument {other}");
@@ -740,6 +765,7 @@ fn build_session(
             max_context: Some(per_slot_context),
             max_sequences: slots,
             extra_activation_bytes: activation_reserve(slots),
+            spec_draft_max: spec_draft(),
             ..LlamaSessionConfig::default()
         },
     )
@@ -903,6 +929,7 @@ fn slot_independence(
             max_context: Some(per_slot_context),
             max_sequences: slots,
             extra_activation_bytes: activation_reserve(slots),
+            spec_draft_max: spec_draft(),
             ..LlamaSessionConfig::default()
         },
     )

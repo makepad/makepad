@@ -258,10 +258,25 @@ fn mtp_carry_ring(prefill_batch_size: usize, draft_max: usize, max_context: usiz
         .max(min_rows)
 }
 
-fn carry_ring_bytes(hidden_size: u32, carry_ring: usize) -> Result<usize> {
+/// Rows the hidden-carry tensor needs for `lanes` lanes.
+///
+/// Each lane owns a contiguous block of `carry_ring + 2` rows: its ring, then
+/// its scratch row, then its never-written zero row. Lane 0's block starts at
+/// row 0, so a single-lane session addresses exactly the rows it always did.
+///
+/// The ring is indexed `position % carry_ring`, so a SHARED ring silently
+/// aliases whenever two lanes sit at congruent positions — at ring 2048, every
+/// 2048 tokens. That is a wrong-hidden-state feeding the draft head, which
+/// surfaces as the model getting subtly worse rather than as an error. Per-lane
+/// blocks make the collision unrepresentable.
+fn carry_rows_total(carry_ring: usize, lanes: usize) -> usize {
+    (carry_ring + 2) * lanes.max(1)
+}
+
+fn carry_ring_bytes(hidden_size: u32, carry_ring: usize, lanes: usize) -> Result<usize> {
     ggml_row_size_for_type(TensorType::F32, i64::from(hidden_size))
         .map_err(LlamaError::format)?
-        .checked_mul(carry_ring + 2)
+        .checked_mul(carry_rows_total(carry_ring, lanes))
         .ok_or_else(|| LlamaError::format("overflow sizing the mtp hidden carry"))
 }
 
@@ -452,6 +467,16 @@ impl LlamaSession {
 
     pub fn max_context(&self) -> usize {
         self.max_context
+    }
+
+    /// Speculative draft depth actually ACTIVE, which is 0 whenever the draft
+    /// head did not load — `spec_draft_max` is only a request, and a gguf
+    /// without a nextn block silently declines it.
+    ///
+    /// Exposed so a test can refuse to pass vacuously: a gate that thinks it
+    /// exercised speculation, on a model that has none, certifies nothing.
+    pub fn speculation_depth(&self) -> usize {
+        self.mtp.map(|mtp| mtp.draft_max).unwrap_or(0)
     }
 
     /// Slots this session was built for. 1 for every single-stream session.
@@ -1105,7 +1130,11 @@ impl LlamaSession {
                 )
                 .ok_or_else(|| LlamaError::format("overflow sizing recurrent checkpoint rows"))?;
             cache_bytes = cache_bytes
-                .checked_add(carry_ring_bytes(model.embedding_length()?, carry_ring)?)
+                .checked_add(carry_ring_bytes(
+                    model.embedding_length()?,
+                    carry_ring,
+                    config.max_sequences as usize,
+                )?)
                 .ok_or_else(|| LlamaError::format("overflow sizing the mtp hidden carry"))?;
         }
         let context_extra_bytes = cache_bytes
@@ -1120,6 +1149,7 @@ impl LlamaSession {
             spec_mtp.as_ref(),
             draft_vocab.as_ref(),
             carry_ring,
+            config.max_sequences as usize,
             context_extra_bytes,
             prompt_batch_capacity(config.prefill_batch_size, max_context_usize),
             progress,
@@ -1281,20 +1311,53 @@ impl LlamaSession {
     /// `start`. Row of sequence index `i` is `i % carry_ring`, which makes the
     /// row of any position derivable without extra bookkeeping.
     fn carry_rows_for_positions(&self, start: usize, count: usize) -> Vec<i32> {
+        self.carry_rows_for_lane_positions(0, start, count)
+    }
+
+    /// Ring rows for `count` tokens of `lane` starting at its within-lane
+    /// position `start`. Lane 0's base is 0, so this is byte-identical to the
+    /// single-sequence arithmetic it replaces.
+    fn carry_rows_for_lane_positions(&self, lane: usize, start: usize, count: usize) -> Vec<i32> {
         let Some(mtp) = self.mtp.as_ref() else {
             return Vec::new();
         };
+        let base = self.carry_lane_base(mtp, lane);
         (start..start + count)
-            .map(|index| (index % mtp.carry_ring) as i32)
+            .map(|index| base + (index % mtp.carry_ring) as i32)
             .collect()
     }
 
+    /// First row of `lane`'s carry block.
+    fn carry_lane_base(&self, mtp: &MtpRuntime, lane: usize) -> i32 {
+        (lane * (mtp.carry_ring + 2)) as i32
+    }
+
     fn carry_scratch_row(&self, mtp: &MtpRuntime) -> i32 {
-        mtp.carry_ring as i32
+        self.carry_scratch_row_for(mtp, 0)
+    }
+
+    fn carry_scratch_row_for(&self, mtp: &MtpRuntime, lane: usize) -> i32 {
+        self.carry_lane_base(mtp, lane) + mtp.carry_ring as i32
     }
 
     fn carry_zero_row(&self, mtp: &MtpRuntime) -> i32 {
-        mtp.carry_ring as i32 + 1
+        self.carry_zero_row_for(mtp, 0)
+    }
+
+    fn carry_zero_row_for(&self, mtp: &MtpRuntime, lane: usize) -> i32 {
+        self.carry_lane_base(mtp, lane) + mtp.carry_ring as i32 + 1
+    }
+
+    /// Where a lane that is NOT speculating dumps the hidden row the graph
+    /// obliges every batch column to write.
+    ///
+    /// It is that lane's own scratch row, which nothing else reads while the
+    /// lane is not drafting. Deliberately NOT the shared scratch row: session
+    ///.rs reads that as the draft chain's `h_{-1}` source, so a foreign write
+    /// there corrupts another lane's drafts. And not the zero row, which is
+    /// load-bearing precisely by staying zero.
+    fn carry_dump_row(&self, mtp: &MtpRuntime, lane: usize) -> i32 {
+        self.carry_scratch_row_for(mtp, lane)
     }
 
     /// Append an image span: precomputed vision embeddings for a grid of
@@ -1448,6 +1511,7 @@ impl LlamaSession {
                         self.spec_mtp.as_ref(),
                         self.draft_vocab.as_ref(),
                         self.mtp.map(|mtp| mtp.carry_ring).unwrap_or(0),
+                        self.config.max_sequences as usize,
                         self.context_extra_bytes,
                         prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
                         &mut |_, _| {},
@@ -2397,6 +2461,9 @@ fn build_runtime_state(
     spec_mtp: Option<&HybridDecodeSpec>,
     draft_vocab: Option<&DraftVocab>,
     carry_ring: usize,
+    // Lanes the carry tensor must hold blocks for. 1 for a single-sequence
+    // session, which reproduces the previous allocation exactly.
+    carry_lanes: usize,
     context_extra_bytes: usize,
     prompt_batch_capacity: usize,
     progress: &mut dyn FnMut(&str, f64),
@@ -2444,9 +2511,9 @@ fn build_runtime_state(
                     2,
                     &[
                         i64::from(carry_spec.hidden_size),
-                        i64::try_from(carry_ring + 2).map_err(|_| {
-                            LlamaError::format("mtp carry ring does not fit in i64")
-                        })?,
+                        i64::try_from(carry_rows_total(carry_ring, carry_lanes)).map_err(
+                            |_| LlamaError::format("mtp carry ring does not fit in i64"),
+                        )?,
                     ],
                     crate::BufferUsage::State,
                 )
