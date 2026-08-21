@@ -30,6 +30,11 @@ use crate::slots::{SlotTable, StepPlan};
 /// client sees is unchanged.
 pub const CHUNK_TOKENS: usize = 24;
 
+/// Prompt tokens a lane ingests per prefill step, unless the caller says
+/// otherwise. Matches the single-sequence prefill batch, which has always
+/// chunked for the same reason.
+pub const DEFAULT_PREFILL_CHUNK: usize = 64;
+
 /// A request waiting for, or occupying, a lane.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaneRequest {
@@ -66,6 +71,11 @@ struct Lane {
     /// Next token this lane will decode, from its prefill or its last step.
     next_token: Option<i32>,
     phase: LanePhase,
+    /// Prompt tokens already ingested. A prompt is prefilled in CHUNKS —
+    /// ingesting eight thousand tokens in one graph builds activations
+    /// proportional to `n_tokens x key_span`, and on a lane whose base is high
+    /// in the arena that is gigabytes.
+    ingested: usize,
     /// This lane's own history: the prompt it ingested plus everything it has
     /// generated, in order.
     ///
@@ -153,6 +163,15 @@ pub struct LaneScheduler {
     lanes: Vec<Option<Lane>>,
     pending: VecDeque<LaneRequest>,
     queue_max: usize,
+    /// Tokens a lane ingests per prefill step.
+    ///
+    /// The whole reason prefill is chunked at all: a prefill graph's
+    /// activations scale with `n_tokens x attention_key_count`, and with a
+    /// slot-major arena a high lane's key span is its base PLUS its fill — so
+    /// an 8k prompt on lane 1 of a 128k-per-lane box asks for gigabytes of
+    /// activations in a single graph. Chunking bounds the first factor, which
+    /// is the only one a scheduler controls.
+    prefill_chunk: usize,
     /// Per slot, what its caches still describe after its lane retired.
     ///
     /// PER SLOT, which is the whole point. One shared prefix cache belongs to
@@ -185,6 +204,7 @@ impl LaneScheduler {
             lanes,
             pending: VecDeque::new(),
             queue_max,
+            prefill_chunk: DEFAULT_PREFILL_CHUNK,
             parked: vec![None; slots],
             resumed: vec![false; slots],
             stop_tokens: Vec::new(),
@@ -200,6 +220,13 @@ impl LaneScheduler {
 
     pub fn stop_tokens(&self) -> &[i32] {
         &self.stop_tokens
+    }
+
+    /// Tokens a lane ingests per prefill step. Set from the session's own
+    /// prefill batch so the two agree.
+    pub fn with_prefill_chunk(mut self, tokens: usize) -> Self {
+        self.prefill_chunk = tokens.max(1);
+        self
     }
 
     pub fn slots_total(&self) -> usize {
@@ -285,6 +312,7 @@ impl LaneScheduler {
                 produced: 0,
                 next_token: None,
                 phase: LanePhase::NeedsPrefill,
+                ingested: 0,
                 tokens: history,
             });
         }
@@ -360,13 +388,25 @@ impl LaneScheduler {
             let Some(lane) = lane else { continue };
             if lane.phase == LanePhase::NeedsPrefill {
                 let slot = self.table.slot(index).expect("admitted lane has a slot");
+                // One CHUNK, not the whole prompt. The graph a prefill builds
+                // is sized by `n_tokens x attention_key_count`, and with a
+                // slot-major arena the key count is the lane's BASE plus its
+                // fill — so an 8k prompt on a high lane at 128k per lane asks
+                // for gigabytes of activations at once, and the allocation
+                // fails. The single-sequence path has always chunked; this is
+                // the slot path catching up to it.
+                let end = (lane.ingested + self.prefill_chunk)
+                    .min(lane.request.prompt_tokens.len());
                 return LaneStep::Prefill {
                     lane: index,
                     kv_base: slot.kv_base(),
                     state_row: slot.live_state_row(),
                     start: slot.fill(),
-                    tokens: lane.request.prompt_tokens.clone(),
-                    resumed: self.resumed.get(index).copied().unwrap_or(false),
+                    tokens: lane.request.prompt_tokens[lane.ingested..end].to_vec(),
+                    // Only the FIRST chunk may reset: the ones after it are
+                    // appending to state this same lane just wrote.
+                    resumed: self.resumed.get(index).copied().unwrap_or(false)
+                        || lane.ingested > 0,
                 };
             }
         }
@@ -396,21 +436,34 @@ impl LaneScheduler {
     /// of the turn on token zero.
     pub fn on_prefilled(&mut self, lane: usize, count: usize, first_token: i32) -> Vec<LaneEvent> {
         let _ = self.table.advance(lane, count);
-        let _ = self.table.begin_decoding(lane);
         let stops = self.stop_tokens.contains(&first_token);
+        let mut complete = false;
         if let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) {
-            // The prompt is now this lane's history. `count` rather than the
-            // request's own length, because a prefix hit ingests only a delta
-            // and the lane holds exactly what went in.
-            let ingested = slot.request.prompt_tokens.len().min(count);
-            let prompt: Vec<i32> = slot.request.prompt_tokens[..ingested].to_vec();
-            slot.tokens.extend_from_slice(&prompt);
-            slot.next_token = Some(first_token);
-            slot.phase = if stops {
-                LanePhase::Done(LaneOutcome::Complete)
-            } else {
-                LanePhase::Decoding
-            };
+            // The chunk that just went in is now part of this lane's history.
+            let from = slot.ingested.min(slot.request.prompt_tokens.len());
+            let to = (slot.ingested + count).min(slot.request.prompt_tokens.len());
+            let chunk: Vec<i32> = slot.request.prompt_tokens[from..to].to_vec();
+            slot.tokens.extend_from_slice(&chunk);
+            slot.ingested = to;
+            // More prompt to go: stay in prefill. The token sampled from a
+            // middle chunk's logits is meaningless — the prompt is not
+            // finished, so there is nothing yet to continue from.
+            complete = slot.ingested >= slot.request.prompt_tokens.len();
+            if complete {
+                slot.next_token = Some(first_token);
+                slot.phase = if stops {
+                    LanePhase::Done(LaneOutcome::Complete)
+                } else {
+                    LanePhase::Decoding
+                };
+            }
+        }
+        if complete {
+            let _ = self.table.begin_decoding(lane);
+        } else {
+            // Not a decode step yet, and not an event either: the caller hears
+            // about a prefill once, when it is actually done.
+            return Vec::new();
         }
         let resumed = self.resumed.get(lane).copied().unwrap_or(false);
         self.lanes
@@ -419,7 +472,9 @@ impl LaneScheduler {
             .map(|slot| {
                 vec![LaneEvent::Prefilled {
                     job: slot.request.job,
-                    ingested: count,
+                    // The WHOLE turn's ingest, not the last chunk's — the
+                    // number that says whether this conversation was warm.
+                    ingested: slot.ingested,
                     resumed,
                 }]
             })
@@ -1369,6 +1424,73 @@ mod tests {
             sched.is_solo(lane),
             "a lane left claimed by the previous turn is what forced the \
              batched path onto a single conversation"
+        );
+    }
+
+    /// REGRESSION, 2026-08-21. Live chat showed "loading" on every message.
+    ///
+    /// The slot prefill sent the WHOLE prompt in one graph. A prefill graph's
+    /// activations scale with `n_tokens x attention_key_count`, and with a
+    /// slot-major arena a lane's key count is its BASE plus its fill — so an
+    /// eight-thousand-token prompt on lane 1 of a 128k-per-lane box asked for
+    /// 7.5 GB of activations at once. The allocation failed, the job errored,
+    /// the backend unloaded, and the NEXT message re-booted the model: the
+    /// "loading 13%" the player saw was a session boot on every turn.
+    ///
+    /// The single-sequence path has always chunked. This is the slot path
+    /// doing the same, and the property is simply that no step ever offers
+    /// more than the chunk.
+    #[test]
+    fn a_long_prompt_is_prefilled_in_chunks() {
+        let mut sched = scheduler(2, 4).with_prefill_chunk(8);
+        let prompt: Vec<i32> = (0..20).collect();
+        sched.submit(request(1, &prompt, 4)).expect("submit");
+
+        let mut offered = Vec::new();
+        let mut starts = Vec::new();
+        for _ in 0..5 {
+            match sched.next_step() {
+                LaneStep::Prefill { lane, start, tokens, .. } => {
+                    assert!(tokens.len() <= 8, "a step must never exceed the chunk");
+                    starts.push(start);
+                    offered.extend_from_slice(&tokens);
+                    let events = sched.on_prefilled(lane, tokens.len(), 700);
+                    // Only the LAST chunk finishes the prefill and reports it.
+                    if offered.len() < prompt.len() {
+                        assert!(
+                            events.is_empty(),
+                            "a middle chunk is not a finished prefill"
+                        );
+                    }
+                }
+                LaneStep::Decode { .. } => break,
+                LaneStep::Idle => panic!("idle mid-prefill"),
+            }
+        }
+        assert_eq!(offered, prompt, "every token goes in, once, in order");
+        assert_eq!(starts, vec![0, 8, 16], "each chunk resumes where the last stopped");
+    }
+
+    #[test]
+    fn only_the_first_chunk_of_a_prefill_may_reset() {
+        // Chunks after the first are appending to state THIS lane just wrote.
+        // Resetting on chunk two would throw away chunk one and prefill the
+        // rest at position zero — a prompt with its beginning missing.
+        let mut sched = scheduler(2, 4).with_prefill_chunk(4);
+        let prompt: Vec<i32> = (0..10).collect();
+        sched.submit(request(1, &prompt, 4)).expect("submit");
+        let mut resets = Vec::new();
+        for _ in 0..3 {
+            let LaneStep::Prefill { lane, tokens, resumed, .. } = sched.next_step() else {
+                break;
+            };
+            resets.push(!resumed);
+            sched.on_prefilled(lane, tokens.len(), 700);
+        }
+        assert_eq!(
+            resets,
+            vec![true, false, false],
+            "reset on the first chunk only"
         );
     }
 
