@@ -20,6 +20,7 @@ pub mod qwen35moe;
 pub mod qwen35moe_runtime;
 pub mod runtime;
 mod session;
+pub mod slots;
 pub mod vision;
 pub mod vocab;
 pub mod weights;
@@ -67,6 +68,10 @@ pub use qwen35moe_runtime::{
     qwen35moe_hybrid_cache_template, qwen35moe_hybrid_decode_spec, qwen35moe_moe_ffn_layout,
     qwen35moe_moe_ffn_spec, qwen35moe_recurrent_block_layout, qwen35moe_recurrent_block_spec,
     qwen35moe_token_logits_probe_spec, Qwen35MoeDims,
+};
+pub use slots::{
+    draft_depth_for, pad_batch_width, Slot, SlotPhase, SlotStep, SlotTable, StepPlan,
+    BATCH_WIDTHS, COLUMN_BUDGET,
 };
 pub use runtime::{
     allocate_hybrid_shared_cache_tensors, build_attention_block_graph,
