@@ -716,6 +716,18 @@ impl LaneExecutor {
                 // Drop the retired lane's stream so whoever takes the slot next
                 // starts fresh instead of continuing a stranger's sequence.
                 self.samplers[*lane] = None;
+                if *lane == SOLO_LANE {
+                    // And forget that its history was session-native. Left set,
+                    // the handover at the top of the next step fires for a lane
+                    // that no longer exists: it samples stale logits and, in
+                    // doing so, RE-CREATES `samplers[0]` — seeded from the
+                    // executor default, because the lane is gone and has no
+                    // request to take a seed from. The next conversation to
+                    // land on lane 0 then finds a stream already there and
+                    // silently inherits it, seed ignored. That is the retired
+                    // stream leaking back in through the door reap just shut.
+                    self.solo_native = false;
+                }
             }
             events.push(event);
         }
