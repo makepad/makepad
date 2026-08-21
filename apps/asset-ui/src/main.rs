@@ -251,7 +251,7 @@ app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
-    use mod.widgets.ContentChat
+    use mod.widgets.AssetChatList
     use mod.widgets.*
 
     // ---- design language ----------------------------------------------------
@@ -2576,13 +2576,13 @@ script_mod! {
                                     width: Fill height: Fit flow: Down spacing: 3
                                     PanelHeading{ text: "Qwen · fleet" margin: Inset{top: 0} }
                                     chat_status := DimLabel{
-                                        text: "Waiting for Qwen fleet…"
+                                        text: "Waiting for the asset server…"
                                     }
                                     HintLabel{
-                                        text: "Ask for an image, video, sfx, speech, music, mesh, world, or character. Qwen calls the matching *.generate tool."
+                                        text: "Ask for an image, video, sfx, speech, music, mesh, world, or character. Qwen calls the matching *.generate tool. Esc stops a reply."
                                     }
                                 }
-                                chat_list := ContentChat{}
+                                chat_list := AssetChatList{}
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 6
                                     align: Align{y: 1.0}
@@ -2607,6 +2607,7 @@ script_mod! {
                                     }
                                     chat_send_btn := PrimaryButton{ text: "Send" }
                                     chat_cancel_btn := DangerButton{ text: "Stop" visible: false }
+                                    chat_clear_btn := GhostButton{ text: "Clear" }
                                 }
                             }
 
@@ -3873,17 +3874,10 @@ pub struct App {
     /// `poll` only drains typed results on the UI thread.
     #[rust]
     store: AssetStoreState,
-    /// Local Fleet Qwen chat (never blocks the UI).
+    /// The Qwen chat: a session on the store's chat broker, pumped by the
+    /// shared feed's worker thread (never blocks the UI).
     #[rust]
     chat: ChatBridge,
-    /// Last fleet URL set sent to the chat worker (retry / membership).
-    #[rust]
-    chat_fleet_bases: Vec<String>,
-    #[rust]
-    chat_qwen_retry_at: Option<std::time::Instant>,
-    /// Asset Server catalog tools have been handed to the chat worker.
-    #[rust]
-    chat_asset_linked: bool,
     /// Hardcoded OSS pack catalog (Kenney compile + honest empty states).
     #[rust]
     import_page: ImportPage,
@@ -9518,60 +9512,38 @@ impl App {
                 status = format!("{status} · {defaults}");
             }
         }
-        if let Ok(data) = crate::chat::CHAT.read() {
-            if !data.activity.is_empty() && !status.contains(&data.activity) {
-                if status.is_empty() {
-                    status = data.activity.clone();
-                } else {
-                    status = format!("{status} · {}", data.activity);
-                }
+        let activity = ChatData::activity();
+        if !activity.is_empty() && !status.contains(&activity) {
+            if status.is_empty() {
+                status = activity;
+            } else {
+                status = format!("{status} · {activity}");
             }
+        }
+        // The live number has ONE home while a reply streams: this strip.
+        // (The landed message keeps its own average as a footnote.) It is
+        // the serving box's real generation rate, `· thinking` included.
+        if let Some(rate) = ChatData::live_rate_label() {
+            status = if status.is_empty() { rate } else { format!("{status} · {rate}") };
         }
         self.ui
             .label(cx, ids!(chat_status))
             .set_text(cx, &status);
-        let streaming = crate::chat::CHAT
-            .read()
-            .map(|d| d.is_streaming)
-            .unwrap_or(false);
+        let streaming = ChatData::is_streaming();
         self.ui
             .button(cx, ids!(chat_cancel_btn))
             .set_visible(cx, streaming);
         self.ui.widget(cx, ids!(chat_list)).redraw(cx);
     }
 
+    /// The chat lives on the STORE's chat broker — the server picks the
+    /// serving box and executes the catalog/operation tools itself — so all
+    /// this app has to do is hand over the session once it is up.
     fn maybe_connect_chat(&mut self) {
-        let bases: Vec<String> = self
-            .fleet
-            .as_ref()
-            .map(|fleet| {
-                fleet
-                    .snapshots
-                    .iter()
-                    .map(|snap| snap.base_url.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let now = std::time::Instant::now();
-        let bases_changed = self.chat_fleet_bases != bases;
-        let due = self.chat_qwen_retry_at.map(|t| now >= t).unwrap_or(true);
-        if bases_changed || (!self.chat.is_connected() && !bases.is_empty() && due) {
-            self.chat_fleet_bases = bases.clone();
-            self.chat_qwen_retry_at = Some(now + std::time::Duration::from_secs(8));
-            self.chat.set_fleet(bases);
-        }
-        if !self.chat_asset_linked {
-            if let (Some(endpoints), Some(server)) =
-                (self.store.endpoints, self.store.server.as_ref())
-            {
+        if !self.chat.is_linked() {
+            if let Some(endpoints) = self.store.endpoints {
                 let cache = session_config_from_env().cache_parent.join("cache-chat");
-                self.chat.connect_asset(
-                    endpoints,
-                    self.store.token.clone(),
-                    cache,
-                    server.server_id,
-                );
-                self.chat_asset_linked = true;
+                self.chat.connect(endpoints, self.store.token.clone(), cache);
             }
         }
         self.push_fleet_view();
@@ -12558,9 +12530,20 @@ impl MatchEvent for App {
             self.chat.cancel();
             self.refresh_chat_ui(cx);
         }
+        if self.ui.button(cx, ids!(chat_clear_btn)).clicked(actions) {
+            // Wipe the transcript AND retire the session: the next message
+            // starts a conversation the model has no memory of.
+            self.chat.clear();
+            self.refresh_chat_ui(cx);
+        }
         if self.ui.text_input(cx, ids!(chat_input)).returned(actions).is_some() {
             self.send_chat(cx);
         }
+        // Tool chips in the chat expand/collapse on click.
+        self.ui
+            .widget(cx, ids!(chat_list))
+            .borrow_mut::<makepad_asset_chat_ui::AssetChatList>()
+            .map(|mut list| list.handle_actions(cx, actions));
         // Library filters re-run on every keystroke / dropdown pick and go
         // straight onto the server query.
         let mut filters_changed = self
@@ -13437,7 +13420,9 @@ impl AppMain for App {
         crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);
         crate::thumbnail_renderer::script_mod(vm);
-        crate::chat::script_mod(vm);
+        // The shared chat pane (also the sandbox's): transcript list,
+        // tool chips, think dots.
+        makepad_asset_chat_ui::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -13508,6 +13493,13 @@ impl AppMain for App {
             _ => {}
         }
         if let Event::KeyDown(ke) = event {
+            // Escape stops the reply in flight (the broker's cancel route),
+            // wherever the focus is — a runaway answer must not need a
+            // mouse trip to the Stop button.
+            if ke.key_code == KeyCode::Escape && !ke.is_repeat && ChatData::is_streaming() {
+                self.chat.cancel();
+                self.refresh_chat_ui(cx);
+            }
             if ke.key_code == KeyCode::F8 && !ke.is_repeat {
                 let on = self
                     .ui
