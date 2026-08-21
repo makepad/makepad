@@ -486,19 +486,24 @@ impl Cx {
         // Render all passes using the real draw tree + JIT shaders
         let framebuffers = self.headless_render_all_passes(time_now);
 
-        for (window_id, fb) in framebuffers {
+        for window_id in framebuffers {
             // Skip if we don't have a window state for this window
             if window_id >= windows.len() {
                 continue;
             }
+            let Some((width, height)) = self
+                .os
+                .window_framebuffers
+                .get(&window_id)
+                .map(|fb| (fb.width as u32, fb.height as u32))
+            else {
+                continue;
+            };
             let state = &mut windows[window_id];
             if !state.created {
                 state.created = true;
                 state.ensure_size_defaults();
             }
-
-            let width = fb.width as u32;
-            let height = fb.height as u32;
 
             // Pending grabs: the studio protocol drains them below; a plain
             // headless run answers `--remote` /g requests right here — the
@@ -515,7 +520,14 @@ impl Cx {
                 continue;
             }
 
-            let rgba = fb.to_rgba8();
+            let Some(rgba) = self
+                .os
+                .window_framebuffers
+                .get(&window_id)
+                .map(|fb| fb.to_rgba8())
+            else {
+                continue;
+            };
             let png = match encode_png_rgba(width, height, &rgba) {
                 Ok(png) => png,
                 Err(err) => {
