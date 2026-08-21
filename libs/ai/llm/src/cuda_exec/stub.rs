@@ -80,6 +80,7 @@ impl Runtime {
         _n_tokens: usize,
         _n_outputs: usize,
         _attention_key_count: usize,
+        _n_seqs: usize,
     ) -> Result<Compiled> {
         Err(LlamaError::unsupported(unavailable_reason()))
     }

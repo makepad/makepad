@@ -51,7 +51,8 @@ use crate::{
 use super::{CudaDeviceFeatures, ScratchEpoch};
 use crate::error::{LlamaError, Result};
 use crate::runtime::{
-    build_hybrid_decode_graph_with_attention_key_count, build_hybrid_decode_writes,
+    build_hybrid_decode_graph_with_attention_key_count, build_hybrid_decode_graph_with_sequences,
+    build_hybrid_decode_writes,
     collect_hybrid_decode_run, debug_trace_outputs, import_hybrid_graph_context,
     validate_hybrid_decode_layout,
     HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeOutputConfig, HybridDecodeRun,
@@ -837,13 +838,14 @@ impl Runtime {
         n_tokens: usize,
         n_outputs: usize,
         attention_key_count: usize,
+        n_seqs: usize,
     ) -> Result<Compiled> {
         let ImportedHybridGraphContext {
             mut ctx,
             tensor_ids,
             shared_cache,
         } = import_hybrid_graph_context(weights, Some(shared_cache), false)?;
-        let decode = build_hybrid_decode_graph_with_attention_key_count(
+        let decode = build_hybrid_decode_graph_with_sequences(
             &mut ctx,
             &tensor_ids,
             spec,
@@ -851,6 +853,7 @@ impl Runtime {
             n_tokens,
             n_outputs,
             attention_key_count,
+            n_seqs,
         )?;
         let plan = plan_graph(&ctx, &decode)?;
         if plan.required_size > ctx.mem_size() {

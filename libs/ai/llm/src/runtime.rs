@@ -7592,7 +7592,17 @@ fn compile_hybrid_decode_metal_impl(
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: Option<usize>,
+    n_seqs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
+    // Multi-slot decode is CUDA-only by design: the Mac dev loop keeps working
+    // at one sequence and the gates stay comparable at B = 1. Refuse rather
+    // than compile a graph whose slot structure Metal would ignore.
+    if n_seqs != 1 {
+        return Err(LlamaError::unsupported(format!(
+            "multi-slot decode is CUDA-only, got {} sequences on Metal",
+            n_seqs
+        )));
+    }
     let runtime = if let Some(runtime) = shared_runtime {
         runtime.clone()
     } else {
@@ -7665,7 +7675,7 @@ pub fn compile_hybrid_decode_metal(
     spec: &HybridDecodeSpec,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, None)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_outputs(
@@ -7674,7 +7684,7 @@ pub fn compile_hybrid_decode_metal_with_outputs(
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, None)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_shared_state(
@@ -7693,6 +7703,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
         n_tokens,
         n_tokens,
         None,
+        1,
     )
 }
 
@@ -7713,6 +7724,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
         n_tokens,
         n_outputs,
         None,
+        1,
     )
 }
 
@@ -7733,6 +7745,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
         n_tokens,
         n_tokens,
         None,
+        1,
     )
 }
 
@@ -7754,6 +7767,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
         n_tokens,
         n_outputs,
         None,
+        1,
     )
 }
 
@@ -7766,6 +7780,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: usize,
+    n_seqs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_impl(
         weights,
@@ -7776,6 +7791,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
         n_tokens,
         n_outputs,
         Some(attention_key_count),
+        n_seqs,
     )
 }
 

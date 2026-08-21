@@ -179,6 +179,7 @@ impl ExecRuntime {
         n_tokens: usize,
         n_outputs: usize,
         attention_key_count: usize,
+        n_seqs: usize,
     ) -> Result<CompiledHybridDecode> {
         match (self, shared_buffers) {
             (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
@@ -192,6 +193,7 @@ impl ExecRuntime {
                         n_tokens,
                         n_outputs,
                         attention_key_count,
+                        n_seqs,
                     )?,
                 ))
             }
@@ -204,6 +206,7 @@ impl ExecRuntime {
                     n_tokens,
                     n_outputs,
                     attention_key_count,
+                    n_seqs,
                 )?))
             }
             _ => Err(LlamaError::format(

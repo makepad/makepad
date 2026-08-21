@@ -96,6 +96,10 @@ struct SessionGraphParams {
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: usize,
+    /// Slots sharing this batch. 1 for every single-sequence path, which is
+    /// every path that exists today — so a solo session keys, compiles and
+    /// runs exactly the graph it always did.
+    n_seqs: usize,
 }
 
 impl SessionGraphParams {
@@ -105,11 +109,25 @@ impl SessionGraphParams {
             n_tokens,
             n_outputs,
             attention_key_count,
+            n_seqs: 1,
         }
     }
 
     fn greedy(n_tokens: usize, attention_key_count: usize) -> Self {
         Self::new(n_tokens, 1, attention_key_count)
+    }
+
+    /// One token per slot, one logit row per slot. `n_seqs == 1` reduces to
+    /// `Self::new(1, 1, ..)`, i.e. today's single-token decode key, so the solo
+    /// lane shares the existing compiled graph instead of getting a twin.
+    fn batched(n_seqs: usize, attention_key_count: usize) -> Self {
+        Self {
+            kind: SessionGraphKind::Main,
+            n_tokens: n_seqs,
+            n_outputs: n_seqs,
+            attention_key_count,
+            n_seqs,
+        }
     }
 
     fn greedy_embeddings(n_tokens: usize, attention_key_count: usize) -> Self {
@@ -124,6 +142,7 @@ impl SessionGraphParams {
             n_tokens,
             n_outputs: n_tokens,
             attention_key_count,
+            n_seqs: 1,
         }
     }
 
@@ -133,6 +152,7 @@ impl SessionGraphParams {
             n_tokens,
             n_outputs: 1,
             attention_key_count,
+            n_seqs: 1,
         }
     }
 
@@ -1221,6 +1241,7 @@ impl LlamaSession {
                 params.n_tokens,
                 params.n_outputs,
                 params.attention_key_count,
+                params.n_seqs,
             ) {
                 Ok(compiled) => {
                     self.graphs.insert_graph(params, compiled);
@@ -2289,6 +2310,7 @@ fn build_runtime_state(
                 1,
                 1,
                 session_attention_key_count(spec)?,
+                1,
             )?;
             compiled_by_params.insert(
                 SessionGraphParams::token_generation(session_attention_key_count(spec)?),
