@@ -425,6 +425,54 @@ pub struct SunConfig {
     pub shadow_alpha: Option<f32>,
 }
 
+/// What `game.tune({...})` asked for at the WORLD level: scalars every block
+/// of a kind reads each tick, so one call retunes a whole fleet without
+/// touching a single spawn line. Unlike [`SunConfig`] this IS read by the
+/// step — it is gameplay, not presentation.
+///
+/// A struct rather than loose `GameWorld` fields for one concrete reason:
+/// the derived `GameWorld::default()` then gets the NEUTRAL values, where a
+/// bare `f32` field would default to 0.0 and silently freeze every car in
+/// any world not built through `GameWorld::new()` (the trap `gravity`
+/// documents two constructors up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldTuning {
+    /// Multiplies every car's authored `top_speed` (and its acceleration, so
+    /// the 0-to-top time is unchanged) each tick. 1.0 = exactly as authored.
+    /// Stored raw; read through [`WorldTuning::car_speed_scale`].
+    pub car_speed: f32,
+}
+
+impl Default for WorldTuning {
+    fn default() -> Self {
+        Self { car_speed: 1.0 }
+    }
+}
+
+impl WorldTuning {
+    /// The band a car-speed scale may take. A car that cannot crawl and a car
+    /// that cannot be caught are both broken games, so the setters clamp
+    /// rather than refuse.
+    pub const CAR_SPEED_MIN: f32 = 0.2;
+    pub const CAR_SPEED_MAX: f32 = 5.0;
+
+    /// Clamp an incoming scale into the band; a non-finite value means
+    /// "as authored" rather than a frozen or infinite fleet.
+    pub fn sanitize_car_speed(scale: f32) -> f32 {
+        if scale.is_finite() {
+            scale.clamp(Self::CAR_SPEED_MIN, Self::CAR_SPEED_MAX)
+        } else {
+            1.0
+        }
+    }
+
+    /// The multiplier a car applies THIS tick — always finite and in band,
+    /// even if a snapshot or a hand-built world left the field at zero.
+    pub fn car_speed_scale(&self) -> f32 {
+        Self::sanitize_car_speed(self.car_speed)
+    }
+}
+
 /// Script-registered timer. The callback is an opaque host slot — the sim
 /// never touches the script VM (game.md: no ScriptObjectRef in sim state).
 #[derive(Clone)]
