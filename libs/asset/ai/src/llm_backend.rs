@@ -976,7 +976,18 @@ mod llama_worker {
     const MAX_CONTEXT: u32 = 32768;
     /// Batched prefill: measured 350-600 tok/s vs ~28 tok/s at batch 1 on
     /// the 9B (see libs/converse qwen_filter.rs).
-    const PREFILL_BATCH: usize = 64;
+    ///
+    /// 512, not 64. A chunk's cost is dominated by terms that do not scale
+    /// with the tokens in it — the attention kernel's pass over the key span,
+    /// and a 27B FFN that is latency-bound below a few hundred columns — so 64
+    /// was costing a factor of four and a half on a real prompt. Measured on
+    /// .217, 4096 tokens into one lane: 786 tok/s at 64, 3575 at 512, 3800 at
+    /// 1024. The last step is not worth twice the graph activations.
+    ///
+    /// A player feels this as the wait before the FIRST token of a fresh
+    /// conversation: a 7,900-token taught context is 10 s at 786 tok/s and
+    /// 2.2 s at 3575.
+    const PREFILL_BATCH: usize = 512;
 
     /// Concurrent decode lanes. 1 keeps the single-lane worker, which is the
     /// path every existing deployment runs; >1 selects the batched worker.

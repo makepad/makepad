@@ -33,7 +33,25 @@ pub const CHUNK_TOKENS: usize = 24;
 /// Prompt tokens a lane ingests per prefill step, unless the caller says
 /// otherwise. Matches the single-sequence prefill batch, which has always
 /// chunked for the same reason.
-pub const DEFAULT_PREFILL_CHUNK: usize = 64;
+///
+/// 512 rather than a smaller number because a prefill chunk's cost is very
+/// far from proportional to the tokens in it: the attention kernel walks the
+/// lane's whole key span once per chunk, and the FFN of a 27B model at 64
+/// columns is latency-bound rather than compute-bound. Measured on a 5090,
+/// 4096 tokens into one lane (.217, `llama-slot-probe --prefill-rate`):
+///
+/// | chunk | lane 0 | lane 1 (base 65536) |
+/// |---|---|---|
+/// | 64 | 786 tok/s | 603 tok/s |
+/// | 256 | 3130 | 1438 |
+/// | 512 | 3575 | 1561 |
+/// | 1024 | 3800 | 1727 |
+///
+/// So 64 was costing a factor of four and a half. 1024 buys a further 6 % for
+/// twice the graph activations, which is the wrong side of a trade whose
+/// failure mode is an out-of-memory at prefill on a box sized for the smaller
+/// one.
+pub const DEFAULT_PREFILL_CHUNK: usize = 512;
 
 /// A request waiting for, or occupying, a lane.
 #[derive(Clone, Debug, PartialEq)]
