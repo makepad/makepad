@@ -3533,6 +3533,8 @@ pub struct App {
     pads: PadEngine,
     #[rust(GenModel::new())]
     gen: GenModel,
+    #[rust]
+    gen_panel_loaded: bool,
 
     // Media lane plans (latest-click-wins with cancel-on-supersede).
     #[rust(LatestWins::video())]
@@ -6806,6 +6808,10 @@ impl App {
                 SessionMsg::Up(up) => {
                     self.status_text = format!("connected {}", up.server_label);
                     self.up = Some(*up);
+                    if !self.gen_panel_loaded {
+                        self.gen_panel_loaded = true;
+                        self.load_gen_panel(cx);
+                    }
                     for surface in SURFACES {
                         let cmds = self.model(surface).refresh();
                         self.run_cat_cmds(surface, cmds);
@@ -6897,7 +6903,18 @@ impl App {
                         // Publication marks matching generation rows —
                         // event-driven, never a whole-catalog poll.
                         if let Some(asset) = ev.asset_id {
-                            self.gen.catalog_published(asset);
+                            if ev.kind.removes_content() {
+                                // A retired asset's tile leaves the grid
+                                // immediately and the grid compacts — no
+                                // dead holes where garbage got pulled.
+                                self.video_model.event_remove(asset);
+                                self.music_model.event_remove(asset);
+                                self.sfx_model.event_remove(asset);
+                                self.mesh_model.event_remove(asset);
+                                self.grids_dirty = true;
+                            } else {
+                                self.gen.catalog_published(asset);
+                            }
                         }
                     }
                 }
@@ -7887,6 +7904,49 @@ impl App {
         self.ui.label(cx, ids!(mesh_status)).set_text(cx, text);
     }
 
+    fn gen_panel_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("gen-panel.txt")
+    }
+
+    /// The gen panel survives restarts: pipe, length, CONT arm and the
+    /// prompt re-apply at launch, so an endless stream stays endless
+    /// through every reboot instead of dying with the window.
+    fn save_gen_panel(&self) {
+        let prompt = self.gen.prompt.replace('\n', " ");
+        let body = format!(
+            "{}\n{}\n{}\n{}\n",
+            self.gen.selected,
+            self.gen.video_length(),
+            u8::from(self.gen.continuous()),
+            prompt
+        );
+        let path = Self::gen_panel_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, body);
+    }
+
+    fn load_gen_panel(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::gen_panel_path()) else { return };
+        let mut lines = body.lines();
+        let selected: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        let length: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        let cont = lines.next().map(|l| l == "1").unwrap_or(false);
+        let prompt = lines.next().unwrap_or("").to_string();
+        self.gen.select_profile(selected);
+        self.gen.set_video_length(length);
+        if !prompt.is_empty() {
+            self.gen.set_prompt(prompt.clone());
+            self.ui.text_input(cx, ids!(gen_prompt)).set_text(cx, &prompt);
+        }
+        if cont {
+            let cmds = self.gen.set_continuous(true, now_ms());
+            self.run_gen_cmds(cmds);
+            self.ui.check_box(cx, ids!(gen_loop)).set_active(cx, true, Animate::No);
+        }
+    }
+
     fn sync_gen_profiles(&mut self, cx: &mut Cx) {
         let labels = crate::gen::GenModel::pipe_labels();
         if labels != self.gen_profile_labels {
@@ -7903,7 +7963,7 @@ impl App {
             self.ui.drop_down(cx, ids!(gen_len)).set_labels(cx, lengths);
             self.ui
                 .drop_down(cx, ids!(gen_len))
-                .set_selected_item(cx, crate::gen::VIDEO_LENGTHS.len() - 1);
+                .set_selected_item(cx, self.gen.video_length());
         }
     }
 
@@ -10732,12 +10792,15 @@ impl MatchEvent for App {
         // ---- generate surface ----
         if let Some(index) = self.ui.drop_down(cx, ids!(gen_profile)).selected(actions) {
             self.gen.select_profile(index);
+            self.save_gen_panel();
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(gen_len)).selected(actions) {
             self.gen.set_video_length(index);
+            self.save_gen_panel();
         }
         if let Some(text) = self.ui.text_input(cx, ids!(gen_prompt)).changed(actions) {
             self.gen.set_prompt(text);
+            self.save_gen_panel();
         }
         let submit_prompt = self
             .ui
@@ -10770,6 +10833,7 @@ impl MatchEvent for App {
             let cmds = self.gen.set_continuous(on, now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
+            self.save_gen_panel();
         }
         // ---- chat (same flow as the asset UI: shared feed + broker) ----
         if self.ui.button(cx, ids!(chat_send_btn)).clicked(actions) {
