@@ -562,10 +562,13 @@ impl GenModel {
         if pipe.alpha {
             pairs.push(("alpha".to_string(), Value::Bool(true)));
         }
-        if pipe.loop_video {
-            // A pad loop is a visual: skip the joint audio decode/mux, and
-            // tag the row so the grids can find loops as loops.
+        if pipe.kind == "video.generate" {
+            // The VJ is a visuals instrument: no video it generates carries
+            // an audio track (saves the joint audio decode/mux fleet-side).
             pairs.push(("audio".to_string(), Value::Bool(false)));
+        }
+        if pipe.loop_video {
+            // Tag the row so the grids can find loops as loops.
             pairs.push(("tags".to_string(), Value::Arr(vec![s("loop")])));
         }
         // The video model has no native loop mode; the loop pipe steers the
@@ -892,7 +895,7 @@ mod tests {
     /// free and never runs more than the configured depth, so it degrades
     /// to plain serial execution on a server that runs one job at a time.
     #[test]
-    fn continuous_keeps_exactly_one_generation_in_flight_and_refills_on_completion() {
+    fn continuous_keeps_the_fleet_depth_in_flight_and_refills_on_completion() {
         let mut m = ready_model();
         m.set_prompt("a cathedral of static".into());
 
@@ -916,16 +919,16 @@ mod tests {
             assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
         }
 
-        // It finishes; the very next tick submits the next one.
+        // One finishes; the very next tick refills exactly that slot.
         finish(&mut m, &armed, job_id(1), 10_000);
-        assert_eq!(m.active_jobs(), 0);
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT - 1);
         let cmds = m.tick(11_000);
         assert_eq!(
             cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
             1,
             "a completed job frees the slot and the loop refills it"
         );
-        assert_eq!(m.active_jobs(), 1);
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
     }
 
     #[test]
@@ -933,11 +936,15 @@ mod tests {
         let mut m = ready_model();
         m.set_prompt("keep going".into());
         let armed = m.set_continuous(true, 0);
-        assert_eq!(m.active_jobs(), 1);
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
 
         assert!(m.set_continuous(false, 1_000).is_empty(), "disarming submits nothing");
         assert!(!m.continuous());
-        assert_eq!(m.active_jobs(), 1, "what is already running keeps running");
+        assert_eq!(
+            m.active_jobs(),
+            CONTINUOUS_IN_FLIGHT,
+            "what is already running keeps running"
+        );
 
         // Its completion does NOT start another.
         finish(&mut m, &armed, job_id(2), 2_000);
@@ -972,12 +979,13 @@ mod tests {
         let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS - 1);
         assert!(!cmds.iter().any(|c| matches!(c, GenCmd::Enqueue { .. })));
 
-        // After it, with a usable prompt, the loop starts on its own.
+        // After it, with a usable prompt, the loop starts on its own —
+        // filling every slot of the fleet depth at once.
         m.set_prompt("now with words".into());
         let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS);
         assert_eq!(
             cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
-            1
+            CONTINUOUS_IN_FLIGHT
         );
     }
 
