@@ -333,6 +333,16 @@ impl Session {
             user_text.push('\n');
         }
         user_text.push_str(text);
+        // Recency beats the system block. After one chatty exchange the
+        // model settles into assistant mode and answers "make me a girl"
+        // with a joke or a character sheet, while the tool that does it
+        // sits unused in a list thousands of tokens back. One short line,
+        // last thing before it generates, puts the tools back in front of
+        // it — and only from the second turn, because a fresh session
+        // already acts.
+        if self.turn > 0 {
+            user_text.push_str(TOOL_REMINDER);
+        }
         if user_text.len() > MAX_MESSAGE_BYTES {
             return Err(SendRefusal::TooLarge { what: "message" });
         }
@@ -929,6 +939,12 @@ impl Session {
 /// One call in Qwen's trained tool template, for the assistant history of
 /// the textual lane. String parameter values go in raw; everything else is
 /// JSON — the symmetric inverse of `toolcall`'s native extractor.
+/// Appended to every user message after the first (see `Session::send`).
+/// Short on purpose: it rides in the history for the rest of the session.
+const TOOL_REMINDER: &str = "\n\n(Your tools are live this turn. If this asks for \
+something to happen — in the world, in the store, on the fleet — do it with a tool \
+call. Prose is for reporting what you did.)";
+
 /// Turn a "that tool does not exist" refusal into a CORRECTION.
 ///
 /// A bare "unknown tool 'world'" is a dead end. Models reach for a tool
