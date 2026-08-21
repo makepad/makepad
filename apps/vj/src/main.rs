@@ -7014,6 +7014,7 @@ impl App {
                     .hits
                     .into_iter()
                     .map(|h| catalog::HitRow {
+                        updated_ms: h.updated_ms,
                         asset: h.asset_id,
                         title: if h.title.is_empty() {
                             h.asset_id.to_string()
