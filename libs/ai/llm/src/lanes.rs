@@ -102,6 +102,10 @@ pub enum LaneStep {
         state_row: usize,
         start: usize,
         tokens: Vec<i32>,
+        /// True when this lane kept its caches and `tokens` is only the delta.
+        /// Reported outward so a client can see its conversation stayed warm
+        /// rather than infer it from a latency it cannot attribute.
+        resumed: bool,
     },
     /// Decode one token for every lane in `plan`, in plan order.
     Decode { plan: StepPlan, tokens: Vec<i32> },
@@ -112,6 +116,14 @@ pub enum LaneStep {
 /// Something the worker should report to a caller.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LaneEvent {
+    /// A lane ingested its prompt. `ingested` is what it actually put in,
+    /// which is the DELTA when `resumed` — the two together are how a client
+    /// learns its conversation stayed warm instead of guessing from latency.
+    Prefilled {
+        job: u64,
+        ingested: usize,
+        resumed: bool,
+    },
     Token { job: u64, token: i32, produced: usize },
     /// A lane retired. Carries the lane index so the worker can release
     /// per-lane resources — notably the sampler stream, which must NOT be
@@ -354,6 +366,7 @@ impl LaneScheduler {
                     state_row: slot.live_state_row(),
                     start: slot.fill(),
                     tokens: lane.request.prompt_tokens.clone(),
+                    resumed: self.resumed.get(index).copied().unwrap_or(false),
                 };
             }
         }
@@ -381,7 +394,7 @@ impl LaneScheduler {
     /// A prompt whose very first sampled token is a stop token asks for an
     /// empty reply, and gets one. Decoding it instead would step past the end
     /// of the turn on token zero.
-    pub fn on_prefilled(&mut self, lane: usize, count: usize, first_token: i32) {
+    pub fn on_prefilled(&mut self, lane: usize, count: usize, first_token: i32) -> Vec<LaneEvent> {
         let _ = self.table.advance(lane, count);
         let _ = self.table.begin_decoding(lane);
         let stops = self.stop_tokens.contains(&first_token);
@@ -399,6 +412,18 @@ impl LaneScheduler {
                 LanePhase::Decoding
             };
         }
+        let resumed = self.resumed.get(lane).copied().unwrap_or(false);
+        self.lanes
+            .get(lane)
+            .and_then(|l| l.as_ref())
+            .map(|slot| {
+                vec![LaneEvent::Prefilled {
+                    job: slot.request.job,
+                    ingested: count,
+                    resumed,
+                }]
+            })
+            .unwrap_or_default()
     }
 
     /// Report a completed decode step. `sampled[i]` is the token sampled for
@@ -750,7 +775,9 @@ impl LaneExecutor {
                 state_row,
                 start,
                 tokens,
+                resumed,
             } if lane == SOLO_LANE && self.scheduler.is_solo(lane) => {
+                let _ = resumed;
                 // Session-native ingest, so the speculative loop can run
                 // against it. `reset_first` is the worker's prefix decision.
                 if self.scheduler.reset_requested(lane) {
@@ -772,7 +799,7 @@ impl LaneExecutor {
                         .map_err(|e| format!("lane {lane} sample: {e}"))?
                 };
                 self.solo_native = true;
-                self.scheduler.on_prefilled(lane, tokens.len(), first);
+                events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
             }
             LaneStep::Prefill {
                 lane,
@@ -780,7 +807,9 @@ impl LaneExecutor {
                 state_row,
                 start,
                 tokens,
+                resumed,
             } => {
+                let _ = resumed;
                 let logits = self
                     .session
                     .prefill_slot_chunk(lane, kv_base, state_row, start, &tokens)
@@ -792,7 +821,7 @@ impl LaneExecutor {
                 let first = sampler
                     .sample_logits(&logits, params)
                     .map_err(|e| format!("lane {lane} sample: {e}"))?;
-                self.scheduler.on_prefilled(lane, tokens.len(), first);
+                events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
             }
             LaneStep::Decode { plan, .. }
                 if self.solo_native
