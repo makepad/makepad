@@ -663,12 +663,13 @@ mod tests {
         assert_eq!(state.bank, 9);
         assert_eq!(state.decode([0x90, NOTE_UP, 127]), Some(ApcAction::BankChanged));
         assert_eq!(state.bank, 1);
+        // Note 0 = bottom-left on the mkII = VJ pad 32.
         assert_eq!(
             state.decode([0x80, 0, 127]),
             Some(ApcAction::Pad {
                 surface: ApcSurface::Video,
-                pad: 0,
-                index: 1,
+                pad: 32,
+                index: 33,
                 pressed: false,
             })
         );
