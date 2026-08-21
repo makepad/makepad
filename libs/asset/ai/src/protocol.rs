@@ -992,6 +992,39 @@ mod warm_history_tests {
     /// Rendering a finished turn with an OPEN block would teach the model that
     /// turns end mid-thought. Whatever the generation prefill is, history is
     /// closed.
+    /// LIVE REGRESSION, 2026-08-21, and the reason this test is here rather
+    /// than a fix: turn 1 of an asset-ui chat answered, turn 2 came back
+    /// "llm produced an empty expansion". That error means the model sampled
+    /// its end-of-turn token as the FIRST token after the prompt.
+    ///
+    /// The brief seed is a CLOSED think block, so the generation prompt ends
+    /// with a finished thought and nothing else. On a long taught context with
+    /// a substantive question the model answers (gated: four turns on .217);
+    /// on a two-word casual turn it can read the turn as already over. That is
+    /// the same trap as the empty `</think>` prefill, in a milder form, and
+    /// the guard below is necessary but demonstrably NOT sufficient.
+    ///
+    /// So this test pins what is actually known, and names what is not: the
+    /// seed's shape is fine, and shape is not the whole story. The fix is a
+    /// retry — a chat turn whose prefill samples a stop token should be re-run
+    /// once with the open prefill rather than handed to the user as an error —
+    /// and it is not built.
+    #[test]
+    fn the_brief_seed_is_well_formed_which_is_necessary_and_not_sufficient() {
+        let seed = CHAT_THINK_PREFILL_BRIEF_38;
+        assert!(seed.starts_with("<think>") && seed.contains("</think>"));
+        assert!(
+            seed.trim_end().ends_with("</think>") || seed.ends_with("\n\n"),
+            "the seed must hand the model a finished thought and then get out of              the way, or the answer starts inside the block"
+        );
+        let inner = seed
+            .trim_start_matches("<think>")
+            .split("</think>")
+            .next()
+            .unwrap_or("");
+        assert!(!inner.trim().is_empty(), "an EMPTY closed block returns nothing at all");
+    }
+
     #[test]
     fn a_finished_turn_is_never_left_thinking() {
         for prefill in [

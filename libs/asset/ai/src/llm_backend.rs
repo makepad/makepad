@@ -1425,14 +1425,43 @@ mod llama_worker {
                                 },
                             ));
                         }
-                        if let Some(think) = lane.think_tokens {
-                            let total = lane.token_ids.len();
+                        let total = lane.token_ids.len();
+                        if total == 0 {
+                            // A turn that produced NOTHING is the one thing this
+                            // log absolutely has to carry, and until now it was
+                            // the one thing it dropped: the line below only
+                            // printed when a think block had closed, so an empty
+                            // reply left no trace at all and the client's
+                            // "llm produced an empty expansion" had nothing on
+                            // the box to match it against.
+                            //
+                            // It means the model sampled its end-of-turn token as
+                            // the FIRST token after the prompt — it read the turn
+                            // as already finished. A closed think block in the
+                            // generation prefill is the known way to provoke
+                            // that, so the mode is named here rather than left to
+                            // be guessed.
+                            eprintln!(
+                                "[llm-worker] turn {job}: EMPTY REPLY - the model ended the turn \
+                                 on its first token (think mode: {}). The client will report this \
+                                 as an empty expansion.",
+                                crate::protocol::chat_think_mode(),
+                            );
+                        } else if let Some(think) = lane.think_tokens {
                             eprintln!(
                                 "[llm-worker] turn {job}: {total} tokens generated, {think} of \
                                  them inside <think> ({:.0}% never shown to the user), \
                                  {} visible",
                                 think as f64 / total.max(1) as f64 * 100.0,
                                 total.saturating_sub(think),
+                            );
+                        } else {
+                            // No think block at all (brief mode, or a model that
+                            // does not reason). Still say what came out: a turn
+                            // with no line at all is indistinguishable from a
+                            // turn that never happened.
+                            eprintln!(
+                                "[llm-worker] turn {job}: {total} tokens generated, all visible"
                             );
                         }
                         // The session's KV now holds prompt + reply + suffix,
