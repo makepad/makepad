@@ -234,6 +234,10 @@ EXPLICITLY asks to build something from parts.
     let v1 = game.character({pos: vec3(-2, 0, 2), model: "kenney/mini-characters/character-female-b", tag: "villager"})
     game.wander(v1, {home: vec3(-2, 0, 2), range: 8, speed: 2})
     game.label(v1, "Mara")
+- A village or town level ALWAYS has 2-3 wandering villagers like v1
+  above, even when the user only asked for houses and cars — a street
+  with nobody on it reads as abandoned. Skip them only when the user
+  asks for an empty/abandoned place.
 - Finish with a short hint text.
 
 EDITING A LIVE WORLD (any follow-up request after the first build) —
