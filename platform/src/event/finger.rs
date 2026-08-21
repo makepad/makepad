@@ -1077,6 +1077,16 @@ impl Event {
                             // someone did a second call on our area
                             if cx.fingers.find_digit_for_captured_area(area).is_some() {
                                 let rect = area.clipped_rect(&cx);
+                                // A second touch landing on an area that already captured one
+                                // belongs to that area (e.g. the second finger of a pinch), so
+                                // mark it handled to keep widgets behind us from capturing it.
+                                // The emptiness check preserves the claim of a widget (e.g. a
+                                // child) that already handled this touch earlier in dispatch.
+                                if t.handled.get().is_empty()
+                                    && hit_test(t.abs, &rect, &options.margin_for(&device))
+                                {
+                                    t.handled.set(area);
+                                }
                                 return Hit::FingerDown(FingerDownEvent {
                                     window_id: e.window_id,
                                     abs: t.abs,
