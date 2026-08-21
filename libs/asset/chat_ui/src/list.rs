@@ -8,6 +8,10 @@
 use crate::transcript::{ChatData, ChatRole, CHAT};
 use makepad_widgets::*;
 
+/// How much of the live reasoning the porthole shows. It is a WINDOW on
+/// the thought, not a log: enough to read the current clause, no more.
+const THOUGHT_TAIL_CHARS: usize = 220;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -134,11 +138,10 @@ script_mod! {
             // with the phase text muted beside them; the first streamed
             // token replaces the whole row (drawn as Assistant).
             Thinking := RoundedView {
-                width: Fit
+                width: Fill
                 height: Fit
-                flow: Right
-                spacing: 8
-                align: Align{y: 0.5}
+                flow: Down
+                spacing: 6
                 margin: Inset{top: 6 bottom: 6 left: 4 right: 40}
                 padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
                 show_bg: true
@@ -146,16 +149,34 @@ script_mod! {
                     color: #x232330
                     radius: 8.0
                 }
-                // Full path on purpose: a bare `ThinkingDots` does not
-                // resolve from the same script_mod block that registers it
-                // (the use-glob snapshot predates the assignment).
-                dots := mod.widgets.ThinkingDots {}
-                phase_text := Label {
-                    width: Fit
-                    height: Fit
+                View {
+                    width: Fill
+                    flow: Right
+                    spacing: 8
+                    align: Align{y: 0.5}
+                    // Full path on purpose: a bare `ThinkingDots` does not
+                    // resolve from the same script_mod block that registers
+                    // it (the use-glob snapshot predates the assignment).
+                    dots := mod.widgets.ThinkingDots {}
+                    phase_text := Label {
+                        width: Fit
+                        height: Fit
+                        text: ""
+                        draw_text.color: #x6f7c90
+                        draw_text.text_style: theme.font_regular{font_size: 10}
+                    }
+                }
+                // The thoughts porthole: a FIXED-height window the live
+                // reasoning tail scrolls through. Constant geometry is the
+                // whole point — the bubble never judders, the text inside
+                // it moves instead.
+                thought_text := Label {
+                    width: Fill
+                    height: 46
                     text: ""
-                    draw_text.color: #x6f7c90
-                    draw_text.text_style: theme.font_regular{font_size: 10}
+                    max_lines: 3
+                    draw_text.color: #x525d70
+                    draw_text.text_style: theme.font_regular{font_size: 9}
                 }
             }
 
@@ -263,6 +284,16 @@ impl Widget for AssetChatList {
                         widget
                             .label(cx, ids!(phase_text))
                             .set_text(cx, &data.activity);
+                        // Tail of the live reasoning: the last few clauses,
+                        // single-spaced, so the porthole reads as thought
+                        // scrolling by rather than a growing log.
+                        let tail: String = {
+                            let t = data.thinking_text.replace('\n', " ");
+                            let chars: Vec<char> = t.chars().collect();
+                            let keep = THOUGHT_TAIL_CHARS.min(chars.len());
+                            chars[chars.len() - keep..].iter().collect()
+                        };
+                        widget.label(cx, ids!(thought_text)).set_text(cx, &tail);
                         widget.draw_all_unscoped(cx);
                         continue;
                     }

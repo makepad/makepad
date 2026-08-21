@@ -653,12 +653,21 @@ impl Session {
         let (canonical, args, outcome) = match tools::canonical_from_api_name(&api_name) {
             None => {
                 let name = bounded(&api_name, 32).to_string();
+                // A bare "unknown tool" is a dead end: a model that reached
+                // for a tool from its own training (`computer_use`, a
+                // browser tool) then decides it has no tools at all and
+                // tells the user so. The refusal CORRECTS instead: here is
+                // the surface you actually have, pick from it.
+                let names: Vec<&str> =
+                    tools_exec.tool_definitions().iter().map(|d| d.name).collect();
                 (
                     name,
                     Value::Obj(Vec::new()),
                     Some(refused(format!(
-                        "unknown tool '{}'",
-                        bounded(&api_name, 32)
+                        "unknown tool '{}'. This session has exactly these tools: {}. \
+                         Call one of them.",
+                        bounded(&api_name, 32),
+                        names.join(", ")
                     ))),
                 )
             }
