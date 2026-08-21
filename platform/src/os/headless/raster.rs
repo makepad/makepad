@@ -144,6 +144,32 @@ pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>
 #[derive(Default)]
 pub(crate) struct HeadlessRenderTargets {
     framebuffers: HashMap<usize, Framebuffer>,
+    /// Frame each target was last written or sampled, for eviction. A `Cell`
+    /// because sampling happens behind `&self`, deep inside the draw loop.
+    last_used: HashMap<usize, std::cell::Cell<u64>>,
+    frame: u64,
+}
+
+/// Frames a render target may go completely untouched — neither rendered into
+/// nor sampled — before its framebuffer is released. A GPU keeps these in VRAM
+/// for free; here each one is host RAM, and a lightmap bake leaves a dozen
+/// large scratch targets behind after it has run once. Long enough that a
+/// target used once every few seconds survives.
+const RENDER_TARGET_IDLE_FRAMES: u64 = 120;
+
+/// Retained render-target budget in MB, over which the least recently used
+/// targets are released even if they are not idle yet. Anything dropped is
+/// rebuilt (cleared) the next time a pass renders into it, so this only ever
+/// costs work, never correctness — a bake chain's scratch targets are all
+/// written before they are read within the same frame. Tunable through
+/// `MAKEPAD_HEADLESS_RT_BUDGET_MB`; 0 disables the cap.
+fn render_target_budget_bytes() -> usize {
+    const DEFAULT_MB: usize = 512;
+    std::env::var("MAKEPAD_HEADLESS_RT_BUDGET_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MB)
+        .saturating_mul(1024 * 1024)
 }
 
 /// Attachment-level raster state: what the render pass descriptor fixes for
@@ -154,6 +180,8 @@ struct PassRaster {
     viewport: (usize, usize),
     /// The attachment is 8-bit unorm, so writes clamp to [0,1].
     clamp_unorm: bool,
+    /// The pass has a depth attachment (so fragments depth-test).
+    has_depth: bool,
 }
 
 impl HeadlessRenderTargets {
@@ -162,7 +190,22 @@ impl HeadlessRenderTargets {
         if fb.width == 0 || fb.height == 0 || fb.color.is_empty() {
             return None;
         }
+        if let Some(used) = self.last_used.get(&texture_index) {
+            used.set(self.frame);
+        }
         Some(fb)
+    }
+
+    fn touch(&mut self, texture_index: usize) {
+        let frame = self.frame;
+        self.last_used
+            .entry(texture_index)
+            .or_insert_with(|| std::cell::Cell::new(frame))
+            .set(frame);
+    }
+
+    fn bytes(&self) -> usize {
+        self.framebuffers.values().map(|fb| fb.bytes()).sum()
     }
 }
 
@@ -694,6 +737,7 @@ impl Cx {
         // Taken out of `self.os` so a pass can hold `&mut` its own framebuffer
         // while the sampler reads its already-rendered siblings.
         let mut render_targets = std::mem::take(&mut self.os.render_targets);
+        render_targets.frame = render_targets.frame.wrapping_add(1);
 
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].paint_dirty = false;
@@ -728,6 +772,7 @@ impl Cx {
                             viewport: (width, height),
                             // The window's swapchain image is 8-bit unorm.
                             clamp_unorm: true,
+                            has_depth: true,
                         },
                         &mut texture_cache,
                         &render_targets,
@@ -763,7 +808,7 @@ impl Cx {
 
         // Hand the conversions back for the next frame to reuse.
         self.os.texture_conversions = texture_cache;
-        self.headless_prune_render_targets(&mut render_targets);
+        self.headless_prune_render_targets(&mut render_targets, profile_enabled);
         self.os.render_targets = render_targets;
 
         let elapsed = frame_start.elapsed();
@@ -793,13 +838,63 @@ impl Cx {
     /// Drop framebuffers whose texture slot is gone or has been recycled into
     /// something that is not a render target, so a churn of short-lived
     /// offscreen targets cannot grow the store without bound.
-    fn headless_prune_render_targets(&mut self, render_targets: &mut HeadlessRenderTargets) {
+    fn headless_prune_render_targets(
+        &mut self,
+        render_targets: &mut HeadlessRenderTargets,
+        profile_enabled: bool,
+    ) {
         let pool = &self.textures.0.pool;
+        let frame = render_targets.frame;
+        let last_used = &render_targets.last_used;
         render_targets.framebuffers.retain(|texture_index, _| {
-            pool.get(*texture_index)
+            let still_a_render_target = pool
+                .get(*texture_index)
                 .map(|slot| slot.item.format.as_render_alloc(1, 1).is_some())
-                .unwrap_or(false)
+                .unwrap_or(false);
+            let idle = last_used
+                .get(texture_index)
+                .map(|used| frame.saturating_sub(used.get()))
+                .unwrap_or(u64::MAX);
+            still_a_render_target && idle < RENDER_TARGET_IDLE_FRAMES
         });
+        // Over budget: release least-recently-used targets, never one this
+        // frame still worked with.
+        let budget = render_target_budget_bytes();
+        if budget > 0 && render_targets.bytes() > budget {
+            let mut by_age: Vec<(u64, usize)> = render_targets
+                .framebuffers
+                .keys()
+                .map(|texture_index| {
+                    let used = render_targets
+                        .last_used
+                        .get(texture_index)
+                        .map(|used| used.get())
+                        .unwrap_or(0);
+                    (used, *texture_index)
+                })
+                .collect();
+            by_age.sort_unstable();
+            let mut bytes = render_targets.bytes();
+            for (used, texture_index) in by_age {
+                if bytes <= budget || used == frame {
+                    break;
+                }
+                if let Some(fb) = render_targets.framebuffers.remove(&texture_index) {
+                    bytes = bytes.saturating_sub(fb.bytes());
+                }
+            }
+        }
+        let framebuffers = &render_targets.framebuffers;
+        render_targets
+            .last_used
+            .retain(|texture_index, _| framebuffers.contains_key(texture_index));
+        if profile_enabled {
+            crate::log!(
+                "[headless][profile] render targets: {} live, {:.1} MB",
+                render_targets.framebuffers.len(),
+                render_targets.bytes() as f64 / (1024.0 * 1024.0)
+            );
+        }
     }
 
     /// Render one offscreen pass into the framebuffer that backs its colour
@@ -866,6 +961,7 @@ impl Cx {
                 self.textures[texture_id].format,
                 TextureFormat::RenderBGRAu8 { .. } | TextureFormat::RenderCubeBGRAu8 { .. }
             ),
+            has_depth: self.passes[draw_pass_id].depth_texture.is_some(),
         };
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
@@ -879,8 +975,9 @@ impl Cx {
         let mut fb = render_targets
             .framebuffers
             .remove(&texture_id.0)
-            .unwrap_or_else(|| Framebuffer::new(width, height));
+            .unwrap_or_else(|| Framebuffer::with_depth(width, height, pass_raster.has_depth));
         let discarded = fb.resize(width, height);
+        fb.set_has_depth(pass_raster.has_depth);
 
         // Load actions, mirroring the GPU backends: ClearWith always clears,
         // InitWith clears only the first time the attachment is used. A resize
@@ -909,7 +1006,9 @@ impl Cx {
             }
         };
         if let Some(depth) = clear_depth {
-            fb.clear_depth(depth);
+            if fb.has_depth() {
+                fb.clear_depth(depth);
+            }
         }
 
         self.headless_draw_pass(
@@ -924,6 +1023,7 @@ impl Cx {
         );
 
         render_targets.framebuffers.insert(texture_id.0, fb);
+        render_targets.touch(texture_id.0);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1299,6 +1399,7 @@ impl Cx {
                 blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm),
                 depth_write,
                 clamp_unorm: pass_raster.clamp_unorm,
+                has_depth: pass_raster.has_depth,
             };
             let viewport = pass_raster.viewport;
             let use_parallel = row_chunks.len() > 1
