@@ -180,8 +180,10 @@ EXPLICITLY asks to build something from parts.
   kenney/city-kit-commercial/building-a … (shops, bigger)
 - SCALE FACTS (measured, trust these): kenney models are MINIATURES —
   a whole house model is ~1.3 m tall. People and cars render real-sized.
-  Hand-placed buildings need `scale: 5.5`; props (trees, fountain,
-  cart) `scale: 2`. Never place kit models unscaled next to people.
+  Hand-placed buildings need `scale: 5.5`; props (trees, lamps,
+  fountain, cart) `scale: 2`. NEVER give a prop the street scale — a
+  lamp at `scale: 8` is a 30 m tower. Never place kit models unscaled
+  next to people.
   STREETS ARE NEVER HAND-LAID: they come from game.city / game.village
   / game.racetrack / game.road_network, which apply each kit's measured
   scale themselves (a hand-laid road tile next to a real car is 2-3x
