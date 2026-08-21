@@ -186,6 +186,11 @@ pub struct ChatScript {
     pub fleet_qwen: ScriptedLane,
     pub openai: ScriptedLane,
     pub grok: ScriptedLane,
+    /// Most scripted turns that may run at once across ALL sessions —
+    /// the fixture's stand-in for a serving tier's parallel capacity.
+    /// 0 = unbounded. A concurrency suite needs this to show fairness
+    /// when sessions outnumber slots.
+    pub max_concurrent_turns: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -193,6 +198,10 @@ pub struct ScriptedLane {
     pub available: bool,
     pub model: String,
     pub turns: Vec<ScriptedTurn>,
+    /// Wall-clock one scripted turn costs before its reply is ready.
+    /// 0 = instant (what every pre-existing test wants). A suite that
+    /// measures real parallelism sets hundreds of milliseconds here.
+    pub turn_delay_ms: u64,
 }
 
 /// One `begin_turn` of a scripted provider.
