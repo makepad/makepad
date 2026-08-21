@@ -6486,11 +6486,36 @@ fn build_hybrid_decode_graph_impl(
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: usize,
+    n_seqs: usize,
 ) -> Result<HybridDecodeGraph> {
     if n_tokens == 0 {
         return Err(LlamaError::format(
             "hybrid decode graph requires at least one token",
         ));
+    }
+    if n_seqs == 0 {
+        return Err(LlamaError::format(
+            "hybrid decode graph requires at least one sequence",
+        ));
+    }
+    // The recurrent scan reshapes the batch as `[.., n_tokens / n_seqs,
+    // n_seqs]`, so the batch must divide evenly across slots. Multi-slot
+    // decode is one token per slot, which always does.
+    if n_tokens % n_seqs != 0 {
+        return Err(LlamaError::format(format!(
+            "hybrid decode graph token count {} is not divisible by sequence count {}",
+            n_tokens, n_seqs
+        )));
+    }
+    // Checkpointing repurposes the state-row vector as `[resume, w_0..w_n]`
+    // for ONE sequence, so its length no longer encodes the sequence count.
+    // The two cannot be combined until that overload is unpicked; fail loud
+    // rather than silently decode every slot against slot 0's state.
+    if spec.recurrent_checkpoints && n_seqs > 1 {
+        return Err(LlamaError::format(format!(
+            "recurrent checkpointing is single-sequence only, got {} sequences",
+            n_seqs
+        )));
     }
     if n_outputs == 0 || n_outputs > n_tokens {
         return Err(LlamaError::format(format!(
@@ -6636,12 +6661,15 @@ fn build_hybrid_decode_graph_impl(
     // element 0 is the row the scan starts from, elements 1..=n_tokens are
     // the rows the per-token states are written to, so a rejected draft is
     // rolled back by simply reading a different row next step.
+    // Without checkpointing the vector's LENGTH is the sequence count — that
+    // is how `build_delta_net_recurrent_decode` learns how many slots are in
+    // this batch, so sizing this tensor is the whole of the n_seqs plumbing.
     let state_row_count = if recurrent_checkpoints {
         n_tokens
             .checked_add(1)
             .ok_or_else(|| LlamaError::format("overflow computing recurrent state row count"))?
     } else {
-        1
+        n_seqs
     };
     let input_recurrent_state_rows = if has_recurrent {
         let rows = ctx
@@ -7239,6 +7267,7 @@ pub fn build_hybrid_decode_graph(
         n_tokens,
         n_tokens,
         default_attention_key_count(spec)?,
+        1,
     )
 }
 
@@ -7258,6 +7287,7 @@ pub fn build_hybrid_decode_graph_with_outputs(
         n_tokens,
         n_outputs,
         default_attention_key_count(spec)?,
+        1,
     )
 }
 
@@ -7278,6 +7308,36 @@ pub fn build_hybrid_decode_graph_with_attention_key_count(
         n_tokens,
         n_outputs,
         attention_key_count,
+        1,
+    )
+}
+
+/// Build a decode graph for `n_seqs` slots sharing one flat cache arena.
+///
+/// One token per slot is the decode case (`n_tokens == n_seqs`); the recurrent
+/// scan requires only that `n_tokens` divides evenly by `n_seqs`. Slot
+/// membership is expressed in the attention MASK, not in a tensor dimension,
+/// so this differs from the single-sequence graph in exactly one shape: the
+/// recurrent state-row input is `n_seqs` long instead of 1.
+pub fn build_hybrid_decode_graph_with_sequences(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_count: usize,
+    n_seqs: usize,
+) -> Result<HybridDecodeGraph> {
+    build_hybrid_decode_graph_impl(
+        ctx,
+        tensor_ids,
+        spec,
+        shared_cache,
+        n_tokens,
+        n_outputs,
+        attention_key_count,
+        n_seqs,
     )
 }
 
@@ -9129,6 +9189,96 @@ mod tests {
         layout.attention_key_lower_bounds = vec![0, 1];
         layout.validate().expect("in-range lower bounds are valid");
         assert_eq!(layout.attention_key_lower_bounds(), Some(&[0, 1][..]));
+    }
+
+    /// Smallest spec that lets the batch-shape guards run. They fire before
+    /// any layer or tensor work, so no weights are needed to reach them.
+    fn guard_only_spec(recurrent_checkpoints: bool) -> HybridDecodeSpec {
+        HybridDecodeSpec {
+            input: ProbeInputKind::Embeddings {
+                hidden_size: 8,
+                input_type: TensorType::F32,
+            },
+            output_norm_name: "output_norm".to_string(),
+            output_name: "output".to_string(),
+            rms_epsilon: 1e-6,
+            final_logit_softcap: None,
+            per_layer_input: None,
+            layers: Vec::new(),
+            hidden_carry: None,
+            mtp_prologue: None,
+            recurrent_checkpoints,
+        }
+    }
+
+    fn build_with_sequences(
+        spec: &HybridDecodeSpec,
+        n_tokens: usize,
+        n_seqs: usize,
+    ) -> Result<HybridDecodeGraph> {
+        let mut ctx = Context::new(InitParams::default());
+        build_hybrid_decode_graph_with_sequences(
+            &mut ctx,
+            &BTreeMap::new(),
+            spec,
+            None,
+            n_tokens,
+            n_tokens,
+            256,
+            n_seqs,
+        )
+    }
+
+    #[test]
+    fn a_batch_must_divide_evenly_across_its_slots() {
+        // The recurrent scan reshapes the batch as [.., n_tokens/n_seqs,
+        // n_seqs]. A ragged batch would reshape into the wrong slot rows and
+        // decode each slot against a neighbour's state.
+        let spec = guard_only_spec(false);
+        assert!(build_with_sequences(&spec, 3, 2).is_err());
+        assert!(build_with_sequences(&spec, 5, 4).is_err());
+        // One token per slot always divides — that is the decode case.
+        for width in [1usize, 2, 4] {
+            let err = build_with_sequences(&spec, width, width).err();
+            let message = err.map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                !message.contains("divisible"),
+                "width {width} must not trip the divisibility guard, got {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_needs_at_least_one_sequence() {
+        assert!(build_with_sequences(&guard_only_spec(false), 4, 0).is_err());
+    }
+
+    #[test]
+    fn checkpointing_refuses_more_than_one_sequence() {
+        // The B2 structural conflict, failing LOUD. Checkpointing overloads the
+        // state-row vector as [resume, w_0..w_n] for one sequence, so its
+        // length stops encoding the slot count. Silently accepting it would
+        // decode every slot against slot 0's recurrent state — plausible
+        // output, wrong conversation.
+        let spec = guard_only_spec(true);
+        let message = build_with_sequences(&spec, 4, 4)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            message.contains("single-sequence"),
+            "expected the checkpointing guard, got {message}"
+        );
+        // Single-sequence checkpointing is the shipped speculative path and
+        // must still be reachable.
+        let message = build_with_sequences(&spec, 4, 1)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            !message.contains("single-sequence"),
+            "n_seqs=1 must not trip the checkpointing guard, got {message}"
+        );
     }
 
     #[test]
