@@ -823,6 +823,7 @@ impl ThumbnailRenderer {
                 transform: frame.transform,
                 dynamic: true,
                 depth_order: 0.0,
+                part_poses: Vec::new(),
             }),
             frame,
             min,

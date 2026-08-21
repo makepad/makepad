@@ -38,8 +38,10 @@ pub mod limits;
 pub mod migration;
 pub mod scene;
 pub mod sha256;
+pub mod stateful_billboard;
 pub mod snapshot;
 pub mod value;
+pub mod world_place;
 
 pub use activation::{
     CommitContentChange, CommitRealm, CommitSceneChange, ContentChangeReady, ContentRefusal,

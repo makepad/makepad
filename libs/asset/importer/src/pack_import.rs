@@ -21,11 +21,11 @@ use makepad_asset_data::limits::{
     MAX_STRING_BYTES, MAX_TEXTURE_DIM, MAX_TRIANGLES, MAX_VERTICES, THUMBNAIL_MIN_DIM,
 };
 use makepad_asset_data::{
-    sha256, AssetAlias, AssetFile, AssetKind, Axis, BlobId, Bounds, Capabilities, CoordinateSystem,
+    sha256, Anchor, AssetAlias, AssetFile, AssetKind, Axis, BlobId, Bounds, Capabilities, CoordinateSystem,
     DerivativePolicy, DeviceTier, FileRole, ImageDims, ImportAsset, ImportFile, ImportManifest,
-    ImportThumbnail, MediaType, Metrics, PackEntryKey, Pivot, Redistribution, Rights,
+    ImportThumbnail, MediaType, Metrics, PackEntryKey, Pivot, Quat, Redistribution, Rights,
     SourceCollection, SourceCollectionId, SourceOrigin, ThumbnailCells, ThumbnailMedia,
-    ThumbnailMeta, ThumbnailView, ThumbnailViewKind, Vec3, IMPORT_ASSET_ID_POLICY_V1,
+    ThumbnailMeta, ThumbnailView, ThumbnailViewKind, Transform, Vec3, IMPORT_ASSET_ID_POLICY_V1,
 };
 use makepad_render::skin::SkinnedModel;
 use makepad_render::StaticModel;
@@ -2424,6 +2424,126 @@ struct GlbMeasure {
     rigged: bool,
     animated: bool,
     image_uris: Vec<String>,
+    /// Source-neutral connection points declared by the GLB contract. A
+    /// vendor adapter may author them, but the compiler only understands the
+    /// generic names and measured transforms.
+    anchors: Vec<Anchor>,
+}
+
+/// Generic vehicle contract carried by staged GLBs. Source adapters are free
+/// to recognize any vendor layout, but the compiler admits a Vehicle only
+/// when these four stable connection names are present exactly once.
+const VEHICLE_WHEEL_CONNECTIONS: [&str; 4] = [
+    "wheel_front_left",
+    "wheel_front_right",
+    "wheel_rear_left",
+    "wheel_rear_right",
+];
+
+fn json_f32(value: &Value) -> Option<f32> {
+    let n = match value {
+        Value::Int(v) => *v as f64,
+        Value::F64(v) => *v,
+        _ => return None,
+    };
+    (n.is_finite() && n >= f32::MIN as f64 && n <= f32::MAX as f64).then_some(n as f32)
+}
+
+fn json_vec3_f32(value: &Value) -> Option<[f32; 3]> {
+    let values = value.as_arr()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        json_f32(&values[0])?,
+        json_f32(&values[1])?,
+        json_f32(&values[2])?,
+    ])
+}
+
+/// Read the source-neutral wheel declarations an asset-side adapter authored.
+/// No path, pack or vendor name participates. A partial/duplicate declaration
+/// refuses instead of silently degrading a published Vehicle into a Mesh.
+fn inspect_vehicle_connections(
+    bytes: &[u8],
+    pack_path: &str,
+) -> Result<Option<Vec<Anchor>>, PackImportError> {
+    let container = parse_glb_container(bytes, pack_path)?;
+    let root = json::parse(container.json).map_err(|e| {
+        PackImportError::new(
+            PackImportErrorKind::Malformed,
+            format!("{pack_path}: GLB JSON: {e}"),
+        )
+    })?;
+    let Some(nodes) = root.get("nodes").and_then(Value::as_arr) else {
+        return Ok(None);
+    };
+    let mut anchors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for node in nodes {
+        let Some(extras) = node.get("extras") else {
+            continue;
+        };
+        if extras.get("kind").and_then(Value::as_str) != Some("vehicle_wheel") {
+            continue;
+        }
+        let connection = extras
+            .get("connection")
+            .and_then(Value::as_str)
+            .ok_or_else(|| glb_err(pack_path, "vehicle wheel missing connection"))?;
+        if !VEHICLE_WHEEL_CONNECTIONS.contains(&connection) {
+            return Err(glb_err(
+                pack_path,
+                format!("unknown vehicle wheel connection {connection}"),
+            ));
+        }
+        if !seen.insert(connection.to_string()) {
+            return Err(glb_err(
+                pack_path,
+                format!("duplicate vehicle wheel connection {connection}"),
+            ));
+        }
+        let [x, y, z] = extras
+            .get("anchor")
+            .and_then(json_vec3_f32)
+            .ok_or_else(|| glb_err(pack_path, format!("{connection} has invalid anchor")))?;
+        let pivot_ok = extras.get("pivot").and_then(json_vec3_f32).is_some();
+        let radius = extras.get("radius").and_then(json_f32).unwrap_or(0.0);
+        let width = extras.get("width").and_then(json_f32).unwrap_or(0.0);
+        if !pivot_ok || radius <= 0.0 || width <= 0.0 {
+            return Err(glb_err(
+                pack_path,
+                format!("{connection} has invalid pivot/radius/width"),
+            ));
+        }
+        anchors.push(Anchor {
+            name: connection.to_string(),
+            transform: Transform {
+                pos: Vec3::new(x, y, z),
+                rot: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        });
+    }
+    if anchors.is_empty() {
+        return Ok(None);
+    }
+    if seen.len() != VEHICLE_WHEEL_CONNECTIONS.len()
+        || VEHICLE_WHEEL_CONNECTIONS
+            .iter()
+            .any(|connection| !seen.contains(*connection))
+    {
+        return Err(glb_err(
+            pack_path,
+            format!(
+                "vehicle rig has {} of {} required wheel connections",
+                seen.len(),
+                VEHICLE_WHEEL_CONNECTIONS.len()
+            ),
+        ));
+    }
+    anchors.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Some(anchors))
 }
 
 fn build_manifest(
@@ -3465,7 +3585,9 @@ fn mesh_asset(
         // Navigation facts of a converted map: where a player spawns, the
         // floor under them, the eye and step heights. Without these a walker
         // has to guess, and guesses walk on the ceiling.
-        anchors: nav.map(WorldNav::anchors).unwrap_or_default(),
+        anchors: nav
+            .map(WorldNav::anchors)
+            .unwrap_or_else(|| measure.anchors.clone()),
         capabilities: Capabilities {
             rigged: measure.rigged,
             animated: measure.animated,
@@ -5352,6 +5474,7 @@ fn walk_mp4_boxes(
 
 fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportError> {
     let image_uris = preflight_glb(bytes, pack_path)?;
+    let vehicle_anchors = inspect_vehicle_connections(bytes, pack_path)?;
     let static_res = StaticModel::parse_glb(bytes);
     let inspect_res = inspect_glb(bytes);
     let skinned_res = SkinnedModel::parse_glb(bytes);
@@ -5370,8 +5493,17 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
             ));
         }
     };
-    let triangles = model.triangle_count() as u32;
-    let vertices = model.vertex_count() as u32;
+    // StaticModel deliberately removes externally-driven rigid parts from
+    // its flattened body stream. Catalog metrics describe the complete GLB,
+    // so prefer inspect_glb's document topology (body + driven parts).
+    let triangles = inspect_res
+        .as_ref()
+        .map(|m| m.triangles)
+        .unwrap_or_else(|_| model.triangle_count() as u32);
+    let vertices = inspect_res
+        .as_ref()
+        .map(|m| m.vertices)
+        .unwrap_or_else(|_| model.vertex_count() as u32);
     if triangles == 0 || vertices < 3 {
         return Err(PackImportError::new(
             PackImportErrorKind::Malformed,
@@ -5414,7 +5546,9 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
     // Classic Freedoom/LibreQuake staging uses path prefixes (worlds/, weapons/,
     // props/). Kenney packs never use those folders — additive only.
     let kind = classic_glb_kind(pack_path).unwrap_or_else(|| {
-        if rigged && animated {
+        if vehicle_anchors.is_some() {
+            AssetKind::Vehicle
+        } else if rigged && animated {
             AssetKind::Character
         } else {
             AssetKind::Mesh
@@ -5446,6 +5580,7 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
         rigged,
         animated,
         image_uris,
+        anchors: vehicle_anchors.unwrap_or_default(),
     })
 }
 
