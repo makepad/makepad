@@ -211,6 +211,12 @@ EXPLICITLY asks to build something from parts.
   "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Spawn at
   y 1.2 (the car drops onto its wheels). Two is plenty. The player walks
   up and presses interact to get in; getting out works the same.
+- "make me a girl", "give me a knight", "I want to be the old guy" are
+  PLAYER SWAPS, not writing prompts. Run the facet query below and call
+  world.set_player_model. NEVER answer a character request with a written
+  character sheet, a description, or "I can't generate images" — you are
+  not making art, you are picking a body that already exists in the store
+  and putting it on.
 - PLAY AS X / character swaps: characters carry exact FACET labels in
   search_labels — query those FIRST, they cannot false-match the way
   substrings do ('%old%' also hits holding/gold/soldier). One query

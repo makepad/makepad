@@ -546,7 +546,8 @@ impl Session {
                 self.emit(ChatEventBody::Done);
             }
             Extract::Malformed { clean, reason } => {
-                self.tool_round(clean, None, ToolOutcome::Refused { what: reason }, tools_exec);
+                let what = corrected(reason, tools_exec);
+                self.tool_round(clean, None, ToolOutcome::Refused { what }, tools_exec);
             }
             Extract::Call { clean, name, args } => {
                 let call_id = format!("tc_{}_{}", self.turn, self.tool_rounds + 1);
@@ -564,7 +565,7 @@ impl Session {
                 });
                 self.last_call_trained = Some(render_trained_call(&name, &args));
                 let outcome = match ContentToolCall::parse(&name, &args) {
-                    Err(reason) => ToolOutcome::Refused { what: reason },
+                    Err(reason) => ToolOutcome::Refused { what: corrected(reason, tools_exec) },
                     Ok(call) => {
                         if tools_exec.client_executes(&call) {
                             self.park_for_client(clean, call_id, &call);
@@ -653,21 +654,12 @@ impl Session {
         let (canonical, args, outcome) = match tools::canonical_from_api_name(&api_name) {
             None => {
                 let name = bounded(&api_name, 32).to_string();
-                // A bare "unknown tool" is a dead end: a model that reached
-                // for a tool from its own training (`computer_use`, a
-                // browser tool) then decides it has no tools at all and
-                // tells the user so. The refusal CORRECTS instead: here is
-                // the surface you actually have, pick from it.
-                let names: Vec<&str> =
-                    tools_exec.tool_definitions().iter().map(|d| d.name).collect();
                 (
                     name,
                     Value::Obj(Vec::new()),
-                    Some(refused(format!(
-                        "unknown tool '{}'. This session has exactly these tools: {}. \
-                         Call one of them.",
-                        bounded(&api_name, 32),
-                        names.join(", ")
+                    Some(refused(corrected(
+                        format!("unknown tool '{}'", bounded(&api_name, 32)),
+                        tools_exec,
                     ))),
                 )
             }
@@ -698,7 +690,7 @@ impl Session {
         let outcome = match outcome {
             Some(o) => o,
             None => match ContentToolCall::parse(&canonical, &args) {
-                Err(reason) => ToolOutcome::Refused { what: reason },
+                Err(reason) => ToolOutcome::Refused { what: corrected(reason, tools_exec) },
                 Ok(call) => {
                     if tools_exec.client_executes(&call) {
                         self.park_for_client(visible, call_id, &call);
@@ -937,6 +929,28 @@ impl Session {
 /// One call in Qwen's trained tool template, for the assistant history of
 /// the textual lane. String parameter values go in raw; everything else is
 /// JSON — the symmetric inverse of `toolcall`'s native extractor.
+/// Turn a "that tool does not exist" refusal into a CORRECTION.
+///
+/// A bare "unknown tool 'world'" is a dead end. Models reach for a tool
+/// from their own training — `computer_use`, a browser tool, or the
+/// namespaced shape `world` + `{"action": "get_source"}` instead of
+/// `world.get_source` — and a refusal that only says no leaves them to
+/// conclude they have no tools at all and tell the user so. Naming the
+/// real surface in the result walks them straight back into it.
+fn corrected(reason: String, tools_exec: &mut dyn ToolExecutor) -> String {
+    if !reason.starts_with("unknown tool") {
+        return reason;
+    }
+    let defs = tools_exec.tool_definitions();
+    let names: Vec<&str> = defs.iter().map(|d| d.name).collect();
+    format!(
+        "{reason}. This session has exactly these tools, and the name is the \
+         WHOLE dotted name (world.get_source, not world with an action \
+         argument): {}. Call one of them.",
+        names.join(", ")
+    )
+}
+
 fn render_trained_call(name: &str, args: &Value) -> String {
     let api = tools::api_from_canonical(name).unwrap_or_else(|| name.replace('.', "_"));
     let mut out = String::from("<tool_call>\n<function=");

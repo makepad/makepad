@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 
 /// The transcript and its rate meter are the shared component's; this app
 /// only reads them.
-pub use makepad_asset_chat_ui::{ChatData, ChatRole};
+pub use makepad_asset_chat_ui::{ChatData, ChatRole, CHAT};
 
 // ---------------------------------------------------------------------------
 // mutable generation defaults
@@ -501,7 +501,12 @@ impl ChatBridge {
 
     pub fn send(&self, text: String, attachments: Vec<ChatAttachment>) {
         match &self.feed {
-            Some(feed) => feed.send(text, attachments),
+            Some(feed) => {
+                // The app owns the user's bubble (see `ChatFeed::send`):
+                // exactly one push per message, from here.
+                ChatData::push(ChatRole::User, &text);
+                feed.send(text, attachments);
+            }
             None => {
                 ChatData::push(ChatRole::User, &text);
                 ChatData::push(
@@ -1056,6 +1061,25 @@ mod tests {
         let job = rx.try_recv().expect("a job");
         assert_eq!((job.width, job.height), (1024, 576));
         assert_eq!(job.steps, Some(8));
+    }
+
+    /// One send, one user bubble. Both halves used to push it — the app
+    /// and the shared feed — and the message appeared twice.
+    #[test]
+    fn a_send_puts_the_message_on_screen_exactly_once() {
+        let bridge = ChatBridge::new();
+        ChatData::clear();
+        bridge.send("make me a girl".into(), Vec::new());
+        let data = CHAT.read().unwrap();
+        let users: Vec<&str> = data
+            .messages
+            .iter()
+            .filter(|m| m.role == ChatRole::User)
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(users, vec!["make me a girl"], "{:?}", data.messages);
+        drop(data);
+        ChatData::clear();
     }
 
     /// A tool this app does not own is refused by name — the broker only

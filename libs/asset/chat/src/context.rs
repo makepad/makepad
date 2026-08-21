@@ -212,6 +212,48 @@ mod tests {
         }
     }
 
+    /// The game session's WHOLE brain, end to end: the taught context and
+    /// the world tool surface, in the exact string the broker sends.
+    ///
+    /// A game turn ingests ~7-8k tokens of this; if it ever ingests a few
+    /// hundred, the model answers "make me a girl" with a written character
+    /// sheet instead of swapping the player's body. This test is what makes
+    /// that visible in CI instead of in play.
+    #[test]
+    fn a_game_session_renders_its_whole_brain() {
+        let defs = crate::tools::game_definitions();
+        let taught = assemble(ClientProfile::Game, "LIVE STORE right now (kind count): mesh 4004\n");
+        let system = crate::toolcall::render_system(&defs, &taught);
+        for needle in [
+            // base layer
+            "ARCHITECTURE (how your world works)",
+            "CATALOG QUERY WORKFLOW",
+            // game layer
+            "world.set_source",
+            "game.player_character",
+            "vlm-age-young",
+            // the tool table itself
+            "- world.get_source:",
+            "- world.set_player_model:",
+            "- assets.query:",
+            // the trained-template guidance the agentic surface gets
+            "<parameter=",
+        ] {
+            assert!(system.contains(needle), "the game brain lost: {needle}");
+        }
+        // Bytes, not vibes: the taught stack is thousands of tokens. A
+        // regression that dropped a layer would land far under this.
+        assert!(
+            system.len() > 20_000,
+            "a game session's system text is {} bytes — the taught context is missing",
+            system.len()
+        );
+        assert!(
+            !system.contains("image.generate"),
+            "the game surface must not advertise the asset UI's generate tools"
+        );
+    }
+
     #[test]
     fn the_gen_layer_teaches_the_generate_surface() {
         for needle in
