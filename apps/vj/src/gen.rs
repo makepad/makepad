@@ -1271,7 +1271,8 @@ mod tests {
     fn tick_polls_active_jobs_bounded_and_spaced() {
         let mut m = ready_model();
         m.set_prompt("clip".into());
-        for i in 0..6u8 {
+        const JOBS: usize = MAX_POLLS_PER_TICK + 2;
+        for i in 0..JOBS as u8 {
             let tag = match m.generate(0)[0] {
                 GenCmd::Enqueue { tag, .. } => tag,
                 _ => panic!(),
@@ -1282,12 +1283,12 @@ mod tests {
         assert!(m.tick(POLL_MS - 1).is_empty());
         // Due: at most MAX_POLLS_PER_TICK go out.
         let cmds = m.tick(POLL_MS);
-        assert_eq!(cmds.len(), MAX_POLLS_PER_TICK);
+        assert_eq!(cmds.len(), MAX_POLLS_PER_TICK.min(JOBS));
         // The remainder polls on the next tick; the first batch is spaced.
         let cmds = m.tick(POLL_MS + 1);
-        assert_eq!(cmds.len(), 6 - MAX_POLLS_PER_TICK);
+        assert_eq!(cmds.len(), JOBS.saturating_sub(MAX_POLLS_PER_TICK));
         // Terminal jobs stop polling entirely.
-        for i in 0..6u8 {
+        for i in 0..JOBS as u8 {
             m.status_arrived(&status(job_id(i + 1), JobStateDto::Cancelled));
         }
         assert!(m.tick(POLL_MS * 10).is_empty());
