@@ -163,6 +163,13 @@ pub fn construction_line(rec: &Record) -> String {
     if !rec.desc.is_empty() {
         segs.push(rec.desc.clone());
     }
+    // Last, and marked, because it answers a different question from
+    // everything before it: not "what is this" but "what will the player
+    // see". A character is chosen from the front and then looked at from
+    // behind for the rest of the session.
+    if !rec.back.is_empty() {
+        segs.push(format!("from behind: {}", rec.back));
+    }
     let mut line = segs.join("; ");
     if line.len() > MAX_DESCRIPTION_BYTES {
         line.truncate(MAX_DESCRIPTION_BYTES);
@@ -376,6 +383,47 @@ mod tests {
         );
         // a rough token proxy: this is what 30 rows multiply in an 8k context
         assert!(line.split_whitespace().count() <= 20, "{line}");
+    }
+
+    /// THE LINE THIS PASS EXISTS FOR.
+    ///
+    /// A character is CHOSEN from a front portrait and then looked at from
+    /// behind, small and in motion, for the rest of the session. Every
+    /// description before v6 carried only the portrait, which is how
+    /// kenney/mini-dungeon/character-human could be honestly described as
+    /// "old man … full brown beard, brown hat … holding a sword" while the
+    /// player looking at its back called it a monkey. Both were true.
+    #[test]
+    fn a_character_line_says_how_it_reads_from_behind() {
+        let rec = parse_record(
+            "what: old bearded man\n\
+             cat: character\n\
+             role: standalone\n\
+             size: tall\n\
+             age: old\n\
+             face: beard hat\n\
+             colors: brown, grey\n\
+             desc: Old man with brown beard, brown hat, brown tunic, holding a sword.\n\
+             back: plain brown box head, no face, dark tunic, hat barely visible\n",
+        );
+        assert_eq!(
+            rec.back,
+            "plain brown box head, no face, dark tunic, hat barely visible"
+        );
+        let line = construction_line(&rec);
+        assert!(
+            line.contains("from behind: plain brown box head"),
+            "the rear read must reach the description: {line}"
+        );
+        assert!(
+            line.find("from behind:") > line.find("Old man"),
+            "it comes LAST — it answers a different question from the portrait: {line}"
+        );
+
+        // Absent (a kit piece, or a model that could not tell) adds nothing
+        // rather than a placeholder.
+        let quiet = parse_record("what: rock\ncat: rock");
+        assert!(!construction_line(&quiet).contains("from behind"));
     }
 
     #[test]

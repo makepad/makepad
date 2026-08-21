@@ -59,7 +59,26 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 /// prompt is unchanged; a filtered `--kind character --person` pass
 /// re-annotates the 30 characters, everything else re-runs idempotently
 /// whenever its next filtered pass comes around.
-pub const ANNOTATOR_VERSION: u32 = 5;
+///
+/// v6: the FROM BEHIND line. Every description up to here was written from
+/// a zoomed front portrait — and a player looks at the back of their own
+/// character, small and in motion, for an entire session. That is how
+/// "Old man with short brown hair, full brown beard, brown hat … holding a
+/// sword" and "im a goddamn monkey" were both true of
+/// kenney/mini-dungeon/character-human on the same evening: the first is
+/// the thumbnail, the second is the game. PROMPT_PERSON asks for the rear
+/// silhouette and colour block, and `construction_line` carries it.
+///
+/// v6 ALSO depends on a fix outside this crate. Until makepad 56627e08f
+/// the thumbnail turntable did not turn for rigged characters — the
+/// skinned lane never received the step's transform, so a character's
+/// sheet was sixteen copies of frame 0 while this prompt told the model
+/// "each step rotates the character 22.5 degrees. Study all 16 views".
+/// Every character annotated before that fix was described from ONE view,
+/// by a model that had been told it was looking at sixteen. Re-render the
+/// sheets before re-running this pass, or the rear views it asks for are
+/// not in the image.
+pub const ANNOTATOR_VERSION: u32 = 6;
 
 /// The question put to the vision model about one turntable sheet.
 ///
