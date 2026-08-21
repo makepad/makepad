@@ -130,6 +130,69 @@ pub fn lamp_photometry(mount: f32) -> (f32, f32) {
     (radius, strength)
 }
 
+/// Light an unshadowed, FLAT, UP-FACING ground texel already receives with
+/// no lamp on it at all, in the channel that reaches white first.
+///
+/// This is exactly what the composites give such a fragment before the lamp
+/// term is added — `ambient + direct` with the hemisphere term collapsed to
+/// `sun_sky` (a texel whose normal is +y) and `N·L` collapsed to the sun's
+/// elevation (`sun_dir.y`):
+///
+/// ```text
+/// daylight = max_channel(sun_sky + sun_color * max(sun_dir.y, 0))
+/// ```
+///
+/// Flat up-facing ground is the matched case for [`LM_LAMP_GROUND_PEAK`],
+/// which is defined on exactly that surface directly under the bulb — the
+/// place where daylight and lamp light are BOTH at their maximum and where
+/// the sum therefore clips first. A slope tilted into the sun reads more
+/// daylight, but a downlight's own `N·L` falls off with the same tilt, so
+/// the pair stays the one that matters.
+pub fn daylight_on_ground(sun_dir: Vec3f, sun_color: Vec3f, sun_sky: Vec3f) -> f32 {
+    let ndl = sun_dir.y.max(0.0);
+    let r = sun_sky.x + sun_color.x * ndl;
+    let g = sun_sky.y + sun_color.y * ndl;
+    let b = sun_sky.z + sun_color.z * ndl;
+    r.max(g).max(b)
+}
+
+/// The share of its pool a lamp may actually lay on ground the sky is
+/// ALREADY lighting: a lamp gets the headroom daylight leaves, and no more.
+///
+/// This is the rail that was missing. [`LM_LAMP_CEIL`], [`cap_lamp_pool`]
+/// and [`LM_LAMP_SAT_TEXELS`] all measure ONE lamp against the ATLAS encode
+/// range (0.5), which is 1.67× the pool peak — so for anything
+/// [`lamp_photometry`] sized they can never fire. Nothing measured the
+/// number that actually reaches the screen: the SUM
+///
+/// ```text
+/// out = albedo * (ambient + direct * sun_vis + lamp)
+/// ```
+///
+/// [`LM_LAMP_GROUND_PEAK`]'s doc sizes 0.30 against "the noon sun's 0.72
+/// direct term" — but the same doc says a fully sunlit ground reads 1.0,
+/// ambient included. At noon there is no headroom at all: a 0.30 pool on a
+/// near-white plaza is `0.97 × 1.30 = 1.26`, and the pool's core clips to
+/// white with a warm rim where the tint's red channel saturates before its
+/// blue. That is the blown plaza — not the atlas, which was never over its
+/// own ceiling; the FRAME.
+///
+/// So the pool peak becomes `min(LM_LAMP_GROUND_PEAK, 1 - daylight)`:
+///
+/// ```text
+/// scale = clamp((1 - daylight) / LM_LAMP_GROUND_PEAK, 0, 1)
+/// ```
+///
+/// which makes `daylight + peak ≤ 1` an identity at every hour and on every
+/// albedo ≤ 1 — **a lamp can never push a texel to white.** Below
+/// `daylight = 1 - LM_LAMP_GROUND_PEAK` (0.70) the scale is exactly 1, so
+/// dusk, night and every interior are bit-for-bit what they were; only the
+/// hours with no room left dim, and they dim continuously.
+pub fn lamp_daylight_scale(daylight: f32) -> f32 {
+    let headroom = (1.0 - daylight).clamp(0.0, 1.0);
+    (headroom / LM_LAMP_GROUND_PEAK).clamp(0.0, 1.0)
+}
+
 /// The ground light at which a lamp pool has COMPLETELY drowned the sun's
 /// shadow inside it — a quarter of [`LM_LAMP_GROUND_PEAK`].
 ///
@@ -225,6 +288,38 @@ pub fn lamp_ground_light(mount: f32, rho: f32, radius: f32, strength: f32, spot:
     strength * ndl * att * att * (cone * cone * spot + (1.0 - spot))
 }
 
+/// Ground texels one lamp drives past `ceiling`, at `texels_per_unit`.
+///
+/// Two ceilings matter and they are NOT the same number. [`LM_LAMP_CEIL`]
+/// is what the ATLAS can encode; `1 - daylight` (see
+/// [`lamp_daylight_scale`]) is what the FRAME can show. A pool can sit
+/// comfortably inside the first and paint a street white through the
+/// second — which is exactly the bug this argument exists to let the bake
+/// report on.
+pub fn lamp_ground_texels_over(
+    mount: f32,
+    radius: f32,
+    strength: f32,
+    spot: f32,
+    texels_per_unit: f32,
+    ceiling: f32,
+) -> f32 {
+    if lamp_ground_light(mount, 0.0, radius, strength, spot) <= ceiling {
+        return 0.0;
+    }
+    // Monotone in rho below the bulb: bisect for the crossing.
+    let (mut lo, mut hi) = (0.0f32, radius);
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if lamp_ground_light(mount, mid, radius, strength, spot) > ceiling {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    std::f32::consts::PI * lo * lo * texels_per_unit * texels_per_unit
+}
+
 /// Ground texels one lamp drives to the atlas ceiling, at `texels_per_unit`.
 /// Zero for any fixture whose pool peak stays under [`LM_LAMP_CEIL`].
 pub fn lamp_saturated_ground_texels(
@@ -234,20 +329,37 @@ pub fn lamp_saturated_ground_texels(
     spot: f32,
     texels_per_unit: f32,
 ) -> f32 {
-    if lamp_ground_light(mount, 0.0, radius, strength, spot) <= LM_LAMP_CEIL {
+    lamp_ground_texels_over(mount, radius, strength, spot, texels_per_unit, LM_LAMP_CEIL)
+}
+
+/// A fixture's implied mount from its reach: `lamp_photometry` sets
+/// `radius = mount + LM_LAMP_POOL_RADIUS`, so this inverts it exactly for
+/// anything harvested and degrades gracefully for a hand-set light.
+pub fn lamp_mount_from_radius(radius: f32) -> f32 {
+    (radius - LM_LAMP_POOL_RADIUS).max(0.05)
+}
+
+/// Upper bound on the light one lamp can lay ANYWHERE inside a world box —
+/// the gather's distance falloff at the box's closest approach, with `N·L`
+/// and the spot cone both at their maxima (1). Cheap, never optimistic, and
+/// exact for the flat ground straight under a downlight, which is the case
+/// that matters. The bake reports with it (`gpu_lightmap.rs`), so a blown
+/// region names its own numbers in the log instead of needing a screenshot.
+pub fn lamp_peak_in_box(light: &LmLight, min: Vec3f, max: Vec3f) -> f32 {
+    let cmax = light.color.x.max(light.color.y).max(light.color.z);
+    if cmax <= 0.0 || light.radius <= 0.0 {
         return 0.0;
     }
-    // Monotone in rho below the bulb: bisect for the crossing.
-    let (mut lo, mut hi) = (0.0f32, radius);
-    for _ in 0..40 {
-        let mid = 0.5 * (lo + hi);
-        if lamp_ground_light(mount, mid, radius, strength, spot) > LM_LAMP_CEIL {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+    let c = |v: f32, lo: f32, hi: f32| v.clamp(lo.min(hi), hi.max(lo));
+    let dx = light.pos.x - c(light.pos.x, min.x, max.x);
+    let dy = light.pos.y - c(light.pos.y, min.y, max.y);
+    let dz = light.pos.z - c(light.pos.z, min.z, max.z);
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    if d >= light.radius {
+        return 0.0;
     }
-    std::f32::consts::PI * lo * lo * texels_per_unit * texels_per_unit
+    let att = 1.0 - d / light.radius;
+    cmax * att * att
 }
 
 /// The sanity rail on one baked lamp: if its pool would clip the atlas over
@@ -385,6 +497,11 @@ pub struct LmScene {
     /// Sun tint × intensity. The direct sun term stays analytic in the
     /// shader; this rides on the snapshot for tooling.
     pub sun_color: Vec3f,
+    /// Hemisphere ambient from above. Rides along with `sun_color` so the
+    /// bake can state, per region, how much of the display's 0..1 the sky
+    /// has already spent before a lamp adds anything
+    /// ([`daylight_on_ground`]).
+    pub sun_sky: Vec3f,
     /// Reserved: the deleted CPU bake's bounce tier. The GPU pipeline does
     /// not implement bounce (yet); the flag stays on the snapshot contract.
     pub bounce: bool,
@@ -636,6 +753,143 @@ mod tests {
                 <= LM_LAMP_SAT_TEXELS * 1.001,
             "cap left the pool over budget"
         );
+    }
+
+    /// THE rail this lane exists for: whatever the hour, whatever the
+    /// albedo, a lamp may not push a fragment to white. The sum the frame
+    /// actually shows — `albedo * (daylight + pool)` — stays at or under 1.
+    ///
+    /// The bug it closes: `LM_LAMP_GROUND_PEAK` was sized against the noon
+    /// sun's 0.72 DIRECT term, but the composite adds the 0.28 ambient too,
+    /// so a fully sunlit up-facing texel is already at 1.0 with no headroom
+    /// left. A 0.30 pool on the reported plaza (albedo 0.97) read
+    /// `0.97 × 1.30 = 1.26` — clipped white, with the warm rim of the
+    /// tint's red channel saturating a step before its blue.
+    #[test]
+    fn a_lamp_can_never_push_a_texel_to_white() {
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        // Every hour of a full day at the village's latitude, and the two
+        // ends of the legacy rig.
+        let mut hours: Vec<f32> = (0..=48).map(|i| i as f32 * 0.5).collect();
+        hours.push(12.5); // the world in the report
+        for h in hours {
+            let sun = crate::sun::SunLight::from_time_of_day(h, 52.0);
+            let daylight = daylight_on_ground(sun.dir, sun.color, sun.sky);
+            let scale = lamp_daylight_scale(daylight);
+            // The pool the bake will actually lay, at its brightest texel.
+            let peak = lamp_ground_light(mount, 0.0, radius, strength * scale, 1.0);
+            assert!(
+                daylight + peak <= 1.0 + 1e-4,
+                "hour {h}: daylight {daylight} + pool {peak} = {} clips",
+                daylight + peak
+            );
+            // ...and it is never a NEGATIVE lamp, nor brighter than the
+            // fixture was ever meant to be.
+            assert!((0.0..=LM_LAMP_GROUND_PEAK + 1e-6).contains(&peak), "hour {h}: {peak}");
+        }
+    }
+
+    /// The rail costs nothing where there is room: dusk, night and every
+    /// interior keep the pool that was signed off, unchanged.
+    #[test]
+    fn the_headroom_rail_only_bites_where_the_sky_left_no_room() {
+        // Below the crossover the scale is exactly 1 — bit-for-bit the old
+        // behaviour.
+        for daylight in [0.0f32, 0.1, 0.35, 0.5, 0.69, 1.0 - LM_LAMP_GROUND_PEAK] {
+            assert_eq!(
+                lamp_daylight_scale(daylight),
+                1.0,
+                "daylight {daylight} dimmed a lamp that had room"
+            );
+        }
+        // Above it the taper is continuous and monotone — no step in a day
+        // cycle, ever.
+        let mut prev = 1.0f32;
+        for i in 0..=100 {
+            let daylight = 0.70 + 0.30 * i as f32 / 100.0;
+            let s = lamp_daylight_scale(daylight);
+            assert!(s <= prev + 1e-6, "scale rose at daylight {daylight}");
+            assert!((0.0..=1.0).contains(&s));
+            prev = s;
+        }
+        assert_eq!(lamp_daylight_scale(1.0), 0.0);
+        assert_eq!(lamp_daylight_scale(2.0), 0.0, "an over-bright sky is still zero, not negative");
+        // The village's own numbers, pinned: at the authored noon the sky
+        // has spent 86% of the range, so the lamp gets the last 14%.
+        let noon = crate::sun::SunLight::from_time_of_day(12.5, 52.0);
+        let daylight = daylight_on_ground(noon.dir, noon.color, noon.sky);
+        assert!(
+            (0.80..0.90).contains(&daylight),
+            "the authored noon moved: daylight {daylight}"
+        );
+        assert!(
+            (0.40..0.55).contains(&lamp_daylight_scale(daylight)),
+            "noon lamp scale moved: {}",
+            lamp_daylight_scale(daylight)
+        );
+        // And the dusk the shadow-fill lane verified against still runs its
+        // lamps at full strength.
+        let dusk = crate::sun::SunLight::from_time_of_day(17.6, 52.0);
+        assert_eq!(
+            lamp_daylight_scale(daylight_on_ground(dusk.dir, dusk.color, dusk.sky)),
+            1.0,
+            "the verified dusk pool got dimmed"
+        );
+    }
+
+    /// The reported bug, as arithmetic: the pre-rail pool clipped the plaza
+    /// and the railed one does not — measured on the exact fixture, sun and
+    /// albedo of the world in the report.
+    #[test]
+    fn the_reported_plaza_stops_clipping() {
+        /// The plaza tile, measured off a post-bake grab: 206/255 under a
+        /// daylight of 0.8225 in red.
+        const PLAZA_ALBEDO: f32 = 0.97;
+        let sun = crate::sun::SunLight::from_time_of_day(12.5, 52.0);
+        let daylight = daylight_on_ground(sun.dir, sun.color, sun.sky);
+        let mount = 1.369 * 2.0; // the ×2 Kenney lantern in the slot
+        let (radius, strength) = lamp_photometry(mount);
+
+        let before = PLAZA_ALBEDO * (daylight + lamp_ground_light(mount, 0.0, radius, strength, 1.0));
+        assert!(before > 1.0, "the reported blowout did not reproduce: {before}");
+
+        let scale = lamp_daylight_scale(daylight);
+        let after =
+            PLAZA_ALBEDO * (daylight + lamp_ground_light(mount, 0.0, radius, strength * scale, 1.0));
+        assert!(after <= 1.0, "the rail did not hold: {after}");
+        // Still a POOL, not a switched-off lamp: visibly brighter than the
+        // bare plaza beside it.
+        let bare = PLAZA_ALBEDO * daylight;
+        assert!(
+            after > bare * 1.10,
+            "the pool vanished instead of fitting: {after} vs bare {bare}"
+        );
+    }
+
+    /// The bake's report is only worth logging if its bound is a real one:
+    /// never under what a lamp can actually deliver inside the box.
+    #[test]
+    fn the_reported_region_peak_is_an_upper_bound() {
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        let light = LmLight {
+            pos: Vec3f { x: 0.0, y: mount, z: 0.0 },
+            color: Vec3f { x: strength, y: strength * 0.775, z: strength * 0.475 },
+            radius,
+            dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
+            spot: 1.0,
+        };
+        // A ground region under the lamp: the bound must cover the nadir
+        // peak, which is the brightest texel that exists.
+        let min = Vec3f { x: -20.0, y: 0.0, z: -20.0 };
+        let max = Vec3f { x: 20.0, y: 0.0, z: 20.0 };
+        let bound = lamp_peak_in_box(&light, min, max);
+        let real = lamp_ground_light(mount, 0.0, radius, strength, 1.0);
+        assert!(bound >= real - 1e-6, "bound {bound} under the real peak {real}");
+        // Out of reach is zero, not a tiny number.
+        let far = Vec3f { x: 1000.0, y: 0.0, z: 1000.0 };
+        assert_eq!(lamp_peak_in_box(&light, far, far), 0.0);
     }
 
     /// The lamp-fill law: a pool erases the sun's shadow over its bright core,
