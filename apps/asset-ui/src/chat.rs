@@ -1332,6 +1332,7 @@ mod tests {
                 vram_reserve_mb: Some(1024),
                 queue_limit: Some(4),
                 fleet: None,
+                lanes: None,
             }),
             models: vec![ModelInfoJson {
                 id: id.into(),

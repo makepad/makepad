@@ -3720,6 +3720,7 @@ mod tests {
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
                 fleet: None,
+                lanes: None,
             }),
             models: vec![ModelInfoJson {
                 id: "flux1-schnell".to_string(),
@@ -3768,6 +3769,7 @@ mod tests {
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
                 fleet: None,
+                lanes: None,
             }),
             models: models
                 .iter()

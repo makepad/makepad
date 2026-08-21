@@ -178,6 +178,7 @@ impl PbrProbe {
             transform: trs_yaw(vec3f(0.0, -min.y * scale, 0.0), 0.0, scale),
             dynamic: false,
             depth_order: 0.0,
+            part_poses: Vec::new(),
         });
         self.look.target = vec3f(0.0, 0.9, 0.0);
         self.look.distance = 4.6;

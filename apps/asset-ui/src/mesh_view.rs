@@ -1022,6 +1022,7 @@ impl MeshView {
                 transform: trs_yaw(spec.pos, spec.yaw, 1.0),
                 dynamic: true,
                 depth_order: 0.0,
+                part_poses: Vec::new(),
             });
         }
     }
@@ -1494,6 +1495,7 @@ impl MeshView {
                         transform: Mat4f::identity(),
                         dynamic: true,
                         depth_order: 0.0,
+                        part_poses: Vec::new(),
                     });
                     self.status = format!("{triangles} tris{ao_note} · CSM · WASD walk, drag look");
                 } else {
@@ -1512,6 +1514,7 @@ impl MeshView {
                         // Realtime CSM only collects `dynamic` movers.
                         dynamic: true,
                         depth_order: 0.0,
+                        part_poses: Vec::new(),
                     });
                     self.status =
                         format!("{triangles} tris, fit scale {scale:.2}{ao_note} · CSM");

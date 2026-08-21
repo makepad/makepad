@@ -17,7 +17,7 @@ use makepad_asset_client::{
     AnnotationUpload, ApiEndpoints, AssetClient, ClientConfig,
 };
 use makepad_asset_data::{sha256, AssetKind, BlobId};
-use makepad_widgets::log;
+use makepad_widgets::{log, vec3f};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2140,6 +2140,40 @@ fn run_kenney_import(
             };
         }
     };
+    // Source knowledge stops here. Kenney's car kit names four wheel mesh
+    // nodes consistently, but neither the catalog compiler nor the game is
+    // allowed to know those vendor names. Rewrite the staged copy into the
+    // generic vehicle-wheel GLB contract before thumbnails, AO, manifests or
+    // runtime bytes are produced. Re-running Import is therefore the whole
+    // migration: source files stay pristine and every derived artifact is
+    // rebuilt from the tagged GLB.
+    if pack_name == "car-kit" {
+        if let Err(error) = tag_kenney_car_pack(&glbs) {
+            return ImportPhase::Failed {
+                pack: pack_name,
+                message: error,
+            };
+        }
+    }
+    if let Some(expected) = kenney_ragdoll_pack_expected(&pack_name) {
+        match tag_kenney_ragdoll_pack(&glbs) {
+            Ok(tagged) if tagged == expected => {}
+            Ok(tagged) => {
+                return ImportPhase::Failed {
+                    pack: pack_name,
+                    message: format!(
+                        "expected {expected} compatible Kenney humanoids, found {tagged}; refusing a partial ragdoll migration"
+                    ),
+                };
+            }
+            Err(error) => {
+                return ImportPhase::Failed {
+                    pack: pack_name,
+                    message: error,
+                };
+            }
+        }
+    }
     // BEFORE any thumbnail is synthesized: a `<stem>.png` that exists only
     // because we are about to write it (rendered-icon-or-placeholder) must
     // never be mistaken for a pack-provided preview. `library_landings`'s
@@ -2369,6 +2403,15 @@ fn kenney_bake_or_cancel(
         });
     }
     ao_bake::seed_ao_from_source(pack_dir, staged);
+    if pack_name == "car-kit" {
+        // Source AO was baked before Asset UI split the wheels out of the
+        // static stream. It is therefore not a valid cache for the staged,
+        // tagged GLB: leaving it newer than the GLB would render one frozen
+        // wheel set from the aomesh plus a second driven set from the GLB.
+        // Remove only derived sidecars belonging to tagged vehicle files;
+        // standalone Car Kit props can still reuse their source bake.
+        invalidate_tagged_vehicle_sidecars(staged);
+    }
     let bake = bake_staged_glbs(staged, pack_name, assets, annotated, tx, cancel);
     if cancel.load(Ordering::SeqCst) {
         return Err(ImportPhase::Cancelled {
@@ -2381,6 +2424,28 @@ fn kenney_bake_or_cancel(
         });
     }
     Ok(bake)
+}
+
+fn invalidate_tagged_vehicle_sidecars(staged: &Path) {
+    for glb in ao_bake::collect_glbs(staged) {
+        let Ok(bytes) = std::fs::read(&glb) else {
+            continue;
+        };
+        if !bytes
+            .windows(b"vehicle_wheel".len())
+            .any(|window| window == b"vehicle_wheel")
+        {
+            continue;
+        }
+        for extension in ["aomesh", "ao.png", "shadowsdf"] {
+            let sidecar = glb.with_extension(extension);
+            if let Err(error) = std::fs::remove_file(&sidecar) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log!("import: could not invalidate {}: {error}", sidecar.display());
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2613,6 +2678,543 @@ fn copy_pack_source_files(
         }
     }
     Ok((glbs, images))
+}
+
+/// The four source-node spellings in Kenney Car Kit. This is deliberately
+/// private to Asset UI's Kenney staging adapter: published GLBs carry only
+/// the generic `vehicle_wheel` / `wheel_*` contract below.
+const KENNEY_CAR_WHEELS: [(&str, &str); 4] = [
+    ("wheel-front-left", "wheel_front_left"),
+    ("wheel-front-right", "wheel_front_right"),
+    ("wheel-back-left", "wheel_rear_left"),
+    ("wheel-back-right", "wheel_rear_right"),
+];
+
+/// Tag every complete four-wheel model in a staged Car Kit. Standalone wheel
+/// files and debris have none of the four names and pass through unchanged;
+/// a partial match refuses, because publishing a car with three connection
+/// points is worse than naming the broken source file.
+fn tag_kenney_car_pack(glbs: &[PathBuf]) -> Result<usize, String> {
+    let mut tagged = 0usize;
+    for path in glbs {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("read staged car {}: {e}", path.display()))?;
+        let Some(out) = tag_kenney_car_glb(&bytes)? else {
+            continue;
+        };
+        std::fs::write(path, out)
+            .map_err(|e| format!("write staged car {}: {e}", path.display()))?;
+        tagged += 1;
+    }
+    if tagged == 0 {
+        return Err("car-kit contains no complete four-wheel GLBs".into());
+    }
+    log!("import: car-kit: authored generic vehicle rigs for {tagged} models");
+    Ok(tagged)
+}
+
+/// Convert one Kenney car GLB into the engine-neutral vehicle part contract.
+/// `None` means the file is not a complete vehicle (standalone wheels and
+/// debris); `Some` is byte-complete GLB output with the original BIN intact.
+fn tag_kenney_car_glb(glb: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let loaded = makepad_gltf::load_gltf_from_bytes(glb, None)
+        .map_err(|e| format!("inspect Kenney car GLB: {e}"))?;
+    let nodes = loaded.document.nodes_slice();
+    let mut found = Vec::with_capacity(4);
+    for (source_name, connection) in KENNEY_CAR_WHEELS {
+        let matches: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| (n.name.as_deref() == Some(source_name)).then_some(i))
+            .collect();
+        if matches.len() > 1 {
+            return Err(format!("duplicate Kenney wheel node {source_name}"));
+        }
+        if let Some(&node) = matches.first() {
+            found.push((node, connection));
+        }
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    if found.len() != KENNEY_CAR_WHEELS.len() {
+        return Err(format!(
+            "partial Kenney vehicle rig: found {} of {} wheel nodes",
+            found.len(),
+            KENNEY_CAR_WHEELS.len()
+        ));
+    }
+
+    let parents = gltf_node_parents(nodes)?;
+    let worlds: Vec<[f32; 16]> = (0..nodes.len())
+        .map(|i| gltf_node_world(i, nodes, &parents))
+        .collect::<Result<_, _>>()?;
+    let mut wheels = Vec::with_capacity(4);
+    for (node_index, connection) in found {
+        let node = &nodes[node_index];
+        let mesh_index = node
+            .mesh
+            .ok_or_else(|| format!("Kenney wheel node {node_index} has no mesh"))?;
+        let mesh = loaded
+            .document
+            .meshes_slice()
+            .get(mesh_index)
+            .ok_or_else(|| format!("Kenney wheel node {node_index} has a bad mesh"))?;
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        let mut count = 0usize;
+        for primitive in &mesh.primitives {
+            let accessor = primitive
+                .attributes
+                .get("POSITION")
+                .copied()
+                .ok_or_else(|| format!("Kenney wheel {connection} has no POSITION"))?;
+            for p in makepad_gltf::read_accessor_f32x3(&loaded, accessor)
+                .map_err(|e| format!("read Kenney wheel {connection}: {e}"))?
+            {
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(p[axis]);
+                    hi[axis] = hi[axis].max(p[axis]);
+                }
+                count += 1;
+            }
+        }
+        if count < 3 {
+            return Err(format!("Kenney wheel {connection} has no drawable geometry"));
+        }
+        let pivot = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        // The authored axle is local X; the circular section is local Y/Z.
+        let world = &worlds[node_index];
+        let axis_scale = |column: usize| {
+            let base = column * 4;
+            (world[base] * world[base]
+                + world[base + 1] * world[base + 1]
+                + world[base + 2] * world[base + 2])
+                .sqrt()
+        };
+        let radius = ((hi[1] - lo[1]) * axis_scale(1))
+            .max((hi[2] - lo[2]) * axis_scale(2))
+            * 0.5;
+        let width = (hi[0] - lo[0]) * axis_scale(0);
+        if !radius.is_finite() || !width.is_finite() || radius <= 0.0 || width <= 0.0 {
+            return Err(format!("Kenney wheel {connection} has invalid measured dimensions"));
+        }
+        let anchor = gltf_transform_point(&worlds[node_index], pivot);
+        wheels.push((node_index, connection, pivot, anchor, radius, width));
+    }
+
+    let (json_bytes, bin) = split_glb(glb)?;
+    let mut value = makepad_asset_client::json::parse(json_bytes)
+        .map_err(|e| format!("parse Kenney car GLB JSON: {e}"))?;
+    let json_nodes = json_object_field_mut(&mut value, "nodes")
+        .and_then(|v| match v {
+            makepad_asset_client::json::Value::Arr(v) => Some(v),
+            _ => None,
+        })
+        .ok_or("Kenney car GLB has no nodes array")?;
+    for (node_index, connection, pivot, anchor, radius, width) in wheels {
+        let node = json_nodes
+            .get_mut(node_index)
+            .ok_or("Kenney car node index left JSON range")?;
+        let obj = match node {
+            makepad_asset_client::json::Value::Obj(v) => v,
+            _ => return Err("Kenney car node is not an object".into()),
+        };
+        let extras = if let Some((_, value)) = obj.iter_mut().find(|(k, _)| k == "extras") {
+            match value {
+                makepad_asset_client::json::Value::Obj(v) => v,
+                _ => return Err(format!("Kenney wheel {connection} extras is not an object")),
+            }
+        } else {
+            obj.push((
+                "extras".into(),
+                makepad_asset_client::json::Value::Obj(Vec::new()),
+            ));
+            match &mut obj.last_mut().unwrap().1 {
+                makepad_asset_client::json::Value::Obj(v) => v,
+                _ => unreachable!(),
+            }
+        };
+        for key in ["kind", "connection", "pivot", "anchor", "radius", "width"] {
+            extras.retain(|(k, _)| k != key);
+        }
+        extras.extend([
+            ("kind".into(), makepad_asset_client::json::s("vehicle_wheel")),
+            ("connection".into(), makepad_asset_client::json::s(connection)),
+            ("pivot".into(), json_vec3(pivot)),
+            ("anchor".into(), json_vec3(anchor)),
+            ("radius".into(), makepad_asset_client::json::Value::F64(radius as f64)),
+            ("width".into(), makepad_asset_client::json::Value::F64(width as f64)),
+        ]);
+    }
+    Ok(Some(write_glb(value.to_json().as_bytes(), bin)))
+}
+
+fn kenney_ragdoll_pack_expected(pack: &str) -> Option<usize> {
+    match pack {
+        "mini-characters" => Some(12),
+        "mini-arcade" => Some(2),
+        "mini-dungeon" => Some(2),
+        "mini-forest" => Some(1),
+        "mini-market" => Some(1),
+        "mini-skate" => Some(2),
+        "arena" => Some(1),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum KenneyRagdollShape {
+    Box,
+    CapsuleX,
+    CapsuleY,
+    Sphere,
+}
+
+struct KenneyRagdollBone {
+    source: &'static str,
+    connection: &'static str,
+    parent: Option<&'static str>,
+    shape: KenneyRagdollShape,
+    mass: f32,
+    cone: f32,
+    twist: f32,
+}
+
+const KENNEY_RAGDOLL_BONES: [KenneyRagdollBone; 7] = [
+    KenneyRagdollBone { source: "root", connection: "pelvis", parent: None, shape: KenneyRagdollShape::Box, mass: 0.18, cone: 0.0, twist: 0.0 },
+    KenneyRagdollBone { source: "leg-left", connection: "leg_left", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.14, cone: 0.96, twist: 0.35 },
+    KenneyRagdollBone { source: "leg-right", connection: "leg_right", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.14, cone: 0.96, twist: 0.35 },
+    KenneyRagdollBone { source: "torso", connection: "torso", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.32, cone: 0.44, twist: 0.26 },
+    KenneyRagdollBone { source: "arm-left", connection: "arm_left", parent: Some("torso"), shape: KenneyRagdollShape::CapsuleX, mass: 0.06, cone: 1.57, twist: 0.79 },
+    KenneyRagdollBone { source: "arm-right", connection: "arm_right", parent: Some("torso"), shape: KenneyRagdollShape::CapsuleX, mass: 0.06, cone: 1.57, twist: 0.79 },
+    KenneyRagdollBone { source: "head", connection: "head", parent: Some("torso"), shape: KenneyRagdollShape::Sphere, mass: 0.10, cone: 0.61, twist: 0.44 },
+];
+
+fn tag_kenney_ragdoll_pack(glbs: &[PathBuf]) -> Result<usize, String> {
+    let mut tagged = 0usize;
+    for path in glbs {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read staged character {}: {error}", path.display()))?;
+        let Some(out) = tag_kenney_ragdoll_glb(&bytes)? else { continue };
+        std::fs::write(path, out)
+            .map_err(|error| format!("write staged character {}: {error}", path.display()))?;
+        tagged += 1;
+    }
+    log!("import: authored {tagged} generic seven-body ragdoll rigs");
+    Ok(tagged)
+}
+
+/// Exact Kenney seven-joint profile adapter. The source spellings are used
+/// only to recognize and fit the staged copy; published metadata contains the
+/// generic connections above, and `SkinnedModel` reparses the output before
+/// it is accepted.
+fn tag_kenney_ragdoll_glb(glb: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let loaded = makepad_gltf::load_gltf_from_bytes(glb, None)
+        .map_err(|error| format!("inspect Kenney character GLB: {error}"))?;
+    let nodes = loaded.document.nodes_slice();
+    let mut indices = Vec::with_capacity(KENNEY_RAGDOLL_BONES.len());
+    for bone in &KENNEY_RAGDOLL_BONES {
+        let matches: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| (node.name.as_deref() == Some(bone.source)).then_some(index))
+            .collect();
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        indices.push(matches[0]);
+    }
+    if loaded.document.skins.as_ref().is_none_or(Vec::is_empty) {
+        return Ok(None);
+    }
+    let parents = gltf_node_parents(nodes)?;
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let mut ancestor = parents[indices[bone_index]];
+        let mut actual = None;
+        for _ in 0..nodes.len() {
+            let Some(node) = ancestor else { break };
+            if let Some(match_index) = indices.iter().position(|candidate| *candidate == node) {
+                actual = Some(KENNEY_RAGDOLL_BONES[match_index].connection);
+                break;
+            }
+            ancestor = parents[node];
+        }
+        if actual != bone.parent {
+            return Err(format!("Kenney {} hierarchy does not match the seven-body profile", bone.source));
+        }
+    }
+
+    let skin = makepad_render::skin::SkinnedModel::parse_glb(glb)
+        .map_err(|error| format!("parse Kenney character skin: {error}"))?;
+    let mut fitted = Vec::with_capacity(KENNEY_RAGDOLL_BONES.len());
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let bounds = skin.dominant_joint_local_bounds(indices[bone_index]);
+        // Kenney's root is an unweighted skeleton origin; its three direct
+        // children all start at the hip line. Fit the pelvis box around those
+        // authored anchors instead of inventing weights or a runtime special
+        // case. Every deforming limb still uses its dominant-weight geometry.
+        let (min, max) = match (bounds, bone.shape) {
+            (Some(bounds), _) => bounds,
+            (None, KenneyRagdollShape::Box) => {
+                let children = nodes[indices[bone_index]].children.as_deref().unwrap_or(&[]);
+                let mut lo = vec3f(f32::MAX, f32::MAX, f32::MAX);
+                let mut hi = vec3f(f32::MIN, f32::MIN, f32::MIN);
+                for child in children {
+                    let local = gltf_node_local(&nodes[*child]);
+                    let point = vec3f(local[12], local[13], local[14]);
+                    lo.x = lo.x.min(point.x);
+                    lo.y = lo.y.min(point.y);
+                    lo.z = lo.z.min(point.z);
+                    hi.x = hi.x.max(point.x);
+                    hi.y = hi.y.max(point.y);
+                    hi.z = hi.z.max(point.z);
+                }
+                if children.len() < 3 || !lo.x.is_finite() {
+                    return Err("Kenney root has no usable child anchors".into());
+                }
+                let center = (lo + hi) * 0.5;
+                let width = (hi.x - lo.x).max(0.1);
+                // Divide by the ordinary box fit's 0.45 below so the final
+                // pelvis is wide enough to bridge both hips, with modest
+                // vertical/depth volume around their shared anchor line.
+                let target_half = vec3f(width * 0.75, width * 0.35, width * 0.45);
+                let source_half = target_half * (1.0 / 0.45);
+                (center - source_half, center + source_half)
+            }
+            (None, _) => {
+                return Err(format!("Kenney {} has no dominant skin vertices", bone.source));
+            }
+        };
+        let center = (min + max) * 0.5;
+        let span = max - min;
+        let floor = span.x.max(span.y).max(span.z).max(0.01) * 0.04;
+        let shape_fields = match bone.shape {
+            KenneyRagdollShape::Box => vec![
+                ("shape".into(), makepad_asset_client::json::s("box")),
+                ("position".into(), json_vec3([center.x, center.y, center.z])),
+                ("half_extents".into(), json_vec3([
+                    (span.x * 0.45).max(floor),
+                    (span.y * 0.45).max(floor),
+                    (span.z * 0.45).max(floor),
+                ])),
+            ],
+            KenneyRagdollShape::Sphere => {
+                let radius = span.x.max(span.y).max(span.z) * 0.45;
+                vec![
+                    ("shape".into(), makepad_asset_client::json::s("sphere")),
+                    ("position".into(), json_vec3([center.x, center.y, center.z])),
+                    ("radius".into(), makepad_asset_client::json::Value::F64(radius.max(floor) as f64)),
+                ]
+            }
+            KenneyRagdollShape::CapsuleX | KenneyRagdollShape::CapsuleY => {
+                let (axis_span, perpendicular) = match bone.shape {
+                    KenneyRagdollShape::CapsuleX => (span.x, span.y.max(span.z)),
+                    _ => (span.y, span.x.max(span.z)),
+                };
+                let radius = (perpendicular * 0.45).max(floor);
+                let stem = (axis_span * 0.5 - radius).max(floor);
+                let (a, b) = match bone.shape {
+                    KenneyRagdollShape::CapsuleX => (
+                        [center.x - stem, center.y, center.z],
+                        [center.x + stem, center.y, center.z],
+                    ),
+                    _ => (
+                        [center.x, center.y - stem, center.z],
+                        [center.x, center.y + stem, center.z],
+                    ),
+                };
+                vec![
+                    ("shape".into(), makepad_asset_client::json::s("capsule")),
+                    ("point_a".into(), json_vec3(a)),
+                    ("point_b".into(), json_vec3(b)),
+                    ("radius".into(), makepad_asset_client::json::Value::F64(radius as f64)),
+                ]
+            }
+        };
+        fitted.push(shape_fields);
+    }
+
+    let (json_bytes, bin) = split_glb(glb)?;
+    let mut value = makepad_asset_client::json::parse(json_bytes)
+        .map_err(|error| format!("parse Kenney ragdoll JSON: {error}"))?;
+    let json_nodes = json_object_field_mut(&mut value, "nodes")
+        .and_then(|value| match value {
+            makepad_asset_client::json::Value::Arr(nodes) => Some(nodes),
+            _ => None,
+        })
+        .ok_or("Kenney character GLB has no nodes array")?;
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let node = json_nodes.get_mut(indices[bone_index]).ok_or("ragdoll node left JSON range")?;
+        let object = match node {
+            makepad_asset_client::json::Value::Obj(object) => object,
+            _ => return Err("ragdoll node is not an object".into()),
+        };
+        let extras = if let Some((_, value)) = object.iter_mut().find(|(key, _)| key == "extras") {
+            match value {
+                makepad_asset_client::json::Value::Obj(extras) => extras,
+                _ => return Err(format!("Kenney {} extras is not an object", bone.source)),
+            }
+        } else {
+            object.push(("extras".into(), makepad_asset_client::json::Value::Obj(Vec::new())));
+            match &mut object.last_mut().unwrap().1 {
+                makepad_asset_client::json::Value::Obj(extras) => extras,
+                _ => unreachable!(),
+            }
+        };
+        for key in [
+            "kind", "connection", "root", "parent_connection", "shape", "position",
+            "half_extents", "point_a", "point_b", "radius", "mass_fraction", "joint",
+            "cone_angle", "twist_min", "twist_max",
+        ] {
+            extras.retain(|(candidate, _)| candidate != key);
+        }
+        extras.extend([
+            ("kind".into(), makepad_asset_client::json::s("ragdoll_body")),
+            ("connection".into(), makepad_asset_client::json::s(bone.connection)),
+            ("root".into(), makepad_asset_client::json::Value::Bool(bone.parent.is_none())),
+            ("mass_fraction".into(), makepad_asset_client::json::Value::F64(bone.mass as f64)),
+        ]);
+        if let Some(parent) = bone.parent {
+            extras.extend([
+                ("parent_connection".into(), makepad_asset_client::json::s(parent)),
+                ("joint".into(), makepad_asset_client::json::s("spherical")),
+                ("cone_angle".into(), makepad_asset_client::json::Value::F64(bone.cone as f64)),
+                ("twist_min".into(), makepad_asset_client::json::Value::F64(-bone.twist as f64)),
+                ("twist_max".into(), makepad_asset_client::json::Value::F64(bone.twist as f64)),
+            ]);
+        }
+        extras.extend(fitted[bone_index].drain(..));
+    }
+    let out = write_glb(value.to_json().as_bytes(), bin);
+    let parsed = makepad_render::skin::SkinnedModel::parse_glb(&out)
+        .map_err(|error| format!("validate generic ragdoll contract: {error}"))?;
+    if parsed.ragdoll_rig().map(|rig| rig.bodies.len()) != Some(7) {
+        return Err("generic ragdoll validation did not recover seven bodies".into());
+    }
+    Ok(Some(out))
+}
+
+fn json_object_field_mut<'a>(
+    value: &'a mut makepad_asset_client::json::Value,
+    key: &str,
+) -> Option<&'a mut makepad_asset_client::json::Value> {
+    match value {
+        makepad_asset_client::json::Value::Obj(items) => items
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn json_vec3(v: [f32; 3]) -> makepad_asset_client::json::Value {
+    makepad_asset_client::json::Value::Arr(
+        v.into_iter()
+            .map(|x| makepad_asset_client::json::Value::F64(x as f64))
+            .collect(),
+    )
+}
+
+fn gltf_node_parents(nodes: &[makepad_gltf::GltfNode]) -> Result<Vec<Option<usize>>, String> {
+    let mut parents = vec![None; nodes.len()];
+    for (parent, node) in nodes.iter().enumerate() {
+        for &child in node.children.as_deref().unwrap_or(&[]) {
+            if child >= nodes.len() {
+                return Err(format!("Kenney GLB child node {child} is out of range"));
+            }
+            if parents[child].replace(parent).is_some() {
+                return Err(format!("Kenney GLB node {child} has multiple parents"));
+            }
+        }
+    }
+    Ok(parents)
+}
+
+fn gltf_node_world(
+    mut node: usize,
+    nodes: &[makepad_gltf::GltfNode],
+    parents: &[Option<usize>],
+) -> Result<[f32; 16], String> {
+    let mut chain = vec![node];
+    while let Some(parent) = parents[node] {
+        if chain.len() > nodes.len() {
+            return Err("Kenney GLB node cycle".into());
+        }
+        chain.push(parent);
+        node = parent;
+    }
+    let mut out = gltf_identity();
+    for &index in chain.iter().rev() {
+        out = gltf_mul(&out, &gltf_node_local(&nodes[index]));
+    }
+    Ok(out)
+}
+
+fn gltf_node_local(node: &makepad_gltf::GltfNode) -> [f32; 16] {
+    if let Some(matrix) = node.matrix {
+        return matrix;
+    }
+    let [x, y, z, w] = node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let [sx, sy, sz] = node.scale.unwrap_or([1.0, 1.0, 1.0]);
+    let [tx, ty, tz] = node.translation.unwrap_or([0.0, 0.0, 0.0]);
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
+    let xy = x * y;
+    let xz = x * z;
+    let yz = y * z;
+    let wx = w * x;
+    let wy = w * y;
+    let wz = w * z;
+    [
+        (1.0 - 2.0 * (yy + zz)) * sx,
+        (2.0 * (xy + wz)) * sx,
+        (2.0 * (xz - wy)) * sx,
+        0.0,
+        (2.0 * (xy - wz)) * sy,
+        (1.0 - 2.0 * (xx + zz)) * sy,
+        (2.0 * (yz + wx)) * sy,
+        0.0,
+        (2.0 * (xz + wy)) * sz,
+        (2.0 * (yz - wx)) * sz,
+        (1.0 - 2.0 * (xx + yy)) * sz,
+        0.0,
+        tx,
+        ty,
+        tz,
+        1.0,
+    ]
+}
+
+fn gltf_identity() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn gltf_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = (0..4)
+                .map(|k| a[k * 4 + row] * b[col * 4 + k])
+                .sum();
+        }
+    }
+    out
+}
+
+fn gltf_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
 }
 
 /// Give every staged GLB without its own image (`images`) — and without an
@@ -3614,6 +4216,116 @@ fn png_crc(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kenney_car_staging_publishes_one_generic_rig_once() {
+        // Local pack payloads are intentionally outside the source checkout,
+        // so clean CI may not have this fixture. When the pack is installed,
+        // exercise the exact Asset UI migration over a real model.
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/packs/kenney/car-kit/race.glb");
+        let Ok(bytes) = std::fs::read(&source) else {
+            return;
+        };
+        assert!(!bytes
+            .windows(b"vehicle_wheel".len())
+            .any(|window| window == b"vehicle_wheel"));
+
+        let tagged = tag_kenney_car_glb(&bytes)
+            .expect("tag real Kenney car")
+            .expect("race.glb is a complete vehicle");
+        let model = makepad_render::StaticModel::parse_glb(&tagged)
+            .expect("generic renderer parses tagged car");
+        let mut connections: Vec<&str> = model
+            .driven_parts
+            .iter()
+            .map(|part| part.connection.as_str())
+            .collect();
+        connections.sort_unstable();
+        assert_eq!(
+            connections,
+            vec![
+                "wheel_front_left",
+                "wheel_front_right",
+                "wheel_rear_left",
+                "wheel_rear_right",
+            ]
+        );
+        assert!(model
+            .driven_parts
+            .iter()
+            .all(|part| part.radius > 0.0 && part.width > 0.0));
+
+        let retagged = tag_kenney_car_glb(&tagged)
+            .expect("rerunning the one-time migration stays valid")
+            .expect("tag remains present");
+        assert_eq!(tagged, retagged, "intentional future reimports are idempotent");
+    }
+
+    #[test]
+    fn kenney_character_staging_publishes_one_generic_rig_once() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/packs/kenney/mini-characters/character-male-a.glb");
+        let Ok(bytes) = std::fs::read(&source) else {
+            return;
+        };
+        assert!(!bytes
+            .windows(b"ragdoll_body".len())
+            .any(|window| window == b"ragdoll_body"));
+
+        let tagged = tag_kenney_ragdoll_glb(&bytes)
+            .expect("tag real Kenney humanoid")
+            .expect("character-male-a matches the seven-body profile");
+        let model = makepad_render::skin::SkinnedModel::parse_glb(&tagged)
+            .expect("generic renderer parses tagged humanoid");
+        let rig = model.ragdoll_rig().expect("published generic ragdoll contract");
+        assert_eq!(rig.bodies.len(), 7);
+        assert_eq!(rig.bodies.iter().filter(|body| body.parent.is_none()).count(), 1);
+        let total_mass: f32 = rig.bodies.iter().map(|body| body.mass_fraction).sum();
+        assert!((total_mass - 1.0).abs() < 1.0e-5);
+
+        let retagged = tag_kenney_ragdoll_glb(&tagged)
+            .expect("rerunning the one-time migration stays valid")
+            .expect("tag remains present");
+        assert_eq!(tagged, retagged, "intentional future reimports are idempotent");
+    }
+
+    #[test]
+    fn every_supported_kenney_humanoid_pack_migrates_completely() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/packs/kenney");
+        if !root.is_dir() {
+            return;
+        }
+        for pack in [
+            "mini-characters",
+            "mini-arcade",
+            "mini-dungeon",
+            "mini-forest",
+            "mini-market",
+            "mini-skate",
+            "arena",
+        ] {
+            let expected = kenney_ragdoll_pack_expected(pack).unwrap();
+            let dir = root.join(pack);
+            if !dir.is_dir() {
+                continue;
+            }
+            let mut tagged = 0usize;
+            for glb in ao_bake::collect_glbs(&dir) {
+                let bytes = std::fs::read(&glb).expect("read local Kenney fixture");
+                if tag_kenney_ragdoll_glb(&bytes)
+                    .unwrap_or_else(|error| panic!("{}: {error}", glb.display()))
+                    .is_some()
+                {
+                    tagged += 1;
+                }
+            }
+            assert_eq!(
+                tagged, expected,
+                "{pack} must never publish a partial one-time migration"
+            );
+        }
+    }
 
     #[test]
     fn content_fingerprint_is_deterministic_and_content_sensitive() {
