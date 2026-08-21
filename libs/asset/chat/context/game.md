@@ -180,18 +180,20 @@ EXPLICITLY asks to build something from parts.
   kenney/city-kit-commercial/building-a … (shops, bigger)
 - SCALE FACTS (measured, trust these): kenney models are MINIATURES —
   a whole house model is ~1.3 m tall. People and cars render real-sized.
-  Buildings need `scale: 5`; props (trees, fountain, cart) and road
-  tiles `scale: 2`. Never place kit models unscaled next to people.
-- Layout = a real village: one straight or L main street of road tiles
-  (kenney/fantasy-town-kit/road, scale: 2 → one tile every 2 m at y=0;
-  road-corner turns; yaw RADIANS 0/1.5708/3.1416/4.7124), 4-6 DIFFERENT
+  Hand-placed buildings need `scale: 5.5`; props (trees, fountain,
+  cart) `scale: 2`. Never place kit models unscaled next to people.
+  STREETS ARE NEVER HAND-LAID: they come from game.city / game.village
+  / game.racetrack / game.road_network, which apply each kit's measured
+  scale themselves (a hand-laid road tile next to a real car is 2-3x
+  too narrow).
+- Layout = a real village: game.village lays the street; 4-6 DIFFERENT
   complete buildings on both sides facing the street (doors toward it),
   a small plaza (fantasy-town fountain-round, scale: 2) with trees and a
   cart around it. Real tree aliases (do NOT invent variants):
   kenney/fantasy-town-kit/tree · kenney/nature-kit/tree_default /
   tree_oak / tree_detailed (underscores). Spawn the player ON the
   street, never inside the fountain. Example building line:
-    game.model("kenney/city-kit-suburban/building-type-a", {pos: vec3(8, 0, -6), yaw: 3.1416, scale: 5})
+    game.model("kenney/city-kit-suburban/building-type-a", {pos: vec3(8, 0, -6), yaw: 3.1416, scale: 5.5})
 - BREATHING ROOM (spacing law — the validator refuses crammed layouts):
   a scale-5 building is ~6-7 m WIDE, so keep building centres >= 12 m
   apart (pairs under 8 m are refused as CRAMMED). Building centres sit
