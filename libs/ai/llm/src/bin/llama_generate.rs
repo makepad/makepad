@@ -30,6 +30,7 @@ struct Args {
     build_draft_vocab: bool,
     draft_vocab_coverage: f64,
     draft_vocab_text: Vec<PathBuf>,
+    draft_vocab_eval: Vec<PathBuf>,
     spec_determinism_runs: usize,
     prompt_dir: Option<PathBuf>,
     runs: usize,
@@ -72,6 +73,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.build_draft_vocab {
         return run_build_draft_vocab(&model, &vocab, &args);
+    }
+
+    if !args.draft_vocab_eval.is_empty() {
+        return run_draft_vocab_eval(&model, &vocab, &args);
     }
 
     if args.spec_sample_gate {
@@ -211,6 +216,7 @@ fn parse_args(
     let mut build_draft_vocab = false;
     let mut draft_vocab_coverage = 0.975f64;
     let mut draft_vocab_text: Vec<PathBuf> = Vec::new();
+    let mut draft_vocab_eval: Vec<PathBuf> = Vec::new();
     let mut spec_determinism_runs = 0usize;
     let mut prompt_dir = None;
     let mut runs = 20usize;
@@ -300,6 +306,10 @@ fn parse_args(
                 let value = args.next().ok_or("--draft-vocab-text requires a value")?;
                 draft_vocab_text.push(PathBuf::from(value));
             }
+            "--draft-vocab-eval" => {
+                let value = args.next().ok_or("--draft-vocab-eval requires a value")?;
+                draft_vocab_eval.push(PathBuf::from(value));
+            }
             "--spec-determinism-runs" => {
                 let value = args.next().ok_or("--spec-determinism-runs requires a value")?;
                 spec_determinism_runs = value.to_string_lossy().parse()?;
@@ -338,7 +348,7 @@ fn parse_args(
         "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prompt TEXT | prompt words ...]"
     })?;
     let prompt = prompt.unwrap_or_else(|| prompt_parts.join(" "));
-    if prompt.is_empty() && prompt_dir.is_none() {
+    if prompt.is_empty() && prompt_dir.is_none() && draft_vocab_eval.is_empty() {
         return Err("missing prompt text".into());
     }
 
@@ -362,6 +372,7 @@ fn parse_args(
         build_draft_vocab,
         draft_vocab_coverage,
         draft_vocab_text,
+        draft_vocab_eval,
         spec_determinism_runs,
         prompt_dir,
         runs,
@@ -872,6 +883,119 @@ fn run_build_draft_vocab(
     Ok(())
 }
 
+/// Measure an existing `<model>.gguf.draftvocab` against text it was not built
+/// from. This is the instrument the corpus law needs: a set that covers its own
+/// corpus proves nothing, and a set that misses the held-out distribution turns
+/// speculation into a slowdown (every uncovered position is a forced
+/// rejection). Reports, per file and in total, the share of token
+/// **occurrences** the set covers — the quantity that predicts acceptance —
+/// alongside the distinct-token share and the heaviest misses.
+fn run_draft_vocab_eval(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = makepad_ai_llm::DraftVocab::sidecar_path(&model.gguf.path);
+    let draft_vocab = makepad_ai_llm::DraftVocab::read(&path)?;
+    if draft_vocab.vocab_size as usize != vocab.len() {
+        return Err(format!(
+            "{} was built for a {}-token vocabulary, model has {}",
+            path.display(),
+            draft_vocab.vocab_size,
+            vocab.len()
+        )
+        .into());
+    }
+    let mut kept = vec![false; vocab.len()];
+    for id in &draft_vocab.ids {
+        if let Ok(index) = usize::try_from(*id) {
+            if index < kept.len() {
+                kept[index] = true;
+            }
+        }
+    }
+    println!("draft_vocab.path: {}", path.display());
+    println!("draft_vocab.kept: {}", draft_vocab.len());
+    println!("draft_vocab.build_coverage: {:.4}", draft_vocab.coverage());
+
+    let mut total_counts = vec![0u64; vocab.len()];
+    for file in &args.draft_vocab_eval {
+        let text = std::fs::read_to_string(file)?;
+        // Same tokenisation as `--draft-vocab-text`, so build and eval count
+        // the same way.
+        let tokens = vocab.tokenize(&text, false, false)?;
+        let mut hit = 0u64;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut seen_hit = std::collections::BTreeSet::new();
+        for token in &tokens {
+            let Ok(index) = usize::try_from(*token) else {
+                continue;
+            };
+            if index >= kept.len() {
+                continue;
+            }
+            total_counts[index] += 1;
+            seen.insert(index);
+            if kept[index] {
+                hit += 1;
+                seen_hit.insert(index);
+            }
+        }
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("text");
+        let total = tokens.len().max(1) as f64;
+        println!(
+            "draft_vocab.eval.{name}: tokens={} covered={:.4} distinct={} distinct_covered={:.4}",
+            tokens.len(),
+            hit as f64 / total,
+            seen.len(),
+            seen_hit.len() as f64 / seen.len().max(1) as f64
+        );
+    }
+
+    let total: u64 = total_counts.iter().sum();
+    let covered: u64 = total_counts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| kept[*index])
+        .map(|(_, count)| *count)
+        .sum();
+    let distinct = total_counts.iter().filter(|count| **count > 0).count();
+    let distinct_covered = total_counts
+        .iter()
+        .enumerate()
+        .filter(|(index, count)| **count > 0 && kept[*index])
+        .count();
+    println!("draft_vocab.eval.total_tokens: {total}");
+    println!(
+        "draft_vocab.eval.coverage: {:.4}",
+        covered as f64 / total.max(1) as f64
+    );
+    println!(
+        "draft_vocab.eval.distinct_coverage: {:.4} ({distinct_covered} of {distinct})",
+        distinct_covered as f64 / distinct.max(1) as f64
+    );
+
+    // The heaviest misses are the actionable output: they say what the corpus
+    // is missing, or that the coverage knob is set too low.
+    let mut misses: Vec<(u64, usize)> = total_counts
+        .iter()
+        .enumerate()
+        .filter(|(index, count)| **count > 0 && !kept[*index])
+        .map(|(index, count)| (*count, index))
+        .collect();
+    misses.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (count, index) in misses.iter().take(20) {
+        let piece = vocab
+            .escaped_piece(*index as i32)
+            .unwrap_or_else(|| "<invalid-token-id>".to_owned());
+        println!("draft_vocab.eval.miss: {count}\t{index}\t{piece}");
+    }
+    Ok(())
+}
+
 /// Anti-madness gate for MTP speculative decoding.
 ///
 /// 1. lossless: greedy output with speculation ON must be token-identical to
@@ -1064,7 +1188,9 @@ fn run_bench(
 
 fn print_usage() {
     eprintln!(
-        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--upstream-completion-bin PATH] [--no-bos] [--no-parse-special] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]"
+        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--upstream-completion-bin PATH] [--no-bos] [--no-parse-special] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]\n\
+         draft vocabulary: [--build-draft-vocab --prompt-dir DIR [--runs N] [--draft-vocab-text FILE]... [--draft-vocab-coverage C]]\n\
+         \x20                [--draft-vocab-eval FILE]...   measure the sidecar on held-out text"
     );
 }
 
