@@ -2170,7 +2170,6 @@ impl WidgetTree {
             let Some(widget) = node.widget.upgrade() else {
                 continue;
             };
-            let node_visible = effective_visible(index);
             let id = live_id_token(inner.names[index]);
             let widget_type = widget
                 .widget_type_id()
@@ -2196,6 +2195,11 @@ impl WidgetTree {
                 x += context.position.x.round() as i64;
                 y += context.position.y.round() as i64;
             }
+            // Viewer semantics: a widget with no on-screen rect is not
+            // visible, whatever its own flag says. A recycled PortalList row
+            // whose area went stale kept reporting visible=true at
+            // [0,0,0,0] — one big wheel left 100 of those in the snapshot.
+            let node_visible = effective_visible(index) && width > 0 && height > 0;
 
             let is_button = widget.borrow::<Button>().is_some();
             let button_enabled = widget.borrow::<Button>().map(|button| button.enabled());
