@@ -87,7 +87,14 @@ pub enum LaneStep {
 #[derive(Clone, Debug, PartialEq)]
 pub enum LaneEvent {
     Token { job: u64, token: i32, produced: usize },
-    Finished { job: u64, outcome: LaneOutcome },
+    /// A lane retired. Carries the lane index so the worker can release
+    /// per-lane resources — notably the sampler stream, which must NOT be
+    /// inherited by whoever takes the slot next.
+    Finished {
+        job: u64,
+        lane: usize,
+        outcome: LaneOutcome,
+    },
 }
 
 /// Admission, stepping and retirement across N lanes.
@@ -277,7 +284,11 @@ impl LaneScheduler {
                 .unwrap_or_default();
             self.lanes[index] = None;
             let _ = self.table.retire(index);
-            events.push(LaneEvent::Finished { job, outcome });
+            events.push(LaneEvent::Finished {
+                job,
+                lane: index,
+                outcome,
+            });
         }
         events
     }
@@ -285,6 +296,107 @@ impl LaneScheduler {
     /// Publish the current counters to `/health`.
     pub fn publish_advert(&self) {
         crate::lane_advert::set_live(self.slots_claimed() as u64, self.lanes_active() as u64);
+    }
+}
+
+/// Drives a real batched session from the scheduler's decisions.
+///
+/// Deliberately thin: every decision lives in [`LaneScheduler`], which is
+/// tested everywhere, and this only performs them. Multi-sequence decode is
+/// CUDA-only, so this half cannot be exercised on a dev Mac — keeping it free
+/// of policy is what stops that gap from mattering.
+pub struct LaneExecutor {
+    session: makepad_ai_llm::LlamaSession,
+    scheduler: LaneScheduler,
+    /// One sampler stream per lane. Per-lane rather than per-session because
+    /// interleaved lanes would otherwise draw from one stream in an order that
+    /// depends on who else was talking — the same bug the per-chunk re-seed
+    /// had, one level up.
+    samplers: Vec<Option<makepad_ai_llm::LlamaSamplerState>>,
+    params: makepad_ai_llm::LlamaSamplingParams,
+}
+
+impl LaneExecutor {
+    pub fn new(
+        session: makepad_ai_llm::LlamaSession,
+        scheduler: LaneScheduler,
+        params: makepad_ai_llm::LlamaSamplingParams,
+    ) -> Self {
+        let samplers = vec![None; scheduler.slots_total()];
+        Self {
+            session,
+            scheduler,
+            samplers,
+            params,
+        }
+    }
+
+    pub fn scheduler(&mut self) -> &mut LaneScheduler {
+        &mut self.scheduler
+    }
+
+    /// True when there is nothing to do and the worker should block for work
+    /// rather than spin.
+    pub fn is_idle(&self) -> bool {
+        self.scheduler.is_idle()
+    }
+
+    /// Perform one scheduler step. Returns the events to report to callers.
+    pub fn step(&mut self) -> Result<Vec<LaneEvent>, String> {
+        let mut events = Vec::new();
+        match self.scheduler.next_step() {
+            LaneStep::Idle => {}
+            LaneStep::Prefill {
+                lane,
+                kv_base,
+                state_row,
+                start,
+                tokens,
+            } => {
+                let logits = self
+                    .session
+                    .prefill_slot_chunk(kv_base, state_row, start, &tokens)
+                    .map_err(|e| format!("lane {lane} prefill: {e}"))?;
+                // A lane's stream is seeded once, when it is admitted, and
+                // carried for the whole generation.
+                let sampler = self.samplers[lane].get_or_insert_with(|| {
+                    makepad_ai_llm::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
+                });
+                let first = sampler
+                    .sample_logits(&logits, self.params)
+                    .map_err(|e| format!("lane {lane} sample: {e}"))?;
+                self.scheduler.on_prefilled(lane, tokens.len(), first);
+            }
+            LaneStep::Decode { plan, tokens } => {
+                let rows = self
+                    .session
+                    .step_slots(&plan, &tokens)
+                    .map_err(|e| format!("batched decode: {e}"))?;
+                let mut sampled = Vec::with_capacity(rows.len());
+                for (row, step) in rows.iter().zip(&plan.slots) {
+                    let lane = step.slot;
+                    let sampler = self.samplers[lane].get_or_insert_with(|| {
+                        makepad_ai_llm::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
+                    });
+                    sampled.push(
+                        sampler
+                            .sample_logits(row, self.params)
+                            .map_err(|e| format!("lane {lane} sample: {e}"))?,
+                    );
+                }
+                events.extend(self.scheduler.on_decoded(&plan, &sampled));
+            }
+        }
+        for event in self.scheduler.reap() {
+            if let LaneEvent::Finished { lane, .. } = &event {
+                // Drop the retired lane's stream so whoever takes the slot next
+                // starts fresh instead of continuing a stranger's sequence.
+                self.samplers[*lane] = None;
+            }
+            events.push(event);
+        }
+        self.scheduler.publish_advert();
+        Ok(events)
     }
 }
 
@@ -395,6 +507,7 @@ mod tests {
         assert_eq!(tokens.len(), 3, "exactly max_new tokens, no more");
         assert!(events.contains(&LaneEvent::Finished {
             job: 1,
+            lane: 0,
             outcome: LaneOutcome::Complete
         }));
         assert_eq!(sched.slots_claimed(), 0, "a finished lane frees its slot");
@@ -438,11 +551,13 @@ mod tests {
         let events = run_to_completion(&mut sched, 12);
         assert!(events.contains(&LaneEvent::Finished {
             job: 1,
+            lane: 0,
             outcome: LaneOutcome::Complete
         }));
         assert!(
             events.contains(&LaneEvent::Finished {
                 job: 2,
+                lane: 0,
                 outcome: LaneOutcome::Complete
             }),
             "the queued job must be admitted once lane 0 frees, not stranded"
@@ -468,6 +583,7 @@ mod tests {
             events,
             vec![LaneEvent::Finished {
                 job: 1,
+                lane: 0,
                 outcome: LaneOutcome::Cancelled
             }]
         );
@@ -511,6 +627,34 @@ mod tests {
         assert_eq!(sched.lanes_active(), 0);
         sched.reap();
         assert_eq!(sched.slots_claimed(), 0);
+    }
+
+    #[test]
+    fn retirement_names_the_lane_so_per_lane_state_can_be_released() {
+        // The executor keys its per-lane sampler stream off this. Without the
+        // index it cannot tell which stream to drop, and the next occupant of
+        // the slot silently continues a stranger's RNG sequence — reproducible
+        // only for whoever happened to be there before.
+        let mut sched = scheduler(4, 8);
+        sched.submit(request(1, &[1], 1)).expect("submit");
+        sched.submit(request(2, &[1], 1)).expect("submit");
+        sched.admit_pending();
+        sched.cancel(1);
+        sched.cancel(2);
+        let mut finished: Vec<(u64, usize)> = sched
+            .reap()
+            .into_iter()
+            .filter_map(|e| match e {
+                LaneEvent::Finished { job, lane, .. } => Some((job, lane)),
+                _ => None,
+            })
+            .collect();
+        finished.sort();
+        assert_eq!(
+            finished,
+            vec![(1, 0), (2, 1)],
+            "each retirement must name the lane it freed"
+        );
     }
 
     #[test]

@@ -1569,6 +1569,27 @@ impl LlamaSamplerState {
             rng: Xorshift64::new(seed),
         }
     }
+
+    /// Draw one token from a raw logits row, advancing this stream.
+    ///
+    /// The batched worker holds one row per lane and one state per lane, so it
+    /// samples directly rather than through the single-sequence generate loop.
+    /// Semantics match [`LlamaSession::continue_sampled_with`] exactly —
+    /// greedy when the temperature is non-positive, otherwise
+    /// temperature/top-k/top-p then a draw — so a lane sampled here and a
+    /// sequence sampled there make the same choices from the same logits and
+    /// the same stream position.
+    pub fn sample_logits(
+        &mut self,
+        logits: &[f32],
+        params: LlamaSamplingParams,
+    ) -> Result<i32> {
+        if params.is_greedy() {
+            return argmax_token_id(logits);
+        }
+        let probs = sampling_probabilities(logits, params)?;
+        sample_from(&probs, &mut self.rng)
+    }
 }
 
 /// Deterministic per-session RNG so a seed reproduces a run exactly.
