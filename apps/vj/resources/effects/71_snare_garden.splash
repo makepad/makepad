@@ -1,0 +1,62 @@
+// SNARE GARDEN — a branching domino tree: the trunk topples up the middle
+// and every branch fires IN STEP the moment the front crosses its
+// junction (branch arcs continue the trunk count — parallel toppling is
+// pure per-vertex math). Pattern taught: tree layout + a pulse-bound
+// impact flash (`p1`) so every landing hits like a snare; branches are
+// hue-shifted by their branch id.
+{
+    name: "Snare Garden"
+    engine: "domino"
+    seed: 71
+
+    layout: "tree"
+    count: 800
+    branches: 7
+    per_beat: 8
+    spacing: 0.28
+    resurrect: 1
+    pause_beats: 2
+    flash: 1.4
+    jitter: 0.18
+
+    beat_pulse: 0.7
+    p1: "1.2 * pulse"       // impacts flash WITH the beat envelope
+    p2: 0.6
+
+    // PERFORMANCE DIALS — the engine's own p-levers; touching FLASH
+    // overrides the pulse binding above with a held gain.
+    dials: [
+        {name: "NUDGE", bind: "p0", default: 0.0},
+        {name: "FLASH", bind: "p1", default: 0.5},
+        {name: "ANTIC", bind: "p2", default: 0.6}
+    ]
+
+    color_bg: #x05070d
+    color_a: #x2a3242
+    color_b: #x33ff88
+    color_c: #xff3366
+
+    cam_orbit: 0.10
+    fog: 0.012
+    glow: 1.35
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = topple ease 0..1, attr = (branch, arc index, tile hash, yaw).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxDomino {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let mix_t = clamp(attr.x * 0.23 + attr.z * 0.12, 0.0, 1.0)
+            return self.col_a.mix(self.col_b, mix_t)
+        }
+    }
+}

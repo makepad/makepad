@@ -1,0 +1,22 @@
+// ZOOM ECHO — the infinite-zoom feedback corridor: strong zoom feedback
+// with a ripple riding the beat. The droste-adjacent classic.
+{
+    name: "Zoom Echo"
+    engine: "screen"
+    input0: "test"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ZOOM", bind: "p0", default: 0.5},
+        {name: "RIPPLE", bind: "p1", default: 0.5},
+        {name: "TRAIL", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "feedback", amount: "min(0.88 + (p2-0.5)*0.18, 0.97)", zoom: "1.03 + pulse * 0.03 + (p0-0.5)*0.06",
+         rotate: 0.002, dim: 0.965},
+        {kind: "ripple", p1: "(0.2 + pulse * 0.4) * (0.2 + 1.6*p1)", p2: 0.35},
+        {kind: "bloom", threshold: 0.65, strength: 1.05, levels: 2}
+    ]
+}

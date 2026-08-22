@@ -1,0 +1,69 @@
+// CUMULUS DRIFT — the calm-cloud preset: puff clusters in sunset light,
+// tilt-shifted into a miniature sky. Clouds are particle mode "clouds":
+// nine drifting clusters of big soft sprites.
+{
+    name: "Cumulus Drift"
+    engine: "particles"
+    mode: "clouds"
+    seed: 27
+
+    // Sparse + moderate sprites: the sprites are ADDITIVE, so a dense
+    // cluster of big ones burns to white — clouds need restraint.
+    count: 900
+    spread: 8.5
+    size: 0.65
+    rate: 0.02
+    swirl: 0.8
+
+    beat_pulse: "0.12 * (0.2 + 1.6*p0)"
+    beat_rate: 0.25
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FOCUS", bind: "p1", default: 0.5},
+        {name: "BLUR", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x1a0e24
+    color_a: #xffb48a
+    color_b: #xcc6a9a
+    color_c: #xffe8d0
+
+    cam_dist: 18.0
+    cam_height: 1.5
+    cam_orbit: 0.03
+    fog: 0.02
+
+    stages: [
+        {kind: "tiltshift", focus: "p1", width: "0.3 * (0.2 + 1.6*p2)", levels: 3},
+        {kind: "bloom", threshold: 0.75, strength: 0.9, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, spawn phase, hue, rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxParticles {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, attr.z)
+            let hot = base.xyz + vec3(0.5, 0.4, 0.3) * pow(1.0 - t, 6.0)
+            let fade = (1.0 - t) * smoothstep(0.0, 0.08, t)
+            let boost = 0.85 + self.time_beat.w * 0.9
+            return vec4(hot * boost, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.5, d)
+            let halo = 1.0 - smoothstep(0.15, 1.0, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
+}

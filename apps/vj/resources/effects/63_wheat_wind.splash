@@ -1,0 +1,61 @@
+// WHEAT WIND — tall pale stalks leaning hard in a strong wind, warm
+// noon light, growth loop sprouting the field every eight bars.
+{
+    name: "Wheat Wind"
+    engine: "grass"
+    seed: 71
+
+    blades: 8000
+    area: 10.0
+    height: 1.3
+    width: 0.045
+    clump: 0.25
+
+    grow: "loop"
+    grow_beats: 32
+    sway: "1.4 * (0.25 + 1.5*p0)"
+    sway_freq: 1.1
+    beat_pulse: "0.3 * (0.2 + 1.6*p1)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x141006
+    color_a: #x8a6a2a
+    color_b: #xf0dc8a
+    color_c: #xfffbe8
+
+    cam_orbit: 0.06
+    fog: 0.05
+    glow: "1.1 * (0.25 + 1.5*p2)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc along the blade 0..1, attr = (row, arc, hue, half width).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}

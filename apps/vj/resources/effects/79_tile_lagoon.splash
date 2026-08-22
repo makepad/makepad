@@ -1,0 +1,68 @@
+// TILE LAGOON — the calm ocean-of-tiles: the live content becomes a mosaic
+// raft rolling on a slow swell. Pattern taught here: the tiles engine's
+// "wave" mode tilts every tile with the LOCAL wave slope (the picture
+// glitters like water), and p1 breathes extra amplitude in on the bar so
+// the sea rises and settles once every four beats.
+{
+    name: "Tile Lagoon"
+    engine: "tiles"
+    mode: "wave"
+    seed: 5
+
+    grid: 30
+    spread: 8.0
+    aspect: 0.66
+    gap: 0.05
+    amp: 0.42
+    freq: 0.9
+
+    // Gentle pulse; the bar swell is the real motion driver.
+    beat_pulse: 0.25
+    p1: "0.35 * env(bar)"
+    // A faint constant grout shimmer keeps the lattice readable.
+    p2: "0.05 + 0.08 * pulse"
+    p0: 0.5
+
+    // PERFORMANCE DIALS — SWELL/GROUT are the engine's own p1/p2 levers
+    // (touching one holds its binding above); FOCUS rides the tiltshift
+    // focus line directly (p0 0.5 = today's centre).
+    dials: [
+        {name: "FOCUS", bind: "p0", default: 0.5},
+        {name: "SWELL", bind: "p1", default: 0.5},
+        {name: "GROUT", bind: "p2", default: 0.5}
+    ]
+
+    input0: "test"
+
+    color_bg: #x061018
+    color_a: #x3fd8c8
+    color_b: #x1a5f8a
+    color_c: #xbdf5ec
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "tiltshift", focus: "p0", width: 0.34, levels: 2},
+        {kind: "bloom", threshold: 0.72, strength: 0.8, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the mode highlight drive, attr = (shade, edge, stagger, tumble).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTiles {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            let lit = content.xyz * (attr.x * (0.35 + 0.65 * border))
+            let glowline = self.col_c.xyz * (1.0 - border)
+                * (t + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + glowline) * self.fog.y, 1.0)
+        }
+    }
+}

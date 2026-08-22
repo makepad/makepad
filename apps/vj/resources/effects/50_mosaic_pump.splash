@@ -1,0 +1,21 @@
+// MOSAIC PUMP — pixelation whose BLOCK SIZE snaps on the beat (p2 bound
+// to the pulse): the picture crunches to chunky blocks on every kick and
+// melts back between them.
+{
+    name: "Mosaic Pump"
+    engine: "screen"
+    input0: "test"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BLOCK", bind: "p0", default: 0.5},
+        {name: "SNAP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "pixelate", p1: "0.55 * (0.2 + 1.6*p0)", p2: "pulse * (0.2 + 1.6*p1)"},
+        {kind: "bloom", threshold: 0.55, strength: "1.15 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+}

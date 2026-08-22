@@ -1,0 +1,72 @@
+// DYE WASH — the psychedelic fluid pass OVER LIVE CONTENT: input0 shows
+// through underneath (p1 = input mix) and is WARPED by the fluid's own
+// velocity field (p0), while beat-colored dye screens on top. The same
+// stable-fluids sim as Ink Drop, tuned washier: more ambient swirl, faster
+// dye fade, softer splats.
+{
+    name: "Dye Wash"
+    engine: "fluid"
+    seed: 11
+
+    grid: 160
+    iters: 18
+
+    force: 2.0
+    dissipation: 0.16
+    swirl: 0.75
+    splat: "(1.1 + pulse * 0.6) * (0.2 + 1.6*p2)"
+    dye_fade: 0.5
+    radius: 0.11
+
+    input0: "test"
+    p0: 0.055
+    p1: 0.85
+    p2: 0.5
+
+    // PERFORMANCE DIALS — WARP/MIX are the fluid engine's own p0/p1
+    // levers (resting where this doc holds them); SPLAT routes p2
+    // through the dye splats.
+    dials: [
+        {name: "WARP", bind: "p0", default: 0.055},
+        {name: "MIX", bind: "p1", default: 0.85},
+        {name: "SPLAT", bind: "p2", default: 0.5}
+    ]
+
+    beat_pulse: 0.3
+
+    color_bg: #x0a0612
+    color_a: #xff5ad0
+    color_b: #x5affd8
+    color_c: #xffe45a
+
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.05, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: uv, the dye and flow texels, and the base under the ink.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFluidView {
+        fx_shade: fn(uv: vec2, dye: vec4, flow: vec4, base: vec3) -> vec4 {
+            let glow = self.u_view.x
+            let ink = vec3(dye.x, dye.y, dye.z) * glow
+            let shimmer = clamp(length(flow.xy) * 0.35, 0.0, 0.6)
+            let mut lit = ink + ink * shimmer
+            // Soft-knee tone map: color survives density; only genuinely
+            // dense ink approaches white.
+            lit = lit / (vec3(1.0, 1.0, 1.0) + lit * 0.45)
+            let rgb = vec3(1.0, 1.0, 1.0)
+                - (vec3(1.0, 1.0, 1.0) - base)
+                * clamp(vec3(1.0, 1.0, 1.0) - lit, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            return vec4(rgb, 1.0)
+        }
+    }
+}

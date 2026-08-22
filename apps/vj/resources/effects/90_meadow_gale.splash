@@ -1,0 +1,75 @@
+// MEADOW GALE — the LIVING WIND demo. `wind_field:` swaps the meadow's
+// analytic sway for a 64x64 GPU wind SIM FIELD (sim.rs): a curl-noise base
+// wind plus a gust channel that is INJECTED on the beat and ADVECTED
+// DOWNWIND every frame. A gust is a traveling object — watch one bright
+// band of bent, lit grass cross the field over a couple of seconds.
+// Pattern taught here: wind_field + the field keys (flow/gust/travel/
+// decay/scale/extent) read at document level.
+{
+    name: "Meadow Gale"
+    engine: "grass"
+    seed: 12
+
+    blades: 11000
+    area: 10.0
+    height: 0.95
+    clump: 0.5
+
+    // The wind field. flow = base wind, gust = beat impulse energy,
+    // travel = how fast a gust crosses the field (uv/sec), decay = how
+    // long it survives, extent = the world half-extent the field spans.
+    wind_field: "wind"
+    flow: 1.1
+    gust: "(2.4 + pulse * 1.6) * (0.2 + 1.6*p0)"
+    travel: 0.30
+    decay: 0.45
+    scale: 2.6
+    extent: 11.0
+
+    sway: "0.85 * (0.25 + 1.5*p1)"
+    beat_pulse: 0.2
+    beat_rate: 0.5
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "GUST", bind: "p0", default: 0.5},
+        {name: "WIND", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x101408
+    color_a: #x4a6a14
+    color_b: #xc8e05a
+    color_c: #xfff8d0
+
+    cam_orbit: 0.045
+    cam_height: 3.4
+    fog: 0.05
+    glow: "1.1 * (0.25 + 1.5*p2)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc along the blade 0..1, attr = (row, arc, hue, half width).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMeshField {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}
