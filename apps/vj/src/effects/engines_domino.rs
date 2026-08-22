@@ -365,6 +365,9 @@ script_mod! {
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         tex0: texture_2d(float)
         has_content: uniform(0.0)
+        // Content projection footprint: the layout's xz half-extent
+        // (published per frame by the view from `DominoEngine::extent`).
+        u_area: uniform(10.0)
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -434,6 +437,30 @@ script_mod! {
                 * clamp(0.45 + self.user.z, 0.0, 4.0)
                 * (0.35 + 0.65 * self.time_beat.w)
             let tile = self.fx_color(ease, attr, n, world.xyz)
+            // CONTENT COUPLING: the run catches the live input0 as if
+            // projected straight down (world xz over the layout footprint
+            // → uv). Standing tiles take a whisper on their flanks;
+            // toppled tiles turn face-up and ASSEMBLE the video into a
+            // floor mosaic as the front travels — and resurrect it away in
+            // reverse. Impact flash and pips stay untouched. fog.z is
+            // host-pre-gated to 0 without real content (classic look).
+            let mut tile_rgb = tile.xyz
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 {
+                let ext = max(self.u_area, 1.0)
+                let cuv = clamp(
+                    vec2(pos.x, pos.z) / (ext * 2.0) + vec2(0.5, 0.5),
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
+                )
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                let catch = 0.25 + 0.75 * clamp(n.y, 0.0, 1.0)
+                tile_rgb = mix(
+                    tile_rgb,
+                    texel.xyz * 1.2,
+                    clamp(cmix * 1.1, 0.0, 1.0) * catch
+                )
+            }
             let key = normalize(vec3(0.45, 0.8, 0.35))
             let lit = 0.42 + 0.58 * clamp(dot(n, key), 0.0, 1.0)
             let dim = 1.0 - 0.30 * ease
@@ -441,7 +468,7 @@ script_mod! {
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let d = length(world.xyz - cam.xyz / max(cam.w, 0.0001))
             let fogf = exp(0.0 - d * self.fog.x)
-            let rgb = (tile.xyz * (lit * dim * self.fog.y) + emiss)
+            let rgb = (tile_rgb * (lit * dim * self.fog.y) + emiss)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
             self.v_color = vec4(rgb, clamp(flash, 0.0, 1.0))
             // Face coordinates for the pixel pips: dims unpacked from the

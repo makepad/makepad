@@ -283,9 +283,31 @@ script_mod! {
                     view_pos.z,
                     view_pos.w
                 )
-                let body = self.col_b.mix(self.col_c, bright * bright)
+                // CONTENT COUPLING: each fly blinks in the live input0's
+                // color at its own meadow anchor (xz over the field → uv) —
+                // a swarm over a concert clip becomes the clip's palette,
+                // blinking. The meadow stays dark. fog.z is host-pre-gated
+                // to 0 without real content (classic standalone look); the
+                // 1.3 family gain makes the default 0.5 read as 0.65 —
+                // the flies ARE this engine's coupling.
+                let mut body = self.col_b.mix(self.col_c, bright * bright).xyz
+                let cmix = self.has_content * self.fog.z
+                if cmix > 0.001 {
+                    let area = max(self.flow.z, 0.5)
+                    let cuv = clamp(
+                        vec2(anchor.x, anchor.z) / (area * 2.0) + vec2(0.5, 0.5),
+                        vec2(0.0, 0.0),
+                        vec2(1.0, 1.0)
+                    )
+                    let texel = self.tex0.sample_nearest(cuv, 0.0)
+                    body = mix(
+                        body,
+                        texel.xyz * (0.55 + 0.85 * bright),
+                        clamp(cmix * 1.3, 0.0, 1.0)
+                    )
+                }
                 let gain = (0.05 + 2.4 * bright) * self.fog.y
-                self.v_color = vec4(body.xyz * gain, 1.0)
+                self.v_color = vec4(body * gain, 1.0)
                 self.v_uv = self.geom.geom_uv
                 self.v_flag = 0.0
                 self.vertex_pos = self.draw_pass.camera_projection * billboard
