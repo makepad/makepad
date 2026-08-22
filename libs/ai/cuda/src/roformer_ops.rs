@@ -38,7 +38,9 @@ mod ffi {
     use super::{CudaError, Stream};
     use std::ffi::c_void;
 
-    unsafe extern "C" {
+    // `cuda_ffi!` (see `link_gate.rs`): the real kernel declarations when the
+    // .cu build ran, link-clean stubs when it did not.
+    cuda_ffi! {
         pub fn makepad_cuda_roformer_attn_f32(
             q: *const c_void,
             k: *const c_void,
