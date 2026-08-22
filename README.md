@@ -32,6 +32,18 @@ lane is not regularly tested; expect to fix small things. The errors are
 shallow — point an AI coding assistant at them and it will get you
 building.
 
+**What CUDA is for**: the VJ uses the GPU-AI lane for audio source
+separation (BS-RoFormer splits a track into vocals/drums/bass/other,
+which drives the stem mutes and the karaoke word timing). The app runs
+fine without it — those features just stay off.
+
+**The separation model is not auto-downloaded.** Fetch the checkpoint
+`model_bs_roformer_ep_17_sdr_9.6568.ckpt` (527 MB, MIT-licensed) from
+https://github.com/ZFTurbo/Music-Source-Separation-Training and place it
+at `local/stems_ref/ckpt/` in the checkout (or point `VJ_STEMS_CKPT` at
+the file). Until then the VJ reports "stems: model not installed" and
+carries on.
+
 ## What Makepad Is
 
 - A cross-platform UI runtime for native and web targets.
