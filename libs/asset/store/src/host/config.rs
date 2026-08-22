@@ -36,6 +36,56 @@ fn text_ok(s: &str, max: usize) -> bool {
 /// fleet port (41830) and from the HTTP planes.
 pub const DEFAULT_DISCOVERY_PORT: u16 = 41871;
 
+/// Whether this server will catalogue content it does not copy, and from
+/// whom (see [`crate::blobrefs`]).
+///
+/// Admitting a blob BY REFERENCE means handing the server a filesystem path
+/// and having it read that file — so the route is, precisely, "read any file
+/// this process can read, then serve it by digest". That is exactly the
+/// privilege of the process itself, which is fine for an app hosting its own
+/// store on loopback and is NOT fine for anything reachable off the box.
+/// Hence: OFF unless an embedder turns it on, loopback-only by default, and
+/// an optional prefix allowlist for embedders that want to narrow it further.
+#[derive(Clone, Debug)]
+pub struct BlobRefPolicy {
+    /// Master switch. `false` = `POST /v1/blobs/ref` answers 404 as though
+    /// the route did not exist.
+    pub enabled: bool,
+    /// Only accept reference admission from a loopback peer. Leave `true`
+    /// unless the paths and the callers are both already trusted — a remote
+    /// caller naming a server-local path is a file-read oracle.
+    pub loopback_only: bool,
+    /// Directory prefixes a referenced path must live under. EMPTY means "no
+    /// prefix restriction", which is only sound together with
+    /// `loopback_only` and a token the host process minted for itself.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for BlobRefPolicy {
+    fn default() -> Self {
+        Self { enabled: false, loopback_only: true, roots: Vec::new() }
+    }
+}
+
+impl BlobRefPolicy {
+    /// The shape an app that hosts its own store on loopback wants: on,
+    /// loopback-only, no prefix restriction (the app already runs as the
+    /// user who owns the files).
+    pub fn local_host() -> Self {
+        Self { enabled: true, loopback_only: true, roots: Vec::new() }
+    }
+
+    /// Is this path admissible under the prefix allowlist? An empty
+    /// allowlist admits everything; a non-empty one admits only paths under
+    /// one of its entries.
+    pub fn path_allowed(&self, path: &std::path::Path) -> bool {
+        if self.roots.is_empty() {
+            return true;
+        }
+        self.roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
 /// UDP LAN discovery announcement config. Present = beacon on.
 #[derive(Clone, Debug)]
 pub struct DiscoveryConfig {
@@ -113,6 +163,28 @@ pub struct ServerConfig {
     /// Most connection threads allowed to park in an event wait at once;
     /// over the cap a poll returns empty immediately instead of parking.
     pub event_max_waiters: usize,
+    /// Blob GC (see `crate::gc`). A run is a sequence of bounded steps, and
+    /// these knobs decide how much of it any one actor performs: a request
+    /// does at most `gc_max_steps_per_request` (so `POST /v1/gc` answers in
+    /// bounded time however large the store is), and each janitor tick does
+    /// at most `gc_janitor_steps`, which is what finishes a run nobody is
+    /// polling. Zero janitor steps = GC only advances when asked.
+    pub gc_max_steps_per_request: u32,
+    pub gc_janitor_steps: u32,
+    /// Default grace window: bytes recorded (or re-referenced by a deduped
+    /// upload) inside this window of a run's start are never swept, so an
+    /// upload whose manifest has not landed yet cannot be collected.
+    pub gc_grace_ms: u64,
+    /// Rows one mark/sweep step reads.
+    pub gc_mark_batch: u32,
+    pub gc_sweep_batch: u32,
+    /// Assets one retention step visits.
+    pub gc_retain_batch: u32,
+    /// Ordered batch blob pull (`POST /v1/blobs/fetch`). Bounded so one
+    /// request can never become an unbounded read: most items per batch, and
+    /// most bytes one batch may stream.
+    pub batch_max_items: u32,
+    pub batch_max_bytes: u64,
     /// Ensure the admin principal + a fresh admin token at startup, writing
     /// the token (once, mode 0600) to `<root>/admin-token`.
     pub bootstrap_admin: bool,
@@ -121,6 +193,9 @@ pub struct ServerConfig {
     pub job_profiles: Vec<JobProfile>,
     /// UDP LAN discovery beacon; None = off.
     pub discovery: Option<DiscoveryConfig>,
+    /// Reference blobs (content catalogued without copying). Off by default;
+    /// see [`BlobRefPolicy`] for why turning it on is a privilege decision.
+    pub blob_refs: BlobRefPolicy,
     /// Chat broker: local fleet Qwen and/or external OpenAI/Grok.
     pub chat: ChatConfig,
     /// Log to stderr. Never logs secrets, headers, or bodies.
@@ -132,6 +207,8 @@ pub struct ServerConfig {
 /// node URLs are operator-supplied and never appear on the chat wire.
 #[derive(Clone, Debug)]
 pub struct ChatConfig {
+    /// Named fleet this server will use. Empty = `default`.
+    pub fleet: String,
     /// Fleet/local Qwen node base URLs (`http://10.0.0.217:8765`).
     pub fleet_bases: Vec<String>,
     pub max_sessions: usize,
@@ -145,6 +222,7 @@ pub struct ChatConfig {
 impl Default for ChatConfig {
     fn default() -> Self {
         ChatConfig {
+            fleet: String::new(),
             fleet_bases: Vec::new(),
             max_sessions: 32,
             max_sessions_per_owner: 8,
@@ -161,6 +239,11 @@ pub struct ChatScript {
     pub fleet_qwen: ScriptedLane,
     pub openai: ScriptedLane,
     pub grok: ScriptedLane,
+    /// Most scripted turns that may run at once across ALL sessions —
+    /// the fixture's stand-in for a serving tier's parallel capacity.
+    /// 0 = unbounded. A concurrency suite needs this to show fairness
+    /// when sessions outnumber slots.
+    pub max_concurrent_turns: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -168,6 +251,10 @@ pub struct ScriptedLane {
     pub available: bool,
     pub model: String,
     pub turns: Vec<ScriptedTurn>,
+    /// Wall-clock one scripted turn costs before its reply is ready.
+    /// 0 = instant (what every pre-existing test wants). A suite that
+    /// measures real parallelism sets hundreds of milliseconds here.
+    pub turn_delay_ms: u64,
 }
 
 /// One `begin_turn` of a scripted provider.
@@ -236,9 +323,18 @@ impl ServerConfig {
             event_max_wait_ms: 30_000,
             event_max_batch: 256,
             event_max_waiters: 32,
+            gc_max_steps_per_request: 64,
+            gc_janitor_steps: 16,
+            gc_grace_ms: 60 * 60 * 1000,
+            gc_mark_batch: 64,
+            gc_sweep_batch: 128,
+            gc_retain_batch: 64,
+            batch_max_items: 32,
+            batch_max_bytes: 16 * 1024 * 1024,
             job_profiles: default_job_profiles(),
             bootstrap_admin: false,
             discovery: None,
+            blob_refs: BlobRefPolicy::default(),
             chat: ChatConfig::default(),
             log: true,
         }
@@ -293,6 +389,30 @@ impl ServerConfig {
         if self.event_max_waiters == 0 || self.event_max_waiters > 1024 {
             return Err(ServerError::InvalidInput { what: "config event max waiters" });
         }
+        // GC step budgets: a request or tick must always be bounded, and a
+        // batch must never be big enough to make one step a whole-store
+        // transaction.
+        if self.gc_max_steps_per_request == 0 || self.gc_max_steps_per_request > 4096 {
+            return Err(ServerError::InvalidInput { what: "config gc steps per request" });
+        }
+        if self.gc_janitor_steps > 4096 {
+            return Err(ServerError::InvalidInput { what: "config gc janitor steps" });
+        }
+        if self.gc_mark_batch == 0
+            || self.gc_mark_batch > 100_000
+            || self.gc_sweep_batch == 0
+            || self.gc_sweep_batch > 100_000
+            || self.gc_retain_batch == 0
+            || self.gc_retain_batch > 100_000
+        {
+            return Err(ServerError::InvalidInput { what: "config gc batch" });
+        }
+        if self.batch_max_items == 0 || self.batch_max_items > 256 {
+            return Err(ServerError::InvalidInput { what: "config batch max items" });
+        }
+        if self.batch_max_bytes == 0 || self.batch_max_bytes > 256 * 1024 * 1024 {
+            return Err(ServerError::InvalidInput { what: "config batch max bytes" });
+        }
         if self.job_profiles.len() > 64 {
             return Err(ServerError::InvalidInput { what: "config job profiles count" });
         }
@@ -335,6 +455,17 @@ impl ServerConfig {
         for base in &self.chat.fleet_bases {
             if base.is_empty() || base.len() > 256 || base.chars().any(char::is_control) {
                 return Err(ServerError::InvalidInput { what: "config chat fleet base" });
+            }
+        }
+        // A prefix allowlist that is not absolute cannot be prefix-checked
+        // against the absolute paths references store: refuse it at config
+        // time rather than silently admitting everything.
+        if self.blob_refs.roots.len() > 64 {
+            return Err(ServerError::InvalidInput { what: "config blob ref roots count" });
+        }
+        for root in &self.blob_refs.roots {
+            if !root.is_absolute() {
+                return Err(ServerError::InvalidInput { what: "config blob ref root not absolute" });
             }
         }
         if let Some(d) = &self.discovery {

@@ -27,13 +27,24 @@ makepad-asset-client = { path = "../client" }
 makepad-render = { path = "../../render" }
 makepad-gltf = { path = "../../gltf" }
 makepad-zip-file = { path = "../../zip_file" }
+# Own MP3 / Ogg Vorbis decoders: waveform thumbnails and duration for the
+# music formats the library actually ships, without a platform codec.
+makepad-audio-decode = { path = "../../audio_decode" }
+# The picture recipes (spectrogram, antialiased wave strip, composite),
+# shared with the preview widgets so a baked thumbnail and a live preview
+# are the same picture rather than two drifting copies.
+makepad-audio-picture = { path = "../../audio_picture" }
 makepad-fast-inflate = { path = "../../fast_inflate" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
+# Gaussian-splat PLY validation (the splat payload the importer publishes).
+makepad-splat = { path = "../../splat" }
 # Thumbnail encoding (vendored, no_std-friendly).
 jpeg-encoder = { path = "../../jpeg-encoder" }
 # Fleet dispatch client (default features = [] — the light client side only).
 makepad-asset-ai = { path = "../ai", default-features = false }
+# Base64 for relaying a catalog input into a fleet generate request.
+makepad-base64 = { path = "../../base64" }
 # Hardware mp4 decode for representative first-frame thumbnails + measured
 # durations (standalone seam; no Cx, no window).
 makepad-platform = { path = "../../../platform" }

@@ -2,9 +2,32 @@
 //!
 //! UI hosts (AI Content, the Asset Store, Sandbox's loader) must not block
 //! their frame loop on the network. [`ClientRuntime`] owns a connected
-//! [`AssetClient`] on one worker thread; the app submits typed requests, gets
-//! a [`RequestId`] back immediately, and drains typed [`ClientEvent`]s from
-//! its own poll loop. Requests execute strictly in submission order.
+//! [`AssetClient`], runs it on a pool of worker threads, and hands the app a
+//! [`RequestId`] immediately; the app drains typed [`ClientEvent`]s from its
+//! own poll loop.
+//!
+//! **Two lanes, because one queue is a head-of-line block.** A single serial
+//! worker makes every thumbnail wait behind whatever is in front of it — one
+//! multi-megabyte GLB or track download stalls thirty icon fetches, and the
+//! user watches a grid trickle in against a server on localhost. So requests
+//! are classified ([`Lane`]): small control-plane calls and small blob
+//! fetches take the FAST lane (several workers), large transfers and
+//! publications take the BULK lane (a couple). A big download can saturate
+//! its own lane and never the other.
+//!
+//! Consequences the API makes explicit:
+//! - Requests no longer complete in submission order, and events from
+//!   different requests interleave. Events for ONE request stay ordered:
+//!   `Started` first, then its `Progress`, then exactly one `Done`/`Failed`,
+//!   because one worker owns a request start to finish.
+//! - [`ClientRuntime::submit_with`] takes an explicit [`SubmitOptions`] when
+//!   the caller knows better than the classifier — including `lifo`, which
+//!   serves the newest queued work first (what a scrolling thumbnail grid
+//!   wants: the visible row, not the row the user scrolled past).
+//! - Lane workers share ONE cache and one per-digest transfer gate (see
+//!   [`AssetClient::lane_clone`]), so parallelism never means two writers on
+//!   one partial file, a second lock on the cache root, or the same blob
+//!   downloaded twice.
 //!
 //! There is no implicit state anywhere: a slot the app renders is `Idle`,
 //! `Loading` (with byte progress when known), `Ready`, or `Failed` with the
@@ -21,15 +44,16 @@ use crate::error::{ClientError, ClientResult};
 use crate::json::Value;
 use crate::publish::{PublishBundle, PublishRequest, PublishStage, Published, PublishedBundle};
 use crate::resolver::{ResolvedFile, ResolvedThumbnail, TierPreference};
+use crate::side_channels::{SideChannelFile, SideChannelOutcome};
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DerivedVariantManifest, FileRole, GameAlias, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub type RequestId = u64;
 
@@ -61,12 +85,32 @@ pub enum ClientRequest {
     },
     /// Materialize the manifest's typed thumbnail (None when it has none).
     ResolveThumbnail { manifest: Box<AssetManifest> },
+    /// Delete an asset from the store: every revision retired, aliases and
+    /// search rows gone, bytes handed to blob GC. Idempotent.
+    RetireAsset { id: AssetId },
+    /// Delete one revision (typically superseded); the asset stays live.
+    RetireRevision { id: AssetId, revision: AssetRevisionId },
+    /// Advance blob garbage collection by a bounded amount. One request is
+    /// one bounded unit of work — the UI polls until the status says `done`
+    /// (with `GcRequest::dry_run()` first to show what would be freed).
+    GcBlobs { request: crate::api::GcRequest },
+    /// The newest GC run's progress, without starting or advancing one.
+    GcStatus,
+    /// Abandon the active GC run.
+    GcCancel,
     /// Publish a generated artifact end to end (see [`crate::publish`]).
     PublishArtifact { request: Box<PublishRequest> },
     /// Publish a multi-file bundle; its [`PublishStage`]s stream on the
     /// side channel ([`ClientRuntime::poll_stages`]), and `cancel` aborts it
     /// between stages.
     PublishBundle { request: Box<PublishBundle> },
+    /// Attach derived side-channel files (separated stems, aligned lyrics) to
+    /// an asset's head revision — see [`crate::side_channels`]. The payload is
+    /// `Arc`d because it is megabytes of encoded audio the caller already
+    /// holds, and it is unwrapped rather than copied when nothing else shares
+    /// it. Idempotent at the client: a concurrent winner reports
+    /// [`SideChannelOutcome::AlreadyPresent`].
+    PublishSideChannels { asset: AssetId, files: Arc<Vec<SideChannelFile>> },
     /// Advertised generation capabilities, optionally domain-filtered.
     FetchJobProfiles { domain: Option<String> },
     /// Enqueue a generation job; the server schedules the compute.
@@ -123,8 +167,17 @@ pub enum ClientOutput {
     BlobUnpinned { blob: BlobId },
     File(ResolvedFile),
     Thumbnail(Option<ResolvedThumbnail>),
+    /// One retirement's report (asset or revision).
+    Retired(crate::dto::RetireDto),
+    /// Durable progress of the newest GC run.
+    Gc(crate::dto::GcStatusDto),
+    /// Whether a GC cancel stopped an active run.
+    GcCancelled(bool),
     Published(Published),
     PublishedBundle(PublishedBundle),
+    /// Whether the side-channel attach wrote a revision or found the roles
+    /// already there.
+    SideChannels(SideChannelOutcome),
     JobProfiles(Vec<JobProfileDto>),
     JobQueued(JobId),
     JobStatus(JobStatusDto),
@@ -267,44 +320,285 @@ impl<T> ResourceSlot<T> {
     }
 }
 
+/// Which pool of workers a request runs on. Small work must never queue
+/// behind large transfers, so there are exactly two: one for the many small
+/// requests a UI makes, one for the few big ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// Control-plane calls, manifests, thumbnails, small blobs.
+    Fast,
+    /// Large blob transfers, file resolution, publications, imports.
+    Bulk,
+}
+
+/// Per-submit overrides. `Default` = classify the request and serve it FIFO,
+/// which is what every existing caller gets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmitOptions {
+    /// Force a lane instead of classifying the request.
+    pub lane: Option<Lane>,
+    /// Serve this ahead of everything already queued in its lane (newest
+    /// first). A scrolling grid wants the row on screen, not the twenty rows
+    /// the user has already scrolled past — but that is a scheduling policy
+    /// the caller states, never magic the runtime applies behind its back.
+    pub lifo: bool,
+}
+
+impl SubmitOptions {
+    pub fn fast() -> SubmitOptions {
+        SubmitOptions { lane: Some(Lane::Fast), lifo: false }
+    }
+    pub fn bulk() -> SubmitOptions {
+        SubmitOptions { lane: Some(Lane::Bulk), lifo: false }
+    }
+    /// Newest-first in whichever lane the request lands in.
+    pub fn newest_first() -> SubmitOptions {
+        SubmitOptions { lane: None, lifo: true }
+    }
+    pub fn with_lane(mut self, lane: Lane) -> SubmitOptions {
+        self.lane = Some(lane);
+        self
+    }
+    pub fn with_lifo(mut self, lifo: bool) -> SubmitOptions {
+        self.lifo = lifo;
+        self
+    }
+}
+
+/// Worker counts and the size line between the lanes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    /// Workers serving small requests. Four keeps a thumbnail grid filling
+    /// while one worker is stuck on a slow control-plane call.
+    pub fast_workers: usize,
+    /// Workers serving large transfers. Two so a second big download starts
+    /// without waiting, without turning the link into a congestion contest.
+    pub bulk_workers: usize,
+    /// A blob fetch whose declared length is at or below this goes FAST.
+    /// Thumbnails and icons are far below it; media and models are above.
+    pub fast_blob_max_bytes: u64,
+    /// Most blob fetches one fast-lane worker coalesces into a single
+    /// ordered request. 1 disables batching (every fetch is its own GET).
+    /// Kept at or under the server's own batch ceiling; a server that
+    /// refuses the route makes this a no-op through the fallback path.
+    pub fast_batch_max_items: usize,
+}
+
+impl RuntimeConfig {
+    pub fn default_v1() -> RuntimeConfig {
+        RuntimeConfig {
+            fast_workers: 4,
+            bulk_workers: 2,
+            fast_blob_max_bytes: 512 * 1024,
+            fast_batch_max_items: 16,
+        }
+    }
+
+    fn validate(&self) -> ClientResult<()> {
+        if self.fast_workers == 0 || self.bulk_workers == 0 {
+            return Err(ClientError::InvalidInput { what: "runtime lane workers zero" });
+        }
+        if self.fast_workers + self.bulk_workers > 64 {
+            return Err(ClientError::InvalidInput { what: "runtime lane workers over budget" });
+        }
+        if self.fast_batch_max_items == 0
+            || self.fast_batch_max_items > crate::wire::MAX_BLOB_BATCH_ITEMS
+        {
+            return Err(ClientError::InvalidInput { what: "runtime batch size" });
+        }
+        Ok(())
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self::default_v1()
+    }
+}
+
+/// One lane's work queue: a deque so `lifo` submissions can jump it, plus a
+/// condvar so idle workers cost nothing. Closing it drains what is queued and
+/// then releases every worker — the same "finish what was accepted, then
+/// stop" shutdown the single-worker runtime had.
+struct LaneQueue {
+    state: Mutex<LaneState>,
+    wake: Condvar,
+}
+
+struct LaneState {
+    items: VecDeque<(RequestId, ClientRequest)>,
+    closed: bool,
+}
+
+impl LaneQueue {
+    fn new() -> LaneQueue {
+        LaneQueue {
+            state: Mutex::new(LaneState { items: VecDeque::new(), closed: false }),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Queue one request. Returns false when the lane is closed (shutting
+    /// down), which submit reports as [`ClientError::RuntimeDown`].
+    fn push(&self, id: RequestId, request: ClientRequest, lifo: bool) -> bool {
+        let mut state = self.state.lock().expect("lane queue");
+        if state.closed {
+            return false;
+        }
+        if lifo {
+            state.items.push_front((id, request));
+        } else {
+            state.items.push_back((id, request));
+        }
+        drop(state);
+        self.wake.notify_one();
+        true
+    }
+
+    fn pop(&self) -> Option<(RequestId, ClientRequest)> {
+        let mut state = self.state.lock().expect("lane queue");
+        loop {
+            if let Some(item) = state.items.pop_front() {
+                return Some(item);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self.wake.wait(state).expect("lane queue wait");
+        }
+    }
+
+    /// Take up to `max` further blob fetches from the head of the queue, in
+    /// queue order — which IS priority order, including anything a
+    /// newest-first submit pushed to the front. Only ever called by a worker
+    /// that just took a batchable request, so it never blocks.
+    fn drain_batchable(&self, out: &mut Vec<(RequestId, ClientRequest)>, max: usize) {
+        let mut state = self.state.lock().expect("lane queue");
+        while out.len() < max {
+            match state.items.front() {
+                Some((_, request)) if batchable(request) => {
+                    let item = state.items.pop_front().expect("front exists");
+                    out.push(item);
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.state.lock().expect("lane queue").closed = true;
+        self.wake.notify_all();
+    }
+}
+
 pub struct ClientRuntime {
-    tx: Option<Sender<(RequestId, ClientRequest)>>,
+    fast: Arc<LaneQueue>,
+    bulk: Arc<LaneQueue>,
     rx: Receiver<ClientEvent>,
     stage_rx: Receiver<StageEvent>,
     next_id: RequestId,
     cancelled: Arc<Mutex<HashSet<RequestId>>>,
-    join: Option<std::thread::JoinHandle<()>>,
+    config: RuntimeConfig,
+    joins: Vec<std::thread::JoinHandle<()>>,
+    /// Set by `shutdown`/`Drop` so both paths are idempotent.
+    stopped: bool,
 }
 
 impl ClientRuntime {
-    /// Take ownership of a connected client and run it on a worker thread.
+    /// Take ownership of a connected client and run it on the default lane
+    /// pool (see [`RuntimeConfig::default_v1`]). Every extra worker gets its
+    /// own handle on the same verified server and the same cache through
+    /// [`AssetClient::lane_clone`] — no second connect, no second cache.
     pub fn start(client: AssetClient) -> ClientResult<ClientRuntime> {
-        let (req_tx, req_rx) = channel::<(RequestId, ClientRequest)>();
+        Self::start_with(client, RuntimeConfig::default_v1())
+    }
+
+    /// As [`Self::start`] with explicit lane sizing.
+    pub fn start_with(client: AssetClient, config: RuntimeConfig) -> ClientResult<ClientRuntime> {
+        config.validate()?;
         let (evt_tx, evt_rx) = channel::<ClientEvent>();
         let (stage_tx, stage_rx) = channel::<StageEvent>();
         let cancelled = Arc::new(Mutex::new(HashSet::new()));
-        let worker_cancelled = cancelled.clone();
-        let join = std::thread::Builder::new()
-            .name("asset-client-runtime".into())
-            .spawn(move || worker(client, req_rx, evt_tx, stage_tx, worker_cancelled))
-            .map_err(|e| ClientError::Io { op: "spawn runtime worker", kind: e.kind() })?;
+        let fast = Arc::new(LaneQueue::new());
+        let bulk = Arc::new(LaneQueue::new());
+
+        // One client per worker; the last one takes the caller's original so
+        // nothing is built that is not used.
+        let total = config.fast_workers + config.bulk_workers;
+        let mut clients: Vec<AssetClient> =
+            (0..total - 1).map(|_| client.lane_clone()).collect();
+        clients.push(client);
+
+        let mut joins = Vec::with_capacity(total);
+        for (n, client) in clients.into_iter().enumerate() {
+            let lane_is_fast = n < config.fast_workers;
+            let queue = if lane_is_fast { fast.clone() } else { bulk.clone() };
+            let tx = evt_tx.clone();
+            let stage = stage_tx.clone();
+            let cancelled = cancelled.clone();
+            let name = if lane_is_fast {
+                format!("asset-client-fast-{n}")
+            } else {
+                format!("asset-client-bulk-{}", n - config.fast_workers)
+            };
+            // Only the fast lane coalesces: a bulk transfer is already one
+            // big body, and batching two of them would just delay the first.
+            let batch_max = if lane_is_fast { config.fast_batch_max_items } else { 1 };
+            let join = std::thread::Builder::new()
+                .name(name)
+                .spawn(move || worker(client, queue, tx, stage, cancelled, batch_max))
+                .map_err(|e| ClientError::Io { op: "spawn runtime worker", kind: e.kind() })?;
+            joins.push(join);
+        }
         Ok(ClientRuntime {
-            tx: Some(req_tx),
+            fast,
+            bulk,
             rx: evt_rx,
             stage_rx,
             next_id: 1,
             cancelled,
-            join: Some(join),
+            config,
+            joins,
+            stopped: false,
         })
     }
 
-    /// Queue a request; events for it arrive under the returned id.
+    /// Queue a request; events for it arrive under the returned id. The lane
+    /// is chosen from the request (see [`Lane`]); requests no longer complete
+    /// in submission order, but every event of one request stays ordered.
     pub fn submit(&mut self, request: ClientRequest) -> ClientResult<RequestId> {
+        self.submit_with(request, SubmitOptions::default())
+    }
+
+    /// [`Self::submit`] with an explicit lane and/or newest-first placement.
+    pub fn submit_with(
+        &mut self,
+        request: ClientRequest,
+        options: SubmitOptions,
+    ) -> ClientResult<RequestId> {
+        let lane = options
+            .lane
+            .unwrap_or_else(|| classify(&request, self.config.fast_blob_max_bytes));
+        let queue = match lane {
+            Lane::Fast => &self.fast,
+            Lane::Bulk => &self.bulk,
+        };
         let id = self.next_id;
-        let tx = self.tx.as_ref().ok_or(ClientError::RuntimeDown)?;
-        tx.send((id, request)).map_err(|_| ClientError::RuntimeDown)?;
+        if !queue.push(id, request, options.lifo) {
+            return Err(ClientError::RuntimeDown);
+        }
         self.next_id += 1;
         Ok(id)
+    }
+
+    /// The lane a request would take without an explicit override. Exposed so
+    /// a host can reason about (and test) its own scheduling.
+    pub fn lane_of(&self, request: &ClientRequest) -> Lane {
+        classify(request, self.config.fast_blob_max_bytes)
+    }
+
+    pub fn config(&self) -> RuntimeConfig {
+        self.config
     }
 
     /// Cancel a submitted request. A still-queued request is skipped; an
@@ -344,10 +638,20 @@ impl ClientRuntime {
         out
     }
 
-    /// Stop accepting requests, finish the in-flight one, join the worker.
+    /// Stop accepting requests, let the workers finish what is already
+    /// queued, and join every one of them.
     pub fn shutdown(mut self) {
-        self.tx.take();
-        if let Some(join) = self.join.take() {
+        self.stop_and_join();
+    }
+
+    fn stop_and_join(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.fast.close();
+        self.bulk.close();
+        for join in self.joins.drain(..) {
             let _ = join.join();
         }
     }
@@ -355,28 +659,201 @@ impl ClientRuntime {
 
 impl Drop for ClientRuntime {
     fn drop(&mut self) {
-        self.tx.take();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        self.stop_and_join();
+    }
+}
+
+/// Which lane a request belongs to when the caller states nothing. The rule
+/// is size, not politeness: anything that can be megabytes goes BULK so the
+/// many small requests behind it keep flowing.
+fn classify(request: &ClientRequest, fast_blob_max_bytes: u64) -> Lane {
+    match request {
+        // A declared length decides it; an UNKNOWN length is treated as big,
+        // because guessing small is exactly the mistake that stalls a lane.
+        ClientRequest::FetchBlob { expected_len, .. } => match expected_len {
+            Some(len) if *len <= fast_blob_max_bytes => Lane::Fast,
+            _ => Lane::Bulk,
+        },
+        // A thumbnail is bounded by the content contract and is the request
+        // a grid makes by the dozen.
+        ClientRequest::ResolveThumbnail { .. } => Lane::Fast,
+        // Model/media files, publications and imports move real payloads.
+        ClientRequest::ResolveFile { .. }
+        | ClientRequest::PublishArtifact { .. }
+        | ClientRequest::PublishBundle { .. }
+        | ClientRequest::PublishSideChannels { .. }
+        | ClientRequest::RunImport { .. }
+        | ClientRequest::RegisterSourceCollection { .. } => Lane::Bulk,
+        // A long-poll parks a worker for its whole wait; it must never do
+        // that in the lane the UI needs for icons.
+        ClientRequest::FetchOperationEvents { .. } => Lane::Bulk,
+        // Everything else is a small control-plane call.
+        _ => Lane::Fast,
+    }
+}
+
+/// A request that can ride an ordered batch pull: a blob fetch whose size the
+/// caller declared (an undeclared size cannot honour a per-item cap, and it
+/// is a bulk-lane request anyway).
+fn batchable(request: &ClientRequest) -> bool {
+    matches!(request, ClientRequest::FetchBlob { expected_len: Some(_), .. })
+}
+
+/// Serve several queued blob fetches as ONE ordered request.
+///
+/// Queue order is priority order, and the server streams the frames in
+/// exactly that order, so the first thing the UI asked for is the first thing
+/// it gets. Anything the batch could not deliver — an older server without
+/// the route, a missing blob, an item over budget — falls back to the normal
+/// single-fetch path, so a batch is a pure optimisation and never a
+/// behaviour change.
+fn run_batch(
+    client: &mut AssetClient,
+    batch: Vec<(RequestId, ClientRequest)>,
+    tx: &Sender<ClientEvent>,
+    stage_tx: &Sender<StageEvent>,
+    cancelled: &Arc<Mutex<HashSet<RequestId>>>,
+) -> bool {
+    // Cancelled-while-queued items never start, exactly as in the single path.
+    let mut live: Vec<(RequestId, BlobId, Option<u64>, bool)> = Vec::new();
+    for (id, request) in batch {
+        let ClientRequest::FetchBlob { blob, expected_len, pin } = request else {
+            continue;
+        };
+        if cancelled.lock().expect("cancel set").remove(&id) {
+            if tx.send(ClientEvent::Failed { id, error: ClientError::Cancelled }).is_err() {
+                return false;
+            }
+            continue;
+        }
+        if tx.send(ClientEvent::Started { id }).is_err() {
+            return false;
+        }
+        live.push((id, blob, expected_len, pin));
+    }
+    if live.is_empty() {
+        return true;
+    }
+
+    // One wire item per distinct digest, first occurrence keeping its place;
+    // several requests may be waiting on the same bytes.
+    let mut order: Vec<(BlobId, Option<u64>)> = Vec::new();
+    let mut waiting: HashMap<[u8; 32], Vec<(RequestId, bool)>> = HashMap::new();
+    for (id, blob, expected_len, pin) in &live {
+        let key = *blob.as_bytes();
+        if !waiting.contains_key(&key) {
+            order.push((*blob, *expected_len));
+        }
+        waiting.entry(key).or_default().push((*id, *pin));
+    }
+
+    let mut resolved: HashSet<RequestId> = HashSet::new();
+    let mut pins: Vec<(BlobId, RequestId)> = Vec::new();
+    let mut events: Vec<ClientEvent> = Vec::new();
+    {
+        let abort = |blob: &BlobId| -> bool {
+            let set = cancelled.lock().expect("cancel set");
+            waiting
+                .get(blob.as_bytes())
+                .map(|ids| ids.iter().all(|(id, _)| set.contains(id)))
+                .unwrap_or(true)
+        };
+        let mut on_item = |blob: BlobId, outcome: ClientResult<std::path::PathBuf>| {
+            let Some(ids) = waiting.get(blob.as_bytes()) else {
+                return;
+            };
+            for (id, pin) in ids {
+                match &outcome {
+                    Ok(path) => {
+                        resolved.insert(*id);
+                        if *pin {
+                            pins.push((blob, *id));
+                        }
+                        events.push(ClientEvent::Done {
+                            id: *id,
+                            output: ClientOutput::Blob { blob, path: path.clone() },
+                        });
+                    }
+                    Err(ClientError::Cancelled) => {
+                        resolved.insert(*id);
+                        events.push(ClientEvent::Failed {
+                            id: *id,
+                            error: ClientError::Cancelled,
+                        });
+                    }
+                    // Anything else: leave it unresolved and let the
+                    // single-fetch path produce the authoritative outcome.
+                    Err(_) => {}
+                }
+            }
+        };
+        // A batch that fails outright (no route, transport refusal) simply
+        // leaves everything unresolved for the fallback below.
+        let _ = client.fetch_blobs_ordered(&order, &abort, &mut on_item);
+    }
+    // Pins are transactional exactly as in the single path: only a fetched,
+    // verified, committed object is pinned.
+    for (blob, id) in pins {
+        if let Err(error) = client.pin_blob(&blob) {
+            resolved.remove(&id);
+            events.retain(|e| e.id() != id);
+            events.push(ClientEvent::Failed { id, error });
         }
     }
+    for event in events {
+        let id = event.id();
+        cancelled.lock().expect("cancel set").remove(&id);
+        if tx.send(event).is_err() {
+            return false;
+        }
+    }
+    // Fallback: whatever the batch did not deliver runs the ordinary path,
+    // which owns progress reporting, resume and the typed refusal.
+    for (id, blob, expected_len, pin) in live {
+        if resolved.contains(&id) {
+            continue;
+        }
+        let request = ClientRequest::FetchBlob { blob, expected_len, pin };
+        let event = match run_one(client, id, tx, stage_tx, request, cancelled) {
+            Ok(output) => ClientEvent::Done { id, output },
+            Err(error) => ClientEvent::Failed { id, error },
+        };
+        cancelled.lock().expect("cancel set").remove(&id);
+        if tx.send(event).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn worker(
     mut client: AssetClient,
-    rx: Receiver<(RequestId, ClientRequest)>,
+    queue: Arc<LaneQueue>,
     tx: Sender<ClientEvent>,
     stage_tx: Sender<StageEvent>,
     cancelled: Arc<Mutex<HashSet<RequestId>>>,
+    batch_max_items: usize,
 ) {
-    while let Ok((id, request)) = rx.recv() {
+    while let Some((id, request)) = queue.pop() {
+        // Coalesce: a grid submits thumbnails one by one, and asking for them
+        // in one ordered request costs one round trip instead of thirty.
+        if batch_max_items > 1 && batchable(&request) {
+            let mut batch = vec![(id, request)];
+            queue.drain_batchable(&mut batch, batch_max_items);
+            if !run_batch(&mut client, batch, &tx, &stage_tx, &cancelled) {
+                return;
+            }
+            continue;
+        }
         // Cancelled while queued: never starts.
-        if cancelled.lock().unwrap().remove(&id) {
+        if cancelled.lock().expect("cancel set").remove(&id) {
             if tx.send(ClientEvent::Failed { id, error: ClientError::Cancelled }).is_err() {
                 return;
             }
             continue;
         }
+        // One worker owns a request from Started to its terminal event, so
+        // per-request event order holds even though lanes interleave.
         if tx.send(ClientEvent::Started { id }).is_err() {
             return;
         }
@@ -384,7 +861,7 @@ fn worker(
             Ok(output) => ClientEvent::Done { id, output },
             Err(error) => ClientEvent::Failed { id, error },
         };
-        cancelled.lock().unwrap().remove(&id);
+        cancelled.lock().expect("cancel set").remove(&id);
         if tx.send(event).is_err() {
             return;
         }
@@ -454,6 +931,15 @@ fn run_one(
         ClientRequest::ResolveThumbnail { manifest } => {
             Ok(ClientOutput::Thumbnail(client.resolve_thumbnail(&manifest)?))
         }
+        ClientRequest::RetireAsset { id } => {
+            Ok(ClientOutput::Retired(client.retire_asset(&id)?))
+        }
+        ClientRequest::RetireRevision { id, revision } => {
+            Ok(ClientOutput::Retired(client.retire_revision(&id, &revision)?))
+        }
+        ClientRequest::GcBlobs { request } => Ok(ClientOutput::Gc(client.gc_blobs(&request)?)),
+        ClientRequest::GcStatus => Ok(ClientOutput::Gc(client.gc_status()?)),
+        ClientRequest::GcCancel => Ok(ClientOutput::GcCancelled(client.gc_cancel()?)),
         ClientRequest::PublishArtifact { request } => {
             Ok(ClientOutput::Published(client.publish_artifact(&request)?))
         }
@@ -467,6 +953,14 @@ fn run_one(
                 Some(&mut on_stage),
                 &abort,
             )?))
+        }
+        ClientRequest::PublishSideChannels { asset, files } => {
+            // Unwrap rather than copy: the encoded stems are megabytes and
+            // this worker is the only holder once the caller let go.
+            let files = Arc::try_unwrap(files).unwrap_or_else(|shared| (*shared).clone());
+            Ok(ClientOutput::SideChannels(
+                client.publish_side_channel_files(&asset, files)?,
+            ))
         }
         ClientRequest::FetchJobProfiles { domain } => Ok(ClientOutput::JobProfiles(
             client.api().job_profiles(domain.as_deref())?,

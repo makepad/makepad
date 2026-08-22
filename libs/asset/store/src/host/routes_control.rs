@@ -7,6 +7,11 @@
 //!   asset publish ........................... `asset_publish`
 //!   asset AND game quarantine ............... `asset_quarantine` (the
 //!       moderation capability; the core defines no game-specific one)
+//!   asset/revision RETIREMENT (deletion) .... `asset_quarantine` on the ns
+//!       (deletion is the strongest pull there is, so it rides the pull
+//!       capability — publishing rights alone must not delete history)
+//!   blob garbage collection ................. bootstrap root admin only
+//!       (whole-store operation; no namespace can scope it)
 //!   alias + game-alias writes ............... `alias_write`
 //!   game register/stage ..................... `game_register`
 //!   game publish ............................ `game_publish`
@@ -62,6 +67,9 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
     if let Some(r) = super::routes_chat::dispatch(conn, head, rc, &seg) {
         return r;
     }
+    if let Some(r) = super::routes_rooms::dispatch(conn, head, rc, &seg) {
+        return r;
+    }
     match seg.as_slice() {
         ["v1", "health"] => {
             if is_read(m) {
@@ -98,6 +106,14 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         }
         ["v1", "assets", a, "revisions", r, "quarantine"] if m == Method::Post => {
             asset_lifecycle(head, rc, ast_of(a)?, arev_of(r)?, false)
+        }
+        // Deletion. `retire` is quarantine plus the intent to reclaim the
+        // bytes; DELETE on the asset is the same operation under the verb a
+        // browser-shaped client expects.
+        ["v1", "assets", a, "retire"] if m == Method::Post => asset_retire(head, rc, ast_of(a)?),
+        ["v1", "assets", a] if m == Method::Delete => asset_retire(head, rc, ast_of(a)?),
+        ["v1", "assets", a, "revisions", r, "retire"] if m == Method::Post => {
+            revision_retire(head, rc, ast_of(a)?, arev_of(r)?)
         }
         ["v1", "assets", a, "annotation"] => match m {
             Method::Put => annotation_put(conn, head, rc, ast_of(a)?),
@@ -154,6 +170,14 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
             game_refs(head, rc, gam_of(g)?, grev_of(r)?)
         }
 
+        // ---- blob garbage collection ---------------------------------------
+        ["v1", "gc"] if m == Method::Post => gc_run(conn, head, rc),
+        ["v1", "gc"] if is_read(m) => gc_get(head, rc),
+        ["v1", "gc", "cancel"] if m == Method::Post => gc_cancel(head, rc),
+
+        // ---- reference blobs (catalogued, not copied) -----------------------
+        ["v1", "blob-refs"] if is_read(m) => blob_refs_rescan(head, rc),
+
         // ---- catalog event feed --------------------------------------------
         ["v1", "events"] => {
             if is_read(m) {
@@ -184,6 +208,8 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "job-profiles"] => {
             if is_read(m) {
                 job_profiles(head, rc)
+            } else if m == Method::Put {
+                job_profiles_announce(conn, head, rc)
             } else {
                 method_not_allowed()
             }
@@ -603,15 +629,19 @@ fn assets_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
 fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
-    let (ns, revs) = call_state(&rc.state, move |ctx| {
+    let (ns, revs, retired_ms) = call_state(&rc.state, move |ctx| {
         ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let ns = ctx
             .core
             .catalog()
             .asset_namespace(&ast)?
             .ok_or(ServerError::NotFound { what: "asset" })?;
-        let revs = ctx.asset_rev_list(ast.as_bytes(), 512)?;
-        Ok((ns, revs))
+        // Lifecycle comes from the CORE, not the transport mirror: the GC
+        // retention rule retires revisions without passing through a route,
+        // so a mirrored state could be stale here.
+        let revs = ctx.core.catalog().asset_candidates(&ast, 512)?;
+        let retired_ms = ctx.core.catalog().asset_retired_ms(&ast)?;
+        Ok((ns, revs, retired_ms))
     })?;
     let candidates: Vec<Value> = revs
         .iter()
@@ -620,12 +650,21 @@ fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
                 Some(t) => Value::Int(t as i64),
                 None => Value::Null,
             };
+            // A retired revision reports `retired`, not the `quarantined`
+            // its lifecycle row carries: the state machine is shared, the
+            // meaning to a client is not (retired bytes are collectable).
+            let state = if r.retired_ms.is_some() || retired_ms.is_some() {
+                "retired"
+            } else {
+                r.state.as_str()
+            };
             obj(vec![
-                ("revision", s(AssetRevisionId::from_bytes(r.revision).to_string())),
-                ("state", s(r.state.clone())),
+                ("revision", s(r.revision.to_string())),
+                ("state", s(state)),
                 ("staged_ms", Value::Int(r.staged_ms as i64)),
                 ("published_ms", opt(r.published_ms)),
                 ("quarantined_ms", opt(r.quarantined_ms)),
+                ("retired_ms", opt(r.retired_ms.or(retired_ms))),
             ])
         })
         .collect();
@@ -634,6 +673,11 @@ fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
         &obj(vec![
             ("asset_id", s(ast.to_string())),
             ("namespace", s(ns)),
+            ("retired", Value::Bool(retired_ms.is_some())),
+            ("retired_ms", match retired_ms {
+                Some(t) => Value::Int(t as i64),
+                None => Value::Null,
+            }),
             ("candidates", Value::Arr(candidates)),
         ]),
     )))
@@ -664,7 +708,6 @@ fn asset_stage(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId) ->
             return Err(ServerError::Conflict { what: "manifest asset_id" });
         }
         let rev = ctx.core.catalog().stage_asset_revision(&bytes, now)?;
-        ctx.asset_rev_insert(ast.as_bytes(), rev.as_bytes(), now)?;
         Ok(rev)
     })?;
     Ok(Outcome::Resp(Resp::json(
@@ -721,7 +764,6 @@ fn asset_lifecycle(
             require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
             ctx.core.catalog().quarantine_asset(&ast, &rev, now)?;
         }
-        ctx.asset_rev_mark(ast.as_bytes(), rev.as_bytes(), publish, now)?;
         // Emitted only after the core call above committed, still on the
         // state thread, so journal order equals commit order.
         let kind = if publish {
@@ -743,6 +785,283 @@ fn asset_lifecycle(
             ("revision", s(rev.to_string())),
             ("state", s(if publish { "published" } else { "quarantined" })),
         ]),
+    )))
+}
+
+/// Delete an asset from the store: every revision retired, every alias head
+/// dropped, its whole search footprint removed, and its bytes handed to blob
+/// GC. Idempotent — retiring an already retired asset answers 200 with
+/// `already_retired: true`.
+///
+/// Capability: `asset_quarantine` on the asset's namespace, the existing
+/// moderation capability for pulling content (retirement is the strongest
+/// pull there is). Publishing rights alone must not delete history.
+fn asset_retire(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let report = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let ns = ctx
+            .core
+            .catalog()
+            .asset_namespace(&ast)?
+            .ok_or(ServerError::NotFound { what: "asset" })?;
+        require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
+        // The annotation carries the content kind subscribers filter on, and
+        // retirement deletes it: read it BEFORE the mutation.
+        let content_kind = annotation_kind(ctx, &ast);
+        let report = ctx.core.catalog().retire_asset(&ast, now)?;
+        ctx.asset_mark_retired(ast.as_bytes(), now)?;
+        if !report.already_retired {
+            hub.publish(
+                EventBody::asset(events::KIND_ASSET_RETIRED, &ns, ast.to_string(), now)
+                    .with_content_kind(content_kind),
+            );
+        }
+        Ok(report)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("asset_id", s(ast.to_string())),
+            ("state", s("retired")),
+            ("already_retired", Value::Bool(report.already_retired)),
+            ("revisions_retired", Value::Int(report.revisions_retired as i64)),
+            ("aliases_dropped", Value::Int(report.aliases_dropped as i64)),
+            ("annotation_cleared", Value::Bool(report.annotation_cleared)),
+        ]),
+    )))
+}
+
+/// Delete ONE revision (a superseded one, typically). The asset itself
+/// stays live; alias heads pointing at this revision drop exactly as
+/// quarantine drops them.
+fn revision_retire(
+    head: &Head,
+    rc: &RouteCtx,
+    ast: AssetId,
+    rev: AssetRevisionId,
+) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let changed = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let ns = ctx
+            .core
+            .catalog()
+            .asset_namespace(&ast)?
+            .ok_or(ServerError::NotFound { what: "asset" })?;
+        require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
+        let content_kind = annotation_kind(ctx, &ast);
+        let changed = ctx.core.catalog().retire_revision(&ast, &rev, now)?;
+        if changed {
+            hub.publish(
+                EventBody::asset(events::KIND_REVISION_RETIRED, &ns, ast.to_string(), now)
+                    .with_revision(rev.to_string())
+                    .with_content_kind(content_kind),
+            );
+        }
+        Ok(changed)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("asset_id", s(ast.to_string())),
+            ("revision", s(rev.to_string())),
+            ("state", s("retired")),
+            ("already_retired", Value::Bool(!changed)),
+        ]),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// blob garbage collection
+// ---------------------------------------------------------------------------
+
+fn gc_status_value(status: &crate::GcStatus) -> Value {
+    obj(vec![
+        ("run_id", Value::Int(status.run_id as i64)),
+        ("phase", s(status.phase.as_str())),
+        ("done", Value::Bool(status.finished())),
+        ("dry_run", Value::Bool(status.dry_run)),
+        ("started_ms", Value::Int(status.started_ms as i64)),
+        ("updated_ms", Value::Int(status.updated_ms as i64)),
+        ("horizon_ms", Value::Int(status.horizon_ms as i64)),
+        ("retain_keep", match status.retain_keep {
+            Some(k) => Value::Int(k as i64),
+            None => Value::Null,
+        }),
+        ("retired_revisions", Value::Int(status.retired_revisions as i64)),
+        ("scanned_revisions", Value::Int(status.scanned_revisions as i64)),
+        ("marked_blobs", Value::Int(status.marked_blobs as i64)),
+        ("examined_blobs", Value::Int(status.examined_blobs as i64)),
+        ("unreferenced_blobs", Value::Int(status.unreferenced_blobs as i64)),
+        ("unreferenced_bytes", Value::Int(status.unreferenced_bytes as i64)),
+        ("deleted_blobs", Value::Int(status.deleted_blobs as i64)),
+        ("deleted_bytes", Value::Int(status.deleted_bytes as i64)),
+    ])
+}
+
+/// Start (or resume) a garbage collection run and do a BOUNDED amount of its
+/// work before answering. A whole-store sweep is never performed inside one
+/// request: the response carries the durable progress, `done` says whether
+/// the run finished, and the caller polls this route (or lets the janitor
+/// finish it). Whole-store admin operation: bootstrap admin only.
+fn gc_run(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let dry_run = match body.get("dry_run") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(Fail::Http(400, "malformed dry_run")),
+    };
+    let grace_ms = body_u64(&body, "grace_ms").unwrap_or(rc.cfg.gc_grace_ms);
+    let retain_keep = match body.get("retain_per_asset") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let n = v.as_u64().ok_or(Fail::Http(400, "malformed retain_per_asset"))?;
+            if n == 0 || n > 10_000 {
+                return Err(Fail::Http(400, "retain_per_asset out of range"));
+            }
+            Some(n as u32)
+        }
+    };
+    let max_steps = match body_u64(&body, "max_steps") {
+        None => rc.cfg.gc_max_steps_per_request,
+        Some(n) => {
+            if n == 0 || n > rc.cfg.gc_max_steps_per_request as u64 {
+                return Err(Fail::Http(400, "max_steps out of range"));
+            }
+            n as u32
+        }
+    };
+    let cfg = crate::GcConfig {
+        dry_run,
+        grace_ms,
+        mark_batch: rc.cfg.gc_mark_batch,
+        sweep_batch: rc.cfg.gc_sweep_batch,
+        retain_keep,
+        retain_batch: rc.cfg.gc_retain_batch,
+    };
+    let now = now_ms();
+    let status = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        // An active run is RESUMED rather than restarted: two runs would
+        // each hold half the truth about what is referenced. Resuming with
+        // different policy would silently answer a different question than
+        // the caller asked (a "collect" advancing someone's dry run), so
+        // that refuses instead — cancel first.
+        match ctx.core.gc_status()? {
+            Some(existing) if !existing.finished() => {
+                if existing.dry_run != cfg.dry_run || existing.retain_keep != cfg.retain_keep {
+                    return Err(ServerError::Conflict { what: "gc run already active" });
+                }
+            }
+            _ => {
+                ctx.core.gc_begin(cfg, now)?;
+            }
+        }
+        ctx.core
+            .gc_advance(max_steps, now)?
+            .ok_or(ServerError::NotFound { what: "gc run" })
+    })?;
+    Ok(Outcome::Resp(Resp::json(200, &gc_status_value(&status))))
+}
+
+/// `GET /v1/blob-refs?after=<blob_id>&limit=<n>` — RE-SCAN one bounded page
+/// of the reference blobs, reporting what each one's file looks like right
+/// now: `present`, `missing`, `size_changed`, `content_changed`, or
+/// `unreadable`.
+///
+/// This is the honest counterpart to not copying: the store cannot promise
+/// bytes it does not own, so it offers a way to LOOK. Verifying re-hashes
+/// each file, which is why the page is bounded and the caller drives it —
+/// a UI can walk a library over many frames, or check one asset after a
+/// serve refused.
+///
+/// Paths are the operator's own filesystem layout, so this is admin-only.
+fn blob_refs_rescan(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let after: Option<makepad_asset_data::BlobId> = match head.query_get("after") {
+        None => None,
+        Some(text) => Some(
+            text.parse()
+                .map_err(|_| Fail::Http(400, "malformed after blob id"))?,
+        ),
+    };
+    let limit: u32 = match head.query_get("limit") {
+        None => 32,
+        Some(text) => text
+            .parse()
+            .ok()
+            .filter(|n| (1..=256).contains(n))
+            .ok_or(Fail::Http(400, "limit out of range"))?,
+    };
+    let now = now_ms();
+    let (page, total) = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        let total = ctx.core.blob_refs().count()?;
+        Ok((ctx.core.rescan_blob_refs(after.as_ref(), limit)?, total))
+    })?;
+    let rows: Vec<Value> = page
+        .entries
+        .iter()
+        .map(|(entry, state)| {
+            obj(vec![
+                ("blob_id", s(entry.blob_id.to_string())),
+                ("path", s(entry.path.display().to_string())),
+                ("size", Value::Int(entry.size as i64)),
+                ("recorded_ms", Value::Int(entry.recorded_ms as i64)),
+                ("state", s(state.tag())),
+                ("ok", Value::Bool(state.is_present())),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("total", Value::Int(total as i64)),
+            ("refs", Value::Arr(rows)),
+            (
+                "next",
+                match page.next {
+                    Some(id) => s(id.to_string()),
+                    None => Value::Null,
+                },
+            ),
+        ]),
+    )))
+}
+
+fn gc_get(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let status = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        ctx.core.gc_status()
+    })?;
+    Ok(Outcome::Resp(match status {
+        Some(st) => Resp::json(200, &gc_status_value(&st)),
+        None => Resp::json(200, &obj(vec![("run_id", Value::Null), ("done", Value::Bool(true))])),
+    }))
+}
+
+fn gc_cancel(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let stopped = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        ctx.core.gc_cancel(now)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("cancelled", Value::Bool(stopped))]),
     )))
 }
 
@@ -1266,13 +1585,21 @@ fn annotation_kind(ctx: &StateCtx, ast: &AssetId) -> Option<&'static str> {
         .map(kind_name)
 }
 
-fn events_resp(events: &[CatalogEvent], cursor: &EventCursor, gap: bool) -> Resp {
+fn events_resp(
+    events: &[CatalogEvent],
+    cursor: &EventCursor,
+    gap: bool,
+    vocabulary: u32,
+) -> Resp {
     let arr = events
         .iter()
         .map(|e| {
             let mut pairs = vec![
                 ("seq", Value::Int(e.seq as i64)),
-                ("kind", s(e.kind)),
+                // Kinds added after v1 are rendered in the vocabulary the
+                // subscriber asked for, so an older client never sees a
+                // kind it would refuse.
+                ("kind", s(events::downgrade_kind(e.kind, vocabulary))),
                 ("ns", s(e.namespace.clone())),
             ];
             if let Some(v) = &e.asset_id {
@@ -1345,10 +1672,25 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
         .map(parse_kind)
         .transpose()?
         .map(kind_name);
+    // Event vocabulary the subscriber speaks. Absent = 1 (the kinds that
+    // shipped before retirement existed).
+    let vocabulary = match head.query_get("ev") {
+        None => 1,
+        Some(t) => {
+            if t.len() > 2 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Fail::Http(400, "malformed event vocabulary"));
+            }
+            let v: u32 = t.parse().map_err(|_| Fail::Http(400, "malformed event vocabulary"))?;
+            if v == 0 || v > events::EVENT_VOCABULARY {
+                return Err(Fail::Http(400, "unsupported event vocabulary"));
+            }
+            v
+        }
+    };
 
     let Some(cursor_text) = head.query_get("cursor") else {
         let tail = rc.events.tail_cursor();
-        return Ok(Outcome::Resp(events_resp(&[], &tail, false)));
+        return Ok(Outcome::Resp(events_resp(&[], &tail, false, vocabulary)));
     };
     let mut cursor =
         EventCursor::parse(cursor_text).ok_or(Fail::Http(400, "malformed cursor"))?;
@@ -1357,7 +1699,12 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     loop {
         let poll = rc.events.poll_after(cursor, kind, limit);
         if poll.gap || !poll.events.is_empty() {
-            return Ok(Outcome::Resp(events_resp(&poll.events, &poll.cursor, poll.gap)));
+            return Ok(Outcome::Resp(events_resp(
+                &poll.events,
+                &poll.cursor,
+                poll.gap,
+                vocabulary,
+            )));
         }
         // Empty scan still advances past filtered-out events; wait (and
         // later polls) resume from the advanced cursor.
@@ -1366,7 +1713,7 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
             || std::time::Instant::now() >= deadline
             || !rc.events.wait_beyond(cursor.seq, deadline)
         {
-            return Ok(Outcome::Resp(events_resp(&[], &cursor, false)));
+            return Ok(Outcome::Resp(events_resp(&[], &cursor, false, vocabulary)));
         }
     }
 }
@@ -1381,6 +1728,8 @@ struct SearchParams {
     kind: Option<AssetKind>,
     category: Option<String>,
     tag: Option<String>,
+    /// Negative tag filter, validated by the core exactly like `tag`.
+    exclude_tag: Option<String>,
     creator: Option<String>,
     generator: Option<String>,
     backend: Option<String>,
@@ -1389,6 +1738,8 @@ struct SearchParams {
     live_only: bool,
     page_size: u32,
     cursor: Option<Vec<u8>>,
+    /// Facet rows to return with the page; 0 (the default) asks for none.
+    facets: u32,
 }
 
 fn parse_kind(t: &str) -> RouteResult<AssetKind> {
@@ -1404,7 +1755,8 @@ fn parse_flag(t: &str) -> RouteResult<bool> {
 }
 
 fn parse_cursor(t: &str) -> RouteResult<Vec<u8>> {
-    from_hex_bounded(t, 128).ok_or(Fail::Http(400, "malformed cursor"))
+    from_hex_bounded(t, crate::search::MAX_SEARCH_CURSOR_BYTES)
+        .ok_or(Fail::Http(400, "malformed cursor"))
 }
 
 fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchParams> {
@@ -1424,6 +1776,7 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
         kind: head.query_get("kind").map(parse_kind).transpose()?,
         category: q("category"),
         tag: q("tag"),
+        exclude_tag: q("exclude_tag"),
         creator: q("creator"),
         generator: q("generator"),
         backend: q("backend"),
@@ -1436,6 +1789,14 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
         live_only: head.query_get("live").map(parse_flag).transpose()?.unwrap_or(false),
         page_size,
         cursor: head.query_get("cursor").map(parse_cursor).transpose()?,
+        facets: match head.query_get("facets") {
+            None => 0,
+            Some(_) => parse_limit(
+                head.query_get("facets"),
+                0,
+                rc.cfg.budgets.max_search_facets as u64,
+            )? as u32,
+        },
     })
 }
 
@@ -1464,6 +1825,7 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
         kind: field("kind")?.as_deref().map(parse_kind).transpose()?,
         category: field("category")?,
         tag: field("tag")?,
+        exclude_tag: field("exclude_tag")?,
         creator: field("creator")?,
         generator: field("generator")?,
         backend: field("backend")?,
@@ -1479,6 +1841,13 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
         },
         page_size,
         cursor: field("cursor")?.as_deref().map(parse_cursor).transpose()?,
+        facets: match body.get("facets") {
+            None => 0,
+            Some(v) => {
+                let n = v.as_u64().ok_or(Fail::Http(400, "malformed facets"))?;
+                n.min(rc.cfg.budgets.max_search_facets as u64) as u32
+            }
+        },
     })
 }
 
@@ -1492,6 +1861,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             kind: params.kind,
             category: params.category.as_deref(),
             tag: params.tag.as_deref(),
+            exclude_tag: params.exclude_tag.as_deref(),
             creator: params.creator.as_deref(),
             generator: params.generator.as_deref(),
             backend: params.backend.as_deref(),
@@ -1503,6 +1873,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             text: &params.text,
             filters,
             page_size: params.page_size,
+            facets: params.facets,
         };
         // Read policy: every authenticated principal browses the whole
         // catalog; private annotation fields are still owner-only via the
@@ -1529,6 +1900,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                     Some(a) => s(a.clone()),
                     None => Value::Null,
                 }),
+                ("updated_ms", Value::Int(h.updated_ms as i64)),
             ])
         })
         .collect();
@@ -1541,6 +1913,20 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                 Some(c) => s(to_hex(c)),
                 None => Value::Null,
             }),
+            // Absent unless asked for: an older client parses the page it
+            // knows and a newer one reads the labels it asked to count.
+            ("facets", Value::Arr(
+                page.facets
+                    .iter()
+                    .map(|facet| {
+                        obj(vec![
+                            ("kind", s(facet.kind.as_str())),
+                            ("label", s(facet.label.clone())),
+                            ("count", Value::Int(facet.count as i64)),
+                        ])
+                    })
+                    .collect(),
+            )),
         ]),
     )))
 }
@@ -1731,9 +2117,14 @@ fn annotation_delete(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Ou
 // ---------------------------------------------------------------------------
 
 /// `GET /v1/job-profiles[?domain=…]` — the generation capabilities this
-/// deployment advertises (config data). Authenticated like every other
-/// read; clients enqueue against the returned kind/namespace and never
-/// learn a compute node address.
+/// deployment advertises. Authenticated like every other read; clients
+/// enqueue against the returned kind/namespace and never learn a compute
+/// node address.
+///
+/// The answer is the deployment's config advertisement MERGED with what
+/// live workers announced they can execute right now (see
+/// `super::profiles`), so a tier whose weights left the fleet stops being
+/// offered instead of accepting jobs that would sit pending forever.
 fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
@@ -1743,8 +2134,8 @@ fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     })?;
     let domain = head.query_get("domain");
     let profiles: Vec<Value> = rc
-        .cfg
-        .job_profiles
+        .profiles
+        .advertised(&rc.cfg.job_profiles, now)
         .iter()
         .filter(|p| domain.is_none_or(|d| p.domain == d))
         .map(|p| {
@@ -1762,6 +2153,95 @@ fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
         200,
         &obj(vec![("profiles", Value::Arr(profiles))]),
     )))
+}
+
+/// `PUT /v1/job-profiles` — a worker announces what it can execute.
+///
+/// Body: `{"worker":"<id>", "namespace":"<ns>", "ttl_ms":<lease>,
+/// "domains":[…], "profiles":[…]}`. An empty `profiles` list with a
+/// non-empty `domains` list is the meaningful "I cover these domains and
+/// can execute nothing in them" statement; `retract: true` withdraws the
+/// announcement outright (clean worker shutdown).
+///
+/// Authorization: `job_worker` on the worker's own namespace AND on every
+/// namespace an announced profile routes jobs into — the same grant that
+/// lets the announcer claim those jobs. A principal that cannot work a
+/// namespace cannot advertise into it.
+fn job_profiles_announce(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    use super::profiles::{parse_announced_profiles, MAX_DOMAINS, MAX_PROFILES};
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let worker = body_str(&body, "worker")?.to_string();
+    if worker.is_empty() || worker.len() > 64 || worker.chars().any(char::is_control) {
+        return Err(Fail::Http(400, "worker id out of bounds"));
+    }
+    let ns = body_str(&body, "namespace")?.to_string();
+    let retract = body.get("retract").and_then(Value::as_bool).unwrap_or(false);
+    let now = now_ms();
+    if retract {
+        // A retraction proves nothing about namespaces (its profile list is
+        // gone), so it only needs an authenticated caller that holds
+        // job_worker somewhere — the same principal that announced.
+        call_state(&rc.state, move |ctx| {
+            ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+            Ok(())
+        })?;
+        rc.profiles.retract(&worker, now);
+        return Ok(Outcome::Resp(Resp::empty(204)));
+    }
+    let ttl_ms = body
+        .get("ttl_ms")
+        .and_then(Value::as_u64)
+        .ok_or(Fail::Http(400, "ttl_ms required"))?;
+    let domains: Vec<String> = match body.get("domains") {
+        None => Vec::new(),
+        Some(v) => {
+            let arr = v.as_arr().ok_or(Fail::Http(400, "domains must be an array"))?;
+            if arr.len() > MAX_DOMAINS {
+                return Err(Fail::Http(400, "too many domains"));
+            }
+            let mut out = Vec::with_capacity(arr.len());
+            for value in arr {
+                let d = value.as_str().ok_or(Fail::Http(400, "domains must be strings"))?;
+                if d.is_empty() || d.len() > 32 || d.chars().any(char::is_control) {
+                    return Err(Fail::Http(400, "domain out of bounds"));
+                }
+                out.push(d.to_string());
+            }
+            out
+        }
+    };
+    let rows: Vec<Value> = match body.get("profiles") {
+        None => Vec::new(),
+        Some(v) => {
+            let arr = v.as_arr().ok_or(Fail::Http(400, "profiles must be an array"))?;
+            if arr.len() > MAX_PROFILES {
+                return Err(Fail::Http(400, "too many profiles"));
+            }
+            arr.to_vec()
+        }
+    };
+    let profiles = parse_announced_profiles(&rows).map_err(|what| Fail::Http(400, what))?;
+    // Every namespace the announcement touches, checked once: the worker's
+    // own namespace (a domains-only announcement HIDES advertisements there,
+    // which is a privileged effect on its own) plus each profile's.
+    let mut namespaces: Vec<String> = vec![ns.clone()];
+    for profile in &profiles {
+        if !namespaces.contains(&profile.namespace) {
+            namespaces.push(profile.namespace.clone());
+        }
+    }
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        for ns in &namespaces {
+            require_cap(ctx, &p, Capability::JobWorker, ns)?;
+        }
+        Ok(())
+    })?;
+    rc.profiles
+        .announce(&worker, ttl_ms, domains, profiles, now)
+        .map_err(|e| Fail::Http(400, e.as_str()))?;
+    Ok(Outcome::Resp(Resp::empty(204)))
 }
 
 // ---------------------------------------------------------------------------

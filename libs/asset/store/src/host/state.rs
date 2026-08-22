@@ -29,7 +29,7 @@ use crate::{
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-pub const TRANSPORT_SCHEMA_VERSION: u64 = 2;
+pub const TRANSPORT_SCHEMA_VERSION: u64 = 4;
 
 /// Most distinct namespaces the transport will ever route jobs for. The
 /// worker claim gate authorizes against every namespace jobs have been
@@ -79,18 +79,30 @@ const TRANSPORT_SCHEMA_V2: &str = "
 CREATE TABLE IF NOT EXISTS asset_index(
     asset_id BLOB PRIMARY KEY,
     ns TEXT NOT NULL,
-    created_ms INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS asset_rev_index(
-    asset_id BLOB NOT NULL,
-    revision BLOB NOT NULL,
-    state TEXT NOT NULL,
-    staged_ms INTEGER NOT NULL,
-    published_ms INTEGER,
-    quarantined_ms INTEGER,
-    PRIMARY KEY(asset_id, revision)
+    created_ms INTEGER NOT NULL,
+    retired_ms INTEGER
 );
 ";
+
+/// v3: retirement in the mirror. The browse listing must not serve retired
+/// assets, and it must not do that with a post-filter — the partial indices
+/// below ARE the live listing, so a store where most assets are retired
+/// pages exactly as fast as one where none are. The column they cover is
+/// added with `ALTER TABLE` (schema-only in SQLite), never a table rewrite.
+///
+/// v4: the per-revision mirror is GONE. It existed only because the core
+/// exposed no per-asset candidate API; now that `Catalog::asset_candidates`
+/// does, a second copy of lifecycle state could only ever drift — and it
+/// did, the moment blob GC's retention rule started retiring revisions
+/// without passing through a route.
+const TRANSPORT_SCHEMA_V3_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS asset_index_live
+    ON asset_index(ns, asset_id) WHERE retired_ms IS NULL;
+CREATE INDEX IF NOT EXISTS asset_index_live_all
+    ON asset_index(asset_id) WHERE retired_ms IS NULL;
+";
+
+const TRANSPORT_SCHEMA_V4: &str = "DROP TABLE IF EXISTS asset_rev_index;";
 
 const ROOT_ADMIN_KEY: &str = "root_admin_principal";
 
@@ -122,13 +134,23 @@ pub fn build_ctx(root: &Path, budgets: Budgets) -> ServerResult<(StateCtx, Recov
             tdb.tx(|db| {
                 db.exec("create transport schema", TRANSPORT_SCHEMA)?;
                 db.exec("create transport schema v2", TRANSPORT_SCHEMA_V2)?;
-                db.exec("set transport version", "PRAGMA user_version=2")
+                db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
+                db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
+                db.exec("set transport version", "PRAGMA user_version=4")
             })?;
         }
-        1 => {
+        1 | 2 | 3 => {
             tdb.tx(|db| {
                 db.exec("create transport schema v2", TRANSPORT_SCHEMA_V2)?;
-                db.exec("set transport version", "PRAGMA user_version=2")
+                if !table_has_column(db, "asset_index", "retired_ms")? {
+                    db.exec(
+                        "add mirror retirement column",
+                        "ALTER TABLE asset_index ADD COLUMN retired_ms INTEGER",
+                    )?;
+                }
+                db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
+                db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
+                db.exec("set transport version", "PRAGMA user_version=4")
             })?;
         }
         TRANSPORT_SCHEMA_VERSION => {}
@@ -496,14 +518,6 @@ pub struct AssetIndexRow {
     pub created_ms: u64,
 }
 
-pub struct RevIndexRow {
-    pub revision: [u8; 32],
-    pub state: String,
-    pub staged_ms: u64,
-    pub published_ms: Option<u64>,
-    pub quarantined_ms: Option<u64>,
-}
-
 impl StateCtx {
     pub fn asset_index_insert(&self, asset: &[u8; 16], ns: &str, now: u64) -> ServerResult<()> {
         let mut st = self.tdb.prepare(
@@ -516,42 +530,23 @@ impl StateCtx {
         st.run()
     }
 
-    pub fn asset_rev_insert(&self, asset: &[u8; 16], rev: &[u8; 32], now: u64) -> ServerResult<()> {
+    /// Mirror an asset retirement the core just committed: the asset leaves
+    /// the browse listing. One indexed statement, scoped to this asset; the
+    /// revision-level truth stays in the core (`Catalog::asset_candidates`).
+    pub fn asset_mark_retired(&self, asset: &[u8; 16], now: u64) -> ServerResult<()> {
         let mut st = self.tdb.prepare(
-            "asset rev insert",
-            "INSERT OR IGNORE INTO asset_rev_index(asset_id, revision, state, staged_ms)
-             VALUES(?1, ?2, 'staged', ?3)",
+            "asset index retire",
+            "UPDATE asset_index SET retired_ms=?2 WHERE asset_id=?1 AND retired_ms IS NULL",
         )?;
         st.bind_blob(1, asset)?;
-        st.bind_blob(2, rev)?;
-        st.bind_u64(3, now)?;
-        st.run()
-    }
-
-    /// Mirror a lifecycle transition the core just committed.
-    pub fn asset_rev_mark(
-        &self,
-        asset: &[u8; 16],
-        rev: &[u8; 32],
-        published: bool,
-        now: u64,
-    ) -> ServerResult<()> {
-        let sql = if published {
-            "UPDATE asset_rev_index SET state='published', published_ms=?3
-             WHERE asset_id=?1 AND revision=?2"
-        } else {
-            "UPDATE asset_rev_index SET state='quarantined', quarantined_ms=?3
-             WHERE asset_id=?1 AND revision=?2"
-        };
-        let mut st = self.tdb.prepare("asset rev mark", sql)?;
-        st.bind_blob(1, asset)?;
-        st.bind_blob(2, rev)?;
-        st.bind_u64(3, now)?;
+        st.bind_u64(2, now)?;
         st.run()
     }
 
     /// Keyset page ordered by asset id bytes (identical to display order —
-    /// the fixed-width base32 encoding preserves byte order).
+    /// the fixed-width base32 encoding preserves byte order). Retired assets
+    /// are excluded through the partial `asset_index_live` indices, so the
+    /// listing never scans (or even sees) deleted rows.
     pub fn asset_index_page(
         &self,
         ns: Option<&str>,
@@ -561,19 +556,20 @@ impl StateCtx {
         let sql = match (ns.is_some(), after.is_some()) {
             (true, true) => {
                 "SELECT asset_id, ns, created_ms FROM asset_index
-                 WHERE ns=?1 AND asset_id>?2 ORDER BY asset_id LIMIT ?3"
+                 WHERE ns=?1 AND asset_id>?2 AND retired_ms IS NULL
+                 ORDER BY asset_id LIMIT ?3"
             }
             (true, false) => {
                 "SELECT asset_id, ns, created_ms FROM asset_index
-                 WHERE ns=?1 ORDER BY asset_id LIMIT ?3"
+                 WHERE ns=?1 AND retired_ms IS NULL ORDER BY asset_id LIMIT ?3"
             }
             (false, true) => {
                 "SELECT asset_id, ns, created_ms FROM asset_index
-                 WHERE asset_id>?2 ORDER BY asset_id LIMIT ?3"
+                 WHERE asset_id>?2 AND retired_ms IS NULL ORDER BY asset_id LIMIT ?3"
             }
             (false, false) => {
                 "SELECT asset_id, ns, created_ms FROM asset_index
-                 ORDER BY asset_id LIMIT ?3"
+                 WHERE retired_ms IS NULL ORDER BY asset_id LIMIT ?3"
             }
         };
         let mut st = self.tdb.prepare("asset index page", sql)?;
@@ -595,36 +591,22 @@ impl StateCtx {
         Ok(out)
     }
 
-    /// Every mirrored revision of one asset, oldest staged first, bounded.
-    pub fn asset_rev_list(&self, asset: &[u8; 16], limit: u64) -> ServerResult<Vec<RevIndexRow>> {
-        let mut st = self.tdb.prepare(
-            "asset rev list",
-            "SELECT revision, state, staged_ms, published_ms, quarantined_ms
-             FROM asset_rev_index WHERE asset_id=?1
-             ORDER BY staged_ms, revision LIMIT ?2",
-        )?;
-        st.bind_blob(1, asset)?;
-        st.bind_u64(2, limit)?;
-        let mut out = Vec::new();
-        while st.step()? {
-            out.push(RevIndexRow {
-                revision: fixed32_of(&st.column_blob(0))?,
-                state: st.column_text(1),
-                staged_ms: st.column_u64(2),
-                published_ms: st.column_u64_opt(3)?,
-                quarantined_ms: st.column_u64_opt(4)?,
-            });
+}
+
+/// `PRAGMA table_info` row layout: (cid, name, type, notnull, dflt, pk).
+/// PRAGMA arguments cannot travel as binds; `table` only ever comes from the
+/// migration code above, never from a caller.
+fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
+    let mut st = db.prepare("mirror table info", &format!("PRAGMA table_info({table})"))?;
+    while st.step()? {
+        if st.column_text(1) == column {
+            return Ok(true);
         }
-        Ok(out)
     }
+    Ok(false)
 }
 
 fn fixed16_of(bytes: &[u8]) -> ServerResult<[u8; 16]> {
     <[u8; 16]>::try_from(bytes)
-        .map_err(|_| ServerError::InvalidState { what: "id column", state: "wrong length" })
-}
-
-fn fixed32_of(bytes: &[u8]) -> ServerResult<[u8; 32]> {
-    <[u8; 32]>::try_from(bytes)
         .map_err(|_| ServerError::InvalidState { what: "id column", state: "wrong length" })
 }
