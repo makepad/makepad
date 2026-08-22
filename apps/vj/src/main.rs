@@ -3968,6 +3968,12 @@ const THUMB_TEX_BYTES: usize = 128 * 80 * 4;
 /// three thousand tiles must not queue three thousand blob fetches at once.
 const MAX_THUMB_REFETCH: usize = 48;
 
+/// Cached effect sheets handed to the decode lane in one fill tick while
+/// the operator is browsing. Reading a sheet's layout header is ~0.1ms of
+/// UI thread, so a whole page of them costs less than a frame; what stops
+/// this being unbounded is the decode lane's own pending cap.
+const MAX_FX_CACHE_DECODES_PER_TICK: usize = 48;
+
 const DEFAULT_LIGHT_MASTER: f32 = 0.26;
 
 /// UI-owned show state. Keeping this as a small Copy value lets pointer
@@ -4787,11 +4793,26 @@ pub struct App {
     /// spend 20ms of every 50ms tick uploading them.
     #[rust]
     decode_backlog: VecDeque<DecodeDone>,
-    /// Armed while `decode_backlog` still holds anything, so the rest of a
-    /// thumbnail burst lands at frame rate instead of waiting for the 20Hz
-    /// poll timer.
+    /// Armed while ANY part of the fill chain still owes an answer — a
+    /// catalog page, a tile resolve, a thumbnail blob, a queued decode, a
+    /// backlog of finished ones. The chain is a relay (page → detail →
+    /// manifest → blob → decode → texture) and every hand-off is picked up
+    /// by a poll; on the 20Hz timer alone each hop cost a whole 50ms no
+    /// matter how fast the store and the decode lane actually were. This
+    /// runs the same hand-offs on the frame instead.
     #[rust]
     decode_pump: NextFrame,
+    /// Thumb decodes submitted and not yet answered (finished, failed or
+    /// dropped). Part of "is the fill still owed anything".
+    #[rust]
+    thumb_decodes_out: usize,
+    /// The politeness verdict the fill lanes were last sized for, so the
+    /// widths are only pushed when it actually flips.
+    #[rust]
+    fill_performing: Option<bool>,
+    /// `VJ_THUMB_STATS=1` — stage-by-stage thumbnail fill accounting.
+    #[rust]
+    thumb_stats: ThumbStats,
 
     /// The Asset Server this process is HOSTING, when it is hosting one.
     ///
@@ -4802,6 +4823,147 @@ pub struct App {
     /// store, which is the same code path either way.
     #[rust]
     local_store: Option<LocalStore>,
+}
+
+/// Stage-by-stage accounting for the thumbnail FILL path, behind
+/// `VJ_THUMB_STATS=1`. Every number is cumulative since boot except the
+/// per-report deltas, which reset each line. This is the instrument the
+/// load-path work is measured with: without it "slow" is a feeling.
+#[derive(Default)]
+struct ThumbStats {
+    on: bool,
+    t0: Option<std::time::Instant>,
+    last_report: Option<std::time::Instant>,
+    /// Store blob fetches submitted / landed.
+    fetch_submitted: u64,
+    fetch_landed: u64,
+    /// Cached fx sheets read off disk and submitted to the decode lane.
+    fx_cache_submitted: u64,
+    /// UI-thread milliseconds spent reading fx sheet headers.
+    fx_read_ms: f64,
+    /// Decodes that came back, and UI-thread ms spent turning them into
+    /// textures.
+    decoded: u64,
+    upload_ms: f64,
+    /// Textures created (a 30-cell sheet costs 31).
+    textures: u64,
+    /// Frames in which the 8ms backlog budget ran out with work left.
+    budget_hits: u64,
+    /// `pump()` ticks, and ticks that rebuilt the grids.
+    ticks: u64,
+    rebuilds: u64,
+    rebuild_ms: f64,
+    last_decoded: u64,
+    /// submit -> blob-landed, per store fetch.
+    fetch_at: HashMap<AssetRevisionId, std::time::Instant>,
+    fetch_wait_ms: f64,
+    fetch_wait_max: f64,
+    /// decode-submit -> DecodeDone, per thumb.
+    dec_at: HashMap<AssetRevisionId, std::time::Instant>,
+    dec_wait_ms: f64,
+    dec_wait_max: f64,
+    dec_n: u64,
+    /// Textures the LRU threw out, and the resident texture bytes.
+    evicted: u64,
+    resident_bytes: usize,
+    /// Catalog relay stages: pages listed, tile details and manifests done.
+    pages: u64,
+    details: u64,
+    manifests: u64,
+    resolving: usize,
+    resolve_backlog: usize,
+}
+
+impl ThumbStats {
+    fn start(&mut self) {
+        self.on = std::env::var_os("VJ_THUMB_STATS").is_some();
+        self.t0 = Some(std::time::Instant::now());
+        self.last_report = self.t0;
+    }
+
+    /// Note when a stage started for `revision`; nothing is recorded, and no
+    /// map grows, unless the stats are on.
+    fn stage_begin(map: &mut HashMap<AssetRevisionId, std::time::Instant>, on: bool, revision: AssetRevisionId) {
+        if on {
+            map.insert(revision, std::time::Instant::now());
+        }
+    }
+
+    /// Close a stage for `revision`, folding its wall time into `(sum, max)`.
+    fn stage_end(
+        map: &mut HashMap<AssetRevisionId, std::time::Instant>,
+        revision: &AssetRevisionId,
+        sum: &mut f64,
+        max: &mut f64,
+    ) -> bool {
+        let Some(t) = map.remove(revision) else { return false };
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        *sum += ms;
+        *max = max.max(ms);
+        true
+    }
+    fn secs(&self) -> f64 {
+        self.t0.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+    }
+    fn report(&mut self, backlog: usize, inflight: usize, cached: usize) {
+        if !self.on {
+            return;
+        }
+        let due = self
+            .last_report
+            .map(|t| t.elapsed().as_secs_f64() >= 0.5)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_report = Some(std::time::Instant::now());
+        let rate = self.decoded.saturating_sub(self.last_decoded);
+        self.last_decoded = self.decoded;
+        let fetch_avg = if self.fetch_landed > 0 {
+            self.fetch_wait_ms / self.fetch_landed as f64
+        } else {
+            0.0
+        };
+        let dec_avg = if self.dec_n > 0 { self.dec_wait_ms / self.dec_n as f64 } else { 0.0 };
+        log!(
+            "thumbstat t={:.2}s decoded={} (+{}) cached={} fetch={}/{} fxcache={} backlog={} inflight={} \
+             upload={:.0}ms fxread={:.0}ms rebuild={:.0}ms/{} ticks={} budget_hits={} textures={} \
+             fetchwait={:.0}/{:.0}ms decwait={:.0}/{:.0}ms",
+            self.secs(),
+            self.decoded,
+            rate,
+            cached,
+            self.fetch_landed,
+            self.fetch_submitted,
+            self.fx_cache_submitted,
+            backlog,
+            inflight,
+            self.upload_ms,
+            self.fx_read_ms,
+            self.rebuild_ms,
+            self.rebuilds,
+            self.ticks,
+            self.budget_hits,
+            self.textures,
+            fetch_avg,
+            self.fetch_wait_max,
+            dec_avg,
+            self.dec_wait_max,
+        );
+        log!(
+            "thumbstat   lru: resident={:.1}MB evicted={} pages={} details={} manifests={}",
+            self.resident_bytes as f64 / (1024.0 * 1024.0),
+            self.evicted,
+            self.pages,
+            self.details,
+            self.manifests,
+        );
+        log!(
+            "thumbstat   resolve: inflight={} queued={}",
+            self.resolving,
+            self.resolve_backlog,
+        );
+    }
 }
 
 /// Minimum spacing between catalog refreshes triggered by publish events.
@@ -4825,6 +4987,15 @@ impl App {
             Surface::Music => &mut self.music_model,
             Surface::Sfx => &mut self.sfx_model,
             Surface::Mesh => &mut self.mesh_model,
+        }
+    }
+
+    fn model_ref(&self, surface: Surface) -> &BrowseModel {
+        match surface {
+            Surface::Video => &self.video_model,
+            Surface::Music => &self.music_model,
+            Surface::Sfx => &self.sfx_model,
+            Surface::Mesh => &self.mesh_model,
         }
     }
 
@@ -8202,10 +8373,20 @@ p2 {}
                     }
                 }
                 CatCmd::FetchManifest { gen, asset, revision } => {
-                    if let Ok(id) = up
-                        .catalog
-                        .submit(ClientRequest::FetchAssetManifest { rev: revision })
-                    {
+                    // Newest-first like the detail that produced it, and for
+                    // the same reason — but this one is not optional. The
+                    // lane is a stack: a plain FIFO submit here sat BEHIND
+                    // every detail request, and details are issued
+                    // continuously while a page resolves, so the manifests
+                    // starved. The grid showed it exactly: details landing
+                    // steadily from the first second and not one manifest —
+                    // not one thumbnail blob id — until the details ran out
+                    // four seconds later. A manifest is the LAST hop before
+                    // a picture; finishing a tile outranks starting one.
+                    if let Ok(id) = up.catalog.submit_with(
+                        ClientRequest::FetchAssetManifest { rev: revision },
+                        makepad_asset_client::SubmitOptions::newest_first(),
+                    ) {
                         self.cat_reqs
                             .insert(id, CatPurpose::Manifest { surface, gen, asset, revision });
                     }
@@ -8237,6 +8418,12 @@ p2 {}
                     ) {
                         self.cat_reqs.insert(id, CatPurpose::Thumb { revision });
                         self.thumb_inflight.insert(revision);
+                        self.thumb_stats.fetch_submitted += 1;
+                        ThumbStats::stage_begin(
+                            &mut self.thumb_stats.fetch_at,
+                            self.thumb_stats.on,
+                            revision,
+                        );
                         if self.trace_thumbs {
                             log!("thumb: fetching {revision}");
                         }
@@ -8953,12 +9140,107 @@ p2 {}
         // The published clock has just been advanced; hold every EXT deck
         // against it before anything else reads a deck position.
         self.pump_external_sync(cx);
-        if self.grids_dirty {
-            self.grids_dirty = false;
-            self.rebuild_grids(cx);
-            // The pads follow the grid window (delta-compressed, so a
-            // quiet grid sends nothing).
-            self.sync_apc_leds();
+        self.thumb_stats.ticks += 1;
+        self.rebuild_grids_if_dirty(cx);
+        self.arm_fill_pump(cx);
+        let (backlog, inflight, cached) =
+            (self.decode_backlog.len(), self.thumb_inflight.len(), self.thumbs.len());
+        self.thumb_stats.resolving = SURFACES
+            .iter()
+            .map(|s| self.model_ref(*s).resolving())
+            .sum();
+        self.thumb_stats.resolve_backlog = SURFACES
+            .iter()
+            .map(|s| self.model_ref(*s).resolve_backlog())
+            .sum();
+        self.thumb_stats.report(backlog, inflight, cached);
+    }
+
+    fn rebuild_grids_if_dirty(&mut self, cx: &mut Cx) {
+        if !self.grids_dirty {
+            return;
+        }
+        self.grids_dirty = false;
+        let t = std::time::Instant::now();
+        self.rebuild_grids(cx);
+        self.thumb_stats.rebuild_ms += t.elapsed().as_secs_f64() * 1000.0;
+        self.thumb_stats.rebuilds += 1;
+        // The pads follow the grid window (delta-compressed, so a quiet
+        // grid sends nothing).
+        self.sync_apc_leds();
+    }
+
+    /// Is the grid still owed a picture by anybody?
+    ///
+    /// One question, every stage of the relay: a catalog page on the way, a
+    /// tile being resolved, a thumbnail blob in transit, a decode queued or
+    /// running, finished pixels still waiting for their texture, or a
+    /// rebuild owed. False the instant the library is on screen — an idle
+    /// VJ arms no frames it does not need.
+    fn fill_outstanding(&self) -> bool {
+        if self.grids_dirty || !self.decode_backlog.is_empty() || self.thumb_decodes_out > 0 {
+            return true;
+        }
+        self.cat_reqs.values().any(|purpose| {
+            matches!(
+                purpose,
+                CatPurpose::Page { .. }
+                    | CatPurpose::Detail { .. }
+                    | CatPurpose::Manifest { .. }
+                    | CatPurpose::Thumb { .. }
+                    | CatPurpose::FxSource { .. }
+            )
+        })
+    }
+
+    fn arm_fill_pump(&mut self, cx: &mut Cx) {
+        if self.fill_outstanding() {
+            self.decode_pump = cx.new_next_frame();
+        }
+    }
+
+    /// The fill relay, run on the FRAME instead of the 20Hz poll.
+    ///
+    /// Only the stages that hand a thumbnail along: catalog completions,
+    /// finished decodes, the effect-sheet cache, and the rebuild that turns
+    /// all of it into tiles. Nothing here is allowed to be expensive — the
+    /// decode batch keeps its own `UI_STEP_BUDGET_MS` deadline and hands the
+    /// rest to the next frame, which is what makes a flood of thumbnails
+    /// land fast WITHOUT the app ever missing a frame.
+    fn pump_fill(&mut self, cx: &mut Cx) {
+        self.pump_catalog_runtime(cx);
+        self.pump_decodes(cx);
+        self.pump_fx_thumbs(cx);
+        self.rebuild_grids_if_dirty(cx);
+        self.arm_fill_pump(cx);
+    }
+
+    /// One politeness rule for every lane that fills the grid: wide open
+    /// while the operator is browsing, narrow the moment the program window
+    /// is on a screen or a deck is playing. The effect-thumbnail render bank
+    /// already worked this way (`set_full_speed`); the catalog resolves and
+    /// the thumbnail decode lane now follow the same verdict.
+    fn sync_fill_politeness(&mut self, performing: bool) {
+        if self.fill_performing == Some(performing) {
+            return;
+        }
+        self.fill_performing = Some(performing);
+        if self.thumb_stats.on {
+            log!("thumbstat   politeness: performing={performing}");
+        }
+        self.decode.set_thumb_width(if performing {
+            media::THUMB_WIDTH_PERFORMING
+        } else {
+            media::MAX_THUMB_WORKERS
+        });
+        let width = if performing {
+            catalog::MAX_RESOLVING_PERFORMING
+        } else {
+            catalog::MAX_RESOLVING
+        };
+        for surface in SURFACES {
+            let cmds = self.model(surface).set_resolve_width(width);
+            self.run_cat_cmds(surface, cmds);
         }
     }
 
@@ -9157,6 +9439,18 @@ p2 {}
                                 self.mesh_model.event_remove(asset);
                                 self.grids_dirty = true;
                             } else {
+                                // Republished: every surface forgets the
+                                // revision it remembered for this asset, and
+                                // any tile of it on screen re-resolves in
+                                // place (keeping its current picture until
+                                // the new manifest lands).
+                                for surface in SURFACES {
+                                    let cmds =
+                                        self.model(surface).event_republished(asset);
+                                    if !cmds.is_empty() {
+                                        self.run_cat_cmds(surface, cmds);
+                                    }
+                                }
                                 self.gen.catalog_published(asset);
                             }
                         }
@@ -9284,11 +9578,13 @@ p2 {}
                         kind: h.kind,
                     })
                     .collect();
+                self.thumb_stats.pages += 1;
                 let cmds =
                     self.model(surface).page_arrived(gen, slot, first, hits, page.total, page.next);
                 self.run_cat_cmds(surface, cmds);
             }
             (CatPurpose::Detail { surface, gen, asset }, ClientOutput::AssetDetail(detail)) => {
+                self.thumb_stats.details += 1;
                 let latest = detail.latest_published().map(|c| c.revision);
                 let cmds = self.model(surface).detail_arrived(gen, asset, latest);
                 self.run_cat_cmds(surface, cmds);
@@ -9297,6 +9593,7 @@ p2 {}
                 CatPurpose::Manifest { surface, gen, asset, revision },
                 ClientOutput::AssetManifest(manifest),
             ) => {
+                self.thumb_stats.manifests += 1;
                 let media = match surface {
                     Surface::Video => select_visual_file(&manifest)
                         .or_else(|| select_vjfx_source(&manifest)),
@@ -9437,6 +9734,16 @@ p2 {}
                 }
             }
             (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
+                self.thumb_stats.fetch_landed += 1;
+                let (mut sum, mut max) =
+                    (self.thumb_stats.fetch_wait_ms, self.thumb_stats.fetch_wait_max);
+                ThumbStats::stage_end(&mut self.thumb_stats.fetch_at, &revision, &mut sum, &mut max);
+                (self.thumb_stats.fetch_wait_ms, self.thumb_stats.fetch_wait_max) = (sum, max);
+                ThumbStats::stage_begin(
+                    &mut self.thumb_stats.dec_at,
+                    self.thumb_stats.on,
+                    revision,
+                );
                 // Decode on the worker pool; only the finished BGRA pixels
                 // come back to this thread.
                 // What the MANIFEST said this picture is; the kind gate is
@@ -9453,6 +9760,7 @@ p2 {}
                     legacy_may_be_sheet,
                     epoch: self.view_epoch,
                 });
+                self.thumb_decodes_out += 1;
             }
             (CatPurpose::JobProfiles, ClientOutput::JobProfiles(profiles)) => {
                 self.gen.profiles_arrived(profiles);
@@ -9893,7 +10201,24 @@ p2 {}
         let batch = media::UiStep::new("decode results (whole batch)");
         for done in self.decode.poll() {
             match done {
-                DecodeDone::Thumb { .. } => self.decode_backlog.push_back(done),
+                // A job the lane threw away unstarted: no picture, no
+                // failure, nothing to upload. Clear the marks so the tile
+                // asks again the next time it is wanted, and let the rebuild
+                // do the asking.
+                DecodeDone::ThumbDropped { revision } => {
+                    self.thumb_decodes_out = self.thumb_decodes_out.saturating_sub(1);
+                    self.thumb_inflight.remove(&revision);
+                    self.fx_decode_pending.remove(&revision);
+                    self.thumb_stats.dec_at.remove(&revision);
+                    self.grids_dirty = true;
+                    if self.trace_thumbs {
+                        log!("thumb: {revision} dropped unstarted (view moved) — will ask again");
+                    }
+                }
+                DecodeDone::Thumb { .. } => {
+                    self.thumb_decodes_out = self.thumb_decodes_out.saturating_sub(1);
+                    self.decode_backlog.push_back(done);
+                }
                 done => self.decode_ready.push_back(done),
             }
         }
@@ -10119,7 +10444,21 @@ p2 {}
                     }
                 }
                 DecodeDone::Thumb { revision, result } => {
+                    let t_up = std::time::Instant::now();
+                    self.thumb_stats.decoded += 1;
+                    let (mut sum, mut max) =
+                        (self.thumb_stats.dec_wait_ms, self.thumb_stats.dec_wait_max);
+                    if ThumbStats::stage_end(
+                        &mut self.thumb_stats.dec_at,
+                        &revision,
+                        &mut sum,
+                        &mut max,
+                    ) {
+                        self.thumb_stats.dec_n += 1;
+                    }
+                    (self.thumb_stats.dec_wait_ms, self.thumb_stats.dec_wait_max) = (sum, max);
                     if let Ok(thumb) = result {
+                        self.thumb_stats.textures += 1 + thumb.frames.len() as u64;
                         let mut make = |bgra: Vec<u32>, w: usize, h: usize| {
                             Texture::new_with_format(
                                 cx,
@@ -10146,7 +10485,15 @@ p2 {}
                             Vec::new()
                         };
                         self.thumbs.insert(revision, texture.clone());
-                        self.thumb_clock += 1;
+                        // Stamped with the CURRENT generation, which is the
+                        // one the last rebuild asked for — never a new one.
+                        // Advancing the clock here made every arrival its own
+                        // generation, so after a screenful of decodes the
+                        // eviction floor ("what this rebuild wanted") had
+                        // slid past every tile the rebuild actually wanted
+                        // and the flood evicted itself, tile by tile, only to
+                        // decode the same pictures again on the next
+                        // rebuild. Only `refresh_thumbs` moves the clock.
                         self.thumb_used.insert(revision, self.thumb_clock);
                         self.thumb_inflight.remove(&revision);
                         self.fx_decode_pending.remove(&revision);
@@ -10184,10 +10531,15 @@ p2 {}
                             log!("thumb: decode FAILED {revision}: {e}");
                         }
                     }
+                    self.thumb_stats.upload_ms += t_up.elapsed().as_secs_f64() * 1000.0;
                 }
+                // Sorted into neither queue above: a dropped job carries no
+                // work for this thread.
+                DecodeDone::ThumbDropped { .. } => {}
             }
         }
         if !self.decode_backlog.is_empty() {
+            self.thumb_stats.budget_hits += 1;
             self.decode_pump = cx.new_next_frame();
         }
         batch.done(cx);
@@ -10217,6 +10569,7 @@ p2 {}
             .map(|r| bytes(self.thumb_anims.get(r).map(|(f, _)| f.len()).unwrap_or(0)))
             .sum();
         let budget = THUMB_CACHE_BYTES.max(page.saturating_mul(4));
+        self.thumb_stats.resident_bytes = total;
         if total <= budget {
             return;
         }
@@ -10237,6 +10590,7 @@ p2 {}
             self.thumb_anims.remove(&revision);
             self.thumb_leds.remove(&revision);
             self.thumb_used.remove(&revision);
+            self.thumb_stats.evicted += 1;
             if self.trace_thumbs {
                 log!("thumb: evicted {revision} (last wanted {used}, clock {})", self.thumb_clock);
             }
@@ -10271,6 +10625,26 @@ p2 {}
         }
         hot.extend(self.cue.live().map(|i| i.asset));
         hot.extend(self.cue.next().map(|i| i.asset));
+        // What is on screen resolves FIRST. The store's resolve throughput
+        // is finite and the video bank is a window onto thousands; without
+        // this the page under the operator's eye waits behind every row
+        // above it.
+        let visible: Vec<AssetId> = self
+            .video_model
+            .tiles()
+            .iter()
+            .filter(|t| hot.contains(&t.asset))
+            .map(|t| t.asset)
+            .collect();
+        if !visible.is_empty() {
+            let cmds = self.video_model.resolve_visible_first(&visible);
+            // Only when it actually issued something: `run_cat_cmds` dirties
+            // the grids, and this runs FROM a rebuild — an empty call would
+            // make every rebuild ask for another one, forever.
+            if !cmds.is_empty() {
+                self.run_cat_cmds(Surface::Video, cmds);
+            }
+        }
         let mut wanted: Vec<(AssetRevisionId, catalog::TileThumb)> = Vec::new();
         for surface in [Surface::Video, Surface::Music, Surface::Sfx, Surface::Mesh] {
             let model = match surface {
@@ -10318,6 +10692,12 @@ p2 {}
             ) {
                 self.cat_reqs.insert(id, CatPurpose::Thumb { revision });
                 self.thumb_inflight.insert(revision);
+                self.thumb_stats.fetch_submitted += 1;
+                ThumbStats::stage_begin(
+                    &mut self.thumb_stats.fetch_at,
+                    self.thumb_stats.on,
+                    revision,
+                );
                 if self.trace_thumbs {
                     log!("thumb: re-requesting {revision} (texture gone)");
                 }
@@ -10345,6 +10725,9 @@ p2 {}
         let performing = self.output_window_lifecycle == OutputWindowLifecycle::Open
             || self.decks.deck(DeckId::A).playing
             || self.decks.deck(DeckId::B).playing;
+        // Same verdict, every fill lane: the render bank below, the catalog
+        // resolves, and the thumbnail decode lane.
+        self.sync_fill_politeness(performing);
         let widget = self.ui.widget(cx, ids!(fx_thumbs));
         let (results, free_lanes, render_disabled, cache_dir) = {
             let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
@@ -10377,8 +10760,15 @@ p2 {}
                 legacy_may_be_sheet: false,
                 epoch: self.view_epoch,
             });
+            self.thumb_decodes_out += 1;
             self.grids_dirty = true;
         }
+        // Cached sheets are a DISK READ AND A DECODE, not a render: on a
+        // warm relaunch there is no reason to meter them out six a tick.
+        // The lane's own width is the throttle, and the politeness verdict
+        // already narrowed that; here the only budget is the UI thread's,
+        // and reading a sheet's header costs ~0.1ms.
+        let cache_budget = if performing { 6 } else { MAX_FX_CACHE_DECODES_PER_TICK };
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
@@ -10423,11 +10813,19 @@ p2 {}
             if cache.exists() {
                 // A relaunch must not re-render: decode the digest-keyed
                 // sheet straight off disk, bounded per tick.
+                let t_read = std::time::Instant::now();
                 let layout = std::fs::read(&cache)
                     .ok()
                     .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
+                self.thumb_stats.fx_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
                 match layout {
                     Some((cells, fps)) => {
+                        self.thumb_stats.fx_cache_submitted += 1;
+                        ThumbStats::stage_begin(
+                            &mut self.thumb_stats.dec_at,
+                            self.thumb_stats.on,
+                            revision,
+                        );
                         self.fx_decode_pending.insert(revision, now);
                         self.decode.submit(DecodeJob::Thumb {
                             revision,
@@ -10436,8 +10834,9 @@ p2 {}
                             legacy_may_be_sheet: false,
                             epoch: self.view_epoch,
                         });
+                        self.thumb_decodes_out += 1;
                         cache_decodes += 1;
-                        if cache_decodes >= 6 {
+                        if cache_decodes >= cache_budget {
                             break;
                         }
                     }
@@ -13403,6 +13802,7 @@ impl MatchEvent for App {
             Ok(connector) => self.connector = Some(connector),
             Err(error) => self.status_text = format!("session config invalid: {error}"),
         }
+        self.thumb_stats.start();
         self.poll_timer = cx.start_interval(0.05);
         self.refresh_timer = cx.start_interval(1.0);
         self.video_loop = true;
@@ -14830,7 +15230,7 @@ impl AppMain for App {
             self.grids_dirty = true;
         }
         if self.decode_pump.is_event(event).is_some() {
-            self.pump_decodes(cx);
+            self.pump_fill(cx);
         }
         if self.video_pump.is_event(event).is_some() {
             self.pump_video(cx);

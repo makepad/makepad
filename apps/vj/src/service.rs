@@ -104,6 +104,17 @@ pub fn session_config_from_env() -> SessionConfig {
     let local = attach_local_asset_db(&home);
 
     let mut config = SessionConfig::new(cache_parent);
+    // The catalog runtime carries EVERY small request the grids make:
+    // listings, a detail and a manifest per tile, and every thumbnail blob.
+    // The shared default of four workers is sized for an app that browses;
+    // this one fills a wall of pads, so the lane scales with the machine.
+    // (The bulk lane keeps its default — big transfers, not many small
+    // ones.) The politeness valve is upstream, in how many resolves the
+    // browse models will have in flight during a set.
+    config.catalog_runtime.fast_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(4, 12);
     config.media_lanes = lanes::lane_leaves();
     assert_eq!(config.media_lanes.len(), lanes::LANE_COUNT);
     // Ports in `listen` are a same-machine hint only. Asset-ui binds

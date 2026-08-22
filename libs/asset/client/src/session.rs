@@ -22,7 +22,7 @@ use crate::api::ApiEndpoints;
 use crate::client::{AssetClient, ClientConfig};
 use crate::discovery::{content_client_caps, DiscoveryListener};
 use crate::error::{ClientError, ClientResult};
-use crate::runtime::ClientRuntime;
+use crate::runtime::{ClientRuntime, RuntimeConfig};
 use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
 use crate::util::now_ms;
 use std::path::PathBuf;
@@ -54,6 +54,12 @@ pub struct SessionConfig {
     /// How long one discovery pass waits for a usable beacon.
     pub discovery_wait_ms: u64,
     pub subscriber: CatalogSubscriberConfig,
+    /// Lane sizing for the CATALOG runtime. A browsing UI puts every
+    /// listing, every per-tile detail/manifest resolve and every thumbnail
+    /// blob through this one runtime, so a host that fills grids wants a
+    /// wider fast lane than the shared default. Media lanes keep the
+    /// default: they carry a few big transfers, not a thousand small ones.
+    pub catalog_runtime: RuntimeConfig,
     /// Connect retry backoff bounds.
     pub retry_min_ms: u64,
     pub retry_max_ms: u64,
@@ -71,6 +77,7 @@ impl SessionConfig {
             discovery_port: crate::wire::DEFAULT_DISCOVERY_PORT,
             discovery_wait_ms: 4_000,
             subscriber: CatalogSubscriberConfig::default_v1(),
+            catalog_runtime: RuntimeConfig::default_v1(),
             retry_min_ms: 1_000,
             retry_max_ms: 10_000,
         }
@@ -331,7 +338,8 @@ fn connect_all(
     let subscriber = catalog_client
         .subscribe_catalog(config.subscriber)
         .map_err(|e| e.to_string())?;
-    let catalog = ClientRuntime::start(catalog_client).map_err(|e| e.to_string())?;
+    let catalog = ClientRuntime::start_with(catalog_client, config.catalog_runtime)
+        .map_err(|e| e.to_string())?;
     Ok(SessionHandles {
         catalog,
         media,
