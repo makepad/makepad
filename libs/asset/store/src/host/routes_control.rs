@@ -175,6 +175,9 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "gc"] if is_read(m) => gc_get(head, rc),
         ["v1", "gc", "cancel"] if m == Method::Post => gc_cancel(head, rc),
 
+        // ---- reference blobs (catalogued, not copied) -----------------------
+        ["v1", "blob-refs"] if is_read(m) => blob_refs_rescan(head, rc),
+
         // ---- catalog event feed --------------------------------------------
         ["v1", "events"] => {
             if is_read(m) {
@@ -966,6 +969,72 @@ fn gc_run(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcom
             .ok_or(ServerError::NotFound { what: "gc run" })
     })?;
     Ok(Outcome::Resp(Resp::json(200, &gc_status_value(&status))))
+}
+
+/// `GET /v1/blob-refs?after=<blob_id>&limit=<n>` — RE-SCAN one bounded page
+/// of the reference blobs, reporting what each one's file looks like right
+/// now: `present`, `missing`, `size_changed`, `content_changed`, or
+/// `unreadable`.
+///
+/// This is the honest counterpart to not copying: the store cannot promise
+/// bytes it does not own, so it offers a way to LOOK. Verifying re-hashes
+/// each file, which is why the page is bounded and the caller drives it —
+/// a UI can walk a library over many frames, or check one asset after a
+/// serve refused.
+///
+/// Paths are the operator's own filesystem layout, so this is admin-only.
+fn blob_refs_rescan(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let after: Option<makepad_asset_data::BlobId> = match head.query_get("after") {
+        None => None,
+        Some(text) => Some(
+            text.parse()
+                .map_err(|_| Fail::Http(400, "malformed after blob id"))?,
+        ),
+    };
+    let limit: u32 = match head.query_get("limit") {
+        None => 32,
+        Some(text) => text
+            .parse()
+            .ok()
+            .filter(|n| (1..=256).contains(n))
+            .ok_or(Fail::Http(400, "limit out of range"))?,
+    };
+    let now = now_ms();
+    let (page, total) = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        let total = ctx.core.blob_refs().count()?;
+        Ok((ctx.core.rescan_blob_refs(after.as_ref(), limit)?, total))
+    })?;
+    let rows: Vec<Value> = page
+        .entries
+        .iter()
+        .map(|(entry, state)| {
+            obj(vec![
+                ("blob_id", s(entry.blob_id.to_string())),
+                ("path", s(entry.path.display().to_string())),
+                ("size", Value::Int(entry.size as i64)),
+                ("recorded_ms", Value::Int(entry.recorded_ms as i64)),
+                ("state", s(state.tag())),
+                ("ok", Value::Bool(state.is_present())),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("total", Value::Int(total as i64)),
+            ("refs", Value::Arr(rows)),
+            (
+                "next",
+                match page.next {
+                    Some(id) => s(id.to_string()),
+                    None => Value::Null,
+                },
+            ),
+        ]),
+    )))
 }
 
 fn gc_get(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {

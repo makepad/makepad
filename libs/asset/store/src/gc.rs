@@ -825,6 +825,32 @@ impl<'a> Gc<'a> {
                     continue;
                 }
                 let blob = BlobId::from_bytes(fixed32(blob_bytes, "gc sweep row")?);
+                // A REFERENCE blob's bytes are not the store's to collect:
+                // they are a file the operator owns, at a path the operator
+                // chose. Forgetting it is the whole of the reclamation —
+                // both catalog rows go, no delete intent is queued, and the
+                // id never reaches `doomed`, so the unlink loop below cannot
+                // see it even by accident. (Belt and braces: `Cas` knows
+                // nothing about external paths, so `remove_object` could
+                // only ever unlink inside the CAS anyway.)
+                if is_reference(db, blob_bytes)? {
+                    let mut s = db.prepare(
+                        "gc delete blob ref row",
+                        "DELETE FROM blob_refs WHERE blob_id=?1",
+                    )?;
+                    s.bind_blob(1, blob_bytes)?;
+                    s.run()?;
+                    drop(s);
+                    let mut s =
+                        db.prepare("gc delete blob row", "DELETE FROM blobs WHERE blob_id=?1")?;
+                    s.bind_blob(1, blob_bytes)?;
+                    s.run()?;
+                    drop(s);
+                    // Counted as a deleted record, but NOT as reclaimed
+                    // bytes: nothing was freed on this machine.
+                    deleted += 1;
+                    continue;
+                }
                 // Intent first, row second, unlink third: the object can
                 // never be missing while the catalog still admits it.
                 let mut s = db.prepare(
@@ -937,6 +963,18 @@ fn is_marked(db: &Db, run_id: i64, blob: &[u8]) -> ServerResult<bool> {
     )?;
     s.bind_i64(1, run_id)?;
     s.bind_blob(2, blob)?;
+    s.step()
+}
+
+/// Is this blob one the store REFERENCES rather than owns? The sweep asks
+/// once per doomed blob so a reference is forgotten without ever entering the
+/// unlink path (see [`crate::blobrefs`]).
+fn is_reference(db: &Db, blob: &[u8]) -> ServerResult<bool> {
+    let mut s = db.prepare(
+        "gc is reference",
+        "SELECT 1 FROM blob_refs WHERE blob_id=?1",
+    )?;
+    s.bind_blob(1, blob)?;
     s.step()
 }
 

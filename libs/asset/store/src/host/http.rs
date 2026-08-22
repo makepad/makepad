@@ -163,6 +163,18 @@ impl Conn {
         })
     }
 
+    /// Is the peer on this machine's loopback interface?
+    ///
+    /// The one route that reads a server-local filesystem path
+    /// (`POST /v1/blobs/ref`) asks this. Fail-CLOSED: a peer address the OS
+    /// will not report reads as "not loopback", because the only safe
+    /// interpretation of "I don't know who you are" is "not privileged".
+    /// This is the socket's own address as the kernel sees it, so it cannot
+    /// be spoofed by a header.
+    pub fn peer_is_loopback(&self) -> bool {
+        self.stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false)
+    }
+
     fn buffered(&self) -> &[u8] {
         &self.buf[self.pos..]
     }

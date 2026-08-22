@@ -36,6 +36,56 @@ fn text_ok(s: &str, max: usize) -> bool {
 /// fleet port (41830) and from the HTTP planes.
 pub const DEFAULT_DISCOVERY_PORT: u16 = 41871;
 
+/// Whether this server will catalogue content it does not copy, and from
+/// whom (see [`crate::blobrefs`]).
+///
+/// Admitting a blob BY REFERENCE means handing the server a filesystem path
+/// and having it read that file — so the route is, precisely, "read any file
+/// this process can read, then serve it by digest". That is exactly the
+/// privilege of the process itself, which is fine for an app hosting its own
+/// store on loopback and is NOT fine for anything reachable off the box.
+/// Hence: OFF unless an embedder turns it on, loopback-only by default, and
+/// an optional prefix allowlist for embedders that want to narrow it further.
+#[derive(Clone, Debug)]
+pub struct BlobRefPolicy {
+    /// Master switch. `false` = `POST /v1/blobs/ref` answers 404 as though
+    /// the route did not exist.
+    pub enabled: bool,
+    /// Only accept reference admission from a loopback peer. Leave `true`
+    /// unless the paths and the callers are both already trusted — a remote
+    /// caller naming a server-local path is a file-read oracle.
+    pub loopback_only: bool,
+    /// Directory prefixes a referenced path must live under. EMPTY means "no
+    /// prefix restriction", which is only sound together with
+    /// `loopback_only` and a token the host process minted for itself.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for BlobRefPolicy {
+    fn default() -> Self {
+        Self { enabled: false, loopback_only: true, roots: Vec::new() }
+    }
+}
+
+impl BlobRefPolicy {
+    /// The shape an app that hosts its own store on loopback wants: on,
+    /// loopback-only, no prefix restriction (the app already runs as the
+    /// user who owns the files).
+    pub fn local_host() -> Self {
+        Self { enabled: true, loopback_only: true, roots: Vec::new() }
+    }
+
+    /// Is this path admissible under the prefix allowlist? An empty
+    /// allowlist admits everything; a non-empty one admits only paths under
+    /// one of its entries.
+    pub fn path_allowed(&self, path: &std::path::Path) -> bool {
+        if self.roots.is_empty() {
+            return true;
+        }
+        self.roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
 /// UDP LAN discovery announcement config. Present = beacon on.
 #[derive(Clone, Debug)]
 pub struct DiscoveryConfig {
@@ -143,6 +193,9 @@ pub struct ServerConfig {
     pub job_profiles: Vec<JobProfile>,
     /// UDP LAN discovery beacon; None = off.
     pub discovery: Option<DiscoveryConfig>,
+    /// Reference blobs (content catalogued without copying). Off by default;
+    /// see [`BlobRefPolicy`] for why turning it on is a privilege decision.
+    pub blob_refs: BlobRefPolicy,
     /// Chat broker: local fleet Qwen and/or external OpenAI/Grok.
     pub chat: ChatConfig,
     /// Log to stderr. Never logs secrets, headers, or bodies.
@@ -281,6 +334,7 @@ impl ServerConfig {
             job_profiles: default_job_profiles(),
             bootstrap_admin: false,
             discovery: None,
+            blob_refs: BlobRefPolicy::default(),
             chat: ChatConfig::default(),
             log: true,
         }
@@ -401,6 +455,17 @@ impl ServerConfig {
         for base in &self.chat.fleet_bases {
             if base.is_empty() || base.len() > 256 || base.chars().any(char::is_control) {
                 return Err(ServerError::InvalidInput { what: "config chat fleet base" });
+            }
+        }
+        // A prefix allowlist that is not absolute cannot be prefix-checked
+        // against the absolute paths references store: refuse it at config
+        // time rather than silently admitting everything.
+        if self.blob_refs.roots.len() > 64 {
+            return Err(ServerError::InvalidInput { what: "config blob ref roots count" });
+        }
+        for root in &self.blob_refs.roots {
+            if !root.is_absolute() {
+                return Err(ServerError::InvalidInput { what: "config blob ref root not absolute" });
             }
         }
         if let Some(d) = &self.discovery {
