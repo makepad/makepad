@@ -66,10 +66,14 @@ struct LocalAssetDb {
 }
 
 fn attach_local_asset_db(home: &Path) -> Option<LocalAssetDb> {
-    // asset-ui's live catalog first; the older ai-content tree is a
-    // fallback for checkouts that never moved.
+    // Checkout-local Asset UI first; leftover $HOME trees are a fallback
+    // for checkouts that never moved.
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/asset-ui/asset-server");
+    let mut roots = vec![checkout];
     for leaf in [".makepad-asset-ai", ".makepad-ai-content"] {
-        let root = home.join(leaf).join("asset-server");
+        roots.push(home.join(leaf).join("asset-server"));
+    }
+    for root in roots {
         let token = read_trimmed(&root.join("admin-token"));
         let server_id = read_trimmed(&root.join("server-id")).and_then(|t| from_hex16(&t));
         let endpoints = read_trimmed(&root.join("listen"))
@@ -93,13 +97,24 @@ pub fn session_config_from_env() -> SessionConfig {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    let vj_home = home.join(".makepad-vj");
+    let vj_home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj");
     let cache_parent = std::env::var("VJ_ASSET_CACHE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| vj_home.clone());
     let local = attach_local_asset_db(&home);
 
     let mut config = SessionConfig::new(cache_parent);
+    // The catalog runtime carries EVERY small request the grids make:
+    // listings, a detail and a manifest per tile, and every thumbnail blob.
+    // The shared default of four workers is sized for an app that browses;
+    // this one fills a wall of pads, so the lane scales with the machine.
+    // (The bulk lane keeps its default — big transfers, not many small
+    // ones.) The politeness valve is upstream, in how many resolves the
+    // browse models will have in flight during a set.
+    config.catalog_runtime.fast_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(4, 12);
     config.media_lanes = lanes::lane_leaves();
     assert_eq!(config.media_lanes.len(), lanes::LANE_COUNT);
     // Ports in `listen` are a same-machine hint only. Asset-ui binds

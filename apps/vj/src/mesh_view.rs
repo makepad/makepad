@@ -10,6 +10,10 @@
 //! draw because texture upload needs a `Cx`.
 
 use crate::media::PreparedMesh;
+use makepad_render::level::{
+    BobStyle, LevelCollision, LevelWalker, NavGrid, WalkerConfig, WalkerEvent,
+};
+use makepad_render::player_nav::{config_for_world, NavAnchor, PlayerNav};
 use makepad_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_render::{
     preview_scene_state, set_pass_camera, DrawSceneAlpha, DrawSceneCube,
@@ -83,6 +87,38 @@ struct Dancer {
     lift: f32,
 }
 
+/// A walkable level loaded at its authored scale, plus the NPC touring it.
+/// Collision is the level's own triangles (see `makepad_render::level`);
+/// the instance transform is identity for a map, so model space IS world.
+struct WalkWorld {
+    walker: LevelWalker,
+    level: Box<LevelCollision>,
+    /// Route graph over the whole map. Without it the walker falls back to
+    /// scoring headings locally, which paces one corridor forever.
+    nav: Option<Box<NavGrid>>,
+    // player_nav: the player-behaviour planner — rooms, the entry
+    // look-around, unexplored-exit choices, backtracking, door requests
+    // and the hazard-never rule. It steers; the walker keeps doing all
+    // locomotion. None only when the level has no nav grid at all (the
+    // walker then falls back to its built-in frontier tour).
+    player: Option<PlayerNav>,
+    /// Where the tour restarts from when the walker strands itself.
+    home: Vec3f,
+    /// Renderer model id of the level, for door commands.
+    model: String,
+    /// Door parts in the order `NavGrid::mark_doors` was given them, so a
+    /// walker's door index names a part again.
+    doors: Vec<String>,
+    /// Consecutive ticks the walker reported no floor under its feet. One
+    /// bad probe (a downward ray that catches a wall triangle's top edge)
+    /// must not cost the tour everything it has learned about the map.
+    stranded_ticks: u32,
+    /// Trace bookkeeping: seconds since the last coverage line.
+    trace: bool,
+    since_trace: f32,
+    goals_logged: usize,
+}
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct VjMeshView {
     #[uid]
@@ -149,6 +185,32 @@ pub struct VjMeshView {
     statue: Option<ModelInstance>,
     #[rust]
     statue_yaw: f32,
+    /// Set before `set_prepared` when the asset is a walkable level
+    /// (catalog kind `World` + a GLB): the mesh is then loaded at its
+    /// authored scale and toured by an NPC walker instead of being shrunk
+    /// to 1.75 units and turned on a plinth.
+    #[rust]
+    world_mode: bool,
+    /// Head-bob feel for the next level (set with `set_world_mode`).
+    #[rust]
+    bob_style: BobStyle,
+    // player_nav: manifest anchors of the NEXT level (player_start, keys,
+    // exit, doors). Set by the host before `set_prepared`; empty on every
+    // classic map published before the anchor lane.
+    #[rust]
+    world_anchors: Vec<NavAnchor>,
+    #[rust]
+    tour: Option<WalkWorld>,
+    /// View roll of the current tick (Quake tilts as the view swings); the
+    /// preview camera has no roll input, so the slot builds its own.
+    #[rust]
+    view_roll: f32,
+    /// Doom's teleport white-out, counted down after every cut. While it
+    /// burns the pass is CLEARED to white and the scene is not drawn — the
+    /// flash has to live in the pass texture, because a slot's picture is
+    /// that texture and never touches this widget's own area.
+    #[rust]
+    view_flash: f32,
     /// Monotonic ids: every load gets fresh renderer residency keys.
     #[rust(1u64)]
     next_rig: u64,
@@ -171,7 +233,27 @@ pub struct VjMeshView {
     time_accum: f64,
     #[rust]
     last_time: Option<f64>,
+    /// A parked (held) slot keeps its last pose instead of dancing on.
+    #[rust]
+    paused: bool,
+    /// The musical clock, when the host has one and the slot is synced:
+    /// (continuous position in beats, bpm). None = free-run.
+    #[rust]
+    beat_clock: Option<(f64, f64)>,
+    /// Does this view's picture reach a surface anyone is looking at? A
+    /// walked level costs ~90 collision rays per tick plus a full pass
+    /// render per frame, and the host (`sync_mesh_liveness`) is the only
+    /// thing that knows whether the program or a cue well is showing it.
+    /// Dormant keeps every bit of state — position, map memory, pose — and
+    /// simply stops the clock.
+    #[rust(true)]
+    live: bool,
 }
+
+/// First-person clip planes for a walked level (world units; the classic
+/// importer's scale is Doom map units / 64, so 0.05 ≈ 3 map units).
+const WALK_NEAR: f32 = 0.05;
+const WALK_FAR: f32 = 500.0;
 
 /// Offscreen size for a slot mesh. Independent of the widget rect so a
 /// tiny hidden view still produces a program-resolution texture, and so
@@ -186,6 +268,27 @@ impl VjMeshView {
         self.area.redraw(cx);
     }
 
+    /// Present the NEXT loaded mesh as a walkable level (see `world_mode`).
+    /// `source` is the asset's alias/namespace, which picks the engine's
+    /// head-bob feel. Call before [`Self::set_prepared`].
+    pub fn set_world_mode(&mut self, world: bool, source: &str) {
+        self.world_mode = world;
+        self.bob_style = BobStyle::from_source(source);
+    }
+
+    // player_nav: hand over the NEXT level's manifest anchors (converted by
+    // the host — `player_start`, `key_*`, `exit`, height hints). Call
+    // between `set_world_mode` and `set_prepared`; stale anchors are
+    // consumed by the next world load.
+    pub fn set_world_anchors(&mut self, anchors: Vec<NavAnchor>) {
+        self.world_anchors = anchors;
+    }
+
+    /// Where the NPC currently stands, for a status line.
+    pub fn walker_pos(&self) -> Option<Vec3f> {
+        self.tour.as_ref().map(|w| w.walker.feet())
+    }
+
     pub fn color_texture(&self) -> Texture {
         self.color_texture.clone()
     }
@@ -198,8 +301,83 @@ impl VjMeshView {
         self.pending = None;
         self.dancer = None;
         self.statue = None;
+        self.tour = None;
+        self.world_anchors = Vec::new();
+        self.world_mode = false;
+        self.paused = false;
         self.status.clear();
         self.area.redraw(cx);
+    }
+
+    /// Turn the simulation clock on or off (see the `live` field). Waking a
+    /// dormant view re-arms its frame request and drops the elapsed wall
+    /// time on the floor, so the tour continues from where it stood instead
+    /// of fast-forwarding through however long it was hidden.
+    pub fn set_live(&mut self, cx: &mut Cx, live: bool) {
+        if self.live == live {
+            return;
+        }
+        self.live = live;
+        if live {
+            self.last_time = None;
+            self.time_accum = 0.0;
+            self.next_frame = cx.new_next_frame();
+            self.area.redraw(cx);
+        }
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Host-driven orbit (drag on the cue well): radians per pixel applied
+    /// like the pane's own drag handler.
+    pub fn orbit_by(&mut self, cx: &mut Cx, dx: f32, dy: f32) {
+        self.orbit_yaw -= dx * 0.01;
+        self.orbit_pitch = (self.orbit_pitch + dy * 0.01).clamp(-1.45, 1.45);
+        self.area.redraw(cx);
+    }
+
+    /// Host-driven zoom (wheel on the cue well): same curve as the pane.
+    pub fn zoom_by(&mut self, cx: &mut Cx, axis: f64) {
+        if axis.abs() > f64::EPSILON {
+            let factor = if axis > 0.0 { 1.0 / 0.92 } else { 0.92 };
+            self.look.distance = (self.look.distance * factor).clamp(1.5, 30.0);
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Animation tracks of the loaded dancer (empty for statues/none).
+    pub fn clip_names(&self) -> Vec<String> {
+        self.dancer
+            .as_ref()
+            .map(|d| d.model.clips.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn clip_index(&self) -> Option<usize> {
+        self.dancer.as_ref().map(|d| d.clip)
+    }
+
+    /// The host's musical clock for this slot (or None to free-run). The
+    /// dancer's clip phase rides it directly — continuous by contract, so
+    /// no judder and no seams.
+    pub fn set_beat_clock(&mut self, clock: Option<(f64, f64)>) {
+        self.beat_clock = clock;
+    }
+
+    pub fn set_clip(&mut self, cx: &mut Cx, index: usize) {
+        if let Some(d) = self.dancer.as_mut() {
+            if index < d.model.clips.len() {
+                d.clip = index;
+                d.clip_time = 0.0;
+                self.area.redraw(cx);
+            }
+        }
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
@@ -249,6 +427,10 @@ impl VjMeshView {
 
     fn load_pending(&mut self, cx: &mut Cx) {
         let Some(prepared) = self.pending.take() else { return };
+        let step = crate::media::UiStep::new(match *prepared {
+            PreparedMesh::Skinned { .. } => "mesh upload (skinned)",
+            PreparedMesh::Statue { .. } => "mesh upload (static/world)",
+        });
         self.load_count += 1;
         match *prepared {
             PreparedMesh::Skinned { model, rest, clip, scale, lift, base_color } => {
@@ -277,37 +459,347 @@ impl VjMeshView {
                     lift,
                 });
             }
-            PreparedMesh::Statue { glb, base_color } => {
-                // Unskinned fallback: the renderer's own loader still parses
-                // on this thread, over worker-capped bytes.
+            PreparedMesh::Statue { model, base_color, level, nav_cfg, nav, start } => {
+                // GPU-only: the GLB was parsed on the decode worker (30ms of
+                // a 35ms Doom level), so this is the buffer/texture upload.
                 let name = format!("vj/statue-{}", self.load_count);
                 let png = base_color;
-                match self.renderer.load_model(cx, &name, &glb, png.as_deref()) {
+                let parse = crate::media::UiStep::new("renderer.load_model_parsed (upload)");
+                let loaded = self
+                    .renderer
+                    .load_model_parsed(cx, &name, *model, png.as_deref(), None);
+                parse.done(cx);
+                match loaded {
                     Ok(_tris) => {
                         let (min, max) = self
                             .renderer
                             .model_bounds(&name)
                             .unwrap_or((vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0)));
-                        let height = (max.y - min.y).max(0.01);
-                        let scale = 1.75 / height;
                         self.dancer = None;
                         self.statue_yaw = 0.0;
-                        self.statue = Some(ModelInstance {
-                            model: name,
-                            transform: trs_yaw(vec3f(0.0, -min.y * scale, 0.0), 0.0, scale),
-                            dynamic: false,
-                            depth_order: 0.0,
-                        });
-                        self.status =
-                            "static mesh (no animation clips) — turntable".to_string();
+                        if self.world_mode {
+                            self.load_world(name, min, max, level, nav_cfg, nav, start);
+                        } else {
+                            let height = (max.y - min.y).max(0.01);
+                            let scale = 1.75 / height;
+                            self.tour = None;
+                            self.statue = Some(ModelInstance {
+                                model: name,
+                                transform: trs_yaw(vec3f(0.0, -min.y * scale, 0.0), 0.0, scale),
+                                dynamic: false,
+                                depth_order: 0.0,
+                                part_poses: Vec::new(),
+                            });
+                            self.status =
+                                "static mesh (no animation clips) — turntable".to_string();
+                        }
+                        log!("VjMeshView: statue loaded ({})", self.load_count);
                     }
                     Err(e) => {
                         self.status = format!("mesh load failed: {e}");
+                        log!("VjMeshView: {}", self.status);
                     }
                 }
             }
         }
+        step.done(cx);
         self.area.redraw(cx);
+    }
+
+    /// A walkable level: identity transform (authored scale — a Doom map
+    /// squashed to 1.75 units is not walkable), TRIANGLE collision built on
+    /// the decode worker, and an NPC dropped on an interior floor.
+    ///
+    /// The catalog carries no player start today (classic worlds publish
+    /// `anchors: []`), so the start is found by probing the geometry: a
+    /// floor with a ceiling over it and room to walk.
+    fn load_world(
+        &mut self,
+        name: String,
+        min: Vec3f,
+        max: Vec3f,
+        level: Option<Box<LevelCollision>>,
+        nav_cfg: Option<WalkerConfig>,
+        mut nav: Option<Box<NavGrid>>,
+        start: Option<Vec3f>,
+    ) {
+        self.statue = Some(ModelInstance {
+            model: name.clone(),
+            transform: trs_yaw(vec3f(0.0, 0.0, 0.0), 0.0, 1.0),
+            dynamic: false,
+            depth_order: 0.0,
+            part_poses: Vec::new(),
+        });
+        // A level's door parts are animated nodes, NOT part of the static
+        // collision mesh, so their cells are walkable in the graph and the
+        // tour opens them on approach. `anim_part_boxes` is world space and
+        // the level's transform is identity, so it needs no mapping.
+        let doors: Vec<(String, (Vec3f, Vec3f))> = self
+            .renderer
+            .anim_part_boxes()
+            .into_iter()
+            .filter(|p| p.model == name)
+            .map(|p| (p.part, (p.min, p.max)))
+            .collect();
+        if let Some(nav) = nav.as_mut() {
+            let boxes: Vec<(Vec3f, Vec3f)> = doors.iter().map(|(_, b)| *b).collect();
+            if !boxes.is_empty() {
+                nav.mark_doors(&boxes);
+            }
+        }
+        let doors: Vec<String> = doors.into_iter().map(|(p, _)| p).collect();
+        // player_nav: the world's manifest anchors, taken here so the body
+        // below is built from the SAME facts the planner reads.
+        let anchors = std::mem::take(&mut self.world_anchors);
+        // Body, gait and gravity of the source engine, in this map's own
+        // units. The prep worker built the nav grid with exactly this
+        // config; walking it with any other offers steps the legs refuse.
+        let cfg = nav_cfg.unwrap_or_else(|| config_for_world(self.bob_style, &anchors));
+        let trace = std::env::var_os("VJ_WALKER_TRACE").is_some();
+        let Some(level) = level else {
+            self.tour = None;
+            self.status = "level has no collision — orbiting".to_string();
+            self.orbit_level(min, max);
+            return;
+        };
+        // Seeded by the load, so one tour is repeatable while two
+        // slots showing the same map do not walk in lockstep.
+        let seed = self.load_count.wrapping_mul(0x9e37) ^ level.triangles() as u64;
+        // player_nav: the player-behaviour planner over the door-marked
+        // grid. Its anchored start (when the manifest carries one) beats
+        // the grid's best guess; without a grid the walker's built-in tour
+        // keeps the picture alive.
+        let player =
+            nav.as_deref().and_then(|g| PlayerNav::new(g, &level, &cfg, &anchors, seed));
+        let (start, start_yaw) = match player.as_ref() {
+            Some(p) => {
+                let (feet, yaw) = p.start_hint();
+                (Some(feet), yaw)
+            }
+            None => (start, 0.0),
+        };
+        if trace {
+            if let Some(p) = player.as_ref() {
+                log!(
+                    "player: {} rooms, {} portals, {} anchors",
+                    p.graph().rooms(),
+                    p.graph().portals(),
+                    anchors.len()
+                );
+            }
+        }
+        match start {
+            Some(start) => {
+                self.status = format!(
+                    "walking {:.0}×{:.0} level ({} triangles)",
+                    max.x - min.x,
+                    max.z - min.z,
+                    level.triangles()
+                );
+                let reachable = nav
+                    .as_ref()
+                    .and_then(|g| g.cell_at(start).map(|c| g.reachable_from(c)))
+                    .unwrap_or(0);
+                log!(
+                    "VjMeshView: walking level, {} triangles, {} nav cells ({} reachable, {} doors), start {:.2},{:.2},{:.2}",
+                    level.triangles(),
+                    nav.as_ref().map(|g| g.len()).unwrap_or(0),
+                    reachable,
+                    doors.len(),
+                    start.x,
+                    start.y,
+                    start.z
+                );
+                if trace {
+                    let floor = level.floor_below(
+                        vec3f(start.x, start.y + cfg.step_up, start.z),
+                        cfg.step_up + cfg.fall_limit,
+                    );
+                    let ceiling = level.ceiling_above(vec3f(start.x, start.y + 0.02, start.z), 8.0);
+                    log!("walker: start floor {floor:?} ceiling {ceiling:?} bounds {min:?}..{max:?}");
+                    if let Some(g) = nav.as_ref() {
+                        let (nx, nz) = g.dims();
+                        log!(
+                            "walker: nav grid {nx}×{nz} columns @ {:.2} units, {} cells, {} edges",
+                            g.cell_size(),
+                            g.len(),
+                            g.edge_count()
+                        );
+                    }
+                }
+                self.tour = Some(WalkWorld {
+                    walker: LevelWalker::new(start, start_yaw, cfg, seed),
+                    level,
+                    nav,
+                    player,
+                    home: start,
+                    model: name,
+                    doors,
+                    stranded_ticks: 0,
+                    trace,
+                    since_trace: 0.0,
+                    goals_logged: 0,
+                });
+            }
+            None => {
+                // Nowhere to stand (a sealed shell, or a mesh with no
+                // floors): honest fallback to an orbit, never a stuck cam.
+                self.tour = None;
+                self.status = format!(
+                    "level has no walkable floor ({} triangles) — orbiting",
+                    level.triangles()
+                );
+                log!("VjMeshView: no interior start in {} triangles", level.triangles());
+                self.orbit_level(min, max);
+            }
+        }
+    }
+
+    /// Frame the whole level from outside (the no-floor fallback).
+    fn orbit_level(&mut self, min: Vec3f, max: Vec3f) {
+        self.look.target = vec3f(
+            (min.x + max.x) * 0.5,
+            (min.y + max.y) * 0.5,
+            (min.z + max.z) * 0.5,
+        );
+        self.look.distance = (max.x - min.x).max(max.z - min.z).max(1.0) * 0.8;
+    }
+
+    /// One fixed step of the level tour. The camera IS the walker: the orbit
+    /// rig is placed so its lens sits at the walker's eye looking along its
+    /// heading (`preview_scene_state` puts the camera at
+    /// `target - forward * distance`, with a 0.5 floor on distance).
+    fn run_walk_tick(&mut self) {
+        // ~0.12 s of white, the length of Doom's teleport fog flash.
+        self.view_flash = (self.view_flash - TICK_DT * 8.0).max(0.0);
+        let Some(w) = self.tour.as_mut() else { return };
+        // player_nav: the player's mind runs first — rooms, look-around
+        // pans, which exit leads somewhere new, door requests, cuts. It
+        // steers the walker through the level.rs seam; every step below
+        // (locomotion, the door dance, the flash) is unchanged and also
+        // serves the built-in tour when no planner exists.
+        if let (Some(p), Some(grid)) = (w.player.as_mut(), w.nav.as_deref()) {
+            if let Some(moment) = p.steer(TICK_DT, &mut w.walker, grid, &w.level) {
+                if w.trace {
+                    log!("player: {moment:?}");
+                }
+            }
+        }
+        if w.walker.tick_in(TICK_DT, &w.level, w.nav.as_deref()) == WalkerEvent::Stranded {
+            w.stranded_ticks += 1;
+            // Half a second of genuinely nothing underfoot: cut back to the
+            // start. `relocate` keeps everything the tour has learned —
+            // rebuilding the walker threw away the whole map memory, and one
+            // unlucky probe frame then reset the tour to zero.
+            if w.stranded_ticks >= 30 {
+                w.stranded_ticks = 0;
+                let (home, yaw) = (w.home, w.walker.yaw());
+                w.walker.relocate(home, yaw);
+            }
+        } else {
+            w.stranded_ticks = 0;
+        }
+        // A door the route wants: drive the part, then tell the walker it
+        // may walk through once the part has settled on "open".
+        if let Some(d) = w.walker.wanted_door() {
+            if let Some(part) = w.doors.get(d as usize).cloned() {
+                let settled = self
+                    .renderer
+                    .model_part_state(w.model.as_str(), &part)
+                    .is_some_and(|s| s.state_name == "open" && s.settled);
+                if settled {
+                    w.walker.set_door_open(d, true);
+                } else {
+                    self.renderer.set_model_state(w.model.as_str(), &part, "open", 0.6);
+                }
+            } else {
+                // No such part (a grid marked from stale boxes): never let
+                // the tour stand there waiting for a door that is not real.
+                w.walker.set_door_open(d, true);
+            }
+        }
+        self.renderer.tick_model_states(TICK_DT);
+        // A cut (teleporter, or leaving a wing the tour has finished) reads
+        // as a mistake without it: the camera would simply be somewhere else.
+        if w.walker.take_flash() {
+            self.view_flash = 1.0;
+        }
+        if w.trace {
+            w.since_trace += TICK_DT;
+            if w.since_trace >= 5.0 {
+                w.since_trace = 0.0;
+                // player_nav: the room-level picture, alongside the
+                // walker's cell-level one below.
+                if let Some(p) = w.player.as_ref() {
+                    let ps = p.stats();
+                    log!(
+                        "player: room {:?}, visited {}/{} rooms ({} portals), legs {}, doors {}, jams {}, cuts {}, restarts {}, epoch {}, route left {}",
+                        ps.room,
+                        ps.visited,
+                        ps.rooms,
+                        ps.portals,
+                        ps.legs,
+                        ps.doors_opened,
+                        ps.jammed,
+                        ps.region_cuts,
+                        ps.restarts,
+                        ps.epoch,
+                        ps.route_left
+                    );
+                }
+                let s = w.walker.nav_stats();
+                let fresh: Vec<u32> =
+                    w.walker.nav_goal_log().iter().skip(w.goals_logged).copied().collect();
+                w.goals_logged += fresh.len();
+                log!(
+                    "walker: distinct {}/{} cells, reachable {} ({} unseen), goal {:?} ({} waypoints left), replans {}, dropped edges {}, cuts {}, new goals {:?}",
+                    s.distinct,
+                    s.cells,
+                    s.reachable,
+                    s.unseen,
+                    s.goal,
+                    s.path_left,
+                    s.replans,
+                    s.invalidated,
+                    s.cuts,
+                    fresh
+                );
+            }
+        }
+        let pose = w.walker.camera();
+        let (eye, yaw, roll) = (pose.eye, pose.yaw, pose.roll);
+        let forward = makepad_render::level::yaw_forward(yaw);
+        self.look.target = eye + forward * 0.5;
+        self.look.distance = 0.5;
+        self.look.fov = 75.0;
+        self.orbit_yaw = yaw;
+        self.orbit_pitch = 0.0;
+        // Smooth the roll so a heading change eases in and out.
+        self.view_roll += (roll - self.view_roll) * 0.12;
+    }
+
+    /// The preview camera's look-at uses a fixed world up, so a rolled view
+    /// needs its own scene state: same eye/target, up vector tilted about
+    /// the view direction.
+    fn rolled_scene_state(&self, rect: Rect, time: f64) -> Option<SceneState3D> {
+        let mut state = preview_scene_state(self.look, rect, time)?;
+        if self.tour.is_none() {
+            return Some(state);
+        }
+        // First person indoors: the shared preview near plane (0.15) is
+        // half a Doom step, so a wall a body radius away can still clip.
+        // 0.05 with a D32 depth buffer keeps the whole map z-fight free.
+        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
+        state.projection = Mat4f::perspective(self.look.fov.clamp(20.0, 120.0), aspect, WALK_NEAR, WALK_FAR);
+        if self.view_roll.abs() < 1e-4 {
+            return Some(state);
+        }
+        let forward = (self.look.target - state.camera_pos).normalize();
+        let right = vec3f(self.look.yaw.cos(), 0.0, self.look.yaw.sin());
+        let up = vec3f(0.0, 1.0, 0.0) * self.view_roll.cos()
+            + right * self.view_roll.sin();
+        state.view = Mat4f::look_at(state.camera_pos, state.camera_pos + forward, up);
+        Some(state)
     }
 
     fn draw_scene(&mut self, cx: &mut Cx3d, scene_state: SceneState3D) {
@@ -362,7 +854,13 @@ impl VjMeshView {
             screen_instances: &[],
             view_model: None,
         };
-        let stage = if self.stage {
+        let stage = if self.tour.is_some() {
+            // A level brings its own floor: a plinth slab would slice
+            // through it at eye height. Keep the sky for open-air maps.
+            let mut stage = PreviewStage::empty();
+            stage.sky = self.stage;
+            stage
+        } else if self.stage {
             let mut stage = PreviewStage::statue();
             stage.ground_half = 9.0;
             stage.ground_color = vec4(0.10, 0.11, 0.14, 1.0);
@@ -400,21 +898,50 @@ impl WidgetNode for VjMeshView {
 
 impl Widget for VjMeshView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if self.next_frame.is_event(event).is_some() {
+        if self.next_frame.is_event(event).is_some() && self.live {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
             self.time_accum += (time - last).min(0.25);
             let mut ticked = false;
             while self.time_accum >= TICK_DT as f64 {
                 self.time_accum -= TICK_DT as f64;
-                if let Some(d) = self.dancer.as_mut() {
-                    // sample_clip wraps by duration: this IS the loop.
-                    d.clip_time += TICK_DT;
+                if self.paused {
+                    continue;
                 }
-                self.statue_yaw += TICK_DT * 0.5;
+                if let Some(d) = self.dancer.as_mut() {
+                    match self.beat_clock {
+                        // SYNC: one clip cycle spans a musical unit — the
+                        // skeletal twin of the sprite law. The clock is
+                        // continuous, so the pose never jumps; the loop
+                        // point lands exactly on a musical boundary.
+                        Some((position, bpm)) if bpm > 0.0 => {
+                            let duration = d
+                                .model
+                                .clips
+                                .get(d.clip)
+                                .map(|c| c.duration.max(1.0e-4))
+                                .unwrap_or(1.0);
+                            let natural_beats = duration as f64 * bpm / 60.0;
+                            let cycle = clip_cycle_beats(natural_beats);
+                            let phase = (position / cycle as f64).rem_euclid(1.0);
+                            d.clip_time = (phase * duration as f64) as f32;
+                        }
+                        // Free-run: sample_clip wraps by duration — the loop.
+                        _ => d.clip_time += TICK_DT,
+                    }
+                }
+                if self.tour.is_some() {
+                    // A level tours itself; it must not also spin.
+                    self.run_walk_tick();
+                } else {
+                    self.statue_yaw += TICK_DT * 0.5;
+                }
                 ticked = true;
             }
-            if ticked && (self.dancer.is_some() || self.statue.is_some()) {
+            // A tour that moved has to ask for its own frame: the pass is
+            // only re-rendered when this view draws, and nothing else on the
+            // console is obliged to redraw for it.
+            if ticked && (self.dancer.is_some() || self.statue.is_some() || self.tour.is_some()) {
                 self.area.redraw(cx);
             }
             self.next_frame = cx.new_next_frame();
@@ -472,30 +999,83 @@ impl Widget for VjMeshView {
         self.ensure_scene();
         self.load_pending(cx.cx);
         self.view_rect = rect;
+        if self.tour.is_some() && self.look.distance != 0.5 {
+            // A freshly loaded level draws before its first tick.
+            self.run_walk_tick();
+        }
         self.pass.set_size(cx, pass_rect.size);
-        self.pass.set_color_texture(
-            cx,
-            &self.color_texture,
-            DrawPassClearColor::ClearWith(self.pass_clear_color()),
-        );
+        let flashing = self.view_flash > 0.0;
+        let clear = match flashing {
+            true => vec4(1.0, 1.0, 1.0, 1.0),
+            false => self.pass_clear_color(),
+        };
+        self.pass
+            .set_color_texture(cx, &self.color_texture, DrawPassClearColor::ClearWith(clear));
         self.pass
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, None);
+        // begin_pass copies the PARENT pass rect into the child; the slot
+        // resolution has to be (re)asserted after it or the texture takes
+        // the window's size.
+        self.pass.set_size(cx, pass_rect.size);
         self.look.yaw = self.orbit_yaw;
         self.look.pitch = self.orbit_pitch;
-        if let Some(scene_state) = preview_scene_state(self.look, pass_rect, cx.time()) {
+        if let Some(scene_state) = self.rolled_scene_state(pass_rect, cx.time()) {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
-            let cx3d = &mut Cx3d::new(cx.cx);
-            self.draw_scene(cx3d, scene_state);
+            if !flashing {
+                let cx3d = &mut Cx3d::new(cx.cx);
+                self.draw_scene(cx3d, scene_state);
+            }
         }
         cx.end_pass(&self.pass);
         if self.composite && rect.size.x > 1.0 && rect.size.y > 1.0 {
             self.draw_bg.draw_vars.set_texture(0, &self.color_texture);
             self.draw_bg.draw_abs(cx, rect);
             self.area = self.draw_bg.area();
+            // Only a composited pane tracks its own area: set_pass_area
+            // REPLACES the explicit pass size, and a 4x4 slot placeholder
+            // would shrink the program texture to 8x8.
+            cx.set_pass_area(&self.pass, self.area);
         }
-        cx.set_pass_area(&self.pass, self.area);
         DrawStep::done()
+    }
+}
+
+/// How many beats one cycle of a skeletal clip spans when the slot is
+/// beat-synced: the power of two (1..=8) nearest IN RATIO to the clip's
+/// natural length in beats at the current tempo. Powers of two are the
+/// point — any other rounding puts the loop somewhere that is not a
+/// musical boundary, and a dancer hitting the loop mid-phrase reads as a
+/// stumble. A 1.9s dance clip at 126bpm (~4 natural beats) dances one
+/// cycle per bar; a short 0.9s bounce locks to two beats.
+fn clip_cycle_beats(natural_beats: f64) -> u32 {
+    let want = natural_beats.max(0.51);
+    let exp = want.log2().floor().clamp(0.0, 3.0) as u32;
+    let below = 1u32 << exp;
+    let above = (below * 2).min(8);
+    match want / below as f64 <= above as f64 / want {
+        true => below,
+        false => above,
+    }
+}
+
+#[cfg(test)]
+mod beat_fit_tests {
+    use super::clip_cycle_beats;
+
+    #[test]
+    fn clip_cycles_land_on_powers_of_two_beats() {
+        // A ~4-natural-beat dance clip dances one cycle per bar.
+        assert_eq!(clip_cycle_beats(4.0), 4);
+        // Nearest IN RATIO: 3 beats is closer to 4 than to 2 (1.33 vs 1.5).
+        assert_eq!(clip_cycle_beats(3.0), 4);
+        // Short bounce locks to a single beat...
+        assert_eq!(clip_cycle_beats(1.1), 1);
+        // ...and a long phrase caps at eight beats (two bars).
+        assert_eq!(clip_cycle_beats(23.0), 8);
+        // Degenerate inputs stay sane.
+        assert_eq!(clip_cycle_beats(0.0), 1);
+        assert_eq!(clip_cycle_beats(f64::NAN.max(0.51)), 1);
     }
 }
