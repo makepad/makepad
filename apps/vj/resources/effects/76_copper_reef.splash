@@ -1,0 +1,72 @@
+// COPPER REEF — rasterbars reborn as 3D lacquered slabs: a stack of
+// full-width copper bars sine-dancing and weaving in depth. Pattern
+// taught: the choreography CROSSFADE — `mode` (sine) rolls into
+// `mode_b` (curtain) and back on every bar via `p3: "0.5-0.5*cos(bar*
+// tau)"` (curtain keeps each bar's side of the centre, so the morph
+// never collapses the stack); `p0` pumps the dance amplitude with the
+// bass and `p1` is the classic rasterbar thickness breath.
+{
+    name: "Copper Reef"
+    engine: "copperbars"
+    seed: 7
+
+    bars: 22
+    mode: "sine"
+    mode_b: "curtain"
+    width: 15.0
+    span: 6.5
+    thickness: 0.44
+    depth: 1.3
+    amplitude: 1.7
+    weave: 1.3
+    metal: 3.0
+
+    beat_pulse: 0.6
+    p0: "0.3 + 0.9*bass + 0.5*pulse"    // amplitude gain
+    p1: "0.4 + 0.9*env(phase)"          // the thickness pump
+    p3: "0.5 - 0.5*cos(bar*tau)"        // sine <-> curtain each bar
+
+    // PERFORMANCE DIALS — DANCE/THICK are the engine's own p0/p1 levers
+    // (touching one holds its binding above); GLOW routes p2.
+    p2: 0.5
+    dials: [
+        {name: "DANCE", bind: "p0", default: 0.5},
+        {name: "THICK", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x0a0708
+    color_a: #xff9a3c      // copper core
+    color_b: #x571f10      // lacquer edge
+    color_c: #xffe8c0      // specular line
+
+    cam_orbit: 0.045
+    cam_fov: 50.0
+    fog: 0.020
+    glow: "1.1 * (0.25 + 1.5*p2)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.0, levels: 3},
+        {kind: "feedback", amount: "0.3 + 0.2*pulse", zoom: 1.004, dim: 0.95}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the bar gradient axis 0..1, attr = (id, aux, r0, r1).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCopper {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let band = pow(clamp(sin(t * 3.14159265), 0.0, 1.0), max(self.flow.z, 0.5))
+            let base = self.col_b.mix(self.col_a, band)
+            let sline = 1.0 - clamp(abs(t - 0.68) * 9.0, 0.0, 1.0)
+            let spec = pow(sline, 3.0) * (0.5 + self.time_beat.w * 0.8)
+            let vary = 0.85 + 0.30 * attr.z
+            return vec4(base.xyz * vary + self.col_c.xyz * spec, 1.0)
+        }
+    }
+}

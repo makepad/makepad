@@ -1,0 +1,33 @@
+// LUMA KEY — the MX50's soul: deck B keys over deck A wherever B's luma
+// clears the threshold, and the FADER IS THE KEY AMOUNT (a ridden mode:
+// park it mid-travel and hold the composite; AUTOFADE off is its natural
+// habitat). LVL sets the threshold, SOFT the key edge, INV keys the dark
+// half instead.
+{
+    name: "Luma Key"
+    engine: "transition"
+    // Overlay semantics: ridden to the fader's end the key STAYS fully
+    // applied (the composite is the destination) — never a snap to
+    // plain B. Zero only at the A end.
+    engage: "ramp"
+    dials: [
+        {name: "LVL", bind: "p0", default: 0.5},
+        {name: "SOFT", bind: "p1", default: 0.2},
+        {name: "INV", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let luma = dot(b.xyz, vec3(0.2126, 0.7152, 0.0722))
+            let lvl = mix(0.05, 0.95, self.user.x)
+            let soft = 0.01 + self.user.y * 0.3
+            let mut key = smoothstep(lvl - soft, lvl + soft, luma)
+            if self.user.z > 0.5 {
+                key = 1.0 - key
+            }
+            // t rides the key on: 0 = clean A, full = the keyed composite.
+            return a.mix(b, key * t)
+        }
+    }
+}

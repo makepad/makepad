@@ -1,0 +1,30 @@
+// IRIS — the circle. Deck B opens from the centre (FLIP: deck A closes
+// into it instead). Pattern taught: `self.aspect()` keeps the circle
+// CIRCULAR on a 16:9 canvas — forget it and every iris is an ellipse.
+{
+    name: "Iris"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.2},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let c = vec2((uv.x - 0.5) * self.aspect(), uv.y - 0.5)
+            let r = length(c)
+            // Far corner distance, so t = 1 always covers the frame.
+            let rmax = 0.5 * sqrt(self.aspect() * self.aspect() + 1.0)
+            let soft = 0.005 + self.user.x * 0.2
+            let tt = mix(t, 1.0 - t, step(0.5, self.user.y))
+            let edge = tt * (rmax + 2.0 * soft) - soft
+            let inside = smoothstep(edge + soft, edge - soft, r)
+            let cin = mix(self.deck_b(uv), self.deck_a(uv), step(0.5, self.user.y))
+            let cout = mix(self.deck_a(uv), self.deck_b(uv), step(0.5, self.user.y))
+            let c = cout.mix(cin, inside)
+            // DIP: duck through black mid-fade (0 = off, the stock iris).
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

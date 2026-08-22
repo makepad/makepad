@@ -1,0 +1,32 @@
+// SCREEN MIX — the soft additive (1-(1-a)(1-b)): lights combine without
+// clipping to white the way the raw add does. The gentle MX50 overlay.
+{
+    name: "Screen Mix"
+    engine: "transition"
+    // Overlay semantics: ridden to the fader's end the key STAYS fully
+    // applied (the composite is the destination) — never a snap to
+    // plain B. Zero only at the A end.
+    engage: "ramp"
+    p0: 0.5  p1: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "CURVE", bind: "p1", default: 0.5},
+        {name: "KEY", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let one = vec3(1.0, 1.0, 1.0)
+            // GAIN pushes B hotter into the screen (1:1 at mid-knob);
+            // CURVE bends the fader response; KEY gates by B's luma so
+            // only its bright parts screen through when raised.
+            let gain = 0.4 + self.user.x * 1.2
+            let tt = pow(clamp(t, 0.0, 1.0), pow(4.0, self.user.y * 2.0 - 1.0))
+            let luma = dot(b.xyz, vec3(0.2126, 0.7152, 0.0722))
+            let gate = mix(1.0, smoothstep(0.25, 0.75, luma), self.user.z)
+            let screened = one - (one - a.xyz) * (one - b.xyz * gain * tt * gate)
+            return vec4(screened, 1.0)
+        }
+    }
+}
