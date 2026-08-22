@@ -2264,7 +2264,7 @@ mod tests {
                 fps_den: 1,
                 video_bitrate_bps: 1_000_000,
                 audio: None,
-                keyframe_only: false,
+                ..Default::default()
             },
         )
         .expect("video encoder");
