@@ -212,6 +212,15 @@ pub struct VjFxView {
     #[rust]
     audio: [f32; 4],
 
+    /// Host overrides for the document's `p0..p3` user params (the effect
+    /// slots' general knobs). `None` leaves the document's own — possibly
+    /// music-bound — value in charge.
+    #[rust]
+    user_override: [Option<f32>; 4],
+    /// Host multiplier on the document's own clock (the slots' SPD knob).
+    #[rust(1.0f32)]
+    speed_scale: f32,
+
     #[rust]
     input0: Option<Texture>,
     /// The built-in ANIMATED stand-in for input 0: every texture-input
@@ -528,6 +537,28 @@ impl VjFxView {
         if index == 0 {
             self.input0 = texture;
         }
+    }
+
+    /// Host overrides for the document's `p0..p3` user params; `None` per
+    /// entry keeps the document's binding.
+    pub fn set_user_override(&mut self, over: [Option<f32>; 4]) {
+        self.user_override = over;
+    }
+
+    /// Host multiplier on the document's clock (1.0 = the document's own
+    /// `speed`). Clamped to a sane performance range.
+    pub fn set_speed_scale(&mut self, scale: f32) {
+        self.speed_scale = scale.clamp(0.05, 20.0);
+    }
+
+    /// One user param for this frame: the host override, else the binding.
+    fn user_value(&self, index: usize, sig: &Signals) -> f32 {
+        self.user_override[index].unwrap_or_else(|| {
+            self.doc
+                .as_ref()
+                .map(|d| d.params[index].value(sig))
+                .unwrap_or(0.0)
+        })
     }
 
     pub fn set_live(&mut self, cx: &mut Cx, live: bool) {
@@ -968,10 +999,10 @@ impl VjFxView {
             (
                 doc.engine.uniforms(),
                 vec4(
-                    doc.params[0].value(sig),
-                    doc.params[1].value(sig),
-                    doc.params[2].value(sig),
-                    doc.params[3].value(sig),
+                    self.user_override[0].unwrap_or_else(|| doc.params[0].value(sig)),
+                    self.user_override[1].unwrap_or_else(|| doc.params[1].value(sig)),
+                    self.user_override[2].unwrap_or_else(|| doc.params[2].value(sig)),
+                    self.user_override[3].unwrap_or_else(|| doc.params[3].value(sig)),
                 ),
                 vec4(
                     doc.sway.value(sig),
@@ -1167,8 +1198,9 @@ impl Widget for VjFxView {
             let dt = (time - last).clamp(0.0, 0.1);
             if !self.paused {
                 if let Some(doc) = &self.doc {
-                    self.local_time += dt * doc.speed as f64;
-                    self.frame_dt = (dt * doc.speed as f64) as f32;
+                    let speed = doc.speed as f64 * self.speed_scale as f64;
+                    self.local_time += dt * speed;
+                    self.frame_dt = (dt * speed) as f32;
                 }
                 if !self.host_beat {
                     self.beat_pos += dt * self.bpm / 60.0;
@@ -1246,8 +1278,8 @@ impl Widget for VjFxView {
                     _ => String::new(),
                 };
                 let glow = doc.glow.value(&sig).max(0.0);
-                let warp = doc.params[0].value(&sig);
-                let texmix = doc.params[1].value(&sig).clamp(0.0, 1.0);
+                let warp = self.user_value(0, &sig);
+                let texmix = self.user_value(1, &sig).clamp(0.0, 1.0);
                 (name, [glow, warp, texmix, 0.0], doc.palette)
             };
             match self.sim.fluid_view(

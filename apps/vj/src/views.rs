@@ -1120,25 +1120,6 @@ impl VideoProgram {
         self.area.redraw(cx);
     }
 
-    pub fn set_fx(
-        &mut self,
-        cx: &mut Cx,
-        fx: crate::fx::FxState,
-        beat: f32,
-        time: f32,
-        phases: (f32, f32),
-    ) {
-        self.draw_program.fx_kind = fx.kind.as_f32();
-        self.draw_program.fx_p1 = fx.p1.clamp(0.0, 1.0);
-        self.draw_program.fx_p2 = fx.p2.clamp(0.0, 1.0);
-        self.draw_program.fx_link1 = if fx.beat1 { 1.0 } else { 0.0 };
-        self.draw_program.fx_link2 = if fx.beat2 { 1.0 } else { 0.0 };
-        self.draw_program.fx_beat = beat.clamp(0.0, 1.0);
-        self.draw_program.fx_time = time;
-        self.draw_program.fx_phase1 = phases.0;
-        self.draw_program.fx_phase2 = phases.1;
-        self.area.redraw(cx);
-    }
 }
 
 impl WidgetNode for VideoProgram {
