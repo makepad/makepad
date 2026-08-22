@@ -27,6 +27,10 @@ mod catalog;
 mod chat;
 mod cue;
 mod decks;
+// VJ effect renderstack: mesh-generating engines configured by splash
+// documents (see effects/mod.rs for the document contract). Also compiled
+// standalone by the effect_gallery example.
+mod effects;
 mod flow;
 mod fx;
 mod gen;
@@ -9751,6 +9755,23 @@ impl App {
             .collect()
     }
 
+
+    /// The program-side deck's loaded clip for the enhance pipe: the slot
+    /// the crossfader currently shows (ties break to A), falling back to
+    /// the other deck so "the playing clip" never needs pixel-perfect fader
+    /// position. `None` when neither deck holds a catalog clip.
+    fn program_clip_source(&self) -> Option<(String, String)> {
+        let program = if self.program_mix <= 0.5 { 0 } else { 1 };
+        [program, 1 - program]
+            .into_iter()
+            .find_map(|slot| self.slot_scan[slot])
+            .map(|revision| {
+                let id = revision.to_string();
+                let short: String = id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+                (id, format!("clip …{short}"))
+            })
+    }
+
     // ---- video frame pump ---------------------------------------------------
 
     fn pump_video(&mut self, cx: &mut Cx) {
@@ -10817,6 +10838,7 @@ impl MatchEvent for App {
             .map(|(text, _)| text);
         if let Some(text) = submit_prompt {
             self.gen.set_prompt(text);
+            self.gen.enhance_source = self.program_clip_source();
             let cmds = self.gen.generate(now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
@@ -10829,6 +10851,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(gen_go)).clicked(actions) {
             let text = self.ui.text_input(cx, ids!(gen_prompt)).text();
             self.gen.set_prompt(text);
+            self.gen.enhance_source = self.program_clip_source();
             let cmds = self.gen.generate(now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
@@ -11314,6 +11337,7 @@ impl AppMain for App {
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::music_view::script_mod(vm);
+        crate::effects::script_mod(vm);
         self::script_mod(vm)
     }
 
