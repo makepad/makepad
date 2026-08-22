@@ -20,6 +20,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_REQUIRE_CUDA");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_NO_CUDA");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
@@ -30,6 +31,16 @@ fn main() {
         panic!(
             "MAKEPAD_GGML_REQUIRE_CUDA=1, but CUDA kernels are unsupported for target OS {target_os:?}"
         );
+    }
+    // A standalone app build (the VJ) must not link CUDA merely because the
+    // machine happens to carry the toolkit — the exe would then demand the
+    // CUDA DLLs on every machine it ships to. NO_CUDA forces the kernel-less
+    // stub the no-toolkit path already produces; it outranks REQUIRE.
+    if env_flag("MAKEPAD_GGML_NO_CUDA") {
+        println!(
+            "cargo:warning=makepad-ai-cuda: MAKEPAD_GGML_NO_CUDA set — building without CUDA kernels"
+        );
+        return;
     }
     if target_os == "linux" || target_os == "windows" {
         build_cuda_backends(&target_os, require_cuda);
