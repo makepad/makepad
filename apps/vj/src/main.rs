@@ -1123,7 +1123,16 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
-                                                fx_slot_a_tile := VjFxSlotTile{width: 130 height: 76}
+                                                fx_slot_a_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // A breath between face and
+                                                // dials (user-calibrated).
+                                                // FIXED widths inside the Fit
+                                                // card: a Fill child resolves
+                                                // against the OUTER context
+                                                // and silently inflates the
+                                                // card past the tile (the
+                                                // unequal-padding report).
+                                                View{width: 142 height: 2}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1143,9 +1152,9 @@ script_mod! {
                                                         fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
-                                                View{width: Fill height: Fill}
+                                                View{width: 142 height: Fill}
                                                 View{
-                                                    width: Fill height: Fit flow: Right
+                                                    width: 142 height: Fit flow: Right
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
@@ -1176,7 +1185,16 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
-                                                fx_slot_t_tile := VjFxSlotTile{width: 130 height: 76}
+                                                fx_slot_t_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // A breath between face and
+                                                // dials (user-calibrated).
+                                                // FIXED widths inside the Fit
+                                                // card: a Fill child resolves
+                                                // against the OUTER context
+                                                // and silently inflates the
+                                                // card past the tile (the
+                                                // unequal-padding report).
+                                                View{width: 142 height: 2}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1196,9 +1214,9 @@ script_mod! {
                                                         fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
-                                                View{width: Fill height: Fill}
+                                                View{width: 142 height: Fill}
                                                 View{
-                                                    width: Fill height: Fit flow: Right
+                                                    width: 142 height: Fit flow: Right
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
@@ -1229,7 +1247,16 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
-                                                fx_slot_b_tile := VjFxSlotTile{width: 130 height: 76}
+                                                fx_slot_b_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // A breath between face and
+                                                // dials (user-calibrated).
+                                                // FIXED widths inside the Fit
+                                                // card: a Fill child resolves
+                                                // against the OUTER context
+                                                // and silently inflates the
+                                                // card past the tile (the
+                                                // unequal-padding report).
+                                                View{width: 142 height: 2}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1249,9 +1276,9 @@ script_mod! {
                                                         fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
-                                                View{width: Fill height: Fill}
+                                                View{width: 142 height: Fill}
                                                 View{
-                                                    width: Fill height: Fit flow: Right
+                                                    width: 142 height: Fit flow: Right
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
