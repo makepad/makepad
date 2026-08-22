@@ -10339,8 +10339,14 @@ p2 {}
             return;
         }
         let now = cx.seconds_since_app_start();
+        // POLITENESS: while a set is running — the program window on a
+        // screen, or a deck playing — the renderer keeps to a single lane.
+        // At boot, idle, or a bulk regen it opens up to the full bank.
+        let performing = self.output_window_lifecycle == OutputWindowLifecycle::Open
+            || self.decks.deck(DeckId::A).playing
+            || self.decks.deck(DeckId::B).playing;
         let widget = self.ui.widget(cx, ids!(fx_thumbs));
-        let (results, idle, render_disabled, cache_dir) = {
+        let (results, free_lanes, render_disabled, cache_dir) = {
             let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
                 return;
             };
@@ -10352,13 +10358,16 @@ p2 {}
                 );
             }
             let Some(cache_dir) = thumbs.cache_dir().map(Path::to_path_buf) else { return };
+            thumbs.set_full_speed(!performing);
             (
                 thumbs.take_results(),
-                thumbs.is_idle(),
+                thumbs.free_lanes(),
                 thumbs.disabled_reason().is_some(),
                 cache_dir,
             )
         };
+        // Sources already on the way count against the free lanes.
+        let mut fetches = free_lanes.saturating_sub(self.fx_source_inflight.len());
         for sheet in results {
             self.fx_decode_pending.insert(sheet.revision, now);
             self.decode.submit(DecodeJob::Thumb {
@@ -10400,10 +10409,13 @@ p2 {}
             {
                 continue;
             }
-            let failed = widget
+            // Failed this session, or already on a lane / in the bank's
+            // queue (several documents render at once, so "busy" is no
+            // longer the same as "not idle").
+            let held = widget
                 .borrow::<fx_thumbs::VjFxThumbs>()
-                .is_some_and(|t| t.is_failed(&revision));
-            if failed {
+                .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
+            if held {
                 continue;
             }
             let transition = Self::alias_is_transition(tile.alias.as_deref());
@@ -10437,9 +10449,9 @@ p2 {}
                 }
                 continue;
             }
-            // Cache miss: one render pipeline at a time, and only while the
-            // renderer is idle and able.
-            if render_disabled || !idle || !self.fx_source_inflight.is_empty() {
+            // Cache miss: keep the render bank fed — one source fetch per
+            // free lane, no more (the bank itself staggers the loads).
+            if render_disabled || fetches == 0 {
                 continue;
             }
             if self.fx_source_inflight.contains(&revision) {
@@ -10461,8 +10473,8 @@ p2 {}
                 self.cat_reqs
                     .insert(id, CatPurpose::FxSource { asset, revision });
                 self.fx_source_inflight.insert(revision);
+                fetches -= 1;
             }
-            break;
         }
     }
 

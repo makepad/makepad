@@ -252,6 +252,13 @@ pub struct VjFxView {
     live: bool,
     #[rust]
     paused: bool,
+    /// HOST-DRIVEN CLOCK (the thumbnail renderer, fx_thumbs.rs): the widget
+    /// stops advancing its own clock on `NextFrame` and moves exactly the
+    /// document time a [`VjFxView::tick_manual`] call asks for. That lets a
+    /// host render a fixed span of document time as fast as the GPU allows
+    /// (and identically on any machine) instead of in wall-clock real time.
+    #[rust]
+    manual_clock: bool,
 
     /// Status line: what loaded, its cost, any document warnings.
     #[rust]
@@ -659,6 +666,52 @@ impl VjFxView {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+    }
+
+    /// Switch the clock to host control (see `manual_clock`). While on, the
+    /// widget's own `NextFrame` tick advances nothing; the host calls
+    /// [`VjFxView::tick_manual`] once per frame it wants rendered.
+    pub fn set_manual_clock(&mut self, on: bool) {
+        self.manual_clock = on;
+        self.last_time = None;
+    }
+
+    /// Advance the document clock by `dt` SECONDS OF WALL TIME the host is
+    /// pretending passed (the document's own `speed` and the host's
+    /// `speed_scale` still scale it, exactly as the real clock does), then
+    /// run the per-frame script tick. One call = one frame the host is about
+    /// to draw. No-op unless [`VjFxView::set_manual_clock`] is on.
+    pub fn tick_manual(&mut self, cx: &mut Cx, dt: f64) {
+        if !self.manual_clock || self.paused {
+            return;
+        }
+        if let Some(doc) = &self.doc {
+            let speed = doc.speed as f64 * self.speed_scale as f64;
+            self.local_time += dt * speed;
+            self.frame_dt = (dt * speed) as f32;
+        }
+        if !self.host_beat {
+            self.beat_pos += dt * self.bpm / 60.0;
+        }
+        self.run_frame_tick(cx);
+    }
+
+    /// True when the picture depends on the ITERATION HISTORY of the frames
+    /// before it — sim fields carry GPU state, feedback stages re-project
+    /// their own last output, emitters accumulate what the frame tick
+    /// spawned. A host stepping a span of document time must feed those in
+    /// small steps; everything else is a pure function of the clock and can
+    /// be jumped straight to the moment it wants.
+    pub fn needs_stepped_time(&self) -> bool {
+        self.doc.as_ref().is_some_and(|doc| {
+            !doc.fields.is_empty()
+                || doc.frame_fn.is_some()
+                || matches!(doc.engine, Engine::Emitters(_))
+                || doc
+                    .stages
+                    .iter()
+                    .any(|s| matches!(s, StageCfg::Feedback { .. }))
+        })
     }
 
     /// Slot-mode offscreen resolution (composite off). Thumbnail hosts set
@@ -1407,7 +1460,7 @@ impl WidgetNode for VjFxView {
 
 impl Widget for VjFxView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if self.next_frame.is_event(event).is_some() && self.live {
+        if self.next_frame.is_event(event).is_some() && self.live && !self.manual_clock {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
             let dt = (time - last).clamp(0.0, 0.1);
