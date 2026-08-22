@@ -8,13 +8,13 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps", "voice"] }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
-makepad-tts = { path = "../../libs/tts" }                  # kokoro voice output (🔊)
+makepad-ai-speech = { path = "../../libs/ai/models/speech" } # kokoro voice output (🔊)
 makepad-geodata = { path = "../../libs/geodata" }          # M1: geo.* corridor queries, rain radar
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader" } # terrain drape landcover source
 makepad-ai      = { path = "../../libs/makepad_ai" }       # M1: cloud agent + tool definitions
 serde_json      = "1"                                      # geodata FeatureHit attrs
 
-makepad-llama   = { path = "../../libs/llama" }            # M2: local dispatcher LLM (pure-Rust ggml)
+makepad-ai-llm  = { path = "../../libs/ai/llm" }           # M2: local dispatcher LLM (pure-Rust ggml)
 
 makepad-converse = { path = "../../libs/converse", features = ["local-llm"] } # M3: attention-gate filter
 

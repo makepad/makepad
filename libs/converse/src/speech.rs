@@ -1,6 +1,6 @@
 //! Speech output: a synthesis worker plus the playback buffer it fills.
 //!
-//! `makepad-tts` returns PCM rather than owning a device, so playback goes
+//! `makepad-ai-speech` returns PCM rather than owning a device, so playback goes
 //! through `cx.audio_output` like any other audio in Makepad. Muting is then
 //! just "stop feeding the buffer", which also makes it instant.
 //!
@@ -10,7 +10,7 @@
 //! voice onto an agent.
 
 #[cfg(feature = "tts")]
-use makepad_tts::Speaker;
+use makepad_ai_speech::Speaker;
 use makepad_widgets::makepad_draw::audio::AudioBuffer;
 #[cfg(feature = "tts")]
 use makepad_widgets::log;

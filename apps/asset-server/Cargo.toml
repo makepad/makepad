@@ -1,0 +1,37 @@
+# The standalone Asset Server host.
+#
+# The asset store is inherently MULTIPLAYER: asset-ui, the VJ, the sandbox
+# and headless workers are all clients of one catalog. So the catalog's
+# lifetime must not be any client's lifetime — closing a window must not
+# take the store down under everyone else. This binary is that process: the
+# catalog/CAS service, the chat broker, the events hub, LAN discovery, plus
+# the two background loops a fleet needs (the ai-content library publisher
+# and the GPU-fleet job coordinator), composed in one supervisor.
+#
+# It owns no UI and derives no content that needs a GPU surface: those loops
+# stay in the app that has the resources, as CLIENTS of this server.
+
+[package]
+name = "makepad-app-asset-server"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone Asset Server host: catalog service, chat broker, library publisher and fleet job coordinator in one process"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_app_asset_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-asset-server"
+path = "src/main.rs"
+
+[dependencies]
+# The service itself: catalog + CAS, chat broker, events hub, discovery.
+makepad-asset-store = { path = "../../libs/asset/store" }
+# The headless background loops, shared verbatim with the Asset Worker and
+# with the Asset UI's embedded mode: `watch` (library publication) and
+# `gen_service` (claim -> fleet dispatch -> publish, plus profile announce).
+makepad-asset-importer = { path = "../../libs/asset/importer" }
+# Endpoints + the publishing client the library watcher writes through.
+makepad-asset-client = { path = "../../libs/asset/client" }
