@@ -11,6 +11,9 @@
 name = "makepad-vj"
 version = "0.1.0"
 edition = "2021"
+# src/bin/karaoke_align.rs makes this a two-binary package; without this,
+# `cargo run -p makepad-vj` refuses to guess and demands --bin.
+default-run = "makepad-vj"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
