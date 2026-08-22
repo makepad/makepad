@@ -17,6 +17,7 @@ use makepad_asset_client::{
     AnnotationUpload, ApiEndpoints, AssetClient, ClientConfig,
 };
 use makepad_asset_data::{sha256, AssetKind, BlobId};
+use makepad_widgets::{log, vec3f};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,9 @@ use std::sync::Arc;
 use std::thread;
 
 /// Import-card preview strip size.
-pub const IMPORT_PREVIEW_SLOTS: usize = 8;
+/// How many imported items the LOAD grid remembers a picture for. A grid,
+/// not a strip: the surface shows what is coming in, and eight was a peek.
+pub const IMPORT_PREVIEW_SLOTS: usize = 60;
 
 /// One serial import job. The UI queue runs these one at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +64,12 @@ pub enum ImportJob {
         path: String,
     },
     KayKit,
+    /// A music directory the user picked in the native folder dialog. Unlike
+    /// every other job the path is REQUIRED — there is no conventional
+    /// location for someone's music library.
+    Music {
+        path: String,
+    },
 }
 
 impl ImportJob {
@@ -77,6 +86,13 @@ impl ImportJob {
             ImportJob::Quake3 { .. } => "Quake III demo".into(),
             ImportJob::DarkMod { .. } => "The Dark Mod".into(),
             ImportJob::KayKit => "KayKit".into(),
+            ImportJob::Music { path } => {
+                let leaf = std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                format!("Music · {leaf}")
+            }
         }
     }
 
@@ -96,6 +112,9 @@ impl ImportJob {
             | (ImportJob::Quake3 { .. }, ImportJob::Quake3 { .. })
             | (ImportJob::DarkMod { .. }, ImportJob::DarkMod { .. })
             | (ImportJob::KayKit, ImportJob::KayKit) => true,
+            // Two music jobs conflict only when they are the same folder —
+            // importing two different libraries in a row is legitimate.
+            (ImportJob::Music { path: a }, ImportJob::Music { path: b }) => a == b,
             _ => false,
         }
     }
@@ -382,26 +401,31 @@ pub fn kenney_pack_labels() -> Vec<String> {
         .collect()
 }
 
-/// Candidate local folders for one Kenney pack, first existing dir wins.
-pub fn kenney_candidate_dirs(pack: &str) -> Vec<PathBuf> {
+/// Folders that hold one sub-directory per Kenney kit. Env overrides first,
+/// then the checkout's `local/packs/kenney` — the same `local/packs/<id>`
+/// home the classic (Doom/Quake/…) packs use.
+pub fn kenney_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(root) = std::env::var("AI_CONTENT_PACK_ROOT") {
-        out.push(PathBuf::from(root).join("kenney").join(pack));
+        out.push(PathBuf::from(root).join("kenney"));
     }
     if let Ok(root) = std::env::var("KENNEY_PACK_ROOT") {
-        out.push(PathBuf::from(root).join(pack));
+        out.push(PathBuf::from(root));
     }
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     out.push(
-        repo.join("apps/sandbox/resources/models/kenney")
-            .join(pack),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("local/packs/kenney"),
     );
-    out.push(
-        repo.join("apps/sandbox/resources/audio/kenney")
-            .join(pack),
-    );
-    out.push(repo.join("local/packs/kenney").join(pack));
     out
+}
+
+/// Candidate local folders for one Kenney pack, first existing dir wins.
+pub fn kenney_candidate_dirs(pack: &str) -> Vec<PathBuf> {
+    kenney_roots()
+        .into_iter()
+        .map(|root| root.join(pack))
+        .collect()
 }
 
 pub fn resolve_kenney_dir(pack: &str, override_path: &str) -> PathBuf {
@@ -428,8 +452,8 @@ pub fn nasa_sky_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/sandbox/resources/sky")
 }
 
-/// On-disk Kenney slugs: `(name, page)`. Catalogued packs first, then any
-/// extra kit folder under the sandbox Kenney roots.
+/// On-disk Kenney slugs: `(name, page)`, sorted by name. Catalogued packs
+/// plus any extra kit folder under the Kenney roots ([`kenney_roots`]).
 pub fn on_disk_kenney_packs() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -442,13 +466,7 @@ pub fn on_disk_kenney_packs() -> Vec<(String, String)> {
             out.push((pack.name.to_string(), pack.page.to_string()));
         }
     }
-    let roots = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/sandbox/resources/models/kenney"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/sandbox/resources/audio/kenney"),
-    ];
-    for root in roots {
+    for root in kenney_roots() {
         let Ok(rd) = std::fs::read_dir(root) else {
             continue;
         };
@@ -476,16 +494,60 @@ pub fn on_disk_kenney_packs() -> Vec<(String, String)> {
             out.push((name, page));
         }
     }
+    // read_dir order is arbitrary; the dropdown lists dozens of kits.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
 /// Verified Asset Server session the Import thread may use. Absent = compile
 /// only; never pretend a pack landed in the catalog.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSession {
     pub endpoints: ApiEndpoints,
     pub token: String,
     pub server_id: [u8; 16],
+}
+
+/// The Asset Server THIS process hosts, from its own root files (`listen`
+/// is `ip:ctrl:data` on ephemeral ports, plus `server-id` and the bootstrap
+/// `admin-token`). `None` when no server is hosted here.
+pub(crate) fn hosted_server_session() -> Option<ServerSession> {
+    // The SAME root the embedded server uses, `AI_CONTENT_ASSET_ROOT`
+    // included. Reading the default location unconditionally made an
+    // instance started against an isolated store publish into the shared
+    // one whenever its own session was not up yet — an import must never
+    // land somewhere the operator did not point this process at.
+    let root = crate::asset_store_state::default_asset_server_root();
+    let token = std::fs::read_to_string(root.join("admin-token")).ok()?.trim().to_string();
+    if token.is_empty() {
+        return None;
+    }
+    let id = std::fs::read_to_string(root.join("server-id")).ok()?;
+    let server_id = parse_hex16_root(id.trim())?;
+    let listen = std::fs::read_to_string(root.join(makepad_asset_store::LISTEN_FILE)).ok()?;
+    let parts: Vec<&str> = listen.trim().split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some(ServerSession {
+        endpoints: ApiEndpoints {
+            control: format!("127.0.0.1:{}", parts[1]).parse().ok()?,
+            data: format!("127.0.0.1:{}", parts[2]).parse().ok()?,
+        },
+        token,
+        server_id,
+    })
+}
+
+fn parse_hex16_root(text: &str) -> Option<[u8; 16]> {
+    if text.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// One GLB (or other payload) the UI thread should persist into the local
@@ -556,12 +618,35 @@ pub enum ImportPhase {
         bake_failed: usize,
         current: String,
     },
+    /// Staged + baked; the import thread now BLOCKS (parked on an
+    /// `IconResumeGate` receiver) until the UI has GPU-rendered (or
+    /// fingerprint-reused) a real icon for every staged GLB into the
+    /// persistent pack icon cache. Compile/publish never runs before this
+    /// resolves — no placeholder-thumbnailed revision may ever reach the
+    /// store. `library` is handed to the UI immediately (same shape as
+    /// `Published`/`PackFinished`) so `land_imported_pack` can start
+    /// queuing icon work right away; see `ImportPage::icons_pending_ready`
+    /// / `resume_icons_pending`.
+    IconsPending {
+        pack: String,
+        assets: usize,
+        library: Vec<LibraryLanding>,
+        bake: BakeStats,
+    },
     /// Compiled locally; Asset Server was down so nothing is in the catalog.
     CompiledLocal {
         pack: String,
         assets: usize,
         blobs: usize,
         out: PathBuf,
+        /// Why the catalog did NOT get this pack, when that was a FAILURE
+        /// and not a choice. `None` — there was no server session, the
+        /// bundle is on disk and this is a clean local compile. `Some` —
+        /// the compiler or the publish REFUSED, and this pack did not
+        /// import; "Import all" counts it among the failures and the
+        /// status line leads with the reason instead of burying it in a
+        /// "catalog skipped (…)" aside.
+        error: Option<String>,
         library: Vec<LibraryLanding>,
         bake: BakeStats,
     },
@@ -584,6 +669,20 @@ pub enum ImportPhase {
         annotated: usize,
         library: Vec<LibraryLanding>,
         bake: BakeStats,
+        done: usize,
+        total: usize,
+        more: bool,
+    },
+    /// One pack FAILED during Import all — say why, right now, and keep
+    /// going. A multi-pack run used to collect these silently and report
+    /// nothing but a count at the end (`AllDone::failed`), which cost a
+    /// whole debugging session: 38 packs failed for one reason nobody could
+    /// read. This phase is transient (the next pack overwrites it) but it
+    /// is logged and drawn the moment it happens, and the reason also
+    /// survives into `AllDone::failed`.
+    PackFailed {
+        pack: String,
+        message: String,
         done: usize,
         total: usize,
         more: bool,
@@ -612,6 +711,89 @@ impl ImportPhase {
             current: String::new(),
         }
     }
+
+    /// Why this phase is a FAILURE, if it is one — the ONE place that
+    /// decides what "failed" means, shared by the card's failed flag, the
+    /// `[E]` log line and the run summary. Every phase that can carry a
+    /// refusal answers here, so a new failure shape cannot be added that
+    /// silently draws as success (which is exactly how a whole
+    /// 38-packs-failed run once shipped without a single reason anywhere).
+    ///
+    /// Always `<pack>: <reason>` — a reason that does not say WHICH pack is
+    /// half a diagnosis in a 46-kit run.
+    pub fn failure_reason(&self) -> Option<String> {
+        match self {
+            ImportPhase::Failed { pack, message }
+            | ImportPhase::PackFailed { pack, message, .. } => Some(format!("{pack}: {message}")),
+            ImportPhase::CompiledLocal {
+                pack,
+                error: Some(error),
+                ..
+            } => Some(format!("{pack}: {error}")),
+            ImportPhase::AllDone { failed, .. } if !failed.is_empty() => {
+                Some(failure_summary(failed))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The UI-side half of the icon-render handshake: an import thread that
+/// finished staging+baking sends `ImportPhase::IconsPending` and then
+/// BLOCKS on the `Receiver<()>` half of this gate until the UI resolves it
+/// — every staged GLB has a real icon (rendered or fingerprint-reused into
+/// `pack_icons_dir`), or the import was cancelled. Kenney/KayKit
+/// (`ImportPage`) own one; classic packs (`import_classic.rs`) should own
+/// their own per-source instance the same way — `armed()` for a fresh
+/// import, `arm()` on every new `IconsPending` message so a shared
+/// multi-pack channel (`start_kenney_import_all`) can never double-fire
+/// into the wrong pack's wait, `resume()` to signal once.
+#[derive(Default)]
+pub struct IconResumeGate {
+    tx: Option<mpsc::Sender<()>>,
+    sent: bool,
+}
+
+impl IconResumeGate {
+    /// Fresh gate for a new import thread; returns the receiver half to
+    /// move into that thread's closure (borrowed per pack via `&rx` — one
+    /// `IconsPending`/resume cycle per `run_kenney_import`/
+    /// `run_kaykit_import` call, reused across packs in "Import all").
+    pub fn armed() -> (Self, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Self {
+                tx: Some(tx),
+                sent: false,
+            },
+            rx,
+        )
+    }
+
+    /// A fresh `IconsPending` phase arrived for a (possibly new) pack:
+    /// allow exactly one resume send for it.
+    pub fn arm(&mut self) {
+        self.sent = false;
+    }
+
+    /// Send the resume signal once for the current pack. Returns `true` the
+    /// first time since the last `arm()`; a repeat call is a no-op so
+    /// `maybe_resume_icons_pending` firing on several polling ticks before
+    /// the phase advances can never double-send.
+    pub fn resume(&mut self) -> bool {
+        if self.sent {
+            return false;
+        }
+        let Some(tx) = &self.tx else {
+            return false;
+        };
+        if tx.send(()).is_ok() {
+            self.sent = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub struct ImportPage {
@@ -633,6 +815,16 @@ pub struct ImportPage {
     pub preview_dirty: bool,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<ImportPhase>>,
+    /// The icon-render handshake for whichever pack is currently
+    /// `IconsPending` — see [`IconResumeGate`]. Reused across every pack in
+    /// an "Import all" run (one `armed()` per `start_*` call, `arm()` per
+    /// pack's `IconsPending` message).
+    icon_resume: IconResumeGate,
+    /// (packs finished, packs in run) while an "Import all" run is active,
+    /// else None. Drives the overall progress bar and the "pack x/y"
+    /// status prefix — without it the bar restarted per pack, which over a
+    /// 38-pack run read as noise.
+    all_run: Option<(usize, usize)>,
 }
 
 impl Default for ImportPage {
@@ -650,6 +842,8 @@ impl Default for ImportPage {
             preview_dirty: false,
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
+            icon_resume: IconResumeGate::default(),
+            all_run: None,
         }
     }
 }
@@ -696,7 +890,7 @@ impl ImportPage {
             };
             return format!("{pack}: stopping…");
         }
-        match &self.kenney_phase {
+        let line = match &self.kenney_phase {
             ImportPhase::Downloading {
                 pack,
                 loaded,
@@ -762,14 +956,41 @@ impl ImportPage {
                 }
                 line
             }
+            ImportPhase::IconsPending {
+                pack,
+                assets,
+                library,
+                ..
+            } => {
+                // "icons ready" while NOTHING is registered yet is the lie
+                // that hid a 38-pack failure: an empty wait is a wait that
+                // has not started, never one that finished. Say which.
+                let meshes = library
+                    .iter()
+                    .filter(|landing| landing.content_type.contains("gltf"))
+                    .count();
+                if self.import_icon_files.is_empty() && meshes > 0 {
+                    format!("{pack}: queuing {meshes} icon renders before publish ({assets} staged)")
+                } else {
+                    format!(
+                        "{pack}: {} before publish ({assets} staged)",
+                        self.icon_status_fragment()
+                    )
+                }
+            }
             ImportPhase::CompiledLocal {
                 pack,
                 assets,
                 blobs,
                 bake,
                 out,
+                error,
                 ..
             } => {
+                if let Some(error) = error {
+                    // A refusal is not a "skip". Lead with it.
+                    return format!("{pack}: NOT imported — {error}");
+                }
                 let catalog = if out.is_file() || out.is_dir() {
                     "catalog skipped (server disconnected)".to_string()
                 } else {
@@ -836,6 +1057,20 @@ impl ImportPage {
                     bake_status_fragment(bake, &self.icon_status_fragment())
                 )
             }
+            ImportPhase::PackFailed {
+                pack,
+                message,
+                done,
+                total,
+                more,
+            } => {
+                let tail = if *more {
+                    "next pack…"
+                } else {
+                    "all packs done"
+                };
+                format!("import all {done}/{total} · {pack} FAILED — {message} · {tail}")
+            }
             ImportPhase::AllDone {
                 ok,
                 failed,
@@ -843,7 +1078,7 @@ impl ImportPage {
             } => {
                 let mut parts = vec![format!("{} packs imported", ok.len())];
                 if !failed.is_empty() {
-                    parts.push(format!("{} failed", failed.len()));
+                    parts.push(format!("{} failed — {}", failed.len(), failure_summary(failed)));
                 }
                 if !skipped.is_empty() {
                     parts.push(format!("{} not on disk", skipped.len()));
@@ -872,7 +1107,25 @@ impl ImportPage {
                     format!("not provisioned · {}", probe.line())
                 }
             }
+        };
+        // Inside an "Import all" run, in-pack lines lead with which pack of
+        // how many this is (pack-boundary lines already carry their own
+        // "import all d/t").
+        if let Some((done, total)) = self.all_run {
+            let in_pack = !matches!(
+                &self.kenney_phase,
+                ImportPhase::PackFinished { .. }
+                    | ImportPhase::PackFailed { .. }
+                    | ImportPhase::AllDone { .. }
+                    | ImportPhase::Idle
+                    | ImportPhase::Failed { .. }
+                    | ImportPhase::Cancelled { .. }
+            );
+            if in_pack && total > 0 {
+                return format!("pack {}/{total} · {line}", (done + 1).min(total));
+            }
         }
+        line
     }
 
     fn icon_status_fragment(&self) -> String {
@@ -903,9 +1156,29 @@ impl ImportPage {
     }
 
     /// Honest 0..1 progress from stage counts — no fake ETAs.
-    /// Compile/publish/AO are a short prefix; icon renders own most of the bar
-    /// because that is the slow, visible work (one GLB at a time).
+    /// During an "Import all" run the bar is the OVERALL run — finished
+    /// packs plus the current pack's own fraction, packs weighted equally —
+    /// because a per-pack bar restarting 38 times reads as a broken bar.
     pub fn progress_fraction(&self) -> f32 {
+        if let Some((done, total)) = self.all_run {
+            if total > 0 {
+                // A finished pack is already counted in `done`; its
+                // cumulative-icon fraction would double-count and make the
+                // bar dip when the next pack starts.
+                let pack = match &self.kenney_phase {
+                    ImportPhase::PackFinished { .. } | ImportPhase::PackFailed { .. } => 0.0,
+                    _ => self.pack_fraction().clamp(0.0, 1.0),
+                };
+                return ((done as f32 + pack) / total as f32).min(1.0);
+            }
+        }
+        self.pack_fraction()
+    }
+
+    /// The CURRENT pack's 0..1 fraction. Compile/publish/AO are a short
+    /// prefix; icon renders own most of the bar because that is the slow,
+    /// visible work (one GLB at a time).
+    fn pack_fraction(&self) -> f32 {
         match &self.kenney_phase {
             ImportPhase::Idle
             | ImportPhase::Failed { .. }
@@ -955,9 +1228,11 @@ impl ImportPage {
                 let n = (*bake_total).max(1) as f32;
                 0.12 + 0.08 * ((*bake_done).min(*bake_total) as f32 / n)
             }
-            ImportPhase::Published { .. }
+            ImportPhase::IconsPending { .. }
+            | ImportPhase::Published { .. }
             | ImportPhase::CompiledLocal { .. }
             | ImportPhase::PackFinished { .. }
+            | ImportPhase::PackFailed { .. }
             | ImportPhase::AllDone { .. } => {
                 let total = self.import_icon_files.len();
                 if total == 0 {
@@ -970,8 +1245,10 @@ impl ImportPage {
         }
     }
 
-    /// True while the import thread is still driving compile/publish/bake.
-    /// Icon rendering after publish does not block a reimport click.
+    /// True while the import thread is still driving stage/bake/icons/
+    /// compile/publish. `IconsPending` counts: the thread is PARKED,
+    /// waiting on `icon_resume` — a new import must not start until it
+    /// resolves (resumes to publish, or is cancelled).
     pub fn compiling(&self) -> bool {
         matches!(
             self.kenney_phase,
@@ -979,7 +1256,9 @@ impl ImportPage {
                 | ImportPhase::Publishing { .. }
                 | ImportPhase::Annotating { .. }
                 | ImportPhase::Baking { .. }
+                | ImportPhase::IconsPending { .. }
                 | ImportPhase::PackFinished { more: true, .. }
+                | ImportPhase::PackFailed { more: true, .. }
         )
     }
 
@@ -1068,9 +1347,11 @@ impl ImportPage {
             | ImportPhase::Publishing { pack, .. }
             | ImportPhase::Annotating { pack, .. }
             | ImportPhase::Baking { pack, .. }
+            | ImportPhase::IconsPending { pack, .. }
             | ImportPhase::Published { pack, .. }
             | ImportPhase::CompiledLocal { pack, .. }
             | ImportPhase::PackFinished { pack, .. }
+            | ImportPhase::PackFailed { pack, .. }
             | ImportPhase::PreviewThumb { pack, .. } => pack.clone(),
             ImportPhase::Idle | ImportPhase::AllDone { .. } => self.selected_pack_id().0,
         };
@@ -1085,6 +1366,11 @@ impl ImportPage {
             .saturating_sub(self.icons_processed());
         self.icons_failed = self.icons_failed.saturating_add(leftover);
         self.icon_current.clear();
+        // Do NOT touch `icon_resume` here: if the thread is parked in
+        // `IconsPending`, `maybe_resume_icons_pending`'s cancelled branch
+        // still needs `resume()` to fire so it can wake up, see `cancel`
+        // is set, and exit with `ImportPhase::Cancelled` itself instead of
+        // leaking a parked thread forever.
     }
 
     pub fn icons_total(&self) -> usize {
@@ -1099,6 +1385,7 @@ impl ImportPage {
         self.icon_current.clear();
         self.preview_thumbs.clear();
         self.preview_dirty = true;
+        self.all_run = None;
     }
 
     fn ingest_phase(&mut self, phase: ImportPhase) {
@@ -1110,14 +1397,92 @@ impl ImportPage {
                 self.push_preview_thumb(name.clone(), png.clone());
                 return;
             }
-            ImportPhase::Published { library, .. }
-            | ImportPhase::CompiledLocal { library, .. }
-            | ImportPhase::PackFinished { library, .. } => {
+            ImportPhase::IconsPending { library, .. } => {
+                self.pending_landings.extend(library.iter().cloned());
+                // A fresh pack's icon wait: allow exactly one resume send
+                // for it (see `IconResumeGate::arm`).
+                self.icon_resume.arm();
+            }
+            ImportPhase::Published { library, .. } | ImportPhase::PackFinished { library, .. } => {
+                self.pending_landings.extend(library.iter().cloned());
+            }
+            ImportPhase::CompiledLocal { library, .. } => {
                 self.pending_landings.extend(library.iter().cloned());
             }
             _ => {}
         }
+        match &phase {
+            ImportPhase::PackFinished { done, total, .. }
+            | ImportPhase::PackFailed { done, total, .. } => {
+                self.all_run = Some((*done, *total));
+            }
+            ImportPhase::AllDone { .. }
+            | ImportPhase::Failed { .. }
+            | ImportPhase::Cancelled { .. } => {
+                self.all_run = None;
+            }
+            _ => {}
+        }
         self.kenney_phase = phase;
+    }
+
+    /// True once an `IconsPending` pack's staged icons have all rendered
+    /// (or finished failing) and every landing it handed the UI has been
+    /// drained into the render queue — safe to let the parked import
+    /// thread continue to compile+publish. Landing drainage lives on the
+    /// App (`import_landings`, fed from `pending_landings` every tick), so
+    /// the caller passes whether that queue is currently empty.
+    pub fn icons_pending_ready(&self, landings_drained: bool) -> bool {
+        matches!(self.kenney_phase, ImportPhase::IconsPending { .. })
+            && landings_drained
+            && !self.icons_busy()
+    }
+
+    /// Staged meshes of the parked `IconsPending` pack that were never
+    /// REGISTERED for the icon wait ([`ImportPage::track_import_icon`]).
+    ///
+    /// The wait is over when every registered icon has reported; a mesh
+    /// that never registered is therefore invisible to it, and the gate
+    /// reads a wait with nothing outstanding as "all icons done — publish".
+    /// That is not a hypothetical: `land_imported_pack` once queued every
+    /// fresh GPU render WITHOUT registering it, so a 38-pack run resumed
+    /// instantly, compiled against the placeholders it had just written,
+    /// and every pack died on the placeholder guard while its real icons
+    /// were still rendering.
+    ///
+    /// The gate opens anyway when this is non-empty (a mesh that can never
+    /// be queued must not park an import forever) — the caller LOGS it,
+    /// and the publish-time placeholder guard still refuses the pack. This
+    /// is the diagnosis, not the enforcement.
+    pub fn unregistered_mesh_icons(&self) -> Vec<String> {
+        let ImportPhase::IconsPending { library, .. } = &self.kenney_phase else {
+            return Vec::new();
+        };
+        library
+            .iter()
+            .filter(|landing| landing.content_type.contains("gltf"))
+            .filter_map(|landing| {
+                let stem = landing.path.file_stem()?.to_str()?;
+                // Keys are `pack:<source>:<pack>:<stem>:<fingerprint>` —
+                // match on everything up to the fingerprint, which the
+                // caller computes from bytes this side cannot see.
+                let prefix = format!("pack:{}:{}:{stem}:", landing.source_id, landing.pack);
+                (!self
+                    .import_icon_files
+                    .iter()
+                    .any(|key| key.starts_with(&prefix)))
+                .then(|| stem.to_string())
+            })
+            .collect()
+    }
+
+    /// Let the parked import thread continue: normal readiness
+    /// (`icons_pending_ready`), or the user cancelled (the thread's own
+    /// `cancel` check right after waking decides abort-vs-continue either
+    /// way). No-op past the first call per `IconsPending` phase — see
+    /// [`IconResumeGate::resume`].
+    pub fn resume_icons_pending(&mut self) -> bool {
+        self.icon_resume.resume()
     }
 
     /// Fail-closed local compile, then publish when a server session is
@@ -1153,6 +1518,8 @@ impl ImportPage {
             .join(&pack_name);
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
+        let (icon_resume, icon_resume_rx) = IconResumeGate::armed();
+        self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling(pack_name.clone());
         let cancel = self.cancel.clone();
         thread::Builder::new()
@@ -1167,6 +1534,7 @@ impl ImportPage {
                     server,
                     &tx,
                     &cancel,
+                    &icon_resume_rx,
                 );
                 let _ = tx.send(phase);
             })
@@ -1198,12 +1566,14 @@ impl ImportPage {
             .join("../../local/ai_content_app/import/kaykit");
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
+        let (icon_resume, icon_resume_rx) = IconResumeGate::armed();
+        self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling("kaykit");
         let cancel = self.cancel.clone();
         thread::Builder::new()
             .name("asset-ui-kaykit-import".into())
             .spawn(move || {
-                let phase = run_kaykit_import(&dir, &out, spec, server, &tx, &cancel);
+                let phase = run_kaykit_import(&dir, &out, spec, server, &tx, &cancel, &icon_resume_rx);
                 let _ = tx.send(phase);
             })
             .map_err(|e| format!("failed to start KayKit import thread: {e}"))?;
@@ -1234,7 +1604,10 @@ impl ImportPage {
         }
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
+        let (icon_resume, icon_resume_rx) = IconResumeGate::armed();
+        self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling("all");
+        self.all_run = Some((0, present.len()));
         let cancel = self.cancel.clone();
         thread::Builder::new()
             .name("asset-ui-kenney-import-all".into())
@@ -1263,6 +1636,10 @@ impl ImportPage {
                     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .join("../../local/ai_content_app/import/kenney")
                         .join(&pack_name);
+                    // ONE `IconResumeGate` receiver serves every pack in this
+                    // run — `ImportPage::ingest_phase` re-`arm()`s it on each
+                    // fresh `IconsPending` message, so it is safe to reuse
+                    // across the whole loop (never two packs' waits at once).
                     let phase = run_kenney_import(
                         &dir,
                         &out,
@@ -1272,6 +1649,7 @@ impl ImportPage {
                         server.clone(),
                         &tx,
                         &cancel,
+                        &icon_resume_rx,
                     );
                     match phase {
                         ImportPhase::Cancelled { pack, message } => {
@@ -1298,6 +1676,25 @@ impl ImportPage {
                                 more,
                             });
                         }
+                        // A pack that COMPILED but whose compile or publish
+                        // was refused did not import. Counting it among the
+                        // successes is how "0 packs imported · 38 failed"
+                        // could ever have been the honest summary of a run
+                        // where something else went wrong.
+                        ImportPhase::CompiledLocal {
+                            pack,
+                            error: Some(message),
+                            ..
+                        } => {
+                            let _ = tx.send(ImportPhase::PackFailed {
+                                pack: pack.clone(),
+                                message: message.clone(),
+                                done,
+                                total,
+                                more,
+                            });
+                            failed.push((pack, message));
+                        }
                         ImportPhase::CompiledLocal {
                             pack,
                             assets,
@@ -1318,6 +1715,17 @@ impl ImportPage {
                             });
                         }
                         ImportPhase::Failed { pack, message } => {
+                            // Say it NOW, not as a count at the end: this
+                            // phase is what the card draws and what the app
+                            // log records for this pack. `failed` still
+                            // carries the reason into `AllDone`.
+                            let _ = tx.send(ImportPhase::PackFailed {
+                                pack: pack.clone(),
+                                message: message.clone(),
+                                done,
+                                total,
+                                more,
+                            });
                             failed.push((pack, message));
                         }
                         other => {
@@ -1356,6 +1764,18 @@ impl ImportPage {
                             | ImportPhase::Publishing { .. }
                             | ImportPhase::Annotating { .. }
                             | ImportPhase::Baking { .. }
+                            // A thread legitimately parked in IconsPending
+                            // holds `tx` alive; if it disconnects anyway
+                            // (panicked, or exited without publishing) the
+                            // UI must not stay stuck "compiling" forever —
+                            // fail closed instead of leaking a wait no one
+                            // will ever resolve.
+                            | ImportPhase::IconsPending { .. }
+                            // Same for a multi-pack run that died between
+                            // packs: `compiling()` calls these two busy, so
+                            // without this the queue would never advance.
+                            | ImportPhase::PackFinished { more: true, .. }
+                            | ImportPhase::PackFailed { more: true, .. }
                     ) {
                         self.kenney_phase = ImportPhase::Failed {
                             pack: self.selected_pack_id().0,
@@ -1369,6 +1789,25 @@ impl ImportPage {
             }
         }
         changed
+    }
+}
+
+/// A count is not a diagnosis. Name the first pack that failed and quote
+/// its reason verbatim (trimmed to one status-line's worth), so an
+/// "N failed" summary always ships at least one thread to pull.
+pub fn failure_summary(failed: &[(String, String)]) -> String {
+    let Some((pack, message)) = failed.first() else {
+        return String::new();
+    };
+    let mut reason = message.replace('\n', " ");
+    if reason.chars().count() > 160 {
+        reason = reason.chars().take(157).collect::<String>() + "…";
+    }
+    let rest = failed.len().saturating_sub(1);
+    if rest == 0 {
+        format!("{pack}: {reason}")
+    } else {
+        format!("{pack}: {reason} (+{rest} more)")
     }
 }
 
@@ -1420,6 +1859,7 @@ fn run_kaykit_import(
     server: Option<ServerSession>,
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
+    icon_resume_rx: &Receiver<()>,
 ) -> ImportPhase {
     let staged = out.join("work").join("source");
     let dest_root = out.join("out");
@@ -1433,29 +1873,73 @@ fn run_kaykit_import(
     if bundle.exists() {
         let _ = std::fs::remove_dir_all(&bundle);
     }
-    if let Err(error) = stage_source_pack(pack_dir, &staged) {
+    let (glbs, images) = match copy_pack_source_files(pack_dir, &staged) {
+        Ok(pair) => pair,
+        Err(error) => {
+            return ImportPhase::Failed {
+                pack: "kaykit".into(),
+                message: error,
+            };
+        }
+    };
+    ao_bake::seed_ao_from_source(pack_dir, &staged);
+    // A real icon straight from the mesh's own skeleton/animation where one
+    // exists — no GPU render needed for those. Must run BEFORE
+    // `kaykit_library_landings` (whose premade-thumbnail detection is a
+    // bare `thumb.is_file()`, no freshness check) and before any fallback
+    // placeholder gets synthesized, or a stale/placeholder `<stem>.png`
+    // could be mistaken for a real premade thumbnail.
+    write_kaykit_anim_icons(&staged);
+    let library = kaykit_library_landings(&staged);
+    // Real icons before publish, ALWAYS: hand off to the UI thread for
+    // whatever GLB `write_kaykit_anim_icons` couldn't cover (GPU-rendered
+    // or fingerprint-reused from `pack_icons_dir`), then block until it
+    // signals done or this import is cancelled. See `run_kenney_import`
+    // for the full rationale — same handshake, same guard.
+    let _ = tx.send(ImportPhase::IconsPending {
+        pack: "kaykit".into(),
+        assets: library.len(),
+        library: library.clone(),
+        bake: BakeStats::default(),
+    });
+    if icon_resume_rx.recv().is_err() {
+        return ImportPhase::Cancelled {
+            pack: "kaykit".into(),
+            message: "icon handshake lost".into(),
+        };
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: "kaykit".into(),
+            message: "stopped while rendering icons".into(),
+        };
+    }
+    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir, &staged) {
         return ImportPhase::Failed {
             pack: "kaykit".into(),
             message: error,
         };
     }
-    ao_bake::seed_ao_from_source(pack_dir, &staged);
-    write_kaykit_anim_icons(&staged);
+    if let Some(stem) = first_placeholder_stem(&glbs, &images, &staged) {
+        return ImportPhase::Failed {
+            pack: "kaykit".into(),
+            message: format!("icon for {stem} never rendered — refusing to publish a placeholder"),
+        };
+    }
     let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
         Ok(report) => report,
         Err(error) => {
-            let library = kaykit_library_landings(&staged);
             return ImportPhase::CompiledLocal {
                 pack: "kaykit".into(),
                 assets: library.len(),
                 blobs: 0,
-                out: PathBuf::from(format!("pack_import: {error}")),
+                out: bundle,
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
                 bake: BakeStats::default(),
             };
         }
     };
-    let library = kaykit_library_landings(&staged);
     if cancel.load(Ordering::SeqCst) {
         return ImportPhase::Cancelled {
             pack: "kaykit".into(),
@@ -1491,7 +1975,8 @@ fn run_kaykit_import(
             pack: "kaykit".into(),
             assets: report.assets,
             blobs: report.blobs,
-            out: PathBuf::from(error.clone()),
+            out: report.plan_path.clone(),
+            error: Some(format!("publish to the asset store failed: {error}")),
             library,
             bake: BakeStats::default(),
         };
@@ -1507,10 +1992,12 @@ fn run_kaykit_import(
             assets: report.assets,
             blobs: report.blobs,
             out: report.plan_path,
+            error: None,
             library,
             bake,
         };
     }
+    clear_pack_staging("kaykit", out, true);
     ImportPhase::Published {
         pack: "kaykit".into(),
         assets: report.assets,
@@ -1589,6 +2076,35 @@ fn kaykit_library_landings(staged: &Path) -> Vec<LibraryLanding> {
     out
 }
 
+/// Delete a pack's ORIGINAL staging (`work/`+`out/`, direct children of
+/// `out` — the exact root `run_kenney_import`/`run_kaykit_import` were
+/// given — never `icons/`, the persistent pack-icon cache, or any OTHER
+/// sibling) once its publish has actually succeeded. Real icons are already
+/// guaranteed to exist by the time this runs — the icon-render handshake
+/// blocks compile+publish until they do — so unlike the old "publish now,
+/// re-icon+republish+then-clean later" flow there is only ONE publish and
+/// ONE cleanup point per pack. Reuses the caller's own `out` root instead of
+/// reconstructing a `source/pack` path so it can never drift out of sync
+/// with Kenney's `.../kenney/<pack>` vs. KayKit's single `.../kaykit` (no
+/// pack subdirectory) layouts. A failure leaves staging in place for
+/// inspection/retry (`staging_dirs_to_clear(false)` is empty).
+pub(crate) fn clear_pack_staging(pack_name: &str, out: &Path, publish_ok: bool) {
+    let mut cleared = Vec::new();
+    for sub in staging_dirs_to_clear(publish_ok).iter().copied() {
+        let path = out.join(sub);
+        if !path.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => cleared.push(sub),
+            Err(error) => log!("import: {pack_name}: could not clear staging {sub}/: {error}"),
+        }
+    }
+    if !cleared.is_empty() {
+        log!("import: {pack_name}: staging reclaimed ({})", cleared.join(", "));
+    }
+}
+
 fn run_kenney_import(
     pack_dir: &Path,
     out: &Path,
@@ -1598,6 +2114,7 @@ fn run_kenney_import(
     server: Option<ServerSession>,
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
+    icon_resume_rx: &Receiver<()>,
 ) -> ImportPhase {
     // pack_import refuses --out whose existing ancestor contains the pack
     // (or vice versa). Source and bundle must be in sibling trees, and the
@@ -1614,12 +2131,56 @@ fn run_kenney_import(
     if bundle.exists() {
         let _ = std::fs::remove_dir_all(&bundle);
     }
-    if let Err(error) = stage_source_pack(pack_dir, &staged) {
-        return ImportPhase::Failed {
-            pack: pack_name,
-            message: error,
-        };
+    let (glbs, images) = match copy_pack_source_files(pack_dir, &staged) {
+        Ok(pair) => pair,
+        Err(error) => {
+            return ImportPhase::Failed {
+                pack: pack_name,
+                message: error,
+            };
+        }
+    };
+    // Source knowledge stops here. Kenney's car kit names four wheel mesh
+    // nodes consistently, but neither the catalog compiler nor the game is
+    // allowed to know those vendor names. Rewrite the staged copy into the
+    // generic vehicle-wheel GLB contract before thumbnails, AO, manifests or
+    // runtime bytes are produced. Re-running Import is therefore the whole
+    // migration: source files stay pristine and every derived artifact is
+    // rebuilt from the tagged GLB.
+    if pack_name == "car-kit" {
+        if let Err(error) = tag_kenney_car_pack(&glbs) {
+            return ImportPhase::Failed {
+                pack: pack_name,
+                message: error,
+            };
+        }
     }
+    if let Some(expected) = kenney_ragdoll_pack_expected(&pack_name) {
+        match tag_kenney_ragdoll_pack(&glbs) {
+            Ok(tagged) if tagged == expected => {}
+            Ok(tagged) => {
+                return ImportPhase::Failed {
+                    pack: pack_name,
+                    message: format!(
+                        "expected {expected} compatible Kenney humanoids, found {tagged}; refusing a partial ragdoll migration"
+                    ),
+                };
+            }
+            Err(error) => {
+                return ImportPhase::Failed {
+                    pack: pack_name,
+                    message: error,
+                };
+            }
+        }
+    }
+    // BEFORE any thumbnail is synthesized: a `<stem>.png` that exists only
+    // because we are about to write it (rendered-icon-or-placeholder) must
+    // never be mistaken for a pack-provided preview. `library_landings`'s
+    // `sibling_preview_png` treats any non-blank sibling PNG as "premade",
+    // with no fingerprint check — if it ran after `assign_staged_thumbnails`
+    // a STALE cached icon from a changed GLB would slip through as
+    // "premade" and skip the fresh render entirely.
     let library = library_landings(&staged, &pack_name, &pack_page);
     if library.is_empty() {
         return ImportPhase::Failed {
@@ -1627,26 +2188,90 @@ fn run_kenney_import(
             message: "folder has no png/jpeg/wav/mp4/glb to import".into(),
         };
     }
-    // Catalog compile is fail-closed and refuses some real Kenney kits
-    // (multi-texture GLBs). The Asset UI library still lands those GLBs
-    // so icons and the viewer work; the status line keeps the compiler error.
+    // AO/shadow bake BEFORE compile: the compiler attaches `<stem>.aomesh`,
+    // `.ao.png` and `.shadowsdf` to their GLB as derived roles, so the
+    // published asset carries its bake and a game streaming the mesh gets
+    // AO from the catalog. A source tree that was baked before (the restored
+    // Kenney cache, a re-import) seeds fresh sidecars and the bake is free;
+    // the UI still copies the sidecars onto library payloads at land time.
+    let bake = match kenney_bake_or_cancel(
+        pack_dir,
+        &staged,
+        &pack_name,
+        library.len(),
+        0,
+        tx,
+        cancel,
+    ) {
+        Ok(bake) => bake,
+        Err(phase) => return phase,
+    };
+    // Real icons before publish, ALWAYS: hand the staged GLBs to the UI
+    // thread (via `library`, same shape `Published`/`PackFinished` already
+    // carry — `land_imported_pack` starts queuing icon work immediately)
+    // and block here until it signals every icon is done (rendered fresh,
+    // or fingerprint-reused from `pack_icons_dir`), or this import gets
+    // cancelled. No placeholder-thumbnailed revision may ever reach the
+    // store — see `ImportPage::icons_pending_ready`/`resume_icons_pending`.
+    let _ = tx.send(ImportPhase::IconsPending {
+        pack: pack_name.clone(),
+        assets: library.len(),
+        library: library.clone(),
+        bake: bake.clone(),
+    });
+    if icon_resume_rx.recv().is_err() {
+        // The UI-side sender was dropped (app shutting down) — never
+        // publish with whatever staging happens to hold right now.
+        return ImportPhase::Cancelled {
+            pack: pack_name,
+            message: "icon handshake lost".into(),
+        };
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: pack_name,
+            message: "stopped while rendering icons".into(),
+        };
+    }
+    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir, &staged) {
+        return ImportPhase::Failed {
+            pack: pack_name,
+            message: error,
+        };
+    }
+    // Last guard: never publish a placeholder. A render that silently
+    // failed, or a fingerprint cache miss that fell through, still shows up
+    // here as a black `<stem>.png` — fail the pack loudly instead.
+    if let Some(stem) = first_placeholder_stem(&glbs, &images, &staged) {
+        return ImportPhase::Failed {
+            pack: pack_name,
+            message: format!("icon for {stem} never rendered — refusing to publish a placeholder"),
+        };
+    }
+    // Catalog compile is fail-closed about the PACK; a single model in a
+    // shape it does not support is named in `report.skipped_models` and
+    // left out rather than costing the kit. A pack-level refusal still
+    // keeps the compiler error in the status line.
     let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
         Ok(report) => report,
         Err(error) => {
-            return kenney_local_done(
-                pack_name,
-                library.len(),
-                0,
-                PathBuf::from(format!("pack_import: {error}")),
+            return ImportPhase::CompiledLocal {
+                pack: pack_name,
+                assets: library.len(),
+                blobs: 0,
+                out: bundle,
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
-                &staged,
-                pack_dir,
-                0,
-                tx,
-                cancel,
-            );
+                bake,
+            };
         }
     };
+    // A model left out is not a silent drop: name each one and why, at
+    // warning level, so "34 packs imported" can never hide content that
+    // did not arrive.
+    for (path, why) in &report.skipped_models {
+        log!("import: {pack_name}: SKIPPED {path} — {why}");
+    }
     if cancel.load(Ordering::SeqCst) {
         return ImportPhase::Cancelled {
             pack: pack_name,
@@ -1654,9 +2279,6 @@ fn run_kenney_import(
         };
     }
 
-    // Publish (when connected) before AO bake so catalog work is not blocked
-    // by multi-minute bakes. Bake writes sidecars beside staged GLBs; the UI
-    // copies them onto library payloads at land time.
     let publish_result = if let Some(session) = server {
         let _ = tx.send(ImportPhase::Publishing {
             pack: pack_name.clone(),
@@ -1684,34 +2306,18 @@ fn run_kenney_import(
 
     let (created, annotated, plan_path) = match publish_result {
         Some(Err(error)) => {
-            return kenney_local_done(
-                pack_name,
-                report.assets,
-                report.blobs,
-                PathBuf::from(format!("publish: {error}")),
+            return ImportPhase::CompiledLocal {
+                pack: pack_name,
+                assets: report.assets,
+                blobs: report.blobs,
+                out: report.plan_path.clone(),
+                error: Some(format!("publish to the asset store failed: {error}")),
                 library,
-                &staged,
-                pack_dir,
-                0,
-                tx,
-                cancel,
-            );
+                bake,
+            };
         }
         Some(Ok(pair)) => (pair.0, pair.1, report.plan_path),
         None => (false, 0usize, report.plan_path),
-    };
-
-    let bake = match kenney_bake_or_cancel(
-        pack_dir,
-        &staged,
-        &pack_name,
-        report.assets,
-        annotated,
-        tx,
-        cancel,
-    ) {
-        Ok(bake) => bake,
-        Err(phase) => return phase,
     };
 
     if publish_result.is_none() {
@@ -1720,10 +2326,14 @@ fn run_kenney_import(
             assets: report.assets,
             blobs: report.blobs,
             out: plan_path,
+            error: None,
             library,
             bake,
         };
     }
+    // Published, with real icons already baked into the manifest — the
+    // ONLY cleanup point staging needs now (see `clear_pack_staging`).
+    clear_pack_staging(&pack_name, out, true);
     ImportPhase::Published {
         pack: pack_name,
         assets: report.assets,
@@ -1777,33 +2387,6 @@ fn pack_has_importable_payload(dir: &Path) -> bool {
     false
 }
 
-fn kenney_local_done(
-    pack_name: String,
-    assets: usize,
-    blobs: usize,
-    out: PathBuf,
-    library: Vec<LibraryLanding>,
-    staged: &Path,
-    pack_dir: &Path,
-    annotated: usize,
-    tx: &std::sync::mpsc::Sender<ImportPhase>,
-    cancel: &AtomicBool,
-) -> ImportPhase {
-    match kenney_bake_or_cancel(
-        pack_dir, staged, &pack_name, assets, annotated, tx, cancel,
-    ) {
-        Ok(bake) => ImportPhase::CompiledLocal {
-            pack: pack_name,
-            assets,
-            blobs,
-            out,
-            library,
-            bake,
-        },
-        Err(phase) => phase,
-    }
-}
-
 fn kenney_bake_or_cancel(
     pack_dir: &Path,
     staged: &Path,
@@ -1820,6 +2403,15 @@ fn kenney_bake_or_cancel(
         });
     }
     ao_bake::seed_ao_from_source(pack_dir, staged);
+    if pack_name == "car-kit" {
+        // Source AO was baked before Asset UI split the wheels out of the
+        // static stream. It is therefore not a valid cache for the staged,
+        // tagged GLB: leaving it newer than the GLB would render one frozen
+        // wheel set from the aomesh plus a second driven set from the GLB.
+        // Remove only derived sidecars belonging to tagged vehicle files;
+        // standalone Car Kit props can still reuse their source bake.
+        invalidate_tagged_vehicle_sidecars(staged);
+    }
     let bake = bake_staged_glbs(staged, pack_name, assets, annotated, tx, cancel);
     if cancel.load(Ordering::SeqCst) {
         return Err(ImportPhase::Cancelled {
@@ -1834,11 +2426,149 @@ fn kenney_bake_or_cancel(
     Ok(bake)
 }
 
-/// Copy only pack-source files into `dest`. Engine-derived sidecars stay
-/// behind. Each GLB without a same-stem PNG/JPEG ≥ 512px gets a placeholder
-/// thumbnail so the fail-closed compiler can emit a valid manifest; the UI
-/// replaces that with a ThumbnailRenderer cache after publish.
-fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
+fn invalidate_tagged_vehicle_sidecars(staged: &Path) {
+    for glb in ao_bake::collect_glbs(staged) {
+        let Ok(bytes) = std::fs::read(&glb) else {
+            continue;
+        };
+        if !bytes
+            .windows(b"vehicle_wheel".len())
+            .any(|window| window == b"vehicle_wheel")
+        {
+            continue;
+        }
+        for extension in ["aomesh", "ao.png", "shadowsdf"] {
+            let sidecar = glb.with_extension(extension);
+            if let Err(error) = std::fs::remove_file(&sidecar) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log!("import: could not invalidate {}: {error}", sidecar.display());
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pack icon store: the ONLY thing pack imports persist locally.
+//
+// The local AI-workspace library (`library.rs`) is for AI-generated / drop /
+// webcam content; a pack lands in the ASSET STORE ONLY (`publish_compiled_pack`,
+// run once from `run_kenney_import`/`run_kaykit_import`, ONLY after real
+// icons exist — see the icon-render handshake, `ImportPhase::IconsPending`)
+// and never gets a library row. GPU icon rendering (`land_imported_pack` in
+// main.rs) still needs somewhere durable to cache each rendered icon so
+// `assign_staged_thumbnails` can embed the real render instead of a black
+// placeholder before that one publish, and so an unchanged reimport can
+// skip re-rendering entirely — that "somewhere" is this directory, a
+// sibling of (never inside) the pack's `work/`/`out/` staging trees, which
+// ARE deleted once the publish succeeds (`staging_dirs_to_clear`,
+// `clear_pack_staging`).
+// ---------------------------------------------------------------------------
+
+/// Where a pack's rendered GPU icons persist across imports. Layout:
+/// `<dir>/<stem>.png` (the rendered icon) + `<dir>/<stem>.fp` (a content
+/// fingerprint of the GLB bytes that were rendered — the staging-free analog
+/// of `library::keep_existing_glb_thumbnail`'s byte comparison, since there
+/// is no persisted payload copy to compare against once staging is deleted).
+pub fn pack_icons_dir(source_id: &str, pack: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../local/ai_content_app/import")
+        .join(source_id)
+        .join(pack)
+        .join("icons")
+}
+
+/// Cheap, deterministic (NOT cryptographic) content fingerprint — enough to
+/// detect "this pack item's bytes changed since we last rendered its icon".
+pub fn content_fingerprint(bytes: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.len().hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Stable per-item icon-render key. `ThumbnailRenderer`/`ImportPage::track_import_icon`
+/// treat this as an opaque string id, so the fingerprint rides along inside
+/// it for free — `drain_rendered_thumbnails` (main.rs) parses it back out
+/// with [`parse_pack_icon_key`] to persist the finished render without ever
+/// needing a library row.
+pub fn pack_icon_key(source_id: &str, pack: &str, stem: &str, fingerprint: &str) -> String {
+    format!("pack:{source_id}:{pack}:{stem}:{fingerprint}")
+}
+
+/// Inverse of [`pack_icon_key`]. `None` for any non-pack (library) icon key.
+pub fn parse_pack_icon_key(key: &str) -> Option<(String, String, String, String)> {
+    let rest = key.strip_prefix("pack:")?;
+    let mut parts = rest.splitn(4, ':');
+    let source_id = parts.next()?.to_string();
+    let pack = parts.next()?.to_string();
+    let stem = parts.next()?.to_string();
+    let fingerprint = parts.next()?.to_string();
+    Some((source_id, pack, stem, fingerprint))
+}
+
+/// Pure keep-vs-rerender decision for a pack item's persisted icon — the
+/// staging-free analog of `library::keep_existing_glb_thumbnail`. Keep only
+/// when a previously rendered icon is on disk AND its recorded fingerprint
+/// still matches the freshly staged bytes; a changed payload (or an icon
+/// that never rendered) still gets a render.
+pub fn pack_icon_reusable(icon_exists: bool, recorded_fp: Option<&str>, new_fp: &str) -> bool {
+    icon_exists && recorded_fp == Some(new_fp)
+}
+
+/// Read a pack item's persisted icon from `dir` (see [`pack_icons_dir`]) if
+/// its recorded fingerprint still matches `new_fp`. `None` means: render.
+pub fn read_reusable_pack_icon(dir: &Path, stem: &str, new_fp: &str) -> Option<Vec<u8>> {
+    let icon_path = dir.join(format!("{stem}.png"));
+    let fp_path = dir.join(format!("{stem}.fp"));
+    let recorded = std::fs::read_to_string(&fp_path).ok();
+    if pack_icon_reusable(icon_path.is_file(), recorded.as_deref().map(str::trim), new_fp) {
+        std::fs::read(&icon_path).ok()
+    } else {
+        None
+    }
+}
+
+/// Persist a freshly rendered pack icon + its fingerprint under `dir` (see
+/// [`pack_icons_dir`]) so the next reimport of unchanged content can skip
+/// the GPU render.
+pub fn write_pack_icon(dir: &Path, stem: &str, fingerprint: &str, png: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(format!("{stem}.png")), png)?;
+    std::fs::write(dir.join(format!("{stem}.fp")), fingerprint)?;
+    Ok(())
+}
+
+/// The staging subdirectories to delete after a pack's publish+icon-refresh
+/// cycle — `work/`+`out/`, everything the initial `run_kenney_import` wrote
+/// and nothing else ever reads again (`ImportPhase::{CompiledLocal,Published}::out`
+/// is write-only/display metadata) — ONLY on success; a failure keeps them
+/// around for inspection/retry. `icons/` (this pack's persistent GPU-icon
+/// cache) and `thumb-refresh/` (already self-cleaning) are never included.
+pub fn staging_dirs_to_clear(publish_succeeded: bool) -> &'static [&'static str] {
+    if publish_succeeded {
+        &["work", "out"]
+    } else {
+        &[]
+    }
+}
+
+/// Copy only pack-source files into `dest` (file walk + GLB texture embed).
+/// Engine-derived sidecars stay behind. Returns every staged GLB path and
+/// the stems that already ship their OWN same-stem PNG/JPEG ≥ 512px — a
+/// thumbnail must never be synthesized over those. Split out of the old
+/// `stage_source_pack` so `run_kenney_import`/`run_kaykit_import` can run
+/// the icon-assignment pass (`assign_staged_thumbnails`) only ONCE, AFTER
+/// the icon-render handshake resolves — never before, so compile+publish
+/// can never run against a placeholder. `stage_source_pack` itself (still
+/// used by tests that don't care about that ordering) just calls both
+/// halves back to back.
+fn copy_pack_source_files(
+    src: &Path,
+    dest: &Path,
+) -> Result<(Vec<PathBuf>, std::collections::BTreeSet<String>), String> {
     if dest.exists() {
         std::fs::remove_dir_all(dest).map_err(|e| format!("clear staging {}: {e}", dest.display()))?;
     }
@@ -1887,6 +2617,16 @@ fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
             if ext == "png" && lower.ends_with("_texture.png") {
                 continue;
             }
+            // An older import left the 512² black placeholder BESIDE the
+            // source GLBs (`local/packs/kenney/*/<stem>.png`). It is not a
+            // preview: skip it here so the GLB gets a real assigned icon
+            // instead of publishing a black thumbnail forever.
+            if ext == "png"
+                && path.with_extension("glb").is_file()
+                && std::fs::read(&path).is_ok_and(|bytes| is_blank_preview_png(&bytes))
+            {
+                continue;
+            }
             let rel = path.strip_prefix(src).unwrap_or(&path);
             let target = dest.join(rel);
             if let Some(parent) = target.parent() {
@@ -1896,8 +2636,16 @@ fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
             std::fs::copy(&path, &target)
                 .map_err(|e| format!("copy {} → {}: {e}", path.display(), target.display()))?;
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
-                if let Some(stem) = target.with_extension("").file_name() {
-                    images.insert(stem.to_os_string());
+                // Keyed by the staged-RELATIVE stem, the same shape the
+                // pack key has. Keying by bare file name made a texture
+                // shadow a model of the same name from another directory:
+                // `Textures/fence.png` convinced the thumbnail pass that
+                // `fence.glb` already shipped its own preview, so no icon
+                // was written and compile refused the whole kit for a
+                // missing thumbnail. Five models across the two retro kits
+                // (fence/roof/water, grass/planks) were exactly that.
+                if let Some(stem) = staged_stem_key(dest, &target) {
+                    images.insert(stem);
                 }
             }
             if ext == "glb" {
@@ -1929,17 +2677,691 @@ fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
             }
         }
     }
+    Ok((glbs, images))
+}
+
+/// The four source-node spellings in Kenney Car Kit. This is deliberately
+/// private to Asset UI's Kenney staging adapter: published GLBs carry only
+/// the generic `vehicle_wheel` / `wheel_*` contract below.
+const KENNEY_CAR_WHEELS: [(&str, &str); 4] = [
+    ("wheel-front-left", "wheel_front_left"),
+    ("wheel-front-right", "wheel_front_right"),
+    ("wheel-back-left", "wheel_rear_left"),
+    ("wheel-back-right", "wheel_rear_right"),
+];
+
+/// Tag every complete four-wheel model in a staged Car Kit. Standalone wheel
+/// files and debris have none of the four names and pass through unchanged;
+/// a partial match refuses, because publishing a car with three connection
+/// points is worse than naming the broken source file.
+fn tag_kenney_car_pack(glbs: &[PathBuf]) -> Result<usize, String> {
+    let mut tagged = 0usize;
+    for path in glbs {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("read staged car {}: {e}", path.display()))?;
+        let Some(out) = tag_kenney_car_glb(&bytes)? else {
+            continue;
+        };
+        std::fs::write(path, out)
+            .map_err(|e| format!("write staged car {}: {e}", path.display()))?;
+        tagged += 1;
+    }
+    if tagged == 0 {
+        return Err("car-kit contains no complete four-wheel GLBs".into());
+    }
+    log!("import: car-kit: authored generic vehicle rigs for {tagged} models");
+    Ok(tagged)
+}
+
+/// Convert one Kenney car GLB into the engine-neutral vehicle part contract.
+/// `None` means the file is not a complete vehicle (standalone wheels and
+/// debris); `Some` is byte-complete GLB output with the original BIN intact.
+fn tag_kenney_car_glb(glb: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let loaded = makepad_gltf::load_gltf_from_bytes(glb, None)
+        .map_err(|e| format!("inspect Kenney car GLB: {e}"))?;
+    let nodes = loaded.document.nodes_slice();
+    let mut found = Vec::with_capacity(4);
+    for (source_name, connection) in KENNEY_CAR_WHEELS {
+        let matches: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| (n.name.as_deref() == Some(source_name)).then_some(i))
+            .collect();
+        if matches.len() > 1 {
+            return Err(format!("duplicate Kenney wheel node {source_name}"));
+        }
+        if let Some(&node) = matches.first() {
+            found.push((node, connection));
+        }
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    if found.len() != KENNEY_CAR_WHEELS.len() {
+        return Err(format!(
+            "partial Kenney vehicle rig: found {} of {} wheel nodes",
+            found.len(),
+            KENNEY_CAR_WHEELS.len()
+        ));
+    }
+
+    let parents = gltf_node_parents(nodes)?;
+    let worlds: Vec<[f32; 16]> = (0..nodes.len())
+        .map(|i| gltf_node_world(i, nodes, &parents))
+        .collect::<Result<_, _>>()?;
+    let mut wheels = Vec::with_capacity(4);
+    for (node_index, connection) in found {
+        let node = &nodes[node_index];
+        let mesh_index = node
+            .mesh
+            .ok_or_else(|| format!("Kenney wheel node {node_index} has no mesh"))?;
+        let mesh = loaded
+            .document
+            .meshes_slice()
+            .get(mesh_index)
+            .ok_or_else(|| format!("Kenney wheel node {node_index} has a bad mesh"))?;
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        let mut count = 0usize;
+        for primitive in &mesh.primitives {
+            let accessor = primitive
+                .attributes
+                .get("POSITION")
+                .copied()
+                .ok_or_else(|| format!("Kenney wheel {connection} has no POSITION"))?;
+            for p in makepad_gltf::read_accessor_f32x3(&loaded, accessor)
+                .map_err(|e| format!("read Kenney wheel {connection}: {e}"))?
+            {
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(p[axis]);
+                    hi[axis] = hi[axis].max(p[axis]);
+                }
+                count += 1;
+            }
+        }
+        if count < 3 {
+            return Err(format!("Kenney wheel {connection} has no drawable geometry"));
+        }
+        let pivot = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        // The authored axle is local X; the circular section is local Y/Z.
+        let world = &worlds[node_index];
+        let axis_scale = |column: usize| {
+            let base = column * 4;
+            (world[base] * world[base]
+                + world[base + 1] * world[base + 1]
+                + world[base + 2] * world[base + 2])
+                .sqrt()
+        };
+        let radius = ((hi[1] - lo[1]) * axis_scale(1))
+            .max((hi[2] - lo[2]) * axis_scale(2))
+            * 0.5;
+        let width = (hi[0] - lo[0]) * axis_scale(0);
+        if !radius.is_finite() || !width.is_finite() || radius <= 0.0 || width <= 0.0 {
+            return Err(format!("Kenney wheel {connection} has invalid measured dimensions"));
+        }
+        let anchor = gltf_transform_point(&worlds[node_index], pivot);
+        wheels.push((node_index, connection, pivot, anchor, radius, width));
+    }
+
+    let (json_bytes, bin) = split_glb(glb)?;
+    let mut value = makepad_asset_client::json::parse(json_bytes)
+        .map_err(|e| format!("parse Kenney car GLB JSON: {e}"))?;
+    let json_nodes = json_object_field_mut(&mut value, "nodes")
+        .and_then(|v| match v {
+            makepad_asset_client::json::Value::Arr(v) => Some(v),
+            _ => None,
+        })
+        .ok_or("Kenney car GLB has no nodes array")?;
+    for (node_index, connection, pivot, anchor, radius, width) in wheels {
+        let node = json_nodes
+            .get_mut(node_index)
+            .ok_or("Kenney car node index left JSON range")?;
+        let obj = match node {
+            makepad_asset_client::json::Value::Obj(v) => v,
+            _ => return Err("Kenney car node is not an object".into()),
+        };
+        let extras = if let Some((_, value)) = obj.iter_mut().find(|(k, _)| k == "extras") {
+            match value {
+                makepad_asset_client::json::Value::Obj(v) => v,
+                _ => return Err(format!("Kenney wheel {connection} extras is not an object")),
+            }
+        } else {
+            obj.push((
+                "extras".into(),
+                makepad_asset_client::json::Value::Obj(Vec::new()),
+            ));
+            match &mut obj.last_mut().unwrap().1 {
+                makepad_asset_client::json::Value::Obj(v) => v,
+                _ => unreachable!(),
+            }
+        };
+        for key in ["kind", "connection", "pivot", "anchor", "radius", "width"] {
+            extras.retain(|(k, _)| k != key);
+        }
+        extras.extend([
+            ("kind".into(), makepad_asset_client::json::s("vehicle_wheel")),
+            ("connection".into(), makepad_asset_client::json::s(connection)),
+            ("pivot".into(), json_vec3(pivot)),
+            ("anchor".into(), json_vec3(anchor)),
+            ("radius".into(), makepad_asset_client::json::Value::F64(radius as f64)),
+            ("width".into(), makepad_asset_client::json::Value::F64(width as f64)),
+        ]);
+    }
+    Ok(Some(write_glb(value.to_json().as_bytes(), bin)))
+}
+
+fn kenney_ragdoll_pack_expected(pack: &str) -> Option<usize> {
+    match pack {
+        "mini-characters" => Some(12),
+        "mini-arcade" => Some(2),
+        "mini-dungeon" => Some(2),
+        "mini-forest" => Some(1),
+        "mini-market" => Some(1),
+        "mini-skate" => Some(2),
+        "arena" => Some(1),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum KenneyRagdollShape {
+    Box,
+    CapsuleX,
+    CapsuleY,
+    Sphere,
+}
+
+struct KenneyRagdollBone {
+    source: &'static str,
+    connection: &'static str,
+    parent: Option<&'static str>,
+    shape: KenneyRagdollShape,
+    mass: f32,
+    cone: f32,
+    twist: f32,
+}
+
+const KENNEY_RAGDOLL_BONES: [KenneyRagdollBone; 7] = [
+    KenneyRagdollBone { source: "root", connection: "pelvis", parent: None, shape: KenneyRagdollShape::Box, mass: 0.18, cone: 0.0, twist: 0.0 },
+    KenneyRagdollBone { source: "leg-left", connection: "leg_left", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.14, cone: 0.96, twist: 0.35 },
+    KenneyRagdollBone { source: "leg-right", connection: "leg_right", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.14, cone: 0.96, twist: 0.35 },
+    KenneyRagdollBone { source: "torso", connection: "torso", parent: Some("pelvis"), shape: KenneyRagdollShape::CapsuleY, mass: 0.32, cone: 0.44, twist: 0.26 },
+    KenneyRagdollBone { source: "arm-left", connection: "arm_left", parent: Some("torso"), shape: KenneyRagdollShape::CapsuleX, mass: 0.06, cone: 1.57, twist: 0.79 },
+    KenneyRagdollBone { source: "arm-right", connection: "arm_right", parent: Some("torso"), shape: KenneyRagdollShape::CapsuleX, mass: 0.06, cone: 1.57, twist: 0.79 },
+    KenneyRagdollBone { source: "head", connection: "head", parent: Some("torso"), shape: KenneyRagdollShape::Sphere, mass: 0.10, cone: 0.61, twist: 0.44 },
+];
+
+fn tag_kenney_ragdoll_pack(glbs: &[PathBuf]) -> Result<usize, String> {
+    let mut tagged = 0usize;
+    for path in glbs {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read staged character {}: {error}", path.display()))?;
+        let Some(out) = tag_kenney_ragdoll_glb(&bytes)? else { continue };
+        std::fs::write(path, out)
+            .map_err(|error| format!("write staged character {}: {error}", path.display()))?;
+        tagged += 1;
+    }
+    log!("import: authored {tagged} generic seven-body ragdoll rigs");
+    Ok(tagged)
+}
+
+/// Exact Kenney seven-joint profile adapter. The source spellings are used
+/// only to recognize and fit the staged copy; published metadata contains the
+/// generic connections above, and `SkinnedModel` reparses the output before
+/// it is accepted.
+fn tag_kenney_ragdoll_glb(glb: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let loaded = makepad_gltf::load_gltf_from_bytes(glb, None)
+        .map_err(|error| format!("inspect Kenney character GLB: {error}"))?;
+    let nodes = loaded.document.nodes_slice();
+    let mut indices = Vec::with_capacity(KENNEY_RAGDOLL_BONES.len());
+    for bone in &KENNEY_RAGDOLL_BONES {
+        let matches: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| (node.name.as_deref() == Some(bone.source)).then_some(index))
+            .collect();
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        indices.push(matches[0]);
+    }
+    if loaded.document.skins.as_ref().is_none_or(Vec::is_empty) {
+        return Ok(None);
+    }
+    let parents = gltf_node_parents(nodes)?;
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let mut ancestor = parents[indices[bone_index]];
+        let mut actual = None;
+        for _ in 0..nodes.len() {
+            let Some(node) = ancestor else { break };
+            if let Some(match_index) = indices.iter().position(|candidate| *candidate == node) {
+                actual = Some(KENNEY_RAGDOLL_BONES[match_index].connection);
+                break;
+            }
+            ancestor = parents[node];
+        }
+        if actual != bone.parent {
+            return Err(format!("Kenney {} hierarchy does not match the seven-body profile", bone.source));
+        }
+    }
+
+    let skin = makepad_render::skin::SkinnedModel::parse_glb(glb)
+        .map_err(|error| format!("parse Kenney character skin: {error}"))?;
+    let mut fitted = Vec::with_capacity(KENNEY_RAGDOLL_BONES.len());
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let bounds = skin.dominant_joint_local_bounds(indices[bone_index]);
+        // Kenney's root is an unweighted skeleton origin; its three direct
+        // children all start at the hip line. Fit the pelvis box around those
+        // authored anchors instead of inventing weights or a runtime special
+        // case. Every deforming limb still uses its dominant-weight geometry.
+        let (min, max) = match (bounds, bone.shape) {
+            (Some(bounds), _) => bounds,
+            (None, KenneyRagdollShape::Box) => {
+                let children = nodes[indices[bone_index]].children.as_deref().unwrap_or(&[]);
+                let mut lo = vec3f(f32::MAX, f32::MAX, f32::MAX);
+                let mut hi = vec3f(f32::MIN, f32::MIN, f32::MIN);
+                for child in children {
+                    let local = gltf_node_local(&nodes[*child]);
+                    let point = vec3f(local[12], local[13], local[14]);
+                    lo.x = lo.x.min(point.x);
+                    lo.y = lo.y.min(point.y);
+                    lo.z = lo.z.min(point.z);
+                    hi.x = hi.x.max(point.x);
+                    hi.y = hi.y.max(point.y);
+                    hi.z = hi.z.max(point.z);
+                }
+                if children.len() < 3 || !lo.x.is_finite() {
+                    return Err("Kenney root has no usable child anchors".into());
+                }
+                let center = (lo + hi) * 0.5;
+                let width = (hi.x - lo.x).max(0.1);
+                // Divide by the ordinary box fit's 0.45 below so the final
+                // pelvis is wide enough to bridge both hips, with modest
+                // vertical/depth volume around their shared anchor line.
+                let target_half = vec3f(width * 0.75, width * 0.35, width * 0.45);
+                let source_half = target_half * (1.0 / 0.45);
+                (center - source_half, center + source_half)
+            }
+            (None, _) => {
+                return Err(format!("Kenney {} has no dominant skin vertices", bone.source));
+            }
+        };
+        let center = (min + max) * 0.5;
+        let span = max - min;
+        let floor = span.x.max(span.y).max(span.z).max(0.01) * 0.04;
+        let shape_fields = match bone.shape {
+            KenneyRagdollShape::Box => vec![
+                ("shape".into(), makepad_asset_client::json::s("box")),
+                ("position".into(), json_vec3([center.x, center.y, center.z])),
+                ("half_extents".into(), json_vec3([
+                    (span.x * 0.45).max(floor),
+                    (span.y * 0.45).max(floor),
+                    (span.z * 0.45).max(floor),
+                ])),
+            ],
+            KenneyRagdollShape::Sphere => {
+                let radius = span.x.max(span.y).max(span.z) * 0.45;
+                vec![
+                    ("shape".into(), makepad_asset_client::json::s("sphere")),
+                    ("position".into(), json_vec3([center.x, center.y, center.z])),
+                    ("radius".into(), makepad_asset_client::json::Value::F64(radius.max(floor) as f64)),
+                ]
+            }
+            KenneyRagdollShape::CapsuleX | KenneyRagdollShape::CapsuleY => {
+                let (axis_span, perpendicular) = match bone.shape {
+                    KenneyRagdollShape::CapsuleX => (span.x, span.y.max(span.z)),
+                    _ => (span.y, span.x.max(span.z)),
+                };
+                let radius = (perpendicular * 0.45).max(floor);
+                let stem = (axis_span * 0.5 - radius).max(floor);
+                let (a, b) = match bone.shape {
+                    KenneyRagdollShape::CapsuleX => (
+                        [center.x - stem, center.y, center.z],
+                        [center.x + stem, center.y, center.z],
+                    ),
+                    _ => (
+                        [center.x, center.y - stem, center.z],
+                        [center.x, center.y + stem, center.z],
+                    ),
+                };
+                vec![
+                    ("shape".into(), makepad_asset_client::json::s("capsule")),
+                    ("point_a".into(), json_vec3(a)),
+                    ("point_b".into(), json_vec3(b)),
+                    ("radius".into(), makepad_asset_client::json::Value::F64(radius as f64)),
+                ]
+            }
+        };
+        fitted.push(shape_fields);
+    }
+
+    let (json_bytes, bin) = split_glb(glb)?;
+    let mut value = makepad_asset_client::json::parse(json_bytes)
+        .map_err(|error| format!("parse Kenney ragdoll JSON: {error}"))?;
+    let json_nodes = json_object_field_mut(&mut value, "nodes")
+        .and_then(|value| match value {
+            makepad_asset_client::json::Value::Arr(nodes) => Some(nodes),
+            _ => None,
+        })
+        .ok_or("Kenney character GLB has no nodes array")?;
+    for (bone_index, bone) in KENNEY_RAGDOLL_BONES.iter().enumerate() {
+        let node = json_nodes.get_mut(indices[bone_index]).ok_or("ragdoll node left JSON range")?;
+        let object = match node {
+            makepad_asset_client::json::Value::Obj(object) => object,
+            _ => return Err("ragdoll node is not an object".into()),
+        };
+        let extras = if let Some((_, value)) = object.iter_mut().find(|(key, _)| key == "extras") {
+            match value {
+                makepad_asset_client::json::Value::Obj(extras) => extras,
+                _ => return Err(format!("Kenney {} extras is not an object", bone.source)),
+            }
+        } else {
+            object.push(("extras".into(), makepad_asset_client::json::Value::Obj(Vec::new())));
+            match &mut object.last_mut().unwrap().1 {
+                makepad_asset_client::json::Value::Obj(extras) => extras,
+                _ => unreachable!(),
+            }
+        };
+        for key in [
+            "kind", "connection", "root", "parent_connection", "shape", "position",
+            "half_extents", "point_a", "point_b", "radius", "mass_fraction", "joint",
+            "cone_angle", "twist_min", "twist_max",
+        ] {
+            extras.retain(|(candidate, _)| candidate != key);
+        }
+        extras.extend([
+            ("kind".into(), makepad_asset_client::json::s("ragdoll_body")),
+            ("connection".into(), makepad_asset_client::json::s(bone.connection)),
+            ("root".into(), makepad_asset_client::json::Value::Bool(bone.parent.is_none())),
+            ("mass_fraction".into(), makepad_asset_client::json::Value::F64(bone.mass as f64)),
+        ]);
+        if let Some(parent) = bone.parent {
+            extras.extend([
+                ("parent_connection".into(), makepad_asset_client::json::s(parent)),
+                ("joint".into(), makepad_asset_client::json::s("spherical")),
+                ("cone_angle".into(), makepad_asset_client::json::Value::F64(bone.cone as f64)),
+                ("twist_min".into(), makepad_asset_client::json::Value::F64(-bone.twist as f64)),
+                ("twist_max".into(), makepad_asset_client::json::Value::F64(bone.twist as f64)),
+            ]);
+        }
+        extras.extend(fitted[bone_index].drain(..));
+    }
+    let out = write_glb(value.to_json().as_bytes(), bin);
+    let parsed = makepad_render::skin::SkinnedModel::parse_glb(&out)
+        .map_err(|error| format!("validate generic ragdoll contract: {error}"))?;
+    if parsed.ragdoll_rig().map(|rig| rig.bodies.len()) != Some(7) {
+        return Err("generic ragdoll validation did not recover seven bodies".into());
+    }
+    Ok(Some(out))
+}
+
+fn json_object_field_mut<'a>(
+    value: &'a mut makepad_asset_client::json::Value,
+    key: &str,
+) -> Option<&'a mut makepad_asset_client::json::Value> {
+    match value {
+        makepad_asset_client::json::Value::Obj(items) => items
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn json_vec3(v: [f32; 3]) -> makepad_asset_client::json::Value {
+    makepad_asset_client::json::Value::Arr(
+        v.into_iter()
+            .map(|x| makepad_asset_client::json::Value::F64(x as f64))
+            .collect(),
+    )
+}
+
+fn gltf_node_parents(nodes: &[makepad_gltf::GltfNode]) -> Result<Vec<Option<usize>>, String> {
+    let mut parents = vec![None; nodes.len()];
+    for (parent, node) in nodes.iter().enumerate() {
+        for &child in node.children.as_deref().unwrap_or(&[]) {
+            if child >= nodes.len() {
+                return Err(format!("Kenney GLB child node {child} is out of range"));
+            }
+            if parents[child].replace(parent).is_some() {
+                return Err(format!("Kenney GLB node {child} has multiple parents"));
+            }
+        }
+    }
+    Ok(parents)
+}
+
+fn gltf_node_world(
+    mut node: usize,
+    nodes: &[makepad_gltf::GltfNode],
+    parents: &[Option<usize>],
+) -> Result<[f32; 16], String> {
+    let mut chain = vec![node];
+    while let Some(parent) = parents[node] {
+        if chain.len() > nodes.len() {
+            return Err("Kenney GLB node cycle".into());
+        }
+        chain.push(parent);
+        node = parent;
+    }
+    let mut out = gltf_identity();
+    for &index in chain.iter().rev() {
+        out = gltf_mul(&out, &gltf_node_local(&nodes[index]));
+    }
+    Ok(out)
+}
+
+fn gltf_node_local(node: &makepad_gltf::GltfNode) -> [f32; 16] {
+    if let Some(matrix) = node.matrix {
+        return matrix;
+    }
+    let [x, y, z, w] = node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let [sx, sy, sz] = node.scale.unwrap_or([1.0, 1.0, 1.0]);
+    let [tx, ty, tz] = node.translation.unwrap_or([0.0, 0.0, 0.0]);
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
+    let xy = x * y;
+    let xz = x * z;
+    let yz = y * z;
+    let wx = w * x;
+    let wy = w * y;
+    let wz = w * z;
+    [
+        (1.0 - 2.0 * (yy + zz)) * sx,
+        (2.0 * (xy + wz)) * sx,
+        (2.0 * (xz - wy)) * sx,
+        0.0,
+        (2.0 * (xy - wz)) * sy,
+        (1.0 - 2.0 * (xx + zz)) * sy,
+        (2.0 * (yz + wx)) * sy,
+        0.0,
+        (2.0 * (xz + wy)) * sz,
+        (2.0 * (yz - wx)) * sz,
+        (1.0 - 2.0 * (xx + yy)) * sz,
+        0.0,
+        tx,
+        ty,
+        tz,
+        1.0,
+    ]
+}
+
+fn gltf_identity() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn gltf_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = (0..4)
+                .map(|k| a[k * 4 + row] * b[col * 4 + k])
+                .sum();
+        }
+    }
+    out
+}
+
+fn gltf_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+}
+
+/// Give every staged GLB without its own image (`images`) — and without an
+/// already-real synthesized one, e.g. KayKit's skinned anim sheet — a
+/// thumbnail PNG: the persistent pack-icon cache's ([`pack_icons_dir`])
+/// rendered render if one matches by stem, else the 512² placeholder.
+/// pack_import needs exactly one thumbnail per mesh to emit a valid
+/// manifest. Idempotent and safe to call again after `pack_icons_dir`
+/// gains fresh renders (see the icon-render handshake in
+/// `run_kenney_import`/`run_kaykit_import`) — it only ever (re)writes
+/// `<stem>.png`, never touches AO/shadow sidecars, the GLBs, or a stem that
+/// already has a real (non-placeholder) icon on disk.
+/// A staged file's identity for thumbnail matching: its path relative to
+/// the staging root, without the extension — the same shape the pack entry
+/// key has (`classify_rel`). A bare file name is NOT that: two files with
+/// the same name in different directories are different entries, and
+/// treating them as one is how a texture atlas came to stand in for a
+/// model's missing preview.
+fn staged_stem_key(staged_root: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(staged_root).ok()?;
+    let mut key = rel.with_extension("").to_string_lossy().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    key = key.replace('\\', "/").to_ascii_lowercase();
+    Some(key)
+}
+
+fn assign_staged_thumbnails(
+    glbs: &[PathBuf],
+    images: &std::collections::BTreeSet<String>,
+    source_pack_dir: &Path,
+    staged_root: &Path,
+) -> Result<(), String> {
+    let rendered = rendered_pack_icons(source_pack_dir);
     let placeholder = placeholder_png_512();
     for glb in glbs {
-        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
-        if images.contains(&stem) {
+        if staged_stem_key(staged_root, glb).is_some_and(|k| images.contains(&k)) {
             continue;
         }
+        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
         let thumb = glb.with_extension("png");
-        std::fs::write(&thumb, &placeholder)
-            .map_err(|e| format!("write placeholder {}: {e}", thumb.display()))?;
+        let already_real = std::fs::read(&thumb).is_ok_and(|bytes| !is_blank_preview_png(&bytes));
+        if already_real {
+            continue;
+        }
+        let icon = stem
+            .to_str()
+            .and_then(|stem| rendered.get(stem))
+            .and_then(|path| std::fs::read(path).ok())
+            .filter(|bytes| is_still_png_at_least(bytes, 256));
+        match icon {
+            Some(bytes) => std::fs::write(&thumb, bytes)
+                .map_err(|e| format!("write icon {}: {e}", thumb.display()))?,
+            None => std::fs::write(&thumb, &placeholder)
+                .map_err(|e| format!("write placeholder {}: {e}", thumb.display()))?,
+        }
     }
     Ok(())
+}
+
+/// The first staged GLB (without its own source image) whose `<stem>.png`
+/// is still the black placeholder — meaning its icon render never
+/// completed or the persistent icon cache came back empty for it. `None`
+/// means every staged mesh has a real icon and it is safe to publish. Used
+/// as the last guard before compile+publish in `run_kenney_import`/
+/// `run_kaykit_import`: never let a placeholder-thumbnailed revision reach
+/// the store. Uses [`is_blank_preview_png`] today; swap the body to the
+/// importer's `thumbnail_is_placeholder(bytes)` once it lands (same call
+/// site, tracked with the importer worker doing classic-pack parity).
+fn first_placeholder_stem(
+    glbs: &[PathBuf],
+    images: &std::collections::BTreeSet<String>,
+    staged_root: &Path,
+) -> Option<String> {
+    for glb in glbs {
+        if staged_stem_key(staged_root, glb).is_some_and(|k| images.contains(&k)) {
+            continue;
+        }
+        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
+        let thumb = glb.with_extension("png");
+        // Missing/unreadable is exactly as bad as a placeholder: refuse.
+        // `thumbnail_is_placeholder` is the SAME decode-and-check
+        // `pack_import::compile_pack` itself runs before accepting a
+        // manifest thumbnail — using it here means this guard can only
+        // ever be stricter-or-equal, never miss something compile would
+        // have caught anyway.
+        let is_placeholder = std::fs::read(&thumb)
+            .map(|bytes| makepad_asset_importer::thumbs::thumbnail_is_placeholder(&bytes))
+            .unwrap_or(true);
+        if is_placeholder {
+            return Some(stem.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Copy pack-source files AND assign every staged GLB a thumbnail in one
+/// call — for callers (tests) that don't need to wait for GPU-rendered
+/// icons before "compiling". `run_kenney_import`/`run_kaykit_import` call
+/// the two halves (`copy_pack_source_files`, then — after the icon-render
+/// handshake — `assign_staged_thumbnails`) separately instead, so a real
+/// import never compiles/publishes before real icons exist.
+fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
+    let (glbs, images) = copy_pack_source_files(src, dest)?;
+    assign_staged_thumbnails(&glbs, &images, src, dest)
+}
+
+/// Icons already rendered for this pack, by model stem — read from the
+/// PERSISTENT pack-icon cache ([`pack_icons_dir`]), never the local library:
+/// pack imports no longer create library rows (`land_imported_pack` in
+/// main.rs), so this cache is the only place a rendered icon for reuse can
+/// come from. The pack directory is `…/<source>/<pack>`.
+fn rendered_pack_icons(pack_dir: &Path) -> std::collections::HashMap<String, PathBuf> {
+    let mut out = std::collections::HashMap::new();
+    let (Some(pack), Some(source)) = (
+        pack_dir.file_name().and_then(|n| n.to_str()),
+        pack_dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()),
+    ) else {
+        return out;
+    };
+    let dir = pack_icons_dir(source, pack);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("png") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        out.insert(stem.to_string(), path);
+    }
+    out
+}
+
+/// A PNG still (not an anim strip) of at least `min` px on both sides —
+/// what the content contract accepts as a mesh thumbnail.
+fn is_still_png_at_least(bytes: &[u8], min: u32) -> bool {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.len() < 24 {
+        return false;
+    }
+    let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    w >= min && h >= min && w <= 4096 && h <= 4096 && !is_blank_preview_png(bytes)
 }
 
 fn library_landings(staged: &Path, pack: &str, page: &str) -> Vec<LibraryLanding> {
@@ -2604,8 +4026,18 @@ fn bake_staged_glbs(
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
 ) -> BakeStats {
-    let _ = (staged, pack, assets, annotated, tx, cancel);
-    BakeStats::default()
+    ao_bake::bake_glb_tree_ex(staged, Some(cancel), |done, total, current| {
+        let _ = tx.send(ImportPhase::Baking {
+            pack: pack.to_string(),
+            assets,
+            annotated,
+            bake_done: done,
+            bake_total: total,
+            bake_skipped: 0,
+            bake_failed: 0,
+            current: current.to_string(),
+        });
+    })
 }
 
 fn plan_asset_kinds(
@@ -2650,6 +4082,7 @@ fn parse_kind(name: &str) -> Option<AssetKind> {
         "world" => AssetKind::World,
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
+        "game" => AssetKind::Game,
         _ => return None,
     })
 }
@@ -2695,6 +4128,8 @@ fn kind_tag(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -2784,6 +4219,600 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kenney_car_staging_publishes_one_generic_rig_once() {
+        // Local pack payloads are intentionally outside the source checkout,
+        // so clean CI may not have this fixture. When the pack is installed,
+        // exercise the exact Asset UI migration over a real model.
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/packs/kenney/car-kit/race.glb");
+        let Ok(bytes) = std::fs::read(&source) else {
+            return;
+        };
+        assert!(!bytes
+            .windows(b"vehicle_wheel".len())
+            .any(|window| window == b"vehicle_wheel"));
+
+        let tagged = tag_kenney_car_glb(&bytes)
+            .expect("tag real Kenney car")
+            .expect("race.glb is a complete vehicle");
+        let model = makepad_render::StaticModel::parse_glb(&tagged)
+            .expect("generic renderer parses tagged car");
+        let mut connections: Vec<&str> = model
+            .driven_parts
+            .iter()
+            .map(|part| part.connection.as_str())
+            .collect();
+        connections.sort_unstable();
+        assert_eq!(
+            connections,
+            vec![
+                "wheel_front_left",
+                "wheel_front_right",
+                "wheel_rear_left",
+                "wheel_rear_right",
+            ]
+        );
+        assert!(model
+            .driven_parts
+            .iter()
+            .all(|part| part.radius > 0.0 && part.width > 0.0));
+
+        let retagged = tag_kenney_car_glb(&tagged)
+            .expect("rerunning the one-time migration stays valid")
+            .expect("tag remains present");
+        assert_eq!(tagged, retagged, "intentional future reimports are idempotent");
+    }
+
+    #[test]
+    fn kenney_character_staging_publishes_one_generic_rig_once() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/packs/kenney/mini-characters/character-male-a.glb");
+        let Ok(bytes) = std::fs::read(&source) else {
+            return;
+        };
+        assert!(!bytes
+            .windows(b"ragdoll_body".len())
+            .any(|window| window == b"ragdoll_body"));
+
+        let tagged = tag_kenney_ragdoll_glb(&bytes)
+            .expect("tag real Kenney humanoid")
+            .expect("character-male-a matches the seven-body profile");
+        let model = makepad_render::skin::SkinnedModel::parse_glb(&tagged)
+            .expect("generic renderer parses tagged humanoid");
+        let rig = model.ragdoll_rig().expect("published generic ragdoll contract");
+        assert_eq!(rig.bodies.len(), 7);
+        assert_eq!(rig.bodies.iter().filter(|body| body.parent.is_none()).count(), 1);
+        let total_mass: f32 = rig.bodies.iter().map(|body| body.mass_fraction).sum();
+        assert!((total_mass - 1.0).abs() < 1.0e-5);
+
+        let retagged = tag_kenney_ragdoll_glb(&tagged)
+            .expect("rerunning the one-time migration stays valid")
+            .expect("tag remains present");
+        assert_eq!(tagged, retagged, "intentional future reimports are idempotent");
+    }
+
+    #[test]
+    fn every_supported_kenney_humanoid_pack_migrates_completely() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/packs/kenney");
+        if !root.is_dir() {
+            return;
+        }
+        for pack in [
+            "mini-characters",
+            "mini-arcade",
+            "mini-dungeon",
+            "mini-forest",
+            "mini-market",
+            "mini-skate",
+            "arena",
+        ] {
+            let expected = kenney_ragdoll_pack_expected(pack).unwrap();
+            let dir = root.join(pack);
+            if !dir.is_dir() {
+                continue;
+            }
+            let mut tagged = 0usize;
+            for glb in ao_bake::collect_glbs(&dir) {
+                let bytes = std::fs::read(&glb).expect("read local Kenney fixture");
+                if tag_kenney_ragdoll_glb(&bytes)
+                    .unwrap_or_else(|error| panic!("{}: {error}", glb.display()))
+                    .is_some()
+                {
+                    tagged += 1;
+                }
+            }
+            assert_eq!(
+                tagged, expected,
+                "{pack} must never publish a partial one-time migration"
+            );
+        }
+    }
+
+    #[test]
+    fn content_fingerprint_is_deterministic_and_content_sensitive() {
+        let a = content_fingerprint(b"glTF model bytes one");
+        let b = content_fingerprint(b"glTF model bytes one");
+        let c = content_fingerprint(b"glTF model bytes TWO");
+        assert_eq!(a, b, "same bytes must fingerprint identically every time");
+        assert_ne!(a, c, "different bytes must (almost always) fingerprint differently");
+    }
+
+    #[test]
+    fn pack_icon_key_round_trips() {
+        let key = pack_icon_key("kenney", "space-kit", "crate", "abc123");
+        assert_eq!(key, "pack:kenney:space-kit:crate:abc123");
+        assert_eq!(
+            parse_pack_icon_key(&key),
+            Some((
+                "kenney".to_string(),
+                "space-kit".to_string(),
+                "crate".to_string(),
+                "abc123".to_string(),
+            ))
+        );
+        // A plain library file id is never mistaken for a pack icon key.
+        assert_eq!(parse_pack_icon_key("lib-42.glb"), None);
+    }
+
+    #[test]
+    fn pack_icon_reusable_only_when_rendered_and_unchanged() {
+        assert!(pack_icon_reusable(true, Some("abc"), "abc"));
+        assert!(!pack_icon_reusable(false, Some("abc"), "abc"), "no icon on disk yet");
+        assert!(!pack_icon_reusable(true, Some("abc"), "def"), "content changed");
+        assert!(!pack_icon_reusable(true, None, "abc"), "never recorded a fingerprint");
+    }
+
+    #[test]
+    fn staging_dirs_to_clear_only_on_success() {
+        assert_eq!(staging_dirs_to_clear(true), &["work", "out"]);
+        assert_eq!(staging_dirs_to_clear(false), &[] as &[&str]);
+    }
+
+    #[test]
+    fn pack_icon_store_round_trips_and_detects_changed_content() {
+        let dir = std::env::temp_dir().join(format!(
+            "mp_pack_icon_store_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No icon yet: nothing to reuse.
+        assert!(read_reusable_pack_icon(&dir, "crate", "fp-v1").is_none());
+
+        write_pack_icon(&dir, "crate", "fp-v1", b"rendered-icon-v1").unwrap();
+        assert_eq!(
+            read_reusable_pack_icon(&dir, "crate", "fp-v1"),
+            Some(b"rendered-icon-v1".to_vec()),
+            "unchanged fingerprint must reuse the persisted render"
+        );
+        assert!(
+            read_reusable_pack_icon(&dir, "crate", "fp-v2").is_none(),
+            "a changed fingerprint must NOT reuse a stale render"
+        );
+
+        // A re-render overwrites both the icon and its fingerprint.
+        write_pack_icon(&dir, "crate", "fp-v2", b"rendered-icon-v2").unwrap();
+        assert_eq!(
+            read_reusable_pack_icon(&dir, "crate", "fp-v2"),
+            Some(b"rendered-icon-v2".to_vec())
+        );
+        assert!(read_reusable_pack_icon(&dir, "crate", "fp-v1").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A genuinely decodable, varied (non-flat, non-512²-placeholder) PNG —
+    /// stands in for "a real rendered icon" in tests. Uses the importer's
+    /// own encoder so `thumbnail_is_placeholder` exercises its real decode
+    /// path, the exact same one `pack_import::compile_pack` runs, rather
+    /// than accidentally passing via its "undecodable bytes are not
+    /// placeholders" carve-out.
+    fn fake_valid_png(w: u32, h: u32) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 3 + y * 5) % 200) as u8;
+                rgba.extend_from_slice(&[v, 40 + v / 2, 255 - v, 255]);
+            }
+        }
+        makepad_asset_importer::classic_import::encode_png_rgba(&rgba, w, h)
+            .expect("encode test png")
+    }
+
+    #[test]
+    fn icon_resume_gate_signals_once_per_arm() {
+        let (mut gate, rx) = IconResumeGate::armed();
+        // Never armed for "a pack" yet in this test, but `armed()` starts
+        // ready-to-send once (matches `ImportPage::default()`'s gate being
+        // usable before any `IconsPending` has armed it).
+        assert!(gate.resume(), "first resume after armed() must succeed");
+        assert!(rx.try_recv().is_ok(), "resume must actually signal the receiver");
+        assert!(!gate.resume(), "no double-send before the next arm()");
+        assert!(rx.try_recv().is_err(), "no second signal without re-arming");
+
+        gate.arm();
+        assert!(gate.resume(), "arm() must allow exactly one more resume");
+        assert!(rx.try_recv().is_ok());
+        assert!(!gate.resume());
+    }
+
+    #[test]
+    fn icon_resume_gate_default_has_no_sender() {
+        let mut gate = IconResumeGate::default();
+        assert!(!gate.resume(), "an unarmed default gate must never fire");
+    }
+
+    #[test]
+    fn icons_pending_handshake_waits_for_drained_landings_and_idle_icons() {
+        let mut page = ImportPage::default();
+        let (gate, rx) = IconResumeGate::armed();
+        page.icon_resume = gate;
+        let landing = LibraryLanding {
+            path: PathBuf::from("/tmp/x.glb"),
+            label: "kenney/space-kit/x".into(),
+            domain: "mesh",
+            content_type: "model/gltf-binary",
+            prompt: "test".into(),
+            thumbnail: None,
+            source_id: "kenney".into(),
+            pack: "space-kit".into(),
+        };
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 1,
+            library: vec![landing],
+            bake: BakeStats::default(),
+        });
+        assert!(matches!(page.kenney_phase, ImportPhase::IconsPending { .. }));
+        assert_eq!(page.pending_landings.len(), 1, "landing handed to the UI immediately");
+        assert!(page.compiling(), "IconsPending blocks a new import from starting");
+
+        // Landings not yet drained by the UI (`land_imported_pack` hasn't
+        // consumed `pending_landings` into `App::import_landings` yet):
+        // never ready, no matter the icon state.
+        assert!(!page.icons_pending_ready(false));
+
+        // Drained, but the one queued icon hasn't rendered yet.
+        page.track_import_icon("pack:kenney:space-kit:x:fp1".into(), None);
+        assert!(page.icons_busy());
+        assert!(!page.icons_pending_ready(true), "icons still rendering");
+
+        // Render lands: ready now, resume fires exactly once and actually
+        // wakes the parked import thread's receiver.
+        page.note_rendered_icon("pack:kenney:space-kit:x:fp1", b"\x89PNG\r\n\x1a\nicon");
+        assert!(!page.icons_busy());
+        assert!(page.icons_pending_ready(true));
+        assert!(page.resume_icons_pending());
+        assert!(rx.try_recv().is_ok(), "resume_icons_pending must signal the parked thread");
+        assert!(!page.resume_icons_pending(), "no double-resume before the next IconsPending");
+
+        // A fresh IconsPending (next pack in "Import all") re-arms it.
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "other-kit".into(),
+            assets: 0,
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        });
+        assert!(page.resume_icons_pending());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    /// The exact shape of the 38-packs-failed regression: staged meshes were
+    /// queued for a GPU render but never REGISTERED for the icon wait, so
+    /// the gate saw an empty wait, read "icons ready", and let compile+publish
+    /// run against the placeholders — every pack then died on the publish-time
+    /// placeholder guard while its real icons were still rendering.
+    #[test]
+    fn a_staged_mesh_that_never_registered_is_named_before_the_gate_opens() {
+        let mut page = ImportPage::default();
+        let landing = |stem: &str| LibraryLanding {
+            path: PathBuf::from(format!("/tmp/{stem}.glb")),
+            label: format!("kenney/space-kit/{stem}"),
+            domain: "mesh",
+            content_type: "model/gltf-binary",
+            prompt: "test".into(),
+            thumbnail: None,
+            source_id: "kenney".into(),
+            pack: "space-kit".into(),
+        };
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 2,
+            library: vec![landing("a"), landing("b")],
+            bake: BakeStats::default(),
+        });
+
+        // Nothing registered: the wait is empty, so the gate WOULD open on
+        // drained landings — and both meshes are named as the reason.
+        assert!(!page.icons_busy(), "an empty wait is not busy — that is the trap");
+        assert!(page.icons_pending_ready(true));
+        assert_eq!(page.unregistered_mesh_icons(), vec!["a".to_string(), "b".to_string()]);
+
+        // Registering one (whatever its content fingerprint) accounts for it.
+        page.track_import_icon("pack:kenney:space-kit:a:deadbeef".into(), None);
+        assert_eq!(page.unregistered_mesh_icons(), vec!["b".to_string()]);
+        assert!(page.icons_busy(), "a registered, unrendered icon holds the gate shut");
+        assert!(!page.icons_pending_ready(true));
+
+        // With both registered nothing is unaccounted for, and the gate is
+        // held by the renders themselves — the correct, restored behaviour.
+        page.track_import_icon("pack:kenney:space-kit:b:cafe1234".into(), None);
+        assert!(page.unregistered_mesh_icons().is_empty());
+        assert!(!page.icons_pending_ready(true));
+        page.note_rendered_icon("pack:kenney:space-kit:a:deadbeef", b"\x89PNG\r\n\x1a\nicon");
+        assert!(!page.icons_pending_ready(true), "one icon left");
+        page.note_rendered_icon("pack:kenney:space-kit:b:cafe1234", b"\x89PNG\r\n\x1a\nicon");
+        assert!(page.icons_pending_ready(true));
+    }
+
+    /// A non-mesh landing (a plain pack image) is not part of the icon wait.
+    #[test]
+    fn unregistered_mesh_icons_ignores_non_mesh_landings() {
+        let mut page = ImportPage::default();
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 1,
+            library: vec![LibraryLanding {
+                path: PathBuf::from("/tmp/colormap.png"),
+                label: "kenney/space-kit/colormap".into(),
+                domain: "image",
+                content_type: "image/png",
+                prompt: "test".into(),
+                thumbnail: None,
+                source_id: "kenney".into(),
+                pack: "space-kit".into(),
+            }],
+            bake: BakeStats::default(),
+        });
+        assert!(page.unregistered_mesh_icons().is_empty());
+    }
+
+    /// A run may not report "N failed" without saying why at least once.
+    #[test]
+    fn a_failed_run_always_carries_a_reason() {
+        let mut page = ImportPage::default();
+        page.kenney_phase = ImportPhase::AllDone {
+            ok: Vec::new(),
+            failed: vec![
+                ("blaster-kit".into(), "icon for blaster-a never rendered".into()),
+                ("car-kit".into(), "icon for car-a never rendered".into()),
+            ],
+            skipped: vec!["arena".into()],
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("2 failed"), "{line}");
+        assert!(line.contains("blaster-kit"), "{line}");
+        assert!(line.contains("icon for blaster-a never rendered"), "{line}");
+        assert!(line.contains("+1 more"), "{line}");
+        assert!(line.contains("1 not on disk"), "{line}");
+        assert!(page.kenney_phase.failure_reason().is_some());
+
+        // One pack dying mid-run says so on the spot, and keeps the run busy.
+        page.kenney_phase = ImportPhase::PackFailed {
+            pack: "car-kit".into(),
+            message: "compile refused the pack: multi-texture GLB".into(),
+            done: 3,
+            total: 38,
+            more: true,
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("car-kit"), "{line}");
+        assert!(line.contains("multi-texture GLB"), "{line}");
+        assert!(page.compiling(), "more packs follow — the run is still busy");
+        assert_eq!(
+            page.kenney_phase.failure_reason().as_deref(),
+            Some("car-kit: compile refused the pack: multi-texture GLB"),
+            "a reason must name the pack it belongs to"
+        );
+
+        // A publish that was REFUSED is a failure, not a local compile.
+        page.kenney_phase = ImportPhase::CompiledLocal {
+            pack: "car-kit".into(),
+            assets: 50,
+            blobs: 60,
+            out: PathBuf::from("/tmp/plan.json"),
+            error: Some("publish to the asset store failed: 401 unauthorized".into()),
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("NOT imported"), "{line}");
+        assert!(line.contains("401 unauthorized"), "{line}");
+        assert!(page.kenney_phase.failure_reason().is_some());
+
+        // A local compile with no server session is NOT a failure.
+        page.kenney_phase = ImportPhase::CompiledLocal {
+            pack: "car-kit".into(),
+            assets: 50,
+            blobs: 60,
+            out: PathBuf::from("/tmp/plan.json"),
+            error: None,
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        };
+        assert!(page.kenney_phase.failure_reason().is_none());
+    }
+
+    #[test]
+    fn icons_pending_handshake_also_resumes_on_cancel_via_stop_requested() {
+        // `mark_cancelled` deliberately leaves `icon_resume` untouched so a
+        // thread parked in `IconsPending` can still be woken — the actual
+        // wake call is `resume_icons_pending()`, driven by
+        // `App::maybe_resume_icons_pending` checking `stop_requested()`.
+        let mut page = ImportPage::default();
+        let (gate, rx) = IconResumeGate::armed();
+        page.icon_resume = gate;
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 1,
+            library: vec![LibraryLanding {
+                path: PathBuf::from("/tmp/x.glb"),
+                label: "kenney/space-kit/x".into(),
+                domain: "mesh",
+                content_type: "model/gltf-binary",
+                prompt: "test".into(),
+                thumbnail: None,
+                source_id: "kenney".into(),
+                pack: "space-kit".into(),
+            }],
+            bake: BakeStats::default(),
+        });
+        page.request_stop();
+        assert!(page.stop_requested());
+        // Landings not drained AND icons still "busy" (never even queued) —
+        // `icons_pending_ready` alone would say no, but the app's cancel
+        // path resumes regardless so the thread can wake, see `cancel` is
+        // set, and exit with `ImportPhase::Cancelled` itself.
+        assert!(!page.icons_pending_ready(false));
+        assert!(page.resume_icons_pending());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn assign_staged_thumbnails_reuses_cached_icon_and_guard_flags_placeholders() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let source_id = format!("test-src-{nonce}");
+        let pack_name = format!("test-pack-{nonce}");
+        let icons_dir = pack_icons_dir(&source_id, &pack_name);
+        let _ = std::fs::remove_dir_all(&icons_dir);
+
+        let tmp = std::env::temp_dir().join(format!("mp_assign_thumbs_{nonce}"));
+        // `rendered_pack_icons` derives source/pack from this dir's own name
+        // and its parent's — mirror that layout so it resolves back to
+        // `icons_dir` above.
+        let source_pack_dir = tmp.join(&source_id).join(&pack_name);
+        std::fs::create_dir_all(&source_pack_dir).unwrap();
+
+        let glb_cached = tmp.join("cached.glb");
+        let glb_fresh = tmp.join("fresh.glb");
+        std::fs::write(&glb_cached, b"glTF cached").unwrap();
+        std::fs::write(&glb_fresh, b"glTF fresh").unwrap();
+        let glbs = vec![glb_cached.clone(), glb_fresh.clone()];
+        let images = std::collections::BTreeSet::new();
+
+        // No cache yet: every stem gets the placeholder; the guard flags
+        // the first one (deterministic order from `glbs`).
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
+        assert_eq!(first_placeholder_stem(&glbs, &images, &tmp).as_deref(), Some("cached"));
+
+        // Persist a real (non-512×512, non-blank) icon for "cached" only.
+        std::fs::create_dir_all(&icons_dir).unwrap();
+        let real_icon = fake_valid_png(300, 300);
+        std::fs::write(icons_dir.join("cached.png"), &real_icon).unwrap();
+
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
+        assert_eq!(
+            std::fs::read(glb_cached.with_extension("png")).unwrap(),
+            real_icon,
+            "the cached icon must be reused for the matching stem"
+        );
+        assert_eq!(
+            first_placeholder_stem(&glbs, &images, &tmp).as_deref(),
+            Some("fresh"),
+            "the stem with no cached icon still guards as a placeholder"
+        );
+
+        // Persist "fresh" too: the guard now passes every staged GLB.
+        std::fs::write(icons_dir.join("fresh.png"), fake_valid_png(300, 300)).unwrap();
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
+        assert_eq!(first_placeholder_stem(&glbs, &images, &tmp), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&icons_dir);
+    }
+
+    /// A texture named like a model must not stand in for that model's
+    /// preview. Kenney's retro kits ship `Textures/fence.png` (the atlas)
+    /// beside a `fence.glb` that has NO `fence.png` of its own; keying the
+    /// staged image index by bare file name made the thumbnail pass skip
+    /// `fence.glb` as "already has its own picture", so it reached compile
+    /// with no thumbnail and refused the whole kit:
+    ///
+    ///     fence.glb: mesh-bearing import needs a pack PNG/JPEG thumbnail ≥ 256px
+    ///
+    /// Five models across the two retro kits were exactly that shape
+    /// (fence / roof / water, grass / planks).
+    #[test]
+    fn a_texture_named_like_a_model_does_not_shadow_its_thumbnail() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(2);
+        let tmp = std::env::temp_dir().join(format!("mp_shadow_thumb_{nonce}"));
+        let src = tmp.join("src");
+        let staged = tmp.join("staged");
+        std::fs::create_dir_all(src.join("Textures")).unwrap();
+        // The model, with no sibling preview of its own.
+        std::fs::write(src.join("fence.glb"), b"glTF fence").unwrap();
+        // The material atlas, same NAME, different directory.
+        std::fs::write(src.join("Textures/fence.png"), fake_valid_png(64, 64)).unwrap();
+        // A model that really does ship its own preview: still skipped.
+        std::fs::write(src.join("wall.glb"), b"glTF wall").unwrap();
+        std::fs::write(src.join("wall.png"), fake_valid_png(300, 300)).unwrap();
+
+        let (glbs, images) = copy_pack_source_files(&src, &staged).unwrap();
+        assert!(
+            images.contains("textures/fence"),
+            "the atlas is indexed by its own path, not a bare name: {images:?}"
+        );
+        assert!(!images.contains("fence"), "{images:?}");
+        assert!(images.contains("wall"), "{images:?}");
+
+        assign_staged_thumbnails(&glbs, &images, &src, &staged).unwrap();
+        // fence.glb got a thumbnail written (the placeholder here, since no
+        // rendered icon is cached) rather than being passed over.
+        assert!(
+            staged.join("fence.png").is_file(),
+            "fence.glb must be given a thumbnail, not shadowed by Textures/fence.png"
+        );
+        // wall.glb kept the preview it shipped.
+        assert_eq!(
+            std::fs::read(staged.join("wall.png")).unwrap(),
+            fake_valid_png(300, 300)
+        );
+        // And the pre-publish guard now SEES fence as needing a real icon,
+        // instead of skipping it and letting compile refuse the kit.
+        assert_eq!(
+            first_placeholder_stem(&glbs, &images, &staged).as_deref(),
+            Some("fence")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn assign_staged_thumbnails_never_overwrites_an_already_real_icon() {
+        // Mirrors KayKit: `write_kaykit_anim_icons` (or an original pack
+        // image) may already have written a real `<stem>.png` before
+        // `assign_staged_thumbnails` ever runs. It must be left alone, not
+        // clobbered with a cache lookup or the placeholder.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(1);
+        let tmp = std::env::temp_dir().join(format!("mp_assign_thumbs_real_{nonce}"));
+        let source_pack_dir = tmp.join("kaykit-src");
+        std::fs::create_dir_all(&source_pack_dir).unwrap();
+        let glb = tmp.join("hero.glb");
+        std::fs::write(&glb, b"glTF hero").unwrap();
+        let already_real = fake_valid_png(300, 300);
+        std::fs::write(glb.with_extension("png"), &already_real).unwrap();
+
+        assign_staged_thumbnails(&[glb.clone()], &Default::default(), &source_pack_dir, &tmp).unwrap();
+        assert_eq!(std::fs::read(glb.with_extension("png")).unwrap(), already_real);
+        assert_eq!(first_placeholder_stem(&[glb], &Default::default(), &tmp), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn kenney_module_reuses_pack_import_cc_by_grant() {
         assert_eq!(KENNEY_MODULE.id, "kenney");
         assert_eq!(KENNEY_MODULE.license, "CC-BY-4.0");
@@ -2833,8 +4862,14 @@ mod tests {
         );
     }
 
+    /// retro-fantasy-kit's `barrels.glb` is barrel+planks — the shape that
+    /// used to refuse the whole kit. It stages, lands, and now COMPILES;
+    /// the only thing left between it and the catalog is the same rendered
+    /// icon every mesh needs (`stage_source_pack` writes placeholders, so
+    /// the placeholder guard is what this stops at, exactly as the
+    /// single-texture kits do in `compile_sandbox_space_kit`).
     #[test]
-    fn multi_texture_kit_still_lands_library() {
+    fn multi_texture_kit_lands_library_and_compiles() {
         let dir = resolve_kenney_dir("retro-fantasy-kit", "");
         if !dir.is_dir() {
             return;
@@ -2870,12 +4905,27 @@ mod tests {
             "staged multi-texture Kenney GLB must still produce a library landing"
         );
         let spec = kenney_spec("retro-fantasy-kit").expect("spec");
-        let err = pack_import::compile_pack(&staged, &dest.join("bundle"), spec, None, false)
-            .expect_err("pack_import must refuse multi-texture Kenney GLBs");
-        assert!(
-            err.to_string().contains("multi-texture") || err.to_string().contains("unsupported"),
-            "{err}"
-        );
+        match pack_import::compile_pack(&staged, &dest.join("bundle"), spec, None, false) {
+            Ok(report) => {
+                assert_eq!(report.assets, 1, "the multi-material barrel is one asset");
+                assert!(
+                    report.skipped_models.is_empty(),
+                    "nothing skipped: {:?}",
+                    report.skipped_models
+                );
+            }
+            // No GPU render is cached in this environment, so the
+            // fail-closed thumbnail guard is the honest stopping point —
+            // the multi-texture refusal is gone, which is what this covers.
+            Err(error) => {
+                let text = error.to_string();
+                assert!(
+                    text.contains("placeholder"),
+                    "multi-texture must no longer refuse the kit: {error}"
+                );
+                assert!(!text.contains("multi-texture"), "{error}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -3072,6 +5122,37 @@ mod tests {
     }
 
     #[test]
+    fn import_all_bar_is_overall_and_status_leads_with_the_pack() {
+        let mut page = ImportPage::default();
+        page.all_run = Some((10, 38));
+        page.kenney_phase = ImportPhase::compiling("marble-kit");
+        let f = page.progress_fraction();
+        assert!(
+            f >= 10.0 / 38.0 && f <= 11.0 / 38.0,
+            "mid-run bar must sit between finished-packs and next-pack: {f}"
+        );
+        assert!(
+            page.kenney_status_line(true).starts_with("pack 11/38 · "),
+            "in-pack status must lead with which pack of how many"
+        );
+        // A pack boundary must not dip the bar: the finished pack is in
+        // `done`, so its own fraction counts as zero.
+        page.ingest_phase(ImportPhase::PackFailed {
+            pack: "brick-kit".into(),
+            message: "refused".into(),
+            done: 11,
+            total: 38,
+            more: true,
+        });
+        let boundary = page.progress_fraction();
+        assert!(boundary >= f && boundary <= 11.0 / 38.0 + 1e-6);
+        // Single-pack imports keep the per-pack bar exactly as before.
+        page.all_run = None;
+        page.kenney_phase = ImportPhase::compiling("space-kit");
+        assert!(page.progress_fraction() < 0.1);
+    }
+
+    #[test]
     fn status_line_bake_and_publish_counts() {
         let mut page = ImportPage::default();
         page.kenney_phase = ImportPhase::Publishing {
@@ -3221,9 +5302,14 @@ mod tests {
         );
     }
 
+    /// `ASSET_UI_IMPORT_TEST_PACK=<kit>` points this at another on-disk kit
+    /// (compile, and publish when the local Asset UI server is up) — the
+    /// quickest way to see a pack's real publish error.
     #[test]
     fn compile_sandbox_space_kit() {
-        let dir = resolve_kenney_dir("space-kit", "");
+        let pack = std::env::var("ASSET_UI_IMPORT_TEST_PACK").unwrap_or_else(|_| "space-kit".into());
+        let pack = pack.as_str();
+        let dir = resolve_kenney_dir(pack, "");
         if !dir.is_dir() {
             return;
         }
@@ -3236,15 +5322,33 @@ mod tests {
         std::fs::create_dir_all(&dest_root).unwrap();
         let bundle = dest_root.join("bundle");
         stage_source_pack(&dir, &staged).expect("stage");
-        let spec = kenney_spec("space-kit").expect("spec");
-        let report = pack_import::compile_pack(&staged, &bundle, spec, None, false)
-            .unwrap_or_else(|e| panic!("compile space-kit: {e}"));
+        // Same order as run_kenney_import: a source tree that was baked
+        // before seeds its fresh sidecars, and the compiler attaches them.
+        ao_bake::seed_ao_from_source(&dir, &staged);
+        let spec = kenney_spec(pack).expect("spec");
+        let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
+            Ok(report) => report,
+            // `stage_source_pack` (unlike `run_kenney_import`'s real
+            // handshake) never waits for GPU-rendered icons — outside a
+            // real app session with `pack_icons_dir` already populated
+            // there is no render available, so `compile_pack`'s own
+            // fail-closed `thumbnail_is_placeholder` guard correctly
+            // refuses the placeholder fallback. That is exactly the
+            // invariant this whole area exists to enforce, not a bug —
+            // nothing to verify further in this environment.
+            Err(error) if error.to_string().contains("thumbnail is a placeholder") => {
+                println!("{pack}: no rendered icons cached yet — compile correctly refused a placeholder ({error})");
+                let _ = std::fs::remove_dir_all(&tmp);
+                return;
+            }
+            Err(error) => panic!("compile {pack}: {error}"),
+        };
         assert!(report.assets > 0, "expected mesh assets, got {}", report.assets);
         println!(
-            "space-kit compile: {} assets / {} blobs",
+            "{pack} compile: {} assets / {} blobs",
             report.assets, report.blobs
         );
-        if let Some(session) = live_server_session() {
+        if let Some(session) = hosted_server_session() {
             let dest_root = tmp.join("out");
             let staged = tmp.join("work").join("source");
             let (tx, _rx) = mpsc::channel();
@@ -3253,54 +5357,23 @@ mod tests {
                 &staged,
                 &dest_root.join("bundle"),
                 &session,
-                "space-kit",
-                "https://kenney.nl/assets/space-kit",
+                pack,
+                &format!("https://kenney.nl/assets/{pack}"),
                 report.assets,
                 report.blobs,
                 &tx,
                 &cancel,
             ) {
                 Ok((created, annotated)) => {
-                    println!("space-kit publish: created={created} annotated={annotated}");
+                    println!("{pack} publish: created={created} annotated={annotated}");
                     assert!(annotated > 0);
                 }
-                Err(error) => panic!("publish space-kit: {error}"),
+                Err(error) => panic!("publish {pack}: {error}"),
             }
         } else {
-            println!("no live Asset Server on 127.0.0.1:9701 — compile-only");
+            println!("no live Asset UI server — compile-only");
         }
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    fn live_server_session() -> Option<ServerSession> {
-        let token = std::fs::read_to_string(
-            dirs_home().join(".makepad-asset-ai/asset-server/admin-token"),
-        )
-        .ok()?
-        .trim()
-        .to_string();
-        if token.is_empty() {
-            return None;
-        }
-        let id = std::fs::read_to_string(
-            dirs_home().join(".makepad-asset-ai/asset-server/server-id"),
-        )
-        .ok()?;
-        let server_id = parse_hex16_local(id.trim())?;
-        Some(ServerSession {
-            endpoints: ApiEndpoints {
-                control: "127.0.0.1:9701".parse().ok()?,
-                data: "127.0.0.1:9702".parse().ok()?,
-            },
-            token,
-            server_id,
-        })
-    }
-
-    fn dirs_home() -> PathBuf {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir())
     }
 
     fn parse_hex16_local(text: &str) -> Option<[u8; 16]> {

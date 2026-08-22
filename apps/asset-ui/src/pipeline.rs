@@ -17,8 +17,7 @@
 
 use makepad_asset_ai::fleet::{self, BoxSnapshot};
 use makepad_asset_ai::protocol::{
-    ArtifactRefJson, GenerateRequestJson, GenerateResponseJson, JobStatusJson, NamedInputJson,
-};
+    ArtifactRefJson, GenerateRequestJson, GenerateResponseJson, JobStatusJson, NamedInputJson, LoraRefJson};
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
@@ -39,9 +38,21 @@ pub const IMAGE_SIZES: &[(u32, u32)] = &[
 /// Image step presets; the dropdown's extra first entry means "model
 /// default" (schnell 4, dev-class ~20).
 pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
+/// img2img strength choices for edit chains: 1.0 = a full instruction edit
+/// (reference tokens only); lower = the sampler starts from the VAE-encoded
+/// input at sigma index floor((1-strength)*steps), keeping more of it.
+pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
+/// LoRA strength choices for the image stage.
+pub const LORA_STRENGTHS: &[f32] = &[1.0, 0.8, 0.6, 0.4, 1.2];
+/// RIFE interpolation factors offered for video (1 = off).
+pub const VIDEO_INTERPOLATE: &[u32] = &[1, 2, 4];
+/// Enhance-stage factor choices, shared by the uprez and tween pickers.
+pub const ENHANCE_FACTORS: &[u32] = &[1, 2, 4];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
 /// larger atlases trade bake time and device memory for sharper materials.
 pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
+/// QEM face-count presets. Index 0 is Auto (12k objects / 20k characters).
+pub const MESH_FACE_COUNTS: &[u32] = &[0, 12_000, 20_000, 40_000, 80_000, 160_000];
 /// Video canvas presets; entry 0 is the small default.
 pub const VIDEO_SIZES: &[(u32, u32)] = &[(640, 352), (864, 480), (960, 544)];
 /// Video (frames, steps) presets at 16 fps; entry 0 is the default.
@@ -77,12 +88,19 @@ pub fn format_clock(seconds: f64) -> String {
 }
 
 fn music_expansion_max_tokens(seconds: u32) -> u32 {
+    // Official MiniMax Structured Captions are ~250-450 words in Arrangement
+    // alone, plus tagged lyrics that scale with duration. The old 500-700
+    // budget truncated mid-caption and never reached `Lyrics:`. The budget
+    // must ALSO cover Qwen3.8's open <think> block — the song plan alone can
+    // burn 1000+ tokens, and a budget exhausted inside think makes
+    // clean_expansion return the truncated reasoning dump (which then gets
+    // split on a draft `Lyrics:` and SUNG, bar counts and all).
+    // The service clamps max_tokens to 4096 (backend.rs) — values above the
+    // ceiling are silently wasted, so long songs pin to it exactly.
     match seconds.clamp(MUSIC_MIN_SECONDS, MUSIC_MAX_SECONDS) {
-        0..=60 => 500,
-        61..=120 => 600,
-        121..=180 => 700,
-        181..=240 => 900,
-        _ => 1_100,
+        0..=60 => 3_000,
+        61..=120 => 3_600,
+        _ => 4_096,
     }
 }
 
@@ -93,12 +111,43 @@ pub struct GenParams {
     /// None = model default (schnell 4, dev-class ~20).
     pub image_steps: Option<u32>,
     pub mesh_texture_size: u32,
+    /// QEM face target. `None` = auto (12k objects, 20k when a rig stage follows).
+    pub mesh_faces: Option<u32>,
+    /// Keep TRELLIS's own baked colors on the mesh stage even when a PBR
+    /// paint stage follows (paint retextures anyway, so the default skips
+    /// the ~30 s tex flow there). Mesh-only chains always keep them.
+    pub mesh_trellis_texture: bool,
+    /// Motion stage override. Empty = the playable idle/walk/jump/run/dance
+    /// set from the backend's own prompts; otherwise ONE prompted take
+    /// (`motion_mode: "prompt"`) — "make them dance".
+    pub motion_prompt: String,
+    /// Edit-stage img2img strength; 1.0 = full edit (no init), see
+    /// [`EDIT_STRENGTHS`].
+    pub edit_strength: f32,
+    /// FLUX.1 LoRA adapter for the image stage: (name under the box's
+    /// `loras/` drop-box, strength). None = pristine model.
+    pub image_lora: Option<(String, f32)>,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
+    /// H3 always denoises video and audio jointly (no upstream mode drops
+    /// the audio rows from the packed sequence); this only controls whether
+    /// the service decodes the audio VAE and muxes an AAC track. Default on
+    /// (audible clip); off = silent mp4, faster by skipping decode + mux.
+    pub video_audio: bool,
+    /// RIFE frame interpolation factor for the video stage: 1 = off, 2/4 =
+    /// the service interpolates the generated frames (fps × factor).
+    pub video_interpolate: u32,
     /// Requested Music3 song ceiling in seconds. Captured in each run spec,
     /// so moving the UI picker cannot mutate already queued/running songs.
     pub music_seconds: u32,
+    /// Enhance stage resolution multiplier: 1 = off, 2/4 = RealESRGAN.
+    pub enhance_upscale: u32,
+    /// Enhance stage frame-rate multiplier: 1 = off, 2/4 = RIFE tween.
+    pub enhance_interpolate: u32,
+    /// Enhance stage: append the motion-vector `mkfl` box for
+    /// arbitrary-rate GPU playback.
+    pub enhance_flow: bool,
 }
 
 impl Default for GenParams {
@@ -107,10 +156,20 @@ impl Default for GenParams {
             image_size: IMAGE_SIZES[0],
             image_steps: None,
             mesh_texture_size: MESH_TEXTURE_SIZES[0],
+            mesh_faces: None,
+            mesh_trellis_texture: false,
+            motion_prompt: String::new(),
+            edit_strength: 1.0,
+            image_lora: None,
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
+            video_audio: true,
+            video_interpolate: 1,
             music_seconds: MUSIC_DEFAULT_SECONDS,
+            enhance_upscale: 2,
+            enhance_interpolate: 2,
+            enhance_flow: true,
         }
     }
 }
@@ -174,23 +233,38 @@ const CHARACTER_MATTE_MODEL: &str = "birefnet-hr";
 const CHARACTER_MESH_MODEL: &str = "trellis-2";
 const CHARACTER_RIG_MODEL: &str = "skintokens";
 const CHARACTER_MOTION_MODEL: &str = "hy-motion";
+/// Instruction image editing (reference image + "change …" prompt).
+const EDIT_MODEL: &str = "flux2-klein-4b";
+/// General image 4x upscaling (RealESRGAN x4plus). Pinned — the domain has
+/// exactly one model, so no dropdown.
+const UPSCALE_MODEL: &str = "realesrgan-x4plus";
+/// Structure-conditioned FLUX.1 tiers (BFL official BF16; ~35 GB, gated).
+const CONTROL_DEPTH_MODEL: &str = "flux1-depth-dev";
+const CONTROL_CANNY_MODEL: &str = "flux1-canny-dev";
+/// FLUX.1 Fill-dev: mask inpaint/outpaint (named inputs image + mask).
+const INPAINT_MODEL: &str = "flux1-fill-dev";
+/// TripoSplat: single picture -> 3D Gaussian splat (.ply), the object-level
+/// splat backend (FlashWorld stays the scene/world one).
+const SPLAT_MODEL: &str = "triposplat";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
 /// continue with it; the user can see and retry the failed LLM stage.
 const CHARACTER_EXPANSION_MIN_WORDS: usize = 24;
 
-/// A character reconstruction gets two deterministic second chances when a
-/// mesh, rig, or animated-skin quality gate rejects it. The matte/image are
+/// A character reconstruction gets two deterministic second chances when the
+/// rig or animated-skin quality gate rejects it. The matte/image are
 /// deliberately retained: changing only the mesh seed makes the retry cheap,
 /// attributable, and useful instead of silently rerolling the whole chain.
+/// Mesh geometry itself is never gated: whatever TRELLIS reconstructs is
+/// returned as-is (geometry reseeds never produced a better mesh).
 const CHARACTER_MESH_MAX_ATTEMPTS: u8 = 3;
-/// If every deterministic mesh seed for one raster is rejected, advance the
-/// Flux seed and rematte before trying mesh reconstruction again. Three image
-/// attempts × three mesh attempts is bounded, but avoids treating an unlucky
-/// akimbo/contact-pose raster as a terminal pipeline failure.
+/// If every deterministic mesh seed for one raster is rejected by the rig or
+/// motion gate, advance the Flux seed and rematte before trying mesh
+/// reconstruction again. Three image attempts × three mesh attempts is
+/// bounded, but avoids treating an unlucky akimbo/contact-pose raster as a
+/// terminal pipeline failure.
 const CHARACTER_IMAGE_MAX_ATTEMPTS: u8 = 3;
-const TRELLIS_GEOMETRY_QUALITY_MARKER: &str = "trellis-geometry-quality:";
 /// Stable fail-closed markers emitted after SkinTokens and HY-Motion quality
 /// validation.  These are deterministic content defects, not CUDA/model
 /// failures: a character run may retry its mesh seed while keeping the
@@ -318,6 +392,24 @@ fn pick_stage_model_target(
     }
 }
 
+/// Dropdown presentation order: preset indices sorted by name so the
+/// families group ("expand → …" together, "image → …" together). `PRESETS`
+/// itself stays in curated order — saved presets reference names, and every
+/// stored index is a `PRESETS` index; only the dropdown rows are sorted.
+pub fn presets_sorted_order() -> Vec<usize> {
+    let mut order: Vec<usize> = (0..PRESETS.len()).collect();
+    order.sort_by_key(|&index| PRESETS[index].name);
+    order
+}
+
+/// The dropdown row showing `PRESETS[index]` under the sorted order.
+pub fn preset_row_for_index(index: usize) -> usize {
+    presets_sorted_order()
+        .iter()
+        .position(|&i| i == index)
+        .unwrap_or(0)
+}
+
 /// The preset chains offered in the UI. Domains not yet served by any box
 /// (mesh, world today) stay listed on purpose: picking them surfaces the
 /// service gap in the stage status instead of hiding it.
@@ -325,16 +417,8 @@ pub const PRESETS: &[Preset] = &[
     Preset::linear("image", &["image"], &[]),
     Preset::linear("expand → image", &["text", "image"], &[]),
     Preset::linear("text expand only", &["text"], &[]),
-    // Named-model presets PIN that exact model. A preset that says
-    // "(kokoro)" must never affinity-route to whichever other speech
-    // backend happens to be resident (see tests below).
-    Preset::linear("speech (kokoro)", &["speech"], &[("speech", "kokoro")]),
-    Preset::linear(
-        "speech clone (indextts-2.5)",
-        &["speech"],
-        &[("speech", "indextts-2.5")],
-    ),
-    Preset::linear("audio sfx (sa3)", &["audio"], &[("audio", "sa3-sfx")]),
+    Preset::linear("speech", &["speech"], &[]),
+    Preset::linear("audio sfx", &["audio"], &[]),
     Preset::linear("video (small)", &["video"], &[]),
     Preset::linear("expand → video", &["text", "video"], &[]),
     Preset::linear("image → mesh", &["image", "mesh"], &[]),
@@ -343,19 +427,11 @@ pub const PRESETS: &[Preset] = &[
     // volume PBR (texture:false); paint retextures from the source image
     // onto xatlas UV0. Two generators, one chain.
     Preset::linear(
-        "image → mesh → hunyuan PBR",
+        "image → mesh → PBR",
         &["image", "mesh", "paint"],
         &[
             ("mesh", CHARACTER_MESH_MODEL),
             ("paint", "hunyuan3d-paint-2.1"),
-        ],
-    ),
-    Preset::linear(
-        "image → mesh → PBR (testpattern)",
-        &["image", "mesh", "paint"],
-        &[
-            ("mesh", CHARACTER_MESH_MODEL),
-            ("paint", "pbr-testpattern"),
         ],
     ),
     Preset::linear(
@@ -382,17 +458,70 @@ pub const PRESETS: &[Preset] = &[
         1,
     ),
     Preset::linear("image → world (splat)", &["image", "world"], &[]),
+    // Object-level Gaussian splats: prompt → picture → TripoSplat .ply, or
+    // straight from a selected picture (consumer-only).
+    Preset::linear(
+        "image → splat (3D gaussians)",
+        &["image", "splat"],
+        &[("splat", SPLAT_MODEL)],
+    ),
+    Preset::linear(
+        "splat from selected image",
+        &["splat"],
+        &[("splat", SPLAT_MODEL)],
+    ),
     Preset::linear("expand → image → world", &["text", "image", "world"], &[]),
-    Preset::linear("expand → sfx (sa3)", &["text", "audio"], &[("audio", "sa3-sfx")]),
-    Preset::linear("audio sfx (moss)", &["audio"], &[("audio", "moss-sfx")]),
-    Preset::linear("expand → sfx (moss)", &["text", "audio"], &[("audio", "moss-sfx")]),
-    Preset::linear("audio sfx (woosh)", &["audio"], &[("audio", "woosh-sfx")]),
-    Preset::linear("expand → sfx (woosh)", &["text", "audio"], &[("audio", "woosh-sfx")]),
-    Preset::linear("music (minimax-music3)", &["music"], &[("music", "minimax-music3")]),
-    Preset::linear("expand → music (minimax-music3)", &["text", "music"], &[("music", "minimax-music3")]),
-    Preset::linear("music (ace-step-1.5-xl)", &["music"], &[("music", "ace-step-1.5-xl")]),
-    Preset::linear("expand → music (ace-step-1.5-xl)", &["text", "music"], &[("music", "ace-step-1.5-xl")]),
+    Preset::linear("expand → sfx", &["text", "audio"], &[]),
+    // Model is chosen in the settings panel, not baked into the type.
+    Preset::linear("music", &["music"], &[]),
+    Preset::linear("expand → music", &["text", "music"], &[]),
     Preset::linear("image → cutout (alpha)", &["image", "matte"], &[]),
+    // "Talk about it to change it": select a picture, type the instruction
+    // ("change the background to trees"), and the instruction-edit model
+    // (FLUX.2 klein, reference-image conditioned) returns the edited picture
+    // — no segment/plan/composite chain needed. Consumer-only: refused
+    // without a selected image.
+    // The VJ loop post-processor: select a video, get it back upscaled
+    // (RealESRGAN), frame-tweened (RIFE) and/or carrying a motion-vector
+    // `mkfl` box for arbitrary-rate GPU playback. One decode, one encode,
+    // all-intra output (bounce loops decode backwards). Consumer-only:
+    // refused without a selected video.
+    Preset::linear(
+        "video → upscale / tween / motionvec",
+        &["enhance"],
+        &[("enhance", "video-enhance")],
+    ),
+    Preset::linear("edit selected image (instruction)", &["edit"], &[("edit", EDIT_MODEL)]),
+    // Native RealESRGAN x4plus: select a picture, get it back at 4x
+    // resolution. Consumer-only like `edit` — no prompt-only mode, refused
+    // without a selected image.
+    Preset::linear(
+        "image → upscale (×4)",
+        &["upscale"],
+        &[("upscale", UPSCALE_MODEL)],
+    ),
+    // Structure-guided re-rendering of a selected picture: the prompt says
+    // WHAT to render, the picture's depth (DA3 metric depth → FLUX.1
+    // Depth-dev) or edges (FLUX.1 Canny-dev runs its own Canny pass) says
+    // WHERE. Consumer-only like `edit`.
+    Preset::linear(
+        "image → depth-guided image",
+        &["depth", "control"],
+        &[("control", CONTROL_DEPTH_MODEL)],
+    ),
+    Preset::linear(
+        "image → edge-guided image (canny)",
+        &["control"],
+        &[("control", CONTROL_CANNY_MODEL)],
+    ),
+    // Mask inpaint/outpaint: select a picture, paint the area to repaint in
+    // the viewer (or Outpaint to grow the canvas), describe what goes there.
+    // Consumer-only; refused without a painted mask.
+    Preset::linear(
+        "inpaint / outpaint selected image (paint mask)",
+        &["inpaint"],
+        &[("inpaint", INPAINT_MODEL)],
+    ),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
     // The character chain: prompt -> clean character image -> Trellis mesh ->
@@ -432,8 +561,21 @@ pub const PRESETS: &[Preset] = &[
             ("motion", CHARACTER_MOTION_MODEL),
         ],
     ),
-    // Same playable chain with Hunyuan (or testpattern) on the TRELLIS
-    // mesh before SkinTokens. Rig/motion consume the painted GLB.
+    // Rig + animate a mesh you already have: select a mesh (History tile or
+    // run-tray chip) and it seeds the chain at the rig stage; the mesh stage
+    // only exists so the chain has a producer prefix to replace. Motion =
+    // playable set, or the Motion-prompt override ("dance").
+    Preset::linear(
+        "mesh → rig → motion (from selected mesh)",
+        &["mesh", "rig", "motion"],
+        &[
+            ("mesh", CHARACTER_MESH_MODEL),
+            ("rig", CHARACTER_RIG_MODEL),
+            ("motion", CHARACTER_MOTION_MODEL),
+        ],
+    ),
+    // Same playable chain with Hunyuan on the TRELLIS mesh before
+    // SkinTokens. Rig/motion consume the painted GLB.
     Preset::linear(
         "character (playable + hunyuan PBR)",
         &["text", "image", "matte", "mesh", "paint", "rig", "motion"],
@@ -447,19 +589,6 @@ pub const PRESETS: &[Preset] = &[
             ("motion", CHARACTER_MOTION_MODEL),
         ],
     ),
-    Preset::linear(
-        "character (playable + PBR test)",
-        &["text", "image", "matte", "mesh", "paint", "rig", "motion"],
-        &[
-            ("text", CHARACTER_LLM_MODEL),
-            ("image", CHARACTER_IMAGE_MODEL),
-            ("matte", CHARACTER_MATTE_MODEL),
-            ("mesh", CHARACTER_MESH_MODEL),
-            ("paint", "pbr-testpattern"),
-            ("rig", CHARACTER_RIG_MODEL),
-            ("motion", CHARACTER_MOTION_MODEL),
-        ],
-    ),
 ];
 
 /// Which upstream payload class a stage's request relays as its binary
@@ -469,10 +598,26 @@ pub const PRESETS: &[Preset] = &[
 pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
-        "mesh" | "video" | "world" | "matte" | "depth" | "segment" => Some(&["image/"]),
+        "enhance" => Some(&["video/"]),
+        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale"
+        | "control" | "inpaint" | "splat" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
+}
+
+/// Domains that ONLY transform an input and have no prompt-only mode: a
+/// chain starting with one is seedable even though nothing is replaced
+/// (`edit`: "change the background to trees" needs the picture; `upscale`:
+/// RealESRGAN x4 has no prompt-only mode either; `depth`/`matte`/`segment`
+/// analyse a picture; `control` renders from a control image), and is
+/// refused without a selected input instead of failing on the box.
+pub fn consumer_only_domain(domain: &str) -> bool {
+    matches!(
+        domain,
+        "edit" | "upscale" | "control" | "inpaint" | "depth" | "matte" | "segment" | "splat"
+            | "enhance"
+    )
 }
 
 /// Index of the first stage of `domains` that CONSUMES a payload of
@@ -493,7 +638,8 @@ pub fn seeded_stage_skip(domains: &[&str], seed_content_type: &str) -> Option<us
 /// text-to-video preset stays a pure prompt generator even while an input
 /// is selected — its dedicated `image → video` sibling is the transform.
 pub fn seed_replaces_prefix(domains: &[&str], seed_content_type: &str) -> Option<usize> {
-    seeded_stage_skip(domains, seed_content_type).filter(|skip| *skip >= 1)
+    seeded_stage_skip(domains, seed_content_type)
+        .filter(|skip| *skip >= 1 || domains.first().is_some_and(|d| consumer_only_domain(d)))
 }
 
 /// Human-facing stage name.  In particular, call the text stage what it is:
@@ -505,6 +651,12 @@ pub fn stage_display_name(domain: &str) -> &str {
         "matte" => "subject matte",
         "segment" => "SAM 3.1 segment",
         "paint" => "Hunyuan PBR paint",
+        "edit" => "instruction edit",
+        "upscale" => "RealESRGAN x4 upscale",
+        "control" => "structure-guided render",
+        "inpaint" => "Fill-dev inpaint",
+        "splat" => "TripoSplat 3D gaussians",
+        "enhance" => "uprez / tween / motionvec",
         _ => domain,
     }
 }
@@ -719,9 +871,11 @@ pub struct Pipeline {
     /// Retained candidate groups are part of run provenance, including after
     /// a choice is committed and the linear chain resumes.
     pub candidate_sets: Vec<CandidateSet>,
-    /// When the user pinned a concrete model in the selector it applies to
-    /// stages of that model's domain; other stages use domain affinity.
-    pub model_override: Option<(String, String)>, // (domain, model)
+    /// Interactive per-domain model picks from the settings panel
+    /// (`image model`, `music model`, …). An entry wins over the preset
+    /// pin for that domain; missing domains fall through to pins, then
+    /// affinity.
+    pub model_overrides: Vec<(String, String)>,
     /// Preset-baked model pins, (domain, model) — one-click buttons like
     /// "SFX (moss)" carry their model choice here. The interactive selector
     /// override wins over these; both win over affinity.
@@ -752,6 +906,13 @@ pub struct Pipeline {
     /// payload `(content_type, bytes)` that replaces the producer stages
     /// this chain skipped. Set only via [`Pipeline::set_seed_input`].
     seed_input: Option<(String, Vec<u8>)>,
+    /// Extra reference payloads (content type, bytes) for multi-reference
+    /// editors — sent as named inputs `reference_1..N` next to the primary
+    /// seed. Set via [`Pipeline::set_seed_references`].
+    seed_references: Vec<(String, Vec<u8>)>,
+    /// Inpaint mask PNG (white = repaint) for an `inpaint` stage; the seed
+    /// input is the canvas it applies to. Set via [`Pipeline::set_seed_mask`].
+    seed_mask: Option<Vec<u8>>,
     in_flight: HashMap<LiveId, Req>,
 }
 
@@ -767,7 +928,7 @@ impl Pipeline {
         prompt: &str,
         domains: &[&str],
         preset_pins: &[(&str, &str)],
-        model_override: Option<(String, String)>,
+        model_overrides: Vec<(String, String)>,
         box_override: Option<String>,
         voice: Option<String>,
         gen: GenParams,
@@ -799,7 +960,7 @@ impl Pipeline {
             current: 0,
             finished: false,
             candidate_sets: Vec::new(),
-            model_override,
+            model_overrides,
             preset_pins: preset_pins
                 .iter()
                 .map(|(d, m)| (d.to_string(), m.to_string()))
@@ -813,6 +974,8 @@ impl Pipeline {
             fan_out_stages: Vec::new(),
             fan_out_templates: HashMap::new(),
             seed_input: None,
+            seed_references: Vec::new(),
+            seed_mask: None,
             in_flight: HashMap::new(),
         };
         if pipeline.is_character_pipeline() {
@@ -924,6 +1087,27 @@ impl Pipeline {
             }
             _ => None,
         }
+    }
+
+    /// Service job ids this run has in flight on `base_url` (linear stage
+    /// + fan-out candidates) — lets the fleet panel tell "ours" from other
+    /// clients' jobs.
+    pub fn job_ids_on(&self, base_url: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .candidate_sets
+            .iter()
+            .flat_map(|set| set.candidates.iter())
+            .filter(|c| c.endpoint == base_url && !c.job_id.is_empty())
+            .map(|c| c.job_id.clone())
+            .collect();
+        if !self.finished {
+            if let Some(stage) = self.stages.get(self.current) {
+                if stage.box_url == base_url && !stage.job_id.is_empty() {
+                    ids.push(stage.job_id.clone());
+                }
+            }
+        }
+        ids
     }
 
     /// Every endpoint this run currently occupies. Fan-out stages can own
@@ -1119,6 +1303,40 @@ impl Pipeline {
         Ok(())
     }
 
+    /// The inpaint mask (PNG, white = repaint) for the chain's `inpaint`
+    /// stage. Refused for chains without one.
+    pub fn set_seed_mask(&mut self, mask_png: Vec<u8>) -> Result<(), String> {
+        if !self.stages.iter().any(|stage| stage.domain == "inpaint") {
+            return Err("a mask needs an inpaint stage in the chain".to_string());
+        }
+        if mask_png.is_empty() {
+            return Err("empty mask".to_string());
+        }
+        self.seed_mask = Some(mask_png);
+        Ok(())
+    }
+
+    /// Extra references for multi-reference edit stages (`reference_1..N`).
+    /// Requires an edit stage in the chain — other consumers take exactly
+    /// one input, and an ignored reference would be a silent lie.
+    pub fn set_seed_references(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        if refs.is_empty() {
+            self.seed_references.clear();
+            return Ok(());
+        }
+        if !self.stages.iter().any(|stage| stage.domain == "edit") {
+            return Err("extra references need an edit stage in the chain".to_string());
+        }
+        if let Some((ct, _)) = refs
+            .iter()
+            .find(|(ct, _)| !ct.to_ascii_lowercase().starts_with("image/png"))
+        {
+            return Err(format!("extra references must be image/png, got {ct}"));
+        }
+        self.seed_references = refs;
+        Ok(())
+    }
+
     fn request_for_stage(&self, stage: usize) -> Result<GenerateRequestJson, String> {
         self.request_for_stage_routed(
             stage,
@@ -1161,12 +1379,15 @@ impl Pipeline {
                         later.iter().find(|s| {
                             matches!(
                                 s.domain.as_str(),
-                                "mesh" | "world" | "video" | "audio" | "music"
+                                "mesh" | "splat" | "world" | "video" | "audio" | "music"
                             )
                         })
                     })
                     .or_else(|| self.stages.get(stage + 1))
                     .map(|s| s.domain.clone())
+                    // A splat stage wants exactly what the mesh template
+                    // wants: one clean, fully visible subject.
+                    .map(|d| if d == "splat" { "mesh".to_string() } else { d })
                     .unwrap_or_else(|| "image".to_string());
                 let is_music_target = target == "music";
                 request.target_domain = Some(target);
@@ -1194,12 +1415,12 @@ impl Pipeline {
                         .clamp(MUSIC_MIN_SECONDS, MUSIC_MAX_SECONDS);
                     request.max_tokens = Some(music_expansion_max_tokens(seconds));
                     request.style = Some(format!(
-                        "Write an arrangement and enough original section-tagged lyrics for a target song length of {} ({} seconds). Pace the verses, choruses, bridge and instrumental passages for that duration; do not pad by merely repeating one line. The music model may end naturally before this upper bound.",
+                        "Keep any private reasoning to two or three sentences and spend the token budget on the answer itself — a budget burned on deliberation truncates the caption before the lyrics and fails the whole run. Write an arrangement and enough original section-tagged lyrics for a target song length of {} ({} seconds). Pace the verses, choruses, bridge and instrumental passages for that duration; do not pad by merely repeating one line. The music model may end naturally before this upper bound. Everything after the Lyrics: marker is sung verbatim — never write bar counts, BPM, durations, timing math, or planning notes in the lyrics ('8 bars' would literally be sung); a section tag line is the tag alone. Structure and pacing talk belongs in the caption's Arrangement block only.",
                         format_music_duration(seconds),
                         seconds,
                     ));
                 } else {
-                    request.max_tokens = Some(220);
+                    request.max_tokens = Some(512);
                 }
             }
             "image" => {
@@ -1207,6 +1428,50 @@ impl Pipeline {
                 request.width = Some(self.gen.image_size.0);
                 request.height = Some(self.gen.image_size.1);
                 request.steps = self.gen.image_steps;
+                // LoRA: only the FLUX.1 (`flux`) backend applies adapters;
+                // the service refuses them elsewhere (visible error, never
+                // a silently un-adapted picture).
+                if let Some((name, strength)) = &self.gen.image_lora {
+                    request.loras = Some(vec![LoraRefJson {
+                        name: name.clone(),
+                        strength: Some(*strength as f64),
+                    }]);
+                }
+            }
+            // Instruction edit: the prompt IS the edit instruction; output
+            // size follows the reference (backend default), steps = model
+            // default (klein: 4 distilled).
+            "edit" => {
+                request.prompt = Some(prompt);
+                if self.gen.edit_strength < 1.0 {
+                    request.strength = Some(self.gen.edit_strength);
+                }
+            }
+            // Structure control: prompt = what to render; the control image
+            // (depth map / photo for canny) is the relayed input; output
+            // size follows the control image (backend default), steps/
+            // guidance = the model-card defaults.
+            "control" => {
+                request.prompt = Some(prompt);
+            }
+            // Fill-dev: named inputs image (the canvas = the relayed input)
+            // + mask (painted in the viewer); prompt = what goes in the mask.
+            "inpaint" => {
+                request.prompt = Some(prompt);
+            }
+            // TripoSplat: picture in, .ply out; the prompt is trace metadata
+            // only (no text conditioning in the model).
+            "splat" => {
+                request.prompt = Some(prompt);
+            }
+            // Video post-process: the selected video rides as the seed
+            // input; each transform is independently optional (a
+            // motionvec-only pass over an existing clip is a valid job).
+            "enhance" => {
+                request.prompt = Some(prompt);
+                request.upscale = Some(self.gen.enhance_upscale);
+                request.interpolate = Some(self.gen.enhance_interpolate);
+                request.flow_map = Some(self.gen.enhance_flow);
             }
             "speech" => {
                 request.text = Some(prompt);
@@ -1231,6 +1496,18 @@ impl Pipeline {
             "music" => {
                 let (description, lyrics) =
                     makepad_asset_ai::music3_backend::split_music_prompt(&prompt);
+                // An expansion stage promises the template's `Lyrics:`
+                // section (instrumental requests still carry it, holding
+                // only [Instrumental]). Its absence means the expander
+                // overran its budget inside <think> and the "expansion" is
+                // a truncated reasoning dump — refuse to sing that.
+                let expanded = self.stages[..stage].iter().any(|s| s.domain == "text");
+                if expanded && lyrics.is_empty() {
+                    return Err(
+                        "music expansion has no Lyrics: section (the LLM likely overran its budget mid-think) — run it again"
+                            .to_string(),
+                    );
+                }
                 request.prompt = Some(description);
                 if !lyrics.is_empty() {
                     request.lyrics = Some(lyrics);
@@ -1253,6 +1530,14 @@ impl Pipeline {
                 }
                 request.frames = Some(self.gen.video_frames);
                 request.steps = Some(self.gen.video_steps);
+                if self.gen.video_interpolate > 1 {
+                    request.interpolate = Some(self.gen.video_interpolate);
+                }
+                // H3 still denoises the audio rows jointly either way; off
+                // only skips the service's audio VAE decode + AAC mux.
+                if !self.gen.video_audio {
+                    request.audio = Some(false);
+                }
             }
             "mesh" => {
                 request.prompt = Some(prompt);
@@ -1265,11 +1550,16 @@ impl Pipeline {
                 request.remesh_resolution = Some(512);
                 let is_character = self.stages.iter().any(|s| s.domain == "rig");
                 let hunyuan_paint = self.stages.iter().any(|s| s.domain == "paint");
-                request.decimation_target = Some(if is_character { 20_000 } else { 12_000 });
+                request.decimation_target = Some(self.gen.mesh_faces.unwrap_or(if is_character {
+                    20_000
+                } else {
+                    12_000
+                }));
                 request.texture_size = Some(self.gen.mesh_texture_size);
                 // Hunyuan retextures from the photo. Skip TRELLIS volume PBR
-                // so the mesh stage is geometry + xatlas UV0 only.
-                if hunyuan_paint {
+                // so the mesh stage is geometry + xatlas UV0 only — unless
+                // the user asked to keep TRELLIS's colors on that stage.
+                if hunyuan_paint && !self.gen.mesh_trellis_texture {
                     request.texture = Some(false);
                 }
             }
@@ -1284,11 +1574,17 @@ impl Pipeline {
                 request.prompt = Some(prompt);
             }
             "motion" => {
-                // The native playable contract currently owns deterministic
-                // idle/walk/run/jump recipes, so this is trace/style metadata.
-                // Keep the identity-anchored expansion on the request instead
-                // of breaking provenance at the final stage.
-                request.prompt = Some(prompt);
+                let override_prompt = self.gen.motion_prompt.trim();
+                if override_prompt.is_empty() {
+                    // Playable contract: the backend's own deterministic
+                    // idle/walk/jump/run/dance recipes; the chain prompt is
+                    // trace/style metadata kept for provenance.
+                    request.prompt = Some(prompt);
+                } else {
+                    // One prompted take ("A person dances the robot").
+                    request.prompt = Some(override_prompt.to_string());
+                    request.motion_mode = Some("prompt".to_string());
+                }
             }
             // world: prompt + image input relay.
             _ => {
@@ -1299,6 +1595,50 @@ impl Pipeline {
         if let Some((b64, content_type)) = self.input_for_stage(stage) {
             request.input_b64 = Some(b64);
             request.input_content_type = Some(content_type);
+        }
+        if domain == "inpaint" {
+            let (b64, content_type) = self
+                .input_for_stage(stage)
+                .ok_or_else(|| "inpaint stage has no picture to paint on".to_string())?;
+            let mask = self
+                .seed_mask
+                .as_ref()
+                .ok_or_else(|| "inpaint stage has no mask — paint one in the viewer first".to_string())?;
+            request.input_b64 = None;
+            request.input_content_type = None;
+            request.inputs = Some(vec![
+                NamedInputJson {
+                    name: "image".to_string(),
+                    content_type,
+                    data_b64: b64,
+                },
+                NamedInputJson {
+                    name: "mask".to_string(),
+                    content_type: "image/png".to_string(),
+                    data_b64: String::from_utf8(makepad_base64::base64_encode(
+                        mask,
+                        &makepad_base64::BASE64_STANDARD,
+                    ))
+                    .unwrap_or_default(),
+                },
+            ]);
+        }
+        if domain == "edit" && !self.seed_references.is_empty() {
+            request.inputs = Some(
+                self.seed_references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (ct, bytes))| NamedInputJson {
+                        name: format!("reference_{}", index + 1),
+                        content_type: ct.clone(),
+                        data_b64: String::from_utf8(makepad_base64::base64_encode(
+                            bytes,
+                            &makepad_base64::BASE64_STANDARD,
+                        ))
+                        .unwrap_or_default(),
+                    })
+                    .collect(),
+            );
         }
         if domain == "paint" {
             let mesh = self
@@ -1351,15 +1691,28 @@ impl Pipeline {
 
     // -- stage lifecycle ----------------------------------------------------
 
+    /// Every model this run names explicitly (UI override or preset pin) —
+    /// the fleet's per-domain preference filter must never hide these from
+    /// the run's routing view.
+    pub fn pinned_models(&self) -> Vec<String> {
+        self.model_overrides
+            .iter()
+            .chain(self.preset_pins.iter())
+            .map(|(_, model)| model.clone())
+            .collect()
+    }
+
     fn pinned_model_for_domain(&self, domain: &str) -> Option<String> {
-        match &self.model_override {
-            Some((override_domain, model)) if override_domain == domain => Some(model.clone()),
-            _ => self
-                .preset_pins
-                .iter()
-                .find(|(pin_domain, _)| pin_domain == domain)
-                .map(|(_, model)| model.clone()),
-        }
+        self.model_overrides
+            .iter()
+            .find(|(override_domain, _)| override_domain == domain)
+            .map(|(_, model)| model.clone())
+            .or_else(|| {
+                self.preset_pins
+                    .iter()
+                    .find(|(pin_domain, _)| pin_domain == domain)
+                    .map(|(_, model)| model.clone())
+            })
     }
 
     fn stable_id_hash(parts: &[&str]) -> u64 {
@@ -1675,9 +2028,9 @@ impl Pipeline {
         // character preset's documented 9B fallback, but never an explicit
         // model chosen in the UI and never before live /models says ready.
         let has_interactive_model_override = self
-            .model_override
-            .as_ref()
-            .is_some_and(|(override_domain, _)| override_domain == &domain);
+            .model_overrides
+            .iter()
+            .any(|(override_domain, _)| override_domain == &domain);
         let pinned_model = self.pinned_model_for_domain(&domain);
         let prefer_ready_qwen38 = domain == "text"
             && !has_interactive_model_override
@@ -1894,14 +2247,11 @@ impl Pipeline {
 
         let is_character = self.is_character_pipeline();
         let failed_domain = self.stages[failed_stage].domain.clone();
-        let mesh_quality = failed_domain == "mesh"
-            && error.contains(TRELLIS_GEOMETRY_QUALITY_MARKER);
-        let retryable = mesh_quality
-            || (is_character
-                && ((matches!(failed_domain.as_str(), "rig" | "motion")
-                    && error.contains(CHARACTER_RIG_QUALITY_MARKER))
-                    || (failed_domain == "motion"
-                        && error.contains(CHARACTER_MOTION_QUALITY_MARKER))));
+        let retryable = is_character
+            && ((matches!(failed_domain.as_str(), "rig" | "motion")
+                && error.contains(CHARACTER_RIG_QUALITY_MARKER))
+                || (failed_domain == "motion"
+                    && error.contains(CHARACTER_MOTION_QUALITY_MARKER)));
         let Some(mesh_stage) = self
             .stages
             .iter()
@@ -1917,7 +2267,7 @@ impl Pipeline {
             if self.stages[mesh_stage].mesh_attempt + 1 < CHARACTER_MESH_MAX_ATTEMPTS {
                 self.stages[mesh_stage].mesh_attempt += 1;
                 (mesh_stage, failed_domain.clone())
-            } else if is_character {
+            } else {
                 if self.character_image_attempt + 1 >= CHARACTER_IMAGE_MAX_ATTEMPTS {
                     return None;
                 }
@@ -1931,8 +2281,6 @@ impl Pipeline {
                 self.character_image_attempt += 1;
                 self.stages[mesh_stage].mesh_attempt = 0;
                 (image_stage, failed_domain.clone())
-            } else {
-                return None;
             };
 
         for stage in &mut self.stages[retry_stage..] {
@@ -2999,6 +3347,17 @@ impl Pipeline {
                 }
             }
             Req::Poll(stage) => {
+                if response.is_some_and(|r| r.status_code == 404)
+                    || response
+                        .and_then(|r| r.get_string_body())
+                        .is_some_and(|body| body.contains("no such job"))
+                {
+                    return self.fail_stage(
+                        stage,
+                        "box lost the job (service restarted or the job expired)".to_string(),
+                        events,
+                    );
+                }
                 let parsed = response
                     .filter(|_| !failed)
                     .and_then(|r| r.get_string_body())
@@ -3148,12 +3507,18 @@ impl Pipeline {
         cx.http_request(LiveId::unique(), request);
     }
 
-    /// True while the current stage's job is queued OR running on its box:
-    /// queued jobs drop immediately; running jobs raise the job's cancel
-    /// flag and the backend unwinds at the next step/tile boundary.
+    /// True while the current stage is in-flight. A missing job id still
+    /// counts: that is the defunct case after a box restart, and Stop must
+    /// be able to clear it locally.
     pub fn can_cancel_current(&self) -> bool {
         if self.finished {
             return false;
+        }
+        // A VRAM-admission backoff has no job on the box yet but is still a
+        // live run holding a slot; Stop must be able to abandon it instead
+        // of reporting "no cancellable job" until the box frees up.
+        if self.waiting_for_admission {
+            return true;
         }
         if let Some(set) = self.active_candidate_set() {
             return set.state == CandidateSetState::FanOut
@@ -3165,19 +3530,26 @@ impl Pipeline {
                 });
         }
         self.stages.get(self.current).is_some_and(|s| {
-            !s.job_id.is_empty()
-                && matches!(
-                    s.state,
-                    StageState::Submitting | StageState::Polling | StageState::Fetching
-                )
+            matches!(
+                s.state,
+                StageState::Submitting | StageState::Polling | StageState::Fetching
+            )
         })
     }
 
-    /// Fire-and-forget `POST /job/<id>/cancel` for the current stage; a
-    /// later poll sees the job in state "cancelled" and fails the stage.
+    /// Ask the box to unwind, then fail the local stage immediately.
+    /// Waiting for the box to ack is how a restarted or hard-hung worker
+    /// left Stop looking dead: the job id is gone, polls keep retrying,
+    /// and cancel has nothing to cancel.
     pub fn cancel_current(&mut self, cx: &mut Cx) -> bool {
         if !self.can_cancel_current() {
             return false;
+        }
+        if self.waiting_for_admission {
+            self.waiting_for_admission = false;
+            self.admission_retry_not_before = None;
+            let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
+            return true;
         }
         if self.active_candidate_set().is_some() {
             let Some(jobs) = self.begin_candidate_cancellation() else {
@@ -3186,15 +3558,19 @@ impl Pipeline {
             for (endpoint, job_id) in &jobs {
                 Self::send_cancel_request(cx, endpoint, job_id);
             }
+            let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
             return true;
         }
         let stage = &self.stages[self.current];
-        let url = format!("{}/job/{}/cancel", stage.box_url, stage.job_id);
-        let mut request = crate::http::request(url, HttpMethod::POST);
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-        // The in-repo HttpServer 500s on body-less POSTs; send an empty object.
-        request.set_body(b"{}".to_vec());
-        cx.http_request(LiveId::unique(), request);
+        if !stage.job_id.is_empty() && !stage.box_url.is_empty() {
+            let url = format!("{}/job/{}/cancel", stage.box_url, stage.job_id);
+            let mut request = crate::http::request(url, HttpMethod::POST);
+            request.set_header("Content-Type".to_string(), "application/json".to_string());
+            // The in-repo HttpServer 500s on body-less POSTs; send an empty object.
+            request.set_body(b"{}".to_vec());
+            cx.http_request(LiveId::unique(), request);
+        }
+        let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
         true
     }
 
@@ -3286,7 +3662,7 @@ mod tests {
             intent,
             preset.domains,
             preset.pins,
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3352,7 +3728,7 @@ mod tests {
             "a moonlit harbor",
             &["image", "video"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3393,6 +3769,8 @@ mod tests {
                 capabilities: Some(vec!["image".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                fleet: None,
+                lanes: None,
             }),
             models: vec![ModelInfoJson {
                 id: "flux1-schnell".to_string(),
@@ -3409,6 +3787,11 @@ mod tests {
                 error: None,
                 revision: Some("rev".to_string()),
                 unavailable_reason: None,
+                license_name: None,
+                license_url: None,
+                license_summary: None,
+                license_restriction: None,
+                license_sha256: None,
             }],
         }
     }
@@ -3435,6 +3818,8 @@ mod tests {
                 capabilities: Some(vec!["text".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                fleet: None,
+                lanes: None,
             }),
             models: models
                 .iter()
@@ -3457,6 +3842,11 @@ mod tests {
                     error: None,
                     revision: None,
                     unavailable_reason: None,
+                    license_name: None,
+                    license_url: None,
+                    license_summary: None,
+                    license_restriction: None,
+                    license_sha256: None,
                 })
                 .collect(),
         }
@@ -3473,7 +3863,6 @@ mod tests {
         let absent = vec![
             text_snapshot("http://qwen38", &[(PREFERRED_EXPAND_MODEL, MODEL_STATE_ABSENT)]),
             text_snapshot("http://qwen35", &[(CHARACTER_LLM_MODEL, MODEL_STATE_READY)]),
-            text_snapshot("http://qwen36", &[("qwen3.6-27b", MODEL_STATE_LOADED)]),
         ];
         let picked = pick_stage_model_target(&absent, "text", None, true, true).unwrap();
         assert_eq!(picked.1, CHARACTER_LLM_MODEL);
@@ -3690,6 +4079,32 @@ mod tests {
     }
 
     #[test]
+    fn defunct_polling_stage_can_still_be_stopped() {
+        let mut pipeline = Pipeline::new(
+            "x",
+            &["image", "mesh", "paint"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.current = 1;
+        pipeline.stages[1].state = StageState::Polling;
+        pipeline.stages[1].job_id.clear();
+        pipeline.stages[1].box_url = "http://10.0.0.169:8123".into();
+        assert!(pipeline.can_cancel_current());
+        assert!(pipeline.is_running());
+        let _ = pipeline.fail_stage(1, "cancelled".into(), Vec::new());
+        assert!(!pipeline.is_running());
+        assert!(!pipeline.can_cancel_current());
+        assert!(matches!(
+            pipeline.stages[1].state,
+            StageState::Failed(ref e) if e == "cancelled"
+        ));
+    }
+
+    #[test]
     fn fleet_choice_presets_declare_the_gate_stage_explicitly() {
         let direct = PRESETS
             .iter()
@@ -3750,12 +4165,13 @@ mod tests {
                 ("motion", "hy-motion"),
             ]
         );
-        let test = PRESETS
-            .iter()
-            .find(|preset| preset.name == "character (playable + PBR test)")
-            .unwrap();
-        assert_eq!(test.domains, preset.domains);
-        assert!(test.pins.iter().any(|pin| *pin == ("paint", "pbr-testpattern")));
+        assert!(PRESETS.iter().all(|preset| {
+            !preset.name.contains("testpattern")
+                && !preset
+                    .pins
+                    .iter()
+                    .any(|pin| *pin == ("paint", "pbr-testpattern"))
+        }));
     }
 
     #[test]
@@ -3764,7 +4180,7 @@ mod tests {
             "an upbeat synth-pop song about finding home",
             &["text", "music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3772,11 +4188,18 @@ mod tests {
 
         let expand = pipeline.request_for_stage(0).unwrap();
         assert_eq!(expand.target_domain.as_deref(), Some("music"));
-        assert_eq!(expand.max_tokens, Some(700));
+        assert_eq!(expand.max_tokens, Some(4_096));
         assert!(expand
             .style
             .as_deref()
             .is_some_and(|style| style.contains("3:00") && style.contains("180 seconds")));
+        // The lyric sheet is sung verbatim: the style direction must forbid
+        // bar counts / timing math after the Lyrics: marker (a run once sang
+        // "8 bars").
+        assert!(expand
+            .style
+            .as_deref()
+            .is_some_and(|style| style.contains("sung verbatim") && style.contains("bar counts")));
 
         put_output(
             &mut pipeline,
@@ -3804,6 +4227,42 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     }
 
     #[test]
+    fn expanded_music_without_lyrics_section_refuses_to_sing_the_think_dump() {
+        let mut pipeline = Pipeline::new(
+            "a stomping glam rock anthem",
+            &["text", "music"],
+            &[("music", "minimax-music3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        // A budget-exhausted expansion: truncated reasoning, no Lyrics: ever.
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            b"Global Metadata\nBasic Attributes: bpm is 128. Verse 1 carries cocky, conversational",
+        );
+        let err = pipeline.request_for_stage(1).unwrap_err();
+        assert!(err.contains("no Lyrics: section"), "got {err:?}");
+
+        // A direct music run (no text stage) may legitimately have no lyrics.
+        let mut direct = Pipeline::new(
+            "dub instrumental groove",
+            &["music"],
+            &[("music", "minimax-music3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        let request = direct.request_for_stage(0).unwrap();
+        assert!(request.lyrics.is_none());
+        let _ = &mut direct;
+    }
+
+    #[test]
     fn music_duration_is_captured_per_pipeline_and_clamped_to_model_range() {
         let mut one_minute = GenParams::default();
         one_minute.music_seconds = 60;
@@ -3811,7 +4270,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "dub instrumental",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             one_minute,
@@ -3823,7 +4282,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "an extended roots-reggae song",
             &["text", "music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             five_minutes,
@@ -3832,7 +4291,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         // Two concurrently held run objects retain their own selection.
         assert_eq!(one_minute.request_for_stage(0).unwrap().seconds, Some(60.0));
         let long_expand = five_minutes.request_for_stage(0).unwrap();
-        assert_eq!(long_expand.max_tokens, Some(1_100));
+        assert_eq!(long_expand.max_tokens, Some(4_096));
         assert!(long_expand
             .style
             .as_deref()
@@ -3844,7 +4303,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "sting",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             below_model_minimum,
@@ -3860,7 +4319,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "long song",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             above_model_maximum,
@@ -3895,7 +4354,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "a tree",
             &["image"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3905,63 +4364,48 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     }
 
     #[test]
-    fn character_mesh_quality_retries_only_mesh_with_consecutive_seeds() {
-        let mut pipeline = character_pipeline("yoshi");
-        put_output(
-            &mut pipeline,
-            0,
-            "text/plain; charset=utf-8",
-            YOSHI_BRIEF.as_bytes(),
-        );
-        put_output(&mut pipeline, 1, "image/png", b"flux-png");
-        put_output(&mut pipeline, 2, "image/png", b"clean-matte");
-        put_output(&mut pipeline, 3, "model/gltf-binary", b"rejected-mesh");
-        let upstream_before = pipeline.stages[0..3]
-            .iter()
-            .map(|stage| stage.outputs.clone())
-            .collect::<Vec<_>>();
-        let first_seed = pipeline.stages[3].seed.unwrap();
+    fn mesh_geometry_is_never_retried_whatever_trellis_made_is_returned() {
+        // The mesh stage has no quality gate: an old-style geometry marker,
+        // a plain remesh complaint, or a CUDA failure all terminate the run
+        // instead of burning more TRELLIS passes on reseeds.
+        let mut character = character_pipeline("yoshi");
+        put_output(&mut character, 0, "text/plain", YOSHI_BRIEF.as_bytes());
+        put_output(&mut character, 1, "image/png", b"flux-png");
+        put_output(&mut character, 2, "image/png", b"clean-matte");
+        let mesh_seed = character.stages[3].seed.unwrap();
+        for error in [
+            "trellis: trellis-geometry-quality: floor component dominates",
+            "trellis: remesh produced 0 faces",
+            "trellis: CUDA out of memory",
+        ] {
+            assert_eq!(character.prepare_character_mesh_retry(3, error), None, "{error}");
+        }
+        assert_eq!(character.stages[3].seed, Some(mesh_seed));
+        assert_eq!(character.stages[3].mesh_attempt, 0);
+        assert_eq!(character.character_image_attempt, 0);
+        assert!(character.stages[..3].iter().all(|stage| !stage.outputs.is_empty()));
 
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis: trellis-geometry-quality: floor component dominates"
-            ),
-            Some(3)
+        let mut ordinary = Pipeline::new(
+            "a teapot",
+            &["image", "mesh"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
         );
-        assert_eq!(pipeline.stages[3].seed, Some(first_seed.wrapping_add(1)));
-        assert!(pipeline.stages[3].outputs.is_empty());
         assert_eq!(
-            decoded_input(&pipeline.request_for_stage(3).unwrap()),
-            b"clean-matte"
+            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
+            None
         );
-        assert_eq!(pipeline.stages[0..3].iter().map(|stage| stage.outputs.clone()).collect::<Vec<_>>(), upstream_before);
-
         assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis-geometry-quality: disconnected ground sheet"
-            ),
-            Some(3)
+            ordinary.prepare_character_mesh_retry(1, "trellis: CUDA out of memory"),
+            None
         );
-        assert_eq!(pipeline.stages[3].seed, Some(first_seed.wrapping_add(2)));
-        let first_image_seed = pipeline.stages[1].seed.unwrap();
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis-geometry-quality: still rejected"
-            ),
-            Some(1)
-        );
-        assert_eq!(pipeline.character_image_attempt, 1);
-        assert_eq!(pipeline.stages[3].mesh_attempt, 0);
-        assert_ne!(pipeline.stages[1].seed, Some(first_image_seed));
-        assert!(!pipeline.stages[0].outputs.is_empty());
-        assert!(pipeline.stages[1..].iter().all(|stage| stage.outputs.is_empty()));
     }
 
     #[test]
-    fn character_quality_retry_ladder_is_bounded_to_three_images_by_three_meshes() {
+    fn character_rig_retry_ladder_is_bounded_to_three_images_by_three_meshes() {
         let mut pipeline = character_pipeline("yoshi");
         let image_stage = pipeline
             .stages
@@ -3973,17 +4417,24 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             .iter()
             .position(|stage| stage.domain == "mesh")
             .unwrap();
+        let rig_stage = pipeline
+            .stages
+            .iter()
+            .position(|stage| stage.domain == "rig")
+            .unwrap();
         let mut image_seeds = vec![pipeline.stages[image_stage].seed.unwrap()];
 
         for rejection in 0..8 {
             let retry_stage = pipeline
                 .prepare_character_mesh_retry(
-                    mesh_stage,
-                    "trellis-geometry-quality: deterministic rejection",
+                    rig_stage,
+                    "native SkinTokens: character-rig-quality: deterministic rejection",
                 )
                 .unwrap_or_else(|| panic!("retry {rejection} ended the bounded ladder early"));
             if retry_stage == image_stage {
                 image_seeds.push(pipeline.stages[image_stage].seed.unwrap());
+            } else {
+                assert_eq!(retry_stage, mesh_stage);
             }
         }
 
@@ -3993,51 +4444,9 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(pipeline.stages[mesh_stage].mesh_attempt, 2);
         assert_eq!(
             pipeline.prepare_character_mesh_retry(
-                mesh_stage,
-                "trellis-geometry-quality: ninth rejection"
+                rig_stage,
+                "native SkinTokens: character-rig-quality: ninth rejection"
             ),
-            None
-        );
-    }
-
-    #[test]
-    fn mesh_retry_does_not_swallow_other_failures_or_other_pipelines() {
-        let mut character = character_pipeline("yoshi");
-        assert_eq!(
-            character.prepare_character_mesh_retry(3, "trellis: CUDA out of memory"),
-            None
-        );
-        assert_eq!(
-            character.prepare_character_mesh_retry(
-                2,
-                "trellis-geometry-quality: not a mesh stage"
-            ),
-            None
-        );
-
-        let mut ordinary = Pipeline::new(
-            "a teapot",
-            &["image", "mesh"],
-            &[],
-            None,
-            None,
-            None,
-            GenParams::default(),
-        );
-        assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis: CUDA out of memory"),
-            None
-        );
-        assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
-            Some(1)
-        );
-        assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
-            Some(1)
-        );
-        assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
             None
         );
     }
@@ -4174,6 +4583,28 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(pipeline.request_for_stage(1).unwrap().texture_size, None);
         assert_eq!(pipeline.request_for_stage(2).unwrap().texture_size, None);
         assert_eq!(pipeline.request_for_stage(3).unwrap().texture_size, Some(4096));
+        assert_eq!(
+            pipeline.request_for_stage(3).unwrap().decimation_target,
+            Some(20_000)
+        );
+    }
+
+    #[test]
+    fn selected_mesh_faces_override_auto_character_target() {
+        let mut pipeline = character_pipeline("yoshi");
+        pipeline.gen.mesh_faces = Some(80_000);
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            YOSHI_BRIEF.as_bytes(),
+        );
+        put_output(&mut pipeline, 1, "image/png", b"flux-png");
+        put_output(&mut pipeline, 2, "image/png", b"rgba-cutout");
+        assert_eq!(
+            pipeline.request_for_stage(3).unwrap().decimation_target,
+            Some(80_000)
+        );
     }
 
     #[test]
@@ -4217,7 +4648,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "dancing elf",
             &["video"],
             &[("video", "minimax-h3")],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4240,6 +4671,9 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert!(pipeline.stages[0].service_state.is_empty());
         assert!(pipeline.stages[0].detail.contains("retry in 5s"));
         assert_eq!(pipeline.stages[0].vram_retries, 1);
+        // Stop must be able to abandon the backoff: it is a live run with a
+        // slot even though no job exists on the box yet.
+        assert!(pipeline.can_cancel_current());
     }
 
     /// Exhaustive snapshot of the registry's (domain, id) set. When a model
@@ -4257,27 +4691,32 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("audio", "moss-sfx"),
             ("audio", "sa3-sfx"),
             ("audio", "woosh-sfx"),
+            ("control", "flux1-canny-dev"),
+            ("control", "flux1-depth-dev"),
             ("depth", "da3-metric-large"),
             ("image", "flux1-dev"),
             ("image", "flux1-schnell"),
-            ("image", "flux2-klein-4b"),
-            ("image", "testpattern"),
+            ("edit", "flux2-klein-4b"),
+            ("enhance", "video-enhance"),
+            ("image", "flux2-dev"),
+            ("image", "flux2-dev-q4-24g"),
+            ("inpaint", "flux1-fill-dev"),
             ("matte", "birefnet-hr"),
             ("mesh", "trellis-2"),
             ("motion", "hy-motion"),
             ("motion", "hy-motion-oracle"),
             ("music", "minimax-music3"),
-            ("music", "minimax-music3-python"),
+            ("music", "minimax-music3-q4"),
             ("music", "ace-step-1.5-xl"),
             ("paint", "hunyuan3d-paint-2.1"),
-            ("paint", "pbr-testpattern"),
             ("rig", "skintokens"),
             ("rig", "skintokens-oracle"),
             ("segment", "sam3-1-multiplex"),
+            ("splat", "triposplat"),
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
-            ("text", "qwen3.6-27b"),
             ("text", "qwen3.8-27b"),
+            ("upscale", "realesrgan-x4plus"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),
@@ -4363,7 +4802,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "hello there",
             &["speech"],
             &[("speech", "indextts-2.5")],
-            None,
+            vec![],
             None,
             Some("af_heart".to_string()),
             GenParams::default(),
@@ -4382,7 +4821,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "a weathered fishing trawler",
             domains,
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4416,7 +4855,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         // outright — it must never silently regenerate from prompt alone
         // while claiming to transform the selection.
         let mut mesh_only = Pipeline::new(
-            "x", &["mesh"], &[], None, None, None, GenParams::default(),
+            "x", &["mesh"], &[], vec![], None, None, GenParams::default(),
         );
         assert!(mesh_only
             .set_seed_input("audio/wav".into(), b"riff".to_vec())
@@ -4428,7 +4867,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
 
         // GLB-consuming chains refuse images the same way.
         let mut rig_only = Pipeline::new(
-            "x", &["rig", "motion"], &[], None, None, None, GenParams::default(),
+            "x", &["rig", "motion"], &[], vec![], None, None, GenParams::default(),
         );
         assert!(rig_only
             .set_seed_input("image/png".into(), b"png".to_vec())
@@ -4463,7 +4902,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                 ("mesh", CHARACTER_MESH_MODEL),
                 ("paint", "hunyuan3d-paint-2.1"),
             ],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4472,6 +4911,11 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         put_output(&mut pipeline, 1, "model/gltf-binary", b"glb-bytes");
         let mesh = pipeline.request_for_stage(1).unwrap();
         assert_eq!(mesh.texture, Some(false));
+        // Opting into TRELLIS colors keeps the tex flow on the mesh stage
+        // even though paint follows (texture unset = backend default true).
+        pipeline.gen.mesh_trellis_texture = true;
+        assert_eq!(pipeline.request_for_stage(1).unwrap().texture, None);
+        pipeline.gen.mesh_trellis_texture = false;
         let paint = pipeline.request_for_stage(2).unwrap();
         let inputs = paint.inputs.expect("paint named inputs");
         assert_eq!(inputs.len(), 2);
@@ -4488,6 +4932,243 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     }
 
     #[test]
+    fn edit_chain_is_seeded_at_stage_zero_and_relays_the_picture() {
+        // Consumer-only first stage: seedable even though nothing is replaced.
+        assert_eq!(seed_replaces_prefix(&["edit"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["edit"], "model/gltf-binary"), None);
+        // Ordinary consumer-first chains keep the old rule (prompt generators).
+        assert_eq!(seed_replaces_prefix(&["video"], "image/png"), None);
+        let mut pipeline = Pipeline::new(
+            "change the background to trees",
+            &["edit"],
+            &[("edit", EDIT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"picture".to_vec()).unwrap();
+        let edit = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(edit.prompt.as_deref(), Some("change the background to trees"));
+        assert_eq!(edit.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(decoded_input(&edit), b"picture");
+        assert_eq!(edit.width, None, "output size follows the reference");
+        assert!(edit.inputs.is_none(), "no extra references unless pinned");
+        assert!(edit.strength.is_none(), "1.0 = full edit, nothing on the wire");
+        {
+            let mut keep = Pipeline::new(
+                "x",
+                &["edit"],
+                &[("edit", EDIT_MODEL)],
+                vec![],
+                None,
+                None,
+                GenParams { edit_strength: 0.55, ..GenParams::default() },
+            );
+            keep.set_seed_input("image/png".to_string(), b"picture".to_vec()).unwrap();
+            assert_eq!(keep.request_for_stage(0).unwrap().strength, Some(0.55));
+        }
+
+        // Extra references ride as reference_1..N named PNG inputs.
+        pipeline
+            .set_seed_references(vec![
+                ("image/png".to_string(), b"ref-a".to_vec()),
+                ("image/png".to_string(), b"ref-b".to_vec()),
+            ])
+            .unwrap();
+        let edit = pipeline.request_for_stage(0).unwrap();
+        let inputs = edit.inputs.expect("extra references attached");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].name, "reference_1");
+        assert_eq!(inputs[1].name, "reference_2");
+        assert_eq!(inputs[1].content_type, "image/png");
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap(),
+            b"ref-b"
+        );
+        // Non-PNG references and non-edit chains are refused, never dropped.
+        assert!(pipeline
+            .set_seed_references(vec![("image/jpeg".to_string(), b"x".to_vec())])
+            .is_err());
+        let mut mesh_only = Pipeline::new(
+            "",
+            &["mesh"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(mesh_only
+            .set_seed_references(vec![("image/png".to_string(), b"x".to_vec())])
+            .is_err());
+    }
+
+    #[test]
+    fn control_chains_seed_from_the_picture_and_relay_the_control_image() {
+        // depth → control: the picture seeds the depth stage (consumer-only
+        // chain), the control stage relays the depth stage's PNG.
+        assert_eq!(seed_replaces_prefix(&["depth", "control"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["control"], "image/png"), Some(0));
+        let mut pipeline = Pipeline::new(
+            "a knight in a cathedral",
+            &["control"],
+            &[("control", CONTROL_CANNY_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"photo".to_vec()).unwrap();
+        let control = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(pipeline.pinned_model_for_domain("control").as_deref(), Some(CONTROL_CANNY_MODEL));
+        assert_eq!(control.prompt.as_deref(), Some("a knight in a cathedral"));
+        assert_eq!(decoded_input(&control), b"photo");
+        assert_eq!(control.width, None, "size follows the control image");
+    }
+
+    #[test]
+    fn splat_chains_seed_from_a_picture_and_expand_like_mesh() {
+        assert_eq!(seed_replaces_prefix(&["splat"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["image", "splat"], "image/png"), Some(1));
+        let mut pipeline = Pipeline::new(
+            "a bronze owl statuette",
+            &["splat"],
+            &[("splat", SPLAT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"owl".to_vec()).unwrap();
+        let request = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(decoded_input(&request), b"owl");
+        assert_eq!(request.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(pipeline.pinned_model_for_domain("splat").as_deref(), Some(SPLAT_MODEL));
+        // text → image → splat expands for the mesh template (one subject).
+        let chain = Pipeline::new(
+            "a bronze owl statuette",
+            &["text", "image", "splat"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        let expand = chain.request_for_stage(0).unwrap();
+        assert_eq!(expand.target_domain.as_deref(), Some("mesh"));
+    }
+
+    #[test]
+    fn inpaint_chain_sends_image_and_mask_as_named_inputs() {
+        assert_eq!(seed_replaces_prefix(&["inpaint"], "image/png"), Some(0));
+        let mut pipeline = Pipeline::new(
+            "a red door",
+            &["inpaint"],
+            &[("inpaint", INPAINT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"canvas".to_vec()).unwrap();
+        // No mask = refused, never a silent full-image repaint.
+        assert!(pipeline.request_for_stage(0).is_err());
+        pipeline.set_seed_mask(b"mask".to_vec()).unwrap();
+        let request = pipeline.request_for_stage(0).unwrap();
+        assert!(request.input_b64.is_none(), "dual named-input contract, no input_b64");
+        let inputs = request.inputs.unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].name, "image");
+        assert_eq!(inputs[1].name, "mask");
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[0].data_b64.as_bytes()).unwrap(),
+            b"canvas"
+        );
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap(),
+            b"mask"
+        );
+        assert_eq!(request.prompt.as_deref(), Some("a red door"));
+        // A mask on a chain without an inpaint stage is refused.
+        let mut edit = Pipeline::new("x", &["edit"], &[], vec![], None, None, GenParams::default());
+        assert!(edit.set_seed_mask(b"m".to_vec()).is_err());
+    }
+
+    #[test]
+    fn upscale_chain_is_seeded_at_stage_zero_and_relays_the_picture() {
+        // Consumer-only first stage: seedable even though nothing is replaced.
+        assert_eq!(seed_replaces_prefix(&["upscale"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["upscale"], "model/gltf-binary"), None);
+        let mut pipeline = Pipeline::new(
+            "",
+            &["upscale"],
+            &[("upscale", UPSCALE_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline
+            .set_seed_input("image/png".to_string(), b"picture".to_vec())
+            .unwrap();
+        let upscale = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(upscale.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(decoded_input(&upscale), b"picture");
+        assert_eq!(upscale.width, None, "output size follows the reference (4x)");
+    }
+
+    #[test]
+    fn motion_prompt_override_requests_one_prompted_take() {
+        let mut pipeline = Pipeline::new(
+            "a forest elf",
+            &["mesh", "rig", "motion"],
+            &[("rig", CHARACTER_RIG_MODEL), ("motion", CHARACTER_MOTION_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        put_output(&mut pipeline, 0, "model/gltf-binary", b"mesh");
+        put_output(&mut pipeline, 1, "model/gltf-binary", b"rigged");
+        // Empty override: playable set, chain prompt as trace metadata.
+        let motion = pipeline.request_for_stage(2).unwrap();
+        assert_eq!(motion.motion_mode, None);
+        assert_eq!(motion.prompt.as_deref(), Some("a forest elf"));
+        // Override: the motion text travels as the prompt with mode "prompt".
+        pipeline.gen.motion_prompt = "  A person dances the robot. ".to_string();
+        let motion = pipeline.request_for_stage(2).unwrap();
+        assert_eq!(motion.motion_mode.as_deref(), Some("prompt"));
+        assert_eq!(motion.prompt.as_deref(), Some("A person dances the robot."));
+        assert_eq!(decoded_input(&motion), b"rigged");
+        // A selected GLB seeds this chain at the rig stage (mesh skipped).
+        assert_eq!(seed_replaces_prefix(&["mesh", "rig", "motion"], "model/gltf-binary"), Some(1));
+    }
+
+    /// `video_audio` off requests a silent H3 clip (`request.audio =
+    /// Some(false)`); on (the default) leaves `request.audio` unset so the
+    /// service applies its own default (decode + mux the joint audio track).
+    #[test]
+    fn video_audio_toggle_sets_request_audio_field() {
+        let mut pipeline = Pipeline::new(
+            "dancing elf",
+            &["video"],
+            &[("video", "minimax-h3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(pipeline.gen.video_audio, "video_audio defaults on");
+        let video = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(video.audio, None, "default: no override, service decides");
+
+        pipeline.gen.video_audio = false;
+        let video = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(video.audio, Some(false));
+    }
+
+    #[test]
     fn character_hunyuan_pbr_rig_consumes_painted_glb() {
         let mut pipeline = Pipeline::new(
             YOSHI_BRIEF,
@@ -4498,7 +5179,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                 ("rig", CHARACTER_RIG_MODEL),
                 ("motion", CHARACTER_MOTION_MODEL),
             ],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
