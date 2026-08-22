@@ -966,6 +966,13 @@ impl PortalList {
             rect.size.index(vi) * total_views
         };
 
+        // Position first so the handle drawn THIS frame already reflects a
+        // programmatic reposition (set_first_id_and_scroll) instead of
+        // lagging one frame; re-asserted after the draw once view_total is
+        // known so the clamp is exact.
+        if !self.scroll_bar.animator_in_state(cx, ids!(hover.drag)) {
+            self.update_scroll_bar(cx);
+        }
         match self.vec_index {
             Vec2Index::Y => {
                 self.scroll_bar.draw_scroll_bar(
@@ -1276,19 +1283,40 @@ impl PortalList {
                                     pos: total_height,
                                     viewport,
                                 });
-                                cx.begin_turtle(
-                                    Walk {
-                                        abs_pos: Some(dvec2(
-                                            viewport.pos.x,
-                                            viewport.pos.y + total_height,
-                                        )),
-                                        margin: Default::default(),
-                                        width: Size::fill(),
-                                        height: Size::fit(),
-                                        metrics: Metrics::default(),
-                                    },
-                                    layout,
-                                );
+                                // Axis-aware like the Down path: a horizontal
+                                // list's re-entry item must NOT be a Fill-wide
+                                // row — it was measured at the whole viewport
+                                // width, which poisoned the size tree (the
+                                // scrollbar handle changed length while
+                                // scrolling a horizontal list).
+                                match vi {
+                                    Vec2Index::Y => cx.begin_turtle(
+                                        Walk {
+                                            abs_pos: Some(dvec2(
+                                                viewport.pos.x,
+                                                viewport.pos.y + total_height,
+                                            )),
+                                            margin: Default::default(),
+                                            width: Size::fill(),
+                                            height: Size::fit(),
+                                            metrics: Metrics::default(),
+                                        },
+                                        layout,
+                                    ),
+                                    Vec2Index::X => cx.begin_turtle(
+                                        Walk {
+                                            abs_pos: Some(dvec2(
+                                                viewport.pos.x + total_height,
+                                                viewport.pos.y,
+                                            )),
+                                            margin: Default::default(),
+                                            width: Size::fit(),
+                                            height: Size::fill(),
+                                            metrics: Metrics::default(),
+                                        },
+                                        layout,
+                                    ),
+                                }
                                 return Some(last_index + 1);
                             }
                         }
@@ -1315,16 +1343,29 @@ impl PortalList {
                         viewport,
                     });
 
-                    cx.begin_turtle(
-                        Walk {
-                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
-                            margin: Default::default(),
-                            width: Size::fill(),
-                            height: Size::fit(),
-                            metrics: Metrics::default(),
-                        },
-                        Layout::flow_down(),
-                    );
+                    // Same axis rule for every further "before first_id" item.
+                    match vi {
+                        Vec2Index::Y => cx.begin_turtle(
+                            Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::fill(),
+                                height: Size::fit(),
+                                metrics: Metrics::default(),
+                            },
+                            layout,
+                        ),
+                        Vec2Index::X => cx.begin_turtle(
+                            Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::fit(),
+                                height: Size::fill(),
+                                metrics: Metrics::default(),
+                            },
+                            layout,
+                        ),
+                    }
 
                     return Some(index - 1);
                 }
@@ -1616,6 +1657,26 @@ impl PortalList {
             self.first_scroll += delta;
         }
 
+        // One huge downward wheel delta (a fast coast) used to leave the whole
+        // travel as negative first_scroll backlog: the draw loop then
+        // instantiates and draws every row between the old viewport and the
+        // new one (dy=8000 drew ~200 live rows down to y=-7391), only for
+        // end() to renormalise afterwards. Convert any beyond-a-viewport
+        // backlog into a first_id jump through the height tree first — the
+        // same mapping a scroll-bar drag lands by — so the draw only ever
+        // walks the rows around the viewport.
+        if extent > 0.0 && self.first_scroll < -extent {
+            if let Some(tree) = self.height_tree.as_ref() {
+                let first_idx = self.first_id.saturating_sub(self.range_start);
+                let height_before =
+                    if first_idx > 0 { tree.prefix_sum(first_idx - 1) } else { 0.0 };
+                let target = (height_before - self.first_scroll).max(0.0);
+                let (item_idx, offset) = tree.find_position(target);
+                self.first_id = self.range_start + item_idx;
+                self.first_scroll = -offset;
+            }
+        }
+
         if self.first_id == self.range_start {
             if !self.bounce_at_start {
                 self.first_scroll = self.first_scroll.min(0.0);
@@ -1709,6 +1770,12 @@ impl PortalList {
     /// Returns the number of items that are currently visible in the viewport.
     pub fn visible_items(&self) -> usize {
         self.visible_items
+    }
+
+    /// The item currently shown first. A list whose content shrank under it
+    /// needs this to notice that its viewport is now past the end.
+    pub fn first_id(&self) -> usize {
+        self.first_id
     }
 
     /// Computes the top position of `target_id` relative to the viewport top
