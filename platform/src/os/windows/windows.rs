@@ -177,9 +177,23 @@ impl Cx {
                         d3d11_windows.remove(index);
                     }
                 }
+                // `close_window` (behind `CxOsOp::CloseWindow`) clears
+                // `is_created` *before* calling `DestroyWindow`, so a window
+                // still marked created at this point was torn down by
+                // something other than the app — combined with the WM_CLOSE
+                // accept above, that is the human dismissing it. Say so on
+                // stdout so an agent tailing the log does not read a
+                // deliberate close as an unexplained death (mirrors
+                // macos.rs's `MacosEvent::WindowClosed` handling).
+                let user_closed = crate::remote::take_window_close_requested(window_id.id())
+                    || self.windows[window_id].is_created;
+                let title = self.windows[window_id].create_title.clone();
                 self.call_event_handler(&Event::WindowClosed(wc));
                 // Remove the window; tolerate CxOsOp::CloseWindow having removed it already.
                 self.windows[window_id].is_created = false;
+                if user_closed {
+                    crate::remote::note_user_closed_window(window_id.id(), &title);
+                }
                 if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id) {
                     d3d11_windows.remove(index);
                 }
@@ -204,6 +218,9 @@ impl Cx {
                         )
                     })
                 {
+                    if user_closed {
+                        crate::remote::note_user_closed_last_window();
+                    }
                     self.call_event_handler(&Event::Shutdown);
                     return EventFlow::Exit;
                 }
@@ -364,7 +381,20 @@ impl Cx {
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
             Win32Event::WindowCloseRequested(e) => {
-                self.call_event_handler(&Event::WindowCloseRequested(e))
+                // WM_CLOSE only ever reaches here for a native close (the
+                // close button, Alt-F4, or the system menu) — `close_window`
+                // (behind `CxOsOp::CloseWindow`) calls `DestroyWindow`
+                // directly and never sends WM_CLOSE. So an accepted request
+                // here is the human dismissing the window; remember it, and
+                // report it when the close actually lands (mirrors
+                // macos.rs's `windowShouldClose:` handling — see
+                // `note_window_close_requested`).
+                let window_id = e.window_id;
+                let accept_close = e.accept_close.clone();
+                self.call_event_handler(&Event::WindowCloseRequested(e));
+                if accept_close.get() {
+                    crate::remote::note_window_close_requested(window_id.id());
+                }
             }
             Win32Event::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             Win32Event::Drag(window_id, mut e) => {
