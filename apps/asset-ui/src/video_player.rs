@@ -248,7 +248,7 @@ impl Drop for VideoPlayer {
     }
 }
 
-fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
+fn decode_loop(_path: String, mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
     let info = decoder.info().clone();
     let mut audio_eos = false;
     let mut rgb_scratch = Vec::new();

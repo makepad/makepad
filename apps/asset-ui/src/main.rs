@@ -80,7 +80,7 @@ use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
     server_kind_label, session_config_from_env, AssetStoreState, KindChoice, LibraryFilters,
     MAX_CATALOG_ROWS,
-    Remote, SERVER_KINDS,
+    Remote,
 };
 use makepad_asset_client::GcStatusDto;
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
@@ -13148,7 +13148,7 @@ impl MatchEvent for App {
             VideoAction::Seek(fraction) => {
                 self.scrub_video_to(cx, fraction);
             }
-            VideoAction::ToggleLoop | VideoAction::None => {}
+            VideoAction::ToggleLoop | VideoAction::TrimChanged(..) | VideoAction::None => {}
         }
         // The separated layers: four mute toggles over one shared playhead.
         for (lane, id) in [
@@ -13425,7 +13425,7 @@ impl MatchEvent for App {
                 VideoAction::Seek(fraction) => {
                     self.scrub_video_to(cx, fraction);
                 }
-                VideoAction::ToggleLoop | VideoAction::None => {}
+                VideoAction::ToggleLoop | VideoAction::TrimChanged(..) | VideoAction::None => {}
             }
         }
         if self.ui.button(cx, ids!(retry_btn)).clicked(actions) {
