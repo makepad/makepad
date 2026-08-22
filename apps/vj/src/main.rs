@@ -19,6 +19,9 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
+use crate::import_ui::ImportPanel;
+use crate::local_store::LocalStore;
 
 mod apc40;
 mod beat_sync;
@@ -36,6 +39,7 @@ mod flow;
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
 mod fx;
+mod import_ui;
 mod gen;
 mod lanes;
 mod loop_detect;
@@ -54,6 +58,8 @@ mod music_view;
 mod stems;
 mod wave_analysis;
 mod pads;
+mod local_store;
+mod media_scan;
 mod service;
 // Stems/lyrics the STORE already holds: fetch instead of separate, and give
 // back what this machine had to compute.
@@ -640,6 +646,7 @@ script_mod! {
                                 text: "Word hops"
                                 active: true
                             }
+                            import_toggle := ChromeButton{text: "IMPORT"}
                             open_output := ChromeButton{text: "OUTPUT"}
                             output_window_status := PanelLabel{width: 96 text: "output open"}
                         }
@@ -1332,6 +1339,65 @@ script_mod! {
                                     }
                                     chat_send_btn := ChromeButton{text: "Send"}
                                 }
+                            }
+                        }
+                        // IMPORT CONTENT. Folded away until asked for, because
+                        // importing is a thing you do between sets, not during
+                        // one — but the handle is always on screen so it is
+                        // discoverable without a manual.
+                        import_panel := RoundedView{
+                            visible: false
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 4
+                            padding: Inset{left: 10.0 right: 10.0 top: 6.0 bottom: 6.0}
+                            draw_bg +: {
+                                color: #x141920
+                                border_color: #xffffff22
+                                border_size: 1.0
+                                border_radius: 8.0
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                align: Align{x: 0.0 y: 0.5}
+                                Label{
+                                    text: "IMPORT CONTENT"
+                                    draw_text.color: #x3ee0b0
+                                    draw_text.text_style: theme.font_bold{font_size: 10}
+                                }
+                                import_path := TextInput{
+                                    width: Fill
+                                    empty_text: "folder or file path — or drop one on this window"
+                                }
+                                import_browse := ChromeButton{text: "BROWSE…"}
+                                import_go := ChromeButton{text: "IMPORT"}
+                                import_cancel := ChromeButton{text: "CANCEL"}
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                align: Align{x: 0.0 y: 0.5}
+                                import_bar := Slider{
+                                    width: 220
+                                    min: 0.0
+                                    max: 1.0
+                                    default: 0.0
+                                }
+                                import_status := PanelLabel{
+                                    width: Fill
+                                    text: "drop a folder here, or type a path"
+                                }
+                            }
+                            import_notes := PanelLabel{
+                                width: Fill
+                                height: Fit
+                                text: ""
                             }
                         }
                         // Live show control stays visible on every surface. The
@@ -3471,6 +3537,13 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    /// The IMPORT CONTENT panel: its path, its worker and its progress.
+    #[rust]
+    import: ImportPanel,
+    /// Set while a native folder picker is open, so a second click on the
+    /// browse button cannot stack two modal dialogs.
+    #[rust]
+    import_picking: bool,
     #[rust]
     connector: Option<SessionConnector>,
     /// First connection-class failure of the current session, if failures
@@ -4021,6 +4094,16 @@ pub struct App {
     /// poll timer.
     #[rust]
     decode_pump: NextFrame,
+
+    /// The Asset Server this process is HOSTING, when it is hosting one.
+    ///
+    /// LAST FIELD ON PURPOSE. Rust drops struct fields in declaration order,
+    /// so everything that might still be talking to the store — the session
+    /// handles, the decode pool, the import worker — is torn down before the
+    /// server it was talking to. `None` when attached to somebody else's
+    /// store, which is the same code path either way.
+    #[rust]
+    local_store: Option<LocalStore>,
 }
 
 /// Minimum spacing between catalog refreshes triggered by publish events.
@@ -6940,6 +7023,9 @@ impl App {
     // ---- polling ------------------------------------------------------------
 
     fn pump(&mut self, cx: &mut Cx) {
+        // The import worker reports here: cheap when idle, and it must be
+        // drained on the UI tick rather than blocking anything.
+        self.pump_import(cx);
         // The output window starts CLOSED (cleaner for testing; the OUTPUT
         // button reopens it). Done here, not in Startup, because the native
         // window may not exist yet at Startup; `VJ_OUTPUT=1` keeps the old
@@ -7648,11 +7734,105 @@ impl App {
         // the reconnect lands (the transcript on screen survives).
         self.chat.disconnect();
         self.status_text = "asset server lost — rediscovering…".to_string();
-        match SessionConnector::start(service::session_config_from_env()) {
+        // If THIS process is the host, the store did not go anywhere — only
+        // the client session did. Re-point at the server we are still
+        // running rather than re-resolving, which would try to take a lock
+        // we already hold and fail every time.
+        let config = match &self.local_store {
+            Some(local) => {
+                let mut config = service::session_config_from_env();
+                config.endpoints = Some(local.endpoints());
+                self.status_text = "reconnecting to the local store…".to_string();
+                config
+            }
+            None => {
+                let resolved = local_store::resolve(service::session_config_from_env());
+                self.status_text = resolved.note.clone();
+                self.local_store = resolved.local;
+                resolved.config
+            }
+        };
+        match SessionConnector::start(config) {
             Ok(connector) => self.connector = Some(connector),
             Err(error) => self.status_text = format!("session config invalid: {error}"),
         }
         self.grids_dirty = true;
+    }
+
+    // ---- IMPORT CONTENT ---------------------------------------------------
+
+    fn set_import_panel_open(&mut self, cx: &mut Cx, open: bool) {
+        self.import.open = open;
+        self.ui.view(cx, ids!(import_panel)).set_visible(cx, open);
+        self.ui
+            .button(cx, ids!(import_toggle))
+            .set_text(cx, if open { "IMPORT ●" } else { "IMPORT" });
+        if open {
+            self.sync_import_ui(cx);
+        }
+        self.ui.redraw(cx);
+    }
+
+    /// Open the platform's native folder picker.
+    ///
+    /// The answer arrives later as a `FileDialogAction` in an actions pass —
+    /// there is no return value to wait for, and waiting would mean holding
+    /// the `Cx` borrow across a modal run loop.
+    fn open_import_picker(&mut self, cx: &mut Cx) {
+        if self.import_picking {
+            return;
+        }
+        self.import_picking = true;
+        let mut dialog = FileDialog::new().set_title("Choose media to import".into());
+        let current = self.import.path.trim();
+        if !current.is_empty() {
+            dialog = dialog.set_location(PathBuf::from(current));
+        }
+        cx.open_select_folder_dialog(dialog);
+    }
+
+    /// Hand the panel a live session and let it start its worker.
+    fn start_import(&mut self, cx: &mut Cx) {
+        let Some(up) = self.up.as_ref() else {
+            self.import.status = "no asset server session yet".to_string();
+            self.sync_import_ui(cx);
+            return;
+        };
+        let endpoints = up.endpoints;
+        let server_id = up.server_id;
+        let token = up.token.clone();
+        let cache = service::session_config_from_env().cache_parent;
+        if let Err(error) = self.import.start(endpoints, server_id, token, cache) {
+            crate::log!("import refused: {error}");
+        }
+        self.sync_import_ui(cx);
+    }
+
+    /// Drain the import worker and repaint the panel. Cheap when idle.
+    fn pump_import(&mut self, cx: &mut Cx) {
+        if self.import.poll() {
+            self.sync_import_ui(cx);
+            // Newly published rows arrive through the normal catalog-event
+            // path; nudging the grids just makes them appear a beat sooner.
+            self.grids_dirty = true;
+        }
+    }
+
+    fn sync_import_ui(&mut self, cx: &mut Cx) {
+        if !self.import.open {
+            return;
+        }
+        let status = self.import.status.clone();
+        self.ui.label(cx, ids!(import_status)).set_text(cx, &status);
+        let progress = self.import.progress();
+        self.ui.slider(cx, ids!(import_bar)).set_value(cx, progress);
+        let notes = match &self.import.phase {
+            crate::import_ui::ImportPhase::Done(s)
+            | crate::import_ui::ImportPhase::Cancelled(s) => s.notes.join("  ·  "),
+            _ => String::new(),
+        };
+        self.ui.label(cx, ids!(import_notes)).set_text(cx, &notes);
+        self.ui.redraw(cx);
     }
 
     /// The next finished decode to spend UI-thread time on.
@@ -10785,7 +10965,14 @@ impl MatchEvent for App {
         self.midi_output = cx.midi_output();
         self.start_lighting();
         self.sync_lighting_controls_ui(cx);
-        match SessionConnector::start(service::session_config_from_env()) {
+        // STANDALONE BY DEFAULT. The VJ hosts its own Asset Server on
+        // loopback unless an external one is reachable (or pinned) — see
+        // `local_store::resolve`. Either way everything above this line is a
+        // thin client over HTTP and cannot tell the difference.
+        let resolved = local_store::resolve(service::session_config_from_env());
+        self.status_text = resolved.note.clone();
+        self.local_store = resolved.local;
+        match SessionConnector::start(resolved.config) {
             Ok(connector) => self.connector = Some(connector),
             Err(error) => self.status_text = format!("session config invalid: {error}"),
         }
@@ -11658,6 +11845,48 @@ impl MatchEvent for App {
             for key in self.pads.pad_keys() {
                 let cmds = self.pads.stop_pad(key);
                 self.run_pad_cmds(cmds);
+            }
+        }
+
+        // ---- IMPORT CONTENT ----
+        if self.ui.button(cx, ids!(import_toggle)).clicked(actions) {
+            let open = !self.import.open;
+            self.set_import_panel_open(cx, open);
+        }
+        if let Some(text) = self.ui.text_input(cx, ids!(import_path)).changed(actions) {
+            self.import.set_path(text);
+        }
+        if self.ui.text_input(cx, ids!(import_path)).returned(actions).is_some()
+            || self.ui.button(cx, ids!(import_go)).clicked(actions)
+        {
+            let text = self.ui.text_input(cx, ids!(import_path)).text();
+            self.import.set_path(text);
+            self.start_import(cx);
+        }
+        if self.ui.button(cx, ids!(import_cancel)).clicked(actions) {
+            self.import.cancel();
+            self.sync_import_ui(cx);
+        }
+        if self.ui.button(cx, ids!(import_browse)).clicked(actions) {
+            self.open_import_picker(cx);
+        }
+        // The native picker answers in a LATER actions pass; the call that
+        // asked is long gone by then, so the answer is matched here.
+        for action in actions {
+            let Some(picked) = action.downcast_ref::<FileDialogAction>() else { continue };
+            match picked {
+                FileDialogAction::FolderSelected(path) => {
+                    self.import_picking = false;
+                    self.import.set_path(path.to_string_lossy().into_owned());
+                    self.ui
+                        .text_input(cx, ids!(import_path))
+                        .set_text(cx, &self.import.path.clone());
+                    self.sync_import_ui(cx);
+                }
+                FileDialogAction::FolderCancelled => {
+                    self.import_picking = false;
+                }
+                FileDialogAction::None => {}
             }
         }
 
