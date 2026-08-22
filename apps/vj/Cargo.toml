@@ -11,12 +11,47 @@
 name = "makepad-vj"
 version = "0.1.0"
 edition = "2021"
+# src/bin/karaoke_align.rs makes this a two-binary package; without this,
+# `cargo run -p makepad-vj` refuses to guess and demands --bin.
+default-run = "makepad-vj"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-asset-data = { path = "../../libs/asset/data" }
+# Own MP3 / Ogg Vorbis decoders for the music decks and SFX pads.
+makepad-audio-decode = { path = "../../libs/audio_decode" }
+# Four-stem source separation for the music decks' stem mix.
+makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+# Whisper transcription of the separated vocals stem: karaoke subtitles.
+makepad-voice = { path = "../../libs/voice" }
+makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
+# Stems + lyrics as server-stored side-channels: the encode/role/publish
+# implementation shared with the asset-ui bake.
+makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }
+makepad-asset-widgets = { path = "../../libs/asset/widgets" }
 makepad-asset-client = { path = "../../libs/asset/client" }
+# The chat pane itself — ONE component, shared with the asset UI and the
+# game sandbox: the session on the server's chat broker, the worker thread,
+# the transcript with tool chips and the rate meter.
+makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
 # 3D program lane: skinned-GLB playback via the renderer.
 makepad-render = { path = "../../libs/render" }
 makepad-show-control = { path = "../../libs/show_control" }
 makepad-gltf = { path = "../../libs/gltf" }
+# Gaussian-splat program slots: XrSceneView offscreen pass + ViewSplat.
+makepad-xr = { path = "../../xr" }
+# Procedural placeholder thumbnails for bundled effect presets.
+jpeg-encoder = { path = "../../libs/jpeg-encoder", version = "0.6.1" }
+# FULLY-LOCAL MODE: the VJ hosts its own Asset Server in-process, on
+# loopback, when no external store is reachable. Same crate asset-ui and the
+# sandbox embed — the VJ stays a THIN CLIENT over it either way, talking
+# HTTP to 127.0.0.1 exactly as it talks to a remote store.
+makepad-asset-store = { path = "../../libs/asset/store" }
+# Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
+# pictures for audio, and the dimension probes for stills.
+makepad-asset-importer = { path = "../../libs/asset/importer" }
+# VARIABLE-FRAMERATE IMPORT: the `mkfl` payload the player reads, the
+# classical (model-free) optical flow that fills it, and the all-intra
+# re-encode. Shared with the enhance backend, which fills the same box from
+# RIFE — one format, one parser, two producers.
+makepad-video-flow = { path = "../../libs/video_flow" }
