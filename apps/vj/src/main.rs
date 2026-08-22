@@ -309,12 +309,12 @@ script_mod! {
     // 22px icon button for the cue strips / console. The host paints `lit`
     // state (playing, loop on, spin on) through draw_bg.color like FxButton.
     let IconButton = ButtonIcon{
-        width: 26
+        width: 24
         height: 22
         padding: 0
-        // ONE glyph-to-button ratio app-wide (~0.38): comfortable padding,
-        // never a glyph crowding its chrome.
-        icon_walk: Walk{width: 10 height: Fit}
+        // ONE BUTTON FAMILY app-wide (the pager's well + glyph ratio):
+        // 24x22 wells, 9-wide glyphs, comfortable padding everywhere.
+        icon_walk: Walk{width: 9 height: Fit}
         draw_bg +: {
             color: #x272e38
             color_focus: #x272e38
@@ -482,7 +482,9 @@ script_mod! {
                             // surface re-rendered two levels and two splat
                             // scenes. They now redraw when THEY change.
                             new_batch: true
-                            padding: Inset{left: 74.0 right: 8.0 top: 0.0 bottom: 0.0}
+                            // +1: the bar's contents sit 1px low of the
+                            // window edge optics (user-calibrated).
+                            padding: Inset{left: 74.0 right: 8.0 top: 1.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
                             // THE window grip: as the bar filled with
                             // controls, "drag anywhere that isn't a button"
@@ -728,40 +730,42 @@ script_mod! {
                             Tip{ text: "Word-hop timing"
                                 karaoke_word_hops := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/wordhop.svg") } }
                             }
-                            // FADEOUT dims ONLY the output window.
+                            // FADEOUT (output-window dim) as a DROPDOWN
+                            // SLIDER — same idiom as volume, no bar drags.
                             Tip{ text: "Fade the output to black"
                                 fadeout_learn := Learn{
-                                    fadeout_knob := ApcKnob{width: 22 height: 22 default: 0.0}
+                                    fadeout_knob := DropSlider{
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.0
+                                        display_scale: 100.0
+                                        suffix: "%"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/fade.svg") }
+                                    }
                                 }
                             }
-                            fadeout_value := PanelLabel{width: 34 flow: Flow.Right{wrap: false} max_lines: 1 text: ""}
                             Tip{ text: "Output window"
                                 open_output := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/monitor.svg") } }
                             }
-                            // Volume icon instead of a MASTER word — the
-                            // slider + % already say the rest.
-                            Icon{
-                                icon_walk: Walk{width: 14 height: Fit}
-                                draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/volume.svg")
-                                    color: #xa9b4bf
+                            // MASTER VOLUME as a DROPDOWN SLIDER: the chip
+                            // is a plain click target (no drag in the bar —
+                            // it can never fight window-dragging); the
+                            // slider lives in a popover below.
+                            Tip{ text: "Master volume"
+                                master_learn := Learn{
+                                    master_slider := DropSlider{
+                                        min: 0.0
+                                        max: 1.2
+                                        default: 0.9
+                                        display_scale: 100.0
+                                        suffix: "%"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") }
+                                    }
                                 }
                             }
                             // The stock Slider is drawn for a tall well with a
                             // label gutter and is INVISIBLE at 28px of chrome —
                             // this is the same fader the FX/light strips use.
-                            master_learn := Learn{
-                                master_slider := ApcHSlider{
-                                    width: 116
-                                    // Pulled onto the bar's centerline (the
-                                    // Slider's theme walk hangs 3px low).
-                                    margin: Inset{top: -3.0}
-                                    min: 0.0
-                                    max: 1.2
-                                    default: 0.9
-                                }
-                            }
-                            master_value := PanelLabel{width: 38 text: "90%"}
                             // The master program-audio mute lives with the
                             // MASTER it silences — nothing floats loose in
                             // panel space.
@@ -1041,7 +1045,11 @@ script_mod! {
                                             // Card: one tidy module per
                                             // cluster (the app's well idiom).
                                             RoundedView{
-                                                width: Fit height: Fit flow: Down spacing: 4
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
                                                     color: #x181c23
@@ -1066,9 +1074,8 @@ script_mod! {
                                                     }
                                                 }
                                                 deck_a_controls := View{
-                                                    width: Fill height: Fit flow: Right spacing: 3
+                                                    width: Fill height: 26 flow: Right spacing: 3
                                                     align: Align{x: 0.0, y: 0.5}
-                                                    visible: false
                                                     deck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
                                                     deck_a_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
@@ -1097,7 +1104,11 @@ script_mod! {
                                             // width this frees belongs to the deck
                                             // source monitors' transport rows.
                                             RoundedView{
-                                                width: Fit height: Fit flow: Down spacing: 4
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
                                                     color: #x181c23
@@ -1106,35 +1117,39 @@ script_mod! {
                                                     border_radius: 9.0
                                                 }
                                                 align: Align{x: 0.0, y: 0.0}
-                                                View{
-                                                    width: Fit height: Fit flow: Right spacing: 4
-                                                    fx_slot_a_tile := VjFxSlotTile{width: 130 height: 76}
-                                                    View{
-                                                        width: Fit height: Fit flow: Down spacing: 3
-                                                        fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
-                                                        fx_slot_a_clear := ChromeButton{width: 30 text: "×"}
-                                                    }
-                                                }
-                                                // 2x2 dial grid: SPD + the three doc
-                                                // dials, label beside each knob.
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_a_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        Tick{width: 40 text: "SPD"}
-                                                        fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_a_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_a_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_a_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
+                                                }
+                                                View{width: Fill height: Fill}
+                                                View{
+                                                    width: Fill height: Fit flow: Right
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_a_clear := ChromeButton{width: 22 text: "×"}
                                                 }
                                             }
                                             // Tile over dials: the effect's face on
@@ -1142,7 +1157,11 @@ script_mod! {
                                             // width this frees belongs to the deck
                                             // source monitors' transport rows.
                                             RoundedView{
-                                                width: Fit height: Fit flow: Down spacing: 4
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
                                                     color: #x181c23
@@ -1151,35 +1170,39 @@ script_mod! {
                                                     border_radius: 9.0
                                                 }
                                                 align: Align{x: 0.0, y: 0.0}
-                                                View{
-                                                    width: Fit height: Fit flow: Right spacing: 4
-                                                    fx_slot_t_tile := VjFxSlotTile{width: 130 height: 76}
-                                                    View{
-                                                        width: Fit height: Fit flow: Down spacing: 3
-                                                        fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
-                                                        fx_slot_t_clear := ChromeButton{width: 30 text: "×"}
-                                                    }
-                                                }
-                                                // 2x2 dial grid: SPD + the three doc
-                                                // dials, label beside each knob.
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_t_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        Tick{width: 40 text: "SPD"}
-                                                        fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_t_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_t_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_t_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
+                                                }
+                                                View{width: Fill height: Fill}
+                                                View{
+                                                    width: Fill height: Fit flow: Right
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_t_clear := ChromeButton{width: 22 text: "×"}
                                                 }
                                             }
                                             // Tile over dials: the effect's face on
@@ -1187,7 +1210,11 @@ script_mod! {
                                             // width this frees belongs to the deck
                                             // source monitors' transport rows.
                                             RoundedView{
-                                                width: Fit height: Fit flow: Down spacing: 4
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
                                                     color: #x181c23
@@ -1196,42 +1223,50 @@ script_mod! {
                                                     border_radius: 9.0
                                                 }
                                                 align: Align{x: 0.0, y: 0.0}
-                                                View{
-                                                    width: Fit height: Fit flow: Right spacing: 4
-                                                    fx_slot_b_tile := VjFxSlotTile{width: 130 height: 76}
-                                                    View{
-                                                        width: Fit height: Fit flow: Down spacing: 3
-                                                        fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
-                                                        fx_slot_b_clear := ChromeButton{width: 30 text: "×"}
-                                                    }
-                                                }
-                                                // 2x2 dial grid: SPD + the three doc
-                                                // dials, label beside each knob.
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_b_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        Tick{width: 40 text: "SPD"}
-                                                        fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_b_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fit height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_b_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
-                                                        fx_slot_b_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
+                                                }
+                                                View{width: Fill height: Fill}
+                                                View{
+                                                    width: Fill height: Fit flow: Right
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_b_clear := ChromeButton{width: 22 text: "×"}
                                                 }
                                             }
                                             // DECK B SOURCE, mirroring A.
                                             // Card: one tidy module per
                                             // cluster (the app's well idiom).
                                             RoundedView{
-                                                width: Fit height: Fit flow: Down spacing: 4
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
                                                 padding: 6
                                                 draw_bg +: {
                                                     color: #x181c23
@@ -1256,9 +1291,8 @@ script_mod! {
                                                     }
                                                 }
                                                 deck_b_controls := View{
-                                                    width: Fill height: Fit flow: Right spacing: 3
+                                                    width: Fill height: 26 flow: Right spacing: 3
                                                     align: Align{x: 0.0, y: 0.5}
-                                                    visible: false
                                                     deck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
                                                     deck_b_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
@@ -2444,6 +2478,18 @@ impl LatchPaint {
                 fg: 0xd6dee6ff,
                 fg_hover: 0xfffaf4ff,
             }
+        }
+    }
+
+    /// The RESERVED transport row of an EMPTY deck (the no-push law):
+    /// chrome present, faces nearly off — geometry never changes.
+    pub fn ghost() -> LatchPaint {
+        LatchPaint {
+            bg: 0x1a1e2455,
+            bg_hover: 0x1a1e2455,
+            bg_down: 0x1a1e2455,
+            fg: 0x39404a66,
+            fg_hover: 0x39404a66,
         }
     }
 
@@ -4171,6 +4217,9 @@ pub struct App {
     beat_clock: BeatClock,
     #[rust]
     clock_epoch: Option<Instant>,
+    /// The next beat boundary the pump will pulse the deck transports at.
+    #[rust]
+    beat_edge: Option<Instant>,
     /// The FREE-RUNNING FLOOR of the clock ladder: there is NO clockless
     /// state. From process start this ticks at 120 BPM; every real source
     /// (tap, typed BPM, deck, detector) steers the ladder above it, and
@@ -4739,16 +4788,8 @@ impl App {
     /// the picture down — a half-faded program must never be a mystery.
     fn set_fadeout(&mut self, cx: &mut Cx, value: f32) {
         self.fadeout = value.clamp(0.0, 1.0);
-        let label = self.ui.label(cx, ids!(fadeout_value));
-        if self.fadeout > 0.005 {
-            label.set_text(cx, &format!("{:.0}%", self.fadeout * 100.0));
-            let mut label = label;
-            script_apply_eval!(cx, label, {
-                draw_text +: { color: #xffa040 }
-            });
-        } else {
-            label.set_text(cx, "");
-        }
+        // The chip carries its own live readout.
+        self.set_drop_slider(cx, ids!(fadeout_knob), self.fadeout as f64);
         self.video_pump = cx.new_next_frame();
     }
 
@@ -4944,13 +4985,11 @@ impl App {
             }
             "fadeout" => {
                 self.set_fadeout(cx, v);
-                self.ui.slider(cx, ids!(fadeout_knob)).set_value(cx, v as f64);
             }
             "master" => {
                 let value = v * 1.2;
                 self.mixer.set_master(value);
-                self.set_master_readout(cx, value);
-                self.ui.slider(cx, ids!(master_slider)).set_value(cx, value as f64);
+                self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
             _ => {
                 let Some(rest) = control.strip_prefix("fx_") else { return };
@@ -6236,109 +6275,29 @@ p2 {}
     /// Beat-sync a video loop: N beats per loop → playback rate so the clip
     /// length lands exactly on N beats (0 = free-running). Re-applied as the
     /// tempo drifts; silently free when there is no lock.
-    /// ONE RATE AUTHORITY per deck: `base × chip`, written from exactly
-    /// one place.
-    ///
-    /// `base` is the ANALYZER'S loop fit when it is usable (or the
-    /// operator's TRIM span when one is cut); otherwise the whole-clip
-    /// bars fit against the clock (musical doublings keep it near natural
-    /// speed). `chip` is the transport's .5/1/2/4 multiplier. The old
-    /// split — bars fit in one fn, analyzer fit in another that wrote the
-    /// rate WITHOUT the chip — let whichever ran last erase the other,
-    /// which is why the chip "did nothing".
+    /// THE VIDEOLOOP SYNC LAW ("sync is 1 beat one play direction"):
+    /// playback RATE is fixed — natural speed × the .5/1/2/4 chip, NEVER
+    /// derived from the range length (stretch-to-fit made a shorter trim
+    /// play faster, which is not what a videoloop does). SYNC means the
+    /// BEAT drives direction/phase: every beat boundary flips a bounce /
+    /// restarts a wrap (`SlotPlayer::beat_pulse`, fed from the pump), so
+    /// the clip sweeps at constant speed and TURNS ON THE BEAT. A range
+    /// edge reached early holds until the next beat. The chip multiplies
+    /// the RATE — a 2× loop sweeps twice as far per beat, not twice as
+    /// fast through a fixed range.
     fn apply_slot_beat_sync(&mut self, slot: SlotId) {
         let i = slot.index();
         let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
-        let beat = self.current_beat().filter(|b| b.locked);
-        let period = beat
-            .as_ref()
-            .map(|b| b.period.as_secs_f64())
-            .filter(|p| *p > 0.0 && p.is_finite());
-        let media_secs = self
-            .players[i]
-            .as_ref()
-            .map(|player| player.duration_secs)
-            .unwrap_or(0.0);
-        // -- analyzer fit / trimmed-span fit ------------------------------
-        let trim = self.slot_trim[i];
-        let musical = beat.as_ref().filter(|b| b.confidence >= CONF_MUSICAL);
-        let fit = if !synced || media_secs <= 0.0 {
-            None
-        } else if trim.1 - trim.0 < 0.999 {
-            // The operator DEFINED the loop with the handles: fit the
-            // trimmed span's bars, not the analyzer's natural period.
-            musical.and_then(|beat| {
-                fit_loop_to_grid(
-                    ((trim.1 - trim.0) * media_secs).max(0.05),
-                    beat.bpm as f64,
-                    MAX_LOOP_RATE_DEVIATION,
-                )
-            })
-            .filter(|fit| fit.within_rate_limit)
-        } else {
-            self.slot_scan[i].and_then(|revision| {
-                let beat = musical?;
-                let report = self.loop_reports.get(&revision)?;
-                let usable = report.detection.is_usable()
-                    && matches!(
-                        report.detection.kind,
-                        LoopKind::Wrap | LoopKind::PingPong
-                    )
-                    && report.detection.confidence >= LOOP_FIT_MIN_CONFIDENCE
-                    && loop_report_matches_media(*report, media_secs);
-                if !usable {
-                    return None;
-                }
-                fit_loop_to_grid(
-                    report.period_secs,
-                    beat.bpm as f64,
-                    MAX_LOOP_RATE_DEVIATION,
-                )
-                .filter(|fit| fit.within_rate_limit)
-            })
-        };
-        self.applied_fit[i] = fit;
-        // -- bars-fit fallback: the WHOLE clip stretched into N bars ------
-        // (doublings keep it near natural speed so the clamp never bites
-        // and then drifts against the grid).
-        let bars = if synced { self.slot_sync_beats[i] } else { 0 };
-        let bars_fit = match (bars, period) {
-            (0, _) | (_, None) => 1.0,
-            (n, Some(period)) if media_secs > 0.0 => {
-                let mut span = n as f64 * 4.0 * period;
-                let mut rate = media_secs / span;
-                while rate > MAX_VIDEO_PLAYBACK_RATE * 0.75 {
-                    span *= 2.0;
-                    rate = media_secs / span;
-                }
-                while rate < MIN_VIDEO_PLAYBACK_RATE * 1.5 {
-                    span *= 0.5;
-                    rate = media_secs / span;
-                }
-                rate
-            }
-            _ => 1.0,
-        };
-        let exact_bars = match (bars, period) {
-            (0, _) | (_, None) => 1.0,
-            (n, Some(period)) if media_secs > 0.0 => {
-                media_secs / (n as f64 * 4.0 * period)
-            }
-            _ => 1.0,
-        };
-        let base = fit.map(|fit| fit.playback_rate).unwrap_or(bars_fit);
         let chip = self.slot_beat_rate[i] as f64;
-        let target = base * chip;
+        self.applied_fit[i] = None;
         if let Some(player) = self.players[i].as_mut() {
-            if (player.playback_rate() - target).abs() > 0.0015 {
-                player.set_playback_rate(target);
+            if (player.playback_rate() - chip).abs() > 0.0015 {
+                player.set_playback_rate(chip);
             }
+            player.set_beat_transport(synced);
         }
-        // FLOW WARP: same musical intent, free of the doubling ladder —
-        // the EXACT unquantized rate is what flow playback is for. Stored
-        // here, pushed onto the view every pump (this fn has no Cx).
-        self.slot_flow_rate[i] =
-            chip * fit.map(|fit| fit.playback_rate).unwrap_or(exact_bars);
+        // FLOW WARP mirrors the same intent: constant chip rate.
+        self.slot_flow_rate[i] = chip;
     }
 
     /// Alias kept for its many call sites; the ONE authority lives above.
@@ -6346,9 +6305,13 @@ p2 {}
         self.apply_slot_beat_sync(slot);
     }
 
+
     /// Paint an icon button lit (accent) or at rest.
     fn paint_icon_button(&mut self, cx: &mut Cx, id: &[LiveId], lit: bool) {
-        let p = LatchPaint::icon(lit);
+        self.paint_icon_face(cx, id, LatchPaint::icon(lit));
+    }
+
+    fn paint_icon_face(&mut self, cx: &mut Cx, id: &[LiveId], p: LatchPaint) {
         let (bg, bg_hover, bg_down, fg) = (p.bg(), p.bg_hover(), p.bg_down(), p.fg());
         let mut button = self.ui.widget(cx, id);
         script_apply_eval!(cx, button, {
@@ -6359,6 +6322,30 @@ p2 {}
                 color_down: #(bg_down)
             }
             draw_icon +: { color: #(fg) }
+        });
+    }
+
+    /// Same face law for TEXT buttons (the rate chip, ×) — and it drops
+    /// the paint_lit cache entry so the next real latch paint lands.
+    fn paint_text_face(&mut self, cx: &mut Cx, id: &[LiveId], p: LatchPaint) {
+        let key = id.iter().fold(0u64, |acc, live| acc ^ live.0.rotate_left(7));
+        self.lit_state.remove(&key);
+        let (bg, bg_hover, bg_down, fg, fg_hover) =
+            (p.bg(), p.bg_hover(), p.bg_down(), p.fg(), p.fg_hover());
+        let mut button = self.ui.button(cx, id);
+        script_apply_eval!(cx, button, {
+            draw_bg +: {
+                color: #(bg)
+                color_focus: #(bg)
+                color_hover: #(bg_hover)
+                color_down: #(bg_down)
+            }
+            draw_text +: {
+                color: #(fg)
+                color_focus: #(fg)
+                color_hover: #(fg_hover)
+                color_down: #(fg)
+            }
         });
     }
 
@@ -6445,11 +6432,22 @@ p2 {}
             };
             if self.strip_shape[i].as_ref() != Some(&shape) {
                 self.strip_shape[i] = Some(shape.clone());
-                // An EMPTY deck is a clean canvas: the transport row
-                // appears when a clip lands — never dead-looking buttons.
-                self.ui
-                    .view(cx, Self::deck_controls_path(slot))
-                    .set_visible(cx, shape.present);
+                // THE NO-PUSH LAW: the transport row's SPACE is always
+                // reserved — hiding it made the first cue shove the whole
+                // console down. An empty deck GHOSTS the controls instead.
+                if !shape.present {
+                    for path in [
+                        Self::deck_play_path(slot),
+                        Self::deck_rw_path(slot),
+                        Self::deck_loop2_path(slot),
+                        Self::deck_bounce_path(slot),
+                        Self::deck_mute_path(slot),
+                    ] {
+                        self.paint_icon_face(cx, path, LatchPaint::ghost());
+                    }
+                    self.paint_text_face(cx, Self::deck_rate_path(slot), LatchPaint::ghost());
+                    self.paint_text_face(cx, Self::deck_eject_path(slot), LatchPaint::ghost());
+                }
                 self.ui.button(cx, Self::slot_spin_path(slot)).set_visible(cx, is_3d);
                 self.ui
                     .view(cx, Self::slot_anim_box_path(slot))
@@ -7649,7 +7647,7 @@ p2 {}
             ApcAction::VideoStop => self.stop_video_playback(cx),
             ApcAction::Master(value) => {
                 self.mixer.set_master(value);
-                self.ui.slider(cx, ids!(master_slider)).set_value(cx, value as f64);
+                self.set_drop_slider(cx, ids!(master_slider), value as f64);
             }
             ApcAction::Crossfader(value) => {
                 // On the music surface the hardware crossfader IS the deck
@@ -10041,10 +10039,33 @@ p2 {}
     /// MASTER's number next to its fader. Percent of unity, so 0.90 reads
     /// as "90%" and the 1.2 headroom reads as "120%" — a dB scale would be
     /// honest too, but the fader is linear and pretending otherwise lies.
-    fn set_master_readout(&self, cx: &mut Cx, value: f32) {
-        self.ui
-            .label(cx, ids!(master_value))
-            .set_text(cx, &format!("{:.0}%", value * 100.0));
+    /// The chip carries its own readout now.
+    fn set_master_readout(&self, _cx: &mut Cx, _value: f32) {}
+
+    /// A DropSlider's change in this frame's actions, by widget path.
+    fn drop_slider_changed(&mut self, cx: &mut Cx, path: &[LiveId], actions: &Actions) -> Option<f64> {
+        let uid = self.ui.widget(cx, path).widget_uid();
+        let mut changed = None;
+        for action in actions.iter() {
+            if let Some(wa) = action.as_widget_action() {
+                if wa.widget_uid == uid {
+                    if let makepad_widgets::drop_slider::DropSliderAction::Changed(v) = wa.cast() {
+                        changed = Some(v);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    fn set_drop_slider(&mut self, cx: &mut Cx, path: &[LiveId], value: f64) {
+        if let Some(mut chip) = self
+            .ui
+            .widget(cx, path)
+            .borrow_mut::<makepad_widgets::drop_slider::DropSlider>()
+        {
+            chip.set_value(cx, value);
+        };
     }
 
     fn remember_output_window_geometry(
@@ -12155,6 +12176,34 @@ p2 {}
             // step per display frame (parked players cost nothing above).
             self.pump_flow(cx, slot, dt as f64);
         }
+        // THE BEAT EDGE: one pulse per beat boundary to every synced video
+        // deck — the transport turn/wrap authority of the sync law.
+        {
+            let beat = self.current_beat();
+            if let Some(beat) = beat.as_ref() {
+                let now_i = Instant::now();
+                let fire = match self.beat_edge {
+                    Some(edge) => now_i >= edge,
+                    None => false,
+                };
+                if fire {
+                    for i in 0..2 {
+                        if self.slot_beat_sync[i] && self.external_sync_enabled {
+                            if let Some(player) = self.players[i].as_mut() {
+                                player.beat_pulse();
+                            }
+                        }
+                    }
+                }
+                if fire || self.beat_edge.is_none() {
+                    let mut next = beat.next_beat;
+                    if next <= now_i {
+                        next = now_i + beat.period;
+                    }
+                    self.beat_edge = Some(next);
+                }
+            }
+        }
         // The program mix mirrors the device-clock transition exactly: the
         // audio gains and this visual mix advance from one sample counter,
         // so what you see crossfades in lockstep with what you hear.
@@ -13087,9 +13136,8 @@ impl MatchEvent for App {
         }
 
         // ---- header ----
-        if let Some(v) = self.ui.slider(cx, ids!(master_slider)).slided(actions) {
+        if let Some(v) = self.drop_slider_changed(cx, ids!(master_slider), actions) {
             self.mixer.set_master(v as f32);
-            self.set_master_readout(cx, v as f32);
         }
 
         let mut lighting_changed = false;
@@ -13495,6 +13543,11 @@ impl MatchEvent for App {
                 }
                 VideoAction::None => {}
             }
+            // GRAYED = disabled: an empty deck's transports are inert (the
+            // ghost faces already say so).
+            if self.slot_media[i] == SlotMedia::Empty {
+                continue;
+            }
             if self.ui.button(cx, Self::deck_eject_path(slot)).clicked(actions) {
                 self.unslot_deck(cx, slot);
             }
@@ -13582,7 +13635,7 @@ impl MatchEvent for App {
             self.refresh_program_lighting();
             self.sync_slot_controls_ui(cx);
         }
-        if let Some(v) = self.ui.slider(cx, ids!(fadeout_knob)).slided(actions) {
+        if let Some(v) = self.drop_slider_changed(cx, ids!(fadeout_knob), actions) {
             self.set_fadeout(cx, v as f32);
         }
         if let Some(v) = self.ui.slider(cx, ids!(video_fade)).slided(actions) {
@@ -14044,17 +14097,26 @@ impl AppMain for App {
         if let Event::WindowDragQuery(dq) = event {
             let main_id = self.ui.window(cx, ids!(main_window)).window_id();
             if Some(dq.window_id) == main_id {
-                // The LOGO is the one Caption spot; EVERY other point in
-                // the bar answers Client EXPLICITLY — macOS treats the
-                // unanswered titlebar strip as a system drag region, which
-                // is how dragging the BPM field moved the window instead
-                // of scrubbing the value.
+                // The LOGO is the one Caption spot; EVERY other point of
+                // the top strip answers Client EXPLICITLY — macOS treats
+                // any UNANSWERED titlebar-strip point as a native drag
+                // region (the BPM-field-drags-the-window bug, then the
+                // fadeout dial: its top pixels poked above the bar's rect
+                // into the root padding). Answering the full strip height,
+                // edge to edge, is the systematic fix — no per-widget
+                // allowlist to rot.
                 let grip = self.ui.view(cx, ids!(win_grip)).area();
                 if grip.is_valid(cx) && grip.rect(cx).contains(dq.abs) {
                     dq.response.set(WindowDragQueryResponse::Caption);
                 } else {
                     let bar = self.ui.view(cx, ids!(status_bar)).area();
-                    if bar.is_valid(cx) && bar.rect(cx).contains(dq.abs) {
+                    let strip_bottom = if bar.is_valid(cx) {
+                        let rect = bar.rect(cx);
+                        rect.pos.y + rect.size.y + 2.0
+                    } else {
+                        34.0
+                    };
+                    if dq.abs.y <= strip_bottom {
                         dq.response.set(WindowDragQueryResponse::Client);
                     }
                 }
