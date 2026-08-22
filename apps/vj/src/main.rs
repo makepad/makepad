@@ -27,6 +27,7 @@ mod catalog;
 mod chat;
 mod cue;
 mod decks;
+mod flow;
 mod fx;
 mod gen;
 mod lanes;
