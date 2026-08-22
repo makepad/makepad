@@ -119,3 +119,4 @@ fleet-hosts*.txt
 /examples/automate/local/
 /examples/cad/generated/
 window_*_frame_*.png
+remote-jobs/
