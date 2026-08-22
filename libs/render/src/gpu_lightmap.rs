@@ -1,8 +1,8 @@
 //! GPU-resident world lightmap bake: the CPU ray bake's per-texel work as
 //! fragment-shader passes, ZERO CPU readback. The output is bit-compatible
 //! with lightmap.rs's atlas conventions (A = sun SDF with 128 the edge,
-//! RGB = lamp light x0.5, plus the R8-style shadow-top plane), so the
-//! material shaders consume it unchanged.
+//! RGB = lamp light / lightmap::LM_LAMP_CEIL, plus the R8-style shadow-top
+//! plane), so the material shaders consume it unchanged.
 //!
 //! # Pass pipeline (all raster, per dirty region)
 //!
@@ -17,10 +17,14 @@
 //! 4. distance transform at 1x as iterated 3/4-chamfer relaxation over the
 //!    coverage majority (see below for why not seed-JFA), rect-clamped so
 //!    regions never bleed.
-//! 5. lamps: per lamp a 6-face tiled depth render + one additive gather
-//!    over every receiving region in radius (N.L x (1-d/r)^2 x cone^2 with
-//!    SPILL = 0.35, mirroring the CPU lamp loop), then the two-ring rim
-//!    dilation + 4/2/1 smooth.
+//! 5. lamps: the accumulator is first HARD-ZEROED over this batch's write
+//!    footprint (each region's rect + pad ring — [`batch_zero_rects`]),
+//!    because it loads and a batch owns only its own regions; then per lamp
+//!    a 6-face tiled depth render + one additive gather over every receiving
+//!    region in radius (N.L x (1-d/r)^2 x cone^2 with SPILL = 0.35,
+//!    mirroring the CPU lamp loop), then the two-ring rim dilation + 4/2/1
+//!    smooth. Re-baking an unedited world must land on the same bytes;
+//!    MAKEPAD_GPU_LM_REBAKE (renderer.rs) measures that end to end.
 //! 6. encode: A from the signed distance blended toward measured coverage
 //!    at mixed texels (the CPU's thin-feature guard), RGB from the lamp
 //!    accumulation. Region quads are expanded one texel so the pad ring
@@ -40,7 +44,13 @@
 //!
 //! The ATLAS is static-only and mode-independent: one camera-blind bake per
 //! dirty kick (world edit / explicit sun change, settle-debounced by the
-//! renderer), identical bytes in both modes. What differs is how DYNAMIC
+//! renderer), identical bytes in both modes. The bake is AMORTIZED — a kick
+//! queues every region and each frame encodes at most [`DEFAULT_BAKE_BUDGET`]
+//! of them, so a world appears immediately in flat light and its shadows
+//! land over the next frames instead of behind a multi-second freeze. The
+//! caller keeps drawing (a game view always does); [`GpuLightmapBaker::bake_progress`]
+//! says whether lighting is still filling in, for an app that wants to tell
+//! the player. What differs between modes is how DYNAMIC
 //! casters shadow and where SUN visibility comes from at shade time:
 //!
 //! [`GpuLightmapMode::OnChange`] (default everywhere, the slow-GPU tier):
@@ -68,7 +78,6 @@ use makepad_draw::*;
 /// Mirrors lightmap.rs's private constants — the GPU passes must agree with
 /// the CPU conventions the material shaders were tuned against.
 const RAY_OFFSET: f32 = 0.02;
-const LIGHT_CLEARANCE: f32 = 0.25;
 
 /// How the baker schedules work. Pure runtime policy — no platform
 /// conditionals; switchable live via [`Renderer::set_gpu_lightmap_mode`].
@@ -82,6 +91,10 @@ pub enum GpuLightmapMode {
     /// for every receiver; every caster (characters included) renders into
     /// the cascades; the SDF quad tier draws nothing.
     Realtime,
+    /// No dynamic sun shadows. Cascades and SDF quads are both off;
+    /// `csm_vis` returns 1 and materials see full sun. Preview / debug
+    /// toggle — does not kick an OnChange atlas bake.
+    Off,
 }
 
 /// Device-local budget for the Realtime cascaded-shadow tier.
@@ -188,31 +201,62 @@ pub fn dynamic_shadow_tiers(mode: GpuLightmapMode) -> DynamicShadowTiers {
             sdf_quads: false,
             csm: true,
         },
+        GpuLightmapMode::Off => DynamicShadowTiers {
+            sdf_quads: false,
+            csm: false,
+        },
     }
 }
 
+/// Regions one frame may bake before the rest wait for the next frame. A
+/// city of 3285 lit props is 13k passes: encoded in one frame that is a
+/// four-second freeze on first load, and the world does not appear at all
+/// until it ends. Encoded a slice at a time, the world is on screen from
+/// frame one in flat light and its shadows land over the following second.
+/// `MAKEPAD_GPU_LM_BAKE_BUDGET=0` restores the everything-at-once bake (the
+/// honest choice for an offline capture, where a settled frame matters and
+/// no one is watching it arrive).
+const DEFAULT_BAKE_BUDGET: usize = 24;
+
 /// The ATLAS scheduling decision, pure and mode-independent: the dirty bit
 /// — set only by a realized job (a world edit's settle kick), never by
-/// routine mover or replication traffic — bakes ALL regions once,
-/// camera-blind, and a clean bit encodes ZERO atlas passes. Realtime's
-/// per-frame work is the CASCADES, never the atlas (the invariant the
-/// tests below pin for both modes).
+/// routine mover or replication traffic — queues ALL regions once,
+/// camera-blind, and a clean bit with a drained queue encodes ZERO atlas
+/// passes. Realtime's per-frame work is the CASCADES, never the atlas (the
+/// invariant the tests below pin for both modes).
+///
+/// The queue is what makes the bake amortizable: a kick fills it, every
+/// frame drains at most `budget` of it (0 = no budget, the whole kick in
+/// one frame), and the atlas is correct-so-far the whole way — each
+/// region's chain writes only its own rect of the persistent atlas, so a
+/// half-drained queue is a world whose remaining props are still flat, not
+/// a world whose lighting is wrong.
 ///
 /// `only_region` is the MAKEPAD_GPU_LM_ONLY_REGION debug pin (stage
 /// dumps).
 fn schedule_regions(
     dirty: &mut bool,
+    queue: &mut std::collections::VecDeque<usize>,
     region_count: usize,
     only_region: Option<usize>,
+    budget: usize,
 ) -> Vec<usize> {
-    if !*dirty {
-        return Vec::new();
+    if *dirty {
+        *dirty = false;
+        // A fresh kick supersedes whatever the last one had left: the
+        // layout it was baking is gone.
+        queue.clear();
+        match only_region.filter(|only| *only < region_count) {
+            Some(only) => queue.push_back(only),
+            None => queue.extend(0..region_count),
+        }
     }
-    *dirty = false;
-    match only_region.filter(|only| *only < region_count) {
-        Some(only) => vec![only],
-        None => (0..region_count).collect(),
-    }
+    let take = if budget == 0 {
+        queue.len()
+    } else {
+        budget.min(queue.len())
+    };
+    queue.drain(..take).collect()
 }
 
 /// One caster the depth passes rasterize.
@@ -256,9 +300,50 @@ pub struct GpuBakeJob {
     /// Parallel to `scene.meshes`: the placed-model index each region maps
     /// back to (for the renderer's lm_remaps).
     pub mesh_map: Vec<usize>,
+    /// Static instances WITHOUT a lightmap layout of their own (no AO
+    /// bake): they own no region — they light analytically — but they still
+    /// stand in the sun, so they join every sun-depth pass as casters. A
+    /// fence without a bake used to throw no shadow at all.
+    pub casters_only: Vec<GpuBakeMesh>,
     /// World xz rect of the ground region (x0, z0, span, span).
     pub terrain_world: Option<Vec4f>,
+    /// Why this bake was scheduled, for the log. The bake is the one thing
+    /// in the frame that can change a settled picture seconds after the
+    /// world appeared, so it says so out loud.
+    pub trigger: BakeTrigger,
 }
+
+/// What asked for a bake. Purely for the log line — a blowout that "pops
+/// in" has to be attributable to the run that caused it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BakeTrigger {
+    /// The first bake of a realm: the world just loaded.
+    #[default]
+    FirstBake,
+    /// The world changed — an edit, a re-eval, streamed-in props.
+    WorldEdit,
+    /// The sun moved far enough to restrengthen the lamps.
+    SunChange,
+}
+
+impl BakeTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            BakeTrigger::FirstBake => "first bake",
+            BakeTrigger::WorldEdit => "world edit / re-eval",
+            BakeTrigger::SunChange => "sun change",
+        }
+    }
+}
+
+/// The sum a lamp is allowed to leave on flat, unshadowed, up-facing
+/// ground: daylight plus every pool that reaches it. Above 1.0 the frame
+/// clips — a near-white albedo goes to pure white with the warm rim of the
+/// tint's red channel saturating first. `lightmap::lamp_daylight_scale` is
+/// the rail that keeps this true; this constant is what the bake CHECKS,
+/// so a future path that skips the rail is caught by its own log line
+/// instead of by a screenshot.
+const LM_EXPOSURE_CEILING: f32 = 1.0;
 
 /// What the renderer stores when a scheduled layout is first realized.
 pub struct GpuLmDelivery {
@@ -307,6 +392,10 @@ struct Region {
     /// World bounds of the receiver (light culling, sun camera fit).
     min: Vec3f,
     max: Vec3f,
+    /// Measured chart density, atlas texels per world unit of SURFACE
+    /// (lightmap::chart_density; ground = rect over span). Converts the
+    /// world-space sun band into this region's texels at encode time.
+    tpu: f32,
 }
 
 struct BakeTextures {
@@ -330,16 +419,6 @@ struct BakeTextures {
     sun_far: Texture,
     lamp_depth: Texture,
     lamp_depth_z: Texture,
-    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles side by side in
-    /// one Rf32 strip (one texture slot in every material family), plus its
-    /// hardware depth. Written every Realtime frame, sampled by the PCF
-    /// compare in the material shaders.
-    /// Allocated only while Realtime is serving. At the default 2048 tile
-    /// edge these two targets are about 96 MiB per view, so retaining them in
-    /// OnChange (where they are never sampled) is a serious split/mobile
-    /// memory leak rather than harmless scratch.
-    csm: Option<Texture>,
-    csm_z: Option<Texture>,
     mask_w: usize,
     mask_h: usize,
 }
@@ -357,14 +436,13 @@ struct BakeState {
     /// and the cascades' z windows.
     scene_min: Vec3f,
     scene_max: Vec3f,
-    /// One cascade tile's edge, texels (MAKEPAD_CSM_RES at realize).
-    csm_res: usize,
     tex: BakeTextures,
 }
 
 /// All the baker's draw shaders, lazily constructed from their script
 /// type defaults.
 struct LmDraws {
+    zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
     sun_depth_skinned: DrawLmSunDepthSkinned,
     lamp_depth: DrawLmLampDepth,
@@ -379,6 +457,58 @@ struct LmDraws {
     encode: DrawLmEncode,
     top: DrawLmTop,
     top_dilate: DrawLmTopDilate,
+}
+
+/// THE ZERO FOOTPRINT of one batch: every region it is about to bake, each
+/// over the rect the bake actually writes ([`LmRect::padded`] — the chart
+/// rect plus the pad ring the encode stamps and the dilate reads).
+///
+/// Exactly the batch, and nothing else: a region this batch does NOT bake
+/// keeps its content, which is what makes the amortized kick (24 regions a
+/// frame) and any partial re-bake correct — and the pack's gutter
+/// (`lightmap::LM_PAD`) guarantees a padded rect can never reach into a
+/// neighbouring region's texels.
+fn batch_zero_rects(regions: &[Region], batch: &[usize], size: usize) -> Vec<LmRect> {
+    batch.iter().map(|ri| regions[*ri].rect.padded(size)).collect()
+}
+
+/// Hard-zero one footprint rect in the pass that is currently open.
+/// Blending is off in `DrawLmZero`, so this is a real clear, not another
+/// accumulation.
+fn zero_rect(cx: &mut CxDraw, d: &mut DrawLmZero, rect: LmRect, size: usize, fill: Vec4f) {
+    d.quad_a = rect.uv_remap(size);
+    d.fill_a = fill;
+    if d.draw_vars.can_instance() {
+        cx.add_instance(&d.draw_vars);
+    }
+}
+
+/// Grow `pool` to `n` reusable passes. A free function rather than a method
+/// so the atlas chain and the cascade chain can each own a pool while the
+/// baker keeps the rest of its state borrowable.
+fn ensure_pool(pool: &mut Vec<BakePass>, cx: &mut Cx, n: usize) {
+    while pool.len() < n {
+        let pass = DrawPass::new(cx);
+        // Recover the pool index of this pass id: pass ids are small
+        // (one per pass ever alive), so a linear probe terminates fast.
+        let probe = (0..1_000_000)
+            .find(|i| pass.id_equals(*i))
+            .unwrap_or(usize::MAX);
+        pool.push(BakePass {
+            pass,
+            list: DrawList::new(cx),
+            probe,
+        });
+    }
+}
+
+/// Pool indices in execution order (descending pass id), truncated to the
+/// `n` passes this frame actually encodes.
+fn pass_order(pool: &[BakePass], n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pool.len()).collect();
+    order.sort_by(|a, b| pool[*b].probe.cmp(&pool[*a].probe));
+    order.truncate(n);
+    order
 }
 
 struct BakePass {
@@ -459,10 +589,51 @@ pub struct GpuLightmapBaker {
     state: Option<BakeState>,
     draws: Option<Box<LmDraws>>,
     pool: Vec<BakePass>,
-    /// The whole dirt model, both modes: the next run re-bakes ALL atlas
-    /// regions in one frame. Set only by a realized job — the atlas is
+    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles side by side in
+    /// one Rf32 strip (one texture slot in every material family), plus its
+    /// hardware depth. Written every Realtime frame, sampled by the PCF
+    /// compare in the material shaders.
+    ///
+    /// Owned by the BAKER, never by a realized atlas layout. The cascade
+    /// tier must serve worlds that have NO static lightmap at all — flat
+    /// starter terrain, a props-free scene, anything where
+    /// `kick_lightmap_bake` finds no AO mesh and no receiver box and so
+    /// never schedules a job. Hanging these off `state` made F8 silently
+    /// drop EVERY dynamic shadow in exactly those worlds: no state, no
+    /// cascades, no binding, `csm_vis` returning full sun.
+    ///
+    /// Allocated only while Realtime is serving. At the default 2048 tile
+    /// edge these two targets are about 96 MiB per view, so retaining them
+    /// in OnChange (where they are never sampled) is a serious split/mobile
+    /// memory leak rather than harmless scratch.
+    csm_tex: Option<Texture>,
+    csm_depth: Option<Texture>,
+    /// One cascade tile's edge, texels — latched when the targets allocate,
+    /// so a live `set_csm_config` can never mix a new inverse resolution
+    /// with an old target.
+    csm_res: usize,
+    /// The cascade pass owns its own one-entry pool: it is encoded on
+    /// frames where the atlas encodes nothing, and both chains hang off the
+    /// 3D pass independently.
+    csm_pool: Vec<BakePass>,
+    /// The whole dirt model, both modes: the next run queues ALL atlas
+    /// regions for re-bake. Set only by a realized job — the atlas is
     /// static-only and mode-independent, so mode switches never touch it.
     dirty: bool,
+    /// Regions of the current kick still to bake, drained `bake_budget` at
+    /// a time. Non-empty means "the lighting is still filling in".
+    bake_queue: std::collections::VecDeque<usize>,
+    /// Regions in the kick that filled `bake_queue` — the denominator of
+    /// [`Self::bake_progress`].
+    bake_total: usize,
+    /// Regions per frame (0 = the whole kick at once); see
+    /// [`DEFAULT_BAKE_BUDGET`].
+    bake_budget: usize,
+    /// This kick's accumulated cost, so the finish can report the whole
+    /// bake instead of one slice of it.
+    bake_frames: u32,
+    bake_passes: usize,
+    bake_us: u64,
     /// This frame's fitted cascades (Realtime), for the renderer's material
     /// uniforms. None in OnChange.
     csm_last: Option<CsmFrame>,
@@ -481,7 +652,17 @@ impl Default for GpuLightmapBaker {
             state: None,
             draws: None,
             pool: Vec::new(),
+            csm_tex: None,
+            csm_depth: None,
+            csm_res: DEFAULT_CSM_CONFIG.tile_resolution,
+            csm_pool: Vec::new(),
             dirty: false,
+            bake_queue: std::collections::VecDeque::new(),
+            bake_total: 0,
+            bake_budget: bake_budget_from_env(),
+            bake_frames: 0,
+            bake_passes: 0,
+            bake_us: 0,
             csm_last: None,
             rt_frames: 0,
             rt_us: 0,
@@ -489,8 +670,246 @@ impl Default for GpuLightmapBaker {
     }
 }
 
+/// `MAKEPAD_GPU_LM_BAKE_BUDGET` regions per frame, else the default. Read
+/// once per baker rather than per frame: this is a launch policy, and a
+/// bake that changed budget halfway through would report nonsense progress.
+fn bake_budget_from_env() -> usize {
+    std::env::var("MAKEPAD_GPU_LM_BAKE_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BAKE_BUDGET)
+}
+
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
     Vec3f { x, y, z }
+}
+
+/// The one number a region's exposure report is about: what the brightest
+/// texel of `region` can read once the bake lands, and how it got there.
+struct RegionExposure {
+    /// Lamps whose reach touches the region.
+    lamps: usize,
+    /// The brightest lamp light any texel of the region can receive.
+    /// Evaluated AT each touching bulb's own hot spot and summed there, so
+    /// two pools 26 m apart do not add into a number neither of them
+    /// delivers — a report that cries wolf is worse than no report.
+    lamp_peak: f32,
+    /// `daylight + lamp_peak`: the composite an unshadowed, flat, up-facing
+    /// texel of this region reads on an albedo of 1. Over
+    /// [`LM_EXPOSURE_CEILING`] the frame CLIPS.
+    sum: f32,
+    /// GROUND regions only: how many texels the pools drive past the
+    /// FRAME's clip point. `LM_LAMP_SAT_TEXELS` of them is the collar a
+    /// fixture is allowed (5cf85a720: "a lamp may blow out a 1.13 m collar,
+    /// never the street"); more than that is the street.
+    clip_texels: f32,
+}
+
+fn region_exposure(
+    region: &Region,
+    lights: &[LmLight],
+    daylight: f32,
+    texels_per_unit: f32,
+) -> RegionExposure {
+    use crate::lightmap::{
+        lamp_ground_light, lamp_ground_texels_over, lamp_mount_from_radius, lamp_peak_in_box,
+        LM_LAMP_CEIL,
+    };
+    let ground = matches!(region.kind, RegionKind::Ground);
+    let headroom = (LM_EXPOSURE_CEILING - daylight).max(0.0);
+    let touching: Vec<&LmLight> = lights
+        .iter()
+        .filter(|l| sphere_touches_box(l.pos, l.radius, region.min, region.max))
+        .collect();
+    // What light `l` lays at world point `p`. On the ground that is the
+    // pool's own arithmetic and exact for a harvested fixture; on a mesh
+    // the surface normal is unknown, so the distance falloff alone is the
+    // honest upper bound.
+    let at = |l: &LmLight, p: Vec3f| -> f32 {
+        let cmax = l.color.x.max(l.color.y).max(l.color.z);
+        if ground {
+            let mount = lamp_mount_from_radius(l.radius);
+            let rho = ((p.x - l.pos.x).powi(2) + (p.z - l.pos.z).powi(2)).sqrt();
+            lamp_ground_light(mount, rho, l.radius, cmax, l.spot)
+        } else {
+            let d = ((p.x - l.pos.x).powi(2) + (p.y - l.pos.y).powi(2) + (p.z - l.pos.z).powi(2))
+                .sqrt();
+            if d >= l.radius {
+                0.0
+            } else {
+                let att = 1.0 - d / l.radius;
+                cmax * att * att
+            }
+        }
+    };
+    // The hot spot is under one of the bulbs; overlap between pools shows
+    // up because every OTHER pool is evaluated at that same point.
+    let mut lamp_peak = 0.0f32;
+    let mut clip_texels = 0.0f32;
+    for l in &touching {
+        let p = Vec3f {
+            x: l.pos.x.clamp(region.min.x, region.max.x),
+            y: l.pos.y.clamp(region.min.y, region.max.y),
+            z: l.pos.z.clamp(region.min.z, region.max.z),
+        };
+        let here: f32 = touching.iter().map(|o| at(o, p)).sum();
+        // On a mesh the point-sample IS `lamp_peak_in_box`; take the pair's
+        // max so the bound can never read under the closest approach.
+        lamp_peak = lamp_peak
+            .max(here)
+            .max(if ground { 0.0 } else { lamp_peak_in_box(l, region.min, region.max) });
+        if ground {
+            let cmax = l.color.x.max(l.color.y).max(l.color.z);
+            clip_texels += lamp_ground_texels_over(
+                lamp_mount_from_radius(l.radius),
+                l.radius,
+                cmax,
+                l.spot,
+                texels_per_unit,
+                headroom,
+            );
+        }
+    }
+    // The atlas cannot carry more than its own ceiling however many pools
+    // overlap, so the report may not claim more either.
+    lamp_peak = lamp_peak.min(LM_LAMP_CEIL);
+    RegionExposure {
+        lamps: touching.len(),
+        lamp_peak,
+        sum: daylight + lamp_peak,
+        clip_texels,
+    }
+}
+
+/// Annotate the bake, once per run, at INFO — the permanent record of what
+/// the bake is about to do to a picture the player is already looking at.
+///
+/// A bake is the ONE thing that changes a settled frame seconds after a
+/// world appears, so a blowout that "pops in" must be attributable from the
+/// log alone: which run, what triggered it, how many regions and lamps, how
+/// much of the display's 0..1 the sky had already spent, and — per region
+/// that a lamp reaches — the sum that region's brightest texel will read.
+/// Any region over [`LM_EXPOSURE_CEILING`] gets its own loud line naming
+/// itself and its numbers, so the next regression does not need a
+/// screenshot.
+///
+/// Cost is per REGION, not per texel: a handful of float ops against a
+/// light list that is already in hand. The heavy per-region lines are
+/// capped so a city of thousands of props stays readable.
+fn report_bake_exposure(state: &BakeState, scene: &LmScene, trigger: BakeTrigger, budget: usize) {
+    use crate::lightmap::{LM_LAMP_GROUND_PEAK, LM_LAMP_SAT_TEXELS};
+    let daylight =
+        crate::lightmap::daylight_on_ground(scene.sun_dir, scene.sun_color, scene.sun_sky);
+    let scale = crate::lightmap::lamp_daylight_scale(daylight);
+    // The ground region's real density, so `clip_texels` is in the same
+    // units the collar budget is written in.
+    let tpu = state
+        .regions
+        .iter()
+        .find(|r| matches!(r.kind, RegionKind::Ground))
+        .map(|r| r.rect.w as f32 / (r.max.x - r.min.x).max(0.0001))
+        .unwrap_or(crate::lightmap::LM_LAMP_SAT_DENSITY);
+    let exposure = |r: &Region| region_exposure(r, &state.lights, daylight, tpu);
+    log!(
+        "lm bake: {} — {} regions ({} lamp-lit), {} lamp(s), {}px atlas, {} region(s)/frame, \
+         ground {:.2} texels/unit; sun elev {:.0} deg, daylight {:.3} of {:.1} on flat ground, \
+         headroom {:.3}, lamp scale {:.2} (pool peak {:.3})",
+        trigger.label(),
+        state.regions.len(),
+        state.regions.iter().filter(|r| exposure(r).lamps > 0).count(),
+        state.lights.len(),
+        state.size,
+        if budget == 0 { state.regions.len() } else { budget },
+        tpu,
+        scene.sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        daylight,
+        LM_EXPOSURE_CEILING,
+        (LM_EXPOSURE_CEILING - daylight).max(0.0),
+        scale,
+        LM_LAMP_GROUND_PEAK * scale,
+    );
+    if std::env::var_os("MAKEPAD_GPU_LM_REGIONS").is_some() {
+        for (ri, r) in state.regions.iter().enumerate() {
+            let kind = if matches!(r.kind, RegionKind::Ground) { "ground" } else { "mesh" };
+            let sx = (r.max.x - r.min.x).max(1e-4);
+            let sz = (r.max.z - r.min.z).max(1e-4);
+            log!(
+                "lmreg {ri} {kind} rect {} {} {} {} world ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2}) dens {:.2}x{:.2}",
+                r.rect.x, r.rect.y, r.rect.w, r.rect.h,
+                r.min.x, r.min.y, r.min.z, r.max.x, r.max.y, r.max.z,
+                r.rect.w as f32 / sx, r.rect.h as f32 / sz,
+            );
+        }
+    }
+    /// Per-region detail lines one bake may print before it summarizes: a
+    /// city of thousands of props must stay readable.
+    const DETAIL_LINES: usize = 8;
+    let mut printed = 0usize;
+    let mut blown = 0usize;
+    let (mut worst, mut worst_at) = (0.0f32, 0usize);
+    for (ri, r) in state.regions.iter().enumerate() {
+        let e = exposure(r);
+        if e.sum > worst {
+            worst = e.sum;
+            worst_at = ri;
+        }
+        let kind = if matches!(r.kind, RegionKind::Ground) { "ground" } else { "mesh" };
+        // LOUD, and never elided: a pool painting more than the documented
+        // collar past the frame\'s clip point IS the blown plaza, and this
+        // is it naming itself. Everything the eye would have had to guess
+        // from a screenshot is on this line.
+        if e.clip_texels > LM_LAMP_SAT_TEXELS {
+            blown += 1;
+            error!(
+                "lm bake: region {ri} ({kind}) BLOWS OUT — {:.0} ground texels past the clip \
+                 point ({:.0}x the {} texel collar a fixture is allowed), {} lamp(s), \
+                 {}x{} texels over world ({:.1},{:.1})..({:.1},{:.1}); daylight {:.3} + lamp \
+                 {:.3} = {:.3} > {:.1}. A texel of albedo {:.2} or brighter reaches white. \
+                 The daylight rail (lightmap::lamp_daylight_scale) did not hold.",
+                e.clip_texels,
+                e.clip_texels / LM_LAMP_SAT_TEXELS,
+                LM_LAMP_SAT_TEXELS as u32,
+                e.lamps,
+                r.rect.w, r.rect.h,
+                r.min.x, r.min.z, r.max.x, r.max.z,
+                daylight, e.lamp_peak, e.sum, LM_EXPOSURE_CEILING,
+                (LM_EXPOSURE_CEILING / e.sum.max(1e-4)).clamp(0.0, 1.0),
+            );
+        } else if e.lamps > 0 && printed < DETAIL_LINES {
+            printed += 1;
+            log!(
+                "lm bake: region {ri} ({kind}) {}x{} texels, {} lamp(s), daylight {:.3} + lamp \
+                 {:.3} = {:.3} ({:.0}% of the clip point{})",
+                r.rect.w,
+                r.rect.h,
+                e.lamps,
+                daylight,
+                e.lamp_peak,
+                e.sum,
+                100.0 * e.sum / LM_EXPOSURE_CEILING,
+                if e.clip_texels > 0.0 {
+                    format!(", {:.0} texels in the fixture\'s own collar", e.clip_texels)
+                } else {
+                    String::new()
+                },
+            );
+        }
+    }
+    if blown > 0 {
+        error!(
+            "lm bake: {blown} region(s) blow out — the picture WILL flood white when this bake lands"
+        );
+    } else {
+        log!(
+            "lm bake: clean — no region paints past the collar; brightest is region {} at {:.3} \
+             of {:.1} ({} detail line(s) shown of {} lamp-lit)",
+            worst_at,
+            worst,
+            LM_EXPOSURE_CEILING,
+            printed,
+            state.regions.iter().filter(|r| exposure(r).lamps > 0).count(),
+        );
+    }
 }
 
 fn min3(a: Vec3f, b: Vec3f) -> Vec3f {
@@ -695,14 +1114,11 @@ impl GpuLightmapBaker {
 
         self.csm_last = None;
         if old.tile_resolution != new.tile_resolution {
-            if let Some(state) = self.state.as_mut() {
-                state.csm_res = new.tile_resolution;
-                // The strip and depth attachment are one shape-coupled pair.
-                // Drop both even if one was unexpectedly absent so the next
-                // sync can never assemble a mixed-resolution framebuffer.
-                state.tex.csm = None;
-                state.tex.csm_z = None;
-            }
+            // The strip and depth attachment are one shape-coupled pair.
+            // Drop both even if one was unexpectedly absent so the next
+            // sync can never assemble a mixed-resolution framebuffer.
+            self.csm_tex = None;
+            self.csm_depth = None;
         }
         log!(
             "gpu csm: tile {}px, far {:.0} (requested {}px/{:.0})",
@@ -722,9 +1138,50 @@ impl GpuLightmapBaker {
         self.pending = None;
         self.state = None;
         self.dirty = false;
+        // Regions of a realm that no longer exists must never be baked into
+        // the next one's atlas.
+        self.bake_queue.clear();
+        self.bake_total = 0;
+        self.bake_frames = 0;
+        self.bake_passes = 0;
+        self.bake_us = 0;
         self.csm_last = None;
         self.rt_frames = 0;
         self.rt_us = 0;
+    }
+
+    /// DEBUG (idempotence probe): re-bake every region of the CURRENT
+    /// layout into the CURRENT targets — no re-plan, no fresh textures.
+    /// This is the exact path the accumulator invariant is about.
+    pub fn debug_redirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// DEBUG: `(regions, lamps)` of the realized layout — the probe waits
+    /// for the streamed-in world before it starts measuring.
+    pub fn debug_scene_size(&self) -> (usize, usize) {
+        match &self.state {
+            Some(s) => (s.regions.len(), s.lights.len()),
+            None => (0, 0),
+        }
+    }
+
+    /// DEBUG: each region's atlas rect + whether a lamp reaches it.
+    pub fn debug_region_rects(&self) -> Vec<(LmRect, bool)> {
+        let Some(state) = &self.state else {
+            return Vec::new();
+        };
+        state
+            .regions
+            .iter()
+            .map(|r| {
+                let lit = state
+                    .lights
+                    .iter()
+                    .any(|l| sphere_touches_box(l.pos, l.radius, r.min, r.max));
+                (r.rect, lit)
+            })
+            .collect()
     }
 
     /// Live mode switch. No re-bake either way: the atlas is static-only
@@ -742,21 +1199,24 @@ impl GpuLightmapBaker {
     /// Match the expensive realtime targets to the active serving tier.
     /// Called from `run_frame`, where a draw context is available; mode
     /// switches themselves deliberately remain allocation-free.
+    ///
+    /// Deliberately NOT gated on a realized atlas: the cascades are the
+    /// whole dynamic-shadow tier in Realtime and must exist for a world
+    /// with no static lightmap.
     fn sync_csm_targets(&mut self, cx: &mut Cx) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
         if self.mode == GpuLightmapMode::Realtime {
-            if state.tex.csm.is_none() {
-                let width = state.csm_res * CSM_CASCADES;
-                state.tex.csm = Some(render_tex_rf32(cx, width, state.csm_res));
-                state.tex.csm_z = Some(depth_tex(cx, width, state.csm_res));
+            let res = self.csm_policy.effective().tile_resolution;
+            if self.csm_tex.is_none() || self.csm_depth.is_none() || self.csm_res != res {
+                self.csm_res = res;
+                let width = res * CSM_CASCADES;
+                self.csm_tex = Some(render_tex_rf32(cx, width, res));
+                self.csm_depth = Some(depth_tex(cx, width, res));
             }
         } else {
             // Dropping the last handles lets the backend reclaim ~96 MiB per
             // 2048px view instead of carrying realtime-only memory forever.
-            state.tex.csm = None;
-            state.tex.csm_z = None;
+            self.csm_tex = None;
+            self.csm_depth = None;
             self.csm_last = None;
         }
     }
@@ -773,21 +1233,39 @@ impl GpuLightmapBaker {
 
     /// True when a realized layout exists and nothing is queued: the atlas
     /// content is complete as of the previous frame (debug dumps read here).
+    /// A half-drained bake queue is NOT idle — the atlas is correct so far
+    /// but not finished, and a dump taken there would show flat props.
     pub fn is_idle(&self) -> bool {
-        self.state.is_some() && self.pending.is_none() && !self.dirty
+        self.state.is_some()
+            && self.pending.is_none()
+            && !self.dirty
+            && self.bake_queue.is_empty()
+    }
+
+    /// How far the static bake has got: `(regions done, regions in the
+    /// kick)` while lighting is still filling in, `None` once it has
+    /// settled. The app's own status line is the honest place to say
+    /// "baking lighting…" — the engine only reports.
+    pub fn bake_progress(&self) -> Option<(usize, usize)> {
+        let left = self.bake_queue.len();
+        if left == 0 {
+            return None;
+        }
+        Some((self.bake_total.saturating_sub(left), self.bake_total))
     }
 
     /// This frame's cascade binding for the material shaders: the fitted
     /// cascades, the tile-strip texture and one tile's inverse resolution.
-    /// None whenever the CSM tier is not serving (OnChange, or no realized
-    /// scene) — the renderer then writes csm off into the uniforms.
+    /// None whenever the CSM tier is not serving (OnChange/Off, sun below
+    /// the horizon) — the renderer then writes csm off into the uniforms.
+    /// A realized atlas is NOT a precondition: a world with no static
+    /// lightmap still gets full cascade shadows for its dynamics.
     pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
-        let state = self.state.as_ref()?;
         let frame = self.csm_last?;
         Some((
             frame,
-            state.tex.csm.as_ref()?.clone(),
-            1.0 / state.csm_res as f32,
+            self.csm_tex.as_ref()?.clone(),
+            1.0 / self.csm_res.max(1) as f32,
         ))
     }
 
@@ -800,6 +1278,8 @@ impl GpuLightmapBaker {
         };
         vec![
             (state.tex.cov.clone(), "cov"),
+            (state.tex.lamp_a.clone(), "lamp_a"),
+            (state.tex.lamp_b.clone(), "lamp_b"),
             (state.tex.dt_a.clone(), "dt_a"),
             (state.tex.dt_b.clone(), "dt_b"),
             (state.tex.mask_a.clone(), "mask_a"),
@@ -831,12 +1311,26 @@ impl GpuLightmapBaker {
                 kind: RegionKind::Mesh(i),
                 min: lo,
                 max: hi,
+                tpu: crate::lightmap::chart_density(m, rects[i].w, rects[i].h),
             });
             meshes.push(GpuBakeMesh {
                 geometry: job.mesh_geometry[i],
                 transform: m.transform,
                 min: lo,
                 max: hi,
+            });
+        }
+        // Caster-only statics come AFTER the regioned meshes, so the
+        // `RegionKind::Mesh(i)` indices above stay valid; every depth loop
+        // walks `state.meshes` whole and so shadows from them.
+        for m in &job.casters_only {
+            scene_min = min3(scene_min, m.min);
+            scene_max = max3(scene_max, m.max);
+            meshes.push(GpuBakeMesh {
+                geometry: m.geometry,
+                transform: m.transform,
+                min: m.min,
+                max: m.max,
             });
         }
         for (bmin, bmax) in &job.scene.boxes {
@@ -884,6 +1378,7 @@ impl GpuLightmapBaker {
                 kind: RegionKind::Ground,
                 min: gmin,
                 max: gmax,
+                tpu: rect.w as f32 / (p.x1 - p.x0).max(0.001),
             });
             ground = Some(GroundInfo {
                 world: Vec4f {
@@ -959,9 +1454,6 @@ impl GpuLightmapBaker {
             mw = mw.max(r.rect.w * 4);
             mh = mh.max(r.rect.h * 4);
         }
-        // One cascade tile's edge. The targets themselves stay lazy until
-        // Realtime serves; the shape comes from this device's current tier.
-        let csm_res = self.csm_policy.effective().tile_resolution;
         let tex = BakeTextures {
             atlas: render_tex(cx, size, size),
             top_a: render_tex(cx, size, size),
@@ -978,10 +1470,6 @@ impl GpuLightmapBaker {
             sun_far: render_tex_rf32(cx, SUN_DEPTH_RES, SUN_DEPTH_RES),
             lamp_depth: render_tex_rf32(cx, LAMP_FACE_RES * 3, LAMP_FACE_RES * 2),
             lamp_depth_z: depth_tex(cx, LAMP_FACE_RES * 3, LAMP_FACE_RES * 2),
-            // Realtime-only and very large; `run_frame` realizes these on
-            // demand after the scene has been adopted.
-            csm: None,
-            csm_z: None,
             mask_w: mw,
             mask_h: mh,
         };
@@ -999,7 +1487,7 @@ impl GpuLightmapBaker {
             mesh_map: job.mesh_map.clone(),
             terrain_world: job.terrain_world,
         };
-        self.state = Some(BakeState {
+        let state = BakeState {
             size,
             regions,
             meshes,
@@ -1008,9 +1496,10 @@ impl GpuLightmapBaker {
             ground,
             scene_min,
             scene_max,
-            csm_res,
             tex,
-        });
+        };
+        report_bake_exposure(&state, &job.scene, job.trigger, self.bake_budget);
+        self.state = Some(state);
         self.dirty = true;
         Some(delivery)
     }
@@ -1021,6 +1510,7 @@ impl GpuLightmapBaker {
         }
         let draws = cx.try_with_vm(|vm| {
             Box::new(LmDraws {
+                zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
@@ -1043,22 +1533,6 @@ impl GpuLightmapBaker {
                 true
             }
             None => false, // VM held (script-driven draw); retry next frame
-        }
-    }
-
-    fn ensure_pool(&mut self, cx: &mut Cx, n: usize) {
-        while self.pool.len() < n {
-            let pass = DrawPass::new(cx);
-            // Recover the pool index of this pass id: pass ids are small
-            // (one per pass ever alive), so a linear probe terminates fast.
-            let probe = (0..1_000_000)
-                .find(|i| pass.id_equals(*i))
-                .unwrap_or(usize::MAX);
-            self.pool.push(BakePass {
-                pass,
-                list: DrawList::new(cx),
-                probe,
-            });
         }
     }
 
@@ -1085,31 +1559,68 @@ impl GpuLightmapBaker {
         if let Some(job) = self.pending.take() {
             delivery = self.realize(cx.cx, job);
         }
-        if self.state.is_none() {
-            return delivery;
-        }
         let realtime = self.mode == GpuLightmapMode::Realtime;
+        // Deliberately BEFORE any `state` test: the cascade tier is the whole
+        // dynamic-shadow contract in Realtime, and a world can legitimately
+        // carry no atlas layout at all (flat starter terrain, no props — the
+        // renderer's bake kick finds nothing to bake and never schedules a
+        // job). Gating this on a realized atlas is what made F8 read as
+        // "realtime deletes shadows" in those worlds.
         self.sync_csm_targets(cx.cx);
-        let mut batch: Vec<usize> = {
-            let state = self.state.as_ref().unwrap();
-            let only_region = std::env::var("MAKEPAD_GPU_LM_ONLY_REGION")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok());
-            schedule_regions(&mut self.dirty, state.regions.len(), only_region)
+        let mut batch: Vec<usize> = match self.state.as_ref() {
+            Some(state) => {
+                let only_region = std::env::var("MAKEPAD_GPU_LM_ONLY_REGION")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok());
+                let kick = self.dirty;
+                let batch = schedule_regions(
+                    &mut self.dirty,
+                    &mut self.bake_queue,
+                    state.regions.len(),
+                    only_region,
+                    self.bake_budget,
+                );
+                if kick {
+                    self.bake_total = batch.len() + self.bake_queue.len();
+                    self.bake_frames = 0;
+                    self.bake_passes = 0;
+                    self.bake_us = 0;
+                    if !self.bake_queue.is_empty() {
+                        log!(
+                            "gpu lightmap: baking {} regions, {} per frame — the world lights flat until it settles",
+                            self.bake_total,
+                            self.bake_budget
+                        );
+                    }
+                }
+                batch
+            }
+            None => Vec::new(),
         };
         // Realtime: fit this frame's cascades (sun below the horizon fits
         // nothing — the materials' sun term is dead anyway).
-        let csm = (realtime && sun_dir.y > 0.02).then(|| {
-            let state = self.state.as_ref().unwrap();
+        let csm = (realtime && sun_dir.y > 0.02 && self.csm_tex.is_some()).then(|| {
             let range = self.csm_policy.effective().far_range;
+            // The z window reaches from the cascade slice BACK to the scene
+            // bound toward the sun. With a realized atlas that bound is
+            // exact; without one, a range-sized box around the eye is the
+            // honest stand-in — it can only make the window longer than
+            // needed, never clip a caster out of it.
+            let (scene_min, scene_max) = match self.state.as_ref() {
+                Some(state) => (state.scene_min, state.scene_max),
+                None => (
+                    v3(eye.x - range, eye.y - range, eye.z - range),
+                    v3(eye.x + range, eye.y + range, eye.z + range),
+                ),
+            };
             fit_cascades(
                 csm_view,
                 eye,
                 sun_dir,
-                state.scene_min,
-                state.scene_max,
+                scene_min,
+                scene_max,
                 range,
-                state.csm_res as f32,
+                self.csm_res as f32,
             )
         });
         if batch.is_empty() && csm.is_none() {
@@ -1117,24 +1628,46 @@ impl GpuLightmapBaker {
         }
         // The ground region must be processed LAST within a batch (its sun
         // depth must survive until the top-plane passes).
-        {
-            let state = self.state.as_ref().unwrap();
+        if let Some(state) = self.state.as_ref() {
             batch.sort_by_key(|ri| matches!(state.regions[*ri].kind, RegionKind::Ground));
         }
         let t0 = std::time::Instant::now();
-        let passes = self.encode_batch(cx, sun_dir, movers, &batch, csm);
+        let mut passes = 0;
+        if !batch.is_empty() {
+            passes += self.encode_batch(cx, sun_dir, &batch);
+        }
+        if let Some(frame) = csm {
+            passes += self.encode_cascades(cx, movers, &frame);
+        }
         let us = t0.elapsed().as_micros() as u64;
         self.csm_last = csm;
         if !batch.is_empty() {
-            let state = self.state.as_ref().unwrap();
-            log!(
-                "gpu lightmap: {}px atlas, {} regions, {} lamps — {} passes encoded in {}us (CPU-side submission; GPU renders in-frame)",
-                state.size,
-                state.regions.len(),
-                state.lights.len(),
-                passes,
-                us
-            );
+            self.bake_frames += 1;
+            self.bake_passes += passes;
+            self.bake_us += us;
+            // One line per BAKE, not per frame: an amortized city is a
+            // hundred frames, and a hundred identical log lines is noise
+            // that hides the number that matters.
+            if self.bake_queue.is_empty() {
+                let state = self.state.as_ref().unwrap();
+                log!(
+                    "gpu lightmap: {}px atlas, {} regions, {} lamps — {} passes encoded over {} frame(s) in {}us (CPU-side submission; GPU renders in-frame)",
+                    state.size,
+                    state.regions.len(),
+                    state.lights.len(),
+                    self.bake_passes,
+                    self.bake_frames,
+                    self.bake_us
+                );
+            } else if std::env::var_os("MAKEPAD_GPU_LM_PERF").is_some() {
+                log!(
+                    "gpu lightmap: {} of {} regions baked ({} passes in {}us this frame)",
+                    self.bake_total - self.bake_queue.len(),
+                    self.bake_total,
+                    passes,
+                    us
+                );
+            }
         } else if std::env::var_os("MAKEPAD_GPU_LM_PERF").is_some() {
             self.rt_frames += 1;
             self.rt_us += us;
@@ -1150,17 +1683,12 @@ impl GpuLightmapBaker {
         delivery
     }
 
-    /// Encode one batch of dirty atlas regions (statics only, both modes)
-    /// plus — when `csm` is fitted — this frame's cascade depth pass, as
+    /// Encode one batch of dirty atlas regions (statics only, both modes) as
     /// one chain of render passes. Returns the number of passes encoded.
-    fn encode_batch(
-        &mut self,
-        cx: &mut CxDraw,
-        sun_dir: Vec3f,
-        movers: &[GpuLmMover],
-        batch: &[usize],
-        csm: Option<CsmFrame>,
-    ) -> usize {
+    /// Never called with an empty batch; the cascade pass is its own chain
+    /// ([`Self::encode_cascades`]) because it must also serve frames — and
+    /// whole worlds — where no atlas exists to batch.
+    fn encode_batch(&mut self, cx: &mut CxDraw, sun_dir: Vec3f, batch: &[usize]) -> usize {
         let state = self.state.take().unwrap();
         let mut draws = self.draws.take().unwrap();
         let sun_up = sun_dir.y > 0.02;
@@ -1183,35 +1711,26 @@ impl GpuLightmapBaker {
             .iter()
             .any(|ri| matches!(state.regions[*ri].kind, RegionKind::Ground));
 
-        // Atlas pass count (zero on a clean frame): lamp coverage +
-        // 4/region + 2/lamp + 3 lamp dilate + (1 + CHAMFER_STEPS) DT +
-        // encode + 4 top passes (far depth, convert, two dilate rings).
-        let atlas_passes = if batch.is_empty() {
-            0
-        } else {
-            1 + batch.len() * 4
-                + lamps.len() * 2
-                + 3
-                + 1
-                + CHAMFER_STEPS
-                + 1
-                + if ground_in_batch && state.ground.is_some() {
-                    4
-                } else {
-                    0
-                }
-        };
-        let n_passes = atlas_passes + csm.is_some() as usize;
-        // Loop bounds for the fixed-count atlas sections, zeroed when no
-        // region bakes this frame (Realtime steady state encodes ONLY the
-        // cascade pass).
-        let lamp_dilate_passes = if batch.is_empty() { 0 } else { 3 };
-        let dt_passes = if batch.is_empty() { 0 } else { 1 + CHAMFER_STEPS };
-        self.ensure_pool(cx.cx, n_passes);
+        // Atlas pass count: lamp coverage + 4/region + 2/lamp + 3 lamp
+        // dilate + (1 + CHAMFER_STEPS) DT + encode + 4 top passes (far
+        // depth, convert, two dilate rings).
+        let n_passes = 1
+            + batch.len() * 4
+            + lamps.len() * 2
+            + 3
+            + 1
+            + CHAMFER_STEPS
+            + 1
+            + if ground_in_batch && state.ground.is_some() {
+                4
+            } else {
+                0
+            };
+        let lamp_dilate_passes = 3;
+        let dt_passes = 1 + CHAMFER_STEPS;
+        ensure_pool(&mut self.pool, cx.cx, n_passes);
         // Execution order = DESCENDING pass id (see BakePass::probe).
-        let mut order: Vec<usize> = (0..self.pool.len()).collect();
-        order.sort_by(|a, b| self.pool[*b].probe.cmp(&self.pool[*a].probe));
-        order.truncate(n_passes);
+        let order = pass_order(&self.pool, n_passes);
         let mut seq = PassSeq {
             pool: &mut self.pool,
             order,
@@ -1221,8 +1740,16 @@ impl GpuLightmapBaker {
         let clear0 = DrawPassClearColor::ClearWith(Vec4f::default());
         let load = |c: Vec4f| DrawPassClearColor::InitWith(c);
 
-        // ---- 1. Lamp coverage prepass: batch regions rasterized at 1x,
-        // (0,0,0,1) marks "holds light" and zeroes the accumulator.
+        // ---- 1. Lamp accumulator zero + coverage prepass. The accumulator
+        // LOADS (a batch owns only its own regions, and an amortized kick
+        // spreads the atlas over frames), so this batch's regions are hard-
+        // zeroed over their full write footprint FIRST — rect plus pad ring.
+        // Only then does the chart rasterize (0,0,0,1) over the texels that
+        // hold light. Zeroing by coverage alone leaves every rim texel the
+        // chart misses holding the PREVIOUS bake's light, and the dilate
+        // spreads it one ring further out on every re-bake (measured: 13142
+        // -> 31775 texels, all brighter, over five re-bakes of one settled
+        // town).
         if !batch.is_empty() {
             let idx = seq.open(
                 cx,
@@ -1232,6 +1759,9 @@ impl GpuLightmapBaker {
                 load(Vec4f::default()),
                 None
             );
+            for rect in batch_zero_rects(&state.regions, batch, state.size) {
+                zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+            }
             for ri in batch {
                 let r = &state.regions[*ri];
                 match r.kind {
@@ -1429,7 +1959,10 @@ impl GpuLightmapBaker {
                 }
                 seq.close(cx, idx);
             }
-            // 2d. downsample mask_b -> coverage atlas (persistent, loads)
+            // 2d. downsample mask_b -> coverage atlas (persistent, loads).
+            // The downsample covers the rect; the pad ring around it is read
+            // by the encode and the dilate's `covf`, so it is zeroed here
+            // rather than left holding whatever the last bake wrote.
             {
                 let idx = seq.open(
                     cx,
@@ -1439,6 +1972,9 @@ impl GpuLightmapBaker {
                     load(Vec4f::default()),
                     None
                 );
+                for rect in batch_zero_rects(&state.regions, &[*ri], state.size) {
+                    zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+                }
                 let d = &mut draws.downsample;
                 d.quad_a = r.rect.uv_remap(state.size);
                 d.src_a = Vec4f {
@@ -1465,6 +2001,9 @@ impl GpuLightmapBaker {
         // gather over every batch region in radius.
         for li in &lamps {
             let light = &state.lights[*li];
+            // A fixture must not shadow its own bulb, at any placed scale
+            // (lightmap::lamp_clearance).
+            let clearance = crate::lightmap::lamp_clearance(light);
             {
                 let idx = seq.open(
                     cx,
@@ -1480,7 +2019,7 @@ impl GpuLightmapBaker {
                     Some(&state.tex.lamp_depth_z)
                 );
                 let lamp_range = Vec4f {
-                    x: LIGHT_CLEARANCE,
+                    x: clearance,
                     y: light.radius,
                     z: 0.0,
                     w: 0.0,
@@ -1541,7 +2080,7 @@ impl GpuLightmapBaker {
                     w: 1.0, // lamp mode
                 };
                 let lamp_d = Vec4f {
-                    x: LIGHT_CLEARANCE,
+                    x: clearance,
                     y: light.radius,
                     z: 0.06,
                     w: RAY_OFFSET,
@@ -1590,7 +2129,10 @@ impl GpuLightmapBaker {
         }
 
         // ---- 4. Lamp dilate x2 + smooth: lamp_a -> lamp_b -> lamp_a ->
-        // lamp_b; encode reads lamp_b.
+        // lamp_b; encode reads lamp_b. Each destination is zeroed over this
+        // batch's footprint first: the dilate itself writes the rect, while
+        // the encode reads the rect PLUS the pad ring, and a loading target
+        // would hand that ring the previous bake's light.
         for mode in 0..lamp_dilate_passes {
             let (src, dst) = match mode {
                 0 => (&state.tex.lamp_a, &state.tex.lamp_b),
@@ -1598,6 +2140,9 @@ impl GpuLightmapBaker {
                 _ => (&state.tex.lamp_a, &state.tex.lamp_b),
             };
             let idx = seq.open(cx, state.size, state.size, dst, load(Vec4f::default()), None);
+            for rect in batch_zero_rects(&state.regions, batch, state.size) {
+                zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+            }
             for ri in batch {
                 let r = &state.regions[*ri];
                 let d = &mut draws.lamp_dilate;
@@ -1615,6 +2160,11 @@ impl GpuLightmapBaker {
                     w: 0.0,
                 };
                 d.draw_vars.set_texture(0, src);
+                // Chart coverage (written by this batch's downsample passes,
+                // which run earlier in the sequence): the dilate distrusts
+                // partially-covered chart-edge texels and rebuilds them from
+                // the interior — see DrawLmLampDilate.
+                d.draw_vars.set_texture(1, &state.tex.cov);
                 if d.draw_vars.can_instance() {
                     cx.add_instance(&d.draw_vars);
                 }
@@ -1688,12 +2238,10 @@ impl GpuLightmapBaker {
             );
             for ri in batch {
                 let r = &state.regions[*ri];
-                let ex = LmRect {
-                    x: r.rect.x.saturating_sub(1),
-                    y: r.rect.y.saturating_sub(1),
-                    w: (r.rect.w + 2).min(state.size - r.rect.x.saturating_sub(1)),
-                    h: (r.rect.h + 2).min(state.size - r.rect.y.saturating_sub(1)),
-                };
+                // The same footprint the accumulator was zeroed over — the
+                // encode's pad ring may only ever read texels this bake
+                // itself defined.
+                let ex = r.rect.padded(state.size);
                 let d = &mut draws.encode;
                 d.quad_a = ex.uv_remap(state.size);
                 d.rect_px = Vec4f {
@@ -1706,10 +2254,16 @@ impl GpuLightmapBaker {
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(0.0);
+                // The world-space sun band in THIS region's texels: the
+                // penumbra is a world width, not a texel count, so a shadow
+                // edge keeps one softness crossing regions of different
+                // density. Floored at 1 texel (a chart cannot resolve
+                // narrower) and capped inside the DT's 6-texel reach.
+                let band = (crate::lightmap::LM_SUN_BAND_WORLD * r.tpu).clamp(1.0, 5.0);
                 d.misc_a = Vec4f {
                     x: inv_size,
                     y: show,
-                    z: 0.0,
+                    z: band,
                     w: 0.0,
                 };
                 d.draw_vars.set_texture(0, dt_final);
@@ -1866,51 +2420,70 @@ impl GpuLightmapBaker {
             }
         }
 
-        // ---- 8. Realtime cascades: ONE pass, CSM_CASCADES tiles side by
-        // side in the strip, EVERY caster — static meshes, occluder boxes,
-        // rigid movers and skinned characters (posed from the same joint
-        // palette the visible draw binds, so a character shadows in exactly
-        // the pose it renders in). No CPU per-cascade culling yet: instance
-        // encodes are cheap at village scale and the GPU clips; cull here
-        // first if a big world ever makes this loop hot.
-        if let Some(frame) = &csm {
-            let res = state.csm_res;
-            let csm_tex = state
-                .tex
-                .csm
-                .as_ref()
-                .expect("realtime CSM target synchronized before encoding");
-            let csm_z = state
-                .tex
-                .csm_z
-                .as_ref()
-                .expect("realtime CSM depth synchronized before encoding");
-            let idx = seq.open(
-                cx,
-                res * CSM_CASCADES,
-                res,
-                csm_tex,
-                DrawPassClearColor::ClearWith(Vec4f {
-                    x: 1.0,
-                    y: 1.0,
-                    z: 1.0,
-                    w: 1.0,
-                }),
-                Some(csm_z),
-            );
-            for (ci, casc) in frame.cascades.iter().enumerate() {
-                let tile = Vec4f {
-                    x: 1.0 / CSM_CASCADES as f32,
-                    y: 1.0,
-                    z: (2.0 * ci as f32 + 1.0) / CSM_CASCADES as f32 - 1.0,
-                    w: 0.0,
-                };
-                let d = &mut draws.sun_depth;
-                d.sun_rx = casc.rx;
-                d.sun_ry = casc.ry;
-                d.sun_rz = casc.rz;
-                d.flip_a = Vec4f::default();
-                d.tile_a = tile;
+        let encoded = seq.cursor;
+        assert!(encoded <= n_passes, "gpu lightmap pass budget mismatch");
+        self.draws = Some(draws);
+        self.state = Some(state);
+        encoded
+    }
+
+    /// Realtime cascades: ONE pass, CSM_CASCADES tiles side by side in the
+    /// strip, EVERY caster — static meshes, occluder boxes, rigid movers
+    /// and skinned characters (posed from the same joint palette the
+    /// visible draw binds, so a character shadows in exactly the pose it
+    /// renders in). No CPU per-cascade culling yet: instance encodes are
+    /// cheap at village scale and the GPU clips; cull here first if a big
+    /// world ever makes this loop hot.
+    ///
+    /// The static half comes from the realized atlas layout when there IS
+    /// one; a world without a layout still encodes its dynamic casters,
+    /// which is the whole point of separating this from `encode_batch`.
+    fn encode_cascades(
+        &mut self,
+        cx: &mut CxDraw,
+        movers: &[GpuLmMover],
+        frame: &CsmFrame,
+    ) -> usize {
+        let res = self.csm_res;
+        let (Some(csm_tex), Some(csm_z)) = (self.csm_tex.clone(), self.csm_depth.clone()) else {
+            return 0;
+        };
+        let state = self.state.take();
+        let mut draws = self.draws.take().unwrap();
+        ensure_pool(&mut self.csm_pool, cx.cx, 1);
+        let order = pass_order(&self.csm_pool, 1);
+        let mut seq = PassSeq {
+            pool: &mut self.csm_pool,
+            order,
+            cursor: 0,
+        };
+        let idx = seq.open(
+            cx,
+            res * CSM_CASCADES,
+            res,
+            &csm_tex,
+            DrawPassClearColor::ClearWith(Vec4f {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                w: 1.0,
+            }),
+            Some(&csm_z),
+        );
+        for (ci, casc) in frame.cascades.iter().enumerate() {
+            let tile = Vec4f {
+                x: 1.0 / CSM_CASCADES as f32,
+                y: 1.0,
+                z: (2.0 * ci as f32 + 1.0) / CSM_CASCADES as f32 - 1.0,
+                w: 0.0,
+            };
+            let d = &mut draws.sun_depth;
+            d.sun_rx = casc.rx;
+            d.sun_ry = casc.ry;
+            d.sun_rz = casc.rz;
+            d.flip_a = Vec4f::default();
+            d.tile_a = tile;
+            if let Some(state) = state.as_ref() {
                 for m in &state.meshes {
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
@@ -1925,37 +2498,35 @@ impl GpuLightmapBaker {
                         cx.add_instance(&d.draw_vars);
                     }
                 }
-                for mv in movers.iter().filter(|m| m.skin.is_none()) {
-                    d.transform = mv.transform;
-                    d.draw_vars.geometry_id = Some(mv.geometry);
-                    if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
-                    }
-                }
-                for mv in movers {
-                    let Some(skin) = &mv.skin else { continue };
-                    let ds = &mut draws.sun_depth_skinned;
-                    ds.sun_rx = casc.rx;
-                    ds.sun_ry = casc.ry;
-                    ds.sun_rz = casc.rz;
-                    ds.flip_a = Vec4f::default();
-                    ds.tile_a = tile;
-                    ds.transform = mv.transform;
-                    ds.skin_a.x = skin.joint_base;
-                    ds.draw_vars.set_texture(0, &skin.joint_tex);
-                    ds.draw_vars.geometry_id = Some(mv.geometry);
-                    if ds.draw_vars.can_instance() {
-                        cx.add_instance(&ds.draw_vars);
-                    }
+            }
+            for mv in movers.iter().filter(|m| m.skin.is_none()) {
+                d.transform = mv.transform;
+                d.draw_vars.geometry_id = Some(mv.geometry);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
                 }
             }
-            seq.close(cx, idx);
+            for mv in movers {
+                let Some(skin) = &mv.skin else { continue };
+                let ds = &mut draws.sun_depth_skinned;
+                ds.sun_rx = casc.rx;
+                ds.sun_ry = casc.ry;
+                ds.sun_rz = casc.rz;
+                ds.flip_a = Vec4f::default();
+                ds.tile_a = tile;
+                ds.transform = mv.transform;
+                ds.skin_a.x = skin.joint_base;
+                ds.draw_vars.set_texture(0, &skin.joint_tex);
+                ds.draw_vars.geometry_id = Some(mv.geometry);
+                if ds.draw_vars.can_instance() {
+                    cx.add_instance(&ds.draw_vars);
+                }
+            }
         }
-
+        seq.close(cx, idx);
         let encoded = seq.cursor;
-        assert!(encoded <= n_passes, "gpu lightmap pass budget mismatch");
         self.draws = Some(draws);
-        self.state = Some(state);
+        self.state = state;
         encoded
     }
 }
@@ -2001,38 +2572,8 @@ mod tests {
         baker.csm_policy.env_far_range = None;
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let texture = Texture::new(&mut cx);
-        baker.state = Some(BakeState {
-            size: 1,
-            regions: Vec::new(),
-            meshes: Vec::new(),
-            box_geometry: None,
-            lights: Vec::new(),
-            ground: None,
-            scene_min: Vec3f::default(),
-            scene_max: Vec3f::default(),
-            csm_res: DEFAULT_CSM_CONFIG.tile_resolution,
-            tex: BakeTextures {
-                atlas: texture.clone(),
-                top_a: texture.clone(),
-                top_b: texture.clone(),
-                cov: texture.clone(),
-                lamp_a: texture.clone(),
-                lamp_b: texture.clone(),
-                dt_a: texture.clone(),
-                dt_b: texture.clone(),
-                mask_a: texture.clone(),
-                mask_b: texture.clone(),
-                sun_depth: texture.clone(),
-                sun_depth_z: texture.clone(),
-                sun_far: texture.clone(),
-                lamp_depth: texture.clone(),
-                lamp_depth_z: texture.clone(),
-                csm: Some(texture.clone()),
-                csm_z: Some(texture),
-                mask_w: 1,
-                mask_h: 1,
-            },
-        });
+        baker.csm_tex = Some(texture.clone());
+        baker.csm_depth = Some(texture);
         baker.csm_last = Some(CsmFrame::default());
 
         assert_eq!(
@@ -2044,10 +2585,55 @@ mod tests {
         );
         assert!(baker.csm_last.is_none());
         assert_eq!(baker.csm_config().tile_resolution, 1024);
-        let state = baker.state.as_ref().unwrap();
-        assert_eq!(state.csm_res, 1024);
-        assert!(state.tex.csm.is_none());
-        assert!(state.tex.csm_z.is_none());
+        // The shape-coupled pair is released together, so the next sync
+        // cannot assemble a mixed-resolution framebuffer.
+        assert!(baker.csm_tex.is_none());
+        assert!(baker.csm_depth.is_none());
+        assert!(
+            baker.csm_binding().is_none(),
+            "no target means no binding, whatever the last fitted frame was"
+        );
+    }
+
+    /// The regression this file exists to pin: the cascade tier is NOT a
+    /// passenger of the atlas layout. A world with no static lightmap at
+    /// all — flat starter terrain, no props, so the renderer never
+    /// schedules a bake job — must still allocate cascade targets and hand
+    /// the materials a binding in Realtime. When these were fields of
+    /// `BakeState`, pressing F8 in such a world produced no cascades, no
+    /// binding, and every dynamic shadow vanished instead of upgrading.
+    #[test]
+    fn the_cascade_tier_serves_a_world_with_no_atlas_layout() {
+        let mut baker = GpuLightmapBaker::default();
+        baker.csm_policy.env_resolution = None;
+        baker.csm_policy.env_far_range = None;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(baker.state.is_none() && baker.pending.is_none());
+        assert!(
+            !baker.has_state(),
+            "the scenario under test is a world the atlas never realized"
+        );
+
+        baker.set_mode(GpuLightmapMode::Realtime);
+        baker.sync_csm_targets(&mut cx);
+        assert!(
+            baker.csm_tex.is_some() && baker.csm_depth.is_some(),
+            "Realtime must allocate its cascade targets without an atlas"
+        );
+        baker.csm_last = Some(CsmFrame::default());
+        let (_, _, inv_res) = baker
+            .csm_binding()
+            .expect("a fitted frame plus a target is a complete binding");
+        assert!(
+            (inv_res - 1.0 / baker.csm_res as f32).abs() < 1.0e-9,
+            "the binding's inverse resolution must match the allocated tile"
+        );
+
+        // ...and OnChange still reclaims them, atlas or no atlas.
+        baker.set_mode(GpuLightmapMode::OnChange);
+        baker.sync_csm_targets(&mut cx);
+        assert!(baker.csm_tex.is_none() && baker.csm_depth.is_none());
+        assert!(baker.csm_binding().is_none());
     }
 
     /// The mode split is airtight by construction: exactly ONE tier serves
@@ -2061,6 +2647,8 @@ mod tests {
         assert!(on_change.sdf_quads && !on_change.csm);
         let realtime = dynamic_shadow_tiers(GpuLightmapMode::Realtime);
         assert!(!realtime.sdf_quads && realtime.csm);
+        let off = dynamic_shadow_tiers(GpuLightmapMode::Off);
+        assert!(!off.sdf_quads && !off.csm);
         for mode in [GpuLightmapMode::OnChange, GpuLightmapMode::Realtime] {
             let t = dynamic_shadow_tiers(mode);
             assert!(
@@ -2078,15 +2666,18 @@ mod tests {
     #[test]
     fn steady_state_encodes_zero_atlas_passes() {
         let mut dirty = true;
-        // The kick: all regions.
-        let first = schedule_regions(&mut dirty, 4, None);
+        let mut queue = std::collections::VecDeque::new();
+        // The kick: all regions, and a world smaller than the budget still
+        // bakes in ONE frame (the small-scene picture is unchanged).
+        let first = schedule_regions(&mut dirty, &mut queue, 4, None, DEFAULT_BAKE_BUDGET);
         assert_eq!(first, vec![0, 1, 2, 3]);
         assert!(!dirty, "the kick must consume the dirty bit");
+        assert!(queue.is_empty());
         // Steady state: N frames, nothing edits the world — nothing bakes.
         // The scheduler is mode-blind by construction, so this covers
         // Realtime's "zero lightmap sun passes" mirror too.
         for frame in 0..600 {
-            let batch = schedule_regions(&mut dirty, 4, None);
+            let batch = schedule_regions(&mut dirty, &mut queue, 4, None, DEFAULT_BAKE_BUDGET);
             assert!(
                 batch.is_empty(),
                 "atlas re-baked at steady-state frame {frame}: {batch:?}"
@@ -2095,8 +2686,252 @@ mod tests {
         // The debug pin narrows a kick to one region without unconsuming
         // the bit.
         dirty = true;
-        assert_eq!(schedule_regions(&mut dirty, 4, Some(2)), vec![2]);
-        assert!(schedule_regions(&mut dirty, 4, Some(2)).is_empty());
+        assert_eq!(
+            schedule_regions(&mut dirty, &mut queue, 4, Some(2), DEFAULT_BAKE_BUDGET),
+            vec![2]
+        );
+        assert!(
+            schedule_regions(&mut dirty, &mut queue, 4, Some(2), DEFAULT_BAKE_BUDGET).is_empty()
+        );
+    }
+
+    /// The amortization contract: one kick still bakes every region exactly
+    /// once, in order, but spread over frames — a city of thousands of lit
+    /// props must not encode thousands of passes in the frame the player is
+    /// waiting on. And it still ENDS: after the queue drains, steady state
+    /// is zero passes forever, budget or no budget.
+    #[test]
+    fn a_big_kick_is_spread_over_frames_and_still_bakes_everything_once() {
+        let mut dirty = true;
+        let mut queue = std::collections::VecDeque::new();
+        let regions = 3285; // the city that froze for four seconds
+        let budget = 24;
+        let mut baked = Vec::new();
+        let mut frames = 0;
+        loop {
+            let batch = schedule_regions(&mut dirty, &mut queue, regions, None, budget);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(
+                batch.len() <= budget,
+                "frame {frames} encoded {} regions, over the {budget} budget",
+                batch.len()
+            );
+            frames += 1;
+            baked.extend(batch);
+        }
+        assert_eq!(baked, (0..regions).collect::<Vec<_>>());
+        assert_eq!(frames, regions.div_ceil(budget));
+        for _ in 0..600 {
+            assert!(schedule_regions(&mut dirty, &mut queue, regions, None, budget).is_empty());
+        }
+
+        // Budget 0 is the offline escape hatch: the whole kick at once.
+        dirty = true;
+        assert_eq!(
+            schedule_regions(&mut dirty, &mut queue, regions, None, 0).len(),
+            regions
+        );
+
+        // A NEW kick supersedes a half-drained queue: the layout the old
+        // regions indexed is gone, and baking them into the new atlas would
+        // light the wrong rects.
+        dirty = true;
+        let _ = schedule_regions(&mut dirty, &mut queue, 100, None, 10);
+        assert_eq!(queue.len(), 90);
+        dirty = true;
+        let batch = schedule_regions(&mut dirty, &mut queue, 5, None, 10);
+        assert_eq!(batch, vec![0, 1, 2, 3, 4]);
+        assert!(queue.is_empty());
+    }
+
+    /// Progress is what an app puts in front of a player who is looking at a
+    /// flat-lit world: it counts up, and it stops existing the moment the
+    /// lighting has settled.
+    #[test]
+    fn bake_progress_reports_only_while_the_lighting_is_filling_in() {
+        let mut baker = GpuLightmapBaker::default();
+        baker.bake_budget = 10;
+        assert!(baker.bake_progress().is_none(), "nothing scheduled, nothing to report");
+
+        baker.dirty = true;
+        let batch = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        baker.bake_total = batch.len() + baker.bake_queue.len();
+        assert_eq!(baker.bake_progress(), Some((10, 25)));
+        assert!(!baker.is_idle(), "a half-baked atlas is not settled content");
+
+        let _ = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        assert_eq!(baker.bake_progress(), Some((20, 25)));
+        let _ = schedule_regions(
+            &mut baker.dirty,
+            &mut baker.bake_queue,
+            25,
+            None,
+            baker.bake_budget,
+        );
+        assert!(baker.bake_progress().is_none());
+    }
+
+    fn ground_region(min: Vec3f, max: Vec3f, px: usize) -> Region {
+        Region {
+            rect: LmRect { x: 1, y: 1, w: px, h: px },
+            kind: RegionKind::Ground,
+            min,
+            max,
+            tpu: px as f32 / (max.x - min.x).max(0.001),
+        }
+    }
+
+    /// RE-BAKE IDEMPOTENCE, at the layer a CPU test can hold: a batch zeroes
+    /// exactly what it writes — every region it bakes, over the full
+    /// footprint (chart rect + pad ring) the splat, the dilate and the
+    /// encode reach — and NOTHING a region outside the batch owns.
+    ///
+    /// Both halves are load-bearing and both were violated in one direction
+    /// or the other:
+    /// * too little zero (the shipped bug): the accumulator loads, so a rim
+    ///   texel the coverage rasterization missed kept the previous bake's
+    ///   light and the dilate carried it one ring further out on every
+    ///   re-bake. Measured on a settled 98-region town re-baked into its own
+    ///   targets: 13142 -> 20777 -> 25669 -> 29019 -> 31775 texels changed,
+    ///   all brighter, none dimmer.
+    /// * too much zero: an amortized kick bakes 24 regions a frame, so
+    ///   zeroing a region this batch is not baking would blank light that is
+    ///   already correct.
+    ///
+    /// The end-to-end counterpart is MAKEPAD_GPU_LM_REBAKE (renderer.rs),
+    /// which re-bakes a live world and diffs the atlas bytes.
+    #[test]
+    fn a_batch_zeroes_exactly_the_regions_it_bakes() {
+        // A packed strip: 10px regions on the pack's 1-texel gutter.
+        let size = 64;
+        let regions: Vec<Region> = [(1, 1), (13, 1), (1, 13), (13, 13)]
+            .iter()
+            .map(|(x, y)| Region {
+                rect: LmRect { x: *x, y: *y, w: 10, h: 10 },
+                kind: RegionKind::Ground,
+                min: v3(0.0, 0.0, 0.0),
+                max: v3(1.0, 1.0, 1.0),
+                tpu: 10.0,
+            })
+            .collect();
+        let batch = vec![0usize, 2];
+        let zeros = batch_zero_rects(&regions, &batch, size);
+
+        assert_eq!(zeros.len(), batch.len(), "one footprint per region baked");
+        for (slot, ri) in batch.iter().enumerate() {
+            let r = regions[*ri].rect;
+            let z = zeros[slot];
+            // Covers the chart rect...
+            assert!(
+                z.x <= r.x && z.y <= r.y && z.x + z.w >= r.x + r.w && z.y + z.h >= r.y + r.h,
+                "region {ri}: zero {z:?} does not cover its chart {r:?}"
+            );
+            // ...and exactly the ring the encode stamps around it.
+            assert_eq!(z, r.padded(size), "region {ri}: zero is not the write footprint");
+        }
+        // Regions this batch does not bake keep every texel they own.
+        for (ri, region) in regions.iter().enumerate() {
+            if batch.contains(&ri) {
+                continue;
+            }
+            for z in &zeros {
+                assert!(
+                    !z.intersects(&region.rect),
+                    "a batch zero {z:?} blanks region {ri} {:?}, which it never re-bakes",
+                    region.rect
+                );
+            }
+        }
+    }
+
+    /// The bake's own alarm, both ways. A blowout that "pops in" seconds
+    /// after a world appears must be attributable from the LOG — so the
+    /// region that will flood has to name itself, and a region running
+    /// inside its headroom has to stay quiet. (A report that cries wolf is
+    /// worse than no report: this is the test that keeps it honest.)
+    #[test]
+    fn the_bake_reports_the_region_that_will_flood_and_stays_quiet_otherwise() {
+        use crate::lightmap::{
+            lamp_daylight_scale, lamp_photometry, LM_LAMP_SAT_TEXELS,
+        };
+        // The reported world: noon over a town-sized ground region, one ×2
+        // Kenney lantern in the middle of it.
+        let daylight = 0.861; // measured, and what the bake logs at 12.5
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        let tint = Vec3f { x: 1.0, y: 0.775, z: 0.475 };
+        let region = ground_region(
+            v3(-50.0, -1.0, -50.0),
+            v3(37.0, 2.0, 37.0),
+            1024,
+        );
+        let tpu = 11.77;
+
+        // WITHOUT the rail: a 0.30 pool against 0.139 of headroom paints
+        // far more than the collar a fixture is allowed.
+        let blown = vec![LmLight {
+            pos: v3(14.0, mount, -5.0),
+            color: tint * strength,
+            radius,
+            dir: v3(0.0, -1.0, 0.0),
+            spot: 1.0,
+        }];
+        let e = region_exposure(&region, &blown, daylight, tpu);
+        assert_eq!(e.lamps, 1);
+        assert!(e.sum > 1.0, "the reported blowout did not reproduce: {}", e.sum);
+        assert!(
+            e.clip_texels > LM_LAMP_SAT_TEXELS,
+            "the blown street was inside the collar budget: {} texels",
+            e.clip_texels
+        );
+
+        // WITH it: same lamp, same sun, nothing over the ceiling and
+        // nothing to shout about.
+        let scale = lamp_daylight_scale(daylight);
+        let railed = vec![LmLight {
+            color: tint * (strength * scale),
+            ..blown[0].clone()
+        }];
+        let e = region_exposure(&region, &railed, daylight, tpu);
+        assert!(e.sum <= 1.0, "the rail did not hold: {}", e.sum);
+        assert_eq!(e.clip_texels, 0.0, "a railed pool still clipped the frame");
+
+        // Two lamps 26 m apart do not ADD into a brightness neither of them
+        // delivers — the loose bound that made the first cut of this report
+        // cry wolf on the ground region.
+        let pair = vec![
+            railed[0].clone(),
+            LmLight { pos: v3(-12.0, mount, 5.0), ..railed[0].clone() },
+        ];
+        let e2 = region_exposure(&region, &pair, daylight, tpu);
+        assert_eq!(e2.lamps, 2);
+        assert!(
+            (e2.lamp_peak - e.lamp_peak).abs() < 1e-3,
+            "distant pools summed: one {} vs two {}",
+            e.lamp_peak,
+            e2.lamp_peak
+        );
+
+        // And a region no lamp reaches is not lamp-lit at all.
+        let far = ground_region(v3(400.0, 0.0, 400.0), v3(500.0, 1.0, 500.0), 64);
+        let e3 = region_exposure(&far, &pair, daylight, tpu);
+        assert_eq!(e3.lamps, 0);
+        assert_eq!(e3.lamp_peak, 0.0);
+        assert_eq!(e3.sum, daylight);
     }
 
     #[test]
@@ -2107,6 +2942,8 @@ mod tests {
         baker.set_mode(GpuLightmapMode::Realtime);
         baker.set_csm_config(1024, 48.0);
         baker.dirty = true;
+        baker.bake_queue.extend([0, 1, 2]);
+        baker.bake_total = 3;
         baker.rt_frames = 9;
         baker.rt_us = 42;
         // A pass cannot be constructed without a draw context, but an empty
@@ -2128,6 +2965,10 @@ mod tests {
         assert!(baker.state.is_none());
         assert!(baker.csm_last.is_none());
         assert!(!baker.dirty);
+        assert!(
+            baker.bake_queue.is_empty() && baker.bake_progress().is_none(),
+            "regions of the realm we just left must never bake into the next one"
+        );
         assert_eq!(baker.rt_frames, 0);
         assert_eq!(baker.rt_us, 0);
         assert_eq!(baker.pool.capacity(), pool_capacity);

@@ -17,6 +17,7 @@ mod segment;
 mod util;
 
 pub use atlas::{
-    parametrize, parametrize_with_options, unwrap_mesh, AddMeshError, ChartOptions, PackOptions,
+    parametrize, parametrize_with_options, parametrize_with_options_progress,
+    parametrize_with_progress, unwrap_mesh, AddMeshError, ChartOptions, PackOptions,
     Parametrize, Vertex,
 };

@@ -132,6 +132,12 @@ pub struct GameWorld {
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).
     /// Presentation only — the step never reads it.
     pub sun: SunConfig,
+    /// World-level gameplay knobs (`game.tune({car_speed: 0.6})`): scalars
+    /// every block of a kind multiplies its authored config by, each tick.
+    /// Retroactive by construction — a car spawned before the tune reads the
+    /// same scalar as one spawned after — and idempotent, so a re-declaration
+    /// on the addon lane is the whole persistence story (see WorldTuning).
+    pub tuning: WorldTuning,
     /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
     /// camera-relative movement ("run where the camera looks").
     pub cam_yaw: f32,
@@ -312,6 +318,9 @@ impl GameWorld {
         self.water = None;
         self.sky = None;
         self.sun = SunConfig::default();
+        // World knobs are script content like the sun: the re-eval re-declares
+        // them (`world.tune` appends an idempotent line, so a reload does).
+        self.tuning = WorldTuning::default();
         self.next_id = 0;
         self.gravity = 30.0;
         self.on_tick = None;
