@@ -1,49 +1,84 @@
-// BAR SHATTER — the picture EXPLODES on the downbeat and reassembles
-// pixel-perfect before the next one. Pattern taught here: the tiles
-// engine's "shatter" mode is bar-clocked in the shader (flight vectors are
-// BAKED per tile — rim tiles fly further, every tile tumbles on its own
-// hashed axis), so the doc only shapes the mood: spin, scatter reach, a
-// p0 kicker that adds a pulse-snap to the launch, and grout glow that
-// burns while the tiles are airborne.
+// BAR SHATTER — PURE GEOMETRY, ZERO BLEND. Deck A breaks into glass
+// tiles that slide apart and wink out; a beat of void; deck B's tiles fly
+// back in and SNAP into the whole picture. Every shard carries its EXACT
+// source rect (screen-anchored texels: a shard displaced by d shows
+// src[uv - d], so the picture visibly breaks apart and reassembles like
+// glass, never smearing). NO pixel ever shows a mix of A and B — the only
+// softness in this transition is absence (the black void behind).
+//
+// Pattern taught here: the duo compositor's inverse shard map. For a
+// screen pixel, the shard that covers it is found by testing the 3x3
+// cell neighborhood (flight is capped under one tile-width while a shard
+// is alive, so the search is exact); `shard_hit` returns the shard's
+// texel with a hit flag in alpha.
 {
     name: "Bar Shatter"
-    engine: "tiles"
-    mode: "shatter"
-    seed: 12
-
-    grid: 22
-    spread: 7.0
-    aspect: 0.75
-    gap: 0.04
-    scatter: 1.3
-    spin: 1.7
-
-    bar_beats: 4
-    beat_pulse: 0.9
-    // Extra launch bite right on the downbeat (bar-gated pulse).
-    p0: "0.22 * env(bar) * pulse"
-    p2: "0.30 * pulse"
-    p1: 0.5
-
-    // PERFORMANCE DIALS — KICK/GROUT are the engine's own p0/p2 levers
-    // (touching KICK holds the launch bite; full KICK = hung in the air);
-    // TRAIL routes p1 through the feedback amount.
+    engine: "transition"
     dials: [
-        {name: "KICK", bind: "p0", default: 0.5},
-        {name: "TRAIL", bind: "p1", default: 0.5},
-        {name: "GROUT", bind: "p2", default: 0.5}
+        {name: "TILES", bind: "p0", default: 0.5},
+        {name: "BLAST", bind: "p1", default: 0.5},
+        {name: "STAG", bind: "p2", default: 0.5}
     ]
-
-    input0: "test"
-
-    color_bg: #x0a0614
-    color_a: #x8899ff
-    color_b: #xff3f88
-    color_c: #xcfd8ff
-
-    stages: [
-        {kind: "feedback", amount: "min(0.35 + 0.3 * env(bar) + (p1-0.5)*0.6, 0.97)", zoom: 1.006,
-         rotate: 0.0, dim: 0.94},
-        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3}
-    ]
+    shader: draw.DrawVjFxDuo {
+        shard_hit: fn(uv: vec2, cell: vec2, n: float, phase: float, from_a: float) -> vec4 {
+            // Per-shard signature (stable hash of the cell id).
+            let r = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453)
+            let r2 = fract(r * 7.13)
+            // Rim shards launch first; STAG spreads the takeoffs.
+            let centre = (cell + vec2(0.5, 0.5)) / n
+            let rim = length(centre - vec2(0.5, 0.5)) * 1.4142
+            let stg = self.user.z * 1.5
+            let local = clamp(phase * (1.0 + stg) - mix(r, rim, 0.6) * stg, 0.0, 1.0)
+            // Alive: a shard slides under ONE tile-width, then is GONE
+            // (the void). The cap keeps the 3x3 inverse search exact.
+            let alive = 1.0 - step(0.72, local)
+            let travel = pow(local / 0.72, 1.6) * min(0.35 + self.user.y * 0.75, 0.95)
+            let dir = normalize(
+                centre - vec2(0.5, 0.5)
+                    + vec2(r - 0.5, r2 - 0.5) * 0.7
+                    + vec2(0.0001, 0.0002)
+            )
+            let d = dir * travel / n
+            // Screen-anchored: the displaced shard covers uv iff the
+            // source point falls back inside its home cell.
+            let src = uv - d
+            let home = floor(src * n)
+            let hit = alive
+                * step(abs(home.x - cell.x), 0.01)
+                * step(abs(home.y - cell.y), 0.01)
+                * step(0.0, src.x) * step(src.x, 1.0)
+                * step(0.0, src.y) * step(src.y, 1.0)
+            let col = self.deck_b(src).mix(self.deck_a(src), from_a)
+            return vec4(col.x, col.y, col.z, hit)
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = floor(mix(5.0, 24.0, self.user.x))
+            // First half: A explodes OUT (phase 0→1 of A-shards). Second
+            // half: B implodes IN (phase runs back 1→0 as t rises).
+            let from_a = 1.0 - step(0.5, t)
+            let phase = mix(clamp(2.0 - t * 2.0, 0.0, 1.0), clamp(t * 2.0, 0.0, 1.0), from_a)
+            let base = floor(uv * n)
+            let mut col = vec3(0.0, 0.0, 0.0)
+            let mut covered = 0.0
+            let c1 = self.shard_hit(uv, base + vec2(-1.0, -1.0), n, phase, from_a)
+            col = mix(col, c1.xyz, c1.w * (1.0 - covered)); covered = max(covered, c1.w)
+            let c2 = self.shard_hit(uv, base + vec2(0.0, -1.0), n, phase, from_a)
+            col = mix(col, c2.xyz, c2.w * (1.0 - covered)); covered = max(covered, c2.w)
+            let c3 = self.shard_hit(uv, base + vec2(1.0, -1.0), n, phase, from_a)
+            col = mix(col, c3.xyz, c3.w * (1.0 - covered)); covered = max(covered, c3.w)
+            let c4 = self.shard_hit(uv, base + vec2(-1.0, 0.0), n, phase, from_a)
+            col = mix(col, c4.xyz, c4.w * (1.0 - covered)); covered = max(covered, c4.w)
+            let c5 = self.shard_hit(uv, base, n, phase, from_a)
+            col = mix(col, c5.xyz, c5.w * (1.0 - covered)); covered = max(covered, c5.w)
+            let c6 = self.shard_hit(uv, base + vec2(1.0, 0.0), n, phase, from_a)
+            col = mix(col, c6.xyz, c6.w * (1.0 - covered)); covered = max(covered, c6.w)
+            let c7 = self.shard_hit(uv, base + vec2(-1.0, 1.0), n, phase, from_a)
+            col = mix(col, c7.xyz, c7.w * (1.0 - covered)); covered = max(covered, c7.w)
+            let c8 = self.shard_hit(uv, base + vec2(0.0, 1.0), n, phase, from_a)
+            col = mix(col, c8.xyz, c8.w * (1.0 - covered)); covered = max(covered, c8.w)
+            let c9 = self.shard_hit(uv, base + vec2(1.0, 1.0), n, phase, from_a)
+            col = mix(col, c9.xyz, c9.w * (1.0 - covered)); covered = max(covered, c9.w)
+            return vec4(col.x, col.y, col.z, 1.0)
+        }
+    }
 }

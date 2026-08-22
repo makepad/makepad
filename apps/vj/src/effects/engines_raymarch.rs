@@ -438,8 +438,16 @@ script_mod! {
                 } else { if an.x > an.z {
                     cuv = vec2(p.z, 0.0 - p.y)
                 } }
-                let tx = self.tex0.sample_as_bgra(fract(cuv * 0.09))
-                let alb = base.mix(base * 0.35 + tx.xyz * 0.9, self.fog.z * 0.7)
+                let tx = self.tex0.sample_as_bgra(fract(cuv * 0.07))
+                // Near-full transfer at the default: a 0.7 mix left the
+                // palette in charge and the fresco read as a stain. The
+                // material's own light (key/amb/ao/spec) is what keeps the
+                // marched geometry reading as geometry, so the albedo can
+                // go almost entirely to the video without losing the form.
+                let alb = base.mix(
+                    base * 0.18 + tx.xyz * 1.15,
+                    clamp(self.fog.z * 1.2, 0.0, 1.0)
+                )
                 col = alb * ((amb + key) * ao) * self.fog.y
                     + self.col_c.xyz * (spec * sh * 0.35)
             }

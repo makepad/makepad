@@ -397,10 +397,18 @@ script_mod! {
             // Hot tail: the newest grown length burns; beat pulse feeds it.
             let heat = exp(0.0 - max(front - birth, 0.0) * self.shape.y)
                 * step(birth, front)
-            self.v_misc = vec4(heat, birth, self.geom.geom_uv.x, 0.0)
             self.v_color = self.fx_color(birth, attr, self.geom.geom_normal, world.xyz)
             let view_pos = self.draw_pass.camera_view * world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
+            // v_misc.zw = this fragment's SCREEN uv — the address the
+            // content coupling mirrors the channel video from.
+            let ndc = self.vertex_pos.xy / max(self.vertex_pos.w, 0.0001)
+            self.v_misc = vec4(
+                heat,
+                birth,
+                clamp(ndc.x * 0.5 + 0.5, 0.0, 1.0),
+                clamp(0.5 - ndc.y * 0.5, 0.0, 1.0)
+            )
             return self.vertex_pos
         }
 
@@ -421,17 +429,23 @@ script_mod! {
             let hot = self.col_c.xyz * heat * (0.8 + self.time_beat.w * 0.9)
             let d = length(self.v_world - cam_pos)
             let fogf = exp(0.0 - d * self.fog.x)
-            // CONTENT: glossy pipes reflect the channel video — a fake env
-            // map addressed by the mirror direction, folded into the
-            // specular/rim term (chrome under the video, plastic dims a
-            // touch so reflections read). fog.z = pre-gated `content`.
+            // CONTENT: the pipes turn to CHROME and mirror the channel
+            // video. Addressing by the mirror direction alone (the first
+            // pass) folded a whole frame into a few degrees of tube normal
+            // and read as a smear; addressing by the fragment's own SCREEN
+            // uv, pushed sideways by the normal, makes each tube reflect
+            // what is behind it — the lattice assembles the picture and
+            // stays curved metal. fog.z = pre-gated `content`.
             let cm = self.fog.z
-            let mr = n * (2.0 * dot(n, vd)) - vd
-            let env = self.tex0.sample_as_bgra(
-                vec2(0.5 + mr.x * 0.32, 0.5 - mr.y * 0.32)
+            let suv = clamp(
+                vec2(self.v_misc.z, self.v_misc.w) + vec2(n.x, 0.0 - n.y) * 0.13,
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
             )
-            let rgb = (self.v_color.xyz * (lit + fill) * (1.0 - cm * 0.30) * self.fog.y
-                + env.xyz * ((rim * 3.0 + spec * 1.6 + 0.16) * cm)
+            let env = self.tex0.sample_as_bgra(suv).xyz * (0.45 + 0.85 * lit)
+            let body = (self.v_color.xyz * (lit + fill)).mix(env, clamp(cm * 1.25, 0.0, 1.0))
+            let rgb = (body * self.fog.y
+                + env * ((rim * 2.0 + spec * 1.2) * cm)
                 + self.col_c.xyz * (spec + rim) + hot)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
             return vec4(rgb, 1.0)

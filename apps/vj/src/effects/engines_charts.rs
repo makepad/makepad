@@ -564,7 +564,7 @@ script_mod! {
                     min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
                 )
                 let scan = 0.88 + 0.12 * sin(self.v_world.y * self.shape.x * 3.14159265)
-                let lvl = 0.30 * cm * vig * scan * (1.0 + self.time_beat.w * 0.15)
+                let lvl = 0.50 * cm * vig * scan * (1.0 + self.time_beat.w * 0.15)
                 return vec4(tx.xyz * lvl, cm * vig)
             }
             let mut a = smoothstep(0.0, self.v_shape.x, min(f.x, 1.0 - f.x))

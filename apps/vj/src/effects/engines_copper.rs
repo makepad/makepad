@@ -333,9 +333,18 @@ script_mod! {
             self.v_world = world.xyz
             self.v_normal = n
             self.v_attr = vec4(attr.x, self.geom.geom_uv.x, attr.z, attr.w)
-            self.v_misc = vec4(clamp(attr.y, 0.0, 1.0), ch.w, 0.0, 0.0)
             let view_pos = self.draw_pass.camera_view * world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
+            // v_misc.zw = SCREEN uv — the address the content coupling
+            // mirrors the channel video from (the slab stack becomes a
+            // venetian blind over the picture).
+            let ndc = self.vertex_pos.xy / max(self.vertex_pos.w, 0.0001)
+            self.v_misc = vec4(
+                clamp(attr.y, 0.0, 1.0),
+                ch.w,
+                clamp(ndc.x * 0.5 + 0.5, 0.0, 1.0),
+                clamp(0.5 - ndc.y * 0.5, 0.0, 1.0)
+            )
             return self.vertex_pos
         }
 
@@ -353,18 +362,26 @@ script_mod! {
             let cam_pos = cam.xyz / max(cam.w, 0.0001)
             let d = length(self.v_world - cam_pos)
             let fogf = exp(0.0 - d * self.fog.x)
-            // CONTENT: the bars catch the channel video as environment
-            // light — a fake env map addressed by the mirror direction; as
-            // the bars dance the reflection sweeps. The copper band keeps
-            // shaping the light, so the metal identity stays primary.
+            // CONTENT: the slabs turn to POLISHED METAL and mirror the
+            // channel video. A mirror-direction env map (the first pass)
+            // smeared a whole frame across each bar; sampling at the
+            // fragment's own SCREEN position, nudged by the normal, makes
+            // each bar reflect the slice of the picture behind it — the
+            // dancing stack cuts the video into venetian-blind bands and
+            // reassembles it. The copper band keeps shaping the light, so
+            // the metal identity stays primary.
             // fog.z = the pre-gated `content` strength.
             let cm = self.fog.z
-            let vd = normalize(cam_pos - self.v_world)
-            let mr = n * (2.0 * dot(n, vd)) - vd
-            let env = self.tex0.sample_as_bgra(
-                vec2(0.5 + mr.x * 0.30, 0.5 - mr.y * 0.30)
+            let suv = clamp(
+                vec2(self.v_misc.z, self.v_misc.w) + vec2(n.x, 0.0 - n.y) * 0.06,
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
             )
-            let metal = c.xyz.mix(env.xyz * (0.35 + 0.85 * lit), cm * 0.65)
+            let env = self.tex0.sample_as_bgra(suv)
+            let metal = c.xyz.mix(
+                env.xyz * (0.55 + 0.75 * lit),
+                clamp(cm * 1.2, 0.0, 1.0)
+            )
             let rgb = (metal * (lit * ends * self.fog.y)
                 + self.col_c.xyz * self.v_misc.y * 0.8)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
