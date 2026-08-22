@@ -334,11 +334,22 @@ impl VideoView {
 
     fn seek_to(&mut self, cx: &mut Cx, uid: WidgetUid, x: f64) {
         let band = self.bar_band(cx);
-        let Some(fraction) = Self::fraction_at(x, band) else {
+        if band.size.x <= 1.0 {
             return;
+        }
+        // The same bracket-to-bracket mapping as the draw side: the
+        // pointer's travel between the [ ] inner edges is the playable
+        // range, so the head follows the finger with no offset drift.
+        let (t_in, t_out) = if self.trim_handles { self.trim } else { (0.0, 1.0) };
+        let inset = if self.trim_handles { 1.5 } else { 0.0 };
+        let left_inner = band.pos.x + band.size.x * t_in + inset;
+        let right_inner = band.pos.x + band.size.x * t_out - inset;
+        let u = if right_inner > left_inner {
+            ((x - left_inner) / (right_inner - left_inner)).clamp(0.0, 1.0)
+        } else {
+            0.0
         };
-        // Playback lives inside the trim range; so does the playhead.
-        self.fraction = fraction.clamp(self.trim.0, self.trim.1);
+        self.fraction = t_in + u * (t_out - t_in);
         cx.widget_action(uid, VideoAction::Seek(self.fraction));
         self.view.redraw(cx);
     }
@@ -463,12 +474,31 @@ impl Widget for VideoView {
                     size: dvec2(w * (f - t_in), TRACK_H),
                 },
             );
-            let knob_x = x0 + (w - KNOB_W) * f;
+            // THE RANGE MAPS EXACTLY BRACKET-TO-BRACKET: position IN puts
+            // the playhead flush against the [ inner stroke, position OUT
+            // flush against the ] inner stroke, linear in between — the
+            // old full-bar scale made the head undershoot the range ends.
+            // The head is also slimmer (75%) and NESTS the brackets'
+            // vertical opening (18-tall glyphs, 2.5px strokes → a 12-tall
+            // head sits flush-plus-a-hair, user-calibrated).
+            let knob_w = if self.trim_handles { 6.0 } else { KNOB_W };
+            let knob_h = if self.trim_handles { 12.0 } else { KNOB_H };
+            // 1.5: the head parks INSIDE the bracket mouth, kissing the
+            // vertical stroke (user-calibrated final).
+            let inset = if self.trim_handles { 1.5 } else { 0.0 };
+            let left_inner = x0 + w * t_in + inset;
+            let right_inner = x0 + w * t_out - inset;
+            let u = if t_out > t_in {
+                ((f - t_in) / (t_out - t_in)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let knob_x = left_inner + ((right_inner - left_inner) - knob_w).max(0.0) * u;
             self.draw_knob.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(knob_x, y - (KNOB_H - TRACK_H) / 2.0),
-                    size: dvec2(KNOB_W, KNOB_H),
+                    pos: dvec2(knob_x, y - (knob_h - TRACK_H) / 2.0),
+                    size: dvec2(knob_w, knob_h),
                 },
             );
             // The IN/OUT brackets — [ and ] on the range edges, thin
