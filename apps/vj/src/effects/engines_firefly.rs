@@ -243,6 +243,40 @@ script_mod! {
             return vec4(tint.xyz * a, 0.0)
         }
 
+        // THE LOOK — one element, doc-replaceable (CONTRACT.md). One
+        // stream carries two kinds and `attr.y` tells them apart, exactly
+        // as the vertex stage does:
+        //   attr.y <  1.5  A GRASS BLADE. t = along the blade 0..1, attr =
+        //                  (row, along, hash, half width). Return the lit
+        //                  blade colour; the engine fogs it toward col_bg.
+        //                  Blades never sample content (the meadow stays
+        //                  dark under the flies) — content/cmix arrive 0.
+        //   attr.y >= 2.0  A FIREFLY. t = blink brightness 0..1, attr =
+        //                  (fly id, 2 + height class, blink phase, rate).
+        //                  Return the orb's BODY colour; the engine
+        //                  multiplies the blink gain (0.05 + 2.4·t)·glow.
+        //   content        input0 at this fly's meadow anchor, cmix the
+        //                  pre-gated strength — the flies ARE this
+        //                  family's coupling, so they take the clip
+        //                  essentially whole at the default.
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            if attr.y > 1.5 {
+                let mut body = self.col_b.mix(self.col_c, t * t).xyz
+                if cmix > 0.001 {
+                    body = mix(
+                        body,
+                        content.xyz * (0.75 + 0.85 * t),
+                        clamp(cmix * 1.6, 0.0, 1.0)
+                    )
+                }
+                return vec4(body, 1.0)
+            }
+            let base = self.col_a.mix(self.col_b, t * 0.7 + attr.z * 0.15)
+            let moon = self.shape.w * (0.25 + 0.75 * t)
+            let breath = 1.0 + self.time_beat.w * 0.18
+            return vec4(base.xyz * ((0.16 + moon) * breath * self.fog.y), 1.0)
+        }
+
         vertex: fn() {
             let attr = vec4(
                 self.geom.geom_id,
@@ -289,24 +323,17 @@ script_mod! {
                 // blinking, over the shared video backdrop (view.rs
                 // `backdrop_level`). The meadow stays dark. fog.z is
                 // host-pre-gated to 0 without real content (classic
-                // standalone look); the flies ARE this engine's coupling,
-                // so they take the clip essentially whole at the default.
-                let mut body = self.col_b.mix(self.col_c, bright * bright).xyz
+                // standalone look). The mix itself lives in `fx_color`, so
+                // a document can rewrite the coupling with the look.
                 let cmix = self.has_content * self.fog.z
-                if cmix > 0.001 {
-                    let area = max(self.flow.z, 0.5)
-                    let cuv = clamp(
-                        vec2(anchor.x, anchor.z) / (area * 2.0) + vec2(0.5, 0.5),
-                        vec2(0.0, 0.0),
-                        vec2(1.0, 1.0)
-                    )
-                    let texel = self.tex0.sample_nearest(cuv, 0.0)
-                    body = mix(
-                        body,
-                        texel.xyz * (0.75 + 0.85 * bright),
-                        clamp(cmix * 1.6, 0.0, 1.0)
-                    )
-                }
+                let area = max(self.flow.z, 0.5)
+                let cuv = clamp(
+                    vec2(anchor.x, anchor.z) / (area * 2.0) + vec2(0.5, 0.5),
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
+                )
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                let body = self.fx_color(bright, attr, texel, cmix).xyz
                 let gain = (0.05 + 2.4 * bright) * self.fog.y
                 self.v_color = vec4(body * gain, 1.0)
                 self.v_uv = self.geom.geom_uv
@@ -324,13 +351,10 @@ script_mod! {
                 cos(wf * 0.81 + self.geom.geom_pos.z * 0.33)
             ) * bend
             let world = self.draw_list.view_transform * vec4(pos.x, pos.y, pos.z, 1.0)
-            let base = self.col_a.mix(self.col_b, along * 0.7 + attr.z * 0.15)
-            let moon = self.shape.w * (0.25 + 0.75 * along)
-            let breath = 1.0 + self.time_beat.w * 0.18
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let d = length(world.xyz - cam.xyz / max(cam.w, 0.0001))
             let fogf = exp(0.0 - d * self.fog.x)
-            let lit = base.xyz * ((0.16 + moon) * breath * self.fog.y)
+            let lit = self.fx_color(along, attr, vec4(0.0, 0.0, 0.0, 0.0), 0.0).xyz
             let rgb = lit.mix(self.col_bg.xyz, 1.0 - fogf)
             self.v_color = vec4(rgb, 1.0)
             self.v_uv = self.geom.geom_uv

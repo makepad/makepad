@@ -546,16 +546,28 @@ script_mod! {
             return self.vertex_pos
         }
 
-        pixel: fn() {
-            let fam = self.v_misc.x
+        // THE LOOK — doc-replaceable (CONTRACT.md). One hook for all three
+        // elements this engine puts in one stream, branching on the class
+        // exactly as the vertex stage does:
+        //   t       = this element's own look parameter — terrain height
+        //             0..1, hull face shade, burner plume gain
+        //   attr    = (class 0 land / 1 jet / 2 burner, that same
+        //             parameter, secondary (land: slope+sun shade; jet:
+        //             part id; burner: flicker seed), distance to camera)
+        //   content = input0 at the SCROLLED grid uv — the terrain drape;
+        //             the jet and the burner ignore it
+        //   cmix    = pre-gated content strength (0 = the classic look)
+        // Returns the element's colour BEFORE fog; the engine mixes it
+        // toward col_bg by that element's own fog weight.
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let fam = attr.x
             let look = self.flow.y
-            let fogf = exp(0.0 - self.v_misc.w * self.fog.x)
             let gain = self.fog.y * (1.0 + self.user.z)
             let mut rgb = vec3(0.0, 0.0, 0.0)
             if fam < 0.5 {
                 // ---- TERRAIN ----
-                let h = self.v_misc.y
-                let lit = self.v_misc.z
+                let h = t
+                let lit = attr.z
                 // Same NEGATIVE sign as `height_at`: grid, drape and land
                 // must travel together, toward the camera (see the scroll
                 // sign note there — the range used to fly backwards).
@@ -571,8 +583,8 @@ script_mod! {
                 // tint on a dark alpenglow ramp reads as a mood, never as
                 // a picture) and keeps the terrain's own lighting.
                 // fog.z = the pre-gated `content` strength.
-                let cm = self.fog.z
-                let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
+                let cm = cmix
+                let ttx = content
                 if look < 0.5 {
                     // solid alpenglow: valleys col_a, peaks col_b, summits
                     // catch col_c; a whisper of grid keeps the retro DNA.
@@ -609,7 +621,7 @@ script_mod! {
                         rgb = self.col_a.xyz * ((lum + grain) * beat_glow) * gain
                     }
                 }
-                return vec4(rgb.mix(self.col_bg.xyz, 1.0 - fogf), 1.0)
+                return vec4(rgb, 1.0)
             }
             if fam < 1.5 {
                 // ---- JET HULL ----
@@ -618,8 +630,8 @@ script_mod! {
                     min(self.v_uv.y, 1.0 - self.v_uv.y)
                 )
                 let edge = 1.0 - smoothstep(0.0, 0.09, edge_d)
-                let shade = self.v_misc.y
-                let part = self.v_misc.z
+                let shade = t
+                let part = attr.z
                 if look < 0.5 {
                     let c = self.fx_jet_color(shade, part, edge)
                     rgb = c.xyz * gain
@@ -637,7 +649,7 @@ script_mod! {
                         rgb = self.col_a.xyz * ((0.10 + shade * 0.55 + edge * 0.35)) * gain
                     }
                 }
-                return vec4(rgb.mix(self.col_bg.xyz, (1.0 - fogf) * 0.4), 1.0)
+                return vec4(rgb, 1.0)
             }
             // ---- BURNER ----
             let along = self.v_uv.y
@@ -645,9 +657,29 @@ script_mod! {
             let core = pow(clamp(1.0 - along, 0.0, 1.0), 1.5)
                 * clamp(1.0 - across, 0.0, 1.0)
             let heat = self.col_c.xyz.mix(self.col_b.xyz, along)
-            let flick = 0.9 + 0.25 * sin(self.time_beat.x * 43.0 + self.v_misc.z * 61.0)
-            rgb = heat * (core * (0.8 + self.v_misc.y * 1.6) * flick) * self.fog.y
+            let flick = 0.9 + 0.25 * sin(self.time_beat.x * 43.0 + attr.z * 61.0)
+            rgb = heat * (core * (0.8 + t * 1.6) * flick) * self.fog.y
             return vec4(rgb, 1.0)
+        }
+
+        pixel: fn() {
+            // The classic look is the document's `fx_color`; the engine
+            // keeps only what is structural: the drape sample (the same
+            // scrolled grid uv the land travels by) and the per-element
+            // fog weight — the range fades into the sky, the jet barely
+            // does, the burner never does.
+            let fam = self.v_misc.x
+            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
+            let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
+            let c = self.fx_color(self.v_misc.y, self.v_misc, ttx, self.fog.z)
+            let fogf = exp(0.0 - self.v_misc.w * self.fog.x)
+            if fam < 0.5 {
+                return vec4(c.xyz.mix(self.col_bg.xyz, 1.0 - fogf), 1.0)
+            }
+            if fam < 1.5 {
+                return vec4(c.xyz.mix(self.col_bg.xyz, (1.0 - fogf) * 0.4), 1.0)
+            }
+            return vec4(c.xyz, 1.0)
         }
 
         fragment: fn() {

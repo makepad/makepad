@@ -46,4 +46,21 @@
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 0.9, levels: 2}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = birth order 0..1, attr = (pipe, birth, hue, radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxPipes {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, attr.z)
+            let shade = 0.85 + 0.15 * sin(attr.z * 6.2831853)
+            return vec4(base.xyz * shade, 1.0)
+        }
+    }
 }

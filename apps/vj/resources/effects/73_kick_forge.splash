@@ -49,4 +49,21 @@
     stages: [
         {kind: "bloom", threshold: 0.5, strength: "1.2 + 0.8*pulse", levels: 3}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = flight heat 0..1, attr = (id, aux, r0, r1).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxForge {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, fract(attr.w * 7.93))
+            let flash = self.col_c * (t * 0.55)
+            return vec4(base.xyz + flash.xyz, 1.0)
+        }
+    }
 }

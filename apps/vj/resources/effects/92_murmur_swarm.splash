@@ -49,4 +49,32 @@
         {kind: "feedback", amount: "min(0.75 + (p1-0.5)*0.44, 0.97)", zoom: 1.004, dim: 0.94},
         {kind: "bloom", threshold: 0.5, strength: "1.25 * (0.25 + 1.5*p2)", levels: 3}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = age 0..1, attr = (id, speed, rnd, state age).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxSimSwarmDraw {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let sp = clamp(attr.y * self.flow.y, 0.0, 1.0)
+            let base = self.col_a.mix(self.col_b, sp)
+            let hot = base.xyz + self.col_c.xyz * pow(sp, 3.0) * 0.6
+            let fade = smoothstep(0.0, 0.06, t) * (1.0 - smoothstep(0.75, 1.0, t))
+            let boost = 0.8 + self.time_beat.w * 0.9
+            return vec4(hot * boost, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.45, d)
+            let halo = 1.0 - smoothstep(0.12, 1.0, d)
+            let a = clamp(core + halo * 0.55, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
 }

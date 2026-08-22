@@ -5,8 +5,10 @@
 //! source evaluated at load time) plus a shader-hook API. The document names
 //! one mesh-generating ENGINE, sets its parameters (including little
 //! programs like L-system rules), declares an optional multi-stage render
-//! chain, and may override the shader hooks. The effect asset of the future
-//! is exactly such a document — AI-authorable text.
+//! chain, and — this is the part that makes it authorable — **carries the
+//! family's LOOK FUNCTION inline**, as source it can rewrite. The effect
+//! asset of the future is exactly such a document: AI-authorable text where
+//! the pixel math is in the file, not locked in a Rust engine.
 //!
 //! Architecture laws (why it is shaped this way):
 //! * **Splash is configuration, never the frame loop.** Documents are
@@ -76,9 +78,14 @@
 //!         {kind: "blur" levels: 2}
 //!     ]
 //!
-//!     // ---- shader hooks (optional, advanced) ----
-//!     // Fn overrides compiled into the engine's draw shader at load.
-//!     shader: {
+//!     // ---- THE LOOK: this document's own shader ----
+//!     // Not optional and not advanced — EVERY shipped preset carries its
+//!     // family's look function inline, so the file is a complete forkable
+//!     // unit an AI can rewrite into a new look. The engine keeps the same
+//!     // code as its default, so a document without the block still
+//!     // renders. It must SUBCLASS the family's draw shader; signatures
+//!     // and inputs per family are in CONTRACT.md, "The shader hooks".
+//!     shader: draw.DrawVjFxMesh {
 //!         fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
 //!             return vec4(fract(t * 3.0), 0.5, 1.0 - t, 1.0)
 //!         }
@@ -128,12 +135,16 @@
 //! * `res` (110, ≤220), `size` (30), `height` (2.4), `noise_scale` (0.16),
 //!   `scroll` (2.2 world-units/sec), `ridged` (0..1 canyon shaping),
 //!   `tex_displace` (0..1 blend to input0-driven height — needs `input0`)
+//! * hook: `fx_color(t = height 0..1, attr = (slope shade, grid line,
+//!   grid uv.x, grid uv.y), content = the drape texel, cmix)` — the
+//!   whole neon-grid look, pixel stage
 //!
 //! ### `engine: "ribbons"` — flow-field ribbon trails
 //! CPU steps ribbon heads through an analytic curl field; strips rebuilt per
 //! frame (small, capacity-stable), expanded view-facing in the shader.
 //! * `ribbons` (28, ≤96), `trail` (56 points, ≤160), `width` (0.10),
 //!   `flow_speed` (2.0), `swirl` (1.6), `bound` (5.0)
+//! * hook: `fx_color` (t = trail age 0..1)
 //!
 //! ### `engine: "tunnel"` — torus-knot tube flown from inside
 //! Static tube; camera flies the knot; neon rings sweep with the BEAT.
@@ -149,7 +160,8 @@
 //!   `blink_sharp` (7), `wander` (0.55), `moon` (0.35), `grass_height`
 //!   (0.8), `clump` (0.5)
 //! * bindings: `p0` ADDS to sync (the emotional arc), `p1` scales wander
-//! * hooks: `fx_sprite` (see engines_firefly.rs)
+//! * hooks: `fx_color` (blades AND flies — one hook, `attr.y` tells them
+//!   apart), `fx_sprite` (see engines_firefly.rs)
 //!
 //! ### `engine: "harmonograph"` — damped pendulum ribbon, morphing per bars
 //! Position is pure vertex-shader math; a new figure is drawn from a hash
@@ -208,7 +220,7 @@
 //!   speed / spiral spin), `spin` (1.0 shatter tumble), `scatter` (1.2
 //!   shatter flight distance)
 //! * bindings: `p0` ADDS shatter drive (strobe the explosion), `p1` scales
-//!   wave amp, `p2` adds grout glow; hooks: `fx_tint(c, attr, flash)`
+//!   wave amp, `p2` adds grout glow; hooks: `fx_color` (t = highlight drive)
 //!
 //! ### `engine: "flock"` — boid murmuration of oriented gliders
 //! CPU boids (O(N²), regen-per-frame family) emit banked wing/fin
@@ -231,6 +243,8 @@
 //! * `particles` (768 sheet size), `size`, `gravity`, plus the per-frame
 //!   `frame: fn(fx) { ... return [spawns] }` tick — see CONTRACT.md for the
 //!   spawn-object keys, budget, and the slot-respawn = move rule.
+//! * hooks: `fx_color(t = life 0..1, attr = (id, seconds alive, ignition
+//!   rnd, spread rnd), content, cmix)`, `fx_sprite(uv, tint)`
 //!
 //! ### `engine: "raymarch"` — fullscreen SDF raymarcher, subclassable scene
 //! One quad; the pixel shader sphere-traces a distance field. THE variant
@@ -254,7 +268,8 @@
 //!   `nightvision` (mono ramp + grain)
 //! * jet: `jet_size` (1.0), `weave` (1.0)
 //! * bindings: `p0` ADDS afterburner, `p1` scales weave rate, `p2` adds
-//!   glow; hook: `fx_jet_color`
+//!   glow; hooks: `fx_color` (all three elements — see engines_jet.rs),
+//!   `fx_jet_color` (the hull material alone)
 //!
 //! ### `engine: "city"` — procedural city flyover, banking camera
 //! Static towers + ground + sky + (tron) trail walls; windows are a PIXEL

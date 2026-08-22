@@ -52,4 +52,42 @@
         {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3},
         {kind: "feedback", amount: "0.30 + 0.25*pulse", zoom: 1.003, rotate: 0.0, dim: 0.93}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = candle age 0..1, attr = (element class, age, up/down, move size).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCharts {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let class = attr.x
+            if class < 0.5 {
+                // Candle body: col_a up / col_b down, big moves burn.
+                let base = self.col_b.mix(self.col_a, step(0.5, attr.z))
+                let burn = 0.75 + attr.w * 0.7 + self.time_beat.w * (1.0 - t) * 0.6
+                return vec4(base.xyz * burn, 1.0 - t * 0.55)
+            }
+            if class < 1.5 {
+                let base = self.col_b.mix(self.col_a, step(0.5, attr.z))
+                return vec4(base.xyz * 0.55, (1.0 - t * 0.55) * 0.8)
+            }
+            if class < 2.5 {
+                return vec4(self.col_a.xyz * 0.16, 0.5)
+            }
+            if class < 3.5 {
+                // Kept modest: the bloom stage amplifies this line, and an
+                // over-gained crosshair blows out into a white bar.
+                let g = 0.55 + self.user.y * 0.5 + self.time_beat.w * 0.25
+                return vec4(self.col_c.xyz * g, 0.8)
+            }
+            if class < 4.5 {
+                return vec4(self.col_c.xyz * 0.5 + self.col_a.xyz * 0.4, 0.85)
+            }
+            return vec4(self.col_a.xyz * 0.6, 0.9)
+        }
+    }
 }

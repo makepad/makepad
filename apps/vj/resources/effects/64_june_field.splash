@@ -51,4 +51,41 @@
     stages: [
         {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: blades (attr.y < 1.5) and flies (attr.y >= 2) share one hook.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFirefly {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            if attr.y > 1.5 {
+                let mut body = self.col_b.mix(self.col_c, t * t).xyz
+                if cmix > 0.001 {
+                    body = mix(
+                        body,
+                        content.xyz * (0.75 + 0.85 * t),
+                        clamp(cmix * 1.6, 0.0, 1.0)
+                    )
+                }
+                return vec4(body, 1.0)
+            }
+            let base = self.col_a.mix(self.col_b, t * 0.7 + attr.z * 0.15)
+            let moon = self.shape.w * (0.25 + 0.75 * t)
+            let breath = 1.0 + self.time_beat.w * 0.18
+            return vec4(base.xyz * ((0.16 + moon) * breath * self.fog.y), 1.0)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.35, d)
+            let halo = 1.0 - smoothstep(0.08, 1.0, d)
+            let a = clamp(core + halo * 0.6, 0.0, 1.0)
+            return vec4(tint.xyz * a, 0.0)
+        }
+    }
 }

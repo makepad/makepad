@@ -3,12 +3,38 @@
 This file is the coordination contract for agents working on the VJ effect
 renderstack in parallel. Read it top to bottom before touching anything.
 
+## THE FIRST THING TO KNOW: a document carries its own shader
+
+**A `.splash` effect document is a complete, forkable unit. The pixel math
+it runs is IN THE FILE.** Open `09_synthwave.splash` and the neon-grid
+terrain shader is there, in the document, as source you can edit; change a
+line and the effect looks different. That is the point of this design:
+these documents are authored by AIs, and an author who can only re-tune
+`amp: 0.6` can only ever produce a variation. An author who owns the
+fragment code can produce a NEW LOOK.
+
+So the law for every shipped preset (pinned by
+`seed::registry_tests::every_bundled_preset_carries_its_own_shader`):
+
+- every preset carries a `shader:` block subclassing its engine's draw
+  shader, with the family's look function written out inline;
+- several presets of one family each carry their own copy of the same
+  default — **self-containedness beats DRY here.** Do not factor them back
+  together; each file has to read as the whole effect;
+- the ENGINE still holds the same code as its default, so a document that
+  declares no hook (an old doc, a third-party one, a quick sketch) renders
+  exactly as before. The hook is an override, never a requirement.
+
+The engine keeps what is STRUCTURAL — geometry, motion, the camera, which
+texture is sampled where, the content-coupling plumbing and the beat. The
+document owns THE LOOK.
+
 ## Build state (update when it changes)
 
 - `cargo build --release -p makepad-vj --example effect_gallery` and the
   `makepad-vj` app — GREEN, `cargo test -p makepad-vj --example
-  effect_gallery` green (expr, lsys, engines, seed tests + the sibling
-  engines' tests).
+  effect_gallery` green (65 tests: expr, lsys, engines, seed/registry +
+  the sibling engines' tests).
 - Verified visually via the gallery + remote bridge: particles (burst /
   tunnel / vortex / rain / galaxy / image / clouds / phyllo), lsystem,
   metaballs, heightmap, ribbons (curl / lorenz / aizawa), tunnel (knot /
@@ -129,8 +155,10 @@ Reading is forgiving: missing key = default, wrong type = default + warning
         {kind: "kaleido", p1: 0.7, p2: "0.2 + pulse"}
     ]
 
-    // shader hooks: a SUBCLASS of the engine's draw shader (never a plain
-    // object — that would replace the whole shader def and is rejected):
+    // THE LOOK — a SUBCLASS of the engine's draw shader (never a plain
+    // object — that would replace the whole shader def and is rejected).
+    // Every shipped preset carries this block; see "The shader hooks"
+    // below for the family's signature and inputs:
     shader: draw.DrawVjFxMesh {
         fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
             return vec4(fract(t * 3.0), 0.5, 1.0 - t, 1.0)
@@ -177,6 +205,146 @@ subclasses can always read them, no ceremony:
 - `self.shape`, `self.flow` — engine-specific (see engines.rs)
 - `self.col_a/col_b/col_c/col_bg`, `self.fog` = (density, glow, CONTENT
   MIX, 0)
+
+### The shader hooks — one look function per family
+
+Every family exposes a named entry point the document replaces. The style
+is the same everywhere: **`fx_color(t, attr, …) -> vec4`**, where `t` is
+the family's primary look parameter and `attr` its raw vertex channels
+(the per-engine table further down says what each channel holds). The
+remaining arguments come in two shapes, decided by where the family's
+content coupling lives:
+
+- **`(normal: vec3, wpos: vec3)`** — the engine folds the content sample
+  in AROUND the hook (a different shader stage, or a structural backdrop).
+  Return whatever you like: the coupling keeps working.
+- **`(content: vec4, cmix: float)`** — the classic look and the content
+  sample compose in the SAME expression, so both live in the hook.
+  `content` is the input0 texel the engine sampled for this fragment,
+  `cmix` the pre-gated strength (`self.fog.z`, **0 whenever no real
+  channel video is bound** — see Content coupling below). A rewritten look
+  that ignores `cmix` simply has no coupling; it can never leak the
+  fallback pattern, because the host gates the strength, not the hook.
+
+| family (engine keys) | shader type | hooks — stage, signature |
+|---|---|---|
+| lsystem, grass, metaballs | `DrawVjFxMesh` | vertex: `fx_displace(pos, normal, attr) -> vec3`, `fx_color(t = arc/height 0..1, attr, normal, wpos)` |
+| …with `wind_field:` | `DrawVjFxMeshField` | same two, same meaning (the wind comes from a sim field instead of the analytic sway) |
+| heightmap | `DrawVjFxTerrain` | pixel: `fx_color(t = height 0..1, attr = (slope shade, grid line, grid uv.x, grid uv.y), content = drape texel, cmix)` |
+| ribbons | `DrawVjFxRibbon` | vertex: `fx_color(t = trail age 0..1, attr, normal = tangent, wpos)` |
+| tunnel | `DrawVjFxTunnel` | vertex: `fx_color(t = along the bore 0..1, attr, normal = inward, wpos)` |
+| particles | `DrawVjFxParticles` | vertex: `fx_center(mode, id, dir, t01, cyc, r0, r1) -> vec3` (the MOTION program), `fx_color(t = life 0..1, attr, dir, wpos)`; pixel: `fx_sprite(uv, tint)` |
+| emitters | `DrawVjFxEmitter` | vertex: `fx_color(t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd), content, cmix)`; pixel: `fx_sprite(uv, tint)` |
+| firefly | `DrawVjFxFirefly` | vertex: `fx_color(t, attr, content, cmix)` — ONE hook for both kinds, `attr.y < 1.5` a grass blade (t = along), `>= 2` a fly (t = blink brightness); pixel: `fx_sprite(uv, tint)` |
+| harmonograph | `DrawVjFxHarmono` | vertex: `fx_color(t = curve position 0..1, attr, normal, wpos)` |
+| domino | `DrawVjFxDomino` | vertex: `fx_color(t = topple ease 0..1, attr, normal, wpos)` |
+| forge | `DrawVjFxForge` | vertex: `fx_color(t = flight heat 0..1, attr, normal, wpos)` |
+| copperbars | `DrawVjFxCopper` | pixel: `fx_color(t = bar gradient axis 0..1, attr, normal, wpos)` |
+| tiles | `DrawVjFxTiles` | pixel: `fx_color(t = mode highlight drive, attr = (tile shade, edge 0..1, stagger rnd, tumble rnd), content = this tile's texel, cmix)` |
+| flock | `DrawVjFxFlock` | vertex: `fx_color(t = speed 0..1, attr, normal = banked up, wpos)` |
+| mountainjet | `DrawVjFxJet` | pixel: `fx_color(t = element look parameter, attr = (class 0 land / 1 jet / 2 burner, same parameter, secondary, distance), content = drape texel, cmix)`, plus the hull-only `fx_jet_color(shade, part, edge)` |
+| city | `DrawVjFxCity` | vertex: `fx_color(t = height 0..1, attr = (class, id, hash, height/phase), normal, wpos)` |
+| pipes | `DrawVjFxPipes` | vertex: `fx_color(t = birth order 0..1, attr, normal, wpos)` |
+| stockcharts | `DrawVjFxCharts` | vertex: `fx_color(t = candle age 0..1, attr = (element class 0..6, age, up/down, move size), normal, wpos)` |
+| simswarm | `DrawVjFxSimSwarmDraw` | vertex: `fx_color(t = age 0..1, attr = (id, speed, rnd, state age), normal, wpos)`; pixel: `fx_sprite(uv, tint)` |
+| fluid | `DrawVjFxFluidView` | pixel: `fx_shade(uv, dye, flow, base) -> vec4` — the ink over the (optionally warped) base |
+| raymarch | `DrawVjFxRaymarch` | pixel: `scene_sdf(p) -> vec2` (THE scene — distance + material), `fx_palette(t) -> vec3` |
+| transition | `DrawVjFxDuo` | pixel: `trans(uv, t) -> vec4` — the whole two-deck fragment |
+| screen | `DrawVjFxScreen` | pixel: `fx_color(uv, content = input0 at uv, cmix) -> vec4` — THE WHOLE FRAME. OPT-IN: a screen doc with no `shader:` block keeps the classic path (input0 straight into the stage chain, no scene pass at all), because routing it through a blit would resample the input before the chain saw it. Declare the block and the pass runs — the cheapest way there is to author an effect from nothing (113_scan_sermon) |
+
+Rules that hold for every hook:
+
+- **A hook binds to ONE stage.** A fn the vertex path calls cannot also be
+  called from `pixel` — the generated Metal signature mismatches and the
+  whole shader dies. The table says which stage each hook runs in; write
+  code for that stage.
+- Hooks are methods: `self.time_beat`, `self.sig`, `self.user`,
+  `self.anim`, `self.shape`, `self.flow`, `self.col_a/b/c/bg`, `self.fog`
+  and the family's varyings (`self.v_*`) are all in scope, as are the
+  shader's own helpers (`self.hash1`, `self.vnoise`, …).
+- The block must SUBCLASS (`shader: draw.DrawVjFxMesh { … }`). A plain
+  `{ … }` replaces the whole definition, leaves it without a vertex fn,
+  and is rejected at parse with a warning in the widget status.
+- Every distinct document body evaluates in its own content-addressed
+  module, so 119 documents with 119 inline shaders is 119 shader modules
+  compiled lazily on first draw — that is the design, not a leak. Measured
+  cost of the whole migration: document load 0.42 → 0.83 ms each; a full
+  load-and-render walk of the 119-document library 239 s → 241 s (+0.9%).
+
+### Authoring a whole effect as pure document
+
+The shortest path to a NEW look is: pick the family whose geometry and
+motion you want, copy the preset closest to it, and rewrite its `fx_color`.
+Nothing else is required — no Rust, no rebuild.
+
+```text
+// SONAR RINGS — a terrain flythrough that stops being neon-synthwave and
+// becomes a depth sounder: concentric rings sweeping out of the horizon.
+{
+    name: "Sonar Rings"
+    engine: "heightmap"          // geometry + motion come from the engine
+    seed: 3
+    size: 60.0  cells: 120  amp: 3.2  scroll: 2.4  ridged: 0.2
+    beat_pulse: 0.4  fog: 0.045
+    color_bg: #x00120e  color_a: #x0affc0  color_b: #x006a5a
+    color_c: #xd8fff4
+    dials: [{name: "SWEEP", bind: "p0", default: 0.5}]
+    p0: 0.5
+    stages: [{kind: "bloom", threshold: 0.4, strength: 1.3, levels: 3}]
+
+    shader: draw.DrawVjFxTerrain {
+        // t = height 0..1, attr = (slope shade, grid line, uv.x, uv.y),
+        // content = the input0 texel on the land, cmix = its strength.
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            // Range rings: distance from the sounder, swept by the beat.
+            let d = length(vec2(attr.z - 0.5, attr.w - 0.5)) * 2.0
+            let ring = fract(d * 9.0 - self.time_beat.y * 0.5)
+            let edge = pow(1.0 - min(ring, 1.0 - ring) * 2.0, 12.0)
+            // The land itself is a dark wash; the rings carry the picture.
+            let bed = self.col_b.xyz * (0.10 + 0.35 * attr.x) * (0.4 + t)
+            let lit = self.col_a.xyz * edge * (1.0 + self.time_beat.w * 1.4)
+                + self.col_c.xyz * edge * t * 0.5
+            // Content: the clip washes the bed, the rings stay the effect.
+            let paint = bed.mix(content.xyz * (0.3 + 0.7 * attr.x), clamp(cmix * 1.2, 0.0, 1.0))
+            return vec4(paint + lit, 1.0)
+        }
+    }
+}
+```
+
+Drop that in `apps/vj/resources/effects/`, register it in `seed.rs`, and
+`VJFX_DOC=<name> ./target/release/examples/effect_gallery` shows it. The
+same file is what the store publishes and what the next author forks.
+
+### Verifying a look change (the capture instrument)
+
+The gallery renders deterministically on demand, which is how the shader
+migration proved it changed no pixel:
+
+- `VJFX_CAPTURE=<frames>` (or `<frames>@<dt>`) — after each document load
+  the widget advances by a FIXED step for exactly that many frames, resets
+  the beat with the document, then freezes. Whatever is on screen is a
+  pure function of the document.
+- `VJFX_SWEEP=<dir>` — walk every document, write one PNG each, quit.
+  Existing PNGs are skipped, so an interrupted sweep resumes.
+- `VJFX_ONLY=a,b,c` — restrict the sweep to matching document names.
+- `VJFX_DIR=<dir>` — read documents from somewhere else (how one binary
+  timed the pre- and post-migration document sets).
+- `VJFX_INPUT=<image>` — bind real content on input 0; the coupling
+  verify lever. Grab standalone AND with content.
+
+The sweep runs a REAL windowed gallery — the GPU path, ~4 minutes for the
+whole library. (A headless build renders the same documents on the CPU
+rasterizer with JIT-compiled shaders; it is far too slow for a 120-document
+sweep. Do not reach for it here.) The run self-terminates when the sweep
+finishes; if you drive an instance by hand, `/gq` it when you are done —
+never leave a window on the user's screen.
+
+Two sweeps of two builds compare pixel for pixel. The floor is ±1 LSB:
+feedback stages accumulate in float and a run can differ from itself by
+one unit in the last place. **A document's frame also depends on which
+document was shown before it** (the post chain keeps its textures across
+loads), so compare sweeps taken in the SAME order.
 
 ### Content coupling (every engine PLAYS the video, it does not tint with it)
 
@@ -290,8 +458,10 @@ SUBCLASS — engines_raymarch.rs documents the contract + SDF toolkit),
 `mountainjet` (endless range + view-space fighter jet, three looks,
 engines_jet.rs),
 `screen` (no mesh — input0 straight into the stage chain: the fullscreen
-effect family). Engine keys: see the module docs in `mod.rs` (kept
-current) and `engines.rs`.
+effect family; a doc that declares a `shader:` block gets a real
+clip-space pass through its own `fx_color` instead, which is the whole
+effect — see 113_scan_sermon). Engine keys: see the module docs in
+`mod.rs` (kept current) and `engines.rs`.
 
 ### The emitters engine + `frame:` tick
 
@@ -349,6 +519,13 @@ particles are stateless vertex-shader work. The tick touches emitters only
 - Every preset: distinct look (rules/geometry/bindings, not a recolor),
   comments that TEACH the pattern it demonstrates, `#x` colors, and at
   least one beat-aware element.
+- **Every preset carries its own `shader:` block** — the family's look
+  function written out inline, even when it is the family default and even
+  when its neighbour carries the same code. That is what makes the file a
+  forkable unit (see the top of this file). The ten shipped `screen`
+  presets are the one exception: that family's classic path has no scene
+  pass to carry (its look IS the stage list). A screen doc that DOES
+  declare a shader gets a real fullscreen pass — 113_scan_sermon.
 - Verify before calling done: `VJFX_DOC=<name> ./target/release/examples/
   effect_gallery --remote`, grab via `curl :PORT/g`, LOOK at the PNG.
   Cycle: `/t?t=n` (next), `/t?t=p` (prev), `/t?t=g<name>` (jump). Close
