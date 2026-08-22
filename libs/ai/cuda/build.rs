@@ -61,6 +61,28 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+
+/// The compute capability of this machine's first NVIDIA GPU, in nvcc arch
+/// form ("7.5" -> "75"; Blackwell "12.0" -> "120a"), via nvidia-smi. `None`
+/// when there is no driver to ask (cross/CI builds keep the env/default).
+fn detect_local_arch() -> Option<String> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let cap = String::from_utf8_lossy(&out.stdout);
+    let cap = cap.lines().next()?.trim();
+    let (major, minor) = cap.split_once('.')?;
+    let (major, minor): (u32, u32) = (major.trim().parse().ok()?, minor.trim().parse().ok()?);
+    let arch = format!("{major}{minor}");
+    // sm_120 kernels are built with the arch-specific 'a' suffix (the
+    // repo's Blackwell convention); earlier generations use the plain form.
+    Some(if major >= 12 { format!("{arch}a") } else { arch })
+}
+
 fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_paths = [
@@ -108,7 +130,15 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         out_dir.join("libggml_cuda_affine.a")
     };
     let obj_ext = if target_os == "windows" { "obj" } else { "o" };
-    let arch = env::var("MAKEPAD_GGML_CUDA_ARCH").unwrap_or_else(|_| "120a".to_string());
+    // Source builds run on the machine that will run the exe, so the right
+    // default arch is THIS machine's GPU — ask the driver. A wrong default
+    // is silent sabotage: kernels for another generation compile fine and
+    // then refuse to load at runtime. Env overrides for cross-builds.
+    let arch = env::var("MAKEPAD_GGML_CUDA_ARCH")
+        .ok()
+        .or_else(detect_local_arch)
+        .unwrap_or_else(|| "120a".to_string());
+    println!("cargo:warning=makepad-ai-cuda: building kernels for sm_{arch}");
     let include_dir = cuda_root.join("include");
     let msvc_bin_dir = if target_os == "windows" {
         find_msvc_tool("cl.exe").and_then(|path| path.parent().map(Path::to_path_buf))
