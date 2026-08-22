@@ -1,0 +1,12 @@
+[package]
+name = "makepad-audio-encode"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "From-scratch Ogg Vorbis encoder in safe Rust, no dependencies; the sibling decoder is its oracle"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-audio-decode = { path = "../audio_decode" }
