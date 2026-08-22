@@ -236,6 +236,45 @@ pub struct CamCfg {
     pub fov: f32,
 }
 
+/// One declared user-param lever: `{name: "SYNC", bind: "p0", default: 0.3}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DialDecl {
+    /// Knob legend (kept short — the host's knob columns are narrow).
+    pub label: String,
+    /// Which user param it drives (0..=3 → p0..p3 → `self.user.xyzw`).
+    pub index: usize,
+    /// Resting knob position 0..1 (display only — an untouched knob never
+    /// overrides the document's own binding).
+    pub default: f32,
+}
+
+impl DialDecl {
+    fn new(label: &str, index: usize, default: f32) -> DialDecl {
+        DialDecl { label: label.to_string(), index, default }
+    }
+}
+
+/// The levers an engine's STOCK shader actually reads, for docs that do not
+/// declare their own. An engine that reads no user params declares none —
+/// the host hides those knobs rather than showing dead ones.
+pub fn engine_default_dials(engine: &str) -> Vec<DialDecl> {
+    let d = DialDecl::new;
+    match engine {
+        "firefly" => vec![d("SYNC", 0, 0.3), d("FLASH", 1, 0.5)],
+        "domino" => vec![d("NUDGE", 0, 0.0), d("WAVE", 1, 0.5), d("GLOW", 2, 0.5)],
+        "harmonograph" => vec![d("DETUN", 0, 0.3), d("WIDTH", 1, 0.5)],
+        "forge" => vec![d("HEAT", 0, 0.5), d("RING", 1, 0.5), d("EMBER", 2, 0.5)],
+        "copper" => vec![d("BARS", 0, 0.5), d("GLOW", 1, 0.5)],
+        "tiles" => vec![d("DRIVE", 0, 0.0), d("WAVE", 1, 0.5), d("SHADE", 2, 0.5)],
+        "city" => vec![d("DENS", 0, 0.5), d("SPEED", 1, 0.5), d("GLOW", 2, 0.5)],
+        "pipes" => vec![d("FRONT", 0, 0.0), d("HEAT", 1, 0.5), d("GLOW", 2, 0.5)],
+        "stockcharts" => vec![d("GAIN", 0, 0.5), d("GLOW", 1, 0.5), d("PANIC", 2, 0.0)],
+        "mountainjet" => vec![d("GLOW", 0, 0.5), d("FLICK", 1, 0.5), d("PLUME", 2, 0.5)],
+        "fluid" => vec![d("WARP", 0, 0.5), d("TEXMX", 1, 0.5)],
+        _ => Vec::new(),
+    }
+}
+
 pub struct EffectDoc {
     pub name: String,
     pub engine: Engine,
@@ -258,6 +297,11 @@ pub struct EffectDoc {
     /// Free user parameters p0..p3, reachable as `self.user` in shader
     /// hooks — the standard way a doc pipes a custom curve into its shader.
     pub params: [Animatable; 4],
+    /// SELF-DESCRIBING DIALS: which of p0..p3 mean something to THIS
+    /// effect, by name — hosts label real knobs from these instead of
+    /// showing dead "P1/P2" dials. Docs without a `dials:` block inherit
+    /// their engine's default set (possibly empty).
+    pub dials: Vec<DialDecl>,
 
     /// bg, a, b, c.
     pub palette: [Vec4f; 4],
@@ -910,6 +954,44 @@ impl EffectDoc {
                 .push("frame: tick is only run by the emitters engine".to_string());
         }
 
+        // -- dial declarations ----------------------------------------------
+        // dials: [{name: "SYNC", bind: "p0", default: 0.3}, ...] — see
+        // [`DialDecl`]. Forgiving like everything else: a bad entry warns
+        // and is skipped; no block = the engine's default set.
+        let dial_objs = r.object_list(live_id!(dials));
+        let mut dials = Vec::new();
+        for obj in dial_objs {
+            if dials.len() >= 4 {
+                r.warnings.push("more than 4 dials — extras dropped".to_string());
+                break;
+            }
+            let outer = r.obj;
+            r.obj = obj;
+            let label = r.string(live_id!(name)).unwrap_or_default();
+            let bind = r.string(live_id!(bind)).unwrap_or_default();
+            let index = match bind.as_str() {
+                "p0" => Some(0usize),
+                "p1" => Some(1),
+                "p2" => Some(2),
+                "p3" => Some(3),
+                _ => None,
+            };
+            let default = r.f32(live_id!(default), 0.5).clamp(0.0, 1.0);
+            match index {
+                Some(index) if !label.is_empty() => {
+                    dials.push(DialDecl { label, index, default })
+                }
+                _ => r.warnings.push(
+                    "dials: each entry needs name: \"…\" and bind: \"p0\"..\"p3\" — skipped"
+                        .to_string(),
+                ),
+            }
+            r.obj = outer;
+        }
+        if dials.is_empty() {
+            dials = engine_default_dials(&engine_name);
+        }
+
         let warnings = std::mem::take(&mut r.warnings);
         Ok(EffectDoc {
             name,
@@ -927,6 +1009,7 @@ impl EffectDoc {
             grow,
             grow_beats,
             params,
+            dials,
             palette,
             cam,
             input0,

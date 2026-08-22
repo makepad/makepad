@@ -1,9 +1,14 @@
 //! EFFECT SLOTS — the center-console home of the vjeffect content category.
 //!
 //! Three slots sit above the crossfader: EFFECT A | TRANSITION | EFFECT B.
-//! Each holds one `vjeffect` asset from the browse grid (click a slot to arm
-//! it, click an FX tile to load it — or just click an FX tile and it lands in
-//! EFFECT A). A channel slot runs its effect as an EFFECT PASS over that
+//! Each holds one `vjeffect` asset from the browse grid: click a slot to ARM
+//! it and the next FX-tile click loads there; an unarmed FX-tile click lands
+//! on the STANDBY deck's effect slot (content clicks keep cueing the decks —
+//! an effect never displaces a playing clip; SHIFT-click is the explicit
+//! effect-AS-CONTENT cue). The slot type law is strict: A/B take any
+//! vjeffect, TRANSITION only transition-tagged ones, and a wrong-type click
+//! while armed FLASHES a refusal instead of accepting or cueing.
+//! A channel slot runs its effect as an EFFECT PASS over that
 //! deck's content (deck texture → `input0`, effect output replaces the deck's
 //! contribution to the program); on an empty deck the effect runs standalone,
 //! which makes every generator engine playable content on its own. The
@@ -80,7 +85,9 @@ script_mod! {
             let on = max(self.armed, self.engage)
             let bc = mix(vec4(1.0, 1.0, 1.0, 0.16), vec4(acc.x, acc.y, acc.z, 0.9), on)
             let bc2 = bc.mix(vec4(0.9, 1.0, 0.97, 0.7), self.hover * 0.4)
-            sdf.stroke(bc2, 1.0 + self.armed * 0.8)
+            // Refusal: the ring burns amber over everything else.
+            let bc3 = bc2.mix(vec4(1.0, 0.62, 0.24, 0.95), self.refuse)
+            sdf.stroke(bc3, 1.0 + max(self.armed, self.refuse) * 0.8)
             return sdf.result
         }
     }
@@ -158,11 +165,11 @@ impl FxSlotKind {
     }
 }
 
-/// One slot's assignment + controls. `speed` and the two P knobs are the
-/// slot's general params: SPD scales the effect's own clock (0.5 = 1x), P1/P2
-/// override the document's `p0`/`p1` user params only once touched — an
-/// untouched knob leaves the document's own (possibly music-bound) value in
-/// charge.
+/// One slot's assignment + controls. SPD scales the effect's own clock
+/// (0.5 = 1x); the two dial knobs drive the doc's first two DECLARED dials
+/// (`dials:` in the splash, or the engine's default set) and override the
+/// bound user param only once touched — an untouched knob leaves the
+/// document's own (possibly music-bound) value in charge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FxSlotState {
     /// The loaded effect's display name; `None` = empty slot.
@@ -170,15 +177,28 @@ pub struct FxSlotState {
     pub bypass: bool,
     /// SPD knob position 0..1 (see [`FxSlots::speed_scale`]).
     pub speed: f32,
-    /// P1/P2 knob overrides for doc params p0/p1; `None` until touched.
-    pub p: [Option<f32>; 2],
+    /// The THREE fixed dial knobs' overrides for user params p0..p2 (p3 is
+    /// reserved — the transition engage triangle rides it); `None` until
+    /// touched. FIXED COUNT: a MIDI binding on "slot A dial 2" keeps
+    /// meaning p2 whatever effect loads; the doc's declarations only LABEL
+    /// the dials (an undeclared one shows dimmed and inert).
+    pub p: [Option<f32>; 3],
     /// Transient status ("loading…", a load error). Never persisted.
     pub note: Option<String>,
+    /// A refusal flash: (message, host-seconds it expires). Transient.
+    pub flash: Option<(String, f64)>,
 }
 
 impl Default for FxSlotState {
     fn default() -> Self {
-        FxSlotState { title: None, bypass: false, speed: 0.5, p: [None, None], note: None }
+        FxSlotState {
+            title: None,
+            bypass: false,
+            speed: 0.5,
+            p: [None; 3],
+            note: None,
+            flash: None,
+        }
     }
 }
 
@@ -190,12 +210,22 @@ impl FxSlotState {
 }
 
 /// The click-slot-then-click-tile assignment state machine.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FxSlots {
     /// The armed slot: the next FX-tile click loads here. Arming is a
     /// toggle; it survives a load so effects can be auditioned in place.
     pub armed: Option<FxSlotKind>,
     pub slots: [FxSlotState; 3],
+    /// The AUTOFADE toggle: an EFFECT tile click (which always lands on
+    /// the most-faded-out side's slot) also sweeps the crossfader to bring
+    /// that side up. Off = load only; the operator rides the fader.
+    pub click_autofade: bool,
+}
+
+impl Default for FxSlots {
+    fn default() -> Self {
+        FxSlots { armed: None, slots: Default::default(), click_autofade: true }
+    }
 }
 
 impl FxSlots {
@@ -234,6 +264,47 @@ impl FxSlots {
         self.slots[kind.index()] = FxSlotState::default();
     }
 
+    /// SLOT TYPE LAW: EFFECT A/B accept any vjeffect document — never
+    /// videos or other content; the TRANSITION slot accepts ONLY
+    /// transition-tagged vjeffects. `Err` is the refusal message.
+    pub fn accepts(
+        kind: FxSlotKind,
+        is_effect: bool,
+        transition_tagged: bool,
+    ) -> Result<(), &'static str> {
+        if !is_effect {
+            return Err("FX docs only");
+        }
+        if kind == FxSlotKind::Transition && !transition_tagged {
+            return Err("TRANSITION FX only");
+        }
+        Ok(())
+    }
+
+    /// How long a refusal flash stays on the tile.
+    pub const FLASH_SECS: f64 = 2.2;
+
+    /// A wrong-type assignment: flash the slot with the reason.
+    pub fn refuse(&mut self, kind: FxSlotKind, msg: &str, now: f64) {
+        self.slot_mut(kind).flash = Some((msg.to_string(), now + Self::FLASH_SECS));
+    }
+
+    /// Expire finished flashes; true when something changed (UI resync).
+    pub fn tick_flashes(&mut self, now: f64) -> bool {
+        let mut changed = false;
+        for slot in self.slots.iter_mut() {
+            if slot.flash.as_ref().is_some_and(|(_, until)| now >= *until) {
+                slot.flash = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn any_flash(&self) -> bool {
+        self.slots.iter().any(|slot| slot.flash.is_some())
+    }
+
     /// Any slot that wants render/pump time.
     pub fn any_running(&self) -> bool {
         self.slots.iter().any(FxSlotState::running)
@@ -247,17 +318,17 @@ impl FxSlots {
     /// gen-panel.txt-style persistence body (arming is a live gesture and is
     /// not persisted; notes are transient).
     pub fn encode(&self) -> String {
-        let mut out = String::from("v1\n");
+        let mut out = format!("v2\naf {}\n", u8::from(self.click_autofade));
         for slot in &self.slots {
-            let p0 = slot.p[0].map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into());
-            let p1 = slot.p[1].map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into());
+            let dial = |v: Option<f32>| v.map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into());
             out.push_str(&format!(
-                "{} {} {:.4} {} {} {}\n",
+                "{} {} {:.4} {} {} {} {}\n",
                 u8::from(slot.title.is_some()),
                 u8::from(slot.bypass),
                 slot.speed,
-                p0,
-                p1,
+                dial(slot.p[0]),
+                dial(slot.p[1]),
+                dial(slot.p[2]),
                 slot.title.as_deref().unwrap_or(""),
             ));
         }
@@ -265,28 +336,37 @@ impl FxSlots {
     }
 
     /// Tolerant decode of [`FxSlots::encode`]'s output; anything malformed
-    /// falls back to that slot's default.
+    /// falls back to that slot's default. v1 files (two dials) still read.
     pub fn decode(body: &str) -> FxSlots {
         let mut slots = FxSlots::default();
-        let mut lines = body.lines();
-        if lines.next() != Some("v1") {
-            return slots;
+        let mut lines = body.lines().peekable();
+        let dial_count = match lines.next() {
+            Some("v2") => 3usize,
+            Some("v1") => 2,
+            _ => return slots,
+        };
+        // Optional settings line ("af 0|1"); older files go straight to
+        // the slot lines.
+        if lines.peek().is_some_and(|line| line.starts_with("af ")) {
+            slots.click_autofade = lines.next() == Some("af 1");
         }
         for slot in slots.slots.iter_mut() {
             let Some(line) = lines.next() else { break };
-            let mut it = line.splitn(6, ' ');
+            let mut it = line.splitn(4 + dial_count, ' ');
             let loaded = it.next() == Some("1");
             let bypass = it.next() == Some("1");
             let speed = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.5f32);
-            let p0 = it.next().and_then(|v| v.parse().ok());
-            let p1 = it.next().and_then(|v| v.parse().ok());
+            let mut p = [None; 3];
+            for value in p.iter_mut().take(dial_count) {
+                *value = it.next().and_then(|v| v.parse().ok());
+            }
             let title = it.next().unwrap_or("").trim().to_string();
             if loaded && !title.is_empty() {
                 slot.title = Some(title);
             }
             slot.bypass = bypass && slot.title.is_some();
             slot.speed = speed.clamp(0.0, 1.0);
-            slot.p = [p0, p1];
+            slot.p = p;
         }
         slots
     }
@@ -392,6 +472,11 @@ impl VjFxSlotHost {
 
     pub fn has_effect(&self) -> bool {
         self.fx.has_effect()
+    }
+
+    /// The loaded doc's declared dials (see `effects::doc::DialDecl`).
+    pub fn dials(&self) -> Vec<crate::effects::doc::DialDecl> {
+        self.fx.dials().to_vec()
     }
 
     /// Run/park the effect. Parked costs nothing; the last frame stays in
@@ -598,6 +683,10 @@ pub struct DrawFxSlotTile {
     pub bypass: f32,
     #[live]
     pub engage: f32,
+    /// Refusal flash 0/1 — the border burns amber while a wrong-type
+    /// assignment message is up.
+    #[live]
+    pub refuse: f32,
 }
 
 /// What the tile is showing this frame — pushed by the app, compared to
@@ -611,6 +700,8 @@ pub struct FxSlotTileState {
     pub bypass: bool,
     /// Transition liveness 0..1 → the engage meter.
     pub engage: f32,
+    /// A refusal flash is up: the note is the refusal, the ring burns.
+    pub flash: bool,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -739,6 +830,7 @@ impl Widget for VjFxSlotTile {
         self.draw_tile.down = if self.down { 1.0 } else { 0.0 };
         self.draw_tile.bypass = if self.state.bypass { 1.0 } else { 0.0 };
         self.draw_tile.engage = self.state.engage.clamp(0.0, 1.0);
+        self.draw_tile.refuse = if self.state.flash { 1.0 } else { 0.0 };
         self.draw_tile.draw_abs(cx, rect);
         self.area = self.draw_tile.area();
 
@@ -793,10 +885,18 @@ impl Widget for VjFxSlotTile {
             }
         }
         if !self.state.note.is_empty() {
-            // Status word, bottom-right (top-centred when empty).
-            self.draw_tag.color = vec4(0.243, 0.878, 0.690, 0.95);
+            // Status word, bottom-right (top-centred when empty). A
+            // refusal reads in the same amber as the burning ring, and
+            // moves to the top-right so it never collides with the name.
+            self.draw_tag.color = if self.state.flash {
+                vec4(1.0, 0.62, 0.24, 1.0)
+            } else {
+                vec4(0.243, 0.878, 0.690, 0.95)
+            };
             let w = self.measure(cx, &self.state.note);
-            let pos = if self.state.title.is_some() {
+            let pos = if self.state.flash {
+                dvec2(rect.pos.x + rect.size.x - w - 7.0, rect.pos.y + 5.0)
+            } else if self.state.title.is_some() {
                 dvec2(
                     rect.pos.x + rect.size.x - w - 7.0,
                     rect.pos.y + rect.size.y - 14.0,
@@ -850,7 +950,7 @@ mod tests {
         assert!(!slot.bypass, "a fresh load is ON");
         assert_eq!(slot.note, None, "stale errors do not survive a load");
         assert_eq!(slot.speed, 0.8, "the operator's levers stay put");
-        assert_eq!(slot.p, [None, Some(0.9)]);
+        assert_eq!(slot.p, [None, Some(0.9), None]);
         assert!(m.any_running());
         m.clear(FxSlotKind::EffectA);
         assert_eq!(*m.slot(FxSlotKind::EffectA), FxSlotState::default());
@@ -871,13 +971,21 @@ mod tests {
     fn persistence_round_trips_including_untouched_knobs() {
         let mut m = FxSlots::default();
         m.loaded(FxSlotKind::EffectA, "Neon Growth".into());
-        m.slot_mut(FxSlotKind::EffectA).p = [Some(0.25), None];
+        m.slot_mut(FxSlotKind::EffectA).p = [Some(0.25), None, Some(0.8)];
         m.slot_mut(FxSlotKind::EffectA).speed = 0.75;
         m.loaded(FxSlotKind::Transition, "Beat Lens".into());
         m.slot_mut(FxSlotKind::Transition).bypass = true;
         m.toggle_arm(FxSlotKind::EffectB);
+        m.click_autofade = false;
         let decoded = FxSlots::decode(&m.encode());
         assert_eq!(decoded.armed, None, "arming is a live gesture, not state");
+        assert!(!decoded.click_autofade, "the AUTOFADE latch persists");
+        // An older file without the settings line keeps the default ON.
+        assert!(FxSlots::decode("v1\n1 0 0.5 - - X\n").click_autofade);
+        // A v1 (two-dial) file still restores its two dials.
+        let legacy = FxSlots::decode("v1\n1 0 0.6000 0.2500 - Old Effect\n");
+        assert_eq!(legacy.slot(FxSlotKind::EffectA).p, [Some(0.25), None, None]);
+        assert_eq!(legacy.slot(FxSlotKind::EffectA).title.as_deref(), Some("Old Effect"));
         let mut expect = m.clone();
         expect.armed = None;
         assert_eq!(decoded, expect);
@@ -895,6 +1003,43 @@ mod tests {
             decoded.slot(FxSlotKind::EffectB).title.as_deref(),
             Some("Domino Liturgy — gold")
         );
+    }
+
+    #[test]
+    fn slot_type_law_is_strict() {
+        // A/B: any vjeffect, never content.
+        for kind in [FxSlotKind::EffectA, FxSlotKind::EffectB] {
+            assert_eq!(FxSlots::accepts(kind, true, false), Ok(()));
+            assert_eq!(FxSlots::accepts(kind, true, true), Ok(()));
+            assert_eq!(FxSlots::accepts(kind, false, false), Err("FX docs only"));
+            // Even a "transition-tagged" non-effect is content: refused.
+            assert_eq!(FxSlots::accepts(kind, false, true), Err("FX docs only"));
+        }
+        // TRANSITION: only transition-tagged effects.
+        assert_eq!(FxSlots::accepts(FxSlotKind::Transition, true, true), Ok(()));
+        assert_eq!(
+            FxSlots::accepts(FxSlotKind::Transition, true, false),
+            Err("TRANSITION FX only")
+        );
+        assert_eq!(
+            FxSlots::accepts(FxSlotKind::Transition, false, false),
+            Err("FX docs only")
+        );
+    }
+
+    #[test]
+    fn refusal_flashes_expire_and_never_persist() {
+        let mut m = FxSlots::default();
+        m.refuse(FxSlotKind::Transition, "TRANSITION FX only", 10.0);
+        assert!(m.any_flash());
+        assert!(!m.tick_flashes(10.0 + FxSlots::FLASH_SECS - 0.1), "still up");
+        assert!(m.any_flash());
+        assert!(m.tick_flashes(10.0 + FxSlots::FLASH_SECS + 0.1), "expired");
+        assert!(!m.any_flash());
+        // A flash never survives the persistence round trip.
+        m.refuse(FxSlotKind::EffectA, "FX docs only", 5.0);
+        let decoded = FxSlots::decode(&m.encode());
+        assert!(!decoded.any_flash());
     }
 
     #[test]

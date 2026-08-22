@@ -506,6 +506,12 @@ impl VjFxView {
         self.doc.is_some()
     }
 
+    /// The loaded document's declared dials (name + p-index + default) —
+    /// the host labels its knobs from these. Empty = no meaningful levers.
+    pub fn dials(&self) -> &[super::doc::DialDecl] {
+        self.doc.as_ref().map(|d| d.dials.as_slice()).unwrap_or(&[])
+    }
+
     /// The loaded document's `input0` request ("test", …), for the host to
     /// decide what to bind.
     pub fn doc_input0(&self) -> Option<&str> {
