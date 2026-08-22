@@ -1,0 +1,16 @@
+[package]
+name = "makepad-ai-loader"
+version = "0.1.0"
+edition = "2021"
+description = "Backend-neutral model-weight disk layer: safetensors/GGUF/torch/npy parsing, mmap, WeightSet. No GPU deps."
+
+[dependencies]
+makepad-micro-serde = { path = "../../micro_serde" }
+
+[[bin]]
+name = "storage-bench"
+path = "src/bin/storage_bench.rs"
+
+[[bin]]
+name = "mac-storage-bench"
+path = "src/bin/mac_storage_bench.rs"

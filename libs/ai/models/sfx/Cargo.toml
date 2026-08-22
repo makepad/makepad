@@ -1,0 +1,11 @@
+[package]
+name = "makepad-ai-sfx"
+version = "0.1.0"
+edition = "2021"
+description = "SA3 / MOSS / Woosh sound-effect family. Split out of libs/diffusion (lane T6, /aiarch.md)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-ai-h3 = { path = "../h3" }

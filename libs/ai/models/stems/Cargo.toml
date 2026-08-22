@@ -1,0 +1,10 @@
+[package]
+name = "makepad-ai-stems"
+version = "0.1.0"
+edition = "2021"
+description = "BS-RoFormer 4-stem music source separation (vocals/drums/bass/other) on the makepad ggml runtime. Placement-neutral: the same crate serves a Metal client and a CUDA fleet box."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }

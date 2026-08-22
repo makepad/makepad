@@ -1,0 +1,23 @@
+# The motion-field half of flow-warp playback, as ONE implementation shared
+# by everything that produces an `mkfl` clip: the asset-ai `video-enhance`
+# backend (whose field comes from RIFE) and the VJ's import converter (whose
+# field comes from the classical estimator in this crate — no AI model, no
+# weights, no download).
+
+[package]
+name = "makepad-video-flow"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "mkfl motion-vector payload + a classical optical-flow estimator + the all-intra flow re-encode, shared by the enhance backend and the VJ importer"
+license = "MIT OR Apache-2.0"
+
+[features]
+# The conversion pipeline (decode -> flow -> all-intra re-encode -> mkfl).
+# Off leaves a std-only crate: the payload format and the estimator, which
+# is all the enhance backend needs from here.
+default = ["convert"]
+convert = ["dep:makepad-video"]
+
+[dependencies]
+makepad-video = { path = "../../platform/video", optional = true }

@@ -1,0 +1,97 @@
+Third-party notices for the Makepad AI inference stack (`libs/ai`).
+This file is the MIT attribution surface for vendored and ported sources.
+Makepad's own code in this tree remains under the repository MIT license
+(see `/LICENSE`). Publishing this repository is distribution of these
+portions; the copyright notices and permission notices below must be
+retained.
+
+========================================================================
+ggml / llama.cpp
+========================================================================
+
+License: MIT
+Copyright (c) 2023-2026 The ggml authors
+Upstream: https://github.com/ggml-org/llama.cpp
+Upstream LICENSE: MIT License, "Copyright (c) 2023-2026 The ggml authors"
+
+Substantial portions of the following are derived from ggml / llama.cpp
+(quantized GEMM, flash-attention, K-quant layouts, Metal kernels, GGUF
+container details, and related device code). Some files are close
+transcriptions of a pinned llama.cpp revision; others are reimplementations
+that still retain ggml block layouts, kernel structure, or constants.
+
+  libs/ai/cuda/kernels/llm/fattn/          CUDA flash-attn, MMQ, MMVQ, vec-dot
+  libs/ai/cuda/kernels/llm/kernels.cu      K-quant decode / MMVQ launch path
+  libs/ai/cuda/kernels/kquants.cu          K-quant / Q4_0 / related dequant
+  libs/ai/metal/shaders/ggml/              vendored ggml-metal snapshot
+  libs/ai/loader/src/formats/gguf.rs       GGUF reader (moved from llama)
+  libs/ai/loader/src/quant.rs              GGUF dtype / block metadata
+
+Pinned Metal snapshot (see that directory's LICENSE):
+  commit 364c77f4ca2737e3287652e0e8a8c6dce3231bba
+
+CUDA kernel comments name the llama.cpp revision they were ported from
+(for example b10430 / commit 4c1a0af40d88c7fbb3b15c85bf2e8016d1d5b64c).
+That pin is documentation of provenance, not a claim that every later
+edit is still byte-identical to that commit.
+
+The MIT permission notice for ggml / llama.cpp:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+========================================================================
+Apple MLX (steel quantized GEMM)
+========================================================================
+
+License: MIT
+Copyright © 2023-2025 Apple Inc.
+Upstream: https://github.com/ml-explore/mlx
+Vendored snapshot: v0.31.2
+Location: libs/ai/metal/shaders/mlx_qmm/
+Full license text: libs/ai/metal/shaders/mlx_qmm/LICENSE
+
+Only the steel GEMM + quantized.h pieces needed for one instantiation
+are vendored. Do not treat that directory as a full MLX Metal port.
+
+========================================================================
+Tokenizer tables bundled with Flux text encoders
+========================================================================
+
+libs/ai/models/flux/assets/clip_merges_utf8.txt
+  CLIP BPE merges table. CLIP (OpenAI) is MIT-licensed.
+  Copyright (c) 2021 OpenAI.
+
+libs/ai/models/flux/assets/t5_tokenizer.json
+  T5 SentencePiece / HuggingFace tokenizer dump.
+  T5 (Google) is Apache License 2.0.
+  https://github.com/google-research/text-to-text-transfer-transformer
+
+These files are data tables required to run the corresponding checkpoints.
+They are not model weights.
+
+========================================================================
+What this NOTICE does not cover
+========================================================================
+
+Model *weights* that a user downloads (FLUX, Hunyuan, Qwen, MiniMax, …)
+are licensed separately by their authors. This stack does not host or
+redistribute those weights. The Asset UI requires an explicit per-model
+acknowledgement of the registry license record before a model is cleared
+for download or generation. See libs/asset/ai/registry.json `license`
+objects and the Hunyuan paint `LicenseAcknowledgement` gate.
