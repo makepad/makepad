@@ -11,11 +11,11 @@ use crate::backend::{
 use crate::download::ensure_converted_file;
 use crate::error::AssetAiError;
 use crate::rig_backend::check_rig_output;
-use makepad_diffusion::skin_tokens_convert::convert_skin_tokens_checkpoint;
-use makepad_diffusion::skin_tokens_pipeline::{
+use makepad_ai_rig::skin_tokens_convert::convert_skin_tokens_checkpoint;
+use makepad_ai_rig::skin_tokens_pipeline::{
     unload_skin_tokens_runtime_weights, SkinTokensPipeline, SkinTokensPipelineParams,
 };
-use makepad_diffusion::DiffusionError;
+use makepad_ai_common::DiffusionError;
 use makepad_gltf::parse_glb_bytes;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -276,7 +276,7 @@ impl RigWorker {
                 }
                 drop(pipeline);
                 let unload = unload_skin_tokens_runtime_weights().map_err(map_diffusion);
-                makepad_diffusion::backend::gpu_pool_clear();
+                makepad_ai_common::backend::gpu_pool_clear();
                 if let Some(events) = shutdown_reply {
                     let _ = events.send(WorkerEvent::Done(unload.map(|_| Vec::new())));
                 }

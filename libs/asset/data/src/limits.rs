@@ -35,7 +35,11 @@ pub const MAX_FILES_PER_ASSET: usize = 64;
 pub const MAX_DEPENDENCIES_PER_ASSET: usize = 64;
 /// Maximum dependency-chain depth an asset closure may declare.
 pub const MAX_DEPENDENCY_DEPTH: u32 = 8;
-pub const MAX_ANCHORS_PER_ASSET: usize = 32;
+/// Anchors per asset. 64, not 32: a converted Doom map publishes its player
+/// starts, walk heights, exit, keys, every door, every lift and every
+/// teleport pad, and E1M8-sized maps pass 32 on doors alone — a level that
+/// silently drops half its doors is worse than one that refuses.
+pub const MAX_ANCHORS_PER_ASSET: usize = 64;
 pub const MAX_SPAWN_PARAMS: usize = 64;
 pub const MAX_PROVENANCE_PARENTS: usize = 8;
 
@@ -58,6 +62,15 @@ pub const MAX_LOD: u8 = 7;
 pub const THUMBNAIL_MIN_DIM: u32 = 256;
 pub const THUMBNAIL_CANONICAL_DIM: u32 = 512;
 pub const THUMBNAIL_MAX_DIM: u32 = 4096;
+
+/// Regions one thumbnail may declare about itself. Eight is generous for
+/// everything the catalog bakes today — an audio composite declares two, a
+/// sprite sheet one — and keeps the added metadata a rounding error against
+/// `MAX_DOCUMENT_BYTES`.
+pub const MAX_THUMBNAIL_VIEWS: usize = 8;
+/// Ceiling for a declared cycling rate. Above this a "frame" is shorter than
+/// a display refresh, so it is a producer bug, not a fast animation.
+pub const MAX_THUMBNAIL_FPS: f32 = 240.0;
 
 /// Splash source admission ceiling for a game revision.
 pub const MAX_SPLASH_SOURCE_BYTES: u64 = 1024 * 1024;

@@ -11,17 +11,16 @@ use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::error::AssetAiError;
-use crate::motion_backend::check_motion_output;
 use crate::motion_retarget::{
     classify_humanoid_branches, retarget_hy_motion_glb_with_report, HyMotionClipRef,
     RetargetOptions,
 };
-use makepad_diffusion::hy_motion_pipeline::{
+use makepad_ai_motion::hy_motion_pipeline::{
     HyMotionGenerateParams, HyMotionModelPaths, HyMotionPipeline, HyMotionRunControl,
 };
-use makepad_diffusion::hy_motion::{HY_MOTION_BODY_JOINTS, HY_MOTION_CFG};
-use makepad_diffusion::hy_motion_decode::HyMotionDecoded;
-use makepad_diffusion::DiffusionError;
+use makepad_ai_motion::hy_motion::{HY_MOTION_BODY_JOINTS, HY_MOTION_CFG};
+use makepad_ai_motion::hy_motion_decode::HyMotionDecoded;
+use makepad_ai_common::DiffusionError;
 use makepad_gltf::parse_glb_bytes;
 use makepad_render::skin::SkinnedModel;
 use makepad_micro_serde::JsonValue;
@@ -104,6 +103,64 @@ pub struct HyMotionClipRecipe {
     pub name: &'static str,
     pub prompt: &'static str,
     pub frames: usize,
+}
+
+/// Frames of a prompt-mode take: 5 s at the model's 30 fps, the same
+/// short-single-action band as the dance recipe.
+pub const MOTION_PROMPT_FRAMES: usize = 150;
+
+/// What one motion job generates: the fixed playable set, or one finite
+/// take described by the request prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MotionPlan {
+    Playable,
+    Prompt(String),
+}
+
+impl MotionPlan {
+    /// `motion_mode: "prompt"` with a non-empty prompt selects the prompted
+    /// take; everything else is the playable contract.
+    pub fn from_params(motion_mode: Option<&str>, prompt: &str) -> Result<Self, AssetAiError> {
+        match motion_mode.map(|m| m.trim().to_ascii_lowercase()).as_deref() {
+            Some("prompt") => {
+                let prompt = prompt.trim();
+                if prompt.is_empty() {
+                    return Err(AssetAiError::Params(
+                        "motion_mode \"prompt\" needs a non-empty prompt describing the motion".to_string(),
+                    ));
+                }
+                Ok(MotionPlan::Prompt(prompt.to_string()))
+            }
+            None | Some("") | Some("playable") => Ok(MotionPlan::Playable),
+            Some(other) => Err(AssetAiError::Params(format!(
+                "unknown motion_mode {other:?} (expected \"playable\" or \"prompt\")"
+            ))),
+        }
+    }
+
+    /// The clip recipes this plan generates, in order.
+    fn recipes(&self) -> Vec<(String, String, usize, bool)> {
+        match self {
+            // (name, prompt, frames, close_cyclic)
+            MotionPlan::Playable => HY_MOTION_CLIP_RECIPES
+                .iter()
+                .map(|r| (r.name.to_string(), r.prompt.to_string(), r.frames, r.name != "dance" && r.name != "jump"))
+                .collect(),
+            MotionPlan::Prompt(prompt) => vec![(
+                crate::motion_backend::MOTION_PROMPT_CLIP_NAME.to_string(),
+                prompt.clone(),
+                MOTION_PROMPT_FRAMES,
+                false,
+            )],
+        }
+    }
+
+    fn required_clip_names(&self) -> Vec<&'static str> {
+        match self {
+            MotionPlan::Playable => crate::motion_backend::MOTION_CLIP_NAMES.to_vec(),
+            MotionPlan::Prompt(_) => vec![crate::motion_backend::MOTION_PROMPT_CLIP_NAME],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1043,6 +1100,8 @@ impl ContentBackend for MotionNativeBackend {
         let worker = self.worker.as_ref().ok_or_else(|| {
             AssetAiError::Backend("native HY-Motion used before ensure_loaded".to_string())
         })?;
+        let plan = MotionPlan::from_params(params.motion_mode.as_deref(), &params.prompt)?;
+        let required_clips = plan.required_clip_names();
         let job = GenerateJob {
             rigged_glb: params.input_bytes.clone(),
             seed: params.seed,
@@ -1052,6 +1111,7 @@ impl ContentBackend for MotionNativeBackend {
             // rather than silently changing model behavior on ordinary
             // motion requests.
             guidance: HY_MOTION_CFG,
+            plan,
         };
         let output = match worker.generate(job, cancel.clone(), progress) {
             Ok(bytes) => bytes,
@@ -1065,7 +1125,7 @@ impl ContentBackend for MotionNativeBackend {
             }
         };
         cancel.check()?;
-        check_motion_output(&output)?;
+        crate::motion_backend::check_motion_output_clips(&output, &required_clips)?;
         validate_animated_glb_quality(&output)?;
         Ok(vec![ArtifactData {
             content_type: "model/gltf-binary",
@@ -1085,6 +1145,7 @@ struct GenerateJob {
     seed: u64,
     steps: usize,
     guidance: f32,
+    plan: MotionPlan,
 }
 
 enum WorkerCommand {
@@ -1186,7 +1247,7 @@ impl MotionWorker {
                     .evict_conditioner_device_weights()
                     .map_err(diffusion_error);
                 drop(pipeline);
-                makepad_diffusion::backend::gpu_pool_clear();
+                makepad_ai_common::backend::gpu_pool_clear();
                 if let Some(events) = shutdown_reply {
                     let result = conditioner_evict.map(|_| Vec::new());
                     let _ = events.send(WorkerEvent::Done(result));
@@ -1319,16 +1380,17 @@ fn run_generate(
     if !job.guidance.is_finite() {
         return Err(WorkerError::Other("guidance must be finite".to_string()));
     }
-    let mut clips = Vec::with_capacity(HY_MOTION_CLIP_RECIPES.len());
-    for (index, recipe) in HY_MOTION_CLIP_RECIPES.iter().enumerate() {
+    let recipes = job.plan.recipes();
+    let clip_count = recipes.len();
+    let mut clips = Vec::with_capacity(clip_count);
+    for (index, (name, prompt, frames, close_cyclic)) in recipes.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(WorkerError::Cancelled);
         }
-        let clip_count = HY_MOTION_CLIP_RECIPES.len();
-        let mut on_phase = |name: &str, done: usize, total: usize| {
+        let mut on_phase = |phase: &str, done: usize, total: usize| {
             let local = if total == 0 { 0.0 } else { done as f64 / total as f64 };
             let _ = events.send(WorkerEvent::Progress(
-                format!("motion {}/{} {}: {name}", index + 1, clip_count, recipe.name),
+                format!("motion {}/{} {}: {phase}", index + 1, clip_count, name),
                 clip_generation_progress(index, clip_count, local),
             ));
         };
@@ -1339,9 +1401,9 @@ fn run_generate(
         };
         let run = pipeline
             .generate_with_control(
-                recipe.prompt,
+                prompt,
                 &HyMotionGenerateParams {
-                    frames: recipe.frames,
+                    frames: *frames,
                     steps: job.steps,
                     guidance: job.guidance,
                     seed: clip_seed(job.seed, index),
@@ -1351,30 +1413,31 @@ fn run_generate(
                 &mut control,
             )
             .map_err(diffusion_error)?;
-        clips.push(match recipe.name {
-            "jump" => trim_jump_action(&run.decoded),
-            // A dance take has no gait cycle to close: forcing it through
-            // cyclic closure would either reject the take or author a fake
-            // seam. Ship the finite performance as generated; the VJ
-            // playback layer loops it.
-            "dance" => run.decoded,
-            _ => close_cyclic_motion(&run.decoded, recipe.frames).ok_or_else(|| {
+        clips.push(if name == "jump" {
+            trim_jump_action(&run.decoded)
+        } else if *close_cyclic {
+            close_cyclic_motion(&run.decoded, *frames).ok_or_else(|| {
                 WorkerError::Other(format!(
-                    "{} generation has no bounded cyclic motion window",
-                    recipe.name
+                    "{name} generation has no bounded cyclic motion window"
                 ))
-            })?,
+            })?
+        } else {
+            // A dance / prompted take has no gait cycle to close: forcing it
+            // through cyclic closure would either reject the take or author
+            // a fake seam. Ship the finite performance as generated; the
+            // playback layer loops it.
+            run.decoded
         });
     }
     if cancel.is_cancelled() {
         return Err(WorkerError::Cancelled);
     }
     let _ = events.send(WorkerEvent::Progress("motion: native retarget".to_string(), 0.90));
-    let refs: Vec<HyMotionClipRef<'_>> = HY_MOTION_CLIP_RECIPES
+    let refs: Vec<HyMotionClipRef<'_>> = recipes
         .iter()
         .zip(&clips)
-        .map(|(recipe, motion)| HyMotionClipRef {
-            name: recipe.name,
+        .map(|((name, _, _, _), motion)| HyMotionClipRef {
+            name: name.as_str(),
             motion,
         })
         .collect();
@@ -1391,11 +1454,10 @@ fn run_generate(
         },
     )
     .map_err(|error| WorkerError::Other(format!("retarget: {error}")))?;
-    if output.report.clips != HY_MOTION_CLIP_RECIPES.len() {
+    if output.report.clips != clip_count {
         return Err(WorkerError::Other(format!(
-            "retarget emitted {} clips; native contract requires {}",
-            output.report.clips,
-            HY_MOTION_CLIP_RECIPES.len()
+            "retarget emitted {} clips; the plan requires {}",
+            output.report.clips, clip_count
         )));
     }
     let _ = events.send(WorkerEvent::Progress(
@@ -1470,8 +1532,30 @@ mod tests {
     }
 
     #[test]
+    fn motion_plan_selects_playable_set_or_one_prompted_take() {
+        assert_eq!(MotionPlan::from_params(None, "ignored").unwrap(), MotionPlan::Playable);
+        assert_eq!(MotionPlan::from_params(Some("playable"), "").unwrap(), MotionPlan::Playable);
+        let prompted = MotionPlan::from_params(Some("prompt"), " A person dances the robot. ").unwrap();
+        assert_eq!(prompted, MotionPlan::Prompt("A person dances the robot.".to_string()));
+        assert!(MotionPlan::from_params(Some("prompt"), "  ").is_err());
+        assert!(MotionPlan::from_params(Some("waltz"), "x").is_err());
+        // Playable = the full recipe table, cyclic-closed except jump/dance;
+        // prompted = exactly one finite take under the documented clip name.
+        let playable = MotionPlan::Playable.recipes();
+        assert_eq!(playable.len(), HY_MOTION_CLIP_RECIPES.len());
+        assert!(playable.iter().filter(|(_, _, _, cyclic)| *cyclic).count() == 3);
+        let take = prompted.recipes();
+        assert_eq!(take.len(), 1);
+        assert_eq!(take[0].0, crate::motion_backend::MOTION_PROMPT_CLIP_NAME);
+        assert_eq!(take[0].2, MOTION_PROMPT_FRAMES);
+        assert!(!take[0].3);
+        assert_eq!(prompted.required_clip_names(), vec!["prompt"]);
+        assert_eq!(MotionPlan::Playable.required_clip_names(), vec!["idle", "walk", "jump"]);
+    }
+
+    #[test]
     fn dance_recipe_is_appended_finite_and_short() {
-        use makepad_diffusion::hy_motion::{
+        use makepad_ai_motion::hy_motion::{
             HY_MOTION_FPS, HY_MOTION_MAX_FRAMES, HY_MOTION_MIN_FRAMES,
         };
         // Append-only: the locomotion clips keep their indices, so their

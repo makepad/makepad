@@ -27,7 +27,7 @@
 //! the seam, the scripted implementation in the tests is the contract
 //! executor. Wiring a real generator is a later, separate step.
 
-use crate::coordinator::JobOutcome;
+use makepad_asset_importer::coordinator::JobOutcome;
 use makepad_asset_client::json::Value;
 use makepad_asset_client::util::{from_hex_exact, sanitize_text, to_hex};
 use makepad_asset_client::{
@@ -223,11 +223,13 @@ fn declared_rights(body: &Value) -> Result<Option<PublishRights>, String> {
             PolicyWord::Allowed => Redistribution::Allowed,
             PolicyWord::AttributionRequired => Redistribution::AttributionRequired,
             PolicyWord::Forbidden => Redistribution::Forbidden,
+            PolicyWord::LocalOnly => Redistribution::LanLocal,
         },
         derivatives: match derivatives {
             PolicyWord::Allowed => DerivativePolicy::Allowed,
             PolicyWord::AttributionRequired => DerivativePolicy::AttributionRequired,
             PolicyWord::Forbidden => DerivativePolicy::Forbidden,
+            PolicyWord::LocalOnly => DerivativePolicy::LocalPreview,
         },
     }))
 }
@@ -237,6 +239,8 @@ enum PolicyWord {
     Allowed,
     AttributionRequired,
     Forbidden,
+    /// LAN-only (redistribution) / local-preview-only (derivatives).
+    LocalOnly,
 }
 
 fn policy_of(body: &Value, key: &'static str) -> Result<Option<PolicyWord>, String> {
@@ -248,6 +252,9 @@ fn policy_of(body: &Value, key: &'static str) -> Result<Option<PolicyWord>, Stri
                 "allowed" => PolicyWord::Allowed,
                 "attribution-required" => PolicyWord::AttributionRequired,
                 "forbidden" => PolicyWord::Forbidden,
+                "lan-local" | "user-owned-local" | "local-preview-only" | "local-preview" => {
+                    PolicyWord::LocalOnly
+                }
                 _ => return Err(format!("unknown {key} policy")),
             }))
         }
@@ -343,7 +350,7 @@ pub struct DerivedFile {
 /// Everything a deriver produced for one source: the typed files, the
 /// mandatory thumbnail, MEASURED stats (zeros = unmeasured, never guessed),
 /// and the deriver's own identity for provenance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DerivedBundle {
     pub kind: AssetKind,
     pub files: Vec<DerivedFile>,
@@ -683,6 +690,7 @@ impl<'d> DeriveCoordinator<'d> {
                     lod: f.lod,
                     media: f.media,
                     bytes: f.bytes,
+                    reference: None,
                     dims: f.dims,
                 })
                 .collect(),
@@ -768,6 +776,12 @@ impl<'d> DeriveCoordinator<'d> {
 fn publish_permille(stage: &PublishStage) -> u16 {
     match stage {
         PublishStage::Validating => 805,
+        // Reference admission happens before the uploads and costs a
+        // server-side read per file; it shares the pre-upload band rather
+        // than pretending nothing is happening.
+        PublishStage::ReferencingFile { index, of } => {
+            815 + ((*index).min(*of) as u32 * 5 / (*of).max(1) as u32) as u16
+        }
         PublishStage::RegisteringAsset => 815,
         PublishStage::UploadingBlob { index, of, .. } => {
             820 + ((*index).min(*of) as u32 * 120 / (*of).max(1) as u32) as u16
@@ -886,6 +900,7 @@ mod tests {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         }
     }
 
@@ -1122,7 +1137,7 @@ mod tests {
                 .expect("blob bytes");
             assert_eq!(bytes, want.bytes, "blob bytes for {:?}", want.role);
         }
-        let thumb = manifest.thumbnail.expect("mandatory thumbnail");
+        let thumb = manifest.thumbnail.clone().expect("mandatory thumbnail");
         let want_thumb = scripted_thumbnail(&source);
         assert_eq!(thumb.blob, BlobId::hash_of(&want_thumb.bytes));
         assert_eq!((thumb.width, thumb.height), (512, 512));
@@ -1361,6 +1376,7 @@ mod tests {
                     lod: f.lod,
                     media: f.media,
                     bytes: f.bytes,
+                    reference: None,
                     dims: f.dims,
                 })
                 .collect(),

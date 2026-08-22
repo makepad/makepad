@@ -21,11 +21,21 @@ const STABLE_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 const STOP_SLICE_MS: u64 = 50;
 
+/// Files that shape a row's publication but are not its payload: the icon
+/// the app renders beside it and the offline bake sidecars. They routinely
+/// land AFTER the payload — the GPU finishes the thumbnail a moment later,
+/// a bake finishes minutes later — so the fingerprint has to include them,
+/// or the catalog keeps the picture-less first revision forever.
+const SIDECARS: [&str; 4] = ["thumb", "aomesh", "ao.png", "shadowsdf"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
     len: u64,
     modified_ns: u128,
     row_hash: u64,
+    /// Length + mtime of every sidecar that exists right now, hashed. A
+    /// sidecar that appears, changes or disappears changes this.
+    sidecar_hash: u64,
 }
 
 impl FileStamp {
@@ -48,8 +58,37 @@ impl FileStamp {
             len: meta.len(),
             modified_ns,
             row_hash: row.finish(),
+            sidecar_hash: sidecar_hash(dir, &item.file),
         })
     }
+}
+
+/// `<file>.thumb` sits beside the payload; the bake sidecars replace its
+/// extension (`lib-7.glb` -> `lib-7.aomesh`), which is where the importer
+/// looks for them.
+fn sidecar_hash(dir: &Path, file: &str) -> u64 {
+    let payload = dir.join(file);
+    let mut hasher = DefaultHasher::new();
+    for ext in SIDECARS {
+        let path = if ext == "thumb" {
+            dir.join(format!("{file}.thumb"))
+        } else {
+            payload.with_extension(ext)
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            0u8.hash(&mut hasher);
+            continue;
+        };
+        1u8.hash(&mut hasher);
+        meta.len().hash(&mut hasher);
+        meta.modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+            .hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +216,10 @@ pub fn run(
                 if log && last_index_error.take().is_some() {
                     eprintln!("[asset-worker] watch library index recovered");
                 }
+                // Whether a row is a texture OF a mesh is a fact about its
+                // whole run, so the attachment plan is computed once per
+                // snapshot and handed to every single-row import below.
+                let plan = import::RunPlan::plan(&items);
                 for ready in state.observe(dir, &items, now_ms) {
                     if stop.load(Ordering::Acquire) {
                         break;
@@ -187,6 +230,7 @@ pub fn run(
                         namespace,
                         rights,
                         std::slice::from_ref(&ready.item),
+                        &plan,
                         log,
                     );
                     if report.failed.is_empty() {
@@ -229,6 +273,9 @@ mod tests {
             domain: "video".to_string(),
             content_type: "video/mp4".to_string(),
             prompt: prompt.to_string(),
+            group_id: Some("run-watch".to_string()),
+            tags: vec!["generated".to_string()],
+            product: Some(true),
         }
     }
 
@@ -259,6 +306,44 @@ mod tests {
         let edited = item("lib-1.mp4", "edited prompt");
         assert!(state.observe(&dir, std::slice::from_ref(&edited), 4_000).is_empty());
         assert_eq!(state.observe(&dir, std::slice::from_ref(&edited), 5_000).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The icon is rendered AFTER the payload lands, which is the normal
+    /// order: the app writes the artifact, the watcher publishes it, and a
+    /// GPU pass finishes `<file>.thumb` a moment later. If the watcher only
+    /// fingerprinted the payload, the catalog would keep the picture-less
+    /// first revision for the rest of the asset's life.
+    #[test]
+    fn a_thumbnail_that_lands_after_the_payload_re_offers_the_row() {
+        let dir = root("late-thumb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = item("lib-9.mp4", "late icon");
+        std::fs::write(dir.join(&row.file), b"payload").unwrap();
+        let mut state = WatchState::default();
+        state.observe(&dir, std::slice::from_ref(&row), 0);
+        let first = state.observe(&dir, std::slice::from_ref(&row), 1_000);
+        assert_eq!(first.len(), 1, "the payload publishes on its own");
+        state.complete(&row.file, first[0].stamp);
+        assert!(state.observe(&dir, std::slice::from_ref(&row), 2_000).is_empty());
+
+        std::fs::write(dir.join("lib-9.mp4.thumb"), b"rendered icon").unwrap();
+        assert!(
+            state.observe(&dir, std::slice::from_ref(&row), 2_001).is_empty(),
+            "a sidecar still waits out the stability window"
+        );
+        let again = state.observe(&dir, std::slice::from_ref(&row), 3_001);
+        assert_eq!(again.len(), 1, "the icon re-offers the row");
+        state.complete(&row.file, again[0].stamp);
+        assert!(
+            state.observe(&dir, std::slice::from_ref(&row), 4_001).is_empty(),
+            "and once published it settles again"
+        );
+
+        // A bake sidecar landing minutes later is the same event.
+        std::fs::write(dir.join("lib-9.shadowsdf"), b"bake").unwrap();
+        state.observe(&dir, std::slice::from_ref(&row), 4_002);
+        assert_eq!(state.observe(&dir, std::slice::from_ref(&row), 5_002).len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -332,10 +417,13 @@ mod tests {
         std::fs::write(library.join("lib-1.png"), &png).unwrap();
         std::fs::write(
             library.join("index.json"),
-            br#"{"items":[{"file":"lib-1.png","label":"Watched PNG","domain":"image","content_type":"image/png","prompt":"watch test"}],"next_id":2}"#,
+            br#"{"items":[{"file":"lib-1.png","label":"Watched PNG","domain":"image","content_type":"image/png","prompt":"watch test","group_id":"run-watch","tags":["generated"]}],"next_id":2}"#,
         )
         .unwrap();
-        let (_, alias) = crate::import::derived_identity(&png, "gen").unwrap();
+        // The watched row lands under its readable name, not a digest blob.
+        let row = crate::import::read_index(&library).unwrap().remove(0);
+        let (_, alias) = crate::import::derived_identity(&row, &png, "gen").unwrap();
+        assert!(alias.as_str().starts_with("gen/image/watched-png-"), "{alias}");
 
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();

@@ -51,6 +51,29 @@ impl SpriteRole {
     }
 }
 
+/// Uniform-cell layout of a packed sprite sheet: `cols` cells per row, every
+/// cell `cell_w`×`cell_h`, frames top-left anchored inside their cell and
+/// laid out row-major by cell index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SheetLayout {
+    pub cols: u32,
+    pub cell_w: u32,
+    pub cell_h: u32,
+}
+
+impl SheetLayout {
+    /// Top-left pixel of `cell`.
+    pub fn cell_origin(self, cell: u32) -> (u32, u32) {
+        let cols = self.cols.max(1);
+        ((cell % cols) * self.cell_w, (cell / cols) * self.cell_h)
+    }
+
+    pub fn rows_for(self, cells: u32) -> u32 {
+        let cols = self.cols.max(1);
+        cells.div_ceil(cols)
+    }
+}
+
 /// One authored pixel frame. `rot` 0 = all angles; 1 = front.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpriteFrame {
@@ -58,10 +81,14 @@ pub struct SpriteFrame {
     pub rot: u8,
     pub w: u32,
     pub h: u32,
-    /// Path relative to the manifest file.
+    /// Path relative to the manifest file. With a packed sheet every frame
+    /// names that one sheet PNG.
     pub file: String,
     /// Draw this PNG X-flipped (Doom `A2A8` second pair).
     pub flip: bool,
+    /// Cell index inside the packed sheet ([`StatefulBillboard::sheet`]).
+    /// `None` on a legacy manifest whose frames are separate PNGs.
+    pub cell: Option<u32>,
 }
 
 /// One animation step at a camera facing. `flip` is the X-mirror for
@@ -93,6 +120,9 @@ pub struct StatefulBillboard {
     pub mirrors: u8,
     pub states: Vec<AnimState>,
     pub frames: Vec<SpriteFrame>,
+    /// Present when every frame lives in one packed sheet PNG beside the
+    /// manifest (`sheet <cols> <cell_w> <cell_h>`).
+    pub sheet: Option<SheetLayout>,
 }
 
 impl StatefulBillboard {
@@ -107,6 +137,12 @@ impl StatefulBillboard {
         if self.mirrors >= 8 {
             out.push_str("mirrors 8\n");
         }
+        if let Some(sheet) = self.sheet {
+            out.push_str(&format!(
+                "sheet {} {} {}\n",
+                sheet.cols, sheet.cell_w, sheet.cell_h
+            ));
+        }
         for s in &self.states {
             out.push_str(&format!(
                 "state {} {} {} {} {}\n",
@@ -117,6 +153,8 @@ impl StatefulBillboard {
                 s.fps
             ));
         }
+        // Trailing tokens are unordered flags; `flip` stays first so a
+        // parser that only knows the old format still reads it.
         for (i, f) in self.frames.iter().enumerate() {
             out.push_str(&format!(
                 "frame {i} {} {} {} {} {}",
@@ -124,6 +162,9 @@ impl StatefulBillboard {
             ));
             if f.flip {
                 out.push_str(" flip");
+            }
+            if let Some(cell) = f.cell {
+                out.push_str(&format!(" cell {cell}"));
             }
             out.push('\n');
         }
@@ -143,6 +184,7 @@ impl StatefulBillboard {
         let mut mirrors = 0u8;
         let mut states = Vec::new();
         let mut frames = Vec::new();
+        let mut sheet = None;
         for line in lines {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -158,6 +200,14 @@ impl StatefulBillboard {
                 }
                 Some("mirrors") => {
                     mirrors = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                Some("sheet") => {
+                    let mut num = || parts.next().and_then(|s| s.parse::<u32>().ok());
+                    if let (Some(cols), Some(cell_w), Some(cell_h)) = (num(), num(), num()) {
+                        if cols > 0 && cell_w > 0 && cell_h > 0 {
+                            sheet = Some(SheetLayout { cols, cell_w, cell_h });
+                        }
+                    }
                 }
                 Some("state") => {
                     let name = parts.next().unwrap_or("").to_string();
@@ -185,9 +235,26 @@ impl StatefulBillboard {
                     let rot = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
                     let w = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
                     let h = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-                    let file = parts.next().unwrap_or("").to_string();
-                    let flip = parts.next().is_some_and(|t| t.eq_ignore_ascii_case("flip"));
-                    if !file.is_empty() {
+                    // After the file every token is an unordered flag:
+                    // `flip`, `cell <n>`, or something a newer writer added
+                    // that this reader must ignore. A sheet-only manifest
+                    // may drop the file, putting `cell` in its place.
+                    let mut file = parts.next().unwrap_or("").to_string();
+                    let mut rest: Vec<&str> = parts.collect();
+                    if file.eq_ignore_ascii_case("cell") || file.eq_ignore_ascii_case("flip") {
+                        rest.insert(0, if file.eq_ignore_ascii_case("cell") { "cell" } else { "flip" });
+                        file.clear();
+                    }
+                    let mut flip = false;
+                    let mut cell = None;
+                    for (i, token) in rest.iter().enumerate() {
+                        if token.eq_ignore_ascii_case("flip") {
+                            flip = true;
+                        } else if token.eq_ignore_ascii_case("cell") {
+                            cell = rest.get(i + 1).and_then(|s| s.parse::<u32>().ok());
+                        }
+                    }
+                    if !file.is_empty() || cell.is_some() {
                         frames.push(SpriteFrame {
                             letter,
                             rot,
@@ -195,6 +262,7 @@ impl StatefulBillboard {
                             h,
                             file,
                             flip,
+                            cell,
                         });
                     }
                 }
@@ -218,6 +286,7 @@ impl StatefulBillboard {
             mirrors,
             states,
             frames,
+            sheet,
         })
     }
 
@@ -378,6 +447,37 @@ impl StatefulBillboard {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(&frame.file)
+    }
+
+    /// The one packed sheet every frame reads from, if this manifest has one.
+    pub fn sheet_file(&self) -> Option<&str> {
+        self.sheet?;
+        self.frames
+            .iter()
+            .map(|f| f.file.as_str())
+            .find(|f| !f.is_empty())
+    }
+
+    /// Where `frame`'s pixels live inside its file: `(x, y, w, h)` in the
+    /// packed sheet, or `None` when the file *is* the frame (legacy
+    /// per-frame PNGs). `w`/`h` are the authored size, top-left anchored.
+    pub fn frame_rect(&self, frame: &SpriteFrame) -> Option<(u32, u32, u32, u32)> {
+        let sheet = self.sheet?;
+        let cell = frame.cell?;
+        if frame.w == 0 || frame.h == 0 || frame.w > sheet.cell_w || frame.h > sheet.cell_h {
+            return None;
+        }
+        let (x, y) = sheet.cell_origin(cell);
+        Some((x, y, frame.w, frame.h))
+    }
+
+    /// Highest cell index in use, +1 (the number of packed cells).
+    pub fn sheet_cells(&self) -> u32 {
+        self.frames
+            .iter()
+            .filter_map(|f| f.cell)
+            .max()
+            .map_or(0, |m| m + 1)
     }
 }
 
@@ -658,6 +758,7 @@ pub fn assemble(
                 h: *h,
                 file: file.clone(),
                 flip: i > 0,
+                cell: None,
             });
         }
     }
@@ -684,6 +785,7 @@ pub fn assemble(
         mirrors: if facings >= 5 { 8 } else { 0 },
         states,
         frames,
+        sheet: None,
     })
 }
 
@@ -786,6 +888,7 @@ pub fn sequential_idle(prefix: &str, frames: Vec<SpriteFrame>, role: SpriteRole)
             fps: 8,
         }],
         frames,
+        sheet: None,
     }
 }
 
@@ -860,6 +963,7 @@ mod tests {
                 h: 8,
                 file: format!("r{rot}.png"),
                 flip: false,
+                cell: None,
             })
             .collect();
         let refs: Vec<&SpriteFrame> = pool.iter().collect();
@@ -908,6 +1012,59 @@ mod tests {
             "sheet letters are frames, not poses: {:?}",
             again.states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn legacy_manifests_keep_parsing_and_resolve_per_frame_files() {
+        // Written before packed sheets existed: no `sheet` header, one PNG
+        // per frame, `flip` as the only trailing token.
+        let text = "stateful-billboard 1\n\
+                    prefix troo\n\
+                    role character\n\
+                    preview walk\n\
+                    facings 8\n\
+                    mirrors 8\n\
+                    state walk 0 2 1 8\n\
+                    frame 0 A 1 40 55 trooa1.png\n\
+                    frame 1 A 2 41 55 trooa2a8.png flip\n";
+        let bb = StatefulBillboard::parse(text).unwrap();
+        assert!(bb.sheet.is_none());
+        assert!(bb.frames.iter().all(|f| f.cell.is_none()));
+        assert!(bb.frames[1].flip);
+        assert_eq!(bb.frame_rect(&bb.frames[1]), None, "no sheet, no cell rect");
+        assert_eq!(
+            bb.resolve_frame(Path::new("/s/billboards/doom/troo.billboard"), &bb.frames[0]),
+            PathBuf::from("/s/billboards/doom/trooa1.png")
+        );
+    }
+
+    #[test]
+    fn sheet_tokens_are_order_free_and_unknown_tokens_are_ignored() {
+        // `cell` may arrive before or after `flip`, a sheet-only writer may
+        // drop the file, and a newer writer's extra token must not break us.
+        let text = "stateful-billboard 1\n\
+                    prefix troo\n\
+                    role character\n\
+                    preview walk\n\
+                    sheet 4 40 55\n\
+                    lightmap something\n\
+                    state walk 0 3 1 8\n\
+                    frame 0 A 1 40 55 troo.png cell 0\n\
+                    frame 1 A 2 40 55 troo.png cell 1 flip\n\
+                    frame 2 A 8 40 55 troo.png flip cell 1 future 7\n";
+        let bb = StatefulBillboard::parse(text).unwrap();
+        let sheet = bb.sheet.unwrap();
+        assert_eq!((sheet.cols, sheet.cell_w, sheet.cell_h), (4, 40, 55));
+        assert_eq!(
+            bb.frames.iter().map(|f| (f.cell, f.flip)).collect::<Vec<_>>(),
+            vec![(Some(0), false), (Some(1), true), (Some(1), true)]
+        );
+        assert_eq!(bb.frame_rect(&bb.frames[1]), Some((40, 0, 40, 55)));
+        assert_eq!(bb.sheet_file(), Some("troo.png"));
+        assert_eq!(bb.sheet_cells(), 2);
+        // Cell 5 of a 4-wide sheet is row 1, column 1.
+        assert_eq!(sheet.cell_origin(5), (40, 55));
+        assert_eq!(sheet.rows_for(9), 3);
     }
 
     #[test]

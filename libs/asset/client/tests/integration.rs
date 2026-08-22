@@ -14,6 +14,7 @@ use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
     AssetClient, CacheBudgets, CatalogQuery, ClientConfig, ClientError, ClientEvent, ClientOutput,
     ClientRequest, ClientRuntime, ClosureBudget, DiscoveryListener, HttpLimits, ResourceSlot,
+    RuntimeConfig, SubmitOptions,
     SourceCollectionRegistered, TierPreference,
 };
 use makepad_asset_data::*;
@@ -93,6 +94,58 @@ fn seeded_store() -> (FixtureStore, Vec<AssetRevisionRef>) {
     // A crate in another namespace.
     store.add_prop(40, "props", Some("props/crate"), "Wooden Crate", payload(200, 1_500), vec![]);
     (store, refs)
+}
+
+/// The VJ filter contract: `exclude_tag` travels on the wire and the SERVER
+/// drops the rows — the client never post-filters a page, so `total`, the
+/// page contents and the cursor walk all agree with the exclusion.
+#[test]
+fn catalog_search_exclude_tag_is_filtered_server_side() {
+    let (mut store, refs) = seeded_store();
+    // Rockets 1, 3, 5, 7, 9 are intermediates; 3 also carries `keep`.
+    for (i, r) in refs.iter().enumerate() {
+        if i % 2 == 1 {
+            store.tag_asset(r, &["keep", "intermediate"]);
+        } else {
+            store.tag_asset(r, &["keep"]);
+        }
+    }
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let client =
+        AssetClient::connect(config("exclude_tag"), fixture.endpoints(), None).unwrap();
+
+    let mut q = CatalogQuery::text("rocket", 10);
+    q.tag = Some("keep".into());
+    assert_eq!(client.catalog_search(&q, None).unwrap().total, 10);
+    q.exclude_tag = Some("intermediate".into());
+    let page = client.catalog_search(&q, None).unwrap();
+    assert_eq!(page.total, 5, "the server dropped the intermediates");
+    assert_eq!(page.hits.len(), 5);
+    assert!(page.next.is_none());
+    let kept: Vec<AssetId> =
+        refs.iter().step_by(2).map(|r| r.asset_id).collect();
+    let mut got: Vec<AssetId> = page.hits.iter().map(|h| h.asset_id).collect();
+    got.sort();
+    let mut want = kept.clone();
+    want.sort();
+    assert_eq!(got, want);
+
+    // Paging over the excluded set: excluded rows interleave the kept ones,
+    // and the cursor walk still yields each kept row exactly once.
+    q.page_size = 2;
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let page = client.catalog_search(&q, cursor.as_ref()).unwrap();
+        assert_eq!(page.total, 5);
+        seen.extend(page.hits.iter().map(|h| h.asset_id));
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, want);
 }
 
 #[test]
@@ -384,6 +437,7 @@ fn pinning_survives_eviction_pressure_end_to_end() {
         max_object_bytes: 60_000,
         max_partial_bytes: 100_000,
         stale_partial_ms: 1_000_000,
+        max_ram_bytes: 512 * 1024,
     };
     let mut client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
 
@@ -441,6 +495,120 @@ fn dependency_closure_bounded_and_verified() {
         .resolve_closure(&root_ref, ClosureBudget { max_assets: 10, max_depth: 1 })
         .unwrap_err();
     assert!(matches!(err, ClientError::OverBudget { what: "closure depth", .. }), "{err:?}");
+}
+
+/// The bridge for tools that take a FILE rather than bytes (an AO bake, a
+/// rig pass, an OS drag-out): a verified on-disk path for catalog content.
+/// It stays thin-client-legal because the object is named by its digest and
+/// re-hashed before the path is handed out — a materialisation of the
+/// revision, never a second source of truth.
+#[test]
+fn blob_path_materialises_verified_content_and_re_fetches_a_corrupted_object() {
+    let mut store = FixtureStore::default();
+    let payload = vec![7u8; 60_000];
+    let blob = store.add_blob(payload.clone());
+    let other = store.add_blob(b"a second, different object".to_vec());
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut client = AssetClient::connect(config("blob_path"), fixture.endpoints(), None).unwrap();
+
+    let path = client.blob_path(&blob, Some(payload.len() as u64)).unwrap();
+    assert!(path.is_file(), "the object is on disk at {}", path.display());
+    assert_eq!(std::fs::read(&path).unwrap(), payload, "and it is the real payload");
+    // Digest-keyed: the same blob resolves to the same path, and a second
+    // call is served from the cache rather than the network.
+    assert_eq!(client.blob_path(&blob, None).unwrap(), path);
+    assert_ne!(client.blob_path(&other, None).unwrap(), path, "distinct objects, distinct paths");
+
+    // A path is only handed out for bytes that still hash to the digest: a
+    // corrupted object is removed and re-fetched, never returned.
+    std::fs::write(&path, b"tampered").unwrap();
+    let again = client.blob_path(&blob, Some(payload.len() as u64)).unwrap();
+    assert_eq!(std::fs::read(&again).unwrap(), payload, "corruption re-fetched, not served");
+
+    // Asking for a path does not spend the RAM budget on a file the caller
+    // is about to read from disk.
+    client.clear_ram_cache();
+    let cold = client.blob_path(&blob, None).unwrap();
+    assert_eq!(std::fs::read(cold).unwrap(), payload);
+    assert_eq!(client.ram_cache_bytes().0, 0, "a path fetch stays out of RAM");
+}
+
+#[test]
+fn ram_cache_evicts_under_its_budget_and_refetches_verified_after_forget() {
+    // Five blobs, a budget that fits two: the client must stay inside it
+    // and still answer every fetch with verified bytes.
+    let mut store = FixtureStore::default();
+    let payloads: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i + 1; 40_000]).collect();
+    let blobs: Vec<BlobId> = payloads
+        .iter()
+        .map(|bytes| store.add_blob(bytes.clone()))
+        .collect();
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut cfg = config("ram_budget");
+    cfg.cache.max_ram_bytes = 100_000;
+    let mut client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
+
+    for (blob, expect) in blobs.iter().zip(&payloads) {
+        let got = client.fetch_blob_bytes(blob, Some(expect.len() as u64)).unwrap();
+        assert_eq!(&got, expect, "every fetch is the real, verified payload");
+        let (used, budget) = client.ram_cache_bytes();
+        assert!(used <= budget, "ram cache blew its budget: {used} > {budget}");
+    }
+    let (used, budget) = client.ram_cache_bytes();
+    assert_eq!(budget, 100_000);
+    assert!(used <= budget && used > 0, "some residency, under budget: {used}");
+
+    // Forget drops residency; the next fetch re-materialises and re-verifies
+    // from the server (or the disk cache) rather than serving a ghost.
+    let hot = &blobs[4];
+    assert!(client.forget_blob(hot), "the newest fetch was resident");
+    let (after_forget, _) = client.ram_cache_bytes();
+    assert!(after_forget < used, "forget freed its bytes: {after_forget} !< {used}");
+    let again = client.fetch_blob_bytes(hot, Some(payloads[4].len() as u64)).unwrap();
+    assert_eq!(&again, &payloads[4], "re-fetch is verified, not a ghost");
+
+    // Clearing empties it without breaking any later fetch.
+    client.clear_ram_cache();
+    assert_eq!(client.ram_cache_bytes().0, 0);
+    let cold = client.fetch_blob_bytes(&blobs[0], Some(payloads[0].len() as u64)).unwrap();
+    assert_eq!(&cold, &payloads[0]);
+}
+
+#[test]
+fn ram_cache_budget_holds_while_lanes_fetch_together() {
+    // Lane clones share one RAM cache. Eight threads pulling the same six
+    // blobs must never push it past the budget.
+    let mut store = FixtureStore::default();
+    let payloads: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i + 9; 30_000]).collect();
+    let blobs: Vec<BlobId> = payloads
+        .iter()
+        .map(|bytes| store.add_blob(bytes.clone()))
+        .collect();
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut cfg = config("ram_lanes");
+    cfg.cache.max_ram_bytes = 90_000;
+    let client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
+
+    std::thread::scope(|scope| {
+        for lane in 0..8 {
+            let mut lane_client = client.lane_clone();
+            let blobs = &blobs;
+            let payloads = &payloads;
+            scope.spawn(move || {
+                for round in 0..6 {
+                    let i = (lane + round) % blobs.len();
+                    let got = lane_client
+                        .fetch_blob_bytes(&blobs[i], Some(payloads[i].len() as u64))
+                        .unwrap();
+                    assert_eq!(got, payloads[i]);
+                    let (used, budget) = lane_client.ram_cache_bytes();
+                    assert!(used <= budget, "lane saw {used} > {budget}");
+                }
+            });
+        }
+    });
+    let (used, budget) = client.ram_cache_bytes();
+    assert!(used <= budget, "after the lanes: {used} > {budget}");
 }
 
 #[test]
@@ -563,7 +731,10 @@ fn runtime_states_are_explicit() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(search_slot.state.ready(), Some(&10u64));
-    // Requests execute in submission order.
+    // Lanes run requests in parallel, so completion order across requests is
+    // NOT a guarantee any more (tests/runtime_lanes.rs pins what is): every
+    // submitted request starts exactly once, and its own events stay ordered.
+    started_order.sort_unstable();
     assert_eq!(started_order, vec![search_id, fail_id, manifest_id]);
 
     runtime.shutdown();
@@ -707,6 +878,7 @@ fn publish_artifact_roundtrips_manifest_blobs_alias_and_annotation() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.alias = Some(AssetAlias::from_str("gen/neon-drift").unwrap());
@@ -789,20 +961,35 @@ fn runtime_cancel_skips_queued_and_aborts_in_flight() {
     let cfg = config("cancel_rt");
     let cache_root = cfg.cache_root.clone();
     let client = AssetClient::connect(cfg, fx.endpoints(), None).unwrap();
-    let mut runtime = ClientRuntime::start(client).unwrap();
+    // This test is about the QUEUE: one worker per lane and both fetches
+    // pinned to the same lane, so the second is provably still queued when
+    // it is cancelled. (With the default pool it would simply run in
+    // parallel — which is the point of the lanes, proven in
+    // tests/runtime_lanes.rs.)
+    let mut runtime = ClientRuntime::start_with(
+        client,
+        RuntimeConfig { fast_workers: 1, bulk_workers: 1, ..RuntimeConfig::default_v1() },
+    )
+    .unwrap();
     let id_big = runtime
-        .submit(ClientRequest::FetchBlob {
-            blob: big_id,
-            expected_len: Some(big.len() as u64),
-            pin: true,
-        })
+        .submit_with(
+            ClientRequest::FetchBlob {
+                blob: big_id,
+                expected_len: Some(big.len() as u64),
+                pin: true,
+            },
+            SubmitOptions::bulk(),
+        )
         .unwrap();
     let id_queued = runtime
-        .submit(ClientRequest::FetchBlob {
-            blob: small_id,
-            expected_len: Some(small.len() as u64),
-            pin: true,
-        })
+        .submit_with(
+            ClientRequest::FetchBlob {
+                blob: small_id,
+                expected_len: Some(small.len() as u64),
+                pin: true,
+            },
+            SubmitOptions::bulk(),
+        )
         .unwrap();
     // Give the worker time to start the drip transfer, then cancel BOTH:
     // the in-flight one aborts between chunks, the queued one never starts.
@@ -966,7 +1153,7 @@ fn discovery_listeners_share_the_port_on_one_host() {
 // import + immutable derived-variant routes
 //
 // Real-process coverage of these routes belongs in the Asset Server crate
-// (`libs/game/asset-store` e2e). This suite stays hermetic: a local TCP fixture
+// (`libs/asset/store` e2e). This suite stays hermetic: a local TCP fixture
 // that speaks the wire contract. A clean-checkout `cargo test` must not
 // require a prebuilt `makepad-asset-store` binary.
 // ---------------------------------------------------------------------------
@@ -1671,6 +1858,7 @@ fn fixture_import() -> ImportManifest {
                     width: 512,
                     height: 512,
                     byte_len: preview.len() as u64,
+                    views: Vec::new(),
                 },
             }),
             metrics: Metrics {
@@ -1737,6 +1925,7 @@ fn fixture_thumb_variant(base: AssetRevisionRef) -> DerivedVariantManifest {
             width: 512,
             height: 512,
             byte_len: 450,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: 450,
@@ -2179,4 +2368,132 @@ fn source_page_over_ceiling_is_refused() {
         }
         other => panic!("over-ceiling source page must refuse, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// side-channels: stems + lyrics attached to a published audio asset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn side_channels_attach_reuse_blobs_and_are_idempotent() {
+    use makepad_asset_client::side_channels::{SideChannelFile, SideChannelOutcome};
+    use makepad_asset_client::{PublishFile, PublishRequest, PublishThumbnail};
+    use makepad_asset_data::{AssetKind, MediaType, ThumbnailMedia};
+
+    let token = format!("mpat_{}", "6d".repeat(32));
+    let fx = FixtureServer::start(
+        FixtureStore::default(),
+        FixtureOptions { auth_token: Some(token.clone()), ..FixtureOptions::default() },
+    );
+    let mut cfg = config("side_channels");
+    cfg.token = Some(token);
+    let mut client = AssetClient::connect(cfg, fx.endpoints(), None).expect("connect");
+
+    // A published audio track.
+    let audio = payload(41, 9_000);
+    let request = PublishRequest::new(
+        "music",
+        AssetKind::Audio,
+        "Test Track",
+        PublishFile {
+            bytes: audio.clone(),
+            media: MediaType::Mp3,
+            role: FileRole::Audio,
+            media_millis: 187_000,
+            dims: None,
+        },
+        PublishThumbnail {
+            bytes: payload(42, 900),
+            media: ThumbnailMedia::Png,
+            width: 512,
+            height: 512,
+            views: Vec::new(),
+        },
+    );
+    let published = client.publish_artifact(&request).expect("publish audio");
+
+    // Attach the four stems and the lyrics.
+    let stems: Vec<Vec<u8>> = (0..4).map(|i| payload(50 + i, 4_000 + i as usize)).collect();
+    let lyrics = br#"{"format":"vj-lyrics","version":4,"lines":[]}"#.to_vec();
+    let files = |stems: &[Vec<u8>], lyrics: &[u8]| -> Vec<SideChannelFile> {
+        let mut out: Vec<SideChannelFile> = FileRole::STEMS
+            .iter()
+            .zip(stems)
+            .map(|(role, bytes)| SideChannelFile {
+                role: *role,
+                media: MediaType::Ogg,
+                bytes: bytes.clone(),
+            })
+            .collect();
+        out.push(SideChannelFile {
+            role: FileRole::Lyrics,
+            media: MediaType::Json,
+            bytes: lyrics.to_vec(),
+        });
+        out
+    };
+    let outcome = client
+        .publish_side_channel_files(&published.asset_id, files(&stems, &lyrics))
+        .expect("attach side channels");
+    let revision = match outcome {
+        SideChannelOutcome::Published { revision } => revision,
+        other => panic!("expected a publish, got {other:?}"),
+    };
+    assert_ne!(revision, published.revision, "a NEW revision is the head");
+
+    // The head advanced and the manifest carries every role, with the audio
+    // blob REUSED (same id, no second upload of its bytes).
+    let detail = client.asset_detail(&published.asset_id).expect("detail");
+    assert_eq!(detail.latest_published().unwrap().revision, revision);
+    let manifest = client.fetch_asset_manifest(&revision).expect("manifest");
+    for role in FileRole::STEMS {
+        assert!(manifest.files.iter().any(|f| f.role == role), "{role:?} present");
+    }
+    assert!(manifest.files.iter().any(|f| f.role == FileRole::Lyrics));
+    let audio_file =
+        manifest.files.iter().find(|f| f.role == FileRole::Audio).expect("audio kept");
+    assert_eq!(audio_file.blob, published.artifact_blob, "audio blob reused");
+    // Total bytes still exactly the sum of the parts (validate enforces it,
+    // but assert the value moved).
+    let sum: u64 = manifest.files.iter().map(|f| f.byte_len).sum::<u64>()
+        + manifest.thumbnail.as_ref().map(|t| t.byte_len).unwrap_or(0);
+    assert_eq!(manifest.metrics.total_bytes, sum);
+
+    // A stem blob round-trips through the verified cache path.
+    let stem_file =
+        manifest.files.iter().find(|f| f.role == FileRole::StemDrums).expect("drums");
+    let bytes =
+        client.fetch_blob_bytes(&stem_file.blob, Some(stem_file.byte_len)).expect("stem blob");
+    assert_eq!(bytes, stems[0]);
+
+    // Idempotence: a second identical attach is a no-op reporting the head.
+    let again = client
+        .publish_side_channel_files(&published.asset_id, files(&stems, &lyrics))
+        .expect("re-attach");
+    assert_eq!(again, SideChannelOutcome::AlreadyPresent { revision });
+
+    // A PARTIAL stem set refuses locally (contract: all four or none) on a
+    // FRESH asset — on the analysed one above it would be absorbed by role
+    // idempotence instead, which is also what a re-bake relies on.
+    let mut fresh = request.clone();
+    fresh.title = "Second Track".into();
+    fresh.artifact.bytes[0] ^= 0x55;
+    let second = client.publish_artifact(&fresh).expect("publish second audio");
+    let posts_before = fx.log.requests.lock().unwrap().len();
+    let partial: Vec<SideChannelFile> = FileRole::STEMS[..3]
+        .iter()
+        .zip(&stems)
+        .map(|(role, bytes)| SideChannelFile {
+            role: *role,
+            media: MediaType::Ogg,
+            bytes: bytes.iter().map(|b| b ^ 1).collect(),
+        })
+        .collect();
+    let err = client.publish_side_channel_files(&second.asset_id, partial);
+    assert!(err.is_err(), "partial stems must refuse: {err:?}");
+    let log = fx.log.requests.lock().unwrap();
+    assert!(
+        !log[posts_before..].iter().any(|r| r.method == "POST" && r.target.contains("/revisions")),
+        "no staging happened for the refused set"
+    );
 }

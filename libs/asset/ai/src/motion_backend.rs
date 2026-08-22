@@ -124,7 +124,18 @@ impl MotionBackend {
 /// Validates the subprocess output against the motion contract: a GLB that
 /// still carries the skin AND now carries animations. The engine parser is
 /// the deep validator; this catches "retarget wrote the rig back unchanged".
+/// Clip name of a prompt-mode (`motion_mode: "prompt"`) take: ONE finite
+/// performance generated from the request prompt. Viewers without a
+/// matching locomotion name fall back to clip 0, so it plays as the idle.
+pub const MOTION_PROMPT_CLIP_NAME: &str = "prompt";
+
+/// The playable contract: every locomotion clip present and well-formed.
 pub fn check_motion_output(bytes: &[u8]) -> Result<(), AssetAiError> {
+    check_motion_output_clips(bytes, &MOTION_CLIP_NAMES)
+}
+
+/// Structural check of a motion GLB against an explicit required clip set.
+pub fn check_motion_output_clips(bytes: &[u8], required_clips: &[&str]) -> Result<(), AssetAiError> {
     let Some(root) = glb_json_value(bytes) else {
         return Err(AssetAiError::Backend(
             "motion output is not a structurally valid GLB".to_string(),
@@ -143,7 +154,7 @@ pub fn check_motion_output(bytes: &[u8]) -> Result<(), AssetAiError> {
             "motion output GLB has no animations".to_string(),
         ));
     };
-    for required in MOTION_CLIP_NAMES {
+    for required in required_clips.iter().copied() {
         let Some(animation) = animations.iter().find(|animation| {
             matches!(animation.key("name"), Some(JsonValue::String(name)) if name.eq_ignore_ascii_case(required))
         }) else {

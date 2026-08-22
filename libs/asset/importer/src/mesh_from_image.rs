@@ -752,6 +752,7 @@ mod tests {
                 media: ThumbnailMedia::Png,
                 width: 512,
                 height: 512,
+                views: Vec::new(),
             },
         );
         request.rights = PublishRights::declared(

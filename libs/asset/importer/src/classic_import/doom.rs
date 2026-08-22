@@ -2,7 +2,6 @@
 
 use super::shared::*;
 use makepad_asset_data::AssetKind;
-use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -110,8 +109,22 @@ pub(crate) fn convert_wad(
                             let rel_path = format!("{key}.glb");
                             let dest = staged.join(&rel_path);
                             if std::fs::write(&dest, &mesh.glb).is_ok() {
-                                if let Some(spawn) = doom_map_spawn(&wad.lumps, map_name) {
-                                    write_spawn_sidecar(&dest, spawn);
+                                if let Some(mut nav) = doom_map_nav(&wad.lumps, map_name) {
+                                    // Doors travel in the GLB; the sidecar
+                                    // (and through it the catalog anchors)
+                                    // names them and their two heights.
+                                    let as_nav = |d: &DoorMeta| {
+                                        crate::world_nav::NavDoor::vertical(
+                                            d.name.clone(),
+                                            d.centre,
+                                            d.closed_y,
+                                            d.open_y,
+                                        )
+                                    };
+                                    nav.doors = mesh.doors.iter().map(as_nav).collect();
+                                    nav.lifts = mesh.lifts.iter().map(as_nav).collect();
+                                    nav.teleports = mesh.teleporters.clone();
+                                    write_nav_sidecar(&dest, &nav);
                                 }
                                 let place = doom_map_place(
                                     &wad.lumps,
@@ -325,89 +338,392 @@ pub(crate) fn lump_by_name_after<'a>(lumps: &'a [WadLump], map: &str, name: &str
 pub(crate) struct MapMesh {
     pub glb: Vec<u8>,
     pub tris: usize,
+    /// One entry per exported `door_N` node, for the catalog anchors.
+    pub doors: Vec<DoorMeta>,
+    /// Same, for `lift_N` (its `open_y` is the DOWN floor).
+    pub lifts: Vec<DoorMeta>,
+    pub teleporters: Vec<crate::world_nav::NavTeleport>,
 }
 
+/// What the catalog publishes about a door without opening the GLB.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DoorMeta {
+    pub name: String,
+    /// Sector centre at the CLOSED ceiling, engine space (metres, Y-up).
+    pub centre: [f32; 3],
+    pub closed_y: f32,
+    pub open_y: f32,
+}
+
+/// Faces a map leaves open to the sky. They keep their geometry: the
+/// renderer lifts them out of the static stream and direction-maps them.
+#[derive(Default)]
+pub(crate) struct SkyFaces {
+    pub positions: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+impl SkyFaces {
+    pub fn is_empty(&self) -> bool {
+        self.indices.len() < 3
+    }
+}
+
+/// The sky node has its own full-image material, so its UVs map straight
+/// onto the sky picture rather than into the level atlas.
+pub(crate) const SKY_SLOT: AtlasSlot = AtlasSlot {
+    uv: [0.0, 0.0, 1.0, 1.0],
+    w: 256,
+    h: 128,
+};
+
+/// The map's VERTEXES as floats, for the passes that only need points.
+pub(crate) fn map_verts(lumps: &[WadLump], map: &str) -> Vec<[f32; 2]> {
+    let Some(vertexes) = lump_by_name_after(lumps, map, "VERTEXES") else {
+        return Vec::new();
+    };
+    (0..vertexes.len() / 4)
+        .map(|i| {
+            [
+                i16_le(vertexes, i * 4) as f32,
+                i16_le(vertexes, i * 4 + 2) as f32,
+            ]
+        })
+        .collect()
+}
+
+/// Linedef specials that end the level: normal exit (11 switch, 52 walk-over)
+/// and secret exit (51 switch, 124 walk-over).
+pub(crate) const EXIT_SPECIALS: &[(u16, bool)] = &[(11, false), (52, false), (51, true), (124, true)];
+
+/// Thing types of the keys a locked door asks for.
+pub(crate) fn doom_key_name(thing_type: u16) -> Option<&'static str> {
+    match thing_type {
+        5 => Some("key_blue"),
+        6 => Some("key_yellow"),
+        13 => Some("key_red"),
+        38 => Some("key_red"),
+        39 => Some("key_yellow"),
+        40 => Some("key_blue"),
+        _ => None,
+    }
+}
+
+/// Which key a keyed door special demands (`EV_VerticalDoor`'s lock check).
+pub(crate) fn doom_door_key(special: u16) -> Option<&'static str> {
+    match special {
+        26 | 32 => Some("blue"),
+        27 | 34 => Some("yellow"),
+        28 | 33 => Some("red"),
+        _ => None,
+    }
+}
+
+/// Named points a navigator needs but cannot see: the level exit and the
+/// keys that unlock its doors. Positions are eye height above the floor.
+pub(crate) fn doom_markers(
+    lumps: &[WadLump],
+    map: &str,
+    verts: &[[f32; 2]],
+) -> Vec<crate::world_nav::NavStart> {
+    use crate::world_nav::NavStart;
+    let mut out = Vec::new();
+    let (Some(linedefs), Some(sectors), Some(sidedefs)) = (
+        lump_by_name_after(lumps, map, "LINEDEFS"),
+        lump_by_name_after(lumps, map, "SECTORS"),
+        lump_by_name_after(lumps, map, "SIDEDEFS"),
+    ) else {
+        return out;
+    };
+    let vertexes = lump_by_name_after(lumps, map, "VERTEXES").unwrap_or(&[]);
+    let n_vert = verts.len();
+    let mut seen_exit = [false, false];
+    for li in 0..linedefs.len() / 14 {
+        let lo = li * 14;
+        let special = u16_le(linedefs, lo + 6);
+        let Some(&(_, secret)) = EXIT_SPECIALS.iter().find(|(s, _)| *s == special) else {
+            continue;
+        };
+        if seen_exit[usize::from(secret)] {
+            continue;
+        }
+        let v1 = u16_le(linedefs, lo) as usize;
+        let v2 = u16_le(linedefs, lo + 2) as usize;
+        if v1 >= n_vert || v2 >= n_vert {
+            continue;
+        }
+        let (a, b) = (verts[v1], verts[v2]);
+        let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+        let floor = doom_floor_at(sectors, linedefs, sidedefs, vertexes, mid[0], mid[1]);
+        // Face INTO the line from its front side: Doom's front is to the
+        // right of v1->v2, so the press direction is its inward normal.
+        let yaw = (-(b[0] - a[0])).atan2(b[1] - a[1]);
+        seen_exit[usize::from(secret)] = true;
+        out.push(NavStart {
+            name: if secret { "exit_secret".into() } else { "exit".into() },
+            pos: [
+                mid[0] * DOOM_UNIT,
+                floor + DOOM_VIEW_HEIGHT * DOOM_UNIT,
+                mid[1] * DOOM_UNIT,
+            ],
+            yaw,
+            pitch: 0.0,
+        });
+    }
+    if let Some(things) = lump_by_name_after(lumps, map, "THINGS") {
+        let mut seen: Vec<&str> = Vec::new();
+        for i in 0..things.len() / 10 {
+            let o = i * 10;
+            let Some(name) = doom_key_name(u16_le(things, o + 6)) else {
+                continue;
+            };
+            if seen.contains(&name) {
+                continue;
+            }
+            seen.push(name);
+            let (tx, ty) = (i16_le(things, o) as f32, i16_le(things, o + 2) as f32);
+            let floor = doom_floor_at(sectors, linedefs, sidedefs, vertexes, tx, ty);
+            out.push(NavStart {
+                name: name.into(),
+                pos: [
+                    tx * DOOM_UNIT,
+                    floor + DOOM_VIEW_HEIGHT * DOOM_UNIT,
+                    ty * DOOM_UNIT,
+                ],
+                yaw: std::f32::consts::FRAC_PI_2
+                    + (u16_le(things, o + 4) as f32).to_radians(),
+                pitch: 0.0,
+            });
+        }
+    }
+    out
+}
+
+/// Doom's sky column at view angle 0 is column 0 (`R_InitSkyMap`:
+/// `angle >> ANGLETOSKYSHIFT`), and this exporter maps Doom +X to GLB +X /
+/// Doom +Y to GLB +Z, so the renderer's `atan2(dir.x, dir.z)` already lands
+/// on column 0 when the player faces Doom east. No phase shift is needed —
+/// stated rather than omitted, because "no offset" is a fact about the axis
+/// mapping, not a default.
+pub(crate) const DOOM_SKY_OFFSET: f32 = 0.0;
+
+/// Doom's sky is a 256-wide picture wrapped four times around the horizon
+/// (`R_InitSkyMap`: the 1024-unit turn over a 256-texel image).
+pub(crate) const DOOM_SKY_REPEAT: f32 = 4.0;
+
+/// Which SKY lump a map uses: Doom 1 by episode (`E2M4` -> SKY2), Doom 2 by
+/// map number (1-11 SKY1, 12-20 SKY2, 21+ SKY3). Freedoom follows both.
+pub(crate) fn doom_sky_lump(map: &str) -> String {
+    let up = map.to_ascii_uppercase();
+    let bytes = up.as_bytes();
+    if bytes.first() == Some(&b'E') && bytes.len() >= 4 && bytes[2] == b'M' {
+        let episode = (bytes[1] as char).to_digit(10).unwrap_or(1).clamp(1, 4);
+        return format!("SKY{episode}");
+    }
+    if let Some(rest) = up.strip_prefix("MAP") {
+        let n: u32 = rest.parse().unwrap_or(1);
+        return match n {
+            0..=11 => "SKY1".into(),
+            12..=20 => "SKY2".into(),
+            _ => "SKY3".into(),
+        };
+    }
+    "SKY1".into()
+}
+
+/// Doom's `LIGHTSEGSHIFT` step: one light level of the software renderer's
+/// 16-step table, the unit its wall fake-contrast nudge works in.
+pub(crate) const DOOM_LIGHT_STEP: i16 = 16;
+
+/// A sector's light as a linear COLOR_0 factor. Doom's `lightlevel` is
+/// 0..255 over its 16-level ramp; the distance fade stays a renderer matter.
+/// The floor keeps a pitch-black sector readable instead of a void.
+pub(crate) fn doom_light_rgb(lightlevel: i16) -> [f32; 3] {
+    let f = (lightlevel.clamp(0, 255) as f32 / 255.0).clamp(0.06, 1.0);
+    [f, f, f]
+}
+
+/// Doom's fake contrast (`R_RenderSegLoop`): a wall running east-west reads
+/// one light level darker, one running north-south one level brighter, so
+/// corners separate without a single real light.
+pub(crate) fn doom_wall_light(lightlevel: i16, p1: [f32; 2], p2: [f32; 2]) -> [f32; 3] {
+    let nudge = if (p1[1] - p2[1]).abs() < 1e-4 {
+        -DOOM_LIGHT_STEP
+    } else if (p1[0] - p2[0]).abs() < 1e-4 {
+        DOOM_LIGHT_STEP
+    } else {
+        0
+    };
+    doom_light_rgb(lightlevel.saturating_add(nudge))
+}
+
+/// Top `colors` up to `n` vertices with `rgb` — the emitters push positions,
+/// the caller records what light those vertices were lit by.
+pub(crate) fn fill_colors(colors: &mut Vec<[f32; 3]>, n: usize, rgb: [f32; 3]) {
+    while colors.len() < n {
+        colors.push(rgb);
+    }
+}
+
+/// Metres per Doom map unit in every converted Doom GLB.
+pub(crate) const DOOM_UNIT: f32 = 1.0 / 64.0;
+/// Doom `VIEWHEIGHT` — the eye above the floor, in map units.
+pub(crate) const DOOM_VIEW_HEIGHT: f32 = 41.0;
+/// Doom `MAXSTEPMOVE` — the tallest ledge a walker may climb, in map units.
+pub(crate) const DOOM_STEP_HEIGHT: f32 = 24.0;
+
 pub(crate) fn doom_map_spawn(lumps: &[WadLump], map: &str) -> Option<WorldSpawn> {
+    let nav = doom_map_nav(lumps, map)?;
+    let start = nav.primary()?;
+    Some(WorldSpawn {
+        pos: start.pos,
+        yaw: start.yaw,
+        pitch: start.pitch,
+    })
+}
+
+/// Every player/deathmatch start of a map, plus the floor under the primary
+/// one and the engine's eye/step constants — the facts a walker needs to
+/// stand in the converted GLB instead of floating over it.
+///
+/// THINGS type 1 is player 1 (the primary start), 2/3/4 the coop players,
+/// 11 a deathmatch spot; each carries its facing angle in degrees.
+pub(crate) fn doom_map_nav(lumps: &[WadLump], map: &str) -> Option<crate::world_nav::WorldNav> {
+    use crate::world_nav::{deathmatch_name, player_start_name, NavStart, WorldNav};
     let things = lump_by_name_after(lumps, map, "THINGS")?;
     let sectors = lump_by_name_after(lumps, map, "SECTORS")?;
     let linedefs = lump_by_name_after(lumps, map, "LINEDEFS")?;
     let sidedefs = lump_by_name_after(lumps, map, "SIDEDEFS")?;
-    let n_sec = sectors.len() / 26;
-    let n_line = linedefs.len() / 14;
-    let n_side = sidedefs.len() / 30;
+    let vertexes = lump_by_name_after(lumps, map, "VERTEXES")?;
     let n = things.len() / 10;
+    let mut primary: Option<NavStart> = None;
+    let mut coop: Vec<NavStart> = Vec::new();
+    let mut deathmatch: Vec<NavStart> = Vec::new();
+    let mut floor_y = None;
     for i in 0..n {
         let o = i * 10;
         let typ = u16_le(things, o + 6);
-        if typ != 1 {
+        let is_coop = matches!(typ, 1..=4);
+        if !is_coop && typ != 11 {
             continue;
         }
         let tx = i16_le(things, o) as f32;
         let ty = i16_le(things, o + 2) as f32;
         let angle = u16_le(things, o + 4) as f32;
-        let mut floor_z = if n_sec > 0 {
-            i16_le(sectors, 0) as f32 / 64.0
-        } else {
-            0.0
-        };
-        // Nearest linedef's sidedef sector — sector 0 is often a pit.
-        let mut best_d = f32::INFINITY;
-        for li in 0..n_line {
-            let lo = li * 14;
-            let v1 = u16_le(linedefs, lo) as usize;
-            let v2 = u16_le(linedefs, lo + 2) as usize;
-            let vertexes = lump_by_name_after(lumps, map, "VERTEXES")?;
-            let n_vert = vertexes.len() / 4;
-            if v1 >= n_vert || v2 >= n_vert {
-                continue;
-            }
-            let ax = i16_le(vertexes, v1 * 4) as f32;
-            let ay = i16_le(vertexes, v1 * 4 + 2) as f32;
-            let bx = i16_le(vertexes, v2 * 4) as f32;
-            let by = i16_le(vertexes, v2 * 4 + 2) as f32;
-            let dx = bx - ax;
-            let dy = by - ay;
-            let len2 = dx * dx + dy * dy;
-            if len2 < 1.0 {
-                continue;
-            }
-            let t = ((tx - ax) * dx + (ty - ay) * dy) / len2;
-            let t = t.clamp(0.0, 1.0);
-            let px = ax + dx * t;
-            let py = ay + dy * t;
-            let d = (tx - px) * (tx - px) + (ty - py) * (ty - py);
-            if d >= best_d {
-                continue;
-            }
-            let cross = (bx - ax) * (ty - ay) - (by - ay) * (tx - ax);
-            // Doom's front side is where the point is right of the line
-            // (cross < 0, same convention as R_PointOnSide).
-            let side = if cross < 0.0 {
-                u16_le(linedefs, lo + 10)
-            } else {
-                u16_le(linedefs, lo + 12)
-            };
-            if side == 0xFFFF || side as usize >= n_side {
-                continue;
-            }
-            let sec = u16_le(sidedefs, side as usize * 30 + 28) as usize;
-            if sec >= n_sec {
-                continue;
-            }
-            best_d = d;
-            floor_z = i16_le(sectors, sec * 26) as f32 / 64.0;
-        }
-        let x = tx / 64.0;
-        let y = ty / 64.0;
-        let yaw = std::f32::consts::FRAC_PI_2 + angle.to_radians();
-        return Some(WorldSpawn {
-            // Doom VIEWHEIGHT = 41 map units.
-            pos: [x, floor_z + 41.0 / 64.0, y],
-            yaw,
+        let floor_z = doom_floor_at(sectors, linedefs, sidedefs, vertexes, tx, ty);
+        let start = NavStart {
+            // Named below, once the map order is known.
+            name: String::new(),
+            pos: [
+                tx * DOOM_UNIT,
+                floor_z + DOOM_VIEW_HEIGHT * DOOM_UNIT,
+                ty * DOOM_UNIT,
+            ],
+            yaw: std::f32::consts::FRAC_PI_2 + angle.to_radians(),
             pitch: 0.0,
-        });
+        };
+        match (is_coop, typ == 1 && primary.is_none()) {
+            // Player 1 leads however late in the lump it appears.
+            (true, true) => {
+                floor_y = Some(floor_z);
+                primary = Some(start);
+            }
+            (true, false) => coop.push(start),
+            (false, _) => deathmatch.push(start),
+        }
     }
-    None
+    if primary.is_none() && coop.is_empty() && deathmatch.is_empty() {
+        return None;
+    }
+    let mut starts = Vec::with_capacity(1 + coop.len() + deathmatch.len());
+    for (i, mut s) in primary.into_iter().chain(coop).enumerate() {
+        s.name = player_start_name(i);
+        starts.push(s);
+    }
+    for (i, mut s) in deathmatch.into_iter().enumerate() {
+        s.name = deathmatch_name(i);
+        starts.push(s);
+    }
+    let floor_y = floor_y.unwrap_or_else(|| {
+        starts[0].pos[1] - DOOM_VIEW_HEIGHT * DOOM_UNIT
+    });
+    Some(WorldNav {
+        starts,
+        floor_y: Some(floor_y),
+        step_height: Some(DOOM_STEP_HEIGHT * DOOM_UNIT),
+        eye_height: Some(DOOM_VIEW_HEIGHT * DOOM_UNIT),
+        doors: Vec::new(),
+        lifts: Vec::new(),
+        teleports: Vec::new(),
+        markers: doom_markers(lumps, map, &map_verts(lumps, map)),
+    })
+}
+
+/// Floor height (metres) under a map point: the sector behind the nearest
+/// linedef's facing sidedef. Sector 0 is often a pit, so it is only the
+/// fallback when no linedef resolves.
+fn doom_floor_at(
+    sectors: &[u8],
+    linedefs: &[u8],
+    sidedefs: &[u8],
+    vertexes: &[u8],
+    tx: f32,
+    ty: f32,
+) -> f32 {
+    let n_sec = sectors.len() / 26;
+    let n_line = linedefs.len() / 14;
+    let n_side = sidedefs.len() / 30;
+    let n_vert = vertexes.len() / 4;
+    let mut floor_z = if n_sec > 0 {
+        i16_le(sectors, 0) as f32 * DOOM_UNIT
+    } else {
+        0.0
+    };
+    let mut best_d = f32::INFINITY;
+    for li in 0..n_line {
+        let lo = li * 14;
+        let v1 = u16_le(linedefs, lo) as usize;
+        let v2 = u16_le(linedefs, lo + 2) as usize;
+        if v1 >= n_vert || v2 >= n_vert {
+            continue;
+        }
+        let ax = i16_le(vertexes, v1 * 4) as f32;
+        let ay = i16_le(vertexes, v1 * 4 + 2) as f32;
+        let bx = i16_le(vertexes, v2 * 4) as f32;
+        let by = i16_le(vertexes, v2 * 4 + 2) as f32;
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1.0 {
+            continue;
+        }
+        let t = (((tx - ax) * dx + (ty - ay) * dy) / len2).clamp(0.0, 1.0);
+        let px = ax + dx * t;
+        let py = ay + dy * t;
+        let d = (tx - px) * (tx - px) + (ty - py) * (ty - py);
+        if d >= best_d {
+            continue;
+        }
+        let cross = (bx - ax) * (ty - ay) - (by - ay) * (tx - ax);
+        // Doom's front side is where the point is right of the line
+        // (cross < 0, same convention as R_PointOnSide).
+        let side = if cross < 0.0 {
+            u16_le(linedefs, lo + 10)
+        } else {
+            u16_le(linedefs, lo + 12)
+        };
+        if side == 0xFFFF || side as usize >= n_side {
+            continue;
+        }
+        let sec = u16_le(sidedefs, side as usize * 30 + 28) as usize;
+        if sec >= n_sec {
+            continue;
+        }
+        best_d = d;
+        floor_z = i16_le(sectors, sec * 26) as f32 * DOOM_UNIT;
+    }
+    floor_z
 }
 
 pub(crate) fn doom_map_place(
@@ -457,7 +773,33 @@ pub(crate) fn doom_map_place(
     }
 }
 
+/// Metres per Quake map unit in every converted Quake GLB.
+pub(crate) const QUAKE_UNIT: f32 = 1.0 / 32.0;
+/// Quake `DEFAULT_VIEWHEIGHT` above the entity origin, in map units.
+pub(crate) const QUAKE_VIEW_OFFSET: f32 = 22.0;
+/// The player bbox reaches 24 units below its origin, so a spawn entity sits
+/// that far above the floor it was dropped onto.
+pub(crate) const QUAKE_ORIGIN_ABOVE_FLOOR: f32 = 24.0;
+/// Quake `STEPSIZE` — the tallest ledge a walker may climb, in map units.
+pub(crate) const QUAKE_STEP_HEIGHT: f32 = 18.0;
+
 pub(crate) fn quake_bsp_spawn(bytes: &[u8]) -> Option<WorldSpawn> {
+    let nav = quake_bsp_nav(bytes)?;
+    let start = nav.primary()?;
+    Some(WorldSpawn {
+        pos: start.pos,
+        yaw: start.yaw,
+        pitch: start.pitch,
+    })
+}
+
+/// Every `info_player_*` entity of a Quake BSP, plus the floor under the
+/// primary one and the engine's eye/step constants.
+///
+/// `info_player_start` is the primary; `info_player_coop` follows as
+/// `player_start_2`…; `info_player_deathmatch` becomes `deathmatch_N`.
+pub(crate) fn quake_bsp_nav(bytes: &[u8]) -> Option<crate::world_nav::WorldNav> {
+    use crate::world_nav::{deathmatch_name, player_start_name, NavStart, WorldNav};
     if bytes.len() < 4 + 8 {
         return None;
     }
@@ -467,57 +809,30 @@ pub(crate) fn quake_bsp_spawn(bytes: &[u8]) -> Option<WorldSpawn> {
         return None;
     }
     let text = std::str::from_utf8(&bytes[off..off + len]).ok()?;
-    let mut best: Option<WorldSpawn> = None;
-    let mut block_class = String::new();
-    let mut origin;
-    let mut angle;
-    let flush = |class: &str, origin: Option<[f32; 3]>, angle: f32| -> Option<WorldSpawn> {
-        let o = origin?;
-        let rank = match class {
-            "info_player_start" => 0,
-            "info_player_coop" => 1,
-            "info_player_deathmatch" => 2,
-            _ => return None,
-        };
-        let _ = rank;
-        // Quake Z-up: (x,y,z) → engine (x, z, −y) / 32.
-        // info_player_start origin is the player origin; view is +22.
-        let pos = [o[0] / 32.0, o[2] / 32.0 + 22.0 / 32.0, -o[1] / 32.0];
-        let yaw = std::f32::consts::FRAC_PI_2 - angle.to_radians();
-        Some(WorldSpawn {
-            pos,
-            yaw,
-            pitch: 0.0,
-        })
-    };
+    let mut primary: Option<NavStart> = None;
+    let mut coop: Vec<NavStart> = Vec::new();
+    let mut deathmatch: Vec<NavStart> = Vec::new();
+    let mut markers: Vec<NavStart> = Vec::new();
+    let mut floor_y = None;
     for raw in text.split(|c| c == '{' || c == '}') {
         let block = raw.trim();
         if block.is_empty() {
             continue;
         }
-        block_class.clear();
-        origin = None;
-        angle = 0.0;
+        let mut class = String::new();
+        let mut origin: Option<[f32; 3]> = None;
+        let mut angle = 0.0f32;
         for line in block.lines() {
-            let line = line.trim();
-            if !line.starts_with('"') {
-                continue;
-            }
-            let mut parts = line.splitn(4, '"').filter(|s| !s.is_empty() && *s != " ");
-            let key = parts.next().unwrap_or("");
-            let _sep = parts.next();
-            let val = parts.next().unwrap_or("");
-            // splitn on " is messy — parse "key" "value"
             let kv: Vec<&str> = line
+                .trim()
                 .split('"')
                 .filter(|s| !s.trim().is_empty())
                 .collect();
             if kv.len() < 2 {
-                let _ = (key, val);
                 continue;
             }
             match kv[0] {
-                "classname" => block_class = kv[1].to_string(),
+                "classname" => class = kv[1].to_string(),
                 "origin" => {
                     let mut it = kv[1].split_whitespace();
                     if let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) {
@@ -536,16 +851,80 @@ pub(crate) fn quake_bsp_spawn(bytes: &[u8]) -> Option<WorldSpawn> {
                 _ => {}
             }
         }
-        if let Some(spawn) = flush(&block_class, origin, angle) {
-            if block_class == "info_player_start" {
-                return Some(spawn);
+        let Some(o) = origin else { continue };
+        // Quake's exit is a brush entity: its `origin` is (0,0,0) unless the
+        // mapper set one, so a changelevel without an origin is skipped
+        // rather than placed at the map centre.
+        let marker = match class.as_str() {
+            "trigger_changelevel" => Some("exit"),
+            "item_key1" => Some("key_silver"),
+            "item_key2" => Some("key_gold"),
+            _ => None,
+        };
+        if let Some(name) = marker {
+            if o != [0.0, 0.0, 0.0] && !markers.iter().any(|m| m.name == name) {
+                markers.push(NavStart {
+                    name: name.into(),
+                    pos: [
+                        o[0] * QUAKE_UNIT,
+                        o[2] * QUAKE_UNIT + QUAKE_VIEW_OFFSET * QUAKE_UNIT,
+                        -o[1] * QUAKE_UNIT,
+                    ],
+                    yaw: std::f32::consts::FRAC_PI_2 - angle.to_radians(),
+                    pitch: 0.0,
+                });
             }
-            if best.is_none() {
-                best = Some(spawn);
-            }
+            continue;
+        }
+        let is_start = match class.as_str() {
+            "info_player_start" => true,
+            "info_player_coop" | "info_player_deathmatch" => false,
+            _ => continue,
+        };
+        // Quake is Z-up: (x, y, z) → engine (x, z, −y), scaled to metres.
+        let start = NavStart {
+            name: String::new(),
+            pos: [
+                o[0] * QUAKE_UNIT,
+                o[2] * QUAKE_UNIT + QUAKE_VIEW_OFFSET * QUAKE_UNIT,
+                -o[1] * QUAKE_UNIT,
+            ],
+            yaw: std::f32::consts::FRAC_PI_2 - angle.to_radians(),
+            pitch: 0.0,
+        };
+        if is_start && primary.is_none() {
+            floor_y = Some((o[2] - QUAKE_ORIGIN_ABOVE_FLOOR) * QUAKE_UNIT);
+            primary = Some(start);
+        } else if class == "info_player_deathmatch" {
+            deathmatch.push(start);
+        } else {
+            coop.push(start);
         }
     }
-    best
+    if primary.is_none() && coop.is_empty() && deathmatch.is_empty() {
+        return None;
+    }
+    let mut starts = Vec::with_capacity(1 + coop.len() + deathmatch.len());
+    for (i, mut s) in primary.into_iter().chain(coop).enumerate() {
+        s.name = player_start_name(i);
+        starts.push(s);
+    }
+    for (i, mut s) in deathmatch.into_iter().enumerate() {
+        s.name = deathmatch_name(i);
+        starts.push(s);
+    }
+    let eye_height = (QUAKE_VIEW_OFFSET + QUAKE_ORIGIN_ABOVE_FLOOR) * QUAKE_UNIT;
+    let floor_y = floor_y.unwrap_or(starts[0].pos[1] - eye_height);
+    Some(WorldNav {
+        starts,
+        floor_y: Some(floor_y),
+        step_height: Some(QUAKE_STEP_HEIGHT * QUAKE_UNIT),
+        eye_height: Some(eye_height),
+        doors: Vec::new(),
+        lifts: Vec::new(),
+        teleports: Vec::new(),
+        markers,
+    })
 }
 
 pub(crate) fn quake_bsp_place(bytes: &[u8], source: &str, world_key: &str) -> crate::world_place::WorldPlace {
@@ -662,15 +1041,40 @@ pub(crate) fn doom_map_to_mesh(
     }
     let mut sec_floor = vec![0i16; n_sec];
     let mut sec_ceil = vec![0i16; n_sec];
+    let mut sec_light = vec![160i16; n_sec];
     let mut sec_floor_tex = vec![String::new(); n_sec];
     let mut sec_ceil_tex = vec![String::new(); n_sec];
     for i in 0..n_sec {
         let o = i * 26;
         sec_floor[i] = i16_le(sectors, o);
         sec_ceil[i] = i16_le(sectors, o + 2);
+        sec_light[i] = i16_le(sectors, o + 20);
         sec_floor_tex[i] = lump_name(&sectors[o + 4..o + 12]);
         sec_ceil_tex[i] = lump_name(&sectors[o + 12..o + 20]);
     }
+
+    // Doors are authored CLOSED (ceiling on the floor): baked as-is they are
+    // a slab across the doorway that a walker gets stuck in. The level mesh
+    // is built with every door at its OPEN ceiling; the leaf that moves is
+    // exported as its own animated node (see `super::doors`).
+    let doors = super::doors::detect_doors(linedefs, sidedefs, sectors, &verts);
+    let sec_ceil = doors.open_ceilings(&sec_ceil);
+    let movers = super::movers::detect_movers(
+        linedefs,
+        sidedefs,
+        sectors,
+        lump_by_name_after(lumps, map, "THINGS").unwrap_or(&[]),
+        &verts,
+    );
+    let mut lift_floors = vec![super::movers::LiftFloor::default(); movers.lifts.len()];
+    let hazards = super::hazards::detect_hazards(sectors, &sec_floor_tex);
+    let mut hazard_floors =
+        vec![super::hazards::HazardFloor::default(); hazards.kinds.len()];
+    let mut door_leaves = vec![super::doors::DoorLeaf::default(); doors.doors.len()];
+    let mut door_sink = (!doors.is_empty()).then(|| super::doors::DoorSink {
+        doors: &doors,
+        leaves: &mut door_leaves,
+    });
 
     // Build texture atlas from referenced flats + wall patches (best-effort).
     let mut atlas_images: BTreeMap<String, RgbaImage> = BTreeMap::new();
@@ -769,6 +1173,12 @@ pub(crate) fn doom_map_to_mesh(
     let nodes = lump_by_name_after(lumps, map, "NODES").unwrap_or(&[]);
     let has_bsp = segs.len() >= 12 && ssectors.len() >= 4;
 
+    // Doom's own light, baked per vertex: without it the level is lit only
+    // by the analytic sun and every interior goes black once the level
+    // shadows itself.
+    let mut colors: Vec<[f32; 3]> = Vec::new();
+    let mut sky_faces = SkyFaces::default();
+    let mut sink_ref = door_sink.as_mut();
     if has_bsp {
         emit_walls_from_segs(
             &mut positions,
@@ -785,8 +1195,12 @@ pub(crate) fn doom_map_to_mesh(
             &sec_floor,
             &sec_ceil,
             &sec_ceil_tex,
+            &sec_light,
+            &mut colors,
             &uv_map,
             scale,
+            &mut sink_ref,
+            &mut Some(&mut sky_faces),
         );
     } else {
         emit_walls_from_linedefs(
@@ -803,10 +1217,24 @@ pub(crate) fn doom_map_to_mesh(
             &sec_floor,
             &sec_ceil,
             &sec_ceil_tex,
+            &sec_light,
+            &mut colors,
             &uv_map,
             scale,
+            &mut sink_ref,
+            &mut Some(&mut sky_faces),
         );
     }
+    drop(sink_ref);
+    drop(door_sink);
+    let mut lift_sink = (!movers.lifts.is_empty()).then(|| super::movers::LiftSink {
+        movers: &movers,
+        floors: &mut lift_floors,
+    });
+    let mut hazard_sink = (!hazards.is_empty()).then(|| super::hazards::HazardSink {
+        hazards: &hazards,
+        floors: &mut hazard_floors,
+    });
     let covered = emit_subsector_flats(
         &mut positions,
         &mut uvs,
@@ -825,8 +1253,13 @@ pub(crate) fn doom_map_to_mesh(
         &sec_ceil,
         &sec_floor_tex,
         &sec_ceil_tex,
+        &sec_light,
+        &mut colors,
         &uv_map,
         scale,
+        hazard_sink.as_mut(),
+        Some(&mut sky_faces),
+        lift_sink.as_mut(),
     );
     if !has_bsp {
         let mut sector_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_sec];
@@ -864,17 +1297,49 @@ pub(crate) fn doom_map_to_mesh(
             } else {
                 sec_floor_tex[si].as_str()
             };
-            let ceil_tex = if sec_ceil_tex[si].is_empty() || is_sky_flat(&sec_ceil_tex[si]) {
+            let sky_ceiling = is_sky_flat(&sec_ceil_tex[si]);
+            let ceil_tex = if sec_ceil_tex[si].is_empty() || sky_ceiling {
                 ""
             } else {
                 sec_ceil_tex[si].as_str()
             };
             let floor_z = sec_floor[si] as f32 * scale;
             let ceil_z = sec_ceil[si] as f32 * scale;
+            let hazard = hazard_sink
+                .as_mut()
+                .and_then(|sink| sink.hazards.index_of(si).map(|i| (sink, i)));
+            let light = doom_light_rgb(sec_light.get(si).copied().unwrap_or(160));
+            let lift = lift_sink
+                .as_mut()
+                .and_then(|sink| sink.movers.lift_index(si).map(|i| (sink, i)));
+            let (fp, fu, fi, fc) = match (lift, hazard) {
+                // A lift's floor moves: it belongs to the lift node.
+                (Some((sink, i)), _) => {
+                    let floor = &mut sink.floors[i];
+                    (
+                        &mut floor.positions,
+                        &mut floor.uvs,
+                        &mut floor.indices,
+                        &mut floor.colors,
+                    )
+                }
+                (None, hazard) => match hazard {
+                    Some((sink, i)) => {
+                        let floor = &mut sink.floors[i];
+                        (
+                            &mut floor.positions,
+                            &mut floor.uvs,
+                            &mut floor.indices,
+                            &mut floor.colors,
+                        )
+                    }
+                    None => (&mut positions, &mut uvs, &mut indices, &mut colors),
+                },
+            };
             emit_sector_grid(
-                &mut positions,
-                &mut uvs,
-                &mut indices,
+                fp,
+                fu,
+                fi,
                 &sector_edges[si],
                 &verts,
                 scale,
@@ -882,6 +1347,9 @@ pub(crate) fn doom_map_to_mesh(
                 lookup_slot(&uv_map, floor_tex),
                 false,
             );
+            let n = fp.len();
+            fill_colors(fc, n, light);
+            fill_colors(&mut colors, positions.len(), light);
             if !ceil_tex.is_empty() {
                 emit_sector_grid(
                     &mut positions,
@@ -892,6 +1360,20 @@ pub(crate) fn doom_map_to_mesh(
                     scale,
                     ceil_z,
                     lookup_slot(&uv_map, ceil_tex),
+                    true,
+                );
+                fill_colors(&mut colors, positions.len(), light);
+            }
+            if sky_ceiling {
+                emit_sector_grid(
+                    &mut sky_faces.positions,
+                    &mut sky_faces.uvs,
+                    &mut sky_faces.indices,
+                    &sector_edges[si],
+                    &verts,
+                    scale,
+                    ceil_z,
+                    SKY_SLOT,
                     true,
                 );
             }
@@ -908,24 +1390,218 @@ pub(crate) fn doom_map_to_mesh(
         ];
         uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         indices = vec![0, 1, 2, 0, 2, 3];
+        colors.clear();
+    }
+    // Any vertex an emitter pushed without a light (a path added later) is
+    // full-bright rather than black.
+    fill_colors(&mut colors, positions.len(), [1.0, 1.0, 1.0]);
+    colors.truncate(positions.len());
+
+    // The floors the movers and hazards own are complete: release the
+    // sinks so the weld below can rewrite those parts.
+    drop(hazard_sink);
+    drop(lift_sink);
+
+    // Weld the T-junctions the BSP leaves behind. Neighbouring subsectors,
+    // the walls standing on them and the parts that move (doors, lifts) or
+    // hurt (hazard floors) all split their shared boundaries at different
+    // points, and every one of those points is a hairline until the
+    // triangle on the other side carries it too. The grid is built from
+    // EVERY part so a pool edge welds into the floor around it; splitting
+    // only inserts positions the level already has, so welding each part
+    // against that one grid is order-independent.
+    {
+        let mut parts: Vec<&[[f32; 3]]> = vec![&positions[..], &sky_faces.positions[..]];
+        parts.extend(door_leaves.iter().map(|leaf| &leaf.positions[..]));
+        parts.extend(hazard_floors.iter().map(|floor| &floor.positions[..]));
+        parts.extend(lift_floors.iter().map(|floor| &floor.positions[..]));
+        let weld = super::weld::Weld::from_parts(&parts);
+        weld.split(super::weld::Soup {
+            positions: &mut positions,
+            uvs: &mut uvs,
+            normals: None,
+            colors: Some(&mut colors),
+            indices: &mut indices,
+        });
+        weld.split(super::weld::Soup {
+            positions: &mut sky_faces.positions,
+            uvs: &mut sky_faces.uvs,
+            normals: None,
+            colors: None,
+            indices: &mut sky_faces.indices,
+        });
+        for leaf in door_leaves.iter_mut() {
+            weld.split(super::weld::Soup {
+                positions: &mut leaf.positions,
+                uvs: &mut leaf.uvs,
+                normals: None,
+                colors: Some(&mut leaf.colors),
+                indices: &mut leaf.indices,
+            });
+        }
+        for floor in hazard_floors.iter_mut() {
+            weld.split(super::weld::Soup {
+                positions: &mut floor.positions,
+                uvs: &mut floor.uvs,
+                normals: None,
+                colors: Some(&mut floor.colors),
+                indices: &mut floor.indices,
+            });
+        }
+        for floor in lift_floors.iter_mut() {
+            weld.split(super::weld::Soup {
+                positions: &mut floor.positions,
+                uvs: &mut floor.uvs,
+                normals: None,
+                colors: Some(&mut floor.colors),
+                indices: &mut floor.indices,
+            });
+        }
     }
 
-    let glb = write_glb_mesh_textured(&GlbTexturedMesh {
-        positions: &positions,
-        normals: None,
-        uvs: &uvs,
-        indices: &indices,
-        base_color_png: &atlas_png,
-        metallic_roughness_png: None,
-        double_sided: true,
-        colors: None,
-    });
+    // Doom's own sector light rides in COLOR_0, and the material carries the
+    // `lightmapTexture` marker that tells the renderer this level is PRELIT
+    // (otherwise the analytic sun multiplies an already-lit level and every
+    // interior goes black). The marker points back at the atlas itself: a
+    // prelit shader never samples it, and a second image would trip
+    // pack_import's one-texture rule.
+    let marker_uvs = vec![[0.0f32, 0.0]; positions.len()];
+    let glb = makepad_gltf::write_glb_mesh_textured_parts(
+        &[makepad_gltf::GlbTexturedPart {
+            positions: &positions,
+            uvs: &uvs,
+            indices: &indices,
+            base_color_png: &atlas_png,
+            normals: None,
+            base_color_factor: None,
+            colors: Some(&colors),
+            lightmap_png: Some(&atlas_png),
+            lightmap_uvs: Some(&marker_uvs),
+            detail_png: None,
+            detail_scale: [0.0, 0.0],
+        }],
+        true,
+    );
     if !glb.starts_with(b"glTF") {
         return None;
     }
+    // Each door leaf becomes `door_N`: its own node, rest pose OPEN, with a
+    // `door_N` translation animation a game triggers to close/open it.
+    let mut extra_nodes = Vec::new();
+    let mut door_meta = Vec::new();
+    for (i, door) in doors.doors.iter().enumerate() {
+        let leaf = &door_leaves[i];
+        if leaf.is_empty() {
+            continue;
+        }
+        let name = format!("door_{}", door_meta.len() + 1);
+        let closed_y = door.closed_ceil as f32 * scale;
+        let open_y = door.open_ceil as f32 * scale;
+        extra_nodes.push(crate::glb_nodes::ExtraNode::door(
+            name.clone(),
+            leaf.positions.clone(),
+            leaf.uvs.clone(),
+            leaf.indices.clone(),
+            leaf.colors.clone(),
+            closed_y,
+            open_y,
+            door.secret,
+            door.key,
+        ));
+        door_meta.push(DoorMeta {
+            name,
+            centre: [door.centre[0] * scale, closed_y, door.centre[1] * scale],
+            closed_y,
+            open_y,
+        });
+    }
+    for (i, kind) in hazards.kinds.iter().enumerate() {
+        let floor = &hazard_floors[i];
+        if floor.is_empty() {
+            continue;
+        }
+        extra_nodes.push(crate::glb_nodes::ExtraNode::hazard(
+            kind.name.clone(),
+            floor.positions.clone(),
+            floor.uvs.clone(),
+            floor.indices.clone(),
+            floor.colors.clone(),
+            kind.damage,
+            &kind.flat,
+            kind.liquid,
+            // Doom liquids are floors you walk in, never brushes you pass
+            // through: the surface stays solid.
+            true,
+        ));
+    }
+    let mut lift_meta = Vec::new();
+    for (i, lift) in movers.lifts.iter().enumerate() {
+        let floor = &lift_floors[i];
+        if floor.is_empty() {
+            continue;
+        }
+        let up_y = lift.up_floor as f32 * scale;
+        let down_y = lift.down_floor as f32 * scale;
+        extra_nodes.push(crate::glb_nodes::ExtraNode::lift(
+            lift.name.clone(),
+            floor.positions.clone(),
+            floor.uvs.clone(),
+            floor.indices.clone(),
+            floor.colors.clone(),
+            up_y,
+            down_y,
+        ));
+        lift_meta.push(DoorMeta {
+            name: lift.name.clone(),
+            centre: [lift.centre[0] * scale, up_y, lift.centre[1] * scale],
+            closed_y: up_y,
+            open_y: down_y,
+        });
+    }
+    if !sky_faces.is_empty() {
+        let lump = doom_sky_lump(map);
+        // Doom's sky is a patch lump, not a flat: 256x128, its own image.
+        if let Some(png) = lump_named(lumps, &lump)
+            .and_then(|data| doom_patch_to_png(data, palette).ok())
+        {
+            extra_nodes.push(crate::glb_nodes::ExtraNode::sky(
+                std::mem::take(&mut sky_faces.positions),
+                std::mem::take(&mut sky_faces.uvs),
+                std::mem::take(&mut sky_faces.indices),
+                vec![png],
+                "cylinder",
+                DOOM_SKY_REPEAT,
+                DOOM_SKY_OFFSET,
+                &lump,
+                None,
+                None,
+            ));
+        }
+    }
+    let glb = match crate::glb_nodes::inject_nodes(&glb, &extra_nodes) {
+        Ok(g) => g,
+        Err(_) => glb,
+    };
     Some(MapMesh {
         glb,
         tris: indices.len() / 3,
+        doors: door_meta,
+        lifts: lift_meta,
+        teleporters: movers
+            .teleporters
+            .iter()
+            .map(|t| crate::world_nav::NavTeleport {
+                name: t.name.clone(),
+                pad_min: [t.pad_min[0] * scale, t.pad_min[1] * scale],
+                pad_max: [t.pad_max[0] * scale, t.pad_max[1] * scale],
+                dst: [
+                    t.dst[0] * scale,
+                    t.dst_floor as f32 * scale + DOOM_VIEW_HEIGHT * DOOM_UNIT,
+                    t.dst[1] * scale,
+                ],
+                yaw: std::f32::consts::FRAC_PI_2 + t.yaw_degrees.to_radians(),
+            })
+            .collect(),
     })
 }
 
@@ -1225,8 +1901,13 @@ pub(crate) fn push_wall_tiled(
     }
 }
 
-/// Doom units walls poke past the flat so residual T-junctions hide in
-/// the floor/ceiling. Mids (railings) stay flush.
+/// Doom units a wall poke past the flat it meets, so residual T-junctions
+/// hide INSIDE solid geometry. It may only ever be applied to an end that
+/// something else covers: below a floor, above a ceiling. Applying it to the
+/// open-air end of a step riser (above the upper floor) or of an upper band
+/// (below the lower ceiling) puts a visible rim along every sector boundary
+/// — 4 units is 6cm at this scale, and the user could see it. Mids
+/// (railings) stay flush at both ends.
 const WALL_APRON: f32 = 4.0;
 
 pub(crate) fn sidedef_has_mid(sidedefs: &[u8], snum: u16, n_side: usize) -> bool {
@@ -1256,8 +1937,12 @@ pub(crate) fn emit_wall_piece(
     sec_floor: &[i16],
     sec_ceil: &[i16],
     sec_ceil_tex: &[String],
+    sec_light: &[i16],
+    colors: &mut Vec<[f32; 3]>,
     uv_map: &BTreeMap<String, AtlasSlot>,
     scale: f32,
+    mut doors: Option<&mut super::doors::DoorSink<'_>>,
+    mut sky: Option<&mut SkyFaces>,
 ) {
     if snum == 0xFFFF || snum as usize >= n_side {
         return;
@@ -1280,6 +1965,12 @@ pub(crate) fn emit_wall_piece(
     let apron = WALL_APRON * scale;
     let lower_unpeg = flags & 0x0010 != 0;
     let upper_unpeg = flags & 0x0008 != 0;
+    // Doom lights a wall by its FRONT sector, with the fake-contrast nudge.
+    let light = doom_wall_light(
+        sec_light.get(sector).copied().unwrap_or(160),
+        p1,
+        p2,
+    );
 
     if !two_sided {
         let tex = if mid != "-" && !mid.is_empty() {
@@ -1310,6 +2001,7 @@ pub(crate) fn emit_wall_piece(
             v_top - WALL_APRON,
             slot,
         );
+        fill_colors(colors, positions.len(), light);
         return;
     }
     let other = if other_snum != 0xFFFF && (other_snum as usize) < n_side {
@@ -1323,6 +2015,7 @@ pub(crate) fn emit_wall_piece(
         None
     };
     let Some(os) = other else {
+        fill_colors(colors, positions.len(), light);
         return;
     };
     let of = sec_floor[os] as f32 * scale;
@@ -1343,8 +2036,14 @@ pub(crate) fn emit_wall_piece(
             indices,
             [ax, ay],
             [bx, by],
+            // Down into the lower floor (hidden), up to the higher floor
+            // EXACTLY: Doom's riser spans [lower floor, higher floor] and
+            // the higher floor's polygon starts where it ends.
+            // Down into the lower floor (hidden), up to the higher floor
+            // EXACTLY: Doom's riser spans [lower floor, higher floor] and
+            // the higher floor's polygon starts where it ends.
             floor_z - apron,
-            of + apron,
+            of,
             u0,
             u1,
             v_bot + WALL_APRON,
@@ -1352,14 +2051,59 @@ pub(crate) fn emit_wall_piece(
             slot,
         );
     }
-    if ceil_z > oc
-        && !is_sky_flat(&sec_ceil_tex[sector])
-        && !is_sky_flat(&sec_ceil_tex[os])
-        && !is_blank_tex(&upper)
-    {
+    let both_sky = is_sky_flat(&sec_ceil_tex[sector]) && is_sky_flat(&sec_ceil_tex[os]);
+    if ceil_z > oc && both_sky {
+        // Doom does not DRAW this strip (`R_StoreWallRange`), but it is
+        // solid and the sky shows through it: it becomes a sky face, so a
+        // walker still collides with it and the renderer paints sky there.
+        if let Some(sky) = sky.as_deref_mut() {
+            push_wall_tiled(
+                &mut sky.positions,
+                &mut sky.uvs,
+                &mut sky.indices,
+                [ax, ay],
+                [bx, by],
+                oc,
+                ceil_z + apron,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+                SKY_SLOT,
+            );
+        }
+    } else if ceil_z > oc && !is_blank_tex(&upper) {
         let slot = lookup_slot(uv_map, upper.as_str());
         let th = slot.h.max(1) as f32;
-        let step_h = (sec_ceil[sector] - sec_ceil[os]) as f32;
+        // A door's band is the door LEAF: it belongs to the door's own node,
+        // authored at the CLOSED ceiling (full doorway height). The static
+        // mesh leaves that strip out — at rest the leaf covers it exactly,
+        // because Doom opens to `min(neighbour ceiling) - 4`.
+        let door = doors
+            .as_deref_mut()
+            .and_then(|sink| sink.doors.index_of(os).map(|i| (sink, i)));
+        let (out_pos, out_uv, out_idx, out_col, low, step_h) = match door {
+            Some((sink, i)) => {
+                let closed = sink.doors.doors[i].closed_ceil;
+                let leaf = &mut sink.leaves[i];
+                (
+                    &mut leaf.positions,
+                    &mut leaf.uvs,
+                    &mut leaf.indices,
+                    &mut leaf.colors,
+                    closed as f32 * scale,
+                    (sec_ceil[sector] - closed) as f32,
+                )
+            }
+            None => (
+                &mut *positions,
+                &mut *uvs,
+                &mut *indices,
+                &mut *colors,
+                oc,
+                (sec_ceil[sector] - sec_ceil[os]) as f32,
+            ),
+        };
         let (v_top, v_bot) = if upper_unpeg {
             (yoff, yoff + step_h)
         } else {
@@ -1367,12 +2111,14 @@ pub(crate) fn emit_wall_piece(
             (v_top, v_top + step_h.min(th))
         };
         push_wall_tiled(
-            positions,
-            uvs,
-            indices,
+            out_pos,
+            out_uv,
+            out_idx,
             [ax, ay],
             [bx, by],
-            oc - apron,
+            // Mirror of the riser: the open-air end (the lower ceiling) is
+            // exact, only the end buried above the higher ceiling pokes.
+            low,
             ceil_z + apron,
             u0,
             u1,
@@ -1380,6 +2126,8 @@ pub(crate) fn emit_wall_piece(
             v_top - WALL_APRON,
             slot,
         );
+        let n = out_pos.len();
+        fill_colors(out_col, n, light);
     }
     // Two-sided mid (grates, fences) lives on both sidedefs and both
     // segs. Emitting it twice is coplanar z-fight. Keep the front only
@@ -1416,8 +2164,10 @@ pub(crate) fn emit_wall_piece(
             );
         }
     }
+    fill_colors(colors, positions.len(), light);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_walls_from_segs(
     positions: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
@@ -1433,8 +2183,12 @@ pub(crate) fn emit_walls_from_segs(
     sec_floor: &[i16],
     sec_ceil: &[i16],
     sec_ceil_tex: &[String],
+    sec_light: &[i16],
+    colors: &mut Vec<[f32; 3]>,
     uv_map: &BTreeMap<String, AtlasSlot>,
     scale: f32,
+    doors: &mut Option<&mut super::doors::DoorSink<'_>>,
+    sky: &mut Option<&mut SkyFaces>,
 ) {
     let n_seg = segs.len() / 12;
     for si in 0..n_seg {
@@ -1483,12 +2237,17 @@ pub(crate) fn emit_walls_from_segs(
             sec_floor,
             sec_ceil,
             sec_ceil_tex,
+            sec_light,
+            colors,
             uv_map,
             scale,
+            doors.as_deref_mut(),
+            sky.as_deref_mut(),
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_walls_from_linedefs(
     positions: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
@@ -1503,8 +2262,12 @@ pub(crate) fn emit_walls_from_linedefs(
     sec_floor: &[i16],
     sec_ceil: &[i16],
     sec_ceil_tex: &[String],
+    sec_light: &[i16],
+    colors: &mut Vec<[f32; 3]>,
     uv_map: &BTreeMap<String, AtlasSlot>,
     scale: f32,
+    doors: &mut Option<&mut super::doors::DoorSink<'_>>,
+    sky: &mut Option<&mut SkyFaces>,
 ) {
     for li in 0..n_line {
         let o = li * 14;
@@ -1547,8 +2310,12 @@ pub(crate) fn emit_walls_from_linedefs(
                 sec_floor,
                 sec_ceil,
                 sec_ceil_tex,
+                sec_light,
+                colors,
                 uv_map,
                 scale,
+                doors.as_deref_mut(),
+                sky.as_deref_mut(),
             );
         }
     }
@@ -2624,8 +3391,13 @@ pub(crate) fn emit_subsector_flats(
     sec_ceil: &[i16],
     sec_floor_tex: &[String],
     sec_ceil_tex: &[String],
+    sec_light: &[i16],
+    colors: &mut Vec<[f32; 3]>,
     uv_map: &BTreeMap<String, AtlasSlot>,
     scale: f32,
+    mut hazards: Option<&mut super::hazards::HazardSink<'_>>,
+    mut sky: Option<&mut SkyFaces>,
+    mut lifts: Option<&mut super::movers::LiftSink<'_>>,
 ) -> BTreeSet<usize> {
     let mut covered = BTreeSet::new();
     if segs.len() < 12 || ssectors.len() < 4 {
@@ -2684,23 +3456,95 @@ pub(crate) fn emit_subsector_flats(
         } else {
             sec_floor_tex[sec].as_str()
         };
-        let ceil_tex = if sec_ceil_tex[sec].is_empty() || is_sky_flat(&sec_ceil_tex[sec]) {
+        let sky_ceiling = is_sky_flat(&sec_ceil_tex[sec]);
+        let ceil_tex = if sec_ceil_tex[sec].is_empty() || sky_ceiling {
             ""
         } else {
             sec_ceil_tex[sec].as_str()
         };
         let floor_z = sec_floor[sec] as f32 * scale;
         let ceil_z = sec_ceil[sec] as f32 * scale;
+        // F_SKY1 is not a ceiling, it is the hole the sky shows through:
+        // its faces become the sky node instead of vanishing.
+        if sky_ceiling {
+            if let Some(sky) = sky.as_deref_mut() {
+                emit_convex_ring(
+                    &mut sky.positions,
+                    &mut sky.uvs,
+                    &mut sky.indices,
+                    &pts,
+                    scale,
+                    ceil_z,
+                    SKY_SLOT,
+                    true,
+                );
+            }
+        }
+        // Nukage/lava/water floors leave the level mesh for their own
+        // `hazard_N` node; everything else stays static.
+        let hazard = hazards
+            .as_deref_mut()
+            .and_then(|sink| sink.hazards.index_of(sec).map(|i| (sink, i)));
+        let light = doom_light_rgb(sec_light.get(sec).copied().unwrap_or(160));
+        // A lift's floor is the thing that moves: it leaves the level mesh
+        // for its own node, exactly like a door leaf.
+        let lift = lifts
+            .as_deref_mut()
+            .and_then(|sink| sink.movers.lift_index(sec).map(|i| (sink, i)));
+        if let Some((sink, i)) = lift {
+            let floor = &mut sink.floors[i];
+            emit_convex_ring(
+                &mut floor.positions,
+                &mut floor.uvs,
+                &mut floor.indices,
+                &pts,
+                scale,
+                floor_z,
+                lookup_slot(uv_map, floor_tex),
+                false,
+            );
+            let n = floor.positions.len();
+            fill_colors(&mut floor.colors, n, light);
+            covered.insert(sec);
+            if !ceil_tex.is_empty() {
+                emit_convex_ring(
+                    positions,
+                    uvs,
+                    indices,
+                    &pts,
+                    scale,
+                    ceil_z,
+                    lookup_slot(uv_map, ceil_tex),
+                    true,
+                );
+                fill_colors(colors, positions.len(), light);
+            }
+            continue;
+        }
+        let (out_pos, out_uv, out_idx, out_col) = match hazard {
+            Some((sink, i)) => {
+                let floor = &mut sink.floors[i];
+                (
+                    &mut floor.positions,
+                    &mut floor.uvs,
+                    &mut floor.indices,
+                    &mut floor.colors,
+                )
+            }
+            None => (&mut *positions, &mut *uvs, &mut *indices, &mut *colors),
+        };
         emit_convex_ring(
-            positions,
-            uvs,
-            indices,
+            out_pos,
+            out_uv,
+            out_idx,
             &pts,
             scale,
             floor_z,
             lookup_slot(uv_map, floor_tex),
             false,
         );
+        let n = out_pos.len();
+        fill_colors(out_col, n, light);
         covered.insert(sec);
         if !ceil_tex.is_empty() {
             emit_convex_ring(
@@ -2713,6 +3557,7 @@ pub(crate) fn emit_subsector_flats(
                 lookup_slot(uv_map, ceil_tex),
                 true,
             );
+            fill_colors(colors, positions.len(), light);
         }
     }
     covered
@@ -2725,39 +3570,6 @@ pub(crate) fn norm2(v: [f32; 2]) -> [f32; 2] {
     } else {
         [v[0] / l, v[1] / l]
     }
-}
-
-/// Grow a convex ring so neighbouring leaves overlap and hide T-junction
-/// cracks along diagonal partitions (the leftover MAP27 ceiling hairline).
-pub(crate) fn inflate_convex(pts: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
-    let n = pts.len();
-    if n < 3 || amount <= 0.0 {
-        return pts.to_vec();
-    }
-    let mut p = pts.to_vec();
-    if signed_area(&p) < 0.0 {
-        p.reverse();
-    }
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let prev = p[(i + n - 1) % n];
-        let cur = p[i];
-        let next = p[(i + 1) % n];
-        let e0 = [cur[0] - prev[0], cur[1] - prev[1]];
-        let e1 = [next[0] - cur[0], next[1] - cur[1]];
-        // CCW: outward is to the right of each edge.
-        let n0 = norm2([e0[1], -e0[0]]);
-        let n1 = norm2([e1[1], -e1[0]]);
-        let s = [n0[0] + n1[0], n0[1] + n1[1]];
-        let sl = (s[0] * s[0] + s[1] * s[1]).sqrt();
-        if sl < 1e-6 {
-            out.push([cur[0] + n0[0] * amount, cur[1] + n0[1] * amount]);
-            continue;
-        }
-        let miter = (amount * 2.0 / sl).min(amount * 4.0);
-        out.push([cur[0] + s[0] / sl * miter, cur[1] + s[1] / sl * miter]);
-    }
-    out
 }
 
 pub(crate) fn emit_convex_ring(
@@ -2782,7 +3594,11 @@ pub(crate) fn emit_convex_ring(
     if area < 0.0 {
         ordered.reverse();
     }
-    ordered = inflate_convex(&ordered, 0.75);
+    // NO inflation. Growing every BSP leaf outward made neighbouring
+    // leaves cover the same ground twice (coplanar duplicates that z-fight
+    // across the whole floor) and made a sector's flat hang PAST its
+    // linedefs, so the overhang's open edge stood up along every step.
+    // Leaves tile the plane exactly; they are emitted exactly.
     let step = slot.w.max(1) as f32;
     let i0 = ordered[0];
     for k in 1..ordered.len() - 1 {
@@ -2929,16 +3745,15 @@ pub(crate) fn emit_tri_uv_cells(
             let x1 = (i + 1) as f32 * step;
             let y0 = j as f32 * step;
             let y1 = (j + 1) as f32 * step;
-            // Overlap neighbouring cells so T-junctions on the 64-grid
-            // hide inside the neighbour instead of showing sky.
-            const OVERLAP: f32 = 1.0;
-            let clipped = clip_poly_aabb(
-                &[a, b, c],
-                x0 - OVERLAP,
-                y0 - OVERLAP,
-                x1 + OVERLAP,
-                y1 + OVERLAP,
-            );
+            // EXACT cell, no overlap. Growing each cell by a unit was an
+            // attempt to hide T-junctions, but two neighbouring flats then
+            // cover the same square metre twice: coplanar duplicates
+            // z-fight (the shimmer along every tile edge) and each tile
+            // draws its texture a unit past where it belongs (the "tiles
+            // are too big"). Adjacent cells clip against the SAME plane
+            // value from the same source edge, so their shared vertices
+            // come out bitwise equal — watertight without any fudge.
+            let clipped = clip_poly_aabb(&[a, b, c], x0, y0, x1, y1);
             if clipped.len() < 3 {
                 continue;
             }

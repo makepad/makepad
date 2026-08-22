@@ -103,6 +103,7 @@ fn start_box(
             mbps,
             sources: Some(sources),
         },
+        fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
     })
     .unwrap();
     let base = format!("http://{}", handle.addr);
@@ -220,6 +221,7 @@ fn blob_endpoint_auth_allowlist_and_ranges() {
                 mbps: None,
                 sources: Some(Vec::new()),
             },
+            fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
         })
         .unwrap();
         let base = format!("http://{}", handle.addr);
@@ -395,6 +397,7 @@ fn serving_fails_closed_without_a_secret() {
             mbps: None,
             sources: Some(Vec::new()),
         },
+        fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
     })
     .unwrap();
     let base = format!("http://{}", handle.addr);

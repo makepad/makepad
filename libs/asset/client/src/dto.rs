@@ -97,6 +97,8 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "world" => AssetKind::World,
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
+        "game" => AssetKind::Game,
+        "vjeffect" => AssetKind::VjEffect,
         _ => return None,
     })
 }
@@ -116,6 +118,8 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -140,6 +144,13 @@ pub fn role_name(role: makepad_asset_data::FileRole) -> &'static str {
         R::Video => "video",
         R::Source => "source",
         R::Depth => "depth",
+        R::Splat => "splat",
+        R::AoTexture => "ao_texture",
+        R::StemDrums => "stem_drums",
+        R::StemBass => "stem_bass",
+        R::StemVocals => "stem_vocals",
+        R::StemOther => "stem_other",
+        R::Lyrics => "lyrics",
     }
 }
 
@@ -164,6 +175,13 @@ pub fn role_parse(s: &str) -> Option<FileRole> {
         "video" => R::Video,
         "source" => R::Source,
         "depth" => R::Depth,
+        "splat" => R::Splat,
+        "ao_texture" => R::AoTexture,
+        "stem_drums" => R::StemDrums,
+        "stem_bass" => R::StemBass,
+        "stem_vocals" => R::StemVocals,
+        "stem_other" => R::StemOther,
+        "lyrics" => R::Lyrics,
         _ => return None,
     })
 }
@@ -206,12 +224,21 @@ pub fn media_name(media: makepad_asset_data::MediaType) -> &'static str {
         M::Mp4 => "mp4",
         M::Bin => "bin",
         M::Text => "text",
+        M::Ply => "ply",
+        M::Mp3 => "mp3",
+        M::Json => "json",
     }
 }
 
-/// Bounded, sanitized `error` string out of a refusal body; `None` when the
-/// body is not a well-formed error object. Never fails: refusal rendering
-/// must not depend on the refusal body being honest.
+/// Bounded, sanitized refusal text out of an error body; `None` when the body
+/// is not a well-formed error object. Never fails: refusal rendering must not
+/// depend on the refusal body being honest.
+///
+/// Both halves, when the server sent both. `error` is the CATEGORY — "content
+/// contract violation" — and `detail` is the reason, which is the half that
+/// tells anyone what to do about it. Reporting only the category turned every
+/// refusal into "422 content contract violation", which is a sentence with no
+/// information in it.
 pub fn parse_error_detail(bytes: &[u8]) -> Option<String> {
     if bytes.len() as u64 > crate::wire::MAX_JSON_RESPONSE_BYTES {
         return None;
@@ -220,10 +247,17 @@ pub fn parse_error_detail(bytes: &[u8]) -> Option<String> {
     let msg = v.get("error")?.as_str()?;
     let clean = sanitize_text(msg, MAX_ERROR_DETAIL_BYTES);
     if clean.is_empty() {
-        None
-    } else {
-        Some(clean)
+        return None;
     }
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .map(|d| sanitize_text(d, MAX_ERROR_DETAIL_BYTES))
+        .filter(|d| !d.is_empty() && *d != clean);
+    Some(match detail {
+        Some(detail) => sanitize_text(&format!("{clean}: {detail}"), MAX_ERROR_DETAIL_BYTES),
+        None => clean,
+    })
 }
 
 // ---- health ---------------------------------------------------------------
@@ -262,6 +296,26 @@ pub struct CatalogHit {
     /// Canonical alias head pointing at this asset, when one exists.
     /// Optional on the wire for compatibility with older servers.
     pub alias: Option<AssetAlias>,
+    /// When the asset's search row last changed, epoch ms. Absent from a
+    /// server too old to send it, which reads as 0 — "not recorded" — and
+    /// never as a date in 1970 on screen.
+    pub updated_ms: u64,
+}
+
+/// Which vocabulary a facet label came from — the two label filters a
+/// catalog query understands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacetKind {
+    Category,
+    Tag,
+}
+
+/// One label of the result set and how many of its assets carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogFacet {
+    pub kind: FacetKind,
+    pub label: String,
+    pub count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,6 +325,10 @@ pub struct CatalogPageDto {
     pub total: u64,
     /// Opaque continuation token; present iff more results exist.
     pub cursor: Option<String>,
+    /// Label counts over the WHOLE result set, most used first. Empty when
+    /// the query did not ask for facets, and empty from a server too old to
+    /// count them — never a parse failure.
+    pub facets: Vec<CatalogFacet>,
 }
 
 pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
@@ -312,11 +370,55 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
                 )
             }
         };
-        hits.push(CatalogHit { asset_id, namespace, kind, title, snippet, score, live, alias });
+        let updated_ms = match h.get("updated_ms") {
+            None | Some(Value::Null) => 0,
+            Some(_) => need_u64(h, "updated_ms", "hit updated_ms")?,
+        };
+        hits.push(CatalogHit {
+            asset_id,
+            namespace,
+            kind,
+            title,
+            snippet,
+            score,
+            live,
+            alias,
+            updated_ms,
+        });
     }
     let total = need_u64(v, "total", "catalog total")?;
     let cursor = parse_cursor_field(v)?;
-    Ok(CatalogPageDto { hits, total, cursor })
+    let facets = parse_facets(v)?;
+    Ok(CatalogPageDto { hits, total, cursor, facets })
+}
+
+/// Facets are optional on the wire (absent from a server that does not count
+/// them, and from every response that was not asked to), but a facet that IS
+/// present is typed strictly: an unknown kind is a protocol error, not a
+/// label to guess at.
+fn parse_facets(v: &Value) -> ClientResult<Vec<CatalogFacet>> {
+    let Some(list) = v.get("facets") else {
+        return Ok(Vec::new());
+    };
+    if matches!(list, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let list = list.as_arr().ok_or(ClientError::Protocol { what: "catalog facets" })?;
+    if list.len() > MAX_PAGE_ENTRIES {
+        return Err(ClientError::Protocol { what: "catalog facets too many" });
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for f in list {
+        let kind = match need_str(f, "kind", 16, "facet kind")? {
+            "category" => FacetKind::Category,
+            "tag" => FacetKind::Tag,
+            _ => return Err(ClientError::Protocol { what: "facet kind" }),
+        };
+        let label = need_str(f, "label", crate::wire::MAX_FILTER_VALUE_BYTES, "facet label")?.to_string();
+        check_display(&label, "facet label")?;
+        out.push(CatalogFacet { kind, label, count: need_u64(f, "count", "facet count")? });
+    }
+    Ok(out)
 }
 
 /// A cursor out of a response: absent/null = end of results; a string must
@@ -380,6 +482,10 @@ pub enum CandidateStateDto {
     Staged,
     Published,
     Quarantined,
+    /// Deleted: the revision left every listing, alias and search row, and
+    /// its bytes are collectable. Terminal, like `Quarantined`, and reported
+    /// instead of it once the deletion intent is recorded.
+    Retired,
 }
 
 impl CandidateStateDto {
@@ -388,6 +494,7 @@ impl CandidateStateDto {
             Self::Staged => "staged",
             Self::Published => "published",
             Self::Quarantined => "quarantined",
+            Self::Retired => "retired",
         }
     }
 
@@ -396,6 +503,7 @@ impl CandidateStateDto {
             "staged" => Self::Staged,
             "published" => Self::Published,
             "quarantined" => Self::Quarantined,
+            "retired" => Self::Retired,
             _ => return None,
         })
     }
@@ -408,12 +516,19 @@ pub struct CandidateDto {
     pub staged_ms: u64,
     pub published_ms: Option<u64>,
     pub quarantined_ms: Option<u64>,
+    /// When this revision was deleted; `None` while it is live.
+    pub retired_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetDetailDto {
     pub asset_id: AssetId,
     pub namespace: String,
+    /// The asset itself was deleted: it is gone from listings, aliases and
+    /// search, and every revision below reads `Retired`. Detail still
+    /// answers so a UI can say "deleted" instead of "vanished".
+    pub retired: bool,
+    pub retired_ms: Option<u64>,
     pub candidates: Vec<CandidateDto>,
 }
 
@@ -457,20 +572,292 @@ pub fn parse_asset_detail(v: &Value) -> ClientResult<AssetDetailDto> {
         if state == CandidateStateDto::Published && published_ms.is_none() {
             return Err(ClientError::Protocol { what: "published candidate without timestamp" });
         }
-        candidates.push(CandidateDto { revision, state, staged_ms, published_ms, quarantined_ms });
+        let retired_ms = opt_u64(c, "retired_ms", "candidate retired_ms")?;
+        candidates.push(CandidateDto {
+            revision,
+            state,
+            staged_ms,
+            published_ms,
+            quarantined_ms,
+            retired_ms,
+        });
     }
-    Ok(AssetDetailDto { asset_id, namespace, candidates })
+    // Older servers do not send these; absent means "not deleted", which is
+    // exactly what such a server means.
+    let retired = match v.get("retired") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ClientError::Protocol { what: "asset detail retired" }),
+    };
+    let retired_ms = opt_u64(v, "retired_ms", "asset detail retired_ms")?;
+    Ok(AssetDetailDto { asset_id, namespace, retired, retired_ms, candidates })
+}
+
+// ---- deletion --------------------------------------------------------------
+
+/// What one retire call removed. Idempotent by design: a repeat reports
+/// `already_retired` with zero counts instead of failing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetireDto {
+    pub asset_id: AssetId,
+    /// Present for a single-revision retirement.
+    pub revision: Option<AssetRevisionId>,
+    pub already_retired: bool,
+    pub revisions_retired: u64,
+    pub aliases_dropped: u64,
+    pub annotation_cleared: bool,
+}
+
+pub fn parse_retire(v: &Value) -> ClientResult<RetireDto> {
+    let asset_id = parse_asset_id(need_str(v, "asset_id", 64, "retire asset id")?)?;
+    let revision = opt_id_field(v, "revision", "retire revision", AssetRevisionId::from_str)?;
+    let already_retired = match v.get("already_retired") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ClientError::Protocol { what: "retire already_retired" }),
+    };
+    let annotation_cleared = match v.get("annotation_cleared") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ClientError::Protocol { what: "retire annotation_cleared" }),
+    };
+    Ok(RetireDto {
+        asset_id,
+        revision,
+        already_retired,
+        revisions_retired: opt_u64(v, "revisions_retired", "retire revisions")?.unwrap_or(0),
+        aliases_dropped: opt_u64(v, "aliases_dropped", "retire aliases")?.unwrap_or(0),
+        annotation_cleared,
+    })
+}
+
+// ---- live game rooms -------------------------------------------------------
+
+/// One live room: somebody is playing `game` right now, and `invite` is how
+/// to reach them. The invite is opaque to this crate — it is the game app's
+/// own address-plus-key spelling, and it carries capability data, so it is
+/// carried, never interpreted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomDto {
+    pub room: String,
+    pub game: String,
+    pub invite: String,
+    pub host: String,
+    pub created_ms: u64,
+    pub expires_ms: u64,
+}
+
+/// The answer to "I am about to host this game; is anybody already?".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomClaimDto {
+    /// The claim is yours. `token` is the only proof of that and is issued
+    /// once — heartbeat and retire need it.
+    Claimed { room: RoomDto, token: String },
+    /// Somebody was already hosting. Join `room` instead of standing up a
+    /// second world nobody would find.
+    Occupied { room: RoomDto },
+}
+
+impl RoomClaimDto {
+    pub fn room(&self) -> &RoomDto {
+        match self {
+            Self::Claimed { room, .. } | Self::Occupied { room } => room,
+        }
+    }
+}
+
+fn room_text<'a>(v: &'a Value, key: &'static str, max: usize, what: &'static str) -> ClientResult<&'a str> {
+    let s = need_str(v, key, max, what)?;
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return Err(ClientError::Protocol { what });
+    }
+    Ok(s)
+}
+
+pub fn parse_room(v: &Value) -> ClientResult<RoomDto> {
+    Ok(RoomDto {
+        room: room_text(v, "room", 64, "room id")?.to_string(),
+        game: room_text(v, "game", crate::wire::MAX_ROOM_GAME_BYTES, "room game")?.to_string(),
+        invite: room_text(v, "invite", crate::wire::MAX_ROOM_INVITE_BYTES, "room invite")?
+            .to_string(),
+        host: room_text(v, "host", crate::wire::MAX_ROOM_HOST_BYTES, "room host")?.to_string(),
+        created_ms: need_u64(v, "created_ms", "room created_ms")?,
+        expires_ms: need_u64(v, "expires_ms", "room expires_ms")?,
+    })
+}
+
+pub fn parse_rooms(v: &Value) -> ClientResult<Vec<RoomDto>> {
+    let arr = need(v, "rooms", "rooms list")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "rooms list" })?;
+    if arr.len() > crate::wire::MAX_ROOMS_PAGE {
+        return Err(ClientError::OverBudget {
+            what: "rooms",
+            limit: crate::wire::MAX_ROOMS_PAGE as u64,
+            found: arr.len() as u64,
+        });
+    }
+    arr.iter().map(parse_room).collect()
+}
+
+/// A heartbeat answers with the room as the server now holds it — the
+/// renewed lease included, so a host never has to guess when to beat again.
+pub fn parse_room_envelope(v: &Value) -> ClientResult<RoomDto> {
+    parse_room(need(v, "room", "room envelope")?)
+}
+
+pub fn parse_room_claim(v: &Value) -> ClientResult<RoomClaimDto> {
+    let room = parse_room(need(v, "room", "room claim room")?)?;
+    // A closed vocabulary: an outcome this client does not understand must
+    // refuse, never fall through to "somebody else is hosting" — that would
+    // silently drop a claim the caller actually holds.
+    match need_str(v, "outcome", 16, "room claim outcome")? {
+        "claimed" => Ok(RoomClaimDto::Claimed {
+            room,
+            token: room_text(v, "token", 64, "room claim token")?.to_string(),
+        }),
+        "occupied" => Ok(RoomClaimDto::Occupied { room }),
+        _ => Err(ClientError::Protocol { what: "room claim outcome" }),
+    }
+}
+
+// ---- blob garbage collection -----------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcPhaseDto {
+    Retain,
+    Mark,
+    Sweep,
+    Done,
+    Cancelled,
+}
+
+impl GcPhaseDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retain => "retain",
+            Self::Mark => "mark",
+            Self::Sweep => "sweep",
+            Self::Done => "done",
+            Self::Cancelled => "cancelled",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "retain" => Self::Retain,
+            "mark" => Self::Mark,
+            "sweep" => Self::Sweep,
+            "done" => Self::Done,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// What one GC run has done so far. A run advances in bounded steps, so a
+/// caller polls this until `done`; the counters are durable, not a snapshot
+/// of one request's work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GcStatusDto {
+    /// `None` when the server has never run a collection.
+    pub run_id: Option<u64>,
+    pub phase: GcPhaseDto,
+    pub done: bool,
+    pub dry_run: bool,
+    pub started_ms: u64,
+    pub updated_ms: u64,
+    /// Blobs recorded after this timestamp are protected by the grace window.
+    pub horizon_ms: u64,
+    pub retain_keep: Option<u64>,
+    pub retired_revisions: u64,
+    pub scanned_revisions: u64,
+    pub marked_blobs: u64,
+    pub examined_blobs: u64,
+    /// Blobs proven unreferenced (what a dry run reports as reclaimable).
+    pub unreferenced_blobs: u64,
+    pub unreferenced_bytes: u64,
+    pub deleted_blobs: u64,
+    pub deleted_bytes: u64,
+}
+
+pub fn parse_gc_status(v: &Value) -> ClientResult<GcStatusDto> {
+    let run_id = opt_u64(v, "run_id", "gc run id")?;
+    let done = match v.get("done") {
+        Some(Value::Bool(b)) => *b,
+        None | Some(Value::Null) => true,
+        Some(_) => return Err(ClientError::Protocol { what: "gc done" }),
+    };
+    // A server that has never collected answers with a null run: everything
+    // else is absent and reads as a finished, empty run.
+    if run_id.is_none() {
+        return Ok(GcStatusDto {
+            run_id: None,
+            phase: GcPhaseDto::Done,
+            done: true,
+            dry_run: false,
+            started_ms: 0,
+            updated_ms: 0,
+            horizon_ms: 0,
+            retain_keep: None,
+            retired_revisions: 0,
+            scanned_revisions: 0,
+            marked_blobs: 0,
+            examined_blobs: 0,
+            unreferenced_blobs: 0,
+            unreferenced_bytes: 0,
+            deleted_blobs: 0,
+            deleted_bytes: 0,
+        });
+    }
+    let phase = GcPhaseDto::parse(need_str(v, "phase", 16, "gc phase")?)
+        .ok_or(ClientError::Protocol { what: "gc phase" })?;
+    let dry_run = match v.get("dry_run") {
+        Some(Value::Bool(b)) => *b,
+        None | Some(Value::Null) => false,
+        Some(_) => return Err(ClientError::Protocol { what: "gc dry_run" }),
+    };
+    let field = |key: &'static str, what: &'static str| -> ClientResult<u64> {
+        Ok(opt_u64(v, key, what)?.unwrap_or(0))
+    };
+    Ok(GcStatusDto {
+        run_id,
+        phase,
+        done,
+        dry_run,
+        started_ms: field("started_ms", "gc started_ms")?,
+        updated_ms: field("updated_ms", "gc updated_ms")?,
+        horizon_ms: field("horizon_ms", "gc horizon_ms")?,
+        retain_keep: opt_u64(v, "retain_keep", "gc retain_keep")?,
+        retired_revisions: field("retired_revisions", "gc retired_revisions")?,
+        scanned_revisions: field("scanned_revisions", "gc scanned_revisions")?,
+        marked_blobs: field("marked_blobs", "gc marked_blobs")?,
+        examined_blobs: field("examined_blobs", "gc examined_blobs")?,
+        unreferenced_blobs: field("unreferenced_blobs", "gc unreferenced_blobs")?,
+        unreferenced_bytes: field("unreferenced_bytes", "gc unreferenced_bytes")?,
+        deleted_blobs: field("deleted_blobs", "gc deleted_blobs")?,
+        deleted_bytes: field("deleted_bytes", "gc deleted_bytes")?,
+    })
 }
 
 // ---- catalog event feed ----------------------------------------------------
 
-/// Closed catalog-event vocabulary. An unknown kind string refuses the whole
-/// response: this client and its server ship in protocol-version lockstep,
-/// and a change notification must never be silently misread.
+/// Catalog-event vocabulary. The client asks for exactly the vocabulary it
+/// understands (`wire::EVENT_VOCABULARY` travels on every poll), so a server
+/// only ever sends kinds this build knows — and a server NEWER than this
+/// build, which may have kinds beyond that, is still readable because an
+/// unrecognised kind parses as [`CatalogEventKind::Other`] instead of
+/// refusing the whole page. A subscriber that cannot interpret `Other`
+/// treats it as "something changed" and resyncs; nothing is ever silently
+/// misread as a known kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogEventKind {
     AssetPublished,
     AssetQuarantined,
+    /// The whole asset was deleted: every revision retired, aliases gone,
+    /// search rows removed. Subscribers must drop it from their view.
+    AssetRetired,
+    /// One revision was deleted; the asset may still be live.
+    RevisionRetired,
     AliasSet,
     AliasCleared,
     AnnotationSet,
@@ -479,6 +866,9 @@ pub enum CatalogEventKind {
     GameQuarantined,
     GameAliasSet,
     GameAliasCleared,
+    /// A kind this build does not know (a newer server). Carries no
+    /// interpretation on purpose.
+    Other,
 }
 
 impl CatalogEventKind {
@@ -486,6 +876,8 @@ impl CatalogEventKind {
         match self {
             Self::AssetPublished => "asset_published",
             Self::AssetQuarantined => "asset_quarantined",
+            Self::AssetRetired => "asset_retired",
+            Self::RevisionRetired => "revision_retired",
             Self::AliasSet => "alias_set",
             Self::AliasCleared => "alias_cleared",
             Self::AnnotationSet => "annotation_set",
@@ -494,13 +886,22 @@ impl CatalogEventKind {
             Self::GameQuarantined => "game_quarantined",
             Self::GameAliasSet => "game_alias_set",
             Self::GameAliasCleared => "game_alias_cleared",
+            Self::Other => "other",
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s {
+    /// True when the event means "this content is gone": quarantine and both
+    /// retirement kinds. Subscribers drop the asset on any of them.
+    pub fn removes_content(self) -> bool {
+        matches!(self, Self::AssetQuarantined | Self::AssetRetired | Self::RevisionRetired)
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
             "asset_published" => Self::AssetPublished,
             "asset_quarantined" => Self::AssetQuarantined,
+            "asset_retired" => Self::AssetRetired,
+            "revision_retired" => Self::RevisionRetired,
             "alias_set" => Self::AliasSet,
             "alias_cleared" => Self::AliasCleared,
             "annotation_set" => Self::AnnotationSet,
@@ -509,8 +910,8 @@ impl CatalogEventKind {
             "game_quarantined" => Self::GameQuarantined,
             "game_alias_set" => Self::GameAliasSet,
             "game_alias_cleared" => Self::GameAliasCleared,
-            _ => return None,
-        })
+            _ => Self::Other,
+        }
     }
 }
 
@@ -579,8 +980,7 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
         }
         last_seq = seq;
         let kind_s = need_str(r, "kind", 32, "event kind")?;
-        let kind = CatalogEventKind::parse(kind_s)
-            .ok_or(ClientError::Protocol { what: "event kind" })?;
+        let kind = CatalogEventKind::parse(kind_s);
         let namespace = need_str(r, "ns", MAX_NAMESPACE_BYTES, "event ns")?.to_string();
         check_display(&namespace, "event ns")?;
         let asset_id = opt_id_field(r, "asset_id", "event asset_id", AssetId::from_str)?;
@@ -1544,9 +1944,32 @@ pub enum ChatToolOutcomeDto {
     Failed { message: String },
 }
 
+/// PRESENTATION-ONLY facts a chat service may attach to a `delta` (see the
+/// chat wire's `ServingFacts`). Optional and additive: a service that
+/// predates it sends nothing and every field here stays `None`.
+///
+/// `gen_tokens` is cumulative WITHIN the current provider round and
+/// restarts at 0 each round, so a consumer computing a rate must read a
+/// decrease as a restart. The lane pair is the serving box's advertised
+/// decode contention at probe time — stale by construction, and absent
+/// entirely when the box advertises no lanes (which means one lane).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatServingDto {
+    pub gen_tokens: u32,
+    pub lanes_active: Option<u32>,
+    pub slots_total: Option<u32>,
+    /// Tokens the prefix cache let this turn skip (absent on old services).
+    pub prefix_ingested: Option<u32>,
+    pub prefix_resumed: Option<bool>,
+    /// Hidden reasoning tokens so far. `visible_tokens` stays absent while
+    /// the think block is still open — that absence IS the "thinking" flag.
+    pub think_tokens: Option<u32>,
+    pub visible_tokens: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEventBodyDto {
-    Delta { text: String },
+    Delta { text: String, serving: Option<ChatServingDto> },
     ToolCall { id: String, name: String, args: Value },
     ToolProgress { id: String, permille: u16, note: String },
     ToolResult { id: String, outcome: ChatToolOutcomeDto },
@@ -1663,11 +2086,33 @@ pub fn parse_chat_events(v: &Value) -> ClientResult<ChatEventsPageDto> {
     Ok(ChatEventsPageDto { events, cursor })
 }
 
+/// Same ceilings the chat wire clamps to; implausible values are pinned,
+/// never refused (see [`ChatServingDto`]).
+fn parse_chat_serving(v: &Value) -> Option<ChatServingDto> {
+    if !matches!(v, Value::Obj(_)) {
+        return None;
+    }
+    let lane = |key: &str| v.get(key).and_then(Value::as_u64).map(|n| n.min(1024) as u32);
+    Some(ChatServingDto {
+        gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(10_000_000) as u32,
+        lanes_active: lane("lanes_active"),
+        slots_total: lane("slots_total"),
+        prefix_ingested: v.get("prefix_ingested").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
+        prefix_resumed: v.get("prefix_resumed").and_then(Value::as_bool),
+        think_tokens: v.get("think_tokens").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
+        visible_tokens: v.get("visible_tokens").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
+    })
+}
+
 fn parse_chat_event_body(v: &Value) -> ClientResult<ChatEventBodyDto> {
     match need_str(v, "type", 32, "chat event type")? {
         "delta" => {
             let text = need_str(v, "text", MAX_CHAT_DELTA, "chat delta")?.to_string();
-            Ok(ChatEventBodyDto::Delta { text })
+            // Lenient on purpose: this block is a readout, and a garbled
+            // counter must never take down a live turn that is otherwise
+            // perfectly readable.
+            let serving = v.get("serving").and_then(parse_chat_serving);
+            Ok(ChatEventBodyDto::Delta { text, serving })
         }
         "tool_call" => {
             let id = need_str(v, "id", MAX_CHAT_TOOL_ID, "chat tool id")?.to_string();
@@ -2190,7 +2635,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.events.len(), 2);
-        assert!(matches!(page.events[0].body, ChatEventBodyDto::Delta { .. }));
+        // A delta from a service that predates the serving block parses
+        // exactly as before, with nothing invented.
+        assert_eq!(
+            page.events[0].body,
+            ChatEventBodyDto::Delta { text: "hi".into(), serving: None }
+        );
+        // With the block, the counters come through; a broken block costs
+        // the readout, never the delta.
+        let page = parse_chat_events(
+            &json::parse(
+                br#"{"events":[
+                    {"seq":0,"type":"delta","text":"a","serving":{"gen_tokens":40,"lanes_active":2,"slots_total":4}},
+                    {"seq":1,"type":"delta","text":"b","serving":{"lanes_active":2}},
+                    {"seq":2,"type":"delta","text":"c","serving":7}
+                ],"cursor":2}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            page.events[0].body,
+            ChatEventBodyDto::Delta {
+                text: "a".into(),
+                serving: Some(ChatServingDto {
+                    gen_tokens: 40,
+                    lanes_active: Some(2),
+                    slots_total: Some(4),
+                }),
+            }
+        );
+        assert_eq!(
+            page.events[1].body,
+            ChatEventBodyDto::Delta { text: "b".into(), serving: None },
+            "a block with no token count is no count at all"
+        );
+        assert_eq!(
+            page.events[2].body,
+            ChatEventBodyDto::Delta { text: "c".into(), serving: None }
+        );
         assert!(parse_chat_events(
             &json::parse(br#"{"events":[{"seq":0,"type":"explode"}],"cursor":0}"#).unwrap(),
         )
@@ -2233,6 +2716,46 @@ mod tests {
         assert!(parse_catalog_page(&json::parse(bad_title.as_bytes()).unwrap()).is_err());
         let no_total = body.replace(",\"total\":1", "");
         assert!(parse_catalog_page(&json::parse(no_total.as_bytes()).unwrap()).is_err());
+    }
+
+    /// Facets are optional on the wire — a server that does not count them
+    /// (or a query that did not ask) leaves the field out, and that is not
+    /// an error. What IS present is typed strictly.
+    #[test]
+    fn facet_shapes() {
+        let with = |f: &str| format!(r#"{{"hits":[],"total":0,"cursor":null,"facets":{f}}}"#);
+        let none = r#"{"hits":[],"total":0,"cursor":null}"#;
+        assert!(parse_catalog_page(&json::parse(none.as_bytes()).unwrap())
+            .unwrap()
+            .facets
+            .is_empty());
+        assert!(parse_catalog_page(&json::parse(with("null").as_bytes()).unwrap())
+            .unwrap()
+            .facets
+            .is_empty());
+        let good = r#"[{"kind":"category","label":"doom","count":12},
+                       {"kind":"tag","label":"prop","count":3}]"#;
+        let page =
+            parse_catalog_page(&json::parse(with(good).as_bytes()).unwrap()).unwrap();
+        assert_eq!(
+            page.facets,
+            vec![
+                CatalogFacet { kind: FacetKind::Category, label: "doom".into(), count: 12 },
+                CatalogFacet { kind: FacetKind::Tag, label: "prop".into(), count: 3 },
+            ]
+        );
+        for bad in [
+            r#"[{"kind":"colour","label":"doom","count":1}]"#,
+            r#"[{"label":"doom","count":1}]"#,
+            r#"[{"kind":"tag","count":1}]"#,
+            r#"[{"kind":"tag","label":"doom"}]"#,
+            r#"7"#,
+        ] {
+            assert!(
+                parse_catalog_page(&json::parse(with(bad).as_bytes()).unwrap()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -2497,6 +3020,24 @@ mod tests {
         );
         assert_eq!(parse_error_detail(b"garbage"), None);
         assert_eq!(parse_error_detail(br#"{"error":""}"#), None);
+        // The server sends the category AND the reason; a client that
+        // reports only the category says nothing at all.
+        assert_eq!(
+            parse_error_detail(
+                br#"{"error":"content contract violation","detail":"unsupported schema version 3"}"#
+            )
+            .as_deref(),
+            Some("content contract violation: unsupported schema version 3")
+        );
+        // A detail that merely repeats the category is not printed twice.
+        assert_eq!(
+            parse_error_detail(br#"{"error":"not found","detail":"not found"}"#).as_deref(),
+            Some("not found")
+        );
+        assert_eq!(
+            parse_error_detail(br#"{"error":"not found","detail":""}"#).as_deref(),
+            Some("not found")
+        );
         let long = format!(r#"{{"error":"{}"}}"#, "x".repeat(4096));
         assert_eq!(
             parse_error_detail(long.as_bytes()).unwrap().len(),

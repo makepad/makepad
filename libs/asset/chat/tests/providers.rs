@@ -11,7 +11,9 @@ use makepad_asset_chat::responses::{
     DEFAULT_GROK_TIMEOUT, MAX_RESPONSES_BODY,
 };
 use makepad_asset_chat::wire::{MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_MESSAGES};
-use makepad_asset_chat::wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind};
+use makepad_asset_chat::wire::{
+    ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ServingFacts,
+};
 use makepad_asset_client::json::{self, Value};
 use makepad_network::blocking_http::CancelToken;
 use std::cell::RefCell;
@@ -165,6 +167,105 @@ fn qwen_does_not_let_later_preferred_overwrite_qwen38() {
     }
 }
 
+/// The box counts the tokens; the broker only forwards the count. A delta
+/// is a `partial_text` DIFF at poll cadence, so its size says nothing about
+/// how many tokens produced it — this is what makes an honest tok/s
+/// readout possible downstream.
+#[test]
+fn qwen_forwards_the_decode_token_count_and_lane_contention() {
+    let mut t = ScriptedFleet::default();
+    let mut h = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut h {
+        pairs.push((
+            "lanes".to_string(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(4)),
+                ("slots_claimed", Value::Int(3)),
+                ("slots_free", Value::Int(1)),
+                ("lanes_active", Value::Int(2)),
+                ("context_per_slot", Value::Int(16384)),
+                ("queue_depth", Value::Int(0)),
+                ("queue_max", Value::Int(8)),
+            ]),
+        ));
+    }
+    t.on_get("http://n1:8765/health", Ok(h));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-tok"))]));
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 12/3072")),
+            ("partial_text", json::s("Hel")),
+        ])),
+    );
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 40/3072")),
+            ("partial_text", json::s("Hello there")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    let facts = |gen| ServingFacts {
+        gen_tokens: gen,
+        lanes_active: Some(2),
+        slots_total: Some(4), ..Default::default() };
+    // Facts precede the delta they describe.
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(12)), ProviderEvent::Delta("Hel".into())]
+    );
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(40)), ProviderEvent::Delta("lo there".into())]
+    );
+    // An unchanged count says nothing twice.
+    assert!(p.poll().is_empty());
+}
+
+/// A box that advertises no lanes means ONE lane — never "unknown", and
+/// never a fabricated "1/1" on a readout.
+#[test]
+fn qwen_says_nothing_about_lanes_when_the_box_advertises_none() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-nolanes"))]));
+    t.on_get(
+        "http://n1:8765/job/j-nolanes",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 5/3072")),
+            ("partial_text", json::s("Hi")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    assert_eq!(
+        p.poll(),
+        vec![
+            ProviderEvent::Serving(ServingFacts {
+                gen_tokens: 5,
+                lanes_active: None,
+                slots_total: None, ..Default::default() }),
+            ProviderEvent::Delta("Hi".into())
+        ]
+    );
+}
+
 #[test]
 fn qwen_poll_emits_stage_status_before_tokens() {
     let mut t = ScriptedFleet::default();
@@ -285,6 +386,9 @@ fn qwen_probe_caches_and_skips_dead_nodes() {
     assert_eq!(
         first,
         vec![
+            // A failed idempotent GET retries once before the node is
+            // marked dead (a flaky LAN drop must not cost DEAD_TTL).
+            "http://dead:8765/health".to_string(),
             "http://dead:8765/health".to_string(),
             "http://n1:8765/health".to_string(),
             "http://n1:8765/models".to_string(),
@@ -377,6 +481,54 @@ fn qwen_cancel_posts_job_cancel() {
     assert_eq!(recorded.last().unwrap().0, "http://n1:8765/job/j-9/cancel");
     drop(recorded);
     assert!(p.poll().is_empty());
+}
+
+/// N concurrent chat sessions each own a provider, but the fleet roster is
+/// a fact about the LAN — with a shared pick cache the SECOND provider
+/// inherits the first one's scan instead of paying its own `/health` +
+/// `/models` (and its own connect timeouts on a dark box).
+#[test]
+fn qwen_providers_share_one_probe_through_the_pick_cache() {
+    let picks = std::sync::Arc::new(makepad_asset_chat::qwen::FleetPickCache::new());
+
+    let mut first = ScriptedFleet::default();
+    first.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    first.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_first = first.seen_gets.clone();
+    let mut a =
+        FleetQwenChatProvider::with_pick_cache(first, vec!["http://n1:8765".into()], picks.clone());
+    assert!(a.availability().is_available());
+    assert_eq!(seen_first.borrow().len(), 2, "the first provider scans once");
+
+    // A transport that PANICS on any GET: the second provider must not
+    // touch the network at all.
+    let second = ScriptedFleet::default();
+    let seen_second = second.seen_gets.clone();
+    let mut b = FleetQwenChatProvider::with_pick_cache(
+        second,
+        vec!["http://n1:8765".into()],
+        picks.clone(),
+    );
+    match b.availability() {
+        ProviderAvailability::Available { model, .. } => assert_eq!(model, "qwen3.8-27b"),
+        other => panic!("shared pick was not reused: {other:?}"),
+    }
+    assert!(seen_second.borrow().is_empty(), "{:?}", seen_second.borrow());
+
+    // A private cache (the plain constructor) is unchanged: it scans.
+    let mut third = ScriptedFleet::default();
+    third.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    third.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_third = third.seen_gets.clone();
+    let mut c = FleetQwenChatProvider::new(third, vec!["http://n1:8765".into()]);
+    assert!(c.availability().is_available());
+    assert_eq!(seen_third.borrow().len(), 2);
 }
 
 // -------------------------------------------------------------- responses

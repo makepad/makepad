@@ -62,6 +62,7 @@ fn thumb_result(core: &AssetServerCore, now: u64) -> DerivedResult {
             width: 512,
             height: 512,
             byte_len: bytes.len() as u64,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: bytes.len() as u64,

@@ -1,0 +1,41 @@
+# Asset annotation pass: run imported 3D-asset turntable sheets through a
+# vision model and publish the result as queryable store metadata.
+#
+# The pass is versioned and idempotent: an asset already annotated at the
+# current annotator version is skipped, and a re-run at a bumped version
+# REPLACES every field the pass owns rather than merging into it. That is what
+# makes "annotate with model A now, hard-replace with model B later" a
+# supported operation instead of a migration.
+#
+# It owns exactly two things in the store and adds no contract surface: the
+# annotation `description` (one dense construction line) and the `vlm-`
+# prefixed subset of its tags. There is no migration path and no
+# multi-version coexistence: change the shape, bump the version, re-run.
+#
+# Dependency policy follows makepad-asset-client: no HTTP crate, no JSON
+# crate, no async runtime. The vision model is never linked in — it is reached
+# through an executor seam (a subprocess or a fleet endpoint), so swapping
+# Metal-local for CUDA-fleet changes one impl and nothing else.
+
+[package]
+name = "makepad-asset-annotate"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "makepad_asset_annotate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-asset-annotate"
+path = "src/bin/asset_annotate.rs"
+
+[dependencies]
+makepad-asset-data = { path = "../data" }
+makepad-asset-client = { path = "../client" }
+# Turntable sheets are published as PNG; the pass decodes and downsamples
+# them to the vision tower's working size.
+makepad-zune-png = { path = "../../zune/zune-png" }
+# Asset selection reads the store's catalog read-only, the same way the chat
+# broker's CatalogReader does.
+makepad-sqlite = { path = "../../sqlite_query" }

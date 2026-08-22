@@ -514,6 +514,85 @@ fn search_annotations_visibility_and_cursors() {
     let r = owner.get("/v1/search?ns=elsewhere");
     assert_eq!(r.json().get("total").unwrap().as_i64(), Some(0));
 
+    // Server-side tag exclusion, same wire shape as `tag` on both forms.
+    // The asset carries tags [weapon, rocket].
+    for (tag, total) in [("rocket", 0i64), ("weapon", 0), ("nosuch", 1)] {
+        let r = owner.post_json(
+            "/v1/catalog",
+            &jobj(vec![("q", jstr("rocket launcher")), ("exclude_tag", jstr(tag))]),
+        );
+        assert_eq!(r.status, 200, "exclude_tag {tag}");
+        assert_eq!(r.json().get("total").unwrap().as_i64(), Some(total), "exclude_tag {tag}");
+    }
+    // The exclusion beats a matching positive tag on the same request.
+    let r = owner.post_json(
+        "/v1/catalog",
+        &jobj(vec![
+            ("tag", jstr("weapon")),
+            ("exclude_tag", jstr("rocket")),
+        ]),
+    );
+    assert_eq!(r.json().get("total").unwrap().as_i64(), Some(0));
+    let r = owner.get("/v1/search?tag=weapon&exclude_tag=rocket");
+    assert_eq!(r.json().get("total").unwrap().as_i64(), Some(0));
+    let r = owner.get("/v1/search?exclude_tag=nosuch");
+    assert_eq!(r.json().get("total").unwrap().as_i64(), Some(1));
+    // Facets travel on both request forms and are absent unless asked for.
+    // The asset carries kind `prop` and tags [weapon, rocket].
+    let r = owner.get("/v1/search?q=rocket");
+    assert_eq!(
+        r.json().get("facets").unwrap().as_arr().map(<[Value]>::len),
+        Some(0),
+        "no facets unless the query asks"
+    );
+    let r = owner.get("/v1/search?q=rocket&facets=8");
+    let facets = r.json().get("facets").unwrap().as_arr().unwrap().to_vec();
+    let mut seen: Vec<(String, String, i64)> = facets
+        .iter()
+        .map(|f| {
+            (
+                f.get("kind").unwrap().as_str().unwrap().to_string(),
+                f.get("label").unwrap().as_str().unwrap().to_string(),
+                f.get("count").unwrap().as_i64().unwrap(),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("tag".to_string(), "rocket".to_string(), 1),
+            ("tag".to_string(), "weapon".to_string(), 1),
+        ]
+    );
+    let r = owner.post_json(
+        "/v1/catalog",
+        &jobj(vec![("q", jstr("rocket launcher")), ("facets", Value::Int(8))]),
+    );
+    assert_eq!(r.json().get("facets").unwrap().as_arr().map(<[Value]>::len), Some(2));
+    // A facet count over the budget is clamped, not refused, exactly like
+    // `limit`; a malformed one is a 400.
+    assert_eq!(owner.get("/v1/search?q=rocket&facets=100000").status, 200);
+    assert_eq!(
+        owner
+            .post_json(
+                "/v1/catalog",
+                &jobj(vec![("q", jstr("rocket")), ("facets", jstr("many"))])
+            )
+            .status,
+        400
+    );
+
+    // Bad values refuse with 400, byte-for-byte like a bad `tag`.
+    for bad in ["", "Bad Tag", "bad\u{7}"] {
+        let a = owner.post_json("/v1/catalog", &jobj(vec![("tag", jstr(bad))]));
+        let b = owner.post_json("/v1/catalog", &jobj(vec![("exclude_tag", jstr(bad))]));
+        assert_eq!((a.status, b.status), (400, 400), "tag/exclude_tag {bad:?}");
+    }
+    // A non-string value is a malformed search field.
+    let r = owner.post_json("/v1/catalog", &jobj(vec![("exclude_tag", Value::Int(1))]));
+    assert_eq!(r.status, 400);
+
     // Keyset pagination: three annotated assets, one per page, cursor bound
     // to the exact query shape.
     for i in 0..2u8 {

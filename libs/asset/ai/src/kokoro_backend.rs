@@ -1,8 +1,8 @@
 //! The `kokoro` backend: text-to-speech (speech domain) through the EXISTING
-//! in-repo Kokoro-82M port in libs/tts — this file only wraps it, it does not
+//! in-repo Kokoro-82M port in libs/ai/models/speech — this file only wraps it, it does not
 //! re-implement any inference.
 //!
-//! The seam is deliberately tiny because libs/tts already is a clean engine:
+//! The seam is deliberately tiny because libs/ai/models/speech already is a clean engine:
 //! `KokoroSpeaker::load_with_voice(model, voice)` +
 //! `synthesize_with_speed(text, speed) -> SpeechAudio { samples, 24_000 }`.
 //! No Cx/app coupling exists — Metal offload state is process-global inside
@@ -12,7 +12,7 @@
 //! Weights are the makepad-converted `.mktts` / `.mkvoice` format. The
 //! registry lists the upstream `hexgrad/Kokoro-82M` `.pth`/`.pt` files; a
 //! fresh box downloads them from HF like any model and converts them
-//! in-process (libs/tts `convert.rs` — byte-identical to the offline Python
+//! in-process (libs/ai/models/speech `convert.rs` — byte-identical to the offline Python
 //! converter), so nothing is ever hand-carried. A converted file already at
 //! its cache path (`converts_to`) wins outright: existing boxes never
 //! re-download the upstream source. Resolution order per file: converted in
@@ -38,7 +38,7 @@ pub struct SpeechJob {
 }
 
 /// Pluggable synthesis: `(samples, sample_rate)` out. The real path calls
-/// libs/tts; tests plug in a closure.
+/// libs/ai/models/speech; tests plug in a closure.
 pub type SynthFn = Box<dyn FnMut(&SpeechJob) -> Result<(Vec<f32>, u32), AssetAiError> + Send>;
 
 enum Synth {
@@ -149,7 +149,7 @@ impl ContentBackend for KokoroBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Real synthesis through libs/tts (feature tts)
+// Real synthesis through libs/ai/models/speech (feature tts)
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "tts")]
@@ -158,11 +158,11 @@ mod kokoro_synth {
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
     use crate::registry::FileSpec;
-    use makepad_tts::kokoro::KokoroSpeaker;
+    use makepad_ai_speech::kokoro::KokoroSpeaker;
     use std::path::{Path, PathBuf};
 
     // KokoroSpeaker is plain weight buffers (Metal state is process-global in
-    // libs/tts accel.rs), so it can live on the service worker directly.
+    // libs/ai/models/speech accel.rs), so it can live on the service worker directly.
     const _ASSERT_SPEAKER_SEND: fn() = || {
         fn assert_send<T: Send>() {}
         assert_send::<KokoroSpeaker>();
@@ -197,9 +197,9 @@ mod kokoro_synth {
             return false;
         };
         if name.ends_with(".mktts") {
-            makepad_tts::kokoro::model_path_if_present().is_some()
+            makepad_ai_speech::kokoro::model_path_if_present().is_some()
         } else {
-            makepad_tts::kokoro::named_voice_path_if_present(name).is_some()
+            makepad_ai_speech::kokoro::named_voice_path_if_present(name).is_some()
         }
     }
 
@@ -258,7 +258,7 @@ mod kokoro_synth {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| file.cache_as.clone());
                 let progress = &mut *ctx.progress;
-                makepad_tts::convert::convert_torch_weights(
+                makepad_ai_speech::convert::convert_torch_weights(
                     &src,
                     &converted,
                     &mut |done, tensors| {
@@ -296,7 +296,7 @@ mod kokoro_synth {
             let resolved = if cached.is_file() {
                 Some(cached.clone())
             } else {
-                makepad_tts::kokoro::model_path_if_present().map(PathBuf::from)
+                makepad_ai_speech::kokoro::model_path_if_present().map(PathBuf::from)
             };
             match resolved {
                 Some(path) => {
@@ -322,7 +322,7 @@ mod kokoro_synth {
                     return Ok(cached.to_string_lossy().into_owned());
                 }
             }
-            makepad_tts::kokoro::named_voice_path_if_present(&file_name).ok_or_else(|| {
+            makepad_ai_speech::kokoro::named_voice_path_if_present(&file_name).ok_or_else(|| {
                 AssetAiError::Backend(format!(
                     "voice pack {file_name} not found in the cache tts/ dir or next to the service"
                 ))

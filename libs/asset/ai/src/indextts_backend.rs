@@ -225,11 +225,11 @@ mod indextts_synth {
     use super::IndexTtsJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::indextts::INDEXTTS_SAMPLE_RATE;
-    use makepad_diffusion::indextts_pipeline::{
+    use makepad_ai_speech::indextts::INDEXTTS_SAMPLE_RATE;
+    use makepad_ai_speech::indextts_pipeline::{
         IndexTtsPipeline, IndexTtsSynthesisParams, IndexTtsVoice, IndexTtsWeightPaths,
     };
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
@@ -460,7 +460,7 @@ mod indextts_synth {
                         // exists. Clean them on this same thread. If cleanup
                         // itself fails, retire the thread so TLS destruction
                         // remains the unconditional fallback.
-                        let cleanup = makepad_diffusion::backend::release_gpu_runtime_namespaces(
+                        let cleanup = makepad_ai_common::backend::release_gpu_runtime_namespaces(
                             &["indextts_"],
                         );
                         resident.store(false, Ordering::Release);
