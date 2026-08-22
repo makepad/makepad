@@ -19,7 +19,7 @@
 
 use makepad_ai::makepad_micro_serde::*;
 use makepad_ai::*;
-use makepad_llama::{LlamaSession, LlamaSessionConfig};
+use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
 use makepad_widgets::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
