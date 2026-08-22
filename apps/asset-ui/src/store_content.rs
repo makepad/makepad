@@ -185,6 +185,10 @@ pub fn default_viewable_roles() -> Vec<FileRole> {
         FileRole::Texture,
         FileRole::Albedo,
         FileRole::Audio,
+        // The viewer plays catalog videos too — leaving this out made every
+        // store video open fail with "revision has no ... file (has
+        // [Video])".
+        FileRole::Video,
     ]
 }
 
