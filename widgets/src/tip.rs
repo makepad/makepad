@@ -206,14 +206,28 @@ impl Widget for TipLayer {
         let Some(draw_list) = self.draw_list.as_mut() else {
             return DrawStep::done();
         };
-        draw_list.begin_overlay_last(cx);
-        // Estimate the bubble (DrawText measures only while drawing; a
-        // short tip tolerates the slack), place BELOW the control — never
-        // over it — flip ABOVE when the bottom would leave the window,
-        // clamp horizontally.
+        // The PROVEN popup idiom (PopupMenu): bubble as turtle content
+        // at the overlay root, shifted to its clamped position.
+        draw_list.begin_overlay_reuse(cx);
+        let pass = cx.current_pass_size();
+        cx.begin_root_turtle(pass, Layout::flow_down());
         let font_size = 9.0f64;
         let w = text.chars().count() as f64 * font_size * 0.62 + TIP_PAD_X * 2.0 + 4.0;
         let h = font_size * 1.5 + TIP_PAD_Y * 2.0;
+        self.draw_bg.begin(
+            cx,
+            Walk::fixed(w, h),
+            Layout::default(),
+        );
+        let bubble = cx.turtle().rect();
+        self.draw_text.draw_abs(
+            cx,
+            dvec2(bubble.pos.x + TIP_PAD_X, bubble.pos.y + TIP_PAD_Y),
+            &text,
+        );
+        self.draw_bg.end(cx);
+        // Place BELOW the control, flip ABOVE at the window's bottom,
+        // clamp horizontally.
         let mut x = anchor.pos.x + (anchor.size.x - w) * 0.5;
         x = x.clamp(window.pos.x + 2.0, (window.pos.x + window.size.x - w - 2.0).max(2.0));
         let below = anchor.pos.y + anchor.size.y + TIP_GAP;
@@ -222,8 +236,7 @@ impl Widget for TipLayer {
         } else {
             below
         };
-        self.draw_bg.draw_abs(cx, Rect { pos: dvec2(x, y), size: dvec2(w, h) });
-        self.draw_text.draw_abs(cx, dvec2(x + TIP_PAD_X, y + TIP_PAD_Y), &text);
+        cx.end_pass_sized_turtle_with_shift(self.area, dvec2(x, y) - window.pos);
         draw_list.end(cx);
         DrawStep::done()
     }

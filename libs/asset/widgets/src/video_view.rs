@@ -76,8 +76,37 @@ script_mod! {
             // accent = what's on. The playhead follows the handles.
             color: #xffffff
         }
-        draw_handle +: {
+        draw_handle_in +: {
             color: #xf0b34d
+            // [ — the in-point bracket, SDF so the AA is free.
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                sdf.box(1.0, 1.0, 2.5, h - 2.0, 1.0)
+                sdf.fill(self.color)
+                sdf.box(1.0, 1.0, w - 2.0, 2.5, 1.0)
+                sdf.fill(self.color)
+                sdf.box(1.0, h - 3.5, w - 2.0, 2.5, 1.0)
+                sdf.fill(self.color)
+                return sdf.result
+            }
+        }
+        draw_handle_out +: {
+            color: #xf0b34d
+            // ] — mirrored.
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                sdf.box(w - 3.5, 1.0, 2.5, h - 2.0, 1.0)
+                sdf.fill(self.color)
+                sdf.box(1.0, 1.0, w - 2.0, 2.5, 1.0)
+                sdf.fill(self.color)
+                sdf.box(1.0, h - 3.5, w - 2.0, 2.5, 1.0)
+                sdf.fill(self.color)
+                return sdf.result
+            }
         }
         draw_tail +: {
             color: #xffffff10
@@ -200,7 +229,9 @@ pub struct VideoView {
     #[live]
     trim_handles: bool,
     #[live]
-    draw_handle: DrawColor,
+    draw_handle_in: DrawQuad,
+    #[live]
+    draw_handle_out: DrawQuad,
     #[live]
     draw_tail: DrawColor,
     /// The trim range, fractions of the clip. (0, 1) = untrimmed.
@@ -302,11 +333,7 @@ impl VideoView {
     }
 
     fn seek_to(&mut self, cx: &mut Cx, uid: WidgetUid, x: f64) {
-        let band = if self.bar_below {
-            self.view.view(cx, ids!(bar_slot)).area().rect(cx)
-        } else {
-            self.band(cx)
-        };
+        let band = self.bar_band(cx);
         let Some(fraction) = Self::fraction_at(x, band) else {
             return;
         };
@@ -321,7 +348,13 @@ impl VideoView {
     /// against it.
     fn bar_band(&self, cx: &mut Cx) -> Rect {
         if self.bar_below {
-            self.view.view(cx, ids!(bar_slot)).area().rect(cx)
+            // Inset to the transport buttons' margin — the bar must not
+            // run flush to the panel edge.
+            let rect = self.view.view(cx, ids!(bar_slot)).area().rect(cx);
+            Rect {
+                pos: dvec2(rect.pos.x + 4.0, rect.pos.y),
+                size: dvec2((rect.size.x - 8.0).max(1.0), rect.size.y),
+            }
         } else {
             self.band(cx)
         }
@@ -388,12 +421,7 @@ impl Widget for VideoView {
         // In bar_below mode the bar spans the PLAYER's full width (the
         // reserved strip), the normal-video-player shape; floating mode
         // hugs the letterboxed picture band.
-        let band = if self.bar_below {
-            let strip = self.view.view(cx, ids!(bar_slot)).area().rect(cx);
-            Rect { pos: strip.pos, size: dvec2(strip.size.x, strip.size.y) }
-        } else {
-            self.band(cx)
-        };
+        let band = self.bar_band(cx);
         if band.size.x > KNOB_W {
             let y = if self.bar_below {
                 band.pos.y + (band.size.y - TRACK_H) * 0.5
@@ -443,21 +471,19 @@ impl Widget for VideoView {
                     size: dvec2(KNOB_W, KNOB_H),
                 },
             );
-            // The IN/OUT notches: slim bars a touch taller than the knob,
-            // sitting exactly on the range edges — grab and drag inward.
+            // The IN/OUT brackets — [ and ] on the range edges, thin
+            // glyphs on a comfortably wide grab target.
             if self.trim_handles {
-                for t in [t_in, t_out] {
-                    self.draw_handle.draw_abs(
-                        cx,
-                        Rect {
-                            pos: dvec2(
-                                x0 + w * t - 2.0,
-                                y - (KNOB_H + 2.0 - TRACK_H) / 2.0,
-                            ),
-                            size: dvec2(4.0, KNOB_H + 2.0),
-                        },
-                    );
-                }
+                let hy = y - (KNOB_H + 4.0 - TRACK_H) / 2.0;
+                let hs = dvec2(7.0, KNOB_H + 4.0);
+                self.draw_handle_in.draw_abs(
+                    cx,
+                    Rect { pos: dvec2(x0 + w * t_in - 2.0, hy), size: hs },
+                );
+                self.draw_handle_out.draw_abs(
+                    cx,
+                    Rect { pos: dvec2(x0 + w * t_out - 5.0, hy), size: hs },
+                );
             }
         }
         DrawStep::done()

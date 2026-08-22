@@ -251,6 +251,13 @@ struct SlotShared {
     /// inside it, ONCE holds at OUT.
     trim_in_100ns: AtomicI64,
     trim_out_100ns: AtomicI64,
+    /// BEAT TRANSPORT (the videoloop sync law: "one beat, one play
+    /// direction"): while on, the cache repeat runs at CONSTANT rate and
+    /// each `beat_pulse` tick — the app's beat boundary — wraps a Loop to
+    /// IN / flips a PingPong's direction. A range edge reached before the
+    /// beat HOLDS there; the next pulse launches the next sweep.
+    beat_transport: AtomicBool,
+    beat_pulse: AtomicU64,
     /// Bumped by every trim change: a decoded-frame cache built under the
     /// old bounds only covers the old range, so the tiers hand control
     /// back and the next pass rebuilds.
@@ -310,6 +317,8 @@ impl SlotPlayer {
             seek_100ns: AtomicI64::new(-1),
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
+            beat_transport: AtomicBool::new(false),
+            beat_pulse: AtomicU64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(0),
             video_ready: AtomicBool::new(false),
@@ -441,6 +450,16 @@ impl SlotPlayer {
         // A once-mode clip parked past OUT stays put until the operator
         // seeks; a LOOPING clip past OUT wraps on the next decode step.
         self.shared.end_of_stream.store(false, Ordering::Release);
+    }
+
+    /// Beat-driven transport on/off (see `SlotShared::beat_transport`).
+    pub fn set_beat_transport(&mut self, on: bool) {
+        self.shared.beat_transport.store(on, Ordering::Release);
+    }
+
+    /// One beat boundary: the transport turns/wraps NOW.
+    pub fn beat_pulse(&mut self) {
+        self.shared.beat_pulse.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The current trim bounds as fractions (0..=1).
@@ -978,6 +997,65 @@ fn cache_range_outgrown(built: (i64, i64), live: (i64, i64)) -> bool {
     live.0 < built.0 || live.1 > built.1
 }
 
+/// BEAT TRANSPORT: one tick of the sync-law sweep — pure math, pinned by
+/// the `beat_transport_tests` laws.
+///
+/// THE VIDEOLOOP SYNC LAW ("sync is 1 beat one play direction"): the sweep
+/// moves ONE cache frame per tick — constant speed, whatever the range —
+/// and only ever turns or wraps ON a beat pulse, only while HOLDING at a
+/// range edge. The edge requests the turn; the beat grants it:
+///
+/// - LOOP sweeps forward; at OUT it holds the last frame; the next pulse
+///   wraps it to IN — every pass begins ON a beat.
+/// - PING-PONG holds at either edge; the next pulse launches the return
+///   leg — every leg spans a whole number of beats.
+/// - A pulse MID-RANGE does NOTHING. (Turning on every pulse regardless
+///   of position confined playback to one beat's footage anchored
+///   wherever sync engaged — the "made-up range" bug: dialing the rate
+///   chip resized that phantom window. The range is the user's trim,
+///   never the tempo's.)
+///
+/// `idx` may sit outside `[lo, hi)` after a live trim change; it clamps
+/// first, which can itself land on an edge — and then waits for the beat
+/// like any other edge arrival. A trim never resets playback.
+///
+/// PING-PONG reads the EDGE from the position, not the direction flag:
+/// the cache is entered at its very end, and trims can throw the index
+/// onto either edge — position is the truth, the flag only steers
+/// mid-range travel.
+fn beat_transport_step(
+    idx: usize,
+    forward: bool,
+    lo: usize,
+    hi: usize,
+    mode: PlayMode,
+    pulse: bool,
+) -> (usize, bool) {
+    let last = hi.max(lo + 1) - 1;
+    let idx = idx.clamp(lo, last);
+    if mode == PlayMode::Loop {
+        return if idx >= last {
+            (if pulse { lo } else { last }, true)
+        } else {
+            (idx + 1, true)
+        };
+    }
+    if last == lo {
+        // One-frame window: nowhere to go, nothing to turn.
+        (lo, forward)
+    } else if idx >= last {
+        // Holding at OUT; the pulse launches the backward leg.
+        if pulse { (idx - 1, false) } else { (idx, true) }
+    } else if idx <= lo {
+        // Holding at IN; the pulse launches the forward leg.
+        if pulse { (idx + 1, true) } else { (idx, false) }
+    } else if forward {
+        (idx + 1, true)
+    } else {
+        (idx - 1, false)
+    }
+}
+
 fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     if cache.len() < 2 {
         return;
@@ -990,6 +1068,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let n = cache.len();
     let mut idx = n - 1;
     let mut forward = false;
+    let mut last_pulse = shared.beat_pulse.load(Ordering::Acquire);
     // Trim changes do NOT bounce control back here: the IN/OUT bounds are
     // read LIVE each frame below, so a shrinking range just tightens the
     // space the repeat moves in — playback never resets. Control only goes
@@ -1035,6 +1114,21 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
         let lo = cache.partition_point(|f| f.pts_100ns < t_in).min(n - 1);
         let hi = cache.partition_point(|f| f.pts_100ns < t_out).clamp(lo + 1, n);
+        if shared.beat_transport.load(Ordering::Acquire) {
+            let pulse = shared.beat_pulse.load(Ordering::Acquire);
+            let fresh = pulse != last_pulse;
+            last_pulse = pulse;
+            let (next, dir) = beat_transport_step(idx, forward, lo, hi, mode, fresh);
+            idx = next;
+            forward = dir;
+            synth_pts += delta;
+            shared.frames.lock().unwrap().push_back(Frame {
+                pts_100ns: synth_pts,
+                clip_100ns: cache[idx].pts_100ns,
+                bgra: cache[idx].bgra.clone(),
+            });
+            continue;
+        }
         if mode == PlayMode::Loop {
             forward = true;
             idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
@@ -2638,6 +2732,8 @@ mod tests {
             seek_100ns: AtomicI64::new(-1),
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
+            beat_transport: AtomicBool::new(false),
+            beat_pulse: AtomicU64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(info.duration_100ns),
             video_ready: AtomicBool::new(false),
@@ -2737,6 +2833,8 @@ mod tests {
                 seek_100ns: AtomicI64::new(-1),
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
+            beat_transport: AtomicBool::new(false),
+            beat_pulse: AtomicU64::new(0),
             trim_epoch: AtomicU64::new(0),
                 position_100ns: AtomicI64::new(0),
                 video_ready: AtomicBool::new(false),
