@@ -1326,7 +1326,14 @@ impl<'a> ScriptVm<'a> {
                 );
                 body.source_len = body.effective_code.len();
             }
+            // Parse errors never enter the trap queue (the parser recovers);
+            // surface them to a captured-diagnostics sink here or a validating
+            // host reports success for a script that failed to parse.
+            let parse_errors = std::mem::take(&mut body.parser.parse_errors);
             drop(bodies);
+            if let Some(sink) = self.bx.captured_errors.as_mut() {
+                sink.extend(parse_errors);
+            }
             // lets point our thread to it
             let result = self.run_root(body_id);
             // Mark the result object with FROM_EVAL flag
