@@ -1219,6 +1219,18 @@ impl WindowRef {
         }
     }
 
+    pub fn set_transparent(&self, cx: &mut Cx, transparent: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_transparent(cx, transparent);
+        }
+    }
+
+    pub fn set_backdrop(&self, cx: &mut Cx, backdrop: WindowBackdrop) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_backdrop(cx, backdrop);
+        }
+    }
+
     pub fn is_direct_composition(&self, cx: &Cx) -> bool {
         self.borrow()
             .map(|inner| inner.window.handle.is_direct_composition(cx))
