@@ -1533,15 +1533,98 @@ script_mod! {
                                                 chip_mesh := PillButton{width: Fill text: "MESH"}
                                                 chip_map := PillButton{width: Fill text: "MAP"}
                                                 import_toggle := ChromeButton{width: Fill text: "IMPORT"}
-                                                // VARIABLE FRAMERATE VIDEO
-                                                // IMPORT: ticked, video is
-                                                // CONVERTED on the way in
-                                                // (optical flow + all-intra)
-                                                // and owned by the library,
-                                                // so the decks can scratch it
-                                                // at any rate. Unticked, the
-                                                // usual no-copy reference.
-                                                import_flow := CheckBox{width: Fill text: "FLOW"}
+                                                // THE IMPORT MINI-PANEL: born
+                                                // when a folder is picked,
+                                                // gone when the run is. Two
+                                                // faces — ARMED (the picked
+                                                // folder, the FLOW choice,
+                                                // START/×) and RUNNING (bar,
+                                                // phase, file, STOP). The
+                                                // filter column may reflow;
+                                                // this is not the rigid band.
+                                                import_panel := View{
+                                                    visible: false
+                                                    width: Fill height: Fit flow: Down spacing: 3
+                                                    padding: Inset{top: 2, bottom: 2}
+                                                    import_armed := View{
+                                                        width: Fill height: Fit flow: Down spacing: 3
+                                                        import_dir_lab := Tick{
+                                                            flow: Flow.Right{wrap: false} max_lines: 1
+                                                        }
+                                                        import_count_lab := Tick{
+                                                            draw_text.color: #x7a8592
+                                                            draw_text.text_style: theme.font_regular{font_size: 7}
+                                                        }
+                                                        // VARIABLE FRAMERATE
+                                                        // VIDEO IMPORT: ticked,
+                                                        // video is CONVERTED on
+                                                        // the way in (optical
+                                                        // flow + all-intra) and
+                                                        // owned by the library,
+                                                        // so the decks can
+                                                        // scratch it at any
+                                                        // rate. Unticked, the
+                                                        // usual no-copy
+                                                        // reference. A per-
+                                                        // import choice made
+                                                        // HERE, defaulted from
+                                                        // last time.
+                                                        Tip{ width: Fill text: "Convert to variable-framerate (motion-flow) video: owned copy, scratch at any rate"
+                                                            import_flow := CheckBox{
+                                                                width: Fill
+                                                                text: "Make VFR"
+                                                                draw_bg +: {
+                                                                    size: 16.0
+                                                                    mark_color_active: #xff5c39
+                                                                    mark_color_active_hover: #xff7a5c
+                                                                    border_color: #xffffff33
+                                                                    border_color_hover: #xff5c39
+                                                                    border_color_active: #xff5c39
+                                                                    border_color_focus: #xff5c39
+                                                                }
+                                                                draw_text +: {
+                                                                    color: #xc7d0da
+                                                                    color_hover: #xffffff
+                                                                    color_active: #xffd9cc
+                                                                    text_style: theme.font_bold{font_size: 9}
+                                                                }
+                                                            }
+                                                        }
+                                                        View{
+                                                            width: Fill height: Fit flow: Right spacing: 2
+                                                            import_start := ChromeButton{width: Fill text: "START"}
+                                                            import_dismiss := ChromeButton{width: 22 text: "×"}
+                                                        }
+                                                    }
+                                                    import_running := View{
+                                                        visible: false
+                                                        width: Fill height: Fit flow: Down spacing: 3
+                                                        import_bar := SolidView{
+                                                            width: Fill height: 6
+                                                            draw_bg +: {
+                                                                progress: instance(0.0)
+                                                                pixel: fn() {
+                                                                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                                                    sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 1.5)
+                                                                    sdf.fill(#x232833)
+                                                                    sdf.box(0.0, 0.0, max(self.rect_size.x * self.progress, 4.0), self.rect_size.y, 1.5)
+                                                                    sdf.fill(#xff5c39)
+                                                                    return sdf.result
+                                                                }
+                                                            }
+                                                        }
+                                                        import_phase_lab := Tick{text: ""}
+                                                        // One line, clipped: a
+                                                        // filename is a hint,
+                                                        // not a paragraph.
+                                                        import_file_lab := Tick{
+                                                            flow: Flow.Right{wrap: false} max_lines: 1
+                                                            draw_text.color: #x7a8592
+                                                            draw_text.text_style: theme.font_regular{font_size: 7}
+                                                        }
+                                                        import_stop := ChromeButton{width: Fill text: "STOP"}
+                                                    }
+                                                }
                                                 // (No count readout: the
                                                 // scrollbar + pager already
                                                 // say where you are.)
@@ -4663,6 +4746,18 @@ pub struct App {
     pending_filter: Option<String>,
     #[rust]
     filter_timer: Timer,
+    /// The import mini-panel's completion flash: shows the verdict for a
+    /// beat after a run ends, then the panel folds away.
+    #[rust]
+    import_flash_timer: Timer,
+    /// Whether the last sync saw a running import — the edge that arms the
+    /// completion flash exactly once.
+    #[rust]
+    import_was_busy: bool,
+    /// The armed panel's preview scan: counts the picked folder's media
+    /// files off-thread, so the count appears without starting anything.
+    #[rust]
+    import_scan_rx: Option<std::sync::mpsc::Receiver<usize>>,
     /// Search-row input (music / sfx / mesh, text or category box) waiting
     /// for the same idle debounce — typing queries the catalog, no button
     /// press needed.
@@ -8935,12 +9030,13 @@ p2 {}
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);
                         // Dev/automation hook: VJ_IMPORT_PATH=<dir|file>
-                        // imports on first connect — headless rigs have no
-                        // native picker to click.
+                        // ARMS the import panel on first connect, exactly as
+                        // a pick would — headless rigs have no native picker
+                        // to click, but they can click START over the bridge,
+                        // so automation walks the same road the operator does.
                         if let Ok(path) = std::env::var("VJ_IMPORT_PATH") {
                             if !path.trim().is_empty() {
-                                self.import.set_path(path.trim().to_string());
-                                self.start_import(cx);
+                                self.arm_import(cx, path.trim().to_string());
                             }
                         }
                     }
@@ -9645,8 +9741,49 @@ p2 {}
         self.sync_import_ui(cx);
     }
 
+    /// A folder was picked (or handed in by automation): show the ARMED
+    /// mini-panel — folder name, a count as soon as the preview scan has
+    /// one, the FLOW choice, START/×. Nothing imports yet: conversion is
+    /// minutes per clip, so running is an informed second click, never a
+    /// side effect of picking.
+    fn arm_import(&mut self, cx: &mut Cx, path: String) {
+        self.import.set_path(path.clone());
+        let root = PathBuf::from(&path);
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        self.ui.view(cx, ids!(import_panel)).set_visible(cx, true);
+        self.ui.view(cx, ids!(import_armed)).set_visible(cx, true);
+        self.ui.view(cx, ids!(import_running)).set_visible(cx, false);
+        self.ui.label(cx, ids!(import_dir_lab)).set_text(cx, &name);
+        self.ui.label(cx, ids!(import_count_lab)).set_text(cx, "counting…");
+        // The preview scan is read_dir only — no hashing, no decode — but a
+        // network mount can still stall, so it runs off-thread and the count
+        // arrives whenever it does.
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.import_scan_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(media_scan::scan(&root).files.len());
+        });
+        self.ui.redraw(cx);
+    }
+
     /// Drain the import worker and repaint the panel. Cheap when idle.
     fn pump_import(&mut self, cx: &mut Cx) {
+        if let Some(rx) = &self.import_scan_rx {
+            match rx.try_recv() {
+                Ok(n) => {
+                    self.import_scan_rx = None;
+                    self.ui
+                        .label(cx, ids!(import_count_lab))
+                        .set_text(cx, &format!("{n} media files"));
+                    self.ui.redraw(cx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.import_scan_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if self.import.poll() {
             self.sync_import_ui(cx);
             // Newly published rows arrive through the normal catalog-event
@@ -9655,28 +9792,62 @@ p2 {}
         }
     }
 
-    /// The IMPORT button wears the whole import lifecycle: quiet label at
-    /// rest, live "done/total" while working (lit, click = cancel), back
-    /// to quiet when finished — summaries go to the log, the new tiles to
-    /// the grid.
+    /// The import's face is the MINI-PANEL under the IMPORT button: progress
+    /// bar, phase line, the file on the bench, and a STOP button. It exists
+    /// only while a run does — appears on start, flashes the summary for a
+    /// beat on completion, then folds away. The button itself stays "IMPORT"
+    /// (lit while busy); no status words ever crowd its label.
     ///
-    /// A CONVERTING file takes over the label with its own percentage: on
-    /// that phase "3/40" would sit still for minutes and read as a hang.
+    /// A CONVERTING file takes over the phase line with its own percentage:
+    /// on that phase "3/40" would sit still for minutes and read as a hang.
     fn sync_import_ui(&mut self, cx: &mut Cx) {
         use crate::import_ui::ImportPhase;
-        let (label, lit) = match &self.import.phase {
-            ImportPhase::Scanning { found } => (format!("SCAN {found}"), true),
-            ImportPhase::Importing { done, total, phase, file_fraction, .. } => {
-                if phase.is_empty() {
-                    (format!("{done}/{total}"), true)
-                } else {
-                    (format!("CONV {:.0}%", file_fraction * 100.0), true)
+        let busy = self.import.busy();
+        self.paint_lit(cx, ids!(import_toggle), busy);
+        let panel = self.ui.view(cx, ids!(import_panel));
+        if busy {
+            self.import_was_busy = true;
+            cx.stop_timer(self.import_flash_timer);
+            panel.set_visible(cx, true);
+            self.ui.view(cx, ids!(import_armed)).set_visible(cx, false);
+            self.ui.view(cx, ids!(import_running)).set_visible(cx, true);
+            self.ui.button(cx, ids!(import_stop)).set_visible(cx, true);
+            let (phase_line, file_line) = match &self.import.phase {
+                ImportPhase::Scanning { found } => (format!("scanning · {found}"), String::new()),
+                ImportPhase::Importing { done, total, current, phase, file_fraction } => {
+                    let line = if phase.is_empty() {
+                        format!("importing {}/{}", done + 1, total)
+                    } else {
+                        format!("{phase} {:.0}%", file_fraction * 100.0)
+                    };
+                    (line, current.clone())
                 }
-            }
-            _ => ("IMPORT".to_string(), false),
-        };
-        self.ui.button(cx, ids!(import_toggle)).set_text(cx, &label);
-        self.paint_lit(cx, ids!(import_toggle), lit);
+                _ => (String::new(), String::new()),
+            };
+            self.ui.label(cx, ids!(import_phase_lab)).set_text(cx, &phase_line);
+            self.ui.label(cx, ids!(import_file_lab)).set_text(cx, &file_line);
+        } else if self.import_was_busy {
+            // Just finished: flash the verdict where the bar was, then fold.
+            self.import_was_busy = false;
+            let verdict = match &self.import.phase {
+                ImportPhase::Done(_) => "done",
+                ImportPhase::Cancelled(_) => "stopped",
+                ImportPhase::Failed(_) => "failed",
+                _ => "",
+            };
+            panel.set_visible(cx, true);
+            self.ui.view(cx, ids!(import_armed)).set_visible(cx, false);
+            self.ui.view(cx, ids!(import_running)).set_visible(cx, true);
+            self.ui.button(cx, ids!(import_stop)).set_visible(cx, false);
+            self.ui.label(cx, ids!(import_phase_lab)).set_text(cx, verdict);
+            self.ui.label(cx, ids!(import_file_lab)).set_text(cx, &self.import.status);
+            self.import_flash_timer = cx.start_timeout(3.0);
+        }
+        let progress = self.import.progress() as f32;
+        let mut bar = self.ui.view(cx, ids!(import_bar));
+        script_apply_eval!(cx, bar, {
+            draw_bg +: { progress: #(progress) }
+        });
         match &self.import.phase {
             ImportPhase::Done(summary) | ImportPhase::Cancelled(summary) => {
                 if !summary.notes.is_empty() {
@@ -14269,11 +14440,12 @@ impl MatchEvent for App {
             }
         }
 
-        // ---- IMPORT: one quiet button ----
+        // ---- IMPORT: one quiet button, one live mini-panel ----
         // Idle: click opens the native picker (folder — a whole shoot
         // imports in one go; single files ride the same reference-import
-        // walk). Busy: the button IS the progress readout and clicking it
-        // CANCELS, keeping everything already landed.
+        // walk). Busy: the mini-panel below carries the progress and the
+        // STOP; clicking the lit button still cancels, keeping everything
+        // already landed.
         if self.ui.button(cx, ids!(import_toggle)).clicked(actions) {
             if self.import.busy() {
                 self.import.cancel();
@@ -14281,6 +14453,24 @@ impl MatchEvent for App {
             } else {
                 self.open_import_picker(cx);
             }
+        }
+        // STOP on the mini-panel: the proper way out mid-run.
+        if self.ui.button(cx, ids!(import_stop)).clicked(actions) {
+            self.import.cancel();
+            self.sync_import_ui(cx);
+        }
+        // START on the armed panel: the informed second click that actually
+        // runs the import the pick staged.
+        if self.ui.button(cx, ids!(import_start)).clicked(actions) {
+            if !self.import.busy() {
+                self.start_import(cx);
+            }
+        }
+        // × on the armed panel: never mind — fold it away, import nothing.
+        if self.ui.button(cx, ids!(import_dismiss)).clicked(actions) {
+            self.import_scan_rx = None;
+            self.ui.view(cx, ids!(import_panel)).set_visible(cx, false);
+            self.ui.redraw(cx);
         }
         // FLOW: the import's one setting, and it changes what an import
         // COSTS — converting is minutes per clip and a second copy of the
@@ -14299,15 +14489,16 @@ impl MatchEvent for App {
             );
             self.save_gen_panel();
         }
-        // The native picker answers in a LATER actions pass; the pick
-        // starts the import on the spot — no panel, no second click.
+        // The native picker answers in a LATER actions pass; the pick ARMS
+        // the mini-panel — folder, count, FLOW, START — and the import waits
+        // for the deliberate second click.
         for action in actions {
             let Some(picked) = action.downcast_ref::<FileDialogAction>() else { continue };
             match picked {
                 FileDialogAction::FolderSelected(path) => {
                     self.import_picking = false;
-                    self.import.set_path(path.to_string_lossy().into_owned());
-                    self.start_import(cx);
+                    let path = path.to_string_lossy().into_owned();
+                    self.arm_import(cx, path);
                 }
                 FileDialogAction::FolderCancelled => {
                     self.import_picking = false;
@@ -14480,6 +14671,11 @@ impl AppMain for App {
                 let cmds = self.model(Surface::Video).set_text(text.trim().to_string());
                 self.run_cat_cmds(Surface::Video, cmds);
             }
+        }
+        if self.import_flash_timer.is_event(event).is_some() {
+            // The completion flash is over: fold the mini-panel away.
+            self.ui.view(cx, ids!(import_panel)).set_visible(cx, false);
+            self.ui.redraw(cx);
         }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {
