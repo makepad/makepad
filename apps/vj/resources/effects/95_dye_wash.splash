@@ -1,0 +1,37 @@
+// DYE WASH — the psychedelic fluid pass OVER LIVE CONTENT: input0 shows
+// through underneath (p1 = input mix) and is WARPED by the fluid's own
+// velocity field (p0), while beat-colored dye screens on top. The same
+// stable-fluids sim as Ink Drop, tuned washier: more ambient swirl, faster
+// dye fade, softer splats.
+{
+    name: "Dye Wash"
+    engine: "fluid"
+    seed: 11
+
+    grid: 160
+    iters: 18
+
+    force: 2.0
+    dissipation: 0.16
+    swirl: 0.75
+    splat: "1.1 + pulse * 0.6"
+    dye_fade: 0.5
+    radius: 0.11
+
+    input0: "test"
+    p0: 0.055
+    p1: 0.85
+
+    beat_pulse: 0.3
+
+    color_bg: #x0a0612
+    color_a: #xff5ad0
+    color_b: #x5affd8
+    color_c: #xffe45a
+
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.05, levels: 2}
+    ]
+}
