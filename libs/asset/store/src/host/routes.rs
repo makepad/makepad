@@ -34,6 +34,10 @@ pub enum Outcome {
 /// Everything a route handler may reach, shared per worker thread.
 #[derive(Clone)]
 pub struct RouteCtx {
+    /// Requests served on this plane since start. Paired with the accept
+    /// counter it shows what a client's transport really costs: 30 blobs as
+    /// 30 requests over 30 connections, or as 2 requests over 1.
+    pub requests: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub state: StateHandle,
     pub cfg: std::sync::Arc<ServerConfig>,
     pub server_id: [u8; 16],
@@ -48,6 +52,13 @@ pub struct RouteCtx {
     /// then refuse with 503 rather than inventing a session.
     pub chat: Option<super::chat::ChatHandle>,
     pub chat_event_waiters: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Live worker announcements of what the GPU fleet can execute NOW,
+    /// merged over `cfg.job_profiles` by `GET /v1/job-profiles`.
+    pub profiles: std::sync::Arc<super::profiles::ProfileRegistry>,
+    /// Live game rooms — who is playing what, right now, and how to reach
+    /// them. In memory and leased: a room is a process on somebody's desk,
+    /// not a catalog entry.
+    pub rooms: std::sync::Arc<super::rooms::RoomRegistry>,
 }
 
 /// Serve one parsed request head to completion.

@@ -38,8 +38,10 @@ pub mod limits;
 pub mod migration;
 pub mod scene;
 pub mod sha256;
+pub mod stateful_billboard;
 pub mod snapshot;
 pub mod value;
+pub mod world_place;
 
 pub use activation::{
     CommitContentChange, CommitRealm, CommitSceneChange, ContentChangeReady, ContentRefusal,
@@ -51,7 +53,8 @@ pub use activation::{
 pub use asset::{
     Anchor, AssetFile, AssetKind, AssetManifest, Axis, Capabilities, CoordinateSystem,
     DerivativePolicy, DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, PrefabClass,
-    Provenance, Redistribution, Rights, SpawnParam, SpawnRecipe, ThumbnailMedia, ThumbnailMeta,
+    Provenance, Redistribution, Rights, SpawnParam, SpawnRecipe, ThumbnailCells, ThumbnailLayout,
+    ThumbnailMedia, ThumbnailMeta, ThumbnailRect, ThumbnailView, ThumbnailViewKind,
 };
 pub use codec::CONTENT_SCHEMA_VERSION;
 pub use content_set::{AssetSlot, ContentSetManifest};

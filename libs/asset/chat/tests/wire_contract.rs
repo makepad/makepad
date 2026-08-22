@@ -115,10 +115,94 @@ fn attachment_binding_is_exact_revision_plus_role() {
     assert!(AttachmentBinding::decode(&forged).is_err());
 }
 
+/// The serving block is ADDITIVE on `delta`: a delta that knows nothing
+/// encodes exactly the old two keys (so an old client sees the old event),
+/// and a client that predates the block ignores it — pinned here by
+/// decoding one WITH the block and checking the text survives untouched.
+#[test]
+fn serving_facts_are_additive_on_delta() {
+    let bare = ChatEvent { seq: 7, body: ChatEventBody::Delta { text: "hi".into(), serving: None } };
+    assert_eq!(bare.encode().to_json(), r#"{"seq":7,"type":"delta","text":"hi"}"#);
+
+    let full = ChatEvent {
+        seq: 8,
+        body: ChatEventBody::Delta {
+            text: "hi".into(),
+            serving: Some(ServingFacts {
+                gen_tokens: 128,
+                lanes_active: Some(2),
+                slots_total: Some(4), ..Default::default() }),
+        },
+    };
+    let encoded = full.encode();
+    assert_eq!(ChatEvent::decode(&encoded).unwrap(), full);
+    // The old fields are byte-identical; only a new key was added.
+    let json = encoded.to_json();
+    assert!(json.contains(r#""text":"hi""#), "{json}");
+    assert!(json.contains(r#""gen_tokens":128"#), "{json}");
+
+    // Lanes are optional inside the block (a single-lane box says nothing).
+    let no_lanes = ChatEvent {
+        seq: 9,
+        body: ChatEventBody::Delta {
+            text: "x".into(),
+            serving: Some(ServingFacts { gen_tokens: 1, lanes_active: None, slots_total: None, ..Default::default() }),
+        },
+    };
+    assert_eq!(ChatEvent::decode(&no_lanes.encode()).unwrap(), no_lanes);
+}
+
+/// A cosmetic counter must never kill a live turn: garbage in the block
+/// decodes as "no facts", and the delta still arrives.
+#[test]
+fn a_malformed_serving_block_never_fails_the_delta() {
+    for junk in [
+        json::s("nonsense"),
+        Value::Obj(vec![]),
+        json::obj(vec![("gen_tokens", json::s("many"))]),
+    ] {
+        let v = json::obj(vec![
+            ("seq", Value::Int(1)),
+            ("type", json::s("delta")),
+            ("text", json::s("still here")),
+            ("serving", junk),
+        ]);
+        let decoded = ChatEvent::decode(&v).expect("delta survives a bad serving block");
+        match decoded.body {
+            ChatEventBody::Delta { text, serving } => {
+                assert_eq!(text, "still here");
+                assert!(serving.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // Implausible counters are clamped, not refused.
+    let v = json::obj(vec![
+        ("seq", Value::Int(1)),
+        ("type", json::s("delta")),
+        ("text", json::s("t")),
+        (
+            "serving",
+            json::obj(vec![
+                ("gen_tokens", Value::Int(i64::MAX)),
+                ("lanes_active", Value::Int(9_000_000)),
+                ("slots_total", Value::Int(9_000_000)),
+            ]),
+        ),
+    ]);
+    match ChatEvent::decode(&v).unwrap().body {
+        ChatEventBody::Delta { serving: Some(s), .. } => {
+            assert_eq!(s.gen_tokens, 10_000_000);
+            assert_eq!(s.lanes_active, Some(1024));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn event_roundtrip_all_variants() {
     let events = vec![
-        ChatEvent { seq: 0, body: ChatEventBody::Delta { text: "hi".to_string() } },
+        ChatEvent { seq: 0, body: ChatEventBody::Delta { text: "hi".to_string(), serving: None } },
         ChatEvent {
             seq: 1,
             body: ChatEventBody::ToolCall {
@@ -172,6 +256,50 @@ fn tool_outcomes_are_typed_including_unavailable() {
 }
 
 #[test]
+fn clamped_outcomes_always_decode() {
+    // The entry-22 regression: a long honest refusal must arrive truncated,
+    // never be refused wholesale as malformed by the receiving parser.
+    let long = "refused: buildings are CRAMMED — ".repeat(40);
+    assert!(long.len() > 512);
+    for o in [
+        ToolOutcome::Failed { message: long.clone() },
+        ToolOutcome::Refused { what: long.clone() },
+        ToolOutcome::Denied { what: long.clone() },
+        ToolOutcome::Unavailable { reason: long.clone() },
+    ] {
+        // Unclamped, the receiver refuses it.
+        assert!(ToolOutcome::decode(&o.encode()).is_err());
+        let clamped = o.clamped();
+        let back = ToolOutcome::decode(&clamped.encode()).expect("clamped must decode");
+        assert_eq!(back, clamped);
+        // The guidance survives (truncated, ellipsis-terminated).
+        let msg = match &back {
+            ToolOutcome::Failed { message } => message,
+            ToolOutcome::Refused { what } | ToolOutcome::Denied { what } => what,
+            ToolOutcome::Unavailable { reason } => reason,
+            ToolOutcome::Ok { .. } => unreachable!(),
+        };
+        assert!(msg.starts_with("refused: buildings"));
+        assert!(msg.ends_with('…'));
+    }
+    // Multi-byte boundary: a wall of em-dashes truncates on a char boundary.
+    let dashes = "—".repeat(400);
+    let c = ToolOutcome::Failed { message: dashes }.clamped();
+    assert!(ToolOutcome::decode(&c.encode()).is_ok());
+    // Short outcomes pass through untouched.
+    let short = ToolOutcome::Failed { message: "timeout".into() };
+    assert_eq!(short.clone().clamped(), short);
+    // An oversized Ok value downgrades to the broker's own honest bound.
+    let big = ToolOutcome::Ok {
+        value: json::obj(vec![("text", json::s("x".repeat(17 * 1024)))]),
+    };
+    assert_eq!(
+        big.clamped(),
+        ToolOutcome::Failed { message: "tool result too large".to_string() }
+    );
+}
+
+#[test]
 fn permille_range_is_enforced_on_decode() {
     let mut v = ChatEvent {
         seq: 9,
@@ -194,7 +322,7 @@ fn permille_range_is_enforced_on_decode() {
 #[test]
 fn wire_schema_has_no_credential_fields() {
     let sample_events = vec![
-        ChatEvent { seq: 0, body: ChatEventBody::Delta { text: "t".into() } },
+        ChatEvent { seq: 0, body: ChatEventBody::Delta { text: "t".into(), serving: None } },
         ChatEvent {
             seq: 1,
             body: ChatEventBody::ToolCall {

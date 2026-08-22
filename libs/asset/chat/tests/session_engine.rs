@@ -7,8 +7,9 @@ use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_asset_chat::session::{CancelFlag, ExecCtx, SendRefusal, Session, ToolExecutor};
 use makepad_asset_chat::tools::ContentToolCall;
 use makepad_asset_chat::wire::{
-    AttachmentBinding, ChatEventBody, ProviderAvailability, ProviderKind, ToolOutcome,
-    MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_JSON_BYTES, MAX_TOOL_ROUNDS,
+    AttachmentBinding, ChatEventBody, ProviderAvailability, ProviderKind, ServingFacts,
+    ToolOutcome, MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_JSON_BYTES,
+    MAX_TOOL_ROUNDS,
 };
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_data::AssetRevisionId;
@@ -132,6 +133,37 @@ fn tool_line(name: &str, args: Value) -> String {
     )
 }
 
+/// Serving facts ride out on the delta they describe — and on the LAST
+/// chunk of a split, because they describe the END of that text.
+#[test]
+fn serving_facts_ride_on_the_delta_they_describe() {
+    let facts = ServingFacts { gen_tokens: 64, lanes_active: Some(1), slots_total: Some(4), ..Default::default() };
+    let big = "a".repeat(MAX_DELTA_BYTES + 16);
+    let provider = Scripted::new(vec![vec![
+        ProviderEvent::Delta("before".into()),
+        ProviderEvent::Serving(facts),
+        ProviderEvent::Delta(big.clone()),
+        ProviderEvent::Done { text: format!("before{big}") },
+    ]]);
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
+    let mut session = Session::new("prin_test", Box::new(provider));
+    session.send("hi", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+
+    let carried: Vec<Option<ServingFacts>> = session
+        .drain_events()
+        .iter()
+        .filter_map(|e| match &e.body {
+            ChatEventBody::Delta { serving, .. } => Some(*serving),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried.len(), 3, "one delta, then a split one: {carried:?}");
+    assert_eq!(carried[0], None, "facts that had not arrived yet are not invented");
+    assert_eq!(carried[1], None, "the middle of a split says nothing");
+    assert_eq!(carried[2], Some(facts));
+}
+
 #[test]
 fn plain_turn_streams_and_completes_in_order() {
     let provider = Scripted::new(vec![vec![
@@ -150,8 +182,8 @@ fn plain_turn_streams_and_completes_in_order() {
     // seq is monotonic from 0 and the order is delta, delta, done.
     let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![0, 1, 2]);
-    assert!(matches!(&events[0].body, ChatEventBody::Delta { text } if text == "Hel"));
-    assert!(matches!(&events[1].body, ChatEventBody::Delta { text } if text == "lo"));
+    assert!(matches!(&events[0].body, ChatEventBody::Delta { text, .. } if text == "Hel"));
+    assert!(matches!(&events[1].body, ChatEventBody::Delta { text, .. } if text == "lo"));
     assert!(matches!(events[2].body, ChatEventBody::Done));
     assert!(session.is_idle());
 
@@ -379,8 +411,12 @@ fn cancel_mid_stream_emits_cancelled_and_idles() {
 }
 
 #[test]
-fn tool_round_budget_terminates_runaway_loops() {
-    // A provider that answers EVERY turn with another tool call.
+fn tool_round_budget_degrades_gracefully_on_the_textual_lane() {
+    // A provider that answers EVERY turn with another tool call. The
+    // textual lane must NOT hard-kill the turn at the budget: the model
+    // gets one final completion round (with a nudge in history) and any
+    // tool line it emits there is cut off, not executed — the turn ends
+    // in Done, never a dead session.
     let scripts: Vec<Vec<ProviderEvent>> = (0..MAX_TOOL_ROUNDS + 2)
         .map(|_| {
             vec![ProviderEvent::Done {
@@ -389,22 +425,31 @@ fn tool_round_budget_terminates_runaway_loops() {
         })
         .collect();
     let provider = Scripted::new(scripts);
+    let turns = provider.turns.clone();
     let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
     let mut session = Session::new("prin_test", Box::new(provider));
 
     session.send("loop forever", &[], &mut exec).unwrap();
-    for _ in 0..MAX_TOOL_ROUNDS + 2 {
+    for _ in 0..MAX_TOOL_ROUNDS + 4 {
         session.pump(&mut exec);
     }
     let events = session.drain_events();
     let last = events.last().unwrap();
     assert!(
-        matches!(&last.body, ChatEventBody::Error { code, .. } if code == "tool_budget"),
-        "expected tool_budget error, got {:?}",
+        matches!(&last.body, ChatEventBody::Done),
+        "the budget must end the turn gracefully, got {:?}",
         last.body
     );
     assert!(session.is_idle());
+    assert!(!session.is_sealed(), "a budgeted turn is not a dead session");
+    // Exactly the budget executed; the final round's tool line did not.
     assert_eq!(exec.calls.borrow().len(), MAX_TOOL_ROUNDS as usize);
+    // The final provider turn saw the nudge in its history.
+    let final_input = turns.borrow().last().cloned().unwrap();
+    assert!(
+        final_input.messages.iter().any(|m| m.text.contains("tool budget reached")),
+        "the final round must carry the budget nudge"
+    );
 }
 
 /// Qwen keeps the textual marker contract; native providers do not.
@@ -836,4 +881,41 @@ fn session_ids_are_unique_and_parseable() {
     // Origin keeps principal locally; session id is the dispatch scope.
     assert_eq!(a.origin().principal, "p");
     assert_eq!(a.origin().session.as_str(), a.id().as_str());
+}
+
+
+/// A turn spends its opening inside the model's think block. If that reasoning
+/// is not streamed as text there is no delta for the serving facts to ride on
+/// — and the client would see nothing during precisely the wait it most wants
+/// explained, with its rate readout frozen at whatever the last text carried.
+#[test]
+fn serving_facts_reach_the_client_even_when_no_text_does() {
+    let facts = ServingFacts {
+        gen_tokens: 24,
+        think_tokens: Some(24),
+        ..Default::default()
+    };
+    // A poll that reports progress and NO text: the box is generating, the
+    // user can read none of it yet.
+    let provider = Scripted::new(vec![vec![ProviderEvent::Serving(facts)]]);
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
+    let mut session = Session::new("prin_test", Box::new(provider));
+    session.send("hi", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+
+    let deltas: Vec<(String, Option<ServingFacts>)> = session
+        .drain_events()
+        .iter()
+        .filter_map(|e| match &e.body {
+            ChatEventBody::Delta { text, serving } => Some((text.clone(), *serving)),
+            _ => None,
+        })
+        .collect();
+    let (text, serving) = deltas
+        .last()
+        .expect("a silent phase must still report the facts");
+    assert_eq!(text, "", "carried on an EMPTY delta, which appends nothing");
+    let serving = serving.expect("the facts are the whole point of the event");
+    assert_eq!(serving.gen_tokens, 24);
+    assert_eq!(serving.think_tokens, Some(24));
 }

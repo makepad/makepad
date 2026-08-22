@@ -41,6 +41,24 @@ pub mod raw {
         fn sqlite3_free(ptr: *mut c_void);
     }
 
+    unsafe extern "C" fn capture_last_column(
+        arg: *mut c_void,
+        ncols: c_int,
+        vals: *mut *mut c_char,
+        _names: *mut *mut c_char,
+    ) -> c_int {
+        if ncols > 0 {
+            let out = &mut *(arg as *mut Vec<String>);
+            let v = *vals.offset((ncols - 1) as isize);
+            out.push(if v.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(v).to_string_lossy().into_owned()
+            });
+        }
+        0
+    }
+
     unsafe extern "C" fn capture_first_column(
         arg: *mut c_void,
         ncols: c_int,
@@ -59,7 +77,18 @@ pub mod raw {
         0
     }
 
+    /// Like [`exec`] but collects the LAST column of every row — which is
+    /// `detail` for `EXPLAIN QUERY PLAN`, the only column that names the
+    /// index a statement actually uses.
+    pub fn exec_last(path: &Path, sql: &str) -> Vec<String> {
+        exec_with(path, sql, capture_last_column)
+    }
+
     pub fn exec(path: &Path, sql: &str) -> Vec<String> {
+        exec_with(path, sql, capture_first_column)
+    }
+
+    fn exec_with(path: &Path, sql: &str, cb: ExecCallback) -> Vec<String> {
         let cpath = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         let csql = CString::new(sql).unwrap();
         let mut db: *mut Sqlite3 = std::ptr::null_mut();
@@ -73,7 +102,7 @@ pub mod raw {
             sqlite3_exec(
                 db,
                 csql.as_ptr(),
-                Some(capture_first_column),
+                Some(cb),
                 &mut rows as *mut Vec<String> as *mut c_void,
                 &mut errmsg,
             )
@@ -184,6 +213,7 @@ pub fn prop_manifest(asset_id: AssetId, glb: &[u8], thumb: &[u8]) -> AssetManife
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: glb.len() as u64 + thumb.len() as u64,
@@ -340,6 +370,7 @@ pub fn kenney_pack(version: &str) -> ImportManifest {
                         width: 512,
                         height: 512,
                         byte_len: PACK_PREVIEW.len() as u64,
+                        views: Vec::new(),
                     },
                 }),
                 metrics: Metrics {
@@ -448,6 +479,7 @@ pub fn game_manifest(
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         },
         catalog_snapshot: None,
         search_algorithm_version: 1,

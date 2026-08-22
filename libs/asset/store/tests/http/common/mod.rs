@@ -357,6 +357,7 @@ pub fn prop_manifest(asset_id: AssetId, glb: &[u8], thumb: &[u8]) -> AssetManife
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: glb.len() as u64 + thumb.len() as u64,
@@ -468,6 +469,7 @@ pub fn kenney_pack(version: &str) -> ImportManifest {
                         width: 512,
                         height: 512,
                         byte_len: PACK_PREVIEW.len() as u64,
+                        views: Vec::new(),
                     },
                 }),
                 metrics: Metrics {
@@ -578,6 +580,7 @@ pub fn game_manifest(
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         },
         catalog_snapshot: None,
         search_algorithm_version: 1,

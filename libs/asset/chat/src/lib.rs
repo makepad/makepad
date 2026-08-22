@@ -38,7 +38,10 @@
 //! providers), [`responses`] (shared Responses API driver),
 //! [`fleet_http`] (minimal bounded HTTP for the fleet wire).
 
+pub mod catalog_sql;
+pub mod context;
 pub mod dispatch;
+pub mod fleet_discovery;
 pub mod fleet_http;
 pub mod grok;
 pub mod openai;

@@ -1,8 +1,19 @@
 //! Filesystem content-addressed store.
 //!
 //! Layout under the CAS root:
-//!   objects/<first-2-hex>/<64-hex>   committed blobs, named by SHA-256
-//!   tmp/w<pid>-<counter>.part        in-flight streaming writes
+//!   objects/<hex[0..2]>/<hex[2..4]>/<64-hex>   committed blobs, by SHA-256
+//!   tmp/w<pid>-<counter>.part                  in-flight streaming writes
+//!
+//! The two-level hash path is a scale decision: one level fans 256 ways, so
+//! a million objects would be ~3.9k directory entries per shard and ten
+//! million ~39k — directory sizes where lookup, `readdir` and backup tools
+//! start to hurt on every filesystem. Two levels fan 65,536 ways: a million
+//! objects is ~15 entries per leaf, ten million ~153.
+//!
+//! Roots written before schema v8 used the one-level layout, so every READ
+//! falls back to it and `migrate_shards` (the v8 step) moves what it finds.
+//! The fallback is not transitional politeness: it is what makes the move
+//! crash-safe, because a rename that a power cut undid still resolves.
 //!
 //! Invariants:
 //! - Bytes are hashed while they stream into a temp file; nothing ever lands
@@ -18,6 +29,7 @@
 use crate::budget::Budgets;
 use crate::error::{io_err, ServerError, ServerResult};
 use makepad_asset_data::{BlobId, Sha256};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +46,33 @@ fn hex64(id: &BlobId) -> String {
     s
 }
 
+/// Flush a DIRECTORY's entries to stable storage.
+///
+/// The commit protocol depends on this: a renamed object is only durable once
+/// the directory entry naming it is.
+///
+/// On unix that is a real `fsync` of a directory handle.
+///
+/// On WINDOWS there is no such thing to call, and pretending otherwise is
+/// what kept the embedded store from starting at all: a directory can only
+/// be opened for READ (with `FILE_FLAG_BACKUP_SEMANTICS`; a plain
+/// `File::open` is refused outright), and `FlushFileBuffers` on a handle
+/// without write access answers `ERROR_ACCESS_DENIED`. So the very first
+/// call — `Cas::open`'s flush of a brand-new root — returned
+/// `PermissionDenied`, `AssetServer::start` failed, and the VJ fell back to
+/// "no store" on every Windows launch.
+///
+/// Nothing is lost by not calling it. NTFS journals metadata operations
+/// (create, rename, delete) in its own log and commits them in order, so a
+/// rename that returned is already durable without a caller-issued flush —
+/// which is why Windows exposes no directory-fsync API in the first place.
+/// This is a deliberate no-op, not a swallowed error.
+#[cfg(windows)]
+fn fsync_dir(_dir: &Path) -> ServerResult<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> ServerResult<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cas fsync dir"))
 }
@@ -82,13 +121,90 @@ impl Cas {
         Ok(removed)
     }
 
+    /// Where a blob lives today: `objects/ab/cd/<64-hex>`.
     fn object_path(&self, id: &BlobId) -> PathBuf {
+        let hex = hex64(id);
+        self.objects.join(&hex[..2]).join(&hex[2..4]).join(&hex)
+    }
+
+    /// Where a pre-v8 root put it: `objects/ab/<64-hex>`. Read-only now —
+    /// nothing new is ever written here.
+    fn legacy_path(&self, id: &BlobId) -> PathBuf {
         let hex = hex64(id);
         self.objects.join(&hex[..2]).join(&hex)
     }
 
+    /// The path a read must use: the sharded location, else the pre-v8 one.
+    /// Both name the same digest, so whichever exists holds the right bytes
+    /// (and `read_verified` re-hashes regardless).
+    fn read_path(&self, id: &BlobId) -> Option<PathBuf> {
+        let sharded = self.object_path(id);
+        if sharded.is_file() {
+            return Some(sharded);
+        }
+        let legacy = self.legacy_path(id);
+        if legacy.is_file() {
+            return Some(legacy);
+        }
+        None
+    }
+
     pub fn contains(&self, id: &BlobId) -> bool {
-        self.object_path(id).is_file()
+        self.read_path(id).is_some()
+    }
+
+    /// Move every object still at a pre-v8 one-level path into its two-level
+    /// shard. Idempotent and crash-safe: each object moves with a single
+    /// atomic rename, an object already at its sharded path is left alone,
+    /// and an interrupted run leaves a mix that reads resolve either way.
+    /// Returns how many objects moved.
+    pub fn migrate_shards(&self) -> ServerResult<u64> {
+        let mut moved = 0u64;
+        let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
+        for fanout in fs::read_dir(&self.objects).map_err(io_err("cas read objects dir"))? {
+            let fanout = fanout.map_err(io_err("cas read objects entry"))?;
+            let fanout_path = fanout.path();
+            if !fanout_path.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&fanout_path).map_err(io_err("cas read fanout dir"))? {
+                let entry = entry.map_err(io_err("cas read fanout entry"))?;
+                let path = entry.path();
+                // Directories here are the new second level; only files are
+                // objects left over from the one-level layout.
+                if path.is_dir() {
+                    continue;
+                }
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    // A name that is not valid UTF-8 cannot be a hex digest;
+                    // leave it alone rather than guess.
+                    None => continue,
+                };
+                if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                let dest_dir = fanout_path.join(&name[2..4]);
+                let dest = dest_dir.join(name);
+                if dest.is_file() {
+                    // Both layouts hold this digest: identical content by
+                    // construction. Drop the stale one-level copy.
+                    fs::remove_file(&path).map_err(io_err("cas drop legacy duplicate"))?;
+                    continue;
+                }
+                fs::create_dir_all(&dest_dir).map_err(io_err("cas create shard dir"))?;
+                fs::rename(&path, &dest).map_err(io_err("cas shard rename"))?;
+                touched.insert(dest_dir);
+                touched.insert(fanout_path.clone());
+                moved += 1;
+            }
+        }
+        // Persist the new directory entries. Once per directory, not once per
+        // object: the entries are only durable as a set anyway.
+        for dir in &touched {
+            fsync_dir(dir)?;
+        }
+        Ok(moved)
     }
 
     pub fn begin(&self) -> ServerResult<BlobWriter> {
@@ -131,11 +247,13 @@ impl Cas {
                 });
             }
         }
-        let final_path = self.object_path(&blob_id);
-        if final_path.is_file() {
-            // Dedup. The existing object's size must agree; anything else is
+        // Dedup looks at BOTH layouts: a pre-v8 object that has not been
+        // sharded yet is still this content, and re-writing it under the new
+        // path would leave the same bytes on disk twice.
+        if let Some(existing) = self.read_path(&blob_id) {
+            // The existing object's size must agree; anything else is
             // corruption and refuses the commit rather than papering over it.
-            let meta = fs::metadata(&final_path).map_err(io_err("cas stat object"))?;
+            let meta = fs::metadata(&existing).map_err(io_err("cas stat object"))?;
             if meta.len() != writer.written {
                 return Err(ServerError::SizeMismatch {
                     what: "cas dedup object",
@@ -152,19 +270,25 @@ impl Cas {
         }
         file.sync_all().map_err(io_err("cas fsync temp"))?;
         drop(file);
-        let dir = final_path.parent().expect("object path has parent");
-        // A first commit into this fanout creates the fanout directory; that
-        // creation is an entry in objects/ and must be fsynced there too, or
-        // a crash can drop the whole fanout including the renamed object.
-        let fanout_created = !dir.is_dir();
-        fs::create_dir_all(dir).map_err(io_err("cas create fanout dir"))?;
+        let final_path = self.object_path(&blob_id);
+        let leaf = final_path.parent().expect("object path has parent");
+        let fanout = leaf.parent().expect("shard path has parent");
+        // A first commit into this shard creates directories; each creation
+        // is an entry in ITS parent and must be fsynced there too, or a crash
+        // can drop the whole shard including the renamed object.
+        let fanout_created = !fanout.is_dir();
+        let leaf_created = !leaf.is_dir();
+        fs::create_dir_all(leaf).map_err(io_err("cas create fanout dir"))?;
         if fanout_created {
             fsync_dir(&self.objects)?;
+        }
+        if leaf_created {
+            fsync_dir(fanout)?;
         }
         fs::rename(&writer.tmp_path, &final_path).map_err(io_err("cas commit rename"))?;
         // The temp file no longer exists; disarm the Drop cleanup.
         writer.committed = true;
-        fsync_dir(dir)?;
+        fsync_dir(leaf)?;
         Ok(BlobCommit {
             blob_id,
             size: writer.written,
@@ -172,10 +296,30 @@ impl Cas {
         })
     }
 
+    /// Delete an object, from BOTH layouts (a pre-v8 root may still hold it
+    /// at the one-level path, and leaving that copy behind would silently
+    /// resurrect collected bytes). Absent objects succeed: removal is
+    /// idempotent because blob GC may retry an unlink a crash interrupted.
+    /// Returns whether anything was on disk.
+    ///
+    /// This is the ONLY path that removes committed bytes, and it is called
+    /// exclusively by the sweep, after the catalog row is gone.
+    pub fn remove_object(&self, id: &BlobId) -> ServerResult<bool> {
+        let mut removed = false;
+        for path in [self.object_path(id), self.legacy_path(id)] {
+            match fs::remove_file(&path) {
+                Ok(()) => removed = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err("cas remove object")(e)),
+            }
+        }
+        Ok(removed)
+    }
+
     /// Read a whole blob, re-hashing; refuses corrupt bytes. Nothing is
     /// returned unless the complete digest matched.
     pub fn read_verified(&self, id: &BlobId) -> ServerResult<Vec<u8>> {
-        let path = self.object_path(id);
+        let path = self.read_path(id).unwrap_or_else(|| self.object_path(id));
         let mut file = match File::open(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

@@ -12,17 +12,17 @@ use makepad_asset_data::*;
 
 // Frozen golden digests for CONTENT_SCHEMA_VERSION 3.
 const GOLDEN_WEAPON_REVISION: &str =
-    "arev_1b574c4720123d58814b1f247a31d9cd7eeea7bbe6c9ce004a383bc53cdafb39";
+    "arev_db582d7e062bcafc01c4937274a83e996602dd102735b822db91787bd4d42d15";
 const GOLDEN_LOCK_BLOB: &str =
-    "sha256:520fcf64b8e570ccbf94714f1df166a473674ff32030733e769db180a85d7fd2";
+    "sha256:2fd64e6bf54c34a297be22e34427e32a53c26cafcd3457b62c803402551a4af2";
 const GOLDEN_GAME_REVISION: &str =
-    "grev_43246c4a488b20c53903d71ad146cf0028248ae9ecf70968237c66e0e889ab54";
+    "grev_02a07e4e1d441805d1307d6870e59c277326ca53878111f996e7f12a89f46f0e";
 const GOLDEN_BASELINE_SET: &str =
-    "cset_b16ab12ba146ceae0f5bcf6de2289558aa75317e2c0c09e8d6e7ebb0a1b3c841";
+    "cset_f44e42b23470481a5bb6ddd0b902b9e5241a59e22c735264b4b7a06c14d204e4";
 const GOLDEN_SCENE_PLAN: &str =
-    "splan_3436db8c59fb1dba34b820b209fbfacd2064167b22be96c3cf38a34c740e766f";
+    "splan_090f628b81ee71f931a09015b859adf3aac82b579656fcd26cf74ecdd53b0934";
 const GOLDEN_MIGRATION_PLAN: &str =
-    "mplan_5fc48af85a631dc4f7728b32e0976ec99b34bbca09f3cee1b4dc6654edc1918f";
+    "mplan_0d567e82213e671e308509f85d8b991b8984ef9dfadc83fc68f3c464e4372f03";
 
 #[test]
 fn asset_manifest_roundtrip_and_golden_digest() {

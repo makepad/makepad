@@ -415,7 +415,9 @@ impl ImportManifest {
         }
         self.rights.validate()?;
         // Content that may not be redistributed can never be imported into a
-        // catalog that serves peers: refuse before any publication.
+        // catalog that serves peers: refuse before any publication. LanLocal
+        // is accepted — an asset server IS the owner's LAN; the boundary it
+        // must never cross is the internet, which is an exporter's concern.
         if self.rights.redistribution == Redistribution::Forbidden {
             return Err(AssetDataError::Mismatch {
                 what: "forbidden redistribution on import",
@@ -538,7 +540,7 @@ impl ImportManifest {
             kind: asset.kind,
             files: asset.files.iter().map(|f| f.file).collect(),
             dependencies: Vec::new(),
-            thumbnail: asset.thumbnail.as_ref().map(|t| t.meta),
+            thumbnail: asset.thumbnail.as_ref().map(|t| t.meta.clone()),
             metrics: asset.metrics,
             coordinate_system: asset.coordinate_system,
             bounds: asset.bounds,

@@ -15,7 +15,8 @@
 //! cursor can never silently continue on a different server.
 
 use crate::api::{
-    AnnotationUpload, Api, ApiEndpoints, BlobHead, CatalogQuery, SourceCollectionRegistered,
+    AnnotationUpload, Api, ApiEndpoints, BatchFlow, BatchFrame, BatchItem, BlobHead, CatalogQuery,
+    SourceCollectionRegistered,
 };
 use crate::cache::{CacheBudgets, CacheStats, ContentCache};
 use crate::discovery::{content_client_caps, DiscoveredServer};
@@ -32,7 +33,10 @@ use makepad_asset_data::{
     DerivedVariantId, DerivedVariantManifest, GameAlias, GameId, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -41,6 +45,11 @@ pub struct ClientConfig {
     pub http: HttpLimits,
     /// Bearer token (`mpat_<64 hex>`); validated at connect.
     pub token: Option<String>,
+    /// Reuse connections (HTTP keep-alive). On by default: against a
+    /// server on localhost a connect per request costs more than the
+    /// payload of a thumbnail. Turned off only to measure that, or to face
+    /// a middlebox that mangles persistent connections.
+    pub http_keep_alive: bool,
     /// Whole-transfer attempts per blob (first try + resumes).
     pub max_transfer_attempts: u32,
     /// Wall-clock budget for ONE blob transfer attempt.
@@ -54,6 +63,7 @@ impl ClientConfig {
             cache: CacheBudgets::default_v1(),
             http: HttpLimits::default_v1(),
             token: None,
+            http_keep_alive: true,
             max_transfer_attempts: 4,
             blob_body_deadline_ms: 600_000,
         }
@@ -89,6 +99,9 @@ pub struct CatalogPage {
     pub hits: Vec<CatalogHit>,
     pub total: u64,
     pub next: Option<PageCursor>,
+    /// Label counts over the whole result set when the query asked for
+    /// facets (`CatalogQuery::facets`), most used first; otherwise empty.
+    pub facets: Vec<crate::dto::CatalogFacet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,12 +164,77 @@ pub struct CatalogEventsPage {
 }
 
 pub struct AssetClient {
+    /// Stateless: endpoints, limits and the bearer token. Every call opens
+    /// its own connection, which is why lane clones need no session at all.
     api: Api,
-    cache: ContentCache,
+    /// The verified local cache, SHARED with every lane clone of this client
+    /// (see [`AssetClient::lane_clone`]). A cache root is single-owner — the
+    /// cache holds an exclusive lock on `cache.lock` — so parallel workers
+    /// share ONE instance behind a mutex instead of opening a second one.
+    /// The lock is only ever held for cache bookkeeping, never across a
+    /// network transfer.
+    cache: Arc<Mutex<ContentCache>>,
+    /// Verified blobs kept in process memory, shared with lane clones. The
+    /// end-application streams here; the server already owns the disk cache.
+    ram: Arc<Mutex<crate::cache::RamCache>>,
+    /// Serialises transfers of the SAME digest across lanes: two workers
+    /// appending to one resumable partial would interleave bytes. It also
+    /// coalesces duplicate fetches — the second waiter finds the committed
+    /// object instead of downloading it again.
+    transfers: Arc<TransferGate>,
+    /// Cached copy of the cache root so diagnostics need no lock.
+    cache_root: PathBuf,
     server_id: [u8; 16],
     protocol_version: u16,
     max_transfer_attempts: u32,
     blob_body_deadline_ms: u64,
+}
+
+/// Per-digest exclusion for resumable blob transfers.
+struct TransferGate {
+    in_flight: Mutex<HashSet<[u8; 32]>>,
+    wake: Condvar,
+}
+
+/// Slice of the wait on a busy digest; bounds how long a cancelled request
+/// can sit behind another lane's transfer.
+const TRANSFER_WAIT_SLICE_MS: u64 = 50;
+
+impl TransferGate {
+    fn new() -> TransferGate {
+        TransferGate { in_flight: Mutex::new(HashSet::new()), wake: Condvar::new() }
+    }
+
+    /// Claim exclusive right to transfer `digest`, waiting while another
+    /// worker holds it. Returns `None` when `abort` fired while waiting, so
+    /// a cancelled request never waits out someone else's big download.
+    fn claim(&self, digest: [u8; 32], abort: &dyn Fn() -> bool) -> Option<TransferClaim<'_>> {
+        let mut held = self.in_flight.lock().expect("transfer gate");
+        while held.contains(&digest) {
+            if abort() {
+                return None;
+            }
+            let (guard, _) = self
+                .wake
+                .wait_timeout(held, Duration::from_millis(TRANSFER_WAIT_SLICE_MS))
+                .expect("transfer gate wait");
+            held = guard;
+        }
+        held.insert(digest);
+        Some(TransferClaim { gate: self, digest })
+    }
+}
+
+struct TransferClaim<'a> {
+    gate: &'a TransferGate,
+    digest: [u8; 32],
+}
+
+impl Drop for TransferClaim<'_> {
+    fn drop(&mut self) {
+        self.gate.in_flight.lock().expect("transfer gate").remove(&self.digest);
+        self.gate.wake.notify_all();
+    }
 }
 
 impl std::fmt::Debug for AssetClient {
@@ -182,7 +260,12 @@ impl AssetClient {
     ) -> ClientResult<AssetClient> {
         config.validate()?;
         let cache = ContentCache::open(&config.cache_root, config.cache, now_ms())?;
-        let api = Api::new(endpoints, config.http, config.token.clone())?;
+        let api = Api::with_keep_alive(
+            endpoints,
+            config.http,
+            config.token.clone(),
+            config.http_keep_alive,
+        )?;
 
         let health = api.health()?;
         if let Some(expected) = expected_server {
@@ -203,7 +286,12 @@ impl AssetClient {
 
         Ok(AssetClient {
             api,
-            cache,
+            cache_root: config.cache_root.clone(),
+            cache: Arc::new(Mutex::new(cache)),
+            ram: Arc::new(Mutex::new(crate::cache::RamCache::new(
+                config.cache.max_ram_bytes,
+            ))),
+            transfers: Arc::new(TransferGate::new()),
             server_id: health.server_id,
             protocol_version: health.protocol_version,
             max_transfer_attempts: config.max_transfer_attempts,
@@ -248,25 +336,56 @@ impl AssetClient {
     }
 
     pub fn cache_stats(&self) -> CacheStats {
-        self.cache.stats()
+        self.cache().stats()
+    }
+
+    /// Another handle on the SAME verified server and the SAME cache, for a
+    /// second execution lane (see [`crate::runtime::ClientRuntime`]).
+    ///
+    /// No network and no re-verification: identity was proven by
+    /// [`AssetClient::connect`], and `Api` carries no session — endpoints,
+    /// limits and the bearer token only, with one connection per call. What
+    /// IS shared is the single-owner cache, its in-memory blob map, and the
+    /// per-digest transfer gate, so two lanes can never fight over one
+    /// partial file or open a second cache on the same root.
+    pub fn lane_clone(&self) -> AssetClient {
+        AssetClient {
+            api: self.api.clone(),
+            cache: self.cache.clone(),
+            ram: self.ram.clone(),
+            transfers: self.transfers.clone(),
+            cache_root: self.cache_root.clone(),
+            server_id: self.server_id,
+            protocol_version: self.protocol_version,
+            max_transfer_attempts: self.max_transfer_attempts,
+            blob_body_deadline_ms: self.blob_body_deadline_ms,
+        }
+    }
+
+    /// The shared cache. Held for bookkeeping only — never across a network
+    /// call, which is what keeps lanes actually parallel. A poisoned lock
+    /// means another worker panicked mid-bookkeeping; that is not a state
+    /// this client can reason about, so it propagates.
+    fn cache(&self) -> MutexGuard<'_, ContentCache> {
+        self.cache.lock().expect("content cache lock")
     }
 
     // ---- pinning -----------------------------------------------------------
 
     pub fn pin_blob(&mut self, blob: &BlobId) -> ClientResult<()> {
-        self.cache.pin(blob.as_bytes())
+        self.cache().pin(blob.as_bytes())
     }
 
     pub fn unpin_blob(&mut self, blob: &BlobId) -> ClientResult<()> {
-        self.cache.unpin(blob.as_bytes())
+        self.cache().unpin(blob.as_bytes())
     }
 
     pub fn pin_manifest(&mut self, rev: &AssetRevisionId) -> ClientResult<()> {
-        self.cache.pin(rev.as_bytes())
+        self.cache().pin(rev.as_bytes())
     }
 
     pub fn unpin_manifest(&mut self, rev: &AssetRevisionId) -> ClientResult<()> {
-        self.cache.unpin(rev.as_bytes())
+        self.cache().unpin(rev.as_bytes())
     }
 
     // ---- browse ------------------------------------------------------------
@@ -282,6 +401,7 @@ impl AssetClient {
             hits: page.hits,
             total: page.total,
             next: self.wrap_cursor(page.cursor),
+            facets: page.facets,
         })
     }
 
@@ -302,6 +422,61 @@ impl AssetClient {
 
     pub fn resolve_alias(&self, alias: &makepad_asset_data::AssetAlias) -> ClientResult<AliasDto> {
         self.api.resolve_alias(alias)
+    }
+
+    // ---- deletion ----------------------------------------------------------
+
+    /// Delete an asset from the store (see [`crate::api::Api::retire_asset`]).
+    pub fn retire_asset(
+        &self,
+        id: &makepad_asset_data::AssetId,
+    ) -> ClientResult<crate::dto::RetireDto> {
+        self.api.retire_asset(id)
+    }
+
+    /// Delete one revision; the asset stays live.
+    pub fn retire_revision(
+        &self,
+        id: &makepad_asset_data::AssetId,
+        rev: &makepad_asset_data::AssetRevisionId,
+    ) -> ClientResult<crate::dto::RetireDto> {
+        self.api.retire_revision(id, rev)
+    }
+
+    /// Advance blob garbage collection by a bounded amount and report the
+    /// run's durable progress; poll until `done`.
+    pub fn gc_blobs(&self, request: &crate::api::GcRequest) -> ClientResult<crate::dto::GcStatusDto> {
+        self.api.gc_blobs(request)
+    }
+
+    /// Re-scan one bounded page of the store's reference blobs — the
+    /// content it catalogued without copying — reporting what each named
+    /// file looks like on the server's disk right now.
+    pub fn blob_refs_page(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ClientResult<crate::api::BlobRefsPage> {
+        self.api.blob_refs_page(after, limit)
+    }
+
+    /// Admit a file the SERVER can see as a reference blob: hashed in place,
+    /// catalogued, never copied. Only meaningful when this client and the
+    /// store share a filesystem.
+    pub fn admit_blob_ref(
+        &self,
+        ns: &str,
+        path: &str,
+    ) -> ClientResult<crate::api::BlobRefAdmission> {
+        self.api.admit_blob_ref(ns, path)
+    }
+
+    pub fn gc_status(&self) -> ClientResult<crate::dto::GcStatusDto> {
+        self.api.gc_status()
+    }
+
+    pub fn gc_cancel(&self) -> ClientResult<bool> {
+        self.api.gc_cancel()
     }
 
     /// Poll or long-poll committed catalog changes. The resume cursor is
@@ -343,6 +518,24 @@ impl AssetClient {
         domain: Option<&str>,
     ) -> ClientResult<Vec<crate::dto::JobProfileDto>> {
         self.api.job_profiles(domain)
+    }
+
+    /// Announce/renew what this worker can execute now (see
+    /// [`crate::api::Api::announce_job_profiles`]).
+    pub fn announce_job_profiles(
+        &self,
+        worker: &str,
+        ns: &str,
+        ttl_ms: u64,
+        domains: &[String],
+        profiles: &[crate::dto::JobProfileDto],
+    ) -> ClientResult<()> {
+        self.api
+            .announce_job_profiles(worker, ns, ttl_ms, domains, profiles)
+    }
+
+    pub fn retract_job_profiles(&self, worker: &str, ns: &str) -> ClientResult<()> {
+        self.api.retract_job_profiles(worker, ns)
     }
 
     pub fn enqueue_job(
@@ -432,6 +625,41 @@ impl AssetClient {
         self.api.operation_finalize(op, request)
     }
 
+    // ---- live game rooms ---------------------------------------------------
+    //
+    // The rendezvous behind "press Play and be where your friends are". See
+    // `Api::rooms` / `Api::claim_room` for what each call promises; the
+    // sequence a game plays is: list for this game → dial what you find →
+    // on failure, claim naming what you could not reach.
+
+    pub fn rooms(&self, game: Option<&str>) -> ClientResult<Vec<crate::dto::RoomDto>> {
+        self.api.rooms(game)
+    }
+
+    pub fn claim_room(
+        &self,
+        game: &str,
+        invite: &str,
+        host: &str,
+        ttl_ms: u64,
+        replacing: Option<&str>,
+    ) -> ClientResult<crate::dto::RoomClaimDto> {
+        self.api.claim_room(game, invite, host, ttl_ms, replacing)
+    }
+
+    pub fn room_heartbeat(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        self.api.room_heartbeat(room, token, ttl_ms)
+    }
+
+    pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
+        self.api.retire_room(room, token)
+    }
+
     // ---- chat broker -------------------------------------------------------
 
     pub fn chat_providers(&self) -> ClientResult<Vec<crate::dto::ChatProviderDto>> {
@@ -479,6 +707,16 @@ impl AssetClient {
 
     pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {
         self.api.chat_retire(id)
+    }
+
+    /// Answer a client-executed tool call (see `Api::chat_tool_result`).
+    pub fn chat_tool_result(
+        &self,
+        id: &crate::dto::ChatSessionId,
+        call_id: &str,
+        outcome: &crate::json::Value,
+    ) -> ClientResult<()> {
+        self.api.chat_tool_result(id, call_id, outcome)
     }
 
     // ---- import + immutable derived variants -------------------------------
@@ -548,12 +786,12 @@ impl AssetClient {
         &mut self,
         id: &DerivedVariantId,
     ) -> ClientResult<DerivedVariantManifest> {
-        if let Some(bytes) = self.cache.read_verified(id.as_bytes(), now_ms())? {
+        if let Some(bytes) = self.cache().read_verified(id.as_bytes(), now_ms())? {
             return Ok(DerivedVariantManifest::from_canonical_bytes(&bytes)?);
         }
         let bytes = self.api.fetch_derived_variant_bytes(id)?;
         let manifest = DerivedVariantManifest::from_canonical_bytes(&bytes)?;
-        self.cache.put_bytes(&bytes, Some(id.as_bytes()), now_ms())?;
+        self.cache().put_bytes(&bytes, Some(id.as_bytes()), now_ms())?;
         Ok(manifest)
     }
 
@@ -569,12 +807,12 @@ impl AssetClient {
 
     /// Typed variant-set manifest; same digest-then-decode guarantees.
     pub fn fetch_variant_set(&mut self, id: &VariantSetId) -> ClientResult<VariantSetManifest> {
-        if let Some(bytes) = self.cache.read_verified(id.as_bytes(), now_ms())? {
+        if let Some(bytes) = self.cache().read_verified(id.as_bytes(), now_ms())? {
             return Ok(VariantSetManifest::from_canonical_bytes(&bytes)?);
         }
         let bytes = self.api.fetch_variant_set_bytes(id)?;
         let manifest = VariantSetManifest::from_canonical_bytes(&bytes)?;
-        self.cache.put_bytes(&bytes, Some(id.as_bytes()), now_ms())?;
+        self.cache().put_bytes(&bytes, Some(id.as_bytes()), now_ms())?;
         Ok(manifest)
     }
 
@@ -724,12 +962,12 @@ impl AssetClient {
     /// fail-closed. Bytes enter the cache only after BOTH the digest and the
     /// canonical decode succeed.
     pub fn fetch_asset_manifest(&mut self, rev: &AssetRevisionId) -> ClientResult<AssetManifest> {
-        if let Some(bytes) = self.cache.read_verified(rev.as_bytes(), now_ms())? {
+        if let Some(bytes) = self.cache().read_verified(rev.as_bytes(), now_ms())? {
             return Ok(AssetManifest::from_canonical_bytes(&bytes)?);
         }
         let bytes = self.api.fetch_revision_bytes(rev)?;
         let manifest = AssetManifest::from_canonical_bytes(&bytes)?;
-        self.cache.put_bytes(&bytes, Some(rev.as_bytes()), now_ms())?;
+        self.cache().put_bytes(&bytes, Some(rev.as_bytes()), now_ms())?;
         Ok(manifest)
     }
 
@@ -738,12 +976,12 @@ impl AssetClient {
         &mut self,
         rev: &GameRevisionId,
     ) -> ClientResult<GameRevisionManifest> {
-        if let Some(bytes) = self.cache.read_verified(rev.as_bytes(), now_ms())? {
+        if let Some(bytes) = self.cache().read_verified(rev.as_bytes(), now_ms())? {
             return Ok(GameRevisionManifest::from_canonical_bytes(&bytes)?);
         }
         let bytes = self.api.fetch_game_revision_bytes(rev)?;
         let manifest = GameRevisionManifest::from_canonical_bytes(&bytes)?;
-        self.cache.put_bytes(&bytes, Some(rev.as_bytes()), now_ms())?;
+        self.cache().put_bytes(&bytes, Some(rev.as_bytes()), now_ms())?;
         Ok(manifest)
     }
 
@@ -785,13 +1023,26 @@ impl AssetClient {
         abort: &dyn Fn() -> bool,
     ) -> ClientResult<PathBuf> {
         let digest = *blob.as_bytes();
-        if let Some(path) = self.cache.resolve(&digest, now_ms())? {
+        if let Some(path) = self.cache().resolve(&digest, now_ms())? {
             return Ok(path);
         }
         if expected_len == Some(0) {
             // The content contract refuses zero-length files; a zero here is
             // caller confusion, not a fetchable object.
             return Err(ClientError::InvalidInput { what: "expected_len zero" });
+        }
+
+        // One transfer per digest across all lanes: the resumable partial is
+        // a single append-mode file. A waiter re-checks the cache first,
+        // because the holder it waited for has usually just committed it.
+        // The gate handle is cloned out first so the claim borrows it and
+        // not `self`; the transfer below needs `&mut self`.
+        let transfers = self.transfers.clone();
+        let Some(_claim) = transfers.claim(digest, abort) else {
+            return Err(ClientError::Cancelled);
+        };
+        if let Some(path) = self.cache().resolve(&digest, now_ms())? {
+            return Ok(path);
         }
 
         let mut attempt = 0u32;
@@ -807,7 +1058,7 @@ impl AssetClient {
                         // clean restart may recover a torn local file, so it
                         // consumes an attempt like a transport failure.
                         ClientError::DigestMismatch { .. } => {
-                            self.cache.discard_partial(&digest)?;
+                            self.cache().discard_partial(&digest)?;
                             true
                         }
                         // A cancellation is the caller's decision, final.
@@ -832,14 +1083,14 @@ impl AssetClient {
         abort: &dyn Fn() -> bool,
     ) -> ClientResult<PathBuf> {
         let digest = *blob.as_bytes();
-        let mut writer = self.cache.open_partial(&digest)?;
+        let mut writer = self.cache().open_partial(&digest)?;
 
         // A partial already at/above the expected size cannot be extended by
         // a range request; it is either complete (commit will prove it) or
         // poisoned (commit deletes it and the retry starts clean).
         if let Some(len) = expected_len {
             if writer.resumed_bytes() >= len {
-                return self.cache.commit_partial(writer, now_ms());
+                return self.cache().commit_partial(writer, now_ms());
             }
         }
 
@@ -895,7 +1146,7 @@ impl AssetClient {
                 // deletes it on mismatch, so the retry starts clean). A 416
                 // without a range request is protocol nonsense.
                 if start > 0 {
-                    return self.cache.commit_partial(writer, now_ms());
+                    return self.cache().commit_partial(writer, now_ms());
                 }
                 return Err(ClientError::Protocol { what: "unexpected 416" });
             }
@@ -904,10 +1155,10 @@ impl AssetClient {
 
         // Admission preflight: refuse before bytes stream when it can never
         // be admitted (over per-object budget or pinned bytes leave no room).
-        if total > self.cache.budgets().max_object_bytes {
+        if total > self.cache().budgets().max_object_bytes {
             return Err(ClientError::CacheAdmission {
                 what: "object over per-object budget",
-                limit: self.cache.budgets().max_object_bytes,
+                limit: self.cache().budgets().max_object_bytes,
                 found: total,
             });
         }
@@ -939,31 +1190,290 @@ impl AssetClient {
                 found: writer.resumed_bytes(),
             });
         }
-        self.cache.commit_partial(writer, now_ms())
+        self.cache().commit_partial(writer, now_ms())
+    }
+
+    /// Fetch many blobs in ONE request, in the given order, committing each
+    /// one to the cache AS IT ARRIVES and reporting it through `on_item`.
+    ///
+    /// This is the thumbnail-grid path. Three properties make it worth a
+    /// separate route:
+    /// - **Order is priority.** Items are fetched in the order given, so a
+    ///   caller that puts the visible row first sees it first.
+    /// - **Per-frame commit.** Each blob is verified and committed on
+    ///   arrival, so abandoning the rest (below) never wastes what already
+    ///   landed.
+    /// - **Abandonable.** `abort` is consulted per item; when everything
+    ///   still outstanding has been cancelled the response is dropped
+    ///   mid-stream (socket closed, nothing pooled) and the caller can
+    ///   re-issue with its new priorities.
+    ///
+    /// Items already in the cache never reach the wire. Items the server
+    /// could not include (missing, over cap, budget exhausted) are reported
+    /// with a typed error so the caller can fall back to a single fetch;
+    /// `Err` from this call itself means the batch route is unusable (a 404
+    /// from an older server, a transport failure) and EVERY item should fall
+    /// back.
+    pub fn fetch_blobs_ordered(
+        &mut self,
+        items: &[(BlobId, Option<u64>)],
+        abort: &dyn Fn(&BlobId) -> bool,
+        on_item: &mut dyn FnMut(BlobId, ClientResult<PathBuf>),
+    ) -> ClientResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // Cache-first, before anything is asked of the server.
+        let mut wanted: Vec<BatchItem> = Vec::with_capacity(items.len());
+        for (blob, expected_len) in items {
+            if abort(blob) {
+                on_item(*blob, Err(ClientError::Cancelled));
+                continue;
+            }
+            if let Some(path) = self.cache().resolve(blob.as_bytes(), now_ms())? {
+                on_item(*blob, Ok(path));
+                continue;
+            }
+            wanted.push(BatchItem { blob: *blob, max_bytes: *expected_len });
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let deadline = self.blob_body_deadline_ms;
+        // Collected inside the frame callback and applied after, because the
+        // callback cannot borrow `self` while the batch call does.
+        let mut landed: Vec<(BlobId, Vec<u8>)> = Vec::new();
+        let mut refused: Vec<(BlobId, ClientError)> = Vec::new();
+        let mut cancelled: Vec<BlobId> = Vec::new();
+        let mut stopped_at: Option<usize> = None;
+        {
+            let mut index = 0usize;
+            let mut on_frame = |blob: BlobId, frame: BatchFrame, bytes: &[u8]| -> BatchFlow {
+                index += 1;
+                match frame {
+                    BatchFrame::Ok => landed.push((blob, bytes.to_vec())),
+                    BatchFrame::Missing => {
+                        refused.push((blob, ClientError::NotFound { what: "blob" }))
+                    }
+                    BatchFrame::OverItemCap | BatchFrame::Skipped => refused.push((
+                        blob,
+                        ClientError::OverBudget {
+                            what: "batch item",
+                            limit: 0,
+                            found: bytes.len() as u64,
+                        },
+                    )),
+                }
+                // Stop only when NOTHING outstanding is still wanted: a
+                // half-cancelled batch keeps streaming for the items that
+                // still matter.
+                if wanted[index..].iter().all(|i| abort(&i.blob)) {
+                    for item in &wanted[index..] {
+                        cancelled.push(item.blob);
+                    }
+                    stopped_at = Some(index);
+                    return BatchFlow::Stop;
+                }
+                BatchFlow::Continue
+            };
+            self.api.fetch_blob_batch(&wanted, deadline, &mut on_frame)?;
+        }
+        // Commit per item, digest-checked by the cache itself.
+        for (blob, bytes) in landed {
+            // Two statements on purpose: the cache guard from `put_bytes`
+            // must be released before `object_path_of` takes it again — a
+            // std mutex is not reentrant, and a one-liner here deadlocks the
+            // worker against itself.
+            let committed = self.cache().put_bytes(&bytes, Some(blob.as_bytes()), now_ms());
+            let result = match committed {
+                Ok(digest) => Ok(self.cache().object_path_of(&digest)),
+                Err(e) => Err(e),
+            };
+            on_item(blob, result);
+        }
+        for (blob, error) in refused {
+            on_item(blob, Err(error));
+        }
+        for blob in cancelled {
+            on_item(blob, Err(ClientError::Cancelled));
+        }
+        let _ = stopped_at;
+        Ok(())
+    }
+
+    /// Drop one blob from the in-process RAM cache. Returns whether it was
+    /// resident. The disk cache and the server are untouched: the next
+    /// fetch re-materialises and re-verifies it.
+    pub fn forget_blob(&self, blob: &BlobId) -> bool {
+        self.ram
+            .lock()
+            .expect("ram cache")
+            .forget(blob.as_bytes())
+    }
+
+    /// Drop every blob held in process memory.
+    pub fn clear_ram_cache(&self) {
+        self.ram.lock().expect("ram cache").clear();
+    }
+
+    /// Bytes currently resident in the RAM cache, and its budget.
+    pub fn ram_cache_bytes(&self) -> (u64, u64) {
+        let ram = self.ram.lock().expect("ram cache");
+        (ram.used_bytes(), ram.budget_bytes())
     }
 
     /// Fetch a blob and return its verified bytes in memory.
+    ///
+    /// Streams from the server into RAM. Does not write the payload to the
+    /// client disk cache — the asset server already owns that.
     pub fn fetch_blob_bytes(
         &mut self,
         blob: &BlobId,
         expected_len: Option<u64>,
     ) -> ClientResult<Vec<u8>> {
-        self.fetch_blob(blob, expected_len, None)?;
-        self.cache
-            .read_verified(blob.as_bytes(), now_ms())?
-            .ok_or(ClientError::Protocol { what: "committed blob vanished" })
+        let digest = *blob.as_bytes();
+        if let Some(bytes) = self.ram.lock().expect("ram cache").get(&digest) {
+            return Ok(bytes.clone());
+        }
+        if let Some(bytes) = self.cache().read_verified(&digest, now_ms())? {
+            self.ram.lock().expect("ram cache").insert(digest, bytes.clone());
+            return Ok(bytes);
+        }
+        // Streamed outside every lock: a second lane stays free to work.
+        let bytes = self.stream_blob_memory(blob, expected_len)?;
+        self.ram.lock().expect("ram cache").insert(digest, bytes.clone());
+        Ok(bytes)
+    }
+
+    /// Fetch a blob into the verified disk cache and return the PATH of the
+    /// object.
+    ///
+    /// This is the bridge for tools that take a file rather than bytes — an
+    /// AO bake, a rig pass, a decoder, an OS drag-and-drop. It stays
+    /// thin-client-legal because the file is named by its digest and the
+    /// cache re-hashes it before handing the path out: the path is a
+    /// materialisation of catalog content, never a second source of truth
+    /// that could drift from the revision it came from. A corrupt object is
+    /// removed and re-fetched rather than returned.
+    ///
+    /// Bytes are NOT kept in the RAM cache: a caller who wants a path is
+    /// about to hand the file to something that reads it from disk, and the
+    /// budget is better spent on what the viewer is drawing.
+    pub fn blob_path(
+        &mut self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<PathBuf> {
+        let digest = *blob.as_bytes();
+        if let Some(path) = self.cache().resolve(&digest, now_ms())? {
+            return Ok(path);
+        }
+        // A blob already in RAM still has to reach disk; hashing it again on
+        // the way in is what makes the path trustworthy.
+        let bytes = match self.ram.lock().expect("ram cache").get(&digest).cloned() {
+            Some(bytes) => bytes,
+            None => self.stream_blob_memory(blob, expected_len)?,
+        };
+        let now = now_ms();
+        self.cache().put_bytes(&bytes, Some(&digest), now)?;
+        self.cache()
+            .resolve(&digest, now)?
+            .ok_or(ClientError::Protocol { what: "cached blob vanished" })
+    }
+
+    fn stream_blob_memory(
+        &self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        if expected_len == Some(0) {
+            return Err(ClientError::InvalidInput { what: "expected_len zero" });
+        }
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.stream_blob_memory_once(blob, expected_len) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    let retryable = matches!(
+                        e,
+                        ClientError::Io { .. }
+                            | ClientError::Timeout { .. }
+                            | ClientError::DigestMismatch { .. }
+                    );
+                    if !retryable || attempt >= self.max_transfer_attempts {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn stream_blob_memory_once(
+        &self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        let mut resp = self.api.blob_get(blob, None, self.blob_body_deadline_ms)?;
+        if resp.head().status != 200 {
+            return Err(ClientError::Protocol { what: "unexpected blob status" });
+        }
+        let declared = resp.head().content_length;
+        if let Some(len) = expected_len {
+            if declared != len {
+                return Err(ClientError::SizeMismatch {
+                    what: "blob declared length",
+                    expected: len,
+                    found: declared,
+                });
+            }
+        }
+        if declared > self.cache().budgets().max_object_bytes {
+            return Err(ClientError::CacheAdmission {
+                what: "object over per-object budget",
+                limit: self.cache().budgets().max_object_bytes,
+                found: declared,
+            });
+        }
+        let mut hasher = makepad_asset_data::Sha256::new();
+        let mut out = Vec::with_capacity(declared as usize);
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = resp.read_chunk(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&chunk[..n]);
+            out.extend_from_slice(&chunk[..n]);
+        }
+        if out.len() as u64 != declared {
+            return Err(ClientError::SizeMismatch {
+                what: "blob received bytes",
+                expected: declared,
+                found: out.len() as u64,
+            });
+        }
+        let found = hasher.finalize();
+        if &found != blob.as_bytes() {
+            return Err(ClientError::DigestMismatch {
+                what: "memory blob",
+                expected: *blob.as_bytes(),
+                found,
+            });
+        }
+        Ok(out)
     }
 
     /// Verified local path if (and only if) the blob is already cached; no
     /// network. `Ok(None)` means "not cached" — never a guess.
     pub fn cached_blob(&mut self, blob: &BlobId) -> ClientResult<Option<PathBuf>> {
-        self.cache.resolve(blob.as_bytes(), now_ms())
+        self.cache().resolve(blob.as_bytes(), now_ms())
     }
 
     /// This client's cache root (diagnostics only; the cache remains
     /// single-owner).
     pub fn cache_root(&self) -> &Path {
-        self.cache.root()
+        &self.cache_root
     }
 }
 

@@ -54,7 +54,12 @@ pub const MAX_TURN_TEXT_BYTES: usize = 64 * 1024;
 /// Tool progress note (mirrors the Asset Server heartbeat bound).
 pub const MAX_NOTE_BYTES: usize = 200;
 /// Tool rounds within one user turn.
-pub const MAX_TOOL_ROUNDS: u32 = 8;
+/// Tool rounds per user turn. A level-building turn legitimately spends
+/// schema + a few narrowing queries + get_source + set_source + a
+/// correction pass — 8 was hit by real (non-looping) exploration the day
+/// the catalog grew to ~3k models. Fail-closed as before; the session's
+/// history/token budgets remain the real backstop.
+pub const MAX_TOOL_ROUNDS: u32 = 16;
 /// Native function `call_id` / session tool id.
 pub const MAX_TOOL_CALL_ID: usize = 64;
 /// Progress callbacks retained from one tool execution.
@@ -359,6 +364,45 @@ impl ToolOutcome {
         Ok(())
     }
 
+    /// A copy that FITS the wire: message fields truncated to [`validate`]'s
+    /// 512-byte cap (char-boundary safe, ellipsis appended), an oversized
+    /// `Ok` value downgraded to the same honest `Failed` the broker's own
+    /// bounding uses. Senders call this before posting — `encode` does not
+    /// validate, so an unclamped long refusal reaches the receiving parser
+    /// and is refused wholesale as malformed (play-session-1 entry 22: a
+    /// 517-byte cramming refusal 400'd and the model was told the app
+    /// never answered). Truncated guidance beats undeliverable guidance.
+    pub fn clamped(self) -> Self {
+        fn cap(s: String) -> String {
+            const MAX: usize = 512;
+            if s.len() <= MAX {
+                return s;
+            }
+            let mut end = MAX - '…'.len_utf8();
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut out = s[..end].to_string();
+            out.push('…');
+            out
+        }
+        let out = match self {
+            ToolOutcome::Ok { value } => ToolOutcome::Ok { value },
+            ToolOutcome::Unavailable { reason } => {
+                ToolOutcome::Unavailable { reason: cap(reason) }
+            }
+            ToolOutcome::Denied { what } => ToolOutcome::Denied { what: cap(what) },
+            ToolOutcome::Refused { what } => ToolOutcome::Refused { what: cap(what) },
+            ToolOutcome::Failed { message } => ToolOutcome::Failed { message: cap(message) },
+        };
+        if out.validate().is_err() {
+            // Only the whole-outcome size cap can still fail here (an
+            // oversized Ok value); mirror the broker's own bounding.
+            return ToolOutcome::Failed { message: "tool result too large".to_string() };
+        }
+        out
+    }
+
     pub fn decode(v: &Value) -> Result<Self, &'static str> {
         if v.to_json().len() > MAX_TOOL_JSON_BYTES {
             return Err("outcome too large");
@@ -394,10 +438,124 @@ pub struct ChatEvent {
     pub body: ChatEventBody,
 }
 
+/// PRESENTATION-ONLY serving facts observed while a turn streams, ADDITIVE
+/// on the `delta` event: a client that predates this field ignores it and
+/// behaves exactly as before, which is why this rides on `delta` rather
+/// than arriving as a new event tag (unknown tags are refusals here).
+///
+/// `gen_tokens` counts tokens the SERVING box has generated in the current
+/// provider round — it restarts at 0 every round (each tool round is a new
+/// job) and a consumer must treat a decrease as a restart, not a gap. It is
+/// what makes an honest tok/s readout possible at all: deltas are
+/// `partial_text` diffs at the broker's poll cadence, so their count and
+/// their byte length say nothing about how many TOKENS were produced.
+///
+/// The lane pair is the serving box's decode-lane contention as its
+/// `/health` advertised it at probe time (see `LanesJson` in asset-ai):
+/// stale by construction, a preference/context signal, never a reservation.
+/// Absent when the box advertises no lanes — which, per that protocol,
+/// means one lane; a consumer shows nothing rather than inventing "1/1".
+///
+/// Nothing here is a security boundary or a budget: decoding CLAMPS
+/// implausible values and drops malformed ones instead of failing the page,
+/// because a cosmetic counter must never be able to kill a live turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServingFacts {
+    /// Cumulative tokens generated in the current provider round.
+    pub gen_tokens: u32,
+    /// Lanes generating on the serving box at probe time.
+    pub lanes_active: Option<u32>,
+    /// Lanes the serving box is configured for.
+    pub slots_total: Option<u32>,
+    /// Tokens generated inside the model's think block — reasoning the user
+    /// never sees. Rises while the block is open.
+    ///
+    /// Without it a client cannot tell a slow box from a thinking one: the
+    /// meter reads a stalled rate while the box decodes flat out, and the
+    /// wait before ANY text appears is the whole block. With it the client
+    /// can say "thinking · N" and, once `visible_tokens` arrives, quote the
+    /// rate the person actually perceived alongside the rate the box hit.
+    pub think_tokens: Option<u32>,
+    /// Tokens generated after the think block closed. ABSENT while it is
+    /// still open, which is exactly how a client knows it still is.
+    pub visible_tokens: Option<u32>,
+    /// Tokens this turn had to ingest at prefill. A warm conversation ingests
+    /// a handful; a cold one ingests its whole history, and the difference is
+    /// seconds the user feels and cannot otherwise attribute.
+    pub prefix_ingested: Option<u32>,
+    /// True when the serving box kept this conversation's cache and appended
+    /// to it instead of re-reading the whole thing.
+    pub prefix_resumed: Option<bool>,
+}
+
+/// Sanity ceilings for the presentation counters (clamped, never refused).
+const MAX_GEN_TOKENS: u64 = 10_000_000;
+const MAX_LANES: u64 = 1024;
+
+impl ServingFacts {
+    pub fn encode(&self) -> Value {
+        let mut pairs: Vec<(&str, Value)> =
+            vec![("gen_tokens", Value::Int(self.gen_tokens as i64))];
+        if let Some(active) = self.lanes_active {
+            pairs.push(("lanes_active", Value::Int(active as i64)));
+        }
+        if let Some(total) = self.slots_total {
+            pairs.push(("slots_total", Value::Int(total as i64)));
+        }
+        if let Some(think) = self.think_tokens {
+            pairs.push(("think_tokens", Value::Int(think as i64)));
+        }
+        if let Some(visible) = self.visible_tokens {
+            pairs.push(("visible_tokens", Value::Int(visible as i64)));
+        }
+        if let Some(ingested) = self.prefix_ingested {
+            pairs.push(("prefix_ingested", Value::Int(ingested as i64)));
+        }
+        if let Some(resumed) = self.prefix_resumed {
+            pairs.push(("prefix_resumed", Value::Bool(resumed)));
+        }
+        json::obj(pairs)
+    }
+
+    /// Lenient by design (see the type doc): anything unreadable decodes to
+    /// `None` and the stream carries on without a rate readout.
+    pub fn decode(v: &Value) -> Option<ServingFacts> {
+        if !matches!(v, Value::Obj(_)) {
+            return None;
+        }
+        let lane = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(MAX_LANES) as u32)
+        };
+        // Same clamping law as the counters above: a cosmetic number must
+        // never be able to kill a live turn, so implausible values are pinned
+        // and unreadable ones simply go missing.
+        let count = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(MAX_GEN_TOKENS) as u32)
+        };
+        Some(ServingFacts {
+            gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(MAX_GEN_TOKENS) as u32,
+            lanes_active: lane("lanes_active"),
+            slots_total: lane("slots_total"),
+            think_tokens: count("think_tokens"),
+            visible_tokens: count("visible_tokens"),
+            prefix_ingested: count("prefix_ingested"),
+            prefix_resumed: v.get("prefix_resumed").and_then(|b| match b {
+                Value::Bool(value) => Some(*value),
+                _ => None,
+            }),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEventBody {
-    /// Streaming assistant text.
-    Delta { text: String },
+    /// Streaming assistant text, with the optional serving facts observed
+    /// as it was produced (see [`ServingFacts`]).
+    Delta { text: String, serving: Option<ServingFacts> },
     /// The assistant invoked a tool; `args` is the raw argument object.
     ToolCall { id: String, name: String, args: Value },
     /// Bounded progress of a running tool (mirrors job heartbeats).
@@ -414,9 +572,14 @@ impl ChatEvent {
         let mut pairs: Vec<(&str, Value)> =
             vec![("seq", Value::Int(self.seq.min(i64::MAX as u64) as i64))];
         match &self.body {
-            ChatEventBody::Delta { text } => {
+            ChatEventBody::Delta { text, serving } => {
                 pairs.push(("type", json::s("delta")));
                 pairs.push(("text", json::s(text.clone())));
+                // Absent when unknown: the old shape byte-for-byte, so a
+                // golden delta stays golden.
+                if let Some(serving) = serving {
+                    pairs.push(("serving", serving.encode()));
+                }
             }
             ChatEventBody::ToolCall { id, name, args } => {
                 pairs.push(("type", json::s("tool_call")));
@@ -449,7 +612,10 @@ impl ChatEvent {
     pub fn decode(v: &Value) -> Result<Self, &'static str> {
         let seq = v.get("seq").and_then(Value::as_u64).ok_or("event seq")?;
         let body = match v.get("type").and_then(Value::as_str) {
-            Some("delta") => ChatEventBody::Delta { text: str_field(v, "text", MAX_DELTA_BYTES)? },
+            Some("delta") => ChatEventBody::Delta {
+                text: str_field(v, "text", MAX_DELTA_BYTES)?,
+                serving: v.get("serving").and_then(ServingFacts::decode),
+            },
             Some("tool_call") => {
                 let args = v.get("args").cloned().ok_or("tool args")?;
                 if !matches!(args, Value::Obj(_)) {
