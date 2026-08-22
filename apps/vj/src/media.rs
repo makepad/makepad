@@ -2860,6 +2860,38 @@ mod tests {
         assert!(pump_test_player(false, true, 1).needs_frame_pump());
     }
 
+    /// THE RATE-CHIP LAW: dialing .5/1/2/4 touches the PLAYBACK RATE and
+    /// nothing else — the trim bounds and the play position are the
+    /// user's, and a speed change may never move either (the "dialing
+    /// speeds made up a range" bug lived downstream of this promise).
+    #[test]
+    fn rate_chip_touches_neither_bounds_nor_position() {
+        let mut player = pump_test_player(false, false, 0);
+        player.set_trim(0.25, 0.75);
+        let t_in = player.shared.trim_in_100ns.load(Ordering::Acquire);
+        let t_out = player.shared.trim_out_100ns.load(Ordering::Acquire);
+        player.shared.position_100ns.store(4_200_000, Ordering::Release);
+        for chip in [0.5, 1.0, 2.0, 4.0, 1.0, 0.5] {
+            player.set_playback_rate(chip);
+            assert_eq!(player.playback_rate(), chip);
+            assert_eq!(
+                player.shared.trim_in_100ns.load(Ordering::Acquire),
+                t_in,
+                "rate change moved trim IN"
+            );
+            assert_eq!(
+                player.shared.trim_out_100ns.load(Ordering::Acquire),
+                t_out,
+                "rate change moved trim OUT"
+            );
+            assert_eq!(
+                player.shared.position_100ns.load(Ordering::Acquire),
+                4_200_000,
+                "rate change moved the play position"
+            );
+        }
+    }
+
     #[test]
     fn preroll_requires_video_and_bounded_audio_lead() {
         assert_eq!(
@@ -3695,5 +3727,260 @@ mod mode_flip_tests {
             }
         }
         assert!(wraps >= 1, "trimmed loop never wrapped: {ids:?}");
+    }
+}
+
+#[cfg(test)]
+mod beat_transport_tests {
+    use super::*;
+
+    /// Drive the pure step for `ticks` ticks, pulsing every `pulse_every`
+    /// ticks (0 = never), with a live window edit applied at `retrim`.
+    fn sweep(
+        mode: PlayMode,
+        window: (usize, usize),
+        start: (usize, bool),
+        pulse_every: usize,
+        ticks: usize,
+        retrim: Option<(usize, (usize, usize))>,
+    ) -> Vec<(usize, bool, bool)> {
+        let (mut lo, mut hi) = window;
+        let (mut idx, mut fwd) = start;
+        let mut out = Vec::with_capacity(ticks);
+        for t in 1..=ticks {
+            if let Some((at, next)) = retrim {
+                if t == at {
+                    (lo, hi) = next;
+                }
+            }
+            let pulse = pulse_every > 0 && t % pulse_every == 0;
+            let (n, d) = beat_transport_step(idx, fwd, lo, hi, mode, pulse);
+            idx = n;
+            fwd = d;
+            out.push((idx, d, pulse));
+        }
+        out
+    }
+
+    /// LAW: constant sweep speed — the index never moves more than one
+    /// frame per tick, in any mode, at any window size, EXCEPT the loop
+    /// wrap, which must land exactly on IN and only on a pulse tick.
+    #[test]
+    fn constant_speed_and_wraps_only_on_the_beat() {
+        for (mode, window, pulse_every) in [
+            (PlayMode::Loop, (0usize, 60usize), 7usize),
+            (PlayMode::Loop, (5, 14), 40),
+            (PlayMode::PingPong, (0, 60), 7),
+            (PlayMode::PingPong, (5, 14), 40),
+        ] {
+            let trace = sweep(mode, window, (window.1 - 1, false), pulse_every, 600, None);
+            let mut prev = window.1 - 1;
+            for (idx, _, pulse) in &trace {
+                let step = *idx as i64 - prev as i64;
+                if step.abs() > 1 {
+                    assert_eq!(mode, PlayMode::Loop, "bounce jumped {prev}->{idx}");
+                    assert_eq!(*idx, window.0, "wrap landed off IN: {prev}->{idx}");
+                    assert!(*pulse, "wrap without a beat: {prev}->{idx}");
+                }
+                prev = *idx;
+            }
+        }
+    }
+
+    /// THE ANTI-"MADE-UP RANGE" LAW: whatever the beat cadence — shorter
+    /// than the range or longer — the sweep visits EVERY frame of the
+    /// user's window. A sub-window anchored by the tempo is the bug.
+    #[test]
+    fn the_whole_range_is_swept_never_a_tempo_window() {
+        for mode in [PlayMode::Loop, PlayMode::PingPong] {
+            for pulse_every in [7usize, 200] {
+                let trace = sweep(mode, (10, 70), (69, false), pulse_every, 4_000, None);
+                let mut seen = [false; 70];
+                for (idx, _, _) in &trace {
+                    seen[*idx] = true;
+                }
+                let missing: Vec<usize> =
+                    (10..70).filter(|i| !seen[*i]).collect();
+                assert!(
+                    missing.is_empty(),
+                    "{mode:?} pulse_every={pulse_every} never reached {missing:?}"
+                );
+            }
+        }
+    }
+
+    /// LAW: "one beat, one play direction" — a bounce changes direction
+    /// ONLY on a pulse tick, and mid-range pulses change NOTHING (no
+    /// mid-range turns: the flip-anywhere behavior was the confusion).
+    #[test]
+    fn direction_changes_only_at_edges_on_the_beat() {
+        let trace = sweep(PlayMode::PingPong, (0, 200), (100, true), 3, 260, None);
+        let mut dir = true;
+        let mut prev = 100usize;
+        for (idx, d, pulse) in &trace {
+            if *d != dir {
+                assert!(*pulse, "turned without a beat at {idx}");
+                assert!(
+                    prev == 0 || prev == 199,
+                    "turned mid-range at {prev} (the flip-anywhere bug)"
+                );
+                dir = *d;
+            }
+            prev = *idx;
+        }
+        // And with the window far wider than the beat, the first 99 ticks
+        // (mid-range, pulses included) run STRICTLY one way.
+        for pair in trace[..99].windows(2) {
+            assert_eq!(pair[1].0, pair[0].0 + 1, "mid-range pulse disturbed the sweep");
+        }
+    }
+
+    /// LAW: a range edge reached early HOLDS its frame — same picture,
+    /// no self-turn — until the next beat grants the turn.
+    #[test]
+    fn edges_hold_until_the_beat_grants_the_turn() {
+        // Window 12 wide, beat every 100 ticks: the sweep spends most of
+        // each beat holding at an edge.
+        let trace = sweep(PlayMode::PingPong, (4, 16), (15, true), 100, 400, None);
+        for pair in trace.windows(2) {
+            let ((a, _, _), (b, _, pulse)) = (pair[0], pair[1]);
+            if a == 15 || a == 4 {
+                if b != a {
+                    assert!(pulse, "edge {a} let go without a beat -> {b}");
+                }
+            }
+        }
+        // The hold is real: long same-index runs at the edges.
+        let holds = trace.windows(2).filter(|p| p[0].0 == p[1].0).count();
+        assert!(holds > 300, "edges never held ({holds} holds in 400 ticks)");
+    }
+
+    /// LAW: a live trim clamps the sweep into the new window WITHOUT a
+    /// reset — the clamp is one bounded correction onto the nearest new
+    /// edge, never a jump home to IN.
+    #[test]
+    fn live_trim_clamps_without_resetting() {
+        let trace = sweep(
+            PlayMode::Loop,
+            (0, 100),
+            (0, true),
+            1_000,
+            80,
+            Some((60, (10, 40))),
+        );
+        // Tick 59 sits at 59; the retrim to [10,40) must land on 39 (the
+        // nearest edge of the new window), NOT back at 10.
+        assert_eq!(trace[58].0, 59);
+        assert_eq!(trace[59].0, 39, "trim reset playback instead of clamping");
+        // And from there it holds for the beat like any edge arrival.
+        assert!(trace[60..70].iter().all(|(i, _, _)| *i == 39));
+    }
+
+    /// One-frame window: nowhere to go — the step must be a fixed point,
+    /// pulses included (a degenerate trim must not oscillate or panic).
+    #[test]
+    fn one_frame_window_is_a_fixed_point() {
+        for mode in [PlayMode::Loop, PlayMode::PingPong] {
+            for pulse in [false, true] {
+                assert_eq!(beat_transport_step(7, true, 7, 8, mode, pulse).0, 7);
+                // Out-of-window entry clamps in.
+                assert_eq!(beat_transport_step(3, false, 7, 8, mode, pulse).0, 7);
+            }
+        }
+    }
+
+    /// THE LAW END TO END, through the real decode → cache → pacer
+    /// pipeline: with beat transport on and NO pulse, a looping clip
+    /// sweeps to OUT and HOLDS there — it never wraps by itself. The
+    /// pulse, when it comes, wraps it to IN.
+    #[test]
+    fn transport_holds_at_out_and_wraps_on_the_pulse() {
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        const W: u32 = 64;
+        const H: u32 = 32;
+        const FPS: u32 = 24;
+        const FRAMES: usize = 12;
+        fn frame_rgb8(index: usize) -> Vec<u8> {
+            // Flat luma per frame: identity = luma / 16.
+            vec![(index * 16 + 8) as u8; W as usize * H as usize * 3]
+        }
+        fn identity_of(bgra: &[u32]) -> usize {
+            let mid = bgra[(H as usize / 2) * W as usize + W as usize / 2];
+            (((mid >> 16) & 0xff) as usize) / 16
+        }
+
+        let dir = std::env::temp_dir()
+            .join(format!("vj-media-transport-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pulse.mp4");
+        let mut encoder = VideoFileEncoder::new(
+            path.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: W,
+                height: H,
+                fps_num: FPS,
+                fps_den: 1,
+                video_bitrate_bps: 2_000_000,
+                audio: None,
+                keyframe_only: true,
+            },
+        )
+        .expect("encoder");
+        for index in 0..FRAMES {
+            encoder.push_frame_rgb8(&frame_rgb8(index), None).expect("push");
+        }
+        encoder.finish().expect("finish");
+
+        let mixer = Mixer::new();
+        let mut player = SlotPlayer::open(
+            SlotId::A,
+            path.to_str().unwrap(),
+            MediaType::Mp4,
+            mixer,
+            true,  // loop on
+            false, // playing
+        )
+        .expect("open");
+        player.set_muted(true);
+        player.set_beat_transport(true);
+
+        // Phase 1 — no pulses: the last frame must arrive and then HOLD.
+        // (The first decode pass streams naturally; the transport governs
+        // the repeat.) Collect long enough for two would-be passes.
+        let mut ids: Vec<usize> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(
+            ids.iter().any(|id| *id + 1 >= FRAMES),
+            "never reached the tail: {ids:?}"
+        );
+        let after_tail =
+            &ids[ids.iter().position(|id| *id + 1 >= FRAMES).unwrap()..];
+        assert!(
+            after_tail.iter().all(|id| *id + 1 >= FRAMES),
+            "wrapped without a beat pulse: {after_tail:?}"
+        );
+
+        // Phase 2 — the pulse grants the wrap: frame 0 must appear.
+        player.beat_pulse();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut wrapped = false;
+        while Instant::now() < deadline && !wrapped {
+            if let Some(bgra) = player.take_due_frame() {
+                wrapped = identity_of(&bgra) == 0;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(wrapped, "the beat pulse never wrapped the loop to IN");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
