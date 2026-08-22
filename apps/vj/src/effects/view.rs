@@ -27,10 +27,13 @@
 
 use super::doc::{EffectDoc, GrowMode, StageCfg};
 use super::engines::{CamPose, EmitterInst, Engine, ShaderKind};
+use super::engines_charts::DrawVjFxCharts;
+use super::engines_city::DrawVjFxCity;
 use super::engines_domino::DrawVjFxDomino;
 use super::engines_firefly::DrawVjFxFirefly;
 use super::engines_flock::DrawVjFxFlock;
 use super::engines_harmonograph::DrawVjFxHarmono;
+use super::engines_pipes::DrawVjFxPipes;
 use super::engines_tiles::DrawVjFxTiles;
 use super::expr::Signals;
 use super::mesh::FxMesh;
@@ -90,6 +93,12 @@ pub struct VjFxView {
     draw_tiles: DrawVjFxTiles,
     #[live]
     draw_flock: DrawVjFxFlock,
+    #[live]
+    draw_city: DrawVjFxCity,
+    #[live]
+    draw_pipes: DrawVjFxPipes,
+    #[live]
+    draw_charts: DrawVjFxCharts,
     // Post + present quads.
     #[live]
     draw_feedback: DrawVjFxFeedback,
@@ -271,6 +280,9 @@ impl VjFxView {
                         ShaderKind::Domino => live_id!(DrawVjFxDomino),
                         ShaderKind::Tiles => live_id!(DrawVjFxTiles),
                         ShaderKind::Flock => live_id!(DrawVjFxFlock),
+                        ShaderKind::City => live_id!(DrawVjFxCity),
+                        ShaderKind::Pipes => live_id!(DrawVjFxPipes),
+                        ShaderKind::Charts => live_id!(DrawVjFxCharts),
                     };
                     let modules = vm.bx.heap.modules;
                     let draw_mod = vm.bx.heap.value(modules, live_id!(draw).into(), NoTrap);
@@ -316,6 +328,15 @@ impl VjFxView {
                 }
                 ShaderKind::Flock => {
                     self.draw_flock.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::City => {
+                    self.draw_city.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Pipes => {
+                    self.draw_pipes.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Charts => {
+                    self.draw_charts.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
             }
         });
@@ -540,6 +561,17 @@ impl VjFxView {
                 (vec3f(0.0, 0.0, 0.0), b * 2.0, b * 0.32)
             }
             Engine::Emitters(_) => (vec3f(0.0, 2.0, 0.0), 16.0, 4.0),
+            Engine::Pipes(e) => {
+                let ext = e.extent.clamp(0.5, 40.0);
+                (vec3f(0.0, 0.0, 0.0), ext * 2.6, ext * 0.85)
+            }
+            // Stockcharts: frontal terminal framing (presets pin
+            // cam_orbit: 0.0 for a locked screen, or a whisper for drift).
+            Engine::Charts(e) => (
+                vec3f(0.0, 0.0, 0.0),
+                e.cfg.width.clamp(2.0, 60.0) * 0.72,
+                e.cfg.height.clamp(1.0, 40.0) * 0.12,
+            ),
             _ => (vec3f(0.0, 1.2, 0.0), 7.0, 1.8),
         };
         // L-systems: frame the actual plant.
@@ -845,6 +877,9 @@ impl VjFxView {
                 draw_engine!(&mut self.draw_tiles)
             }
             ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
+            ShaderKind::City => draw_engine!(&mut self.draw_city),
+            ShaderKind::Pipes => draw_engine!(&mut self.draw_pipes),
+            ShaderKind::Charts => draw_engine!(&mut self.draw_charts),
             ShaderKind::Particles => {
                 if let Some(tex) = &input0 {
                     self.draw_particles.draw_vars.set_texture(0, tex);

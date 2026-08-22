@@ -1,0 +1,40 @@
+// SCREENSAVER PIPES — the calm homage: six glossy plastic pipes walking
+// the lattice with bulged elbow balls, growing in over twenty-four beats
+// and starting over when the front loops (the screensaver clear-screen,
+// now beat-locked). Pattern taught: the pipes engine's whole animation IS
+// the shared growth front — `grow: "loop"` + `grow_beats` replays the
+// birth-ordered build, and every segment pops in with a soft overshoot.
+{
+    name: "Screensaver Pipes"
+    engine: "pipes"
+    seed: 41
+
+    pipes: 6
+    bound: 6
+    cell: 0.55
+    radius: 0.17
+    sides: 12
+    steps: 1000
+    turn_chance: 0.34
+    pop: 0.45
+    hot: 3.0
+
+    grow: "loop"
+    grow_beats: 24
+    beat_pulse: 0.25
+    p1: 0.3                      // gentle hot-tip glow
+
+    color_bg: #x0a0e16
+    color_a: #x37c8b4
+    color_b: #xb45fd8
+    color_c: #xf2f6ff
+
+    cam_orbit: 0.10
+    cam_fov: 48
+    fog: 0.030
+    glow: 1.1
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 0.9, levels: 2}
+    ]
+}
