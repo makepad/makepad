@@ -39,6 +39,11 @@
 //! `bank` (1.0 roll gain). Bindings: `p0` ADDS window density (the city
 //! wakes up with energy), `p1` = sun/trail-head gain, `p2` = beacon/edge
 //! glow gain. Hook: `fx_color` (facade base tint; t = height01).
+//!
+//! Content coupling (`content:` → `fog.z`): night facades play the channel
+//! video as chunky window-pixel billboards (per-tower crop, flicker still
+//! gates); retro/tron tint the neon wire, street grid and trail walls with
+//! the video instead.
 
 use super::engines::{CamPose, EngineUniforms};
 use super::mesh::{FxMesh, FxRng};
@@ -443,6 +448,8 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -527,12 +534,18 @@ script_mod! {
                 // TRAIL WALL: solid light ribbon, hot at the head, top edge
                 // brightest, aging tail dims toward the loop wrap.
                 let hue = self.v_attr.z
-                let wall = self.col_a.mix(self.col_b, hue)
+                // CONTENT: the wall carries the channel video unrolled
+                // along its arc (three copies, drifting slowly).
+                let ttx = self.tex0.sample_as_bgra(
+                    vec2(fract(self.v_uv.x * 3.0 + self.time_beat.x * 0.03), 1.0 - self.v_uv.y)
+                )
+                let wall = self.col_a.mix(self.col_b, hue).xyz
+                    .mix(ttx.xyz * 1.3, self.fog.z * 0.75)
                 let behind = max(self.v_base.w - self.v_uv.x, 0.0)
                 let head = exp(0.0 - behind * 22.0) * (1.5 + self.user.y)
                 let age = clamp(1.0 - behind * 1.1, 0.35, 1.0)
                 let top = 0.55 + 0.45 * smoothstep(0.55, 1.0, self.v_uv.y)
-                rgb = wall.xyz * (age * top * (1.1 + self.time_beat.w * 0.5))
+                rgb = wall * (age * top * (1.1 + self.time_beat.w * 0.5))
                     + self.col_c.xyz * head
             } else { if class > 1.5 {
                 // SKY: per style — stars / sun stripes / horizon glow.
@@ -581,17 +594,23 @@ script_mod! {
                     rgb = self.col_bg.xyz * 0.9
                         + self.col_a.xyz * street * (0.05 + self.time_beat.w * 0.02)
                         + self.col_c.xyz * lane * 0.10
-                } else { if style < 1.5 {
-                    let edge = 1.0 - smoothstep(half * 0.9, half + 0.05, dm)
-                    rgb = self.col_bg.xyz * 0.5
-                        + self.col_a.xyz * edge * (0.7 + self.time_beat.w * 0.9)
                 } else {
-                    let f = fract(self.v_uv / (s * 0.25))
-                    let fm = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
-                    let fine = 1.0 - smoothstep(0.01, 0.05, fm)
-                    rgb = self.col_bg.xyz * 0.4
-                        + self.col_a.xyz * (fine * 0.20 + lane * (0.9 + self.time_beat.w * 0.8))
-                } }
+                    // CONTENT (retro/tron): the street grid glows in the
+                    // video's palette — one copy every 4 blocks.
+                    let gtx = self.tex0.sample_as_bgra(fract(self.v_uv / (s * 4.0)))
+                    let ga = self.col_a.xyz.mix(gtx.xyz * 1.5, self.fog.z * 0.6)
+                    if style < 1.5 {
+                        let edge = 1.0 - smoothstep(half * 0.9, half + 0.05, dm)
+                        rgb = self.col_bg.xyz * 0.5
+                            + ga * edge * (0.7 + self.time_beat.w * 0.9)
+                    } else {
+                        let f = fract(self.v_uv / (s * 0.25))
+                        let fm = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
+                        let fine = 1.0 - smoothstep(0.01, 0.05, fm)
+                        rgb = self.col_bg.xyz * 0.4
+                            + ga * (fine * 0.20 + lane * (0.9 + self.time_beat.w * 0.8))
+                    }
+                }
             } else {
                 // TOWER: roofs vs facades split on the face normal.
                 let wu = self.v_uv
@@ -625,16 +644,29 @@ script_mod! {
                     let warm = self.hash1(tid * 5.3 + cell.x * 3.7 + cell.y * 9.1)
                     let wcol = vec3(1.0, 0.85, 0.6).mix(vec3(0.75, 0.88, 1.0), step(0.6, warm))
                     let wb = 0.55 + 0.45 * self.hash1(cell.x * 1.7 + cell.y * 2.9 + tid)
+                    // CONTENT: facades become video billboards — every
+                    // window is one chunky pixel of the channel video, with
+                    // a per-tower crop offset (a city of screens). The
+                    // window grid, density and beat flicker stay in charge.
+                    let span = vec2(9.0, 13.0)
+                    let boff = floor(vec2(self.hash1(tid * 2.31), self.hash1(tid * 4.73)) * 6.0)
+                    let fuv = (cell + vec2(0.5, 0.5) + boff) / span
+                    let ftx = self.tex0.sample_as_bgra(vec2(fract(fuv.x), fract(0.0 - fuv.y)))
                     if style < 0.5 {
+                        let win = wcol * (wb * lit)
+                        let vid = ftx.xyz * (0.14 + 1.0 * lit * wb)
                         rgb = self.v_base.xyz * 0.045
-                            + wcol * (lit * inwin * wb * (1.0 + self.time_beat.w * 0.25))
+                            + win.mix(vid, self.fog.z)
+                                * (inwin * (1.0 + self.time_beat.w * 0.25))
                     } else {
                         // Retro/tron: neon wire grid on dark glass; lit
-                        // windows become scanline accents.
+                        // windows become scanline accents. Content tints
+                        // the wire per window cell — a mosaic of the video.
                         let gd = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
                         let wire = 1.0 - smoothstep(0.02, 0.10, gd)
                         let gain = 0.5 + self.time_beat.w * 0.8 + self.user.z * 0.5
-                        let neon = self.v_base.xyz * wire * gain
+                        let neon = self.v_base.xyz.mix(ftx.xyz * 1.5, self.fog.z * 0.6)
+                            * wire * gain
                         if style < 1.5 {
                             rgb = self.col_bg.xyz * 0.25 + neon
                                 + wcol * lit * inwin * 0.12
@@ -642,7 +674,8 @@ script_mod! {
                             let ed = min(f.y, 1.0 - f.y)
                             let floor_line = 1.0 - smoothstep(0.02, 0.08, ed)
                             rgb = self.col_bg.xyz * 0.30
-                                + self.col_a.xyz * floor_line * gain * 0.5
+                                + self.col_a.xyz.mix(ftx.xyz * 1.4, self.fog.z * 0.5)
+                                    * floor_line * gain * 0.5
                                 + neon * 0.35 + wcol * lit * inwin * 0.05
                         }
                     }

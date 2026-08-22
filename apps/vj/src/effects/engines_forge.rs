@@ -46,6 +46,10 @@
 //! membrane wave gain, `p2` = glint boost (hats), `p3` free. Hook:
 //! `fx_color(t = flight heat 0..1, attr = (id, aux, r0, r1), normal =
 //! facet, wpos)`.
+//!
+//! Content coupling (`content:` → `fog.z`): the flat shard facets mirror
+//! the channel video (one vertex-stage env sample per facet), the
+//! reflection swinging as they tumble.
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -382,7 +386,17 @@ script_mod! {
                     * self.flow.w * clamp(1.0 + self.user.z * 3.0, 0.0, 8.0)
                 let heat = airk * (1.0 - phase)
                 let tint = self.fx_color(heat, attr, m, wpos)
-                rgb = tint.xyz * ((0.30 + 0.70 * diff) * self.fog.y)
+                // CONTENT: the flat facets mirror the channel video — one
+                // env-map sample per facet (vertex-stage sampler, exact for
+                // a flat quad), the reflection swinging as the shard
+                // tumbles. fog.z = the pre-gated `content` strength.
+                let cm = self.fog.z
+                let mr = m * (2.0 * dot(m, vdir)) - vdir
+                let env = self.tex0.sample_nearest(
+                    vec2(0.5 + mr.x * 0.30, 0.5 - mr.y * 0.30), 0.0
+                )
+                let facet = tint.xyz.mix(env.xyz * (0.38 + 0.65 * diff), cm * 0.6)
+                rgb = facet * ((0.30 + 0.70 * diff) * self.fog.y)
                     + self.col_c.xyz * (spec * 0.5 + glint)
             }
 

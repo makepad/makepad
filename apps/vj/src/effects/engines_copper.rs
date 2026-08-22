@@ -30,6 +30,9 @@
 //! pump (`"0.4 + 0.9*env(phase)"`), `p2` free, `p3` = mode crossfade 0..1
 //! (`"0.5 - 0.5*cos(bar*tau)"`). Hook: `fx_color(t = gradient axis 0..1,
 //! attr = (id, x01, seed, bar01), normal, wpos)` — the bar material fn.
+//!
+//! Content coupling (`content:` → `fog.z`): the bars catch the video as
+//! environment light (mirror-direction env map shaped by the copper band).
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -347,9 +350,22 @@ script_mod! {
                 min(self.v_attr.y, 1.0 - self.v_attr.y)
             )
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
-            let d = length(self.v_world - cam.xyz / max(cam.w, 0.0001))
+            let cam_pos = cam.xyz / max(cam.w, 0.0001)
+            let d = length(self.v_world - cam_pos)
             let fogf = exp(0.0 - d * self.fog.x)
-            let rgb = (c.xyz * (lit * ends * self.fog.y)
+            // CONTENT: the bars catch the channel video as environment
+            // light — a fake env map addressed by the mirror direction; as
+            // the bars dance the reflection sweeps. The copper band keeps
+            // shaping the light, so the metal identity stays primary.
+            // fog.z = the pre-gated `content` strength.
+            let cm = self.fog.z
+            let vd = normalize(cam_pos - self.v_world)
+            let mr = n * (2.0 * dot(n, vd)) - vd
+            let env = self.tex0.sample_as_bgra(
+                vec2(0.5 + mr.x * 0.30, 0.5 - mr.y * 0.30)
+            )
+            let metal = c.xyz.mix(env.xyz * (0.35 + 0.85 * lit), cm * 0.65)
+            let rgb = (metal * (lit * ends * self.fog.y)
                 + self.col_c.xyz * self.v_misc.y * 0.8)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
             return vec4(rgb, 1.0)

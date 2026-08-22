@@ -285,10 +285,16 @@ script_mod! {
             let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
             let line = 1.0 - smoothstep(0.0, 0.11, dg)
             let t = clamp(self.v_h * 1.4, 0.0, 1.0)
-            let grad = self.col_a.mix(self.col_b, t)
+            // CONTENT: the channel video drapes the terrain — sampled by
+            // the SAME scrolled uv, so it streams with the surface — and
+            // tints the height gradient: dark faces and neon grid lines
+            // both pick up the video's palette. fog.z = pre-gated strength.
+            let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
+            let grad = self.col_a.mix(self.col_b, t).xyz
+                .mix(ttx.xyz * 1.15, self.fog.z * 0.7)
             let beat_glow = 1.0 + self.time_beat.w * 1.1
-            let surface = grad.xyz * 0.30 * self.v_color.x
-            let neon = grad.xyz * line * beat_glow * 1.6 + self.col_c.xyz * line * t * 0.6
+            let surface = grad * 0.30 * self.v_color.x
+            let neon = grad * line * beat_glow * 1.6 + self.col_c.xyz * line * t * 0.6
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let d = length(self.v_world - cam.xyz / max(cam.w, 0.0001))
             let fog = exp(0.0 - d * self.fog.x)

@@ -226,10 +226,10 @@ the effect's identity stays primary. The shared plumbing (pinned names):
 | harmonograph | strand idx | curve t 0..1 | strand rnd | side ±1 | (t, strand01) | strand seed vec |
 | domino | branch id | arc index (dominoes) | tile hash | yaw (rad) | GROUND PIVOT (x, z) | LOCAL face normal (pos = LOCAL corner) |
 | tiles | tile index (grid coords + uv window derive from it) | radial 0..1 from plane centre | rnd (stagger/shade) | rnd (tumble) | corner 0/1 (tile-local uv) | SHATTER FLIGHT VECTOR (unit dir × flight distance, baked; pos = rest centre) |
-| flock | bird id | speed01 | hue | FLAP AMPLITUDE at this vertex (0 spine, wingspan at tips) | (along-body 0..1, flap phase hash) | banked UP vector (the flap axis) |
+| flock | bird id | speed01 (2.0 = the content-backdrop quad, clip-space, screen uv) | hue | FLAP AMPLITUDE at this vertex (0 spine, wingspan at tips) | (along-body 0..1, flap phase hash) | banked UP vector (the flap axis) |
 | city | tower/trail id | CLASS: 0 tower 1 ground 2 sky 3 trail | tower hash / trail hue | tower height / trail phase | tower: facade uv in WINDOW units; ground: world xz; sky: (azimuth01, h01); trail: (arc01, h01) | face normal |
 | pipes | pipe id | birth order 0..1 (THE growth axis) | pipe hue | local radius (balls bulged) | (around01, along/elevation) | radial outward |
-| stockcharts | element class 0..5 (body/wick/grid/crosshair/MA/tick) | candle age 0..1 | up/down (crosshair: axis) | move size 0..1 | quad-local uv | +Z |
+| stockcharts | element class 0..6 (body/wick/grid/crosshair/MA/tick/content-backdrop) | candle age 0..1 | up/down (crosshair: axis) | move size 0..1 | quad-local uv | +Z |
 | raymarch | corner idx | 0 | 0 | 0 | screen uv (0,0 = top-left) | +Z (pos = CLIP-SPACE corner; the pixel shader is the whole effect) |
 | mountainjet (terrain) | checker cell | 0 | vertex hash | 0 | grid uv | +Y |
 | mountainjet (jet hull) | 0 | 2.0 + part hash | face shade tint | 0 | face uv (edge-wire material) | LOCAL face normal (pos = LOCAL jet coords, nose = -z) |

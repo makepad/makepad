@@ -35,6 +35,9 @@
 //! additive), `bank` (1.0 roll-into-turns gain). The shared `bar_beats` key
 //! also feeds the predator's bar clock. Bindings: p0..p3 free for hooks.
 //! Hook: `fx_color(t = speed01, attr = (id, speed01, hue, flap_amp))`.
+//!
+//! Content coupling (`content:` → `fog.z`): a dim clip-space backdrop of
+//! the channel video behind the murmuration (invisible standalone).
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -299,6 +302,25 @@ impl FlockEngine {
     /// a_r1 and the vertex shader beats them from the time uniform.
     pub(crate) fn emit(&mut self, mesh: &mut FxMesh) {
         mesh.clear();
+        // CONTENT backdrop (FIRST = painted behind the flock): one
+        // clip-space quad showing the channel video dimmed behind the
+        // murmuration. a_aux = 2.0 marks it (birds carry speed01 0..1);
+        // the pixel stage gates it with the pre-gated content strength,
+        // so it is invisible standalone.
+        {
+            let n0 = vec3f(0.0, 0.0, 1.0);
+            let corners = [
+                (vec3f(-1.0, -1.0, 0.0), vec2f(0.0, 1.0)),
+                (vec3f(1.0, -1.0, 0.0), vec2f(1.0, 1.0)),
+                (vec3f(1.0, 1.0, 0.0), vec2f(1.0, 0.0)),
+                (vec3f(-1.0, 1.0, 0.0), vec2f(0.0, 0.0)),
+            ];
+            let mut ids = [0u32; 4];
+            for (k, (pos, uv)) in corners.iter().enumerate() {
+                ids[k] = mesh.push_vert(*pos, 0.0, n0, 2.0, *uv, 0.0, 0.0);
+            }
+            mesh.push_quad(ids[0], ids[1], ids[2], ids[3]);
+        }
         let size = Self::san(self.cfg.size, 0.14).clamp(0.01, 2.0);
         let speed = Self::san(self.cfg.speed, 2.4).clamp(0.2, 20.0);
         let bank_gain = Self::san(self.cfg.bank, 1.0).clamp(0.0, 4.0);
@@ -360,7 +382,7 @@ impl FlockEngine {
             let c3 = mesh.push_vert(fin_top, id, u, speed01, vec2f(0.85, ph), hue, 0.0);
             mesh.push_tri(a3, b3, c3);
         }
-        debug_assert_eq!(mesh.vertex_count(), self.pos.len() * VERTS_PER_BIRD);
+        debug_assert_eq!(mesh.vertex_count(), self.pos.len() * VERTS_PER_BIRD + 4);
         mesh.pad_to_high_water();
     }
 
@@ -420,6 +442,15 @@ script_mod! {
                 self.geom.geom_tail_pad_0,
                 self.geom.geom_tail_pad_1
             )
+            if attr.y > 1.5 {
+                // CONTENT BACKDROP: clip-space passthrough; the pixel stage
+                // shows the channel video dimmed behind the flock, gated by
+                // the pre-gated content strength (invisible standalone).
+                // v_color.w = -1 marks it (birds carry alpha 0..1).
+                self.v_color = vec4(self.geom.geom_uv.x, self.geom.geom_uv.y, 0.0, -1.0)
+                self.vertex_pos = vec4(self.geom.geom_pos.x, self.geom.geom_pos.y, 0.5, 1.0)
+                return self.vertex_pos
+            }
             let up = self.geom.geom_normal
             // Per-bird flap rate (±25%) + baked phase; pulse snaps the beat.
             let rate = self.shape.x * (0.75 + 0.5 * fract(attr.x * 0.6180339))
@@ -448,6 +479,14 @@ script_mod! {
         }
 
         pixel: fn() {
+            if self.v_color.w < -0.5 {
+                // CONTENT BACKDROP: the video, dimmed so dusk silhouettes
+                // still read; blends toward the sky color as fog.z falls.
+                let cm = self.fog.z
+                let tx = self.tex0.sample_as_bgra(vec2(self.v_color.x, self.v_color.y))
+                let rgb = tx.xyz * (0.34 * (1.0 + self.time_beat.w * 0.10))
+                return vec4(rgb * cm, cm)
+            }
             return self.v_color
         }
 
@@ -503,7 +542,8 @@ mod tests {
         let mut mesh = FxMesh::default();
         e.step(1.0 / 60.0, 0.0, 0.0);
         e.emit(&mut mesh);
-        assert_eq!(mesh.vertex_count(), 60 * VERTS_PER_BIRD);
+        // + 4: the content-backdrop quad emitted ahead of the birds.
+        assert_eq!(mesh.vertex_count(), 60 * VERTS_PER_BIRD + 4);
         let len = mesh.verts.len();
         for k in 0..30 {
             e.step(1.0 / 60.0, k as f32 / 60.0, (k as f32 * 0.07).fract());
@@ -520,9 +560,16 @@ mod tests {
         e.emit(&mut mesh);
         let floats = super::super::mesh::VERT_FLOATS;
         let mut tips = 0;
+        let mut backdrop = 0;
         for v in mesh.verts.chunks(floats) {
             for f in v {
                 assert!(f.is_finite(), "non-finite vertex data");
+            }
+            if v[7] > 1.5 {
+                // The content-backdrop quad (a_aux = 2.0, clip-space).
+                backdrop += 1;
+                assert!(v[0].abs() == 1.0 && v[1].abs() == 1.0, "backdrop off clip square");
+                continue;
             }
             assert!((0.0..=1.0).contains(&v[7]), "speed01 out of range");
             // Up vector roughly unit.
@@ -534,6 +581,7 @@ mod tests {
         }
         // Exactly the two wingtips per bird carry flap amplitude.
         assert_eq!(tips, 40 * 2);
+        assert_eq!(backdrop, 4, "the content backdrop quad must be present");
     }
 
     #[test]
