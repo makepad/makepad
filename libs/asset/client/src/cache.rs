@@ -219,6 +219,20 @@ pub struct CacheStats {
 /// Push a directory's entries out at cache OPEN time only: the root layout
 /// has to exist for anything else to make sense. Per-object commits do not
 /// call this — see the durability policy above.
+///
+/// Windows has no directory fsync to call: a directory handle is read-only
+/// even with `FILE_FLAG_BACKUP_SEMANTICS`, a plain `File::open` of one is
+/// refused with `PermissionDenied`, and `FlushFileBuffers` on a read handle
+/// answers `ERROR_ACCESS_DENIED`. Left as-is this refused every cache open
+/// on Windows. NTFS journals its own metadata, so a returned rename is
+/// already durable; the no-op is the correct Windows behaviour, not a
+/// swallowed error. (Same reasoning as `makepad_asset_store::cas::fsync_dir`.)
+#[cfg(windows)]
+fn fsync_dir(_dir: &Path) -> ClientResult<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> ClientResult<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cache fsync dir"))
 }

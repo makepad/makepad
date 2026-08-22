@@ -46,6 +46,33 @@ fn hex64(id: &BlobId) -> String {
     s
 }
 
+/// Flush a DIRECTORY's entries to stable storage.
+///
+/// The commit protocol depends on this: a renamed object is only durable once
+/// the directory entry naming it is.
+///
+/// On unix that is a real `fsync` of a directory handle.
+///
+/// On WINDOWS there is no such thing to call, and pretending otherwise is
+/// what kept the embedded store from starting at all: a directory can only
+/// be opened for READ (with `FILE_FLAG_BACKUP_SEMANTICS`; a plain
+/// `File::open` is refused outright), and `FlushFileBuffers` on a handle
+/// without write access answers `ERROR_ACCESS_DENIED`. So the very first
+/// call — `Cas::open`'s flush of a brand-new root — returned
+/// `PermissionDenied`, `AssetServer::start` failed, and the VJ fell back to
+/// "no store" on every Windows launch.
+///
+/// Nothing is lost by not calling it. NTFS journals metadata operations
+/// (create, rename, delete) in its own log and commits them in order, so a
+/// rename that returned is already durable without a caller-issued flush —
+/// which is why Windows exposes no directory-fsync API in the first place.
+/// This is a deliberate no-op, not a swallowed error.
+#[cfg(windows)]
+fn fsync_dir(_dir: &Path) -> ServerResult<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> ServerResult<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cas fsync dir"))
 }
