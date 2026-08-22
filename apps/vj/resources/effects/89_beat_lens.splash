@@ -1,0 +1,51 @@
+// BEAT LENS — the optics preset: blobby GLASS floats in front of the
+// camera and the channel's content (input0) is seen THROUGH it, bent by a
+// real Snell refraction whose strength rides the pulse (p3). Pattern
+// taught: a scene material < 0 marks glass — the base marcher refracts
+// once and samples input0 along the bent ray; total internal reflection
+// falls back to a mirror bounce (branched, never mix-guarded).
+{
+    name: "Beat Lens"
+    engine: "raymarch"
+
+    steps: 56
+    max_dist: 20.0
+    cam: "dolly"
+    cam_speed: 0.5
+    cam_dist: 5.2
+    cam_height: 0.4
+    cam_fov: 52.0
+    shadow: 0
+
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    fog: 0.03
+    glow: 1.0
+    p3: "0.15 + 0.5 * pulse"   // IOR bend breathes on the beat
+
+    input0: "test"
+
+    color_bg: #x101018
+    color_a: #x3060ff
+    color_b: #x20d0ff
+    color_c: #xffffff
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxRaymarch {
+        scene_sdf: fn(p: vec3) -> vec2 {
+            // Three lens-blobs breathing around the view axis.
+            let t = self.time_beat.x
+            let c1 = vec3(sin(t * 0.51) * 1.7, sin(t * 0.73) * 1.0, sin(t * 0.37) * 0.7)
+            let c2 = vec3(cos(t * 0.61 + 2.0) * 1.4, cos(t * 0.43 + 1.0) * 1.2, cos(t * 0.53) * 0.6)
+            let c3 = vec3(sin(t * 0.29 + 4.2) * 1.1, cos(t * 0.67 + 3.1) * 0.8, sin(t * 0.47 + 1.7) * 0.8)
+            let mut d = length(p - c1) - 1.15
+            d = self.smin(d, length(p - c2) - 0.95, 0.7)
+            d = self.smin(d, length(p - c3) - 0.80, 0.7)
+            // material -1 = GLASS: refract and sample input0.
+            return vec2(d, 0.0 - 1.0)
+        }
+    }
+}
