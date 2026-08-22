@@ -1,0 +1,59 @@
+// CANDY STACK — bounce-pile mode: every beat the whole stack of fat
+// pastel bars drops from above and lands staggered ON the kick, each
+// touchdown flashing white (the choreography's landing flash channel).
+// Pattern taught: the bar material HOOK — the default copper gradient is
+// replaced by a soft candy ramp hue-rotated per bar (attr.w = bar01), so
+// one gradient fn recolors the whole stack. Tiltshift sells the
+// miniature-toy read.
+{
+    name: "Candy Stack"
+    engine: "copperbars"
+    seed: 42
+
+    bars: 14
+    mode: "pile"
+    width: 13.0
+    span: 5.5
+    thickness: 0.62
+    depth: 1.6
+    amplitude: 1.4
+    weave: 0.9
+    metal: 1.6
+    drop: 8.0
+
+    beat_pulse: 0.6
+    p0: "0.3 + 0.7*bass + 0.4*pulse"
+    p1: "0.35 + 0.8*env(phase)"
+
+    color_bg: #x14101c
+    color_a: #xffb3d9      // strawberry cream
+    color_b: #x7fd4ff      // sky mint
+    color_c: #xfffbe8      // sugar-white flash
+
+    cam_orbit: 0.09
+    cam_fov: 52.0
+    fog: 0.016
+    glow: 1.15
+
+    // Candy ramp hook: pastel hue per bar, soft band, no hard metal.
+    shader: draw.DrawVjFxCopper {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let h = attr.w * 5.0 + t * 0.6
+            let candy = vec4(
+                0.62 + 0.38 * sin(h),
+                0.62 + 0.38 * sin(h + 2.094),
+                0.62 + 0.38 * sin(h + 4.188),
+                1.0
+            )
+            let band = pow(clamp(sin(t * 3.14159265), 0.0, 1.0), 1.6)
+            let sline = 1.0 - clamp(abs(t - 0.7) * 10.0, 0.0, 1.0)
+            let spec = pow(sline, 3.0) * (0.4 + self.time_beat.w * 0.7)
+            return vec4(candy.xyz * (0.45 + 0.55 * band) + self.col_c.xyz * spec, 1.0)
+        }
+    }
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3},
+        {kind: "tiltshift", focus: 0.52, width: 0.3, levels: 3}
+    ]
+}

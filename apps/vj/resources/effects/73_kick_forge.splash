@@ -1,0 +1,44 @@
+// KICK FORGE — a drumhead piled with steel shards: every kick fires an
+// impulse that launches the pile ballistically; shards tumble, glint and
+// rain back before the next hit, and the membrane rings a damped radial
+// wave from the same impulse. Pattern taught: THE forge binding is `p0`
+// (impulse gain) — bass slams real metal once audio is wired, while the
+// `pulse` term keeps it forging on the free-running clock. Physics is
+// stateless: position is a pure function of (phase, bpm, seeds), and a
+// fading gain pulls its own shards back down.
+{
+    name: "Kick Forge"
+    engine: "forge"
+    seed: 11
+
+    shards: 2200
+    radius: 4.2
+    impulse: 9.0
+    gravity: 46.0        // high gravity = HIGH jumps (launches land per beat)
+    spin: 1.2
+    membrane_wave: 0.5
+    shard_size: 0.17
+    scatter: 0.55
+    falloff: 0.55
+    pile: 0.6
+    glint: 1.2
+
+    beat_pulse: 0.6
+    p0: "0.6 + 2.6*bass"               // impulse gain — the kick moves the metal
+    p1: "0.35 + 1.3*bass"              // membrane wave rides the lows
+    p2: "0.25 + 1.5*high"              // hats fire the glints
+
+    color_bg: #x070608
+    color_a: #x8a93a6      // cold steel
+    color_b: #xff7a2a      // forge ember
+    color_c: #xfff3d8      // white-hot glint
+
+    cam_orbit: 0.10
+    cam_fov: 52.0
+    fog: 0.030
+    glow: 1.3
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: "1.2 + 0.8*pulse", levels: 3}
+    ]
+}
