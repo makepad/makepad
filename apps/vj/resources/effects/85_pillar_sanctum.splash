@@ -1,0 +1,65 @@
+// PILLAR SANCTUM — the raymarch engine's flagship: an infinite hypostyle
+// hall of twisted columns, flown down one open lane. The ENTIRE scene is
+// the scene_sdf subclass below: domain repetition puts a column in every
+// cell, entasis bulge + a beat-pulsed twist shape it, floor and ceiling
+// close the hall. Pattern taught: `scene_sdf` is the variant mechanism —
+// override one function, inherit the whole marcher (march loop, normal,
+// AO, soft shadow, cosine palette, fog).
+{
+    name: "Pillar Sanctum"
+    engine: "raymarch"
+
+    steps: 72
+    max_dist: 44.0
+    cam: "fly"
+    cam_speed: 2.1
+    cam_dist: 6.0        // fly mode: cam_dist * 0.17 = weave amplitude
+    cam_height: 2.1
+    cam_fov: 66.0
+    shadow: 1
+
+    beat_pulse: 0.45
+    beat_rate: 1.0
+    fog: 0.055
+    glow: 1.05
+
+    color_bg: #x140a06
+    color_a: #xffc890
+    color_b: #x8a3c1a
+    color_c: #xfff2dc
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.15, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxRaymarch {
+        scene_sdf: fn(p: vec3) -> vec2 {
+            // Columns on a 4.2 grid, offset half a cell so the fly lane
+            // (x near 0) stays clear of stone.
+            let cell = 4.2
+            let q = vec2(
+                self.rep1(p.x + cell * 0.5, cell),
+                self.rep1(p.z + cell * 0.5, cell)
+            )
+            // Twist by height, pumped by the beat pulse.
+            let tw = p.y * (0.45 + 0.30 * self.time_beat.w)
+            let qq = self.rot2(q, tw)
+            // Entasis: the classical bulge, breathing a little.
+            let r = 0.40 + 0.09 * sin(p.y * 1.9 + 1.2) + 0.04 * self.time_beat.w
+            let cq = abs(qq) - vec2(r, r)
+            let col = length(max(cq, vec2(0.0, 0.0)))
+                + min(max(cq.x, cq.y), 0.0) - 0.10
+            let floor_d = p.y + 1.5
+            let ceil_d = 6.6 - p.y
+            // Twist is not an isometry: keep the estimate conservative.
+            let d = min(col * 0.72, min(floor_d, ceil_d))
+            // Material: column bands by height, floor/ceiling in their own
+            // palette slot.
+            let mut m = 0.82
+            if col * 0.72 < min(floor_d, ceil_d) {
+                m = fract(p.y * 0.16 + 0.1)
+            }
+            return vec2(d, m)
+        }
+    }
+}

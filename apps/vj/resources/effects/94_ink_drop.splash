@@ -1,0 +1,39 @@
+// INK DROP — the STABLE-FLUIDS engine: advect, divergence, a budgeted
+// jacobi pressure solve (`iters`) and projection run on a float GPU grid
+// every frame; dye splats inject ON THE KICK at a per-beat hashed point,
+// in a palette color that cycles per beat. The ink then genuinely FLOWS —
+// filaments curl, collide and fade like drops in dark water.
+{
+    name: "Ink Drop"
+    engine: "fluid"
+    seed: 4
+
+    grid: 176
+    iters: 24
+
+    force: 2.6
+    dissipation: 0.10
+    swirl: 0.35
+    splat: "2.2 + pulse * 0.9"
+    dye_fade: 0.12
+    radius: 0.075
+    vortex: 3.2
+
+    beat_pulse: 0.4
+    beat_rate: 0.5
+
+    // p0 = flow-warp of the (unused) input, p1 = input mix: pure ink here.
+    p0: 0.0
+    p1: 0.0
+
+    color_bg: #x06060a
+    color_a: #x30c8ff
+    color_b: #xff3a9a
+    color_c: #xb0ff5a
+
+    glow: 2.6
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+}

@@ -1,0 +1,62 @@
+// CORRIDOR RUSH — an endless run of identical rooms flown through at
+// speed: one room, domain-repeated along z; each bulkhead carries a
+// doorway that YAWNS OPEN on the beat. Pattern taught: interior SDFs
+// (distance-to-nearest-wall) + carving holes with max(a, -b), all inside a
+// scene_sdf subclass; the fly camera's weave rides cam_dist.
+{
+    name: "Corridor Rush"
+    engine: "raymarch"
+
+    steps: 72
+    max_dist: 46.0
+    cam: "fly"
+    cam_speed: 4.6
+    cam_dist: 4.0        // fly mode: cam_dist * 0.17 = weave amplitude
+    cam_height: 1.0
+    cam_fov: 74.0
+    shadow: 0            // an interior lit by its own walls needs no sun
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    fog: 0.075
+    glow: 1.15
+
+    color_bg: #x03050a
+    color_a: #x2050ff
+    color_b: #xff2080
+    color_c: #xd8e8ff
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.5, levels: 3},
+        {kind: "chroma", p1: "0.10 + 0.25 * pulse", p2: 0.0}
+    ]
+
+    shader: draw.DrawVjFxRaymarch {
+        scene_sdf: fn(p: vec3) -> vec2 {
+            let room = 4.4
+            let z = self.rep1(p.z, room)
+            // Interior of an endless 3.4 x 2.8 duct: distance to the
+            // nearest wall, positive inside.
+            let walls = min(1.7 - abs(p.x), 1.4 - abs(p.y - 1.0))
+            // Bulkhead every room, with a beat-yawning doorway carved out.
+            let slab = self.sd_box(vec3(p.x, p.y - 1.0, z), vec3(1.7, 1.4, 0.16))
+            let dw = 1.05 + 0.35 * self.time_beat.w
+            let door = self.sd_box(vec3(p.x, p.y - 0.9, z), vec3(dw, 1.1, 0.5))
+            let ring = max(slab, 0.0 - door)
+            // Wall ribs running along the corridor give the speed lines.
+            let rib = self.sd_box(
+                vec3(abs(p.x) - 1.7, self.rep1(p.y - 1.0, 0.7), z),
+                vec3(0.10, 0.06, room)
+            )
+            let d = min(walls, min(ring, rib))
+            // Material: room index bands + bulkheads in their own slot.
+            let mut m = fract((p.z - z) * 0.031)
+            if ring < walls {
+                if ring < rib {
+                    m = 0.9
+                }
+            }
+            return vec2(d, m)
+        }
+    }
+}

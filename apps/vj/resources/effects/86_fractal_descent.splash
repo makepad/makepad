@@ -1,0 +1,66 @@
+// FRACTAL DESCENT — a kaleidoscopic-IFS fractal orbited in the dark, its
+// fold angle CREEPING with the beat count so the shape never repeats.
+// Pattern taught: an iterated fold (abs + rotate + scale-out) inside a
+// scene_sdf subclass — five iterations, own constants; the marcher, AO and
+// palette all come free from the base shader. `p0` binds extra fold angle.
+{
+    name: "Fractal Descent"
+    engine: "raymarch"
+
+    steps: 84
+    max_dist: 30.0
+    cam: "orbit"
+    cam_speed: 0.14
+    cam_dist: 3.6
+    cam_height: 1.0
+    cam_fov: 62.0
+    shadow: 1
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    fog: 0.05
+    glow: 1.45
+    p0: "0.06 * sin(bar * tau)"   // the fold slowly breathes over the bar
+
+    color_bg: #x05040f
+    color_a: #x8f4dff
+    color_b: #x0fd0c8
+    color_c: #xf0eaff
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.35, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxRaymarch {
+        scene_sdf: fn(p: vec3) -> vec2 {
+            // Kaleidoscopic IFS: fold into the positive octant, then TWO
+            // rotations (xz and yz — the second is what lifts the fractal
+            // out of a flat extrusion), scale outward. Own constants.
+            let mut z = p * 0.72
+            let k = 1.84
+            let off = vec3(1.18, 0.62, 1.34)
+            let ang = 0.52 + self.time_beat.y * 0.010 + self.user.x
+            let mut s = 0.72
+            let mut trap = 10.0
+            let mut i = 0.0
+            loop {
+                if i > 5.5 {
+                    break
+                }
+                z = abs(z)
+                let r = self.rot2(vec2(z.x, z.z), ang)
+                z = vec3(r.x, z.y, r.y)
+                let r2 = self.rot2(vec2(z.y, z.z), 0.61 - ang * 0.35)
+                z = vec3(z.x, r2.x, r2.y)
+                z = z * k - off * (k - 1.0)
+                s = s * k
+                // Orbit trap: nearest approach to the origin, in world
+                // scale — the palette rides the fractal's onion layers.
+                trap = min(trap, length(z) / s)
+                i = i + 1.0
+            }
+            let d = self.sd_box(z, vec3(0.90, 0.90, 0.90)) / s
+            return vec2(d * 0.82, fract(trap * 2.6))
+        }
+    }
+}

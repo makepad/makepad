@@ -1,0 +1,38 @@
+// VECTOR PATROL — Battlezone energy: the mountain-jet in wireframe. Grid
+// lines only over near-black terrain, the jet reduced to glowing face
+// edges, plume stabbing on the beat. Pattern taught: the `look: "wire"`
+// branch of the mountainjet shader — same stream, vector-monitor material.
+{
+    name: "Vector Patrol"
+    engine: "mountainjet"
+
+    res: 130
+    size: 34.0
+    height: 4.4
+    noise_scale: 0.20
+    scroll: 6.0
+    ridged: 0.85
+    cells: 34
+    look: "wire"
+    jet_size: 1.05
+    weave: 1.4
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    p0: "0.3 + 1.2 * pulse"
+
+    color_bg: #x020803
+    color_a: #x30ff70
+    color_b: #xa0ffc0
+    color_c: #xe8fff0
+
+    cam_fov: 70.0
+    cam_height: 3.6
+    cam_orbit: 0.0
+    fog: 0.045
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 2}
+    ]
+}
