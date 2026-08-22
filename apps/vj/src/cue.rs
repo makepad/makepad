@@ -37,6 +37,10 @@ impl SlotId {
             SlotId::B => 1,
         }
     }
+
+    pub fn from_index(index: usize) -> SlotId {
+        if index == 0 { SlotId::A } else { SlotId::B }
+    }
 }
 
 #[cfg(test)]

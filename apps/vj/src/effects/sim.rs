@@ -1284,7 +1284,10 @@ script_mod! {
             )
             let vtex = self.tex0.sample_nearest(suv, 0.0)
             self.v_color = vec4(
-                c0.xyz.mix(vtex.xyz * (0.85 + 0.55 * self.time_beat.w), self.fog.z * 0.85),
+                c0.xyz.mix(
+                    vtex.xyz * (1.0 + 0.55 * self.time_beat.w),
+                    clamp(self.fog.z * 1.2, 0.0, 1.0)
+                ),
                 c0.w
             )
             self.v_uv = self.geom.geom_uv
@@ -1397,24 +1400,28 @@ script_mod! {
             self.v_gust = clamp(gust, 0.0, 3.0)
             let grow_dim = 0.20 + 0.80 * g
             let c = self.fx_color(arc, attr, self.geom.geom_normal, world.xyz)
-            // CONTENT COUPLING, canopy mode — the same law as DrawVjFxMesh
-            // (shaders.rs): foliage picks up the live input0's colors by
-            // the plant's xz footprint (shape.y = half-extent, engines.rs),
-            // sampled at the REST position so the field-driven wind never
-            // smears them. Tips take the video, trunks keep their color.
+            // CONTENT COUPLING — the same law as DrawVjFxMesh (shaders.rs),
+            // kept identical on purpose: mode 0 = FIELD drape by the
+            // meadow's xz half-extent (shape.y), mode 2 = FRONT projection
+            // over (x half-extent, height shape.z) for the tall thin
+            // l-systems. Always sampled at the REST position so the
+            // field-driven wind moves the picture instead of smearing it.
             // fog.z is host-pre-gated to 0 without real content.
             let mut crgb = c.xyz
             let cmix = self.has_content * self.fog.z
-            if cmix > 0.001 && self.shape.x < 0.5 {
+            if cmix > 0.001 && abs(self.shape.x - 1.0) > 0.5 {
                 let ext = max(self.shape.y, 0.5)
-                let cuv = clamp(
-                    vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5),
-                    vec2(0.0, 0.0),
-                    vec2(1.0, 1.0)
+                let mut cuv = vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5)
+                if self.shape.x > 1.5 {
+                    let hgt = max(self.shape.z, 0.5)
+                    cuv = vec2(twisted.x / (ext * 2.0) + 0.5, 1.0 - twisted.y / hgt)
+                }
+                let texel = self.tex0.sample_nearest(
+                    clamp(cuv, vec2(0.0, 0.0), vec2(1.0, 1.0)),
+                    0.0
                 )
-                let texel = self.tex0.sample_nearest(cuv, 0.0)
-                let tipness = smoothstep(0.12, 0.72, arc)
-                crgb = mix(crgb, texel.xyz * 1.3, cmix * tipness)
+                let tipness = 0.30 + 0.70 * smoothstep(0.04, 0.45, arc)
+                crgb = mix(crgb, texel.xyz * 1.45, clamp(cmix * 1.35, 0.0, 1.0) * tipness)
             }
             self.v_color = vec4(crgb * grow_dim, c.w)
             let view_pos = self.draw_pass.camera_view * world

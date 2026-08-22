@@ -454,11 +454,14 @@ script_mod! {
                     vec2(1.0, 1.0)
                 )
                 let texel = self.tex0.sample_nearest(cuv, 0.0)
-                let catch = 0.25 + 0.75 * clamp(n.y, 0.0, 1.0)
+                // Flanks catch a good half of it, faces the lot: the mosaic
+                // only reads as a picture if the standing run already
+                // carries it, not just the toppled tail.
+                let catch = 0.55 + 0.45 * clamp(n.y, 0.0, 1.0)
                 tile_rgb = mix(
                     tile_rgb,
-                    texel.xyz * 1.2,
-                    clamp(cmix * 1.1, 0.0, 1.0) * catch
+                    texel.xyz * 1.35,
+                    clamp(cmix * 1.6, 0.0, 1.0) * catch
                 )
             }
             let key = normalize(vec3(0.45, 0.8, 0.35))

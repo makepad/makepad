@@ -802,9 +802,14 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // end to start with no decoder reopen, which is what
                     // used to hiccup every wrap. Loop plays forward and
                     // wraps; ping-pong bounces. Returns to the decoder
-                    // path when a seek lands or the mode changes.
+                    // path when a seek lands, the mode changes, or the
+                    // trim range grows past what this cache holds — and
+                    // then FALLS THROUGH to the streaming wrap below.
+                    // (It used to `continue`: an instant cache exit then
+                    // re-entered this branch forever — EOS → exit → EOS —
+                    // a silent busy-spin that froze the picture with the
+                    // loop lit.)
                     cache_playback(&shared, &pingpong_cache);
-                    continue;
                 }
                 if mode == PlayMode::PingPong
                     && pingpong_over_budget
@@ -966,6 +971,13 @@ fn repeat_is_silent(has_audio: bool, muted: bool, mode: PlayMode) -> bool {
     !has_audio || muted || mode == PlayMode::PingPong
 }
 
+/// Whether the LIVE trim range asks for anything outside the range the
+/// cache was decoded under. Pure bounds-vs-bounds — frame pts never enter
+/// it, so container start offsets cannot fake an uncovered range.
+fn cache_range_outgrown(built: (i64, i64), live: (i64, i64)) -> bool {
+    live.0 < built.0 || live.1 > built.1
+}
+
 fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     if cache.len() < 2 {
         return;
@@ -981,10 +993,15 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     // Trim changes do NOT bounce control back here: the IN/OUT bounds are
     // read LIVE each frame below, so a shrinking range just tightens the
     // space the repeat moves in — playback never resets. Control only goes
-    // back when the range GROWS past what this cache holds (the decoder
-    // must fetch the uncovered tail).
-    let cover_lo = cache.first().map(|f| f.clip_100ns).unwrap_or(0);
-    let cover_hi = cache.last().map(|f| f.clip_100ns).unwrap_or(0);
+    // back when the range GROWS past the bounds this cache was BUILT
+    // under (the decoder must fetch the uncovered part). The build bounds
+    // are simply the bounds at entry: any earlier trim change cleared the
+    // cache via the epoch watch, so a complete cache is always a product
+    // of the current bounds. NEVER compare against frame pts — real MP4s
+    // start at a nonzero pts, and measuring trim 0 against that offset
+    // made every untrimmed clip look "uncovered" (the frozen-loop bug).
+    let built_in = shared.trim_in_100ns.load(Ordering::Acquire);
+    let built_out = shared.trim_out_100ns.load(Ordering::Acquire);
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -995,8 +1012,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         {
             let t_in = shared.trim_in_100ns.load(Ordering::Acquire);
             let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
-            // One-frame slack: pts snap to frame boundaries.
-            if t_in + delta < cover_lo || (t_out != i64::MAX && t_out - delta > cover_hi + delta) {
+            if cache_range_outgrown((built_in, built_out), (t_in, t_out)) {
                 return;
             }
         }
@@ -3364,6 +3380,23 @@ mod tests {
 #[cfg(test)]
 mod mode_flip_tests {
     use super::*;
+
+    /// THE FROZEN-LOOP LAW: an untrimmed clip's cache repeat must never
+    /// think its range is uncovered (the old pts-based check compared trim
+    /// 0 against a container's nonzero first pts and exited instantly —
+    /// which busy-spun the EOS path and froze every looping video).
+    #[test]
+    fn untrimmed_and_shrunk_ranges_never_outgrow_the_cache() {
+        let full = (0i64, i64::MAX);
+        assert!(!cache_range_outgrown(full, full), "untrimmed never exits");
+        // Shrinking stays in the cache (no playback reset).
+        assert!(!cache_range_outgrown(full, (2_000_000, 8_000_000)));
+        // Growing past the BUILD bounds hands control back for a re-pass.
+        let built = (2_000_000i64, 8_000_000i64);
+        assert!(cache_range_outgrown(built, (1_000_000, 8_000_000)));
+        assert!(cache_range_outgrown(built, (2_000_000, 9_000_000)));
+        assert!(!cache_range_outgrown(built, (3_000_000, 7_000_000)));
+    }
 
     fn test_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("vj-media-{label}-{}", std::process::id()))

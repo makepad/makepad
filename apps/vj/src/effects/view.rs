@@ -119,6 +119,13 @@ pub struct VjFxView {
     draw_pipes: DrawVjFxPipes,
     #[live]
     draw_charts: DrawVjFxCharts,
+    /// THE CONTENT BACKDROP (shaders.rs): one far-plane quad of the channel
+    /// video drawn UNDER the sparse-geometry families, so "the video is
+    /// playing" reads at a glance instead of surviving only as a tint.
+    /// Skipped entirely unless real content is bound AND the family asks
+    /// for it — `content: 0` and standalone stay bit-exact classic.
+    #[live]
+    draw_backdrop: DrawVjFxBackdrop,
     // Sim-field family (sim.rs): update quads + the stateful consumers.
     #[live]
     draw_mesh_field: DrawVjFxMeshField,
@@ -183,6 +190,9 @@ pub struct VjFxView {
     mesh: FxMesh,
     #[rust]
     geometry: Option<Geometry>,
+    /// The content backdrop's own geometry: one clip-space quad, built once.
+    #[rust]
+    backdrop_geometry: Option<Geometry>,
     #[rust]
     post: PostChain,
     #[rust]
@@ -465,6 +475,49 @@ impl VjFxView {
             ShaderKind::MeshField
         } else {
             kind
+        }
+    }
+
+    /// THE CONTENT BACKDROP TABLE — how much of the channel video a family
+    /// shows behind itself at `content: 1` (0 = no backdrop at all).
+    ///
+    /// A family earns a backdrop when its classic look is BRIGHT SPARSE
+    /// GEOMETRY over a near-black field: no amount of tinting a few
+    /// thousand thin triangles can read as a picture, so the picture goes
+    /// behind them and the geometry plays over it (the murmuration and the
+    /// stock tape shipped this structure first and are the two families a
+    /// viewer could always name the clip in). Families that already fill
+    /// the frame with surface — terrain, tube, city, marcher, tiles, the
+    /// jet's range, the fluid dye, the transition decks — drape or project
+    /// the video instead and take NO backdrop; a second copy behind them
+    /// would only be invisible or muddy.
+    fn backdrop_level(kind: ShaderKind) -> f32 {
+        match kind {
+            ShaderKind::Particles => 0.55,
+            ShaderKind::Emitters => 0.55,
+            ShaderKind::Ribbon => 0.50,
+            // l-system / grass / metaballs (and the wind-field twin).
+            ShaderKind::Mesh | ShaderKind::MeshField => 0.45,
+            ShaderKind::SimSwarm => 0.55,
+            ShaderKind::Firefly => 0.45,
+            ShaderKind::Harmono => 0.50,
+            ShaderKind::Pipes => 0.50,
+            ShaderKind::Forge => 0.50,
+            ShaderKind::Copper => 0.40,
+            ShaderKind::Domino => 0.45,
+            // Frame-filling families: they drape/project the video
+            // themselves, or already own a backdrop quad of their own
+            // (Flock, Charts), or are content-native (Tiles, Duo, Fluid).
+            ShaderKind::Terrain
+            | ShaderKind::Tunnel
+            | ShaderKind::Jet
+            | ShaderKind::City
+            | ShaderKind::Raymarch
+            | ShaderKind::Tiles
+            | ShaderKind::Flock
+            | ShaderKind::Charts
+            | ShaderKind::Duo
+            | ShaderKind::FluidView => 0.0,
         }
     }
 
@@ -1029,6 +1082,23 @@ impl VjFxView {
         let Some(geometry) = &self.geometry else { return };
         let geometry_id = geometry.geometry_id();
 
+        // The content backdrop's quad: built once, never regenerated (it
+        // lives in clip space, so no camera or size can invalidate it).
+        if self.backdrop_geometry.is_none() {
+            let mut quad = FxMesh::default();
+            let n0 = vec3f(0.0, 0.0, 1.0);
+            let a = quad.push_vert(vec3f(-1.0, -1.0, 0.0), 0.0, n0, 0.0, vec2f(0.0, 1.0), 0.0, 0.0);
+            let b = quad.push_vert(vec3f(1.0, -1.0, 0.0), 1.0, n0, 0.0, vec2f(1.0, 1.0), 0.0, 0.0);
+            let c = quad.push_vert(vec3f(1.0, 1.0, 0.0), 2.0, n0, 0.0, vec2f(1.0, 0.0), 0.0, 0.0);
+            let d = quad.push_vert(vec3f(-1.0, 1.0, 0.0), 3.0, n0, 0.0, vec2f(0.0, 0.0), 0.0, 0.0);
+            quad.push_quad(a, b, c, d);
+            let g = Geometry::new(cx.cx);
+            quad.upload_clone(cx.cx, &g);
+            self.backdrop_geometry = Some(g);
+        }
+        let backdrop_geometry_id =
+            self.backdrop_geometry.as_ref().map(|g| g.geometry_id());
+
         // Camera → pass uniforms.
         let cam = self.camera(time);
         let aspect = (pass_rect.size.x / pass_rect.size.y).max(0.001) as f32;
@@ -1178,7 +1248,31 @@ impl VjFxView {
                 }
             }};
         }
-        match Self::effective_shader_kind(doc) {
+        let kind = Self::effective_shader_kind(doc);
+
+        // THE CONTENT BACKDROP, drawn FIRST so every engine paints over it.
+        // Three gates, all of which must hold: real content bound, a
+        // non-zero `content` strength, and a family that asked for one.
+        // Skipping the draw is what makes `content: 0` bit-exact classic.
+        let bd_level = Self::backdrop_level(kind);
+        if has_content && fog.z > 0.001 && bd_level > 0.0 {
+            if let (Some(tex), Some(bg_id)) = (&input0, backdrop_geometry_id) {
+                let d = &mut self.draw_backdrop;
+                d.draw_vars.set_texture(0, tex);
+                d.time_beat = time_beat;
+                d.sig = sig_v;
+                d.col_bg = palette[0];
+                // fog.w = the family's dim; fog.z = pre-gated strength.
+                d.fog = vec4(fog.x, fog.y, fog.z, bd_level);
+                d.draw_vars.geometry_id = Some(bg_id);
+                if d.draw_vars.can_instance() {
+                    let new_area = cx3d.add_instance(&d.draw_vars);
+                    d.draw_vars.area = cx3d.update_area_refs(d.draw_vars.area, new_area);
+                }
+            }
+        }
+
+        match kind {
             ShaderKind::Mesh => draw_engine!(&mut self.draw_mesh),
             ShaderKind::MeshField => {
                 // wind_tex owns slot 0; content rides slot 1 (`tex0`).

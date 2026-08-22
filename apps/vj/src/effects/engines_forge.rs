@@ -386,16 +386,32 @@ script_mod! {
                     * self.flow.w * clamp(1.0 + self.user.z * 3.0, 0.0, 8.0)
                 let heat = airk * (1.0 - phase)
                 let tint = self.fx_color(heat, attr, m, wpos)
-                // CONTENT: the flat facets mirror the channel video — one
-                // env-map sample per facet (vertex-stage sampler, exact for
-                // a flat quad), the reflection swinging as the shard
-                // tumbles. fog.z = the pre-gated `content` strength.
+                // CONTENT: the shards become MIRRORS of the channel video.
+                // The mirror-direction env map (the first pass) squeezed a
+                // whole frame into a few degrees of facet normal and read
+                // as a glint; sampling at the shard's own SCREEN position,
+                // nudged by the facet normal, makes each shard reflect what
+                // is behind it — a pile of mirror fragments assembling the
+                // picture over the shared video backdrop. Still ONE sample
+                // per vertex (exact for a flat quad).
+                // fog.z = the pre-gated `content` strength.
                 let cm = self.fog.z
-                let mr = m * (2.0 * dot(m, vdir)) - vdir
-                let env = self.tex0.sample_nearest(
-                    vec2(0.5 + mr.x * 0.30, 0.5 - mr.y * 0.30), 0.0
+                let sclip = self.draw_pass.camera_projection
+                    * (self.draw_pass.camera_view
+                        * (self.draw_list.view_transform
+                            * vec4(wpos.x, wpos.y, wpos.z, 1.0)))
+                let sndc = sclip.xy / max(sclip.w, 0.0001)
+                let suv = clamp(
+                    vec2(sndc.x * 0.5 + 0.5, 0.5 - sndc.y * 0.5)
+                        + vec2(m.x, 0.0 - m.y) * 0.11,
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
                 )
-                let facet = tint.xyz.mix(env.xyz * (0.38 + 0.65 * diff), cm * 0.6)
+                let env = self.tex0.sample_nearest(suv, 0.0)
+                let facet = tint.xyz.mix(
+                    env.xyz * (0.55 + 0.65 * diff),
+                    clamp(cm * 1.25, 0.0, 1.0)
+                )
                 rgb = facet * ((0.30 + 0.70 * diff) * self.fog.y)
                     + self.col_c.xyz * (spec * 0.5 + glint)
             }

@@ -850,9 +850,13 @@ impl EffectDoc {
         let fog = r.anim(live_id!(fog), 0.045);
         let glow = r.anim(live_id!(glow), 1.0);
         // Content coupling strength (`content:` — number or binding). The
-        // 0.5 default is the ENGINE-TUNED sweet spot: every family scales
-        // its own coupling so mid-strength infuses without pasting.
-        let content = r.anim(live_id!(content), 0.5);
+        // 0.75 default is the ENGINE-TUNED sweet spot: THE BAR IS THAT A
+        // VIEWER INSTANTLY SEES THE VIDEO PLAYING IN THE EFFECT — a
+        // picture, not a tint (the first 0.5 pass read as a wash and was
+        // rejected). Every family scales its own coupling around it: 0.75
+        // = the video plainly there with the effect's identity still on
+        // top, 1.0 = video-dominant, 0 = the exact classic look.
+        let content = r.anim(live_id!(content), 0.75);
         let grow = match r.string(live_id!(grow)).as_deref() {
             None | Some("off") => GrowMode::Off,
             Some("loop") => GrowMode::Loop,

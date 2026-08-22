@@ -286,10 +286,11 @@ script_mod! {
                 // CONTENT COUPLING: each fly blinks in the live input0's
                 // color at its own meadow anchor (xz over the field → uv) —
                 // a swarm over a concert clip becomes the clip's palette,
-                // blinking. The meadow stays dark. fog.z is host-pre-gated
-                // to 0 without real content (classic standalone look); the
-                // 1.3 family gain makes the default 0.5 read as 0.65 —
-                // the flies ARE this engine's coupling.
+                // blinking, over the shared video backdrop (view.rs
+                // `backdrop_level`). The meadow stays dark. fog.z is
+                // host-pre-gated to 0 without real content (classic
+                // standalone look); the flies ARE this engine's coupling,
+                // so they take the clip essentially whole at the default.
                 let mut body = self.col_b.mix(self.col_c, bright * bright).xyz
                 let cmix = self.has_content * self.fog.z
                 if cmix > 0.001 {
@@ -302,8 +303,8 @@ script_mod! {
                     let texel = self.tex0.sample_nearest(cuv, 0.0)
                     body = mix(
                         body,
-                        texel.xyz * (0.55 + 0.85 * bright),
-                        clamp(cmix * 1.3, 0.0, 1.0)
+                        texel.xyz * (0.75 + 0.85 * bright),
+                        clamp(cmix * 1.6, 0.0, 1.0)
                     )
                 }
                 let gain = (0.05 + 2.4 * bright) * self.fog.y

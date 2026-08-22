@@ -484,7 +484,7 @@ script_mod! {
                 // still read; blends toward the sky color as fog.z falls.
                 let cm = self.fog.z
                 let tx = self.tex0.sample_as_bgra(vec2(self.v_color.x, self.v_color.y))
-                let rgb = tx.xyz * (0.34 * (1.0 + self.time_beat.w * 0.10))
+                let rgb = tx.xyz * (0.46 * (1.0 + self.time_beat.w * 0.10))
                 return vec4(rgb * cm, cm)
             }
             return self.v_color
