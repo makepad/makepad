@@ -15,7 +15,8 @@
 //!
 //! # Vertex channels (CubeVertex layout — documented in CONTRACT.md)
 //!   a_id  = element class: 0 body, 1 wick, 2 grid, 3 crosshair, 4 MA
-//!           ribbon, 5 axis tick dash
+//!           ribbon, 5 axis tick dash, 6 content backdrop (the channel
+//!           video dimmed behind the tape; invisible standalone)
 //!   a_aux = candle age 0..1 (0 = live edge; grid/crosshair: 0)
 //!   uv    = quad-local uv (edge falloff shaping)
 //!   a_r0  = up/down (1 = up candle; crosshair: axis select)
@@ -33,6 +34,9 @@
 //! `scan` (14 — scanline density, 0 = off). Bindings: `p0` = brightness
 //! gain, `p1` = crosshair glow, `p2` = panic tint 0..1 (red overlay wash),
 //! `p3` free. Hook: `fx_color` (t = age01, attr = (class, age, up, size)).
+//!
+//! Content coupling (`content:` → `fog.z`): the tape draws over the
+//! channel video, dimmed and scanlined behind the grid (class 6 quad).
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -277,6 +281,20 @@ impl ChartsEngine {
         let n = self.cfg.candles.clamp(16, 400);
         let w = Self::san(self.cfg.width, 14.0).clamp(2.0, 60.0);
         let h = Self::san(self.cfg.height, 7.0).clamp(1.0, 40.0);
+
+        // CONTENT backdrop (class 6, FIRST = painted under everything): a
+        // quad slightly behind and larger than the terminal plane showing
+        // the channel video dimmed under the tape. The pixel stage gates it
+        // with the pre-gated content strength — invisible standalone.
+        {
+            let n0 = vec3f(0.0, 0.0, 1.0);
+            let (bw, bh, bz) = (w * 0.53, h * 0.53, -0.45);
+            let a = mesh.push_vert(vec3f(-bw, -bh, bz), 6.0, n0, 0.0, vec2f(0.0, 0.0), 0.0, 0.0);
+            let b = mesh.push_vert(vec3f(bw, -bh, bz), 6.0, n0, 0.0, vec2f(1.0, 0.0), 0.0, 0.0);
+            let c = mesh.push_vert(vec3f(bw, bh, bz), 6.0, n0, 0.0, vec2f(1.0, 1.0), 0.0, 0.0);
+            let d = mesh.push_vert(vec3f(-bw, bh, bz), 6.0, n0, 0.0, vec2f(0.0, 1.0), 0.0, 0.0);
+            mesh.push_quad(a, b, c, d);
+        }
         let pitch = w / n as f32;
         let body_w = pitch * Self::san(self.cfg.body_w, 0.62).clamp(0.1, 0.95);
         let wick_w = (body_w * 0.16).max(pitch * 0.05);
@@ -519,6 +537,10 @@ script_mod! {
                     }
                 }
             }
+            if class > 5.5 {
+                // Content backdrop: plain fill, marked for the pixel stage.
+                shp = vec4(1.0, 1.0, 1.0, 5.0)
+            }
             self.v_shape = shp
             let view_pos = self.draw_pass.camera_view * world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
@@ -527,6 +549,24 @@ script_mod! {
 
         pixel: fn() {
             let f = self.v_uv
+            if self.v_shape.w > 4.5 {
+                // CONTENT BACKDROP: the channel video dimmed and scanlined
+                // behind the tape, drifting a whisper (fake parallax).
+                // fog.z pre-gates it — fully invisible standalone.
+                let cm = self.fog.z
+                let uv = vec2(
+                    clamp(f.x + sin(self.time_beat.x * 0.11) * 0.012, 0.0, 1.0),
+                    clamp(1.0 - f.y + cos(self.time_beat.x * 0.09) * 0.008, 0.0, 1.0)
+                )
+                let tx = self.tex0.sample_as_bgra(uv)
+                let vig = smoothstep(
+                    0.0, 0.10,
+                    min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
+                )
+                let scan = 0.88 + 0.12 * sin(self.v_world.y * self.shape.x * 3.14159265)
+                let lvl = 0.30 * cm * vig * scan * (1.0 + self.time_beat.w * 0.15)
+                return vec4(tx.xyz * lvl, cm * vig)
+            }
             let mut a = smoothstep(0.0, self.v_shape.x, min(f.x, 1.0 - f.x))
                 * smoothstep(0.0, self.v_shape.y, min(f.y, 1.0 - f.y))
             if self.v_shape.w > 1.5 {

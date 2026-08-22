@@ -32,6 +32,10 @@
 //! * bindings: `p0` ADDS afterburner gain (THE binding — `"0.3 + 2.0 *
 //!   bass"`), `p1` scales weave rate, `p2` adds terrain glow
 //! * hook: `fx_jet_color(shade, part, edge) -> vec4` — the hull material.
+//!
+//! Content coupling (`content:` → `fog.z`): the channel video drapes the
+//! range (same scrolled uv as the grid) — solid tints its slope gradient,
+//! wire re-colors its lines, night vision ghosts the video's luminance.
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -549,24 +553,38 @@ script_mod! {
                 let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
                 let line = 1.0 - smoothstep(0.0, 0.11, dg)
                 let beat_glow = 1.0 + self.time_beat.w * 0.9
+                // CONTENT: the channel video drapes the range — sampled by
+                // the SAME scrolled grid uv, so it streams with the land.
+                // fog.z = the pre-gated `content` strength.
+                let cm = self.fog.z
+                let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
                 if look < 0.5 {
                     // solid alpenglow: valleys col_a, peaks col_b, summits
                     // catch col_c; a whisper of grid keeps the retro DNA.
+                    // Content tints the slope gradient (lit like the land).
                     let grad = self.col_a.xyz.mix(self.col_b.xyz, clamp(h * 1.5 - 0.15, 0.0, 1.0))
+                        .mix(ttx.xyz * 1.1, cm * 0.75)
                     let glow = self.col_c.xyz * pow(clamp(h, 0.0, 1.0), 3.0) * 0.85
                     rgb = (grad * lit + glow + grad * line * 0.10) * gain
                 } else {
                     if look < 1.5 {
                         // Battlezone wire: lines only over near-black fill.
+                        // Content re-colors the wireframe per cell.
+                        let wl = self.col_a.xyz.mix(ttx.xyz * 1.5, cm * 0.7)
                         let fill = self.col_a.xyz * 0.035
-                        rgb = (fill + self.col_a.xyz * line * beat_glow
+                        rgb = (fill + wl * line * beat_glow
                             + self.col_b.xyz * (line * h * 1.3)) * gain
                     } else {
                         // night vision: mono luminance ramp + grain. The
                         // hash is INLINED: a helper fn bound to the vertex
                         // stage (hash2 feeds height_at) cannot also be
-                        // called from the pixel stage.
-                        let lum = clamp(0.14 + h * 0.9 * lit + line * 0.22, 0.0, 1.0)
+                        // called from the pixel stage. Content ghosts the
+                        // video's luminance through the mono ramp.
+                        let vl = dot(ttx.xyz, vec3(0.299, 0.587, 0.114))
+                        let lum = clamp(
+                            0.14 + h * 0.9 * lit + line * 0.22 + vl * cm * 0.45,
+                            0.0, 1.0
+                        )
                         let gv = floor(self.v_uv * 331.0)
                             + vec2(fract(self.time_beat.x * 17.0), 0.0)
                         let grain = fract(sin(dot(gv, vec2(157.31, 113.97))) * 41739.613) * 0.10
