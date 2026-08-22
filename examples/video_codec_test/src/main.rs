@@ -89,6 +89,7 @@ fn encode(
             fps_num: FPS,
             fps_den: 1,
             video_bitrate_bps: 6_000_000,
+            keyframe_only: false,
             audio: with_audio.then(|| PcmAudioTrackOptions {
                 sample_rate: AUDIO_RATE,
                 channels: 1,
