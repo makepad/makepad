@@ -53,6 +53,9 @@ pub fn dispatch(
         // Ordered batch pull. Must be matched BEFORE `["v1","blobs",b]` so
         // `fetch` is never parsed as a (malformed) blob id.
         ["v1", "blobs", "fetch"] if m == Method::Post => blob_batch(conn, head, rc, force_close),
+        // Admit a server-local file BY REFERENCE. Matched before the blob-id
+        // arm for the same reason `fetch` is.
+        ["v1", "blobs", "ref"] if m == Method::Post => blob_ref_admit(conn, head, rc),
         ["v1", "blobs", b] if is_read(m) => {
             let id: BlobId = b.parse().map_err(|_| Fail::Http(400, "malformed blob id"))?;
             blob_get(conn, head, rc, force_close, id)
@@ -122,6 +125,80 @@ fn blob_upload(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
             ("blob_id", s(commit.blob_id.to_string())),
             ("size", Value::Int(commit.size as i64)),
             ("deduped", Value::Bool(commit.deduped)),
+        ]),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// admission by reference (the store catalogues bytes it does not copy)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/blobs/ref?ns=<ns>` with `{"path": "/abs/path/to/file"}`.
+///
+/// The server hashes that file WHERE IT LIES and records it as a reference
+/// blob: catalogued, addressable, servable, never copied. The answer is the
+/// same shape an upload gives — `{blob_id, size, deduped}` — plus `owned`,
+/// which says the store already had these exact bytes in its own CAS and so
+/// recorded no reference at all.
+///
+/// Four gates, in cost order, before a single byte is read:
+/// 1. the policy must be ON (otherwise the route does not exist: 404),
+/// 2. the peer must be loopback when the policy says so — this is a
+///    file-read privilege and it does not leave the machine,
+/// 3. the caller must hold `BlobWrite` in the named namespace,
+/// 4. the path must sit under the policy's prefix allowlist (if any).
+fn blob_ref_admit(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let policy = rc.cfg.blob_refs.clone();
+    if !policy.enabled {
+        // Indistinguishable from "no such route" on purpose: a server that
+        // does not do this should not advertise that it could.
+        return not_found();
+    }
+    if policy.loopback_only && !conn.peer_is_loopback() {
+        return Err(Fail::Http(403, "reference import is loopback-only"));
+    }
+    let secret = secret_of(head)?;
+    let ns = head
+        .query_get("ns")
+        .ok_or(Fail::Http(400, "missing ns"))?
+        .to_string();
+    let bytes = match super::routes::read_body(
+        conn,
+        head,
+        rc.cfg.max_json_body_bytes,
+        rc.cfg.control_body_deadline_ms,
+    ) {
+        Ok(b) => b,
+        Err(o) => return Ok(o),
+    };
+    let body = super::api::parse_json_body(&bytes)?;
+    let path = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or(Fail::Http(400, "missing path"))?
+        .to_string();
+    if path.is_empty() || path.len() > crate::blobrefs::MAX_REF_PATH_BYTES {
+        return Err(Fail::Http(400, "path length"));
+    }
+    let now = now_ms();
+    let commit = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_cap(ctx, &p, Capability::BlobWrite, &ns)?;
+        // Make it absolute BEFORE the allowlist check, or `../` would walk
+        // straight out of an allowed root.
+        let abs = crate::blobrefs::absolute_path(std::path::Path::new(&path))?;
+        if !policy.path_allowed(&abs) {
+            return Err(ServerError::Denied { capability: "blob_ref_path" });
+        }
+        ctx.core.put_blob_ref(&abs, now)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        201,
+        &obj(vec![
+            ("blob_id", s(commit.blob_id.to_string())),
+            ("size", Value::Int(commit.size as i64)),
+            ("deduped", Value::Bool(commit.deduped)),
+            ("owned", Value::Bool(commit.owned)),
         ]),
     )))
 }
@@ -224,7 +301,26 @@ fn blob_batch(
         let mut out: Vec<(BlobId, u8, u64)> = Vec::with_capacity(plan_items.len());
         let mut total = 0u64;
         for (id, cap) in &plan_items {
-            let size = ctx.core.catalog().blob_size(id)?;
+            let mut size = ctx.core.catalog().blob_size(id)?;
+            // A REFERENCE blob's bytes live in a file the store does not
+            // own, so the recorded size is a claim about someone else's
+            // disk. The frame commits to a length before any read, and a
+            // wrong length would force a mid-stream hangup — so re-stat the
+            // file here (one cheap syscall, no hashing) and report a
+            // vanished or resized one as MISSING, which the client already
+            // knows how to handle. Content drift still surfaces later, at
+            // the read, as a refusal to serve.
+            if size.is_some() {
+                if let Some(entry) = ctx.core.blob_ref_of(id)? {
+                    let live = std::fs::metadata(&entry.path)
+                        .ok()
+                        .filter(|m| m.is_file())
+                        .map(|m| m.len());
+                    if live != Some(entry.size) {
+                        size = None;
+                    }
+                }
+            }
             let (status, len) = match size {
                 None => (BATCH_MISSING, 0),
                 Some(size) if size > *cap => (BATCH_OVER_ITEM_CAP, 0),
