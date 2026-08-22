@@ -81,8 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("load.vae_load_ms={:.3}", load_timing.vae_load_ms);
     println!("load.vae_compile_ms={:.3}", load_timing.vae_compile_ms);
     println!("load.total_ms={:.3}", load_timing.total_ms);
-    if makepad_ggml::backend::prof::enabled() {
-        print!("{}", makepad_ggml::backend::prof::report_and_reset("prof.load."));
+    if makepad_ai_common::backend::prof::enabled() {
+        print!("{}", makepad_ai_common::backend::prof::report_and_reset("prof.load."));
     }
 
     let base_seed = pipeline.default_seed();
@@ -94,10 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             warmup + 1,
             run.timing.total_ms
         );
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             print!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset(&format!(
+                makepad_ai_common::backend::prof::report_and_reset(&format!(
                     "prof.warmup.run_{}.",
                     warmup + 1
                 ))
@@ -129,10 +129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             measured + 1,
             run.timing.vae_execute_ms
         );
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             print!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset(&format!(
+                makepad_ai_common::backend::prof::report_and_reset(&format!(
                     "prof.measured.run_{}.",
                     measured + 1
                 ))

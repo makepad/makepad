@@ -1,0 +1,10 @@
+[package]
+name = "makepad-ai-rife"
+version = "0.1.0"
+edition = "2021"
+description = "Practical-RIFE v4.26 IFNet video frame interpolation (CPU reference + native CUDA forward)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }

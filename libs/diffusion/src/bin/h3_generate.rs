@@ -1,6 +1,6 @@
 //! MiniMax H3 end-to-end t2va generation (debug/bench CLI): TE -> DiT
 //! denoise -> video VAE -> frames_u8.npy (+ audio.wav) + timing stats json.
-//! The PRODUCT path is the `h3` video backend in libs/game/asset-ai, which calls
+//! The PRODUCT path is the `h3` video backend in libs/asset/ai, which calls
 //! the same `h3_generate` pipeline and muxes mp4 via the platform hardware
 //! encoder; this bin stays for stage debugging and perf numbers.
 //!

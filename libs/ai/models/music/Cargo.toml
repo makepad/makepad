@@ -1,0 +1,13 @@
+[package]
+name = "makepad-ai-music"
+version = "0.1.0"
+edition = "2021"
+description = "MiniMax-Music3 + ACE-Step music family. Split out of libs/diffusion (lane T6, /aiarch.md)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-ai-llm = { path = "../../llm" }
+makepad-ai-h3 = { path = "../h3" }
+makepad-ai-sfx = { path = "../sfx" }
