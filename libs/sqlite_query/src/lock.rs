@@ -333,11 +333,51 @@ impl FileLock {
                     return Ok(true);
                 }
                 // Waits for every reader to drop its shared lock.
-                let got = sys::lock(file, Kind::Write, SHARED_FIRST, SHARED_SIZE).map_err(Error::Io)?;
-                if got {
-                    self.level = LockLevel::Exclusive;
+                //
+                // This handle is one of those readers: reaching SHARED took a
+                // READ lock on exactly this range. Whether asking for the
+                // WRITE lock on top of it is an upgrade or a collision is the
+                // one place the two lock APIs genuinely disagree.
+                //
+                // POSIX `fcntl` locks belong to the PROCESS, and a second
+                // request over a range it already holds simply CONVERTS it —
+                // so unix reaches EXCLUSIVE by asking, and that is what this
+                // code did everywhere.
+                //
+                // Windows `LockFileEx` locks belong to the HANDLE, and ranges
+                // may not overlap: the request is refused with
+                // ERROR_LOCK_VIOLATION against our OWN read lock, forever, no
+                // matter how long the busy timeout is. That is what made
+                // `PRAGMA journal_mode=WAL` on a brand-new database answer
+                // SQLITE_BUSY on Windows and only on Windows — with the
+                // embedded asset store unable to open a catalog at all.
+                //
+                // So do what SQLite's own Windows VFS does in `winLock`: drop
+                // the shared range first, then take it exclusively. Losing
+                // that race means another process got in between, and the
+                // read lock has to go back so this handle is still the SHARED
+                // (+PENDING) holder it claims to be.
+                #[cfg(windows)]
+                {
+                    sys::lock(file, Kind::Unlock, SHARED_FIRST, SHARED_SIZE).map_err(Error::Io)?;
+                    let got =
+                        sys::lock(file, Kind::Write, SHARED_FIRST, SHARED_SIZE).map_err(Error::Io)?;
+                    if got {
+                        self.level = LockLevel::Exclusive;
+                    } else {
+                        sys::lock(file, Kind::Read, SHARED_FIRST, SHARED_SIZE).map_err(Error::Io)?;
+                    }
+                    return Ok(got);
                 }
-                Ok(got)
+                #[cfg(not(windows))]
+                {
+                    let got =
+                        sys::lock(file, Kind::Write, SHARED_FIRST, SHARED_SIZE).map_err(Error::Io)?;
+                    if got {
+                        self.level = LockLevel::Exclusive;
+                    }
+                    Ok(got)
+                }
             }
         }
     }
