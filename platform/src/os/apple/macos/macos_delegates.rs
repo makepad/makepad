@@ -61,12 +61,37 @@ pub fn define_titlebar_container_class() -> *const Class {
 }
 
 pub fn define_macos_timer_delegate() -> *const Class {
+    // A panic must NOT unwind across these ObjC boundaries: the unwind hits
+    // `panic_cannot_unwind` and aborts the whole app — and because the run
+    // loop re-enters the callback while app state is already poisoned from
+    // the FIRST panic, the readable message is followed by a hard SIGABRT
+    // that looks like a platform crash. Catch at the edge, shout to stderr,
+    // and keep the run loop alive: a live VJ set survives a bad effect
+    // parameter, and the author gets the real panic text instead of a
+    // crash report.
+    fn shielded(name: &str, call: impl FnOnce() + std::panic::UnwindSafe) {
+        static PANICS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if std::panic::catch_unwind(call).is_err() {
+            let count = PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // The panic hook already printed message + backtrace; this line
+            // names the boundary that contained it.
+            eprintln!(
+                "makepad: PANIC contained at the {name} callback boundary \
+                 (#{count}); the app continues but may be in a wounded state"
+            );
+        }
+    }
+
     extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        MacosApp::send_timer_received(nstimer);
+        shielded("timer", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_timer_received(nstimer);
+        }));
     }
 
     extern "C" fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        MacosApp::send_paint_event();
+        shielded("live-resize", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_paint_event();
+        }));
     }
 
     let superclass = class!(NSObject);
