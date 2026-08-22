@@ -600,6 +600,21 @@ script_mod! {
             }
             let attr = vec4(id, phase, hue, r1)
             let mut tint = self.fx_color(t01, attr, dir, world.xyz)
+            // CONTENT COUPLING (fog.z, pre-gated): every particle picks up
+            // the channel video's texel at its own screen position — a
+            // palette wash at half strength, a living pointillist screen at
+            // full. Motion, sprite and fade stay the classic look's.
+            let cc = self.draw_pass.camera_projection * view_pos
+            let suv = clamp(
+                vec2(cc.x, 0.0 - cc.y) / max(cc.w, 0.0001) * 0.5 + vec2(0.5, 0.5),
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
+            )
+            let vtex = self.tex0.sample_nearest(suv, 0.0)
+            tint = vec4(
+                tint.xyz.mix(vtex.xyz * (0.8 + 0.6 * self.time_beat.w), self.fog.z * 0.85),
+                tint.w
+            )
             if mode > 5.5 && mode < 6.5 {
                 // IMAGE mode: the tint IS the texel this particle carries.
                 // Vertex-stage fetch, explicit lod (vertex-legal sampler).
@@ -741,7 +756,19 @@ script_mod! {
             // Color: emitter palette, white-hot at birth, fading out.
             let heat = clamp(1.0 - t * 3.0, 0.0, 1.0)
             let tint0 = self.e_col_a.mix(self.e_col_b, life_t)
-            let rgb = mix(tint0.xyz, vec3(1.0, 0.98, 0.92), heat * heat)
+            // CONTENT COUPLING (fog.z, pre-gated): sparks take on the
+            // channel video's color at their screen position — fireworks
+            // burst IN the clip's palette; the white-hot birth flash and
+            // the fade envelope stay the classic look's.
+            let cc = self.draw_pass.camera_projection * view_pos
+            let suv = clamp(
+                vec2(cc.x, 0.0 - cc.y) / max(cc.w, 0.0001) * 0.5 + vec2(0.5, 0.5),
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
+            )
+            let vtex = self.tex0.sample_nearest(suv, 0.0)
+            let pal = tint0.xyz.mix(vtex.xyz * (0.85 + 0.5 * self.time_beat.w), self.fog.z * 0.8)
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
             let fade = (1.0 - life_t) * (1.0 - life_t)
             self.v_color = vec4(rgb, fade * gate)
             self.v_uv = self.geom.geom_uv
