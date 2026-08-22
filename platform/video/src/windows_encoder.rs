@@ -17,7 +17,7 @@ use {
         Win32::Media::MediaFoundation::{
             eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8, IMFAttributes,
             IMFByteStream, IMFMediaBuffer, IMFSample, IMFSinkWriter, IMFSinkWriterEx,
-            IMFTransform, ICodecAPI, CODECAPI_AVEncMPVGOPSize,
+            IMFTransform, CODECAPI_AVEncMPVGOPSize,
             MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
             MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
             MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFStartup,
@@ -33,7 +33,6 @@ use {
             MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
         },
         Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED},
-        Win32::System::Variant::{VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0},
     },
     std::sync::atomic::{AtomicI32, Ordering},
     std::sync::Once,
@@ -234,42 +233,32 @@ impl WindowsVideoFileEncoder {
             in_type
                 .SetUINT32(&MF_MT_DEFAULT_STRIDE, options.width)
                 .map_err(|e| hr_err("set input stride", e))?;
-            sink.SetInputMediaType(video_stream, &in_type, None::<&IMFAttributes>)
-                .map_err(|e| hr_err("IMFSinkWriter::SetInputMediaType(video NV12)", e))?;
             if options.keyframe_only {
-                // The H.264 MFT IGNORES MF_MT_MAX_KEYFRAME_SPACING on the
-                // media type (measured: 48-frame GOPs shipped regardless).
-                // The binding control is ICodecAPI on the sink writer's
-                // encoder — reachable only after SetInputMediaType created
-                // it. Service GUID GUID_NULL selects the codec api per the
-                // sink-writer contract. Failing to enforce all-intra is an
-                // ERROR here, not a downgrade: callers asked for it because
-                // reverse playback depends on it.
-                let mut raw: *mut core::ffi::c_void = core::ptr::null_mut();
-                sink.GetServiceForStream(
-                    video_stream,
-                    &GUID::zeroed(),
-                    &ICodecAPI::IID,
-                    &mut raw,
-                )
-                .map_err(|e| hr_err("GetServiceForStream(ICodecAPI)", e))?;
-                let codec = unsafe { ICodecAPI::from_raw(raw) };
-                let gop = VARIANT {
-                    Anonymous: VARIANT_0 {
-                        Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
-                            // VT_UI4 (the trimmed vendored crate carries the
-                            // VARENUM type but not this constant).
-                            vt: VARENUM(19),
-                            wReserved1: 0,
-                            wReserved2: 0,
-                            wReserved3: 0,
-                            Anonymous: VARIANT_0_0_0 { ulVal: 1 },
-                        }),
-                    },
-                };
-                codec
-                    .SetValue(&CODECAPI_AVEncMPVGOPSize, &gop)
-                    .map_err(|e| hr_err("ICodecAPI::SetValue(GOP size 1)", e))?;
+                // MEASURED on this MFT: every route that pokes ICodecAPI from
+                // outside — GetServiceForStream before SetInputMediaType,
+                // before BeginWriting, after BeginWriting, or the encoder MFT
+                // straight from GetTransformForStream — returns S_OK, reads
+                // the value back as 1, and still ships 48-frame GOPs. The sink
+                // writer owns the encoder's configuration order, so the only
+                // control that binds is the one IT applies: codec-api
+                // properties handed to SetInputMediaType as
+                // pEncodingParameters. Failing here is an ERROR, not a
+                // downgrade — callers asked for all-intra because reverse and
+                // bounce playback depend on every frame being a sync sample.
+                let mut enc_params = None;
+                MFCreateAttributes(&mut enc_params, 1)
+                    .map_err(|e| hr_err("MFCreateAttributes(encoder params)", e))?;
+                let enc_params = enc_params.unwrap();
+                enc_params
+                    .SetUINT32(&CODECAPI_AVEncMPVGOPSize, 1)
+                    .map_err(|e| hr_err("set CODECAPI_AVEncMPVGOPSize", e))?;
+                sink.SetInputMediaType(video_stream, &in_type, &enc_params)
+                    .map_err(|e| {
+                        hr_err("IMFSinkWriter::SetInputMediaType(video NV12, GOP 1)", e)
+                    })?;
+            } else {
+                sink.SetInputMediaType(video_stream, &in_type, None::<&IMFAttributes>)
+                    .map_err(|e| hr_err("IMFSinkWriter::SetInputMediaType(video NV12)", e))?;
             }
 
             // Optional audio track: PCM in, AAC out.
