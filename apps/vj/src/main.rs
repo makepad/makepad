@@ -118,7 +118,7 @@ use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
-use crate::mix::{MixId, MixState};
+use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
@@ -466,11 +466,13 @@ script_mod! {
                             new_batch: true
                             padding: Inset{left: 74.0 right: 8.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
-                            Label{
-                                text: "VJ"
-                                draw_text.color: #x3ee0b0
-                                draw_text.text_style: theme.font_bold{font_size: 14}
-                            }
+                            // The three MODES sit far left, where the
+                            // wordmark used to be — the lit mode button IS
+                            // the label. VJ = the visual surface, DJ the
+                            // two-deck music mode, SFX the pad sampler.
+                            mode_vj := PillButton{text: "VJ"}
+                            mode_dj := PillButton{text: "DJ"}
+                            mode_sfx := PillButton{text: "SFX"}
                             // Offscreen A/B mesh passes. Each slot has its own
                             // color+depth so two models never share a z-buffer;
                             // VideoProgram samples the textures.
@@ -531,13 +533,6 @@ script_mod! {
                             // here and feeds the slot like any clip.
                             fx_content_a := VjFxSlotHost{}
                             fx_content_b := VjFxSlotHost{}
-                            // Three MODES, not five content lanes: VJ is the
-                            // visual surface (one explorer, preset chips
-                            // inside it), DJ the two-deck music mode, SFX the
-                            // pad sampler. GENERATE stays a drawer.
-                            mode_vj := PillButton{text: "VJ"}
-                            mode_dj := PillButton{text: "DJ"}
-                            mode_sfx := PillButton{text: "SFX"}
                             apc_map_label := PanelLabel{width: 0 text: ""}
                             status_label := Label{
                                 width: Fill
@@ -660,7 +655,6 @@ script_mod! {
                                 text: "Word hops"
                                 active: true
                             }
-                            import_toggle := ChromeButton{text: "IMPORT"}
                             open_output := ChromeButton{text: "OUTPUT"}
                             output_window_status := PanelLabel{width: 96 text: "output open"}
                         }
@@ -971,42 +965,20 @@ script_mod! {
                                             spacing: 14
                                             align: Align{x: 0.5, y: 0.5}
                                             View{width: Fill height: 1}
+                                            // The transition STYLE lives in the TRANSITION
+                                            // slot's document now (empty slot = plain
+                                            // crossfade) — the old mix-mode dropdown and
+                                            // its two knobs are gone. What survives is
+                                            // what a doc cannot decide: how long AUTOFADE
+                                            // takes, and the audio mute.
                                             View{
-                                                width: Fit height: Fit flow: Down spacing: 4
-                                                align: Align{x: 0.0, y: 0.0}
-                                                View{
-                                                    width: Fit height: Fit flow: Right spacing: 8
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    // Downstream stage: how B reaches the
-                                                    // program (dissolve, over, key, wipe).
-                                                    mix_mode := DropDown{width: 92 labels: ["MIX"]}
-                                                    video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                width: Fit height: Fit flow: Down spacing: 6
+                                                align: Align{x: 0.5, y: 0.0}
+                                                KnobCol{
+                                                    Tick{text: "FADE"}
+                                                    video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
                                                 }
-                                                View{
-                                                    width: Fit height: Fit flow: Right spacing: 8
-                                                    align: Align{x: 0.0, y: 0.0}
-                                                    KnobCol{
-                                                        Tick{text: "FADE"}
-                                                        video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
-                                                    }
-                                                    // The two knobs the mix mode reads; hidden
-                                                    // for the modes that have nothing to read.
-                                                    mix_knobs := View{
-                                                        width: Fit
-                                                        height: Fit
-                                                        flow: Right
-                                                        spacing: 8
-                                                        align: Align{x: 0.0, y: 0.0}
-                                                        KnobCol{
-                                                            mix_p1_lab := Tick{text: "—"}
-                                                            mix_p1 := ApcKnob{default: 0.5}
-                                                        }
-                                                        KnobCol{
-                                                            mix_p2_lab := Tick{text: "—"}
-                                                            mix_p2 := ApcKnob{default: 0.35}
-                                                        }
-                                                    }
-                                                }
+                                                video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
                                             }
                                             View{
                                                 width: Fit height: Fit flow: Down spacing: 3
@@ -1077,31 +1049,37 @@ script_mod! {
                                             autofade := ChromeButton{width: 84 text: "AUTOFADE"}
                                             View{width: Fill height: 1}
                                         }
-                                        // ---- clips: kind chips + live filter ----
+                                        // ---- clips: ONE radio group of lane chips + live filter ----
+                                        // Every visual asset kind the store
+                                        // holds gets its own chip (audio
+                                        // lives on the DJ surface), plus the
+                                        // TRANSITION tag-lane. Exactly one
+                                        // is selected; clicking the selected
+                                        // chip returns to ALL. IMPORT sits
+                                        // with the filters, where content
+                                        // enters the library.
                                         View{
                                             width: Fill
                                             height: Fit
-                                            flow: Right
+                                            flow: Flow.Right{wrap: true}
                                             spacing: 6
                                             align: Align{x: 0.0, y: 0.5}
-                                            // HOT PRESETS: one explorer, and a
-                                            // preset SETS what it shows. 3D
-                                            // covers meshes, props, vehicles,
-                                            // weapons, characters, MAPS and
-                                            // splats — which is why there is
-                                            // no separate MESH surface.
                                             preset_all := PillButton{text: "ALL"}
                                             preset_video := PillButton{text: "VIDEO"}
-                                            // The vjeffect category, and its
-                                            // transition-tagged sub-lane.
                                             preset_effect := PillButton{text: "EFFECT"}
                                             preset_transition := PillButton{text: "TRANSITION"}
-                                            preset_3d := PillButton{text: "3D"}
-                                            preset_image := PillButton{text: "IMAGE"}
-                                            preset_audio := PillButton{text: "AUDIO"}
-                                            kind_splat := PillButton{text: "SPLAT"}
-                                            kind_sprite := PillButton{text: "SPRITE"}
-                                            shelf_label := PanelLabel{width: Fit text: ""}
+                                            chip_image := PillButton{text: "IMAGE"}
+                                            chip_mesh := PillButton{text: "MESH"}
+                                            chip_char := PillButton{text: "CHAR"}
+                                            chip_prop := PillButton{text: "PROP"}
+                                            chip_weapon := PillButton{text: "WEAPON"}
+                                            chip_vehicle := PillButton{text: "VEHICLE"}
+                                            chip_world := PillButton{text: "WORLD"}
+                                            chip_sprite := PillButton{text: "SPRITE"}
+                                            chip_skybox := PillButton{text: "SKYBOX"}
+                                            chip_material := PillButton{text: "MATERIAL"}
+                                            chip_prefab := PillButton{text: "PREFAB"}
+                                            import_toggle := ChromeButton{text: "IMPORT"}
                                             View{width: Fill height: 1}
                                             // Bank paging: one row at a time, or a whole page.
                                             grid_prev_page := ChromeButton{text: "|◀"}
@@ -1109,7 +1087,7 @@ script_mod! {
                                             grid_next_row := ChromeButton{text: "▶"}
                                             grid_next_page := ChromeButton{text: "▶|"}
                                             pad_filter := TextInput{
-                                                width: 220
+                                                width: 180
                                                 empty_text: "filter"
                                             }
                                             pad_count := PanelLabel{text: ""}
@@ -3877,8 +3855,9 @@ pub struct App {
     #[rust]
     last_event_refresh: [Option<Instant>; 4],
     /// A tile clicked before its manifest resolved; fires on arrival.
+    /// The flag is the click's SHIFT state (explicit effect-as-content).
     #[rust]
-    pending_click: Option<AssetId>,
+    pending_click: Option<(AssetId, bool)>,
     /// The one tile the clip grid marks: the last one clicked (pointer or
     /// APC pad). The grid used to paint LIVE / CUE / held markers on top of
     /// each other, which read as noise; a single green ring on the last
@@ -3903,10 +3882,6 @@ pub struct App {
     /// Settled program mix (0 = slot A on screen, 1 = slot B).
     #[rust]
     program_mix: f32,
-    /// The downstream mix stage: dissolve / over / chroma / luma / wipes,
-    /// its two knobs, and which bus the FX chain is inserted on.
-    #[rust]
-    mix: MixState,
     #[rust]
     slot_media: [SlotMedia; 2],
     #[rust]
@@ -4307,12 +4282,11 @@ impl App {
         let program_up = output_up && self.out_page == live_id!(video_out_page);
         let mix = self.live_program_mix();
         for slot in [SlotId::A, SlotId::B] {
-            // Every mode but a straight MIX keeps B on screen over A, so
-            // both sides carry weight there.
-            let weight = match (slot, self.mix.mode.keeps_b_resident()) {
-                (_, true) => 1.0,
-                (SlotId::A, false) => 1.0 - mix,
-                (SlotId::B, false) => mix,
+            // A plain crossfade: each side carries its fader weight. (Doc
+            // transitions replace the old resident-B mix modes.)
+            let weight = match slot {
+                SlotId::A => 1.0 - mix,
+                SlotId::B => mix,
             };
             let live = self.slot_media[slot.index()] == SlotMedia::Mesh
                 && (video_front || (program_up && weight > 0.002));
@@ -4495,7 +4469,7 @@ impl App {
         let (Some(revision), Some(media)) = (tile.revision, tile.media.clone()) else {
             // Manifest still resolving: the click fires the moment it lands
             // (the same latch the cue path uses).
-            self.pending_click = Some(asset);
+            self.pending_click = Some((asset, false));
             let cmds = self.video_model.resolve_first(asset);
             self.run_cat_cmds(Surface::Video, cmds);
             self.grids_dirty = true;
@@ -4583,7 +4557,10 @@ impl App {
             } else {
                 0.0
             };
-            let note = if let Some(note) = &slot.note {
+            let flash = slot.flash.as_ref().map(|(msg, _)| msg.clone());
+            let note = if let Some(flash) = flash.clone() {
+                flash
+            } else if let Some(note) = &slot.note {
                 note.clone()
             } else if slot.title.is_none() {
                 if armed { "pick an FX tile".to_string() } else { String::new() }
@@ -4605,6 +4582,7 @@ impl App {
                         armed,
                         bypass: slot.bypass,
                         engage,
+                        flash: flash.is_some(),
                     },
                 );
             }
@@ -4742,7 +4720,9 @@ impl App {
             };
         }
         let quantized = (self.fx_engage_now * 24.0).round() / 24.0;
-        if (quantized - self.fx_engage_synced).abs() > 1e-3 {
+        let now = cx.seconds_since_app_start();
+        let flashes_done = self.fx_slots.tick_flashes(now);
+        if flashes_done || (quantized - self.fx_engage_synced).abs() > 1e-3 {
             self.fx_engage_synced = quantized;
             self.sync_fx_slots_ui(cx);
         }
@@ -4812,35 +4792,6 @@ impl App {
         }
         self.sync_fx_slots_ui(cx);
         self.video_pump = cx.new_next_frame();
-    }
-
-    /// Mirror the downstream mix stage: the mode list, the two knob
-    /// legends and values, the FX bus button, and deck B's role readout.
-    fn sync_mix_mode_ui(&mut self, cx: &mut Cx) {
-        let info = self.mix.mode.info();
-        let drop = self.ui.drop_down(cx, ids!(mix_mode));
-        drop.set_labels(cx, crate::mix::mix_labels());
-        drop.set_selected_item(cx, self.mix.mode.0 as usize);
-        self.set_status_label(cx, ids!(slot_b_mode), info.role);
-        self.set_status_label(cx, ids!(mix_p1_lab), info.p1);
-        self.set_status_label(cx, ids!(mix_p2_lab), info.p2);
-        // A dissolve and an overlay have no knobs; hiding them keeps the
-        // row honest about what the mode actually reads.
-        let has_knobs = self.mix.mode != MixId::MIX
-            && self.mix.mode != MixId::OVER;
-        self.ui.view(cx, ids!(mix_knobs)).set_visible(cx, has_knobs);
-        self.ui.slider(cx, ids!(mix_p1)).set_value(cx, self.mix.p1 as f64);
-        self.ui.slider(cx, ids!(mix_p2)).set_value(cx, self.mix.p2 as f64);
-        self.video_pump = cx.new_next_frame();
-    }
-
-    /// Switch the downstream mix mode. Every mode but a plain dissolve
-    /// keeps B resident on its slot, which is the cue engine's overlay
-    /// rule — so the two always agree.
-    fn set_mix_mode(&mut self, cx: &mut Cx, mode: MixId) {
-        self.mix.set_mode(mode);
-        self.cue.set_overlay(self.mix.mode.keeps_b_resident());
-        self.sync_mix_mode_ui(cx);
     }
 
     /// Toggle one kind chip; the grid re-queries the server for the new lane
@@ -6633,7 +6584,7 @@ impl App {
                 }
                 let Some(asset) = self.apc_asset_at(surface, index) else { return };
                 match surface {
-                    ApcSurface::Video => self.video_tile_clicked(cx, asset),
+                    ApcSurface::Video => self.video_tile_clicked(cx, asset, false),
                     ApcSurface::Music => self.music_tile_clicked(cx, asset),
                     ApcSurface::Sfx => {
                         self.apc_sfx_holds.insert(pad, asset);
@@ -7970,9 +7921,12 @@ impl App {
                 if surface == Surface::Sfx {
                     self.sync_pads();
                 }
-                if surface == Surface::Video && self.pending_click == Some(asset) {
-                    self.pending_click = None;
-                    self.video_tile_clicked(cx, asset);
+                if surface == Surface::Video
+                    && self.pending_click.map(|(pending, _)| pending) == Some(asset)
+                {
+                    let as_content =
+                        self.pending_click.take().map(|(_, sh)| sh).unwrap_or(false);
+                    self.video_tile_clicked(cx, asset, as_content);
                 }
             }
             (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { path, .. }) => {
@@ -11084,7 +11038,9 @@ impl App {
             &self.slot_textures,
             &self.slot_aspect,
         );
-        let mix_state = self.mix;
+        // The downstream stage is a plain crossfade now — transition STYLE
+        // comes from the TRANSITION slot's document (empty slot = dissolve).
+        let mix_state = MixState::default();
         // EFFECT SLOTS: per-deck effect passes over the deck sources, and
         // the transition effect while the crossfader travels. Empty or
         // bypassed slots leave a/b/mix untouched.
@@ -11131,6 +11087,8 @@ impl App {
             // A loaded, switched-on effect slot keeps the pump alive: a
             // standalone generator effect on an empty deck IS the program.
             || self.fx_slots.any_running()
+            // A refusal flash needs frames to expire on.
+            || self.fx_slots.any_flash()
             // The sweep across the current line moves every frame, so
             // karaoke keeps the pump alive on its own — a black program
             // with subtitles is a legitimate output. The condition is the
@@ -11202,7 +11160,7 @@ impl App {
         cx: &mut Cx,
         actions: &Actions,
         grid: &[LiveId],
-    ) -> (Vec<AssetId>, Vec<AssetId>) {
+    ) -> (Vec<(AssetId, KeyModifiers)>, Vec<AssetId>) {
         let widget = self.ui.widget(cx, grid);
         if widget.borrow::<VjPadMatrix>().is_none() {
             return (Vec::new(), Vec::new());
@@ -11225,7 +11183,7 @@ impl App {
             for (slot, path) in slots.iter().enumerate() {
                 let pad = row * 8 + slot;
                 let cell = row_view.view(cx, *path);
-                if cell.finger_down(actions).is_some() {
+                if let Some(fe) = cell.finger_down(actions) {
                     let entry =
                         widget.borrow::<VjPadMatrix>().and_then(|g| g.visible_at(pad).cloned());
                     if self.trace_cue {
@@ -11238,7 +11196,7 @@ impl App {
                         );
                     }
                     if let Some(entry) = entry {
-                        down.push(entry.asset);
+                        down.push((entry.asset, fe.modifiers));
                     }
                 }
                 if cell.finger_up(actions).is_some() {
@@ -11253,20 +11211,37 @@ impl App {
         (down, up)
     }
 
-    fn video_tile_clicked(&mut self, cx: &mut Cx, asset: AssetId) {
+    /// THE ROUTING LAWS (user-ratified):
+    ///  1. CONTENT (video/image/mesh/splat/sprite) auto-cues into the real
+    ///     deck A/B source, autofade included — the classic flow.
+    ///  2. An FX tile routes to the EFFECT LAYER: the armed slot, else the
+    ///     STANDBY side's effect slot — a plain effect click never
+    ///     displaces the video playing on a deck. SHIFT-click keeps the
+    ///     explicit effect-AS-CONTENT cue (standalone generator on a deck).
+    ///  3. Slot type law: A/B slots accept only vjeffects, the TRANSITION
+    ///     slot only transition-tagged ones. A wrong-type click while a
+    ///     slot is armed is a VISIBLE refusal on that slot — never a
+    ///     silent accept, never a surprise cue.
+    fn video_tile_clicked(&mut self, cx: &mut Cx, asset: AssetId, as_content: bool) {
         let Some(tile) = self.video_model.tile(&asset) else { return };
         // The ring follows the hand, not the cue: it marks the tile the
         // operator last touched even while its manifest is still resolving.
         self.last_clicked = Some(asset);
-        // An FX tile has TWO roles. With an effect slot ARMED, the click
-        // loads it there (effect-pass over that channel). With nothing
-        // armed it falls through to the cue engine like any clip — the
-        // effect cues AS CONTENT onto a deck, autofade included (the
-        // OpenSlot arm below routes MediaType::Text + VjEffect into the
-        // deck's content-mode effect host).
-        if tile.kind == Some(AssetKind::VjEffect) {
+        let is_effect = tile.kind == Some(AssetKind::VjEffect);
+        let transition_ok = Self::tile_is_transition_fx(&self.video_model, tile);
+        if is_effect && !as_content {
+            let kind = self.fx_slots.armed.unwrap_or_else(|| self.standby_fx_slot());
+            match FxSlots::accepts(kind, true, transition_ok) {
+                Ok(()) => self.fx_effect_tile_clicked(cx, kind, asset),
+                Err(msg) => self.refuse_fx_slot(cx, kind, msg),
+            }
+            return;
+        }
+        if !is_effect {
             if let Some(kind) = self.fx_slots.armed {
-                self.fx_effect_tile_clicked(cx, kind, asset);
+                // Assignment mode: content can never land in an effect
+                // slot. Refuse loudly; disarm to cue clips again.
+                self.refuse_fx_slot(cx, kind, "FX docs only");
                 return;
             }
         }
@@ -11274,7 +11249,7 @@ impl App {
             // Manifest not resolved yet: the click is not lost — it fires
             // the moment the manifest lands (otherwise a fresh tile needs a
             // second click). Resolve it ahead of the queue.
-            self.pending_click = Some(asset);
+            self.pending_click = Some((asset, as_content));
             let cmds = self.video_model.resolve_first(asset);
             self.run_cat_cmds(Surface::Video, cmds);
             self.grids_dirty = true;
@@ -11284,6 +11259,41 @@ impl App {
         let cmds = self.cue.click(item);
         self.run_cue_cmds(cx, cmds);
         self.grids_dirty = true;
+    }
+
+    /// The effect slot of the deck the crossfader is NOT on — where an
+    /// unarmed FX-tile click lands, mirroring how content cues to standby.
+    fn standby_fx_slot(&self) -> FxSlotKind {
+        if self.program_mix < 0.5 {
+            FxSlotKind::EffectB
+        } else {
+            FxSlotKind::EffectA
+        }
+    }
+
+    /// Whether a catalog tile is a transition-suited effect, as far as this
+    /// client can KNOW: it came through the transition-tagged lane, or its
+    /// alias names a bundled transition preset. (Search hits do not carry
+    /// tags; a user-authored transition doc is loadable from the TRANSITION
+    /// chip's lane, where the server has already vouched for the tag.)
+    fn tile_is_transition_fx(model: &BrowseModel, tile: &catalog::Tile) -> bool {
+        if model.tag == crate::effects::seed::TRANSITION_TAG {
+            return true;
+        }
+        tile.alias
+            .as_deref()
+            .and_then(|alias| alias.strip_prefix("vjfx/"))
+            .is_some_and(crate::effects::seed::is_transition_preset)
+    }
+
+    /// A wrong-type click while a slot is armed: flash the slot with the
+    /// reason. Nothing loads, nothing cues.
+    fn refuse_fx_slot(&mut self, cx: &mut Cx, kind: FxSlotKind, msg: &str) {
+        let now = cx.seconds_since_app_start();
+        self.fx_slots.refuse(kind, msg, now);
+        self.sync_fx_slots_ui(cx);
+        self.video_pump = cx.new_next_frame();
+        log!("fx slot {kind:?}: refused — {msg}");
     }
 
     fn music_tile_clicked(&mut self, cx: &mut Cx, asset: AssetId) {
@@ -11723,7 +11733,6 @@ impl MatchEvent for App {
             self.paint_tabs(cx, id!(video_page));
         }
         self.paint_gen_tab(cx);
-        self.sync_mix_mode_ui(cx);
         // Effect slots restore from their local splash files — before (and
         // independent of) the store connection.
         self.load_fx_slots_panel(cx);
@@ -12017,8 +12026,8 @@ impl MatchEvent for App {
 
         // ---- grids ----
         let (video_down, _) = self.pad_matrix_hits(cx, actions, ids!(video_grid));
-        for asset in video_down {
-            self.video_tile_clicked(cx, asset);
+        for (asset, modifiers) in video_down {
+            self.video_tile_clicked(cx, asset, modifiers.shift);
         }
         self.handle_music_rows(cx, actions);
         let (sfx_down, sfx_up) = self.grid_hits(cx, actions, ids!(sfx_grid));
@@ -12356,17 +12365,6 @@ impl MatchEvent for App {
             if self.ui.button(cx, chip).clicked(actions) {
                 self.toggle_kind_chip(cx, kinds);
             }
-        }
-        if let Some(index) = self.ui.drop_down(cx, ids!(mix_mode)).selected(actions) {
-            self.set_mix_mode(cx, MixId::clamped(index as u8));
-        }
-        if let Some(v) = self.ui.slider(cx, ids!(mix_p1)).slided(actions) {
-            self.mix.p1 = (v as f32).clamp(0.0, 1.0);
-            self.video_pump = cx.new_next_frame();
-        }
-        if let Some(v) = self.ui.slider(cx, ids!(mix_p2)).slided(actions) {
-            self.mix.p2 = (v as f32).clamp(0.0, 1.0);
-            self.video_pump = cx.new_next_frame();
         }
         // ---- effect slots (fx_slot.rs) ----
         for kind in FxSlotKind::ALL {
@@ -12735,6 +12733,16 @@ impl AppMain for App {
         if let Event::Startup = event {
             if !self.started {
                 self.started = true;
+                // Windows has no system chrome overlay on a borderless
+                // window: without the caption bar there is no minimize/
+                // maximize/close at all. Show the bar there; macOS keeps
+                // the borderless look (its traffic lights are the OS's).
+                if matches!(cx.os_type(), OsType::Windows) {
+                    let mut window = self.ui.widget(cx, ids!(main_window));
+                    script_apply_eval!(cx, window, {
+                        show_caption_bar: true
+                    });
+                }
             }
         }
         if self.poll_timer.is_event(event).is_some() {
