@@ -306,9 +306,7 @@ impl PiecewiseParam {
                 self.texcoords[vertex as usize] = texcoords[i as usize];
             }
             self.add_face_to_patch(seed);
-            let tcs = self.texcoords.clone();
-            let idxs = self.mesh().indices().to_vec();
-            self.boundary_grid.reset(&tcs, &idxs, 0);
+            self.boundary_grid.reset(0);
             let mesh = unsafe { &*self.mesh };
             let mut it = mesh.face_edge_iter(seed);
             let mut seed_edges = Vec::new();
@@ -407,9 +405,13 @@ impl PiecewiseParam {
                     cur = self.candidate_store[i].next;
                 }
                 let eps = mesh.epsilon();
-                let new_e = self.new_boundary_edges.clone();
-                let ign = self.ignore_boundary_edges.clone();
-                invalid = self.boundary_grid.intersect(eps, Some(&new_e), &ign);
+                invalid = self.boundary_grid.intersect(
+                    &self.texcoords,
+                    mesh.indices(),
+                    eps,
+                    Some(&self.new_boundary_edges),
+                    &self.ignore_boundary_edges,
+                );
             }
             if invalid {
                 cur = Some(best_idx);
@@ -430,9 +432,7 @@ impl PiecewiseParam {
                     self.add_face_to_patch(f);
                 }
                 self.remove_linked_candidates(best_idx);
-                let tcs = self.texcoords.clone();
-                let idxs = self.mesh().indices().to_vec();
-                self.boundary_grid.reset(&tcs, &idxs, 0);
+                self.boundary_grid.reset(0);
                 let patch = self.patch.clone();
                 for &pf in &patch {
                     let mesh = unsafe { &*self.mesh };
@@ -697,12 +697,13 @@ pub struct Quality {
 
 impl Quality {
     pub fn compute_boundary_intersection(&mut self, mesh: &Mesh, grid: &mut UniformGrid2) {
-        let boundary_edges = mesh.boundary_edges().to_vec();
-        grid.reset(mesh.texcoords(), mesh.indices(), boundary_edges.len() as u32);
-        for &e in &boundary_edges {
+        let boundary_edges = mesh.boundary_edges();
+        grid.reset(boundary_edges.len() as u32);
+        for &e in boundary_edges {
             grid.append(e);
         }
-        self.boundary_intersection = grid.intersect(mesh.epsilon(), None, &[]);
+        self.boundary_intersection =
+            grid.intersect(mesh.texcoords(), mesh.indices(), mesh.epsilon(), None, &[]);
     }
 
     pub fn compute_flipped_faces(&mut self, mesh: &Mesh, flipped_faces: Option<&mut Vec<u32>>) {
@@ -1178,6 +1179,8 @@ impl ChartGroup {
         self.face_to_source_face_map = faces;
     }
 
+    /// `progress(frac)`: segmentation 0.0..0.6, per-chart parameterization
+    /// 0.6..1.0. Returning `false` aborts and yields `false` here.
     pub fn compute_charts(
         &mut self,
         options: &ChartOptions,
@@ -1185,11 +1188,14 @@ impl ChartGroup {
         boundary_grid: &mut UniformGrid2,
         chart_buffers: &mut ChartCtorBuffers,
         piecewise: &mut PiecewiseParam,
-    ) {
+        progress: &mut dyn FnMut(f64) -> bool,
+    ) -> bool {
         self.charts.clear();
         let mesh = self.create_mesh();
         atlas.reset(&mesh, options);
-        atlas.compute();
+        if !atlas.compute(&mut |frac| progress(0.6 * frac)) {
+            return false;
+        }
         let face_count = mesh.face_count();
         let chart_count = atlas.chart_count();
         let mut chart_faces = Vec::new();
@@ -1208,6 +1214,9 @@ impl ChartGroup {
         let mut results: Vec<(Chart, Vec<Chart>)> = Vec::new();
         offset = 0;
         for i in 0..chart_count {
+            if i % 32 == 0 && !progress(0.6 + 0.4 * i as f64 / chart_count.max(1) as f64) {
+                return false;
+            }
             let basis = atlas.chart_basis(i);
             let gen = atlas.chart_generator_type(i);
             let nfaces = chart_faces[offset];
@@ -1242,6 +1251,7 @@ impl ChartGroup {
                 self.charts.push(chart);
             }
         }
+        progress(1.0)
     }
 
     fn create_mesh(&self) -> Mesh {
@@ -1328,6 +1338,19 @@ impl ParamAtlas {
     }
 
     pub fn compute_charts(&mut self, options: &ChartOptions) -> bool {
+        self.compute_charts_with_progress(options, &mut |_| true)
+    }
+
+    /// Same as [`Self::compute_charts`]; `progress(frac)` in [0, 1] advances
+    /// through the chart groups AND inside each group's segmentation and
+    /// parameterization (a closed mesh is a single group, so per-group ticks
+    /// alone would sit still for the whole run). Returning false abandons
+    /// the remaining work and returns false.
+    pub fn compute_charts_with_progress(
+        &mut self,
+        options: &ChartOptions,
+        progress: &mut dyn FnMut(f64) -> bool,
+    ) -> bool {
         self.charts_computed = false;
         let mesh_count = self.meshes.len();
         self.mesh_chart_groups.clear();
@@ -1371,15 +1394,26 @@ impl ParamAtlas {
             rs.sort(&mut sort_data);
             let granks: Vec<u32> = rs.ranks().to_vec();
             let n = groups.len();
+            // Weight groups by face count: the largest group (first) is
+            // where the time goes on a closed mesh.
+            let total_faces: f64 = groups.iter().map(|g| g.face_count() as f64).sum::<f64>().max(1.0);
+            let mut done_faces = 0.0f64;
             for kk in 0..n {
                 let gi = granks[n - 1 - kk] as usize;
-                groups[gi].compute_charts(
+                let group_faces = groups[gi].face_count() as f64;
+                let base = done_faces / total_faces;
+                let span = group_faces / total_faces;
+                if !groups[gi].compute_charts(
                     options,
                     &mut atlas,
                     &mut boundary_grid,
                     &mut chart_buffers,
                     &mut piecewise,
-                );
+                    &mut |frac| progress(base + span * frac),
+                ) {
+                    return false;
+                }
+                done_faces += group_faces;
             }
             self.mesh_chart_groups[i] = groups;
         }

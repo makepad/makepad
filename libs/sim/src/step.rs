@@ -177,6 +177,11 @@ pub fn step_world(world: &mut GameWorld) {
         if e.kind != BodyKind::Mover {
             continue;
         }
+        // An active articulation is authoritative for this entity. Its old
+        // mover sweep/controller must not integrate a second body over it.
+        if dynamics.ragdoll_active(e.id) {
+            continue;
+        }
         // Riders are pinned to their vehicle after this loop, not simulated.
         if e.attached_to != 0 {
             continue;
