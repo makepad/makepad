@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 // The nvcc build for THE CUDA store (aiarch.md §1 + §4, lane T4), and the
@@ -195,14 +195,15 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
 
     // A fresh CUDA build is minutes of silent ptxas under a cargo line that
     // never moves. Tell the terminal what is happening, up front and as it
-    // goes: the up-front number is deliberately ~2x what this repo's
-    // 16-thread reference box measures, so the honest case is "faster than
-    // promised" rather than "it lied and then hung".
+    // goes; and run the kernels concurrently, because one nvcc at a time
+    // leaves most of a modern machine idle.
     let total = src_paths.len();
+    let jobs = kernel_jobs(total);
     let mut console = Console::open();
     console.line(&format!(
-        "makepad-ai-cuda: compiling {total} CUDA kernels for sm_{arch} (toolkit {}).\n\
-         makepad-ai-cuda: this is one-time, and typically takes 5-10 minutes. Progress below.",
+        "makepad-ai-cuda: compiling {total} CUDA kernels for sm_{arch} (toolkit {}), \
+         {jobs} at a time.\n\
+         makepad-ai-cuda: one-time, and typically a couple of minutes. Progress below.",
         cuda_root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -210,73 +211,111 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     ));
     let kernels_started = Instant::now();
 
-    let mut obj_paths = Vec::new();
-    for (index, src_path) in src_paths.iter().enumerate() {
-        let stem = src_path.file_stem().unwrap().to_string_lossy();
-        let obj_path = out_dir.join(format!("ggml_cuda_{stem}.{obj_ext}"));
-        let arch_flag = format!("arch=compute_{arch},code=sm_{arch}");
-        let mut command = Command::new(&nvcc);
-        command.args(["-std=c++17", "-O3"]);
-        if target_os == "windows" {
-            if let Some(msvc_bin_dir) = &msvc_bin_dir {
-                command.arg("-ccbin").arg(msvc_bin_dir);
-            }
-            command.args(["-Xcompiler", "/EHsc"]);
-            command.args(["-Xcompiler", "/MD"]);
-        } else {
-            command.args(["-Xcompiler", "-fPIC"]);
-        }
-        if let Some(src_dir) = src_path.parent() {
-            command.arg("-I").arg(src_dir);
-        }
-        // Piped, not inherited: when nvcc refuses (an arch this toolkit
-        // dropped, an MSVC environment it cannot drive) its own message is
-        // the only thing that tells the user what to do, and a build
-        // script's child stderr is otherwise swallowed. Waited on with a
-        // heartbeat rather than `output()`, because one kernel
-        // (`llm/kernels.cu`) can hold the terminal still for minutes.
-        let output = command
-            .args([
-                "-c",
-                "-I",
-                include_dir.to_string_lossy().as_ref(),
-                "-gencode",
-                arch_flag.as_str(),
-                "-o",
-                obj_path.to_string_lossy().as_ref(),
-                src_path.to_string_lossy().as_ref(),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|child| {
-                wait_with_progress(
-                    child,
-                    &mut console,
-                    &stem,
-                    index,
-                    total,
-                    kernels_started,
-                )
-            });
+    // Derived from the source list, never from completion order, so the
+    // archive below is byte-identical however the jobs happen to interleave.
+    let obj_paths = src_paths
+        .iter()
+        .map(|src_path| {
+            let stem = src_path.file_stem().unwrap().to_string_lossy();
+            out_dir.join(format!("ggml_cuda_{stem}.{obj_ext}"))
+        })
+        .collect::<Vec<_>>();
 
-        let ok = output.as_ref().is_ok_and(|out| out.status.success());
-        if !ok {
-            if let Ok(out) = &output {
-                report_tool_output("nvcc", out);
+    let mut pending = src_paths.iter().zip(&obj_paths).enumerate();
+    let mut running: Vec<Kernel> = Vec::new();
+    let mut done = 0usize;
+    let mut failed: Option<(PathBuf, std::io::Result<Output>)> = None;
+    let mut since_tick = Instant::now();
+    loop {
+        while failed.is_none() && running.len() < jobs {
+            let Some((index, (src_path, obj_path))) = pending.next() else {
+                break;
+            };
+            let arch_flag = format!("arch=compute_{arch},code=sm_{arch}");
+            let mut command = Command::new(&nvcc);
+            command.args(["-std=c++17", "-O3"]);
+            if target_os == "windows" {
+                if let Some(msvc_bin_dir) = &msvc_bin_dir {
+                    command.arg("-ccbin").arg(msvc_bin_dir);
+                }
+                command.args(["-Xcompiler", "/EHsc"]);
+                command.args(["-Xcompiler", "/MD"]);
+            } else {
+                command.args(["-Xcompiler", "-fPIC"]);
             }
-            cuda_unavailable(
-                require_cuda,
-                &format!(
-                    "failed to compile CUDA backend source {} for sm_{arch} \
-                     (override the arch with MAKEPAD_GGML_CUDA_ARCH)",
-                    src_path.display()
-                ),
-            );
-            return;
+            if let Some(src_dir) = src_path.parent() {
+                command.arg("-I").arg(src_dir);
+            }
+            // Piped, not inherited: when nvcc refuses (an arch this toolkit
+            // dropped, an MSVC environment it cannot drive) its own message
+            // is the only thing that tells the user what to do, and a build
+            // script's child stderr is otherwise swallowed. The pipes must
+            // be drained or a chatty nvcc deadlocks on a full buffer, so
+            // each `wait_with_output` gets its own thread and this loop
+            // stays free to tick.
+            let spawned = command
+                .args([
+                    "-c",
+                    "-I",
+                    include_dir.to_string_lossy().as_ref(),
+                    "-gencode",
+                    arch_flag.as_str(),
+                    "-o",
+                    obj_path.to_string_lossy().as_ref(),
+                    src_path.to_string_lossy().as_ref(),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            match spawned {
+                Ok(child) => running.push(Kernel {
+                    index,
+                    waiter: std::thread::spawn(move || child.wait_with_output()),
+                }),
+                Err(err) => failed = Some((src_path.clone(), Err(err))),
+            }
         }
-        console.line(&progress_line(index + 1, total, kernels_started, &stem));
-        obj_paths.push(obj_path);
+        if running.is_empty() {
+            break;
+        }
+        let mut slot = 0;
+        while slot < running.len() {
+            if !running[slot].waiter.is_finished() {
+                slot += 1;
+                continue;
+            }
+            let kernel = running.remove(slot);
+            let result = kernel
+                .waiter
+                .join()
+                .unwrap_or_else(|_| Err(std::io::Error::other("nvcc wait thread panicked")));
+            if result.as_ref().is_ok_and(|out| out.status.success()) {
+                done += 1;
+                console.line(&progress_line(done, total, kernels_started, running.len()));
+                since_tick = Instant::now();
+            } else if failed.is_none() {
+                failed = Some((src_paths[kernel.index].clone(), result));
+            }
+        }
+        if since_tick.elapsed() >= KERNEL_HEARTBEAT {
+            console.line(&progress_line(done, total, kernels_started, running.len()));
+            since_tick = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    if let Some((src_path, result)) = failed {
+        if let Ok(out) = &result {
+            report_tool_output("nvcc", out);
+        }
+        cuda_unavailable(
+            require_cuda,
+            &format!(
+                "failed to compile CUDA backend source {} for sm_{arch} \
+                 (override the arch with MAKEPAD_GGML_CUDA_ARCH)",
+                src_path.display()
+            ),
+        );
+        return;
     }
 
     let archive = if target_os == "windows" {
@@ -366,59 +405,112 @@ impl Console {
     }
 }
 
-/// Heartbeat interval while a single kernel is compiling. Short enough that
-/// a watching user always sees motion inside half a minute — which is the
+/// Heartbeat interval while kernels are compiling. Short enough that a
+/// watching user always sees motion inside half a minute — which is the
 /// whole bar — without turning the build into a log firehose.
 const KERNEL_HEARTBEAT: Duration = Duration::from_secs(20);
 
-/// Wait for one nvcc run, keeping the terminal alive while it works.
-///
-/// `Child::wait_with_output` has to run somewhere, because the pipes must be
-/// drained or a chatty nvcc would deadlock on a full pipe buffer; it goes on
-/// a thread so this one can tick.
-fn wait_with_progress(
-    child: Child,
-    console: &mut Console,
-    stem: &str,
-    done: usize,
-    total: usize,
-    started: Instant,
-) -> std::io::Result<Output> {
-    let waiter = std::thread::spawn(move || child.wait_with_output());
-    let mut since_tick = Instant::now();
-    while !waiter.is_finished() {
-        std::thread::sleep(Duration::from_millis(200));
-        if since_tick.elapsed() >= KERNEL_HEARTBEAT {
-            console.line(&progress_line(done, total, started, stem));
-            since_tick = Instant::now();
-        }
-    }
-    waiter
-        .join()
-        .unwrap_or_else(|_| Err(std::io::Error::other("nvcc wait thread panicked")))
+/// One nvcc job in flight. The join handle owns the drain-and-wait.
+struct Kernel {
+    index: usize,
+    waiter: std::thread::JoinHandle<std::io::Result<Output>>,
 }
 
-/// One progress line, with an ETA that corrects itself from the throughput
-/// measured so far rather than from a number somebody guessed once.
-fn progress_line(done: usize, total: usize, started: Instant, current: &str) -> String {
+/// How many nvcc processes to run at once.
+///
+/// Two ceilings, because either one alone gets a machine wrong. CPU: cargo's
+/// own `-j` (NUM_JOBS), which is the parallelism the user actually asked
+/// for. Memory: nvcc's cicc/ptxas peak near a gigabyte per source, so a
+/// 16-thread laptop with 8GB would swap itself to death long before it ran
+/// out of cores — 1.5GB of headroom each. When the memory is unknowable we
+/// assume a normal modern machine (8) rather than creep, since the common
+/// case is a box that can easily take it.
+fn kernel_jobs(total: usize) -> usize {
+    const BYTES_PER_JOB: u64 = 1536 * 1024 * 1024;
+    let by_cpu = env::var("NUM_JOBS")
+        .ok()
+        .and_then(|jobs| jobs.parse::<usize>().ok())
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(8);
+    let by_memory = available_memory_bytes()
+        .map(|bytes| (bytes / BYTES_PER_JOB) as usize)
+        .unwrap_or(8);
+    by_cpu.min(by_memory).min(total).max(1)
+}
+
+/// Physical memory this machine can actually hand to a wave of compilers.
+/// std-only, because a build script that needs a crates.io dependency to
+/// decide how hard to work has its priorities wrong.
+#[cfg(target_os = "windows")]
+fn available_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.avail_phys)
+}
+
+#[cfg(target_os = "linux")]
+fn available_memory_bytes() -> Option<u64> {
+    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?;
+    let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kilobytes * 1024)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn available_memory_bytes() -> Option<u64> {
+    // No CUDA host here (kernels only build on linux/windows), so this only
+    // exists to keep the call site honest on every host.
+    None
+}
+
+/// One progress line, with an ETA that corrects itself from the completion
+/// throughput measured so far rather than from a number somebody guessed
+/// once. Early on — before the first wave lands — it reads pessimistically,
+/// which is the safe direction to be wrong in.
+fn progress_line(done: usize, total: usize, started: Instant, running: usize) -> String {
     let elapsed = started.elapsed();
     if done == 0 {
         return format!(
-            "makepad-ai-cuda: CUDA kernels 0/{total} — {} elapsed, compiling {current} \
-             (the first kernel sets the pace)",
+            "makepad-ai-cuda: CUDA kernels 0/{total} — {} elapsed, {running} compiling \
+             (the first finishers set the pace)",
             fmt_duration(elapsed)
         );
     }
-    let per_kernel = elapsed.as_secs_f64() / done as f64;
-    let left = Duration::from_secs_f64(per_kernel * (total - done) as f64);
     if done == total {
         return format!(
             "makepad-ai-cuda: CUDA kernels {done}/{total} — done in {}",
             fmt_duration(elapsed)
         );
     }
+    let left = Duration::from_secs_f64(elapsed.as_secs_f64() / done as f64 * (total - done) as f64);
     format!(
-        "makepad-ai-cuda: CUDA kernels {done}/{total} — {} elapsed, ~{} left (now: {current})",
+        "makepad-ai-cuda: CUDA kernels {done}/{total} — {} elapsed, ~{} left, {running} compiling",
         fmt_duration(elapsed),
         fmt_duration(left)
     )
