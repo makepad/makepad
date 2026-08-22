@@ -302,7 +302,10 @@ particles are stateless vertex-shader work. The tick touches emitters only
 - Verify before calling done: `VJFX_DOC=<name> ./target/release/examples/
   effect_gallery --remote`, grab via `curl :PORT/g`, LOOK at the PNG.
   Cycle: `/t?t=n` (next), `/t?t=p` (prev), `/t?t=g<name>` (jump). Close
-  with `/gq`. Never leave an instance running.
+  with `/gq`. Never leave an instance running. `VJFX_INPUT=<image path>`
+  binds a real image as channel content — when touching a content
+  coupling, grab the family standalone AND with content (the standalone
+  grab must stay its classic self).
 
 ## Rules that bit us already (do not relearn)
 
