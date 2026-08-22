@@ -778,6 +778,8 @@ pub(crate) mod tests {
             codec: String::new(),
             audio: None,
             interpolate: None,
+            upscale: None,
+            flow_map: false,
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),

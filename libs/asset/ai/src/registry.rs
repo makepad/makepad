@@ -166,6 +166,13 @@ pub enum Domain {
     /// routes a text-to-image job to a model that fails closed without an
     /// image+mask pair.
     Inpaint,
+    /// Video -> video, decoded once and re-encoded once, with RealESRGAN
+    /// upscaling, RIFE frame-rate multiplication and/or a playback motion
+    /// sidecar fused in the middle (video-enhance). Its own domain so video
+    /// affinity never routes a text-to-video job to a model that fails
+    /// closed without an input clip — and so a box can be dedicated to
+    /// post-processing without advertising generation.
+    Enhance,
     /// Single object image -> 3D gaussian splat PLY (TripoSplat). Distinct
     /// from `World`, which reconstructs a walkable SCENE from an image or
     /// prompt: this is one object, reconstructed at the requested gaussian
@@ -194,6 +201,7 @@ impl Domain {
             "upscale" => Some(Domain::Upscale),
             "control" => Some(Domain::Control),
             "inpaint" => Some(Domain::Inpaint),
+            "enhance" => Some(Domain::Enhance),
             "splat" => Some(Domain::Splat),
             _ => None,
         }
@@ -219,6 +227,7 @@ impl Domain {
             Domain::Upscale => "upscale",
             Domain::Control => "control",
             Domain::Inpaint => "inpaint",
+            Domain::Enhance => "enhance",
             Domain::Splat => "splat",
         }
     }

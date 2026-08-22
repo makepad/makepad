@@ -49,6 +49,7 @@ pub mod llm_backend;
 pub mod matte_backend;
 pub mod segment_backend;
 pub mod upscale_backend;
+pub mod enhance_backend;
 pub mod motion_backend;
 #[cfg(feature = "motion-native")]
 pub mod motion_native_backend;

@@ -403,6 +403,17 @@ pub struct GenerateRequestJson {
     /// unchanged — only the frame cadence gets denser; the audio track is
     /// untouched. Any other value is refused.
     pub interpolate: Option<u32>,
+
+    // -- enhance domain (video-enhance backend) --
+    /// Resolution multiplier for the enhance stage: `2` or `4` (RealESRGAN
+    /// x4plus; x2 is the x4 pass box-downsampled). Absent or `1` = off.
+    pub upscale: Option<u32>,
+    /// Enhance stage: also compute a per-frame-pair RIFE motion field
+    /// (flow + occlusion mask at t=0.5) and append it to the mp4 itself as
+    /// a trailing `mkfl` box, for arbitrary-timestep playback warping.
+    /// Decoders skip unknown top-level boxes, so the file stays a plain
+    /// playable video.
+    pub flow_map: Option<bool>,
     /// Test hook honored by the testpattern backend only: sleep this long
     /// during generation so queue/reject behavior can be exercised.
     pub delay_ms: Option<u64>,

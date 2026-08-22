@@ -89,6 +89,13 @@ pub enum FleetDispatch {
 
 /// The fleet boundary: everything the coordinator needs from the GPU side.
 pub trait GenFleet {
+    /// Short human tag for the box serving `fleet_job` (".203"), when the
+    /// transport knows one. Rides the progress note so an operator watching
+    /// a drawer of jobs can see WHICH GPU is on each — it is their fleet.
+    fn route_label(&self, _fleet_job: &str) -> Option<String> {
+        None
+    }
+
     /// Attempt one generation dispatch. A temporarily VRAM-blocked compatible
     /// node returns [`FleetDispatch::Waiting`], never a doomed submission.
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String>;
@@ -328,7 +335,12 @@ impl<'f> Coordinator<'f> {
                     std::thread::sleep(FLEET_POLL_EVERY);
                 };
 
-                let mut heartbeat_stage = "queued-on-fleet".to_string();
+                let node_tag = self.fleet.route_label(&fleet_job);
+                let tagged = |stage: &str| match &node_tag {
+                    Some(tag) => format!("@{tag} {stage}"),
+                    None => stage.to_string(),
+                };
+                let mut heartbeat_stage = tagged("queued-on-fleet");
                 let mut heartbeat_permille = 0;
                 loop {
                     if stop.load(Ordering::SeqCst) {
@@ -399,7 +411,7 @@ impl<'f> Coordinator<'f> {
                             return Ok(JobOutcome::Failed { error: format!("fleet: {error}") })
                         }
                         Ok(FleetPoll::Running { stage, progress }) => {
-                            heartbeat_stage = stage;
+                            heartbeat_stage = tagged(&stage);
                             heartbeat_permille = (progress.clamp(0.0, 1.0) * 1000.0) as u16;
                         }
                         Err(error) => {
@@ -502,12 +514,14 @@ impl<'f> Coordinator<'f> {
             .map_err(|e| format!("source manifest: {e}"))?;
         let wanted = |media: MediaType| match kind.input {
             InputNeed::Mesh => media == MediaType::Glb,
+            InputNeed::Video => media == MediaType::Mp4,
             _ => matches!(media, MediaType::Png | MediaType::Jpeg),
         };
         // Prefer the role that IS the payload (a render GLB, a texture) over
         // a retained original; both beat nothing.
         let preferred: &[FileRole] = match kind.input {
             InputNeed::Mesh => &[FileRole::RenderGlb, FileRole::Source],
+            InputNeed::Video => &[FileRole::Video, FileRole::Source],
             _ => &[FileRole::Texture, FileRole::Albedo, FileRole::Source],
         };
         let file = preferred
@@ -530,6 +544,7 @@ impl<'f> Coordinator<'f> {
         let content_type = match file.media {
             MediaType::Glb => "model/gltf-binary",
             MediaType::Jpeg => "image/jpeg",
+            MediaType::Mp4 => "video/mp4",
             _ => "image/png",
         };
         Ok(Some(GenInput { bytes, content_type: content_type.to_string() }))
@@ -1033,6 +1048,13 @@ fn wire_request(
 }
 
 impl GenFleet for AssetAiFleet {
+    fn route_label(&self, fleet_job: &str) -> Option<String> {
+        let url = self.routes.get(fleet_job)?;
+        // "http://10.0.0.203:8123" -> ".203"
+        let host = url.rsplit('/').next()?.split(':').next()?;
+        Some(format!(".{}", host.rsplit('.').next()?))
+    }
+
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String> {
         use makepad_asset_ai::client::{ContentProvider, LocalService};
         use makepad_asset_ai::registry::Domain;

@@ -67,6 +67,14 @@ pub struct GenerateParams {
     /// fps. Same clip duration, same audio; only the frame cadence changes.
     pub interpolate: Option<u32>,
 
+    // Enhance domain (video-enhance backend).
+    /// Resolution multiplier: `None`/`Some(1)` = off, `Some(2)` or
+    /// `Some(4)` = RealESRGAN x4plus (x2 = box-downsampled x4 pass).
+    pub upscale: Option<u32>,
+    /// Append the per-pair RIFE motion field to the output mp4 as a
+    /// trailing `mkfl` box (arbitrary-timestep playback warping).
+    pub flow_map: bool,
+
     // Text domain (llm backend).
     /// Domain the expanded prompt targets: "image" | "video" | "mesh".
     pub target_domain: String,
@@ -302,6 +310,16 @@ impl GenerateParams {
                     )))
                 }
             },
+            upscale: match request.upscale {
+                None | Some(1) => None,
+                Some(factor @ (2 | 4)) => Some(factor),
+                Some(other) => {
+                    return Err(AssetAiError::Params(format!(
+                        "upscale: expected 1 (off), 2 or 4, got {other}"
+                    )))
+                }
+            },
+            flow_map: request.flow_map.unwrap_or(false),
 
             target_domain,
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),
@@ -1245,6 +1263,11 @@ pub fn backend_compiled(name: &str) -> bool {
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
+        "video-enhance" => {
+            cfg!(feature = "upscale-native")
+                && cfg!(feature = "interpolate")
+                && cfg!(feature = "video")
+        }
         "triposplat" => cfg!(feature = "splat-native"),
         "rig-native" => cfg!(feature = "rig-native"),
         "motion-native" => cfg!(feature = "motion-native"),
@@ -1294,6 +1317,11 @@ pub fn backend_provisioned(name: &str) -> bool {
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
+        "video-enhance" => {
+            cfg!(feature = "upscale-native")
+                && cfg!(feature = "interpolate")
+                && cfg!(feature = "video")
+        }
         // TripoSplat is CUDA-only like flux2/trellis: ~1.9B parameters of
         // resident f32 with no CPU/Metal production path, so a box without a
         // device must not advertise it.
@@ -1567,6 +1595,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "upscale-native"))]
         "upscale-native" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'upscale-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(all(feature = "upscale-native", feature = "interpolate", feature = "video"))]
+        "video-enhance" => Ok(Box::new(
+            crate::enhance_backend::VideoEnhanceBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(all(feature = "upscale-native", feature = "interpolate", feature = "video")))]
+        "video-enhance" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'upscale-native', 'interpolate' and 'video' cargo features",
             spec.id
         ))),
         #[cfg(feature = "python-backends")]

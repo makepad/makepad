@@ -555,6 +555,52 @@ impl Rife {
             }
         }
     }
+
+    /// The dense motion field of one pair, for arbitrary-timestep playback
+    /// warping: the IFNet's final refined flow (4 planes: frame0→t xy,
+    /// frame1→t xy, pixel units, planar, input resolution) and the
+    /// post-sigmoid occlusion mask (1 plane, 1.0 = take frame0). Computed at
+    /// `timestep` (0.5 for a symmetric playback field).
+    pub fn flow_field_rgb8(
+        &self,
+        pair: RifeFramePair<'_>,
+        timestep: f32,
+        cancel: Option<RifeCancel<'_>>,
+    ) -> Result<RifeFlowField> {
+        check_cancel(cancel)?;
+        if !timestep.is_finite() || timestep <= 0.0 || timestep >= 1.0 {
+            return Err(DiffusionError::workflow(format!(
+                "rife timestep must be strictly between 0 and 1, got {timestep}"
+            )));
+        }
+        let width = pair.width;
+        let height = pair.height;
+        let (flow, mask) = match self.kind {
+            RifeBackendKind::Reference => {
+                crate::rife_cpu::flow_field(&self.weights, pair, timestep, self.scale)?
+            }
+            RifeBackendKind::Device => {
+                crate::rife_model::flow_field(&self.weights, pair, timestep, self.scale)?
+            }
+        };
+        Ok(RifeFlowField {
+            width,
+            height,
+            flow,
+            mask,
+        })
+    }
+}
+
+/// One frame pair's playback motion field (see [`Rife::flow_field_rgb8`]).
+pub struct RifeFlowField {
+    pub width: usize,
+    pub height: usize,
+    /// Planar `[4, height, width]`: frame0→t xy then frame1→t xy, pixels.
+    pub flow: Vec<f32>,
+    /// `[height, width]`, sigmoid applied: 1.0 = the intermediate takes
+    /// frame0's warp entirely.
+    pub mask: Vec<f32>,
 }
 
 /// Evict every device-cached RIFE tensor and release idle pool buffers.

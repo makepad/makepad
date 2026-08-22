@@ -39,6 +39,11 @@ use {
 
 const HNS_PER_SECOND: u128 = 10_000_000;
 
+/// `MF_MT_MAX_KEYFRAME_SPACING` (missing from the pinned windows crate
+/// version): max frames between key frames; 1 = all-intra.
+const MF_MT_MAX_KEYFRAME_SPACING: windows::core::GUID =
+    windows::core::GUID::from_u128(0xc16eb52b_73a1_476f_8d62_839d6a020652);
+
 pub(crate) fn hr_err(context: &str, err: windows::core::Error) -> VideoFileError {
     VideoFileError::with_code(format!("{}: {}", context, err.message()), err.code().0)
 }
@@ -190,6 +195,13 @@ impl WindowsVideoFileEncoder {
             out_type
                 .SetUINT32(&MF_MT_VIDEO_PROFILE, profile as u32)
                 .map_err(|e| hr_err("set video profile", e))?;
+            if options.keyframe_only {
+                // GOP size 1: every output frame is an IDR frame, so the
+                // file decodes at any frame in any order (bounce loops).
+                out_type
+                    .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
+                    .map_err(|e| hr_err("set keyframe spacing", e))?;
+            }
             let video_stream = sink
                 .AddStream(&out_type)
                 .map_err(|e| hr_err("IMFSinkWriter::AddStream(video)", e))?;

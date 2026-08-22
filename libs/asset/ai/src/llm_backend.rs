@@ -2617,6 +2617,11 @@ mod tests {
         assert!(music.contains("[Verse]"));
         assert!(music.contains("[Chorus]"));
         assert!(music.contains("explicitly instrumental"));
+        // Everything after `Lyrics:` is sung verbatim — the prompt must
+        // forbid bar counts / timing math from leaking into the lyric sheet
+        // (a run once sang "8 bars").
+        assert!(music.contains("sung verbatim"));
+        assert!(music.contains("bar counts"));
         // Unknown domains fall back to the generic expander.
         assert_eq!(default_system_prompt("weird"), PROMPT_GENERIC);
     }

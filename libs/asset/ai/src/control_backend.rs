@@ -590,6 +590,8 @@ mod tests {
             strength: None,
             loras: Vec::new(),
             interpolate: None,
+            upscale: None,
+            flow_map: false,
             frames: None,
             codec: String::new(),
             audio: None,

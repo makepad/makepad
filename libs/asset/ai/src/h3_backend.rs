@@ -1167,6 +1167,7 @@ mod h3_mux {
                 channels: 2,
                 aac_bitrate_bps: 128_000,
             }),
+            keyframe_only: false,
         };
         let mux_err = |context: &str, e: makepad_video::VideoFileError| {
             AssetAiError::Backend(format!("mp4 mux {context}: {e}"))

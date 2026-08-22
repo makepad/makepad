@@ -1722,6 +1722,41 @@
    ]
   },
   {
+   "id": "video-enhance",
+   "domain": "enhance",
+   "backend": "video-enhance",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "BSD 3-Clause License + MIT",
+    "url": "https://github.com/xinntao/Real-ESRGAN",
+    "summary": "RealESRGAN x4plus (xinntao, BSD-3-Clause) + Practical-RIFE v4.26 flownet (hzwer, MIT). Both permissive, including commercial, subject to their notice conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 6.0,
+   "note": "Video post-processor: one decode, one encode, up to three fused transforms. upscale: 2|4 = RealESRGAN x4plus per frame (x2 = exact 2:1 box downsample of the x4 pass). interpolate: 2|4 = RIFE v4.26 frame-rate multiplication at the OUTPUT resolution (same clip duration, denser cadence). flow_map: true = per-final-frame-pair RIFE motion field (flow + occlusion mask at t=0.5, quarter source resolution, int8 quarter-pixel) appended to the mp4 as a trailing 'mkfl' box for arbitrary-timestep playback warping - decoders skip unknown top-level boxes so the artifact stays one plain playable video. Request: input_b64 video/mp4 -> video/mp4. The input's audio track is dropped (video-only stage). Weights are shared cache entries with realesrgan-x4plus and the H3 tiers' interpolate role.",
+   "files": [
+    {
+     "role": "native-upscale",
+     "repo": "Comfy-Org/Real-ESRGAN_repackaged",
+     "path": "RealESRGAN_x4plus.safetensors",
+     "revision": "ea19b4cd14f85a5b914eee8aa7ff77bc371039a0",
+     "cache_as": "upscale/realesrgan-x4plus/RealESRGAN_x4plus.safetensors",
+     "size": 66857836,
+     "sha256": "37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
+    }
+   ]
+  },
+  {
    "id": "skintokens",
    "domain": "rig",
    "backend": "rig-native",

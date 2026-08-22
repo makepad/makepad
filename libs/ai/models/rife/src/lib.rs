@@ -19,7 +19,7 @@ mod rife_model;
 
 pub use rife::{
     interpolation_timesteps, padded_extent, rife_device_available, unload_rife, Rife,
-    RifeBackendKind, RifeCancel,
+    RifeBackendKind, RifeCancel, RifeFlowField,
     RifeFramePair, RifeModelWeights, RifeScale, RifeWeights, RIFE_BLOCK_CHANNELS,
     RIFE_CACHE_NAMESPACE, RIFE_ENCODE_CHANNELS, RIFE_LRELU_SLOPE, RIFE_MODEL_PATH,
     RIFE_MODEL_SHA256, RIFE_MODEL_SIZE, RIFE_NUM_BLOCKS, RIFE_PAD_MULTIPLE, RIFE_REPO,
