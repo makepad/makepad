@@ -18,8 +18,15 @@
     swirl: 1.4
 
     // The lightning gate: full strike on beats 1 and 3, near-dark between.
-    beat_pulse: "0.3 + 2.9 * step(0.45, fract(beat * 0.5))"
+    // STRIKE (p0) scales the whole gate; mid-knob = the stock storm.
+    beat_pulse: "(0.3 + 2.9 * step(0.45, fract(beat * 0.5))) * (0.2 + 1.6*p0)"
     beat_rate: 1.0
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "STRIKE", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x05060a
     color_a: #x2a3038
@@ -45,7 +52,7 @@
     }
 
     stages: [
-        {kind: "feedback", amount: 0.4, zoom: 1.002, rotate: 0.0, dim: 0.96},
-        {kind: "bloom", threshold: "0.75 - 0.35 * pulse", strength: 1.1, levels: 3}
+        {kind: "feedback", amount: "min(0.4 + (p1-0.5)*0.8, 0.97)", zoom: 1.002, rotate: 0.0, dim: 0.96},
+        {kind: "bloom", threshold: "0.75 - 0.35 * pulse", strength: "1.1 * (0.25 + 1.5*p2)", levels: 3}
     ]
 }

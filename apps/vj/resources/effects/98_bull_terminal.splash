@@ -27,6 +27,15 @@
     p0: 0.15                     // phosphor gain
     p1: "0.3 + 0.7*pulse"        // crosshair pumps on the beat
 
+    // PERFORMANCE DIALS — the chart engine's own p-levers: GAIN drives
+    // the phosphor, XHAIR holds the crosshair pump when touched, PANIC
+    // floods the board red.
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.15},
+        {name: "XHAIR", bind: "p1", default: 0.5},
+        {name: "PANIC", bind: "p2", default: 0.0}
+    ]
+
     color_bg: #x020604
     color_a: #x39ff6a
     color_b: #x117a34

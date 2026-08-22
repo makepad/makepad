@@ -14,8 +14,15 @@
     size: 0.085
     rate: 0.0
 
-    beat_pulse: 0.4
+    beat_pulse: "0.4 * (0.2 + 1.6*p0)"
     beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FLARE", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x050508
     color_a: #xffffff
@@ -28,6 +35,6 @@
     fog: 0.0
 
     stages: [
-        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 2}
+        {kind: "bloom", threshold: "clamp(0.6 - (p1-0.5)*0.7, 0.02, 0.95)", strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
     ]
 }

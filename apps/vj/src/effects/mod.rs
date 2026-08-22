@@ -329,6 +329,7 @@ pub mod engines_forge;
 pub mod engines_harmonograph;
 pub mod engines_jet;
 pub mod engines_pipes;
+pub mod engines_duo;
 pub mod engines_raymarch;
 pub mod engines_simfx;
 pub mod engines_tiles;
@@ -356,6 +357,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     engines_copper::script_mod(vm);
     engines_tiles::script_mod(vm);
     engines_flock::script_mod(vm);
+    engines_duo::script_mod(vm);
     engines_raymarch::script_mod(vm);
     engines_jet::script_mod(vm);
     engines_city::script_mod(vm);

@@ -8,10 +8,18 @@
 
     bar_beats: 8
 
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SMEAR", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
     stages: [
-        {kind: "chroma", p1: 0.7, p2: "bar"},
-        {kind: "feedback", amount: 0.82, zoom: 1.008,
-         rotate: "0.004 + pulse * 0.006", dim: 0.96},
+        {kind: "chroma", p1: "0.7 * (0.2 + 1.6*p0)", p2: "bar"},
+        {kind: "feedback", amount: "min(0.82 + (p1-0.5)*0.3, 0.97)", zoom: 1.008,
+         rotate: "0.004 + pulse * 0.006 + (p2-0.5)*0.03", dim: 0.96},
         {kind: "blur", levels: 1}
     ]
 }

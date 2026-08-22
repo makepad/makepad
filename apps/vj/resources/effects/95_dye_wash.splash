@@ -14,13 +14,23 @@
     force: 2.0
     dissipation: 0.16
     swirl: 0.75
-    splat: "1.1 + pulse * 0.6"
+    splat: "(1.1 + pulse * 0.6) * (0.2 + 1.6*p2)"
     dye_fade: 0.5
     radius: 0.11
 
     input0: "test"
     p0: 0.055
     p1: 0.85
+    p2: 0.5
+
+    // PERFORMANCE DIALS — WARP/MIX are the fluid engine's own p0/p1
+    // levers (resting where this doc holds them); SPLAT routes p2
+    // through the dye splats.
+    dials: [
+        {name: "WARP", bind: "p0", default: 0.055},
+        {name: "MIX", bind: "p1", default: 0.85},
+        {name: "SPLAT", bind: "p2", default: 0.5}
+    ]
 
     beat_pulse: 0.3
 

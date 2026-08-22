@@ -28,6 +28,14 @@
     p1: "0.35 + 1.3*bass"              // membrane wave rides the lows
     p2: "0.25 + 1.5*high"              // hats fire the glints
 
+    // PERFORMANCE DIALS — the engine's own p-levers; touching one holds
+    // its audio binding above at a fixed gain.
+    dials: [
+        {name: "HEAT", bind: "p0", default: 0.5},
+        {name: "RING", bind: "p1", default: 0.5},
+        {name: "EMBER", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x070608
     color_a: #x8a93a6      // cold steel
     color_b: #xff7a2a      // forge ember

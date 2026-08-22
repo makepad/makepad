@@ -26,6 +26,15 @@
     p1: "0.4 + 0.8*pulse"       // the sun flares on the beat
     p2: 0.5                      // extra edge glow
 
+    // PERFORMANCE DIALS — the city engine's own p-levers: DENS fills
+    // neon cells, SUN holds the flare binding when touched, EDGE gains
+    // the wire glow.
+    dials: [
+        {name: "DENS", bind: "p0", default: 0.0},
+        {name: "SUN", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x16082c
     color_a: #x2cf6ff
     color_b: #xff3fa8

@@ -13,9 +13,16 @@
 
     grow: "loop"
     grow_beats: 32
-    sway: 1.4
+    sway: "1.4 * (0.25 + 1.5*p0)"
     sway_freq: 1.1
-    beat_pulse: 0.3
+    beat_pulse: "0.3 * (0.2 + 1.6*p1)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x141006
     color_a: #x8a6a2a
@@ -24,7 +31,7 @@
 
     cam_orbit: 0.06
     fog: 0.05
-    glow: 1.1
+    glow: "1.1 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}

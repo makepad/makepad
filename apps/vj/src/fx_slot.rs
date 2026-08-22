@@ -174,6 +174,10 @@ impl FxSlotKind {
 pub struct FxSlotState {
     /// The loaded effect's display name; `None` = empty slot.
     pub title: Option<String>,
+    /// The loaded revision id (string form) — the slot tile shows THAT
+    /// effect's catalog thumbnail by it (identity over monitoring: the
+    /// deck monitors show the live result, the tile says WHICH effect).
+    pub rev: Option<String>,
     pub bypass: bool,
     /// SPD knob position 0..1 (see [`FxSlots::speed_scale`]).
     pub speed: f32,
@@ -193,6 +197,7 @@ impl Default for FxSlotState {
     fn default() -> Self {
         FxSlotState {
             title: None,
+            rev: None,
             bypass: false,
             speed: 0.5,
             p: [None; 3],
@@ -252,9 +257,10 @@ impl FxSlots {
     /// An effect landed in `kind`: name it, switch it on, clear stale notes.
     /// The knobs keep their positions — swapping effects mid-set must not
     /// yank the levers.
-    pub fn loaded(&mut self, kind: FxSlotKind, title: String) {
+    pub fn loaded(&mut self, kind: FxSlotKind, title: String, rev: Option<String>) {
         let slot = self.slot_mut(kind);
         slot.title = Some(title);
+        slot.rev = rev;
         slot.bypass = false;
         slot.note = None;
     }
@@ -322,13 +328,14 @@ impl FxSlots {
         for slot in &self.slots {
             let dial = |v: Option<f32>| v.map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into());
             out.push_str(&format!(
-                "{} {} {:.4} {} {} {} {}\n",
+                "{} {} {:.4} {} {} {} {} {}\n",
                 u8::from(slot.title.is_some()),
                 u8::from(slot.bypass),
                 slot.speed,
                 dial(slot.p[0]),
                 dial(slot.p[1]),
                 dial(slot.p[2]),
+                slot.rev.as_deref().unwrap_or("-"),
                 slot.title.as_deref().unwrap_or(""),
             ));
         }
@@ -352,7 +359,8 @@ impl FxSlots {
         }
         for slot in slots.slots.iter_mut() {
             let Some(line) = lines.next() else { break };
-            let mut it = line.splitn(4 + dial_count, ' ');
+            let head_fields = if dial_count == 3 { 5 } else { 4 };
+            let mut it = line.splitn(head_fields + dial_count, ' ');
             let loaded = it.next() == Some("1");
             let bypass = it.next() == Some("1");
             let speed = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.5f32);
@@ -360,9 +368,16 @@ impl FxSlots {
             for value in p.iter_mut().take(dial_count) {
                 *value = it.next().and_then(|v| v.parse().ok());
             }
+            // v2 carries the revision id before the title; v1 has neither.
+            let rev = if dial_count == 3 {
+                it.next().filter(|v| *v != "-").map(str::to_string)
+            } else {
+                None
+            };
             let title = it.next().unwrap_or("").trim().to_string();
             if loaded && !title.is_empty() {
                 slot.title = Some(title);
+                slot.rev = rev;
             }
             slot.bypass = bypass && slot.title.is_some();
             slot.speed = speed.clamp(0.0, 1.0);
@@ -519,6 +534,24 @@ impl VjFxSlotHost {
     /// premix texture next draw, and feed THAT to the effect as `input0`.
     pub fn set_premix(&mut self, job: PremixJob) {
         self.premix = Some(job);
+    }
+
+    /// True when the loaded doc is the two-deck `transition` engine: feed it
+    /// with [`Self::set_deck_inputs`] and sweep p3 with the CROSSFADER.
+    pub fn wants_deck_inputs(&self) -> bool {
+        self.fx.wants_deck_inputs()
+    }
+
+    /// The loaded doc declared `engage: "ramp"` (overlay/key semantics).
+    pub fn engage_ramp(&self) -> bool {
+        self.fx.engage_ramp()
+    }
+
+    /// Duo mode: deck A into input 0, deck B into input 1 (no premix pass).
+    pub fn set_deck_inputs(&mut self, a: Option<Texture>, b: Option<Texture>) {
+        self.premix = None;
+        self.fx.set_input_texture(0, a);
+        self.fx.set_input_texture(1, b);
     }
 
     /// The effect's output — only while it is actually running. Re-fetched
@@ -944,7 +977,7 @@ mod tests {
         slot.note = Some("load failed".into());
         slot.speed = 0.8;
         slot.p[1] = Some(0.9);
-        m.loaded(FxSlotKind::EffectA, "Neon Growth".into());
+        m.loaded(FxSlotKind::EffectA, "Neon Growth".into(), Some("rev:abc".into()));
         let slot = m.slot(FxSlotKind::EffectA);
         assert_eq!(slot.title.as_deref(), Some("Neon Growth"));
         assert!(!slot.bypass, "a fresh load is ON");
@@ -960,7 +993,7 @@ mod tests {
     #[test]
     fn bypass_parks_the_slot() {
         let mut m = FxSlots::default();
-        m.loaded(FxSlotKind::EffectB, "Tunnel".into());
+        m.loaded(FxSlotKind::EffectB, "Tunnel".into(), None);
         assert!(m.slot(FxSlotKind::EffectB).running());
         m.slot_mut(FxSlotKind::EffectB).bypass = true;
         assert!(!m.slot(FxSlotKind::EffectB).running());
@@ -970,10 +1003,10 @@ mod tests {
     #[test]
     fn persistence_round_trips_including_untouched_knobs() {
         let mut m = FxSlots::default();
-        m.loaded(FxSlotKind::EffectA, "Neon Growth".into());
+        m.loaded(FxSlotKind::EffectA, "Neon Growth".into(), Some("rev:abc".into()));
         m.slot_mut(FxSlotKind::EffectA).p = [Some(0.25), None, Some(0.8)];
         m.slot_mut(FxSlotKind::EffectA).speed = 0.75;
-        m.loaded(FxSlotKind::Transition, "Beat Lens".into());
+        m.loaded(FxSlotKind::Transition, "Beat Lens".into(), None);
         m.slot_mut(FxSlotKind::Transition).bypass = true;
         m.toggle_arm(FxSlotKind::EffectB);
         m.click_autofade = false;
@@ -997,7 +1030,7 @@ mod tests {
     #[test]
     fn titles_with_spaces_survive_the_line_format() {
         let mut m = FxSlots::default();
-        m.loaded(FxSlotKind::EffectB, "Domino Liturgy — gold".into());
+        m.loaded(FxSlotKind::EffectB, "Domino Liturgy — gold".into(), Some("sha256:aa".into()));
         let decoded = FxSlots::decode(&m.encode());
         assert_eq!(
             decoded.slot(FxSlotKind::EffectB).title.as_deref(),

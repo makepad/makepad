@@ -107,10 +107,12 @@ pub struct FxThumbSheet {
 
 /// The cache file for one revision. Transition previews render differently
 /// (two-input sweep), so they key their own file — a static sheet cached
-/// before the sweep existed is simply ignored, never shown.
+/// before the sweep existed is simply ignored, never shown. `-t2`: the
+/// first two-input sweep shipped with sheets rendered before input1
+/// actually landed on some docs; bumping the key retired every one.
 pub fn cache_path(dir: &Path, revision: &AssetRevisionId, transition: bool) -> PathBuf {
     if transition {
-        dir.join(format!("{revision}-t.png"))
+        dir.join(format!("{revision}-t2.png"))
     } else {
         dir.join(format!("{revision}.png"))
     }
@@ -294,11 +296,13 @@ pub struct VjFxThumbs {
     #[rust(false)]
     slot_sized: bool,
     /// CPU premix for transition previews (two distinct patterns dissolved
-    /// by the sweep) — reused buffer + texture, like the runtime fallback.
+    /// by the sweep) — reused buffer + textures, like the runtime fallback.
+    /// Two texture slots: premix docs use slot 0; two-deck (`duo`) docs get
+    /// pattern A in slot 0 and pattern B in slot 1.
     #[rust]
     trans_data: Vec<u32>,
     #[rust]
-    trans_tex: Option<Texture>,
+    trans_tex: [Option<Texture>; 2],
 }
 
 impl VjFxThumbs {
@@ -366,9 +370,10 @@ impl VjFxThumbs {
             }
             self.fx.set_bpm(120.0);
             self.fx.set_live(cx, true);
-            // A previous transition job's sweep input/override must never
+            // A previous transition job's sweep inputs/override must never
             // leak into the next document.
             self.fx.set_input_texture(0, None);
+            self.fx.set_input_texture(1, None);
             self.fx.set_user_override([None; 4]);
             let t0 = std::time::Instant::now();
             match self.fx.set_effect_source(cx, "vjfx_thumb", &job.source) {
@@ -511,6 +516,12 @@ impl VjFxThumbs {
     /// counter-drifting bar — dissolved by `m` (the thumbnail's sweeping
     /// crossfade), exactly the slot runtime's premix-as-input0 contract.
     fn transition_input(&mut self, cx: &mut Cx, m: f32, time: f32) -> Texture {
+        self.transition_input_into(cx, m, time, 0)
+    }
+
+    /// Render the premix at sweep position `m` into texture slot `slot`
+    /// (m = 0 → pure pattern A, m = 1 → pure pattern B).
+    fn transition_input_into(&mut self, cx: &mut Cx, m: f32, time: f32, slot: usize) -> Texture {
         const W: usize = VjFxThumbs::TRANS_W;
         const H: usize = VjFxThumbs::TRANS_H;
         self.trans_data.resize(W * H, 0);
@@ -558,7 +569,7 @@ impl VjFxThumbs {
                 self.trans_data[y * W + x] = 0xff00_0000 | (r8 << 16) | (g8 << 8) | b8;
             }
         }
-        match &self.trans_tex {
+        match &self.trans_tex[slot.min(1)] {
             Some(tex) => {
                 tex.set_data_u32(cx, W, H, self.trans_data.clone());
                 tex.clone()
@@ -573,7 +584,7 @@ impl VjFxThumbs {
                         updated: TextureUpdated::Full,
                     },
                 );
-                self.trans_tex = Some(tex.clone());
+                self.trans_tex[slot.min(1)] = Some(tex.clone());
                 tex
             }
         }
@@ -650,10 +661,23 @@ impl Widget for VjFxThumbs {
                 Some(m as f32)
             });
             if let Some(m) = sweep {
-                let tex = self.transition_input(cx.cx, m, now as f32);
-                self.fx.set_input_texture(0, Some(tex));
-                let tri = 1.0 - (2.0 * m - 1.0).abs();
-                self.fx.set_user_override([None, None, None, Some(tri)]);
+                if self.fx.wants_deck_inputs() {
+                    // Two-deck doc: the distinct patterns land on separate
+                    // inputs and p3 sweeps as the crossfader would — the
+                    // thumbnail replays the transition exactly.
+                    let tex_a = self.transition_input_into(cx.cx, 0.0, now as f32, 0);
+                    let tex_b = self.transition_input_into(cx.cx, 1.0, now as f32, 1);
+                    self.fx.set_input_texture(0, Some(tex_a));
+                    self.fx.set_input_texture(1, Some(tex_b));
+                    self.fx.set_user_override([None, None, None, Some(m)]);
+                } else {
+                    // Premix doc: one input carrying the sweeping dissolve,
+                    // intensity on the engage triangle.
+                    let tex = self.transition_input(cx.cx, m, now as f32);
+                    self.fx.set_input_texture(0, Some(tex));
+                    let tri = 1.0 - (2.0 * m - 1.0).abs();
+                    self.fx.set_user_override([None, None, None, Some(tri)]);
+                }
             }
             let t0 = std::time::Instant::now();
             let _ = self.fx.draw_walk(cx, scope, Walk::fill());

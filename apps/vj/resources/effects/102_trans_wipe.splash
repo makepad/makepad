@@ -1,0 +1,26 @@
+// WIPE — the classic left-to-right edge. Pattern taught: subclassing the
+// duo compositor's `trans` hook. `t` is the crossfader 0→1; return deck A
+// at 0 and deck B at 1. SOFT feathers the edge, FLIP reverses direction.
+{
+    name: "Wipe"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.15},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let x = mix(uv.x, 1.0 - uv.x, step(0.5, self.user.y))
+            let soft = 0.004 + self.user.x * 0.25
+            // Widen the sweep so the edge fully clears both ends even
+            // with a fat feather.
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, x)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            // DIP: duck through black mid-fade (0 = off, the stock wipe).
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

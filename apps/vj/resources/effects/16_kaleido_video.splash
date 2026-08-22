@@ -7,8 +7,17 @@
     engine: "screen"
     input0: "test"
 
+    // PERFORMANCE DIALS — SEGS rides the fold count directly (p0 0.7 =
+    // today's fold); the others multiply their binding, mid-knob = stock.
+    p0: 0.7  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SEGS", bind: "p0", default: 0.7},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     stages: [
-        {kind: "kaleido", p1: 0.7, p2: "0.2 + pulse * 0.8"},
-        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 2}
+        {kind: "kaleido", p1: "p0", p2: "(0.2 + pulse * 0.8) * (0.2 + 1.6*p1)"},
+        {kind: "bloom", threshold: 0.55, strength: "1.2 * (0.25 + 1.5*p2)", levels: 2}
     ]
 }

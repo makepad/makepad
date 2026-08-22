@@ -5,9 +5,17 @@
     engine: "screen"
     input0: "test"
 
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TEAR", bind: "p0", default: 0.5},
+        {name: "BLEED", bind: "p1", default: 0.5},
+        {name: "CRUSH", bind: "p2", default: 0.5}
+    ]
+
     stages: [
-        {kind: "glitch", p1: 0.75, p2: "0.15 + pulse * 0.7"},
-        {kind: "chroma", p1: "0.2 + pulse * 0.5", p2: 0.0},
-        {kind: "posterize", p1: 0.55, p2: 0.55}
+        {kind: "glitch", p1: 0.75, p2: "(0.15 + pulse * 0.7) * (0.2 + 1.6*p0)"},
+        {kind: "chroma", p1: "(0.2 + pulse * 0.5) * (0.2 + 1.6*p1)", p2: 0.0},
+        {kind: "posterize", p1: "0.55 + (0.5 - p2)*0.6", p2: 0.55}
     ]
 }

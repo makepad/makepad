@@ -235,8 +235,21 @@ struct SlotShared {
     paused: AtomicBool,
     mode: AtomicU8,
     muted: AtomicBool,
+    /// The operator is holding the scrub bar: seeks land silently (no
+    /// per-tick audio blips); the release seek re-primes audio if unmuted.
+    scrub: AtomicBool,
     /// Pending seek target in 100ns units; negative = none.
     seek_100ns: AtomicI64,
+    /// IN/OUT trim bounds (the scrub bar's range handles), 100ns units.
+    /// `i64::MAX` out = clip end. EVERY tier confines playback to the
+    /// range: streaming wraps to IN at OUT, the cache tiers loop/bounce
+    /// inside it, ONCE holds at OUT.
+    trim_in_100ns: AtomicI64,
+    trim_out_100ns: AtomicI64,
+    /// Bumped by every trim change: a decoded-frame cache built under the
+    /// old bounds only covers the old range, so the tiers hand control
+    /// back and the next pass rebuilds.
+    trim_epoch: AtomicU64,
     /// Presentation position (pts of the last frame handed to the UI).
     position_100ns: AtomicI64,
     video_ready: AtomicBool,
@@ -288,7 +301,11 @@ impl SlotPlayer {
             paused: AtomicBool::new(start_paused),
             mode: AtomicU8::new(if loop_on { PlayMode::Loop } else { PlayMode::Once } as u8),
             muted: AtomicBool::new(false),
+            scrub: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
+            trim_in_100ns: AtomicI64::new(0),
+            trim_out_100ns: AtomicI64::new(i64::MAX),
+            trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(0),
             video_ready: AtomicBool::new(false),
             preroll_status: AtomicU8::new(PrerollStatus::WaitingVideo as u8),
@@ -367,6 +384,11 @@ impl SlotPlayer {
 
     /// Drop this slot's audio at the source: no samples reach the mixer
     /// while muted (the already-buffered lead drains first).
+    /// Scrub-in-progress: audio stays silent across the drag's seeks.
+    pub fn set_scrub(&mut self, scrub: bool) {
+        self.shared.scrub.store(scrub, Ordering::Release);
+    }
+
     pub fn set_muted(&mut self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Release);
     }
@@ -393,6 +415,36 @@ impl SlotPlayer {
     /// Position of the frame currently on screen, seconds.
     pub fn position_secs(&self) -> f64 {
         self.shared.position_100ns.load(Ordering::Acquire).max(0) as f64 / 10_000_000.0
+    }
+
+    /// Constrain playback to the [start, end] fraction range — the scrub
+    /// bar's IN/OUT trim handles. Loop wraps jump to IN, bounce reflects
+    /// at both handles, ONCE holds at OUT. `end >= 1` clears the out
+    /// bound. (A wrap seek lands on the prior keyframe, so an UNMUTED
+    /// trimmed loop may whisper a few pre-IN audio frames per wrap — VJ
+    /// loops are muted by default, and the picture is exact.)
+    pub fn set_trim(&mut self, start: f64, end: f64) {
+        let d = (self.duration_secs * 10_000_000.0).max(0.0) as i64;
+        let a = (start.clamp(0.0, 1.0) * d as f64) as i64;
+        let b = (end.clamp(0.0, 1.0) * d as f64) as i64;
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.shared.trim_in_100ns.store(lo, Ordering::Release);
+        self.shared
+            .trim_out_100ns
+            .store(if end >= 1.0 { i64::MAX } else { hi }, Ordering::Release);
+        self.shared.trim_epoch.fetch_add(1, Ordering::AcqRel);
+        // A once-mode clip parked past OUT stays put until the operator
+        // seeks; a LOOPING clip past OUT wraps on the next decode step.
+        self.shared.end_of_stream.store(false, Ordering::Release);
+    }
+
+    /// The current trim bounds as fractions (0..=1).
+    pub fn trim_fractions(&self) -> (f64, f64) {
+        let d = (self.duration_secs * 10_000_000.0).max(1.0);
+        let lo = self.shared.trim_in_100ns.load(Ordering::Acquire).max(0) as f64 / d;
+        let hi = self.shared.trim_out_100ns.load(Ordering::Acquire);
+        let hi = if hi == i64::MAX { 1.0 } else { (hi as f64 / d).min(1.0) };
+        (lo.min(1.0), hi)
     }
 
     /// Seek by reopening the stream and discarding up to the target. The
@@ -493,11 +545,28 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     let mut pingpong_cache_bytes: usize = 0;
     let mut pingpong_cache_complete = false;
     let mut pingpong_over_budget = false;
+    // Frames decoded this pass: a cache that started mid-pass (the mode
+    // flipped on partway through) covers only the TAIL and must never be
+    // declared complete — it bounces again from the next full pass.
+    let mut pass_frames: u64 = 0;
+    let mut pingpong_cache_partial = false;
     // Latched when this decoder's seek fails: never retry a broken seam.
     let mut seek_bounce_broken = false;
+    let mut trim_epoch_seen = shared.trim_epoch.load(Ordering::Acquire);
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
+        }
+        // A trim change invalidates the frame cache (it only covers the
+        // old range); the rest of THIS pass can never complete one either.
+        let trim_epoch = shared.trim_epoch.load(Ordering::Acquire);
+        if trim_epoch != trim_epoch_seen {
+            trim_epoch_seen = trim_epoch;
+            pingpong_cache.clear();
+            pingpong_cache_bytes = 0;
+            pingpong_cache_complete = false;
+            pingpong_over_budget = false;
+            pingpong_cache_partial = pass_frames > 0;
         }
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
@@ -505,6 +574,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             pingpong_cache.clear();
             pingpong_cache_bytes = 0;
             pingpong_cache_complete = false;
+            pingpong_cache_partial = false;
+            pass_frames = 0;
             match VideoFileDecoder::open(&path) {
                 Ok(d) => {
                     decoder = d;
@@ -537,12 +608,19 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         match decoder.next_audio() {
                             Ok(Some(chunk)) if chunk.pts_100ns < seek => continue,
                             Ok(Some(chunk)) => {
-                                mixer.push_slot_audio(
-                                    slot,
-                                    &chunk.samples,
-                                    chunk.channels,
-                                    chunk.sample_rate,
-                                );
+                                // MUTED stays silent, and a scrub NEVER
+                                // sounds — only the release seek of an
+                                // unmuted clip re-primes the bus here.
+                                if !shared.muted.load(Ordering::Acquire)
+                                    && !shared.scrub.load(Ordering::Acquire)
+                                {
+                                    mixer.push_slot_audio(
+                                        slot,
+                                        &chunk.samples,
+                                        chunk.channels,
+                                        chunk.sample_rate,
+                                    );
+                                }
                                 break;
                             }
                             Ok(None) => {
@@ -629,6 +707,14 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 }
                 match decoder.next_audio() {
                     Ok(Some(chunk)) => {
+                        // The OUT handle gates audio too: nothing past it
+                        // is fed ahead — a trimmed loop's sound stops at
+                        // OUT and the wrap re-feeds from IN.
+                        if chunk.pts_100ns
+                            >= shared.trim_out_100ns.load(Ordering::Acquire)
+                        {
+                            break;
+                        }
                         mixer.push_slot_audio(
                             slot,
                             &chunk.samples,
@@ -647,13 +733,24 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
+        let trim_in = shared.trim_in_100ns.load(Ordering::Acquire).max(0);
+        let trim_out = shared.trim_out_100ns.load(Ordering::Acquire);
         match decoder.next_frame() {
-            Ok(Some(frame)) => {
+            // Pre-IN frames (a wrap seek lands on the prior keyframe, and
+            // the reopen fallback starts at zero) are decoded and dropped.
+            Ok(Some(frame)) if frame.pts_100ns + 400_000 < trim_in => continue,
+            // A frame past OUT falls into the next arm: the OUT handle IS
+            // end-of-stream for every mode.
+            Ok(Some(frame)) if frame.pts_100ns < trim_out => {
                 let cached = push_frame(&shared, frame, &mut rgb_scratch);
+                pass_frames += 1;
                 if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::Once
                     && !pingpong_over_budget
                     && !pingpong_cache_complete
                 {
+                    if pingpong_cache.is_empty() && pass_frames > 1 {
+                        pingpong_cache_partial = true;
+                    }
                     pingpong_cache_bytes += cached.bgra.len() * 4;
                     if pingpong_cache_bytes > MAX_PINGPONG_CACHE_BYTES {
                         pingpong_cache.clear();
@@ -672,12 +769,28 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         .store(PrerollStatus::Ready as u8, Ordering::Release);
                 }
             }
-            Ok(None) => {
-                if !pingpong_over_budget && !pingpong_cache.is_empty() {
+            Ok(Some(_)) | Ok(None) => {
+                if !pingpong_over_budget
+                    && !pingpong_cache.is_empty()
+                    && !pingpong_cache_partial
+                {
                     pingpong_cache_complete = true;
                 }
+                // A tail-only cache is thrown away; the reopen below decodes
+                // the next pass from frame 0 with the mode already set, so
+                // THAT cache completes.
+                if pingpong_cache_partial {
+                    pingpong_cache.clear();
+                    pingpong_cache_bytes = 0;
+                    pingpong_cache_partial = false;
+                }
+                pass_frames = 0;
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
-                let silent = !info.has_audio || shared.muted.load(Ordering::Acquire);
+                let silent = repeat_is_silent(
+                    info.has_audio,
+                    shared.muted.load(Ordering::Acquire),
+                    mode,
+                );
                 if mode != PlayMode::Once && pingpong_cache_complete && silent {
                     // The whole clip is in memory and nothing needs the
                     // audio decoder: repeat it straight from the cache —
@@ -717,6 +830,15 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 }
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
                 if mode != PlayMode::Once {
+                    // A LOOP wrap is an in-place seek to the IN point first
+                    // — ~10 ms against the reopen's full teardown, which is
+                    // what made every wrap of a streaming loop hiccup.
+                    // Decoders that cannot seek fall to the reopen below
+                    // unchanged (the pre-IN discard arm walks them up).
+                    if decoder.seek(trim_in).is_ok() {
+                        audio_eos = !info.has_audio;
+                        continue;
+                    }
                     match VideoFileDecoder::open(&path) {
                         Ok(d) => {
                             decoder = d;
@@ -740,6 +862,9 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         continue;
                     }
                     match decoder.next_audio() {
+                        Ok(Some(chunk)) if chunk.pts_100ns >= trim_out => {
+                            audio_eos = true;
+                        }
                         Ok(Some(chunk)) => {
                             if !shared.muted.load(Ordering::Acquire) {
                                 mixer.push_slot_audio(
@@ -823,6 +948,15 @@ fn push_frame(
 /// so the pacing clock never sees time run backwards. Exits when the mode
 /// goes to Once, a seek lands, or the slot stops — the decoder path takes
 /// over again.
+/// Whether repeat playback may leave the audio decoder behind and serve
+/// from the frame cache / seek-bounce tiers. A PING-PONG is inherently a
+/// VISUAL (there is no reversed audio): it counts as silent even with the
+/// clip unmuted — this is what made the bounce button "do nothing" on any
+/// clip with a soundtrack.
+fn repeat_is_silent(has_audio: bool, muted: bool, mode: PlayMode) -> bool {
+    !has_audio || muted || mode == PlayMode::PingPong
+}
+
 fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     if cache.len() < 2 {
         return;
@@ -835,11 +969,17 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let n = cache.len();
     let mut idx = n - 1;
     let mut forward = false;
+    // A trim change while we repeat: hand control back — the cache only
+    // covers the range it was decoded under.
+    let epoch0 = shared.trim_epoch.load(Ordering::Acquire);
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
         if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
+            return;
+        }
+        if shared.trim_epoch.load(Ordering::Acquire) != epoch0 {
             return;
         }
         let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
@@ -854,9 +994,16 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
+        // Live IN/OUT bounds → the index range [lo, hi) the repeat may
+        // touch (at least one frame wide). Loop wraps to lo, bounce
+        // reflects at both.
+        let t_in = shared.trim_in_100ns.load(Ordering::Acquire);
+        let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
+        let lo = cache.partition_point(|f| f.pts_100ns < t_in).min(n - 1);
+        let hi = cache.partition_point(|f| f.pts_100ns < t_out).clamp(lo + 1, n);
         if mode == PlayMode::Loop {
             forward = true;
-            idx = (idx + 1) % n;
+            idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
             // REAL clip pts, wrapping each pass: the pacer's rebase absorbs
             // the backward jump instantly (the frames are already decoded,
             // so unlike the old reopen there is no starvation gap), and the
@@ -868,18 +1015,19 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             });
             continue;
         } else if forward {
-            if idx + 1 >= n {
+            if idx + 1 >= hi {
                 forward = false;
                 continue;
             }
             idx += 1;
         } else {
-            if idx == 0 {
+            if idx <= lo {
                 forward = true;
                 continue;
             }
             idx -= 1;
         }
+        idx = idx.clamp(lo, hi - 1);
         synth_pts += delta;
         shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: synth_pts,
@@ -909,17 +1057,19 @@ fn seek_bounce_playback(
     shared: &Arc<SlotShared>,
     info: &VideoFileInfo,
 ) -> Result<bool, String> {
-    /// Anything that hands control back to the normal decode loop.
-    fn must_exit(shared: &SlotShared, has_audio: bool) -> bool {
+    /// Anything that hands control back to the normal decode loop —
+    /// including a trim change (the bounce bounds moved under us).
+    fn must_exit(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         shared.stop.load(Ordering::Acquire)
             || shared.seek_100ns.load(Ordering::Acquire) >= 0
+            || shared.trim_epoch.load(Ordering::Acquire) != epoch0
             || PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::PingPong
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
-    fn wait_ring(shared: &SlotShared, has_audio: bool) -> bool {
+    fn wait_ring(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         loop {
-            if must_exit(shared, has_audio) {
+            if must_exit(shared, has_audio, epoch0) {
                 return true;
             }
             if shared.paused.load(Ordering::Acquire) {
@@ -934,7 +1084,11 @@ fn seek_bounce_playback(
         }
     }
     let has_audio = info.has_audio;
+    let epoch0 = shared.trim_epoch.load(Ordering::Acquire);
     let duration = info.duration_100ns.max(0);
+    // The bounce confines itself to the trim range like every other tier.
+    let t_in = shared.trim_in_100ns.load(Ordering::Acquire).clamp(0, duration);
+    let t_out = shared.trim_out_100ns.load(Ordering::Acquire).clamp(t_in, duration);
     let delta = if info.fps_num > 0 {
         ((10_000_000 * info.fps_den.max(1) as i64) / info.fps_num as i64).max(1)
     } else {
@@ -960,13 +1114,13 @@ fn seek_bounce_playback(
         shared.video_ready.store(true, Ordering::Release);
     };
     loop {
-        // ---- reverse leg: end → start, in seek-batched windows.
-        let mut hi = duration;
-        while hi > 0 {
-            if wait_ring(shared, has_audio) {
+        // ---- reverse leg: OUT → IN, in seek-batched windows.
+        let mut hi = t_out;
+        while hi > t_in {
+            if wait_ring(shared, has_audio, epoch0) {
                 return Ok(true);
             }
-            let lo = (hi - REVERSE_WINDOW_100NS).max(0);
+            let lo = (hi - REVERSE_WINDOW_100NS).max(t_in);
             if decoder.seek(lo).is_err() {
                 return Ok(false);
             }
@@ -977,6 +1131,9 @@ fn seek_bounce_playback(
                     return Ok(true);
                 }
                 match decoder.next_frame() {
+                    // A window seek lands on the prior keyframe: frames
+                    // before IN never enter the window.
+                    Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => continue,
                     Ok(Some(f)) if f.pts_100ns < hi => {
                         let frame = convert_frame(f, &mut rgb_scratch);
                         bytes += frame.bgra.len() * 4;
@@ -996,7 +1153,7 @@ fn seek_bounce_playback(
                 continue;
             };
             while let Some(frame) = window.pop_back() {
-                if wait_ring(shared, has_audio) {
+                if wait_ring(shared, has_audio, epoch0) {
                     return Ok(true);
                 }
                 serve(shared, frame.bgra, &mut synth_pts);
@@ -1004,20 +1161,21 @@ fn seek_bounce_playback(
             // Strictly decreasing: every kept frame had pts < hi.
             hi = first_kept;
         }
-        // ---- forward leg: start → end, a plain decode pass.
-        if decoder.seek(0).is_err() {
+        // ---- forward leg: IN → OUT, a plain decode pass.
+        if decoder.seek(t_in).is_err() {
             return Ok(false);
         }
         loop {
-            if wait_ring(shared, has_audio) {
+            if wait_ring(shared, has_audio, epoch0) {
                 return Ok(true);
             }
             match decoder.next_frame() {
-                Ok(Some(f)) => {
+                Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => continue,
+                Ok(Some(f)) if f.pts_100ns < t_out => {
                     let frame = convert_frame(f, &mut rgb_scratch);
                     serve(shared, frame.bgra, &mut synth_pts);
                 }
-                Ok(None) => break,
+                Ok(Some(_)) | Ok(None) => break,
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -2440,7 +2598,11 @@ mod tests {
             paused: AtomicBool::new(false),
             mode: AtomicU8::new(PlayMode::PingPong as u8),
             muted: AtomicBool::new(true),
+            scrub: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
+            trim_in_100ns: AtomicI64::new(0),
+            trim_out_100ns: AtomicI64::new(i64::MAX),
+            trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(info.duration_100ns),
             video_ready: AtomicBool::new(false),
             preroll_status: AtomicU8::new(PrerollStatus::Ready as u8),
@@ -2534,7 +2696,11 @@ mod tests {
                 paused: AtomicBool::new(paused),
                 mode: AtomicU8::new(PlayMode::Once as u8),
                 muted: AtomicBool::new(false),
+                scrub: AtomicBool::new(false),
                 seek_100ns: AtomicI64::new(-1),
+            trim_in_100ns: AtomicI64::new(0),
+            trim_out_100ns: AtomicI64::new(i64::MAX),
+            trim_epoch: AtomicU64::new(0),
                 position_100ns: AtomicI64::new(0),
                 video_ready: AtomicBool::new(false),
                 preroll_status: AtomicU8::new(PrerollStatus::WaitingVideo as u8),
@@ -3171,5 +3337,211 @@ mod tests {
             "walk must be front-facing letters, not every rotation ({})",
             walk.frames.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod mode_flip_tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vj-media-{label}-{}", std::process::id()))
+    }
+
+    /// THE LOOP/BOUNCE LAW, end to end through the real SlotPlayer: a
+    /// muted looping clip wraps to frame 0 at the end (a clean jump cut,
+    /// never a tail oscillation), a mid-play flip to PING-PONG visibly
+    /// REVERSES the frame sequence, and flipping back restores the wrap.
+    #[test]
+    fn loop_wraps_clean_and_a_midplay_bounce_flip_reverses() {
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        const W: u32 = 128;
+        const H: u32 = 64;
+        const FPS: u32 = 24;
+        const FRAMES: usize = 24;
+        const BITS: usize = 5;
+        const BLOCK_W: usize = W as usize / BITS;
+        fn frame_rgb8(index: usize) -> Vec<u8> {
+            let mut out = vec![40u8; W as usize * H as usize * 3];
+            for y in 0..H as usize / 2 {
+                for x in 0..W as usize {
+                    let bit = (x / BLOCK_W).min(BITS - 1);
+                    let luma = if index >> bit & 1 == 1 { 235 } else { 16 };
+                    let at = (y * W as usize + x) * 3;
+                    out[at] = luma;
+                    out[at + 1] = luma;
+                    out[at + 2] = luma;
+                }
+            }
+            out
+        }
+        fn identity_of(bgra: &[u32]) -> usize {
+            let mut index = 0;
+            for bit in 0..BITS {
+                let x0 = bit * BLOCK_W + BLOCK_W / 4;
+                let x1 = bit * BLOCK_W + BLOCK_W * 3 / 4;
+                let mut sum = 0u32;
+                let mut count = 0u32;
+                for y in 4..H as usize / 4 {
+                    for x in x0..x1 {
+                        sum += (bgra[y * W as usize + x] >> 16) & 0xff;
+                        count += 1;
+                    }
+                }
+                if sum / count.max(1) > 128 {
+                    index |= 1 << bit;
+                }
+            }
+            index
+        }
+
+        let dir = test_dir("mode-flip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loop.mp4");
+        let mut encoder = VideoFileEncoder::new(
+            path.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: W,
+                height: H,
+                fps_num: FPS,
+                fps_den: 1,
+                video_bitrate_bps: 4_000_000,
+                audio: None,
+                keyframe_only: true,
+            },
+        )
+        .expect("encoder");
+        for index in 0..FRAMES {
+            encoder.push_frame_rgb8(&frame_rgb8(index), None).expect("push");
+        }
+        encoder.finish().expect("finish");
+
+        let mixer = Mixer::new();
+        let mut player = SlotPlayer::open(
+            SlotId::A,
+            path.to_str().unwrap(),
+            MediaType::Mp4,
+            mixer,
+            true,  // loop on
+            false, // playing
+        )
+        .expect("open");
+        player.set_muted(true);
+
+        // Collect presented identities for ~3 clip lengths.
+        let mut ids: Vec<usize> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && ids.len() < FRAMES * 3 {
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(ids.len() >= FRAMES * 2, "loop starved: {} frames", ids.len());
+        // Law 1: LOOP only ever steps forward or wraps to 0 — a backward
+        // step that is not a wrap is the tail oscillation bug.
+        let mut wraps = 0;
+        for pair in ids.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b < a {
+                assert_eq!(b, 0, "loop went BACKWARD {a}->{b} (tail oscillation)");
+                wraps += 1;
+            }
+        }
+        assert!(wraps >= 1, "never wrapped: {ids:?}");
+
+        // Law 2: flip to PING-PONG mid-play — the sequence must REVERSE.
+        player.set_mode(PlayMode::PingPong);
+        let mut ids: Vec<usize> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && ids.len() < FRAMES * 3 {
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let mut descending_run = 0;
+        let mut best_run = 0;
+        for pair in ids.windows(2) {
+            if pair[1] < pair[0] {
+                descending_run += 1;
+                best_run = best_run.max(descending_run);
+            } else if pair[1] > pair[0] {
+                descending_run = 0;
+            }
+        }
+        assert!(
+            best_run >= FRAMES / 3,
+            "ping-pong never reversed (best descending run {best_run}): {ids:?}"
+        );
+
+        // Law 3: back to LOOP — forward-or-wrap again.
+        player.set_mode(PlayMode::Loop);
+        // Let the mode change propagate through a bounce leg.
+        std::thread::sleep(Duration::from_millis(400));
+        let mut ids: Vec<usize> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && ids.len() < FRAMES * 2 {
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        // Skip the first leg (the in-flight bounce direction drains first).
+        let tail = &ids[ids.len().min(FRAMES / 2)..];
+        for pair in tail.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b < a && b != 0 {
+                // One residual backward step right at the changeover is the
+                // buffered bounce leg; a repeated pattern is the bug.
+                assert!(
+                    a - b <= 1,
+                    "loop after flip still bouncing: {a}->{b} in {tail:?}"
+                );
+            }
+        }
+
+        // Law 4: IN/OUT TRIM — the scrub bar's range handles confine the
+        // loop: every presented frame inside [in, out), wraps land on IN
+        // (never zero).
+        player.set_trim(0.25, 0.75);
+        // Drain the in-flight ring (frames decoded under the old bounds).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let _ = player.take_due_frame();
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let mut ids: Vec<usize> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && ids.len() < FRAMES * 2 {
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        assert!(ids.len() >= FRAMES, "trimmed loop starved: {}", ids.len());
+        let lo = *ids.iter().min().unwrap();
+        let hi = *ids.iter().max().unwrap();
+        assert!(
+            lo + 1 >= FRAMES / 4 && hi < FRAMES * 3 / 4,
+            "trimmed loop escaped [{}..{}): frames {lo}..{hi} in {ids:?}",
+            FRAMES / 4,
+            FRAMES * 3 / 4
+        );
+        let mut wraps = 0;
+        for pair in ids.windows(2) {
+            if pair[1] < pair[0] {
+                wraps += 1;
+                assert!(
+                    pair[1] <= FRAMES / 4 + 1,
+                    "trimmed wrap landed at {} not IN: {ids:?}",
+                    pair[1]
+                );
+            }
+        }
+        assert!(wraps >= 1, "trimmed loop never wrapped: {ids:?}");
     }
 }

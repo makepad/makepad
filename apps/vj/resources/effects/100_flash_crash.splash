@@ -29,6 +29,15 @@
     p1: "0.5 + 0.9*pulse"        // crosshair panic
     p2: "0.25 + 0.45*pulse"      // red wash breathing on the beat
 
+    // PERFORMANCE DIALS — the chart engine's own p-levers; touching one
+    // holds its pulse binding above at a fixed level (PANIC full right =
+    // the board drowns in red).
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "XHAIR", bind: "p1", default: 0.5},
+        {name: "PANIC", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x070102
     color_a: #x9aa89a
     color_b: #xff2333

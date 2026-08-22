@@ -33,6 +33,20 @@ script_mod! {
             return 16.0 / 9.0
         }
 
+        // MASTER FADEOUT: the final composite multiplies by 1-fadeout
+        // right here in the existing pass — a clean blackout with zero
+        // extra render-to-texture, on every path (plain mix, transition
+        // engaged, all of it).
+        fragment: fn(){
+            let c = self.pixel()
+            let keep = 1.0 - clamp(self.fadeout, 0.0, 1.0)
+            self.fb0 = depth_clip(
+                self.world,
+                vec4(c.x * keep, c.y * keep, c.z * keep, c.w),
+                self.depth_clip
+            )
+        }
+
         // Quad uv -> canvas uv (+ inside flag for the letterbox bars).
         to_canvas: fn(uv: vec2) -> vec3 {
             let ra = self.rect_size.x / max(self.rect_size.y, 1.0)
@@ -418,7 +432,7 @@ script_mod! {
                 )
                 let inside = step(0.0, u.x) * step(u.x, 1.0) * step(0.0, u.y) * step(u.y, 1.0)
                 let uc = clamp(u, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                return vec3(uc.x, uc.y, mix(inside, 1.0, self.fill))
+                return vec3(uc.x, uc.y, inside)
             }
             get_color_scale_pan: fn(scale: vec2, pan: vec2) {
                 if self.image_dim_w > 0.0 {
@@ -437,7 +451,13 @@ script_mod! {
                 let framed = self.fill_uv(self.pos)
                 let uv = vec2(framed.x, framed.y) * scale + pan
                 let c = self.image_texture.sample_nearest(uv)
-                return vec4(c.xyz, c.w * framed.z)
+                // Outside the inscribed picture the sample is a clamped
+                // edge texel — drawing it read as "stretched edges". The
+                // bars are BLACK now: opaque for photo/clip tiles (any
+                // fill), transparent for pure-FIT sprites (fill 0) so the
+                // pad face still shows around an icon.
+                let bar = step(0.0001, self.fill)
+                return vec4(c.xyz * framed.z, c.w * mix(framed.z, 1.0, bar))
             }
             // Subtle top/bottom vignette so the pad number (PadCell's top
             // row) and the title (both cells' bottom row) still read over
@@ -1034,6 +1054,10 @@ pub struct DrawProgram {
     pub fx_phase1: f32,
     #[live]
     pub fx_phase2: f32,
+    /// Master video fadeout 0..1: the final composite dims to black by it
+    /// (the crossfader cluster's FADEOUT knob).
+    #[live]
+    pub fadeout: f32,
 }
 
 /// One frame of karaoke, as the program should draw it: the line being sung,
@@ -1112,6 +1136,15 @@ impl VideoProgram {
     /// Bind (or clear) the karaoke subtitle. Only a CHANGE redraws: the
     /// overlay is pushed every frame the program is pumped and the words
     /// change a few times a minute.
+    /// Master video fadeout (post-everything dim to black).
+    pub fn set_fadeout(&mut self, cx: &mut Cx, fadeout: f32) {
+        let fadeout = fadeout.clamp(0.0, 1.0);
+        if (self.draw_program.fadeout - fadeout).abs() > 1e-4 {
+            self.draw_program.fadeout = fadeout;
+            self.area.redraw(cx);
+        }
+    }
+
     pub fn set_karaoke(&mut self, cx: &mut Cx, overlay: Option<KaraokeOverlay>) {
         if self.karaoke == overlay {
             return;

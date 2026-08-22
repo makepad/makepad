@@ -24,6 +24,7 @@ use super::engines_forge::ForgeEngine;
 use super::engines_harmonograph::HarmonographEngine;
 use super::engines_jet::JetEngine;
 use super::engines_pipes::PipesEngine;
+use super::engines_duo::DuoEngine;
 use super::engines_raymarch::RaymarchEngine;
 use super::engines_tiles::TilesEngine;
 use super::lsys;
@@ -64,6 +65,9 @@ pub enum ShaderKind {
     /// Fullscreen SDF raymarcher, scene = subclassable shader hook
     /// (engines_raymarch).
     Raymarch,
+    /// Two-deck transition compositor: fullscreen clip-space quad over
+    /// tex0 (deck A) + tex1 (deck B), swept by p3 (engines_duo).
+    Duo,
     /// Endless mountains + view-space fighter jet (engines_jet).
     Jet,
     /// Procedural city flyover: window-grid towers, banking cam (engines_city).
@@ -1427,6 +1431,8 @@ pub enum Engine {
     Tiles(TilesEngine),
     Flock(FlockEngine),
     Raymarch(RaymarchEngine),
+    /// Two-deck transition compositor (engines_duo).
+    Duo(DuoEngine),
     MountainJet(JetEngine),
     City(CityEngine),
     Pipes(PipesEngine),
@@ -1457,6 +1463,7 @@ impl Engine {
             Engine::Tiles(_) => ShaderKind::Tiles,
             Engine::Flock(_) => ShaderKind::Flock,
             Engine::Raymarch(_) => ShaderKind::Raymarch,
+            Engine::Duo(_) => ShaderKind::Duo,
             Engine::MountainJet(_) => ShaderKind::Jet,
             Engine::City(_) => ShaderKind::City,
             Engine::Pipes(_) => ShaderKind::Pipes,
@@ -1491,6 +1498,7 @@ impl Engine {
             Engine::Charts(_) => "stockcharts",
             Engine::Swarm(_) => "simswarm",
             Engine::Fluid(_) => "fluid",
+            Engine::Duo(_) => "transition",
             Engine::Screen => "screen",
         }
     }
@@ -1687,6 +1695,15 @@ impl Engine {
                 e.build(mesh);
                 true
             }
+            Engine::Duo(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
             Engine::Fluid(_) | Engine::Screen => false,
         }
     }
@@ -1708,6 +1725,7 @@ impl Engine {
             Engine::Tiles(e) => e.uniforms(),
             Engine::Flock(e) => e.uniforms(),
             Engine::Raymarch(e) => e.uniforms(),
+            Engine::Duo(e) => e.uniforms(),
             Engine::MountainJet(e) => e.uniforms(),
             Engine::City(e) => e.uniforms(),
             Engine::Pipes(e) => e.uniforms(),

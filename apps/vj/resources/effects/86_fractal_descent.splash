@@ -16,12 +16,21 @@
     cam_fov: 62.0
     shadow: 1
 
-    beat_pulse: 0.6
+    beat_pulse: "0.6 * (0.2 + 1.6*p2)"
     beat_rate: 1.0
     fog: 0.05
-    glow: 1.45
+    glow: "1.45 * (0.25 + 1.5*p1)"
     p0: "0.06 * sin(bar * tau)"   // the fold slowly breathes over the bar
-    dials: [ {name: "FOLD", bind: "p0", default: 0.5} ]
+
+    // PERFORMANCE DIALS — FOLD is this doc's own p0 lever (the scene hook
+    // reads self.user.x; touching it holds the fold open); GLOW and PUMP
+    // route p1/p2. Mid-knob = the stock look, exact.
+    p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FOLD", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x05040f
     color_a: #x8f4dff

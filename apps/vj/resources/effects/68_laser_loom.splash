@@ -26,6 +26,14 @@
     p1: "0.5 * pulse"                  // width slams on the beat
     p3: "beat * 0.02"                  // slow hue spin
 
+    // PERFORMANCE DIALS — the engine's own p-levers; touching DETUNE or
+    // WIDTH overrides its music binding above with a held value.
+    dials: [
+        {name: "DETUNE", bind: "p0", default: 0.5},
+        {name: "WIDTH", bind: "p1", default: 0.5},
+        {name: "DEPTH", bind: "p2", default: 0.0}
+    ]
+
     color_bg: #x030309
     color_a: #x40ffcc
     color_b: #xff40cc

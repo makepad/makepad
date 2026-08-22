@@ -24,6 +24,15 @@
     beat_pulse: 0.25
     p1: 0.3                      // gentle hot-tip glow
 
+    // PERFORMANCE DIALS — the pipes engine's own p-levers: FRONT shoves
+    // the growth front forward, HEAT gains the fresh-growth burn, SHINE
+    // hardens the plastic specular.
+    dials: [
+        {name: "FRONT", bind: "p0", default: 0.0},
+        {name: "HEAT", bind: "p1", default: 0.3},
+        {name: "SHINE", bind: "p2", default: 0.0}
+    ]
+
     color_bg: #x0a0e16
     color_a: #x37c8b4
     color_b: #xb45fd8

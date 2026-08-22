@@ -97,7 +97,13 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("70_monastery_spiral", include_str!("../../resources/effects/70_monastery_spiral.splash")),
     ("71_snare_garden", include_str!("../../resources/effects/71_snare_garden.splash")),
     ("72_serpent_strobe", include_str!("../../resources/effects/72_serpent_strobe.splash")),
-    ("79_tile_lagoon", include_str!("../../resources/effects/79_tile_lagoon.splash")),
+        ("73_kick_forge", include_str!("../../resources/effects/73_kick_forge.splash")),
+    ("74_ember_pit", include_str!("../../resources/effects/74_ember_pit.splash")),
+    ("75_coin_fountain", include_str!("../../resources/effects/75_coin_fountain.splash")),
+    ("76_copper_reef", include_str!("../../resources/effects/76_copper_reef.splash")),
+    ("77_guillotine", include_str!("../../resources/effects/77_guillotine.splash")),
+    ("78_candy_stack", include_str!("../../resources/effects/78_candy_stack.splash")),
+("79_tile_lagoon", include_str!("../../resources/effects/79_tile_lagoon.splash")),
     ("80_bar_shatter", include_str!("../../resources/effects/80_bar_shatter.splash")),
     ("81_conveyor_wall", include_str!("../../resources/effects/81_conveyor_wall.splash")),
     ("82_dusk_murmuration", include_str!("../../resources/effects/82_dusk_murmuration.splash")),
@@ -108,17 +114,36 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("87_molten_glass", include_str!("../../resources/effects/87_molten_glass.splash")),
     ("88_corridor_rush", include_str!("../../resources/effects/88_corridor_rush.splash")),
     ("89_beat_lens", include_str!("../../resources/effects/89_beat_lens.splash")),
-    ("90_ridge_runner", include_str!("../../resources/effects/90_ridge_runner.splash")),
-    ("91_vector_patrol", include_str!("../../resources/effects/91_vector_patrol.splash")),
-    ("92_night_strike", include_str!("../../resources/effects/92_night_strike.splash")),
-    ("93_midnight_metropolis", include_str!("../../resources/effects/93_midnight_metropolis.splash")),
-    ("94_neon_grid_city", include_str!("../../resources/effects/94_neon_grid_city.splash")),
-    ("95_lightcycle_arena", include_str!("../../resources/effects/95_lightcycle_arena.splash")),
-    ("96_screensaver_pipes", include_str!("../../resources/effects/96_screensaver_pipes.splash")),
+        ("90_meadow_gale", include_str!("../../resources/effects/90_meadow_gale.splash")),
+("90_ridge_runner", include_str!("../../resources/effects/90_ridge_runner.splash")),
+        ("91_gale_grove", include_str!("../../resources/effects/91_gale_grove.splash")),
+("91_vector_patrol", include_str!("../../resources/effects/91_vector_patrol.splash")),
+        ("92_murmur_swarm", include_str!("../../resources/effects/92_murmur_swarm.splash")),
+("92_night_strike", include_str!("../../resources/effects/92_night_strike.splash")),
+        ("93_attractor_storm", include_str!("../../resources/effects/93_attractor_storm.splash")),
+("93_midnight_metropolis", include_str!("../../resources/effects/93_midnight_metropolis.splash")),
+        ("94_ink_drop", include_str!("../../resources/effects/94_ink_drop.splash")),
+("94_neon_grid_city", include_str!("../../resources/effects/94_neon_grid_city.splash")),
+        ("95_dye_wash", include_str!("../../resources/effects/95_dye_wash.splash")),
+("95_lightcycle_arena", include_str!("../../resources/effects/95_lightcycle_arena.splash")),
+        ("96_dye_relief", include_str!("../../resources/effects/96_dye_relief.splash")),
+("96_screensaver_pipes", include_str!("../../resources/effects/96_screensaver_pipes.splash")),
     ("97_pressure_manifold", include_str!("../../resources/effects/97_pressure_manifold.splash")),
     ("98_bull_terminal", include_str!("../../resources/effects/98_bull_terminal.splash")),
     ("99_amber_exchange", include_str!("../../resources/effects/99_amber_exchange.splash")),
     ("100_flash_crash", include_str!("../../resources/effects/100_flash_crash.splash")),
+    ("101_trans_dissolve", include_str!("../../resources/effects/101_trans_dissolve.splash")),
+    ("102_trans_wipe", include_str!("../../resources/effects/102_trans_wipe.splash")),
+    ("103_trans_wipe_v", include_str!("../../resources/effects/103_trans_wipe_v.splash")),
+    ("104_trans_iris", include_str!("../../resources/effects/104_trans_iris.splash")),
+    ("105_trans_push", include_str!("../../resources/effects/105_trans_push.splash")),
+    ("106_trans_blinds", include_str!("../../resources/effects/106_trans_blinds.splash")),
+    ("107_trans_lumakey", include_str!("../../resources/effects/107_trans_lumakey.splash")),
+    ("108_trans_chromakey", include_str!("../../resources/effects/108_trans_chromakey.splash")),
+    ("109_trans_additive", include_str!("../../resources/effects/109_trans_additive.splash")),
+    ("110_trans_negative", include_str!("../../resources/effects/110_trans_negative.splash")),
+    ("111_trans_pip", include_str!("../../resources/effects/111_trans_pip.splash")),
+    ("112_trans_screenmix", include_str!("../../resources/effects/112_trans_screenmix.splash")),
     ]
 }
 
@@ -151,6 +176,18 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "80_bar_shatter",
     "81_conveyor_wall",
     "89_beat_lens",
+    "101_trans_dissolve",
+    "102_trans_wipe",
+    "103_trans_wipe_v",
+    "104_trans_iris",
+    "105_trans_push",
+    "106_trans_blinds",
+    "107_trans_lumakey",
+    "108_trans_chromakey",
+    "109_trans_additive",
+    "110_trans_negative",
+    "111_trans_pip",
+    "112_trans_screenmix",
 ];
 
 pub fn is_transition_preset(name: &str) -> bool {
@@ -170,6 +207,9 @@ fn preset_tags(name: &str) -> Vec<String> {
 pub struct SeedReport {
     pub present: usize,
     pub published: usize,
+    /// OUR heads whose bundled source changed on disk and were republished
+    /// as a new revision of the same asset (self-healing reconcile).
+    pub updated: usize,
     /// Already-seeded presets whose search annotation gained the
     /// `transition` tag (stores seeded before the tag existed).
     pub retagged: usize,
@@ -192,12 +232,33 @@ pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
         };
         match client.resolve_alias(&alias) {
             Ok(dto) => {
-                // Present (possibly a user's newer revision) — the CONTENT is
-                // never touched. The search ANNOTATION is updatable in place,
-                // so a store seeded before the transition tag existed still
-                // gets its TRANSITION lane: our own heads are retagged, a
-                // user-edited head (different generator) is left alone.
+                // Present. SELF-HEALING: a head WE seeded (builtin-tagged)
+                // whose bundled source has since changed on disk is
+                // republished as a NEW REVISION of the same asset — that is
+                // how dial-declaration and other doc backfills reach
+                // existing stores. A user-edited head (no builtin tag) is
+                // NEVER touched; a merely-untagged transition preset gets
+                // its annotation updated in place.
                 report.present += 1;
+                match head_matches_bundle(client, &dto, source, &mut tagged) {
+                    Ok(HeadState::Theirs) | Ok(HeadState::Current) => {}
+                    Ok(HeadState::Stale) => {
+                        match seed_one(client, name, source, &alias_str, Some(dto.asset_id)) {
+                            Ok(()) => {
+                                report.updated += 1;
+                                continue;
+                            }
+                            Err(e) => {
+                                report.failed.push((alias_str, format!("update: {e}")));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        report.failed.push((alias_str.clone(), format!("head check: {e}")));
+                        continue;
+                    }
+                }
                 if is_transition_preset(name) {
                     match retag_transition(client, &dto, name, source, &mut tagged) {
                         Ok(true) => report.retagged += 1,
@@ -215,7 +276,7 @@ pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
                 continue;
             }
         }
-        match seed_one(client, name, source, &alias_str) {
+        match seed_one(client, name, source, &alias_str, None) {
             Ok(()) => report.published += 1,
             Err(e) => report.failed.push((alias_str, e)),
         }
@@ -244,6 +305,58 @@ fn assets_with_tag(
         }
     }
     Ok(out)
+}
+
+/// What the alias head is, relative to the bundled preset dir.
+enum HeadState {
+    /// A user-edited head (not builtin-tagged): never touched.
+    Theirs,
+    /// Our head, content identical to the bundled file.
+    Current,
+    /// Our head, but the bundled source changed: republish it.
+    Stale,
+}
+
+/// Compare the alias head against the bundled source by CONTENT DIGEST
+/// (the manifest's Source blob id is the payload's sha256).
+fn head_matches_bundle(
+    client: &mut AssetClient,
+    dto: &makepad_asset_client::AliasDto,
+    source: &str,
+    sets: &mut RetagSets,
+) -> Result<HeadState, String> {
+    if sets.builtin.is_none() {
+        sets.builtin = Some(assets_with_tag(client, "builtin")?);
+    }
+    if !sets.builtin.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
+        return Ok(HeadState::Theirs);
+    }
+    let manifest = client
+        .fetch_asset_manifest(&dto.head_revision)
+        .map_err(|e| e.to_string())?;
+    let head_blob = manifest
+        .files
+        .iter()
+        .find(|f| f.role == FileRole::Source)
+        .map(|f| f.blob)
+        .ok_or_else(|| "head has no Source file".to_string())?;
+    let bundled = makepad_asset_data::BlobId::hash_of(source.as_bytes());
+    if head_blob == bundled {
+        Ok(HeadState::Current)
+    } else {
+        Ok(HeadState::Stale)
+    }
+}
+
+/// Post-seed acceptance count: how many vjeffect rows the store actually
+/// lists, against how many the binary bundles. The caller logs a shortfall
+/// LOUDLY — a store showing a subset of the shipped library is a bug, and
+/// this line is how it gets seen.
+pub fn library_check(client: &mut AssetClient) -> Result<(u64, usize), String> {
+    let mut query = makepad_asset_client::CatalogQuery::browse(1);
+    query.kind = Some(AssetKind::VjEffect);
+    let page = client.catalog_search(&query, None).map_err(|e| e.to_string())?;
+    Ok((page.total, bundled_presets().len()))
 }
 
 /// The two lazily-built ownership/state sets the retag pass consults.
@@ -299,11 +412,14 @@ fn retag_transition(
     Ok(true)
 }
 
+/// Publish one bundled preset. `reuse` republishes as a new revision of an
+/// EXISTING asset (the self-healing update path); `None` mints a fresh one.
 fn seed_one(
     client: &mut AssetClient,
     name: &str,
     source: &str,
     alias_str: &str,
+    reuse: Option<makepad_asset_data::AssetId>,
 ) -> Result<(), String> {
     let title = title_of(source, name);
     let description = description_of(source);
@@ -325,6 +441,7 @@ fn seed_one(
         PublishRights::generated_cc0(),
     );
     bundle.alias = alias_str.parse().ok();
+    bundle.asset_id = reuse;
     bundle.description = description;
     bundle.tags = preset_tags(name);
     bundle.generator = "makepad-vj effects".to_string();
@@ -457,5 +574,47 @@ mod tests {
         assert!(a.len() > 500, "suspiciously small jpeg");
         assert!(a.starts_with(&[0xff, 0xd8]), "not a jpeg");
         assert_ne!(a, b, "two presets must not share a placeholder");
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// THE LIBRARY LAW: every .splash in the preset directory is registered
+    /// in `bundled_presets` — a store can never be seeded a subset because
+    /// someone forgot the include line. (Compile-time include_str! means the
+    /// registry cannot cover files it does not name; this test names them.)
+    #[test]
+    fn every_preset_file_is_registered_and_every_entry_has_a_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/effects");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("preset dir")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.strip_suffix(".splash").map(str::to_string)
+            })
+            .collect();
+        on_disk.sort();
+        let mut registered: Vec<String> =
+            bundled_presets().iter().map(|(n, _)| n.to_string()).collect();
+        registered.sort();
+        assert_eq!(
+            on_disk, registered,
+            "resources/effects and seed.rs bundled_presets disagree — \
+             register the missing preset (or delete the stale entry)"
+        );
+    }
+
+    #[test]
+    fn transition_set_names_only_registered_presets() {
+        for name in TRANSITION_PRESETS {
+            assert!(
+                bundled_presets().iter().any(|(n, _)| n == name),
+                "transition preset {name} is not in the bundled registry"
+            );
+        }
     }
 }

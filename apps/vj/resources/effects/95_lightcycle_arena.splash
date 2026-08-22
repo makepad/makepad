@@ -30,6 +30,15 @@
     p1: "0.4 + 1.0*pulse"       // trail heads flare on the kick
     p2: 0.8                      // tower edge glow
 
+    // PERFORMANCE DIALS — the city engine's own p-levers: DENS lights
+    // tower windows, HEAD holds the trail-head flare when touched, EDGE
+    // gains the tower edge glow.
+    dials: [
+        {name: "DENS", bind: "p0", default: 0.0},
+        {name: "HEAD", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.8}
+    ]
+
     color_bg: #x02060a
     color_a: #x22d8ff
     color_b: #xff9a1e

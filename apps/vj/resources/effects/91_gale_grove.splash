@@ -20,15 +20,22 @@
 
     wind_field: "wind"
     flow: 0.9
-    gust: "2.0 + pulse * 1.8"
+    gust: "(2.0 + pulse * 1.8) * (0.2 + 1.6*p0)"
     travel: 0.26
     decay: 0.5
     scale: 2.2
     extent: 6.0
 
     sway: 0.5
-    beat_pulse: 0.25
+    beat_pulse: "0.25 * (0.2 + 1.6*p1)"
     beat_rate: 0.5
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "GUST", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x0a0c14
     color_a: #x2a5a3a
@@ -37,7 +44,7 @@
 
     cam_orbit: 0.07
     fog: 0.05
-    glow: 1.05
+    glow: "1.05 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 3}

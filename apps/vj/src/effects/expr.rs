@@ -22,6 +22,9 @@
 //! | `bass`   | low band 0..1 (stub 0 until fed)                    |
 //! | `mid`    | mid band 0..1 (stub 0 until fed)                    |
 //! | `high`   | high band 0..1 (stub 0 until fed)                   |
+//! | `p0`..`p3` | the user params for THIS frame: the host's dial   |
+//! |          | override when touched, else the doc's own `p0:` value |
+//! |          | (a p-param's OWN binding sees other p's as 0)       |
 //!
 //! Constants: `pi`, `tau`.
 //!
@@ -33,7 +36,7 @@
 //! envelope), `min max pow step` (2), `clamp mix` (3).
 
 /// Signal vector: order is the `Sig::*` indices.
-pub const SIG_COUNT: usize = 11;
+pub const SIG_COUNT: usize = 15;
 
 #[derive(Clone, Copy)]
 pub struct Signals(pub [f32; SIG_COUNT]);
@@ -50,6 +53,12 @@ impl Signals {
     pub const BASS: usize = 8;
     pub const MID: usize = 9;
     pub const HIGH: usize = 10;
+    /// p0..p3 — resolved user params (host dial override, else the doc's
+    /// own binding). Contiguous: `P0 + n` is pn.
+    pub const P0: usize = 11;
+    pub const P1: usize = 12;
+    pub const P2: usize = 13;
+    pub const P3: usize = 14;
 }
 
 fn signal_index(name: &str) -> Option<usize> {
@@ -65,6 +74,10 @@ fn signal_index(name: &str) -> Option<usize> {
         "bass" => Signals::BASS,
         "mid" => Signals::MID,
         "high" => Signals::HIGH,
+        "p0" => Signals::P0,
+        "p1" => Signals::P1,
+        "p2" => Signals::P2,
+        "p3" => Signals::P3,
         _ => return None,
     })
 }
@@ -449,7 +462,7 @@ impl<'a> Parser<'a> {
                     }
                     None => Err(format!(
                         "unknown signal '{name}' (time dt beat phase bar bpm pulse energy \
-                         bass mid high, constants pi tau)"
+                         bass mid high p0 p1 p2 p3, constants pi tau)"
                     )),
                 },
             };
@@ -494,6 +507,27 @@ mod tests {
         assert_eq!(e.eval(&sig()), 1.0);
         let e = Expr::compile("tri(0.75)").unwrap();
         assert!((e.eval(&sig()) - 0.5).abs() < 1e-5);
+    }
+
+#[test]
+fn bare_signal_expr() {
+    let mut s = Signals([0.0; SIG_COUNT]);
+    s.0[Signals::P0] = 0.7;
+    let e = Expr::compile("p0").unwrap();
+    assert!((e.eval(&s) - 0.7).abs() < 1e-6);
+}
+
+    #[test]
+    fn user_param_signals() {
+        // p0..p3 are signals: dial-routed bindings like "0.4 + p1*1.2".
+        let mut s = sig();
+        s.0[Signals::P0] = 0.5;
+        s.0[Signals::P1] = 0.25;
+        s.0[Signals::P3] = 1.0;
+        let e = Expr::compile("0.4 + p1 * 1.2").unwrap();
+        assert!((e.eval(&s) - 0.7).abs() < 1e-5);
+        let e = Expr::compile("mix(0.2, 1.0, p0) + p2 + p3").unwrap();
+        assert!((e.eval(&s) - 1.6).abs() < 1e-5);
     }
 
     #[test]

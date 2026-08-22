@@ -1017,41 +1017,30 @@ script_mod! {
                     draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") }
                 }
             }
+            // ONE row: a hand-scale fader (a full-width sweep was
+            // impractical) with its cue/sync controls INLINE — the stacked
+            // second row's height goes back to the deck content.
             View{
                 width: Fill
                 height: Fit
-                flow: Down
-                spacing: 3
+                flow: Right
+                spacing: 6
                 align: Align{x: 0.5, y: 0.5}
-                View{
-                    width: Fill
-                    height: Fit
-                    flow: Right
-                    spacing: 6
-                    align: Align{x: 0.0, y: 0.5}
-                    MusicLabel{width: 12 text: "A"}
-                    xfader := CrossFader{}
-                    MusicLabel{width: 12 text: "B"}
+                fade_to_a := MusicButton{width: 46 height: 22 text: "◀ A"}
+                MusicLabel{width: 12 text: "A"}
+                xfader := CrossFader{width: 300}
+                MusicLabel{width: 12 text: "B"}
+                fade_to_b := MusicButton{width: 46 height: 22 text: "B ▶"}
+                auto_sync := MusicButton{width: 92 height: 22 text: "AUTO SYNC"}
+                decks_swap := MusicButton{width: 56 height: 22 text: "SWAP"}
+                xfade_secs := Slider{
+                    width: 110
+                    text: "fade"
+                    min: 0.05
+                    max: 20.0
+                    default: 4.0
                 }
-                View{
-                    width: Fit
-                    height: Fit
-                    flow: Right
-                    spacing: 6
-                    align: Align{x: 0.5, y: 0.5}
-                    fade_to_a := MusicButton{width: 46 height: 22 text: "◀ A"}
-                    auto_sync := MusicButton{width: 92 height: 22 text: "AUTO SYNC"}
-                    decks_swap := MusicButton{width: 56 height: 22 text: "SWAP"}
-                    xfade_secs := Slider{
-                        width: 130
-                        text: "fade"
-                        min: 0.05
-                        max: 20.0
-                        default: 4.0
-                    }
-                    xcurve := DropDown{labels: ["Equal power" "Linear"]}
-                    fade_to_b := MusicButton{width: 46 height: 22 text: "B ▶"}
-                }
+                xcurve := DropDown{labels: ["Equal power" "Linear"]}
             }
             View{
                 width: 316

@@ -13,8 +13,15 @@
     orbit_speed: 0.35
     beat_swell: 0.25
 
-    beat_pulse: 0.25
+    beat_pulse: "0.25 * (0.2 + 1.6*p0)"
     beat_rate: 0.25
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FLARE", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x140408
     color_a: #xff5533
@@ -23,9 +30,9 @@
 
     cam_orbit: 0.09
     fog: 0.025
-    glow: 1.15
+    glow: "1.15 * (0.25 + 1.5*p2)"
 
     stages: [
-        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 3}
+        {kind: "bloom", threshold: "clamp(0.5 - (p1-0.5)*0.6, 0.02, 0.95)", strength: 1.3, levels: 3}
     ]
 }

@@ -16,9 +16,16 @@
     radius_decay: 0.68
     sides: 6
 
-    sway: "0.5 + pulse * 0.4"
+    sway: "(0.5 + pulse * 0.4) * (0.25 + 1.5*p0)"
     sway_freq: 0.55
-    beat_pulse: 0.25
+    beat_pulse: "0.25 * (0.2 + 1.6*p1)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x060a12
     color_a: #x8899bb
@@ -27,7 +34,7 @@
 
     cam_orbit: 0.08
     fog: 0.03
-    glow: 1.1
+    glow: "1.1 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 2}
