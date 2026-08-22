@@ -35,14 +35,17 @@
 //!
 //! # Document keys (`engine: "forge"`)
 //! `shards` (2000, ≤6000), `radius` (4.0), `impulse` (7.0 launch speed),
-//! `gravity` (15.0), `spin` (1.0 tumble rate), `membrane_wave` (0.5),
-//! `shard_size` (0.16), `scatter` (0.55 lateral cone), `falloff` (0.55 —
-//! impulse fade towards the rim), `pile` (0.55 centre pile height),
-//! `auto_pump` (1 — pulse drives the forge until real audio arrives; set 0
-//! for silence-still), `glint` (1.0). Bindings: `p0` = impulse gain (THE
-//! binding — `"0.5 + 2.4*bass + pulse"`), `p1` = extra membrane wave gain,
-//! `p2` = glint boost (hats), `p3` free. Hook: `fx_color(t = flight heat
-//! 0..1, attr = (id, aux, r0, r1), normal = facet, wpos)`.
+//! `gravity` (42.0 — HIGH gravity = high jumps: launches are capped to
+//! land before the next hit, so the reachable height is `g·T²/8`),
+//! `spin` (1.0 tumble rate), `membrane_wave` (0.5), `shard_size` (0.16),
+//! `scatter` (0.55 lateral cone), `falloff` (0.55 — impulse fade towards
+//! the rim), `pile` (0.55 centre pile height), `auto_pump` (1 — a constant
+//! launch-gain floor so the forge fires on every free-running beat; set 0
+//! for silence-still once real audio is wired), `glint` (1.0). Bindings:
+//! `p0` = impulse gain (THE binding — `"0.6 + 2.6*bass"`), `p1` = extra
+//! membrane wave gain, `p2` = glint boost (hats), `p3` free. Hook:
+//! `fx_color(t = flight heat 0..1, attr = (id, aux, r0, r1), normal =
+//! facet, wpos)`.
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -82,7 +85,7 @@ impl Default for ForgeConfig {
             shards: 2000,
             radius: 4.0,
             impulse: 7.0,
-            gravity: 15.0,
+            gravity: 42.0,
             spin: 1.0,
             membrane_wave: 0.5,
             shard_size: 0.16,
@@ -290,12 +293,11 @@ script_mod! {
             let phase = self.time_beat.z
             let ts = phase * secs_per
             let hit = floor(self.time_beat.y * rate - phase + 0.5)
-            // Impulse gain: the music binding (p0), with the pulse fallback
-            // so a bare document still forges on the free-running clock.
-            let gain = clamp(
-                max(self.user.x, self.flow.z * self.time_beat.w),
-                0.0, 6.0
-            )
+            // Impulse gain: the music binding (p0) with the auto_pump floor.
+            // The floor is CONSTANT within a cycle on purpose — the punch
+            // comes from the ballistics resetting at each hit; a gain that
+            // decayed in-flight would sag every arc into a shiver.
+            let gain = clamp(max(self.user.x, self.flow.z), 0.0, 6.0)
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let cam_pos = cam.xyz / max(cam.w, 0.0001)
 
@@ -315,8 +317,14 @@ script_mod! {
                 // ---- shard ---------------------------------------------
                 let id = attr.x
                 let hs = self.hash1(id * 0.618 + hit * 37.0)
-                let v0 = self.shape.z * attr.z * (0.55 + 0.9 * hs) * gain
                 let g = max(self.shape.y, 0.5)
+                // Velocity cap (per-shard jittered): every shard is DOWN
+                // again before the next hit — no mid-air teleports, ever.
+                let vcap = g * secs_per * 0.475 * (0.55 + 0.45 * hs)
+                let v0 = min(
+                    self.shape.z * attr.z * (0.55 + 0.9 * hs) * gain,
+                    vcap
+                )
                 let yb = max(v0 * ts - 0.5 * g * ts * ts, 0.0)
                 let airk = smoothstep(0.0, 0.05, yb)
                 // Drift ∝ height: 0 at launch AND landing — no pops.
@@ -431,7 +439,7 @@ pub struct DrawVjFxForge {
     #[live(vec4(0.0, 1.0, 1.0, 0.0))]
     pub anim: Vec4f,
     /// (beat_rate, gravity, impulse, spin).
-    #[live(vec4(1.0, 15.0, 7.0, 1.0))]
+    #[live(vec4(1.0, 42.0, 7.0, 1.0))]
     pub shape: Vec4f,
     /// (membrane_wave, shard_size, auto_pump, glint).
     #[live(vec4(0.5, 0.16, 1.0, 1.0))]

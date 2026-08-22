@@ -16,11 +16,15 @@
 
 use super::engines_charts::ChartsEngine;
 use super::engines_city::CityEngine;
+use super::engines_copper::CopperEngine;
 use super::engines_domino::DominoEngine;
 use super::engines_firefly::FireflyEngine;
 use super::engines_flock::FlockEngine;
+use super::engines_forge::ForgeEngine;
 use super::engines_harmonograph::HarmonographEngine;
+use super::engines_jet::JetEngine;
 use super::engines_pipes::PipesEngine;
+use super::engines_raymarch::RaymarchEngine;
 use super::engines_tiles::TilesEngine;
 use super::lsys;
 use super::mesh::{FxMesh, FxRng};
@@ -49,16 +53,34 @@ pub enum ShaderKind {
     Harmono,
     /// Toppling domino boxes, front = f(beat) (engines_domino).
     Domino,
+    /// Kick-launched shard pile + drum membrane (engines_forge).
+    Forge,
+    /// Rasterbar slabs with beat choreography (engines_copper).
+    Copper,
     /// Textured tile grid sampling input0 per tile (engines_tiles).
     Tiles,
     /// Oriented glider triangles, wing flap in the VS (engines_flock).
     Flock,
+    /// Fullscreen SDF raymarcher, scene = subclassable shader hook
+    /// (engines_raymarch).
+    Raymarch,
+    /// Endless mountains + view-space fighter jet (engines_jet).
+    Jet,
     /// Procedural city flyover: window-grid towers, banking cam (engines_city).
     City,
     /// 3D-pipes lattice, growth replayed on the beat (engines_pipes).
     Pipes,
     /// Candlestick terminal, beat-committed OHLC walk (engines_charts).
     Charts,
+    /// The Mesh family with the analytic sway replaced by a wind SIM FIELD
+    /// (sim.rs); selected by the doc's `wind_field:` key, never by an
+    /// engine directly.
+    MeshField,
+    /// Stateful GPU particles: the VS fetches pos/vel from a sim-field
+    /// state texture by instance id (engines_simfx).
+    SimSwarm,
+    /// The fluid engine's dye view pass (engines_simfx + sim.rs).
+    FluidView,
 }
 
 /// Per-frame camera the engine suggests; the document can override knobs.
@@ -1400,11 +1422,19 @@ pub enum Engine {
     Firefly(FireflyEngine),
     Harmono(HarmonographEngine),
     Domino(DominoEngine),
+    Forge(ForgeEngine),
+    Copper(CopperEngine),
     Tiles(TilesEngine),
     Flock(FlockEngine),
+    Raymarch(RaymarchEngine),
+    MountainJet(JetEngine),
     City(CityEngine),
     Pipes(PipesEngine),
     Charts(ChartsEngine),
+    /// Stateful GPU particles from a sim field (engines_simfx).
+    Swarm(super::engines_simfx::SwarmEngine),
+    /// Stable-fluids dye renderer (engines_simfx + sim.rs; no mesh).
+    Fluid(super::engines_simfx::FluidEngine),
     /// Fullscreen: no mesh at all — input texture 0 IS the content and the
     /// stage chain does the work.
     Screen,
@@ -1422,11 +1452,17 @@ impl Engine {
             Engine::Firefly(_) => ShaderKind::Firefly,
             Engine::Harmono(_) => ShaderKind::Harmono,
             Engine::Domino(_) => ShaderKind::Domino,
+            Engine::Forge(_) => ShaderKind::Forge,
+            Engine::Copper(_) => ShaderKind::Copper,
             Engine::Tiles(_) => ShaderKind::Tiles,
             Engine::Flock(_) => ShaderKind::Flock,
+            Engine::Raymarch(_) => ShaderKind::Raymarch,
+            Engine::MountainJet(_) => ShaderKind::Jet,
             Engine::City(_) => ShaderKind::City,
             Engine::Pipes(_) => ShaderKind::Pipes,
             Engine::Charts(_) => ShaderKind::Charts,
+            Engine::Swarm(_) => ShaderKind::SimSwarm,
+            Engine::Fluid(_) => ShaderKind::FluidView, // fluid skips the mesh scene pass
             Engine::Screen => ShaderKind::Emitters, // never drawn; screen skips the scene pass
         }
     }
@@ -1444,11 +1480,17 @@ impl Engine {
             Engine::Firefly(_) => "firefly",
             Engine::Harmono(_) => "harmonograph",
             Engine::Domino(_) => "domino",
+            Engine::Forge(_) => "forge",
+            Engine::Copper(_) => "copperbars",
             Engine::Tiles(_) => "tiles",
             Engine::Flock(_) => "flock",
+            Engine::Raymarch(_) => "raymarch",
+            Engine::MountainJet(_) => "mountainjet",
             Engine::City(_) => "city",
             Engine::Pipes(_) => "pipes",
             Engine::Charts(_) => "stockcharts",
+            Engine::Swarm(_) => "simswarm",
+            Engine::Fluid(_) => "fluid",
             Engine::Screen => "screen",
         }
     }
@@ -1555,6 +1597,24 @@ impl Engine {
                 e.build(mesh);
                 true
             }
+            Engine::Forge(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::Copper(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
             Engine::Tiles(e) => {
                 if e.built {
                     return false;
@@ -1574,6 +1634,24 @@ impl Engine {
                 }
                 e.step(dt.clamp(0.0, 0.1), time, beat_phase);
                 e.emit(mesh);
+                true
+            }
+            Engine::Raymarch(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::MountainJet(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
                 true
             }
             Engine::City(e) => {
@@ -1600,7 +1678,16 @@ impl Engine {
                 e.regen(dt.clamp(0.0, 0.1), beat_phase, mesh);
                 true
             }
-            Engine::Screen => false,
+            Engine::Swarm(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::Fluid(_) | Engine::Screen => false,
         }
     }
 
@@ -1616,12 +1703,17 @@ impl Engine {
             Engine::Firefly(e) => e.uniforms(),
             Engine::Harmono(e) => e.uniforms(),
             Engine::Domino(e) => e.uniforms(),
+            Engine::Forge(e) => e.uniforms(),
+            Engine::Copper(e) => e.uniforms(),
             Engine::Tiles(e) => e.uniforms(),
             Engine::Flock(e) => e.uniforms(),
+            Engine::Raymarch(e) => e.uniforms(),
+            Engine::MountainJet(e) => e.uniforms(),
             Engine::City(e) => e.uniforms(),
             Engine::Pipes(e) => e.uniforms(),
             Engine::Charts(e) => e.uniforms(),
-            Engine::Emitters(_) | Engine::Screen => EngineUniforms::default(),
+            Engine::Swarm(e) => e.uniforms(),
+            Engine::Emitters(_) | Engine::Fluid(_) | Engine::Screen => EngineUniforms::default(),
         }
     }
 

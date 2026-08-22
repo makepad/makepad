@@ -8211,7 +8211,7 @@ impl App {
                         if self.fx_decode_pending.remove(&revision).is_some() {
                             let cache = service::session_config_from_env()
                                 .cache_parent
-                                .join("cache-vjfx-thumbs");
+                                .join("cache-vjfx-thumbs-30");
                             let _ = std::fs::remove_file(fx_thumbs::cache_path(
                                 &cache, &revision,
                             ));
@@ -8365,7 +8365,7 @@ impl App {
                 thumbs.set_cache_dir(
                     service::session_config_from_env()
                         .cache_parent
-                        .join("cache-vjfx-thumbs"),
+                        .join("cache-vjfx-thumbs-30"),
                 );
             }
             let Some(cache_dir) = thumbs.cache_dir().map(Path::to_path_buf) else { return };

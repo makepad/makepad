@@ -84,6 +84,14 @@ Regenerate the table when the library changes; the seeding module
 | 82_dusk_murmuration | Dusk Murmuration | flock | starling silhouettes on a glowing dusk sky; the goal |
 | 83_confetti_swarm | Confetti Swarm | flock | additive neon gliders; a predator dives through the swarm |
 | 84_storm_cell | Storm Cell | particles/clouds | dark cumulus with lightning INSIDE on the kick (gated |
+| 85_pillar_sanctum | Pillar Sanctum | raymarch | infinite hypostyle hall flown down one lane; columns twist |
+| 86_fractal_descent | Fractal Descent | raymarch | kaleidoscopic-IFS fractal orbited in the dark, fold angle |
+| 87_molten_glass | Molten Glass | raymarch | smooth-min metaball puddle, radii pumping on the beat; the |
+| 88_corridor_rush | Corridor Rush | raymarch | endless run of rooms; bulkhead doorways yawn open on the |
+| 89_beat_lens | Beat Lens | raymarch/optics | glass blobs refract input0 via real Snell rays, bend on |
+| 90_ridge_runner | Ridge Runner | mountainjet | alpenglow range streaming under a banking fighter jet, |
+| 91_vector_patrol | Vector Patrol | mountainjet/wire | Battlezone vector terrain, jet as a hot green outline |
+| 92_night_strike | Night Strike | mountainjet/nv | night-vision sortie: phosphor ramp + sensor grain, burner |
 | 93_midnight_metropolis | Midnight Metropolis | city/night | realistic night flyover: window grids re-roll per beat, |
 | 94_neon_grid_city | Neon Grid City | city/retro | wireframe-neon towers, striped synthwave sun, hot-pink |
 | 95_lightcycle_arena | Lightcycle Arena | city/tron | fine-grid floor + ten light-cycle trail walls sweeping |

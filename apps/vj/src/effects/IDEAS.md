@@ -55,7 +55,7 @@ Every idea from the user's directives, mapped to its status. Statuses:
 | GPU fluid sim (float render passes) | planned | needs float render-target formats (RenderRGBAf16/32 — to verify in platform/src/texture.rs); stable-fluids advect/project ping-pong; budgeted jacobi iters |
 | Stateful GPU particles (state in float sim textures, VS-fetched) | planned | same float-pass primitive; vertex-stage `sample_nearest(uv, lod)` is verified available |
 | Sim-texture FIELDS consumed by mesh engines (living wind for trees) | planned | named field node in the render graph, VS-sampled by any engine — design noted in CONTRACT.md once the float-pass primitive lands |
-| Raymarching family (SDF scenes, subclassable scene fn) | planned | base marcher shader + `scene_sdf` hook; reduced-res internal pass + tent upscale; clean-room technique only |
+| Raymarching family (SDF scenes, subclassable scene fn) | done | `raymarch` engine (engines_raymarch.rs): one clip-space quad + a sphere-trace pixel shader; `scene_sdf` SUBCLASS = the variant mechanism (SDF toolkit helpers, branched-NaN normal, 3-tap AO, gated 14-step soft shadow, cosine palette, one-bounce Snell glass sampling input0). Presets 85-89 verified. NOT built: the reduced-res internal pass — the render graph has no half-res scene pass today, so the budget lives in the `steps` doc param (documented per preset in MANIFEST.md) |
 | Reaction-diffusion / Chladni plates | partial | Chladni = cheap heightmap pattern branch (planned); reaction-diffusion = rejected for now (a real sim engine's worth of work, fluid sim first) |
 | Strange attractors (Lorenz/Aizawa) as ribbon fields | planned | `field:` param on ribbons — cheap |
 | Lissajous / oscilloscope curves | planned | `path:` param on tunnel — cheap |
@@ -66,7 +66,7 @@ Every idea from the user's directives, mapped to its status. Statuses:
 | Shadertoy technique mining (plasma/aurora/palette cycling) | partial | cosine-palette technique used (own constants); more looks land with the raymarch family; NO verbatim ports (user's boundary) |
 | Tron light-cycle arenas (grid floor, trail walls, chase cam) | done | city engine style "tron" + `trails`: beat-swept wall fronts on the street lattice (collapse ahead of the front in the VS), fine-grid floor; ridden cycles not modeled (trails + grid are the energy); preset 95_lightcycle_arena |
 | Retro city flyover (wireframe/neon towers, sun-stripe horizon) | done | city engine style "retro": neon cell-edge facades, banded sun disc on the sky cylinder, glowing grid streets; preset 94_neon_grid_city |
-| Endless mountain range + virtual fighter jet | planned | heightmap already scrolls endlessly; jet = primitive-built foreground mesh, banked turns, afterburner pulse; wireframe/sunset/night-vision variants |
+| Endless mountain range + virtual fighter jet | done | `mountainjet` engine (engines_jet.rs): heightmap streaming technique + view-space primitive jet (banked weave, beat-pulsed afterburner as opaque shaped geometry) in one stream; the heightmap engine itself could not host a foreground mesh (its VS displaces everything by grid uv). Presets 90/91/92 = sunset alpenglow / Battlezone wire / night-vision, all verified |
 | Feedback-driven particle class (prev-frame texture as particle input) | planned | folds into the sim-texture family |
 
 ## Expansion builds (local/agent_state/vjfx-ideas/IDEAS-EXPANSION.md)

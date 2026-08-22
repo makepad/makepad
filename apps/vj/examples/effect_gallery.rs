@@ -189,10 +189,12 @@ impl AppMain for App {
                 let widget = self.ui.widget(cx, ids!(fx_view));
                 let line = widget.borrow::<effects::VjFxView>().map(|view| {
                     format!(
-                        "effect_gallery perf: regen {:.3} ms, tick {:.3} ms ({} instr){}",
+                        "effect_gallery perf: regen {:.3} ms, tick {:.3} ms ({} instr), \
+                         sim {:.3} ms{}",
                         view.regen_ms,
                         view.tick_ms,
                         view.tick_instructions,
+                        view.sim_ms,
                         view.tick_error
                             .as_deref()
                             .map(|e| format!(", tick error: {e}"))

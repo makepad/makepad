@@ -271,6 +271,12 @@ pub struct EffectDoc {
     pub shader_hooks: Option<ScriptObjectRef>,
     /// The `frame: fn(fx){...}` per-frame tick (emitters engine).
     pub frame_fn: Option<ScriptObjectRef>,
+    /// Declared + engine-synthesized SIM FIELDS (float ping-pong state
+    /// textures updated per frame on the GPU — see sim.rs).
+    pub fields: Vec<super::sim::SimFieldCfg>,
+    /// `wind_field: "<name>"` — mesh-family engines swap their analytic
+    /// sway for this wind field (the DrawVjFxMeshField shader).
+    pub wind_field: Option<String>,
 }
 
 fn warp_kind(kind: &str) -> Option<WarpMode> {
@@ -505,6 +511,60 @@ impl EffectDoc {
                 cfg.flash = r.f32(live_id!(flash), cfg.flash);
                 Engine::Domino(DominoEngine::new(cfg))
             }
+            "forge" | "kickforge" => {
+                use super::engines_forge::{ForgeConfig, ForgeEngine};
+                let mut cfg = ForgeConfig { seed, ..Default::default() };
+                cfg.shards = r.usize(live_id!(shards), cfg.shards).clamp(64, 6000);
+                cfg.radius = r.f32(live_id!(radius), cfg.radius);
+                cfg.impulse = r.f32(live_id!(impulse), cfg.impulse);
+                cfg.gravity = r.f32(live_id!(gravity), cfg.gravity);
+                cfg.spin = r.f32(live_id!(spin), cfg.spin);
+                cfg.membrane_wave = r.f32(live_id!(membrane_wave), cfg.membrane_wave);
+                cfg.shard_size = r.f32(live_id!(shard_size), cfg.shard_size);
+                cfg.scatter = r.f32(live_id!(scatter), cfg.scatter);
+                cfg.falloff = r.f32(live_id!(falloff), cfg.falloff);
+                cfg.pile = r.f32(live_id!(pile), cfg.pile);
+                cfg.auto_pump = r.f32(live_id!(auto_pump), cfg.auto_pump);
+                cfg.glint = r.f32(live_id!(glint), cfg.glint);
+                // Mirror of the shared beat_rate key: the forge shader needs
+                // it to reconstruct seconds-per-pulse and the pulse index.
+                cfg.rate = r.f32(live_id!(beat_rate), cfg.rate).clamp(0.05, 8.0);
+                Engine::Forge(ForgeEngine::new(cfg))
+            }
+            "copperbars" | "bars" | "rasterbars" => {
+                use super::engines_copper::{CopperConfig, CopperEngine, CopperMode};
+                let mut cfg = CopperConfig { seed, ..Default::default() };
+                cfg.bars = r.usize(live_id!(bars), cfg.bars).clamp(4, 64);
+                cfg.width = r.f32(live_id!(width), cfg.width);
+                cfg.span = r.f32(live_id!(span), cfg.span);
+                cfg.thickness = r.f32(live_id!(thickness), cfg.thickness);
+                cfg.depth = r.f32(live_id!(depth), cfg.depth);
+                cfg.amplitude = r.f32(live_id!(amplitude), cfg.amplitude);
+                cfg.weave = r.f32(live_id!(weave), cfg.weave);
+                cfg.metal = r.f32(live_id!(metal), cfg.metal);
+                cfg.drop = r.f32(live_id!(drop), cfg.drop);
+                if let Some(mode) = r.string(live_id!(mode)) {
+                    match CopperMode::parse(&mode) {
+                        Some(m) => {
+                            cfg.mode = m;
+                            cfg.mode_b = m;
+                        }
+                        None => r.warnings.push(format!(
+                            "mode '{mode}' unknown (sine/pile/scissor/curtain)"
+                        )),
+                    }
+                }
+                if let Some(mode) = r.string(live_id!(mode_b)) {
+                    match CopperMode::parse(&mode) {
+                        Some(m) => cfg.mode_b = m,
+                        None => r.warnings.push(format!(
+                            "mode_b '{mode}' unknown (sine/pile/scissor/curtain)"
+                        )),
+                    }
+                }
+                cfg.rate = r.f32(live_id!(beat_rate), cfg.rate).clamp(0.05, 8.0);
+                Engine::Copper(CopperEngine::new(cfg))
+            }
             "tiles" => {
                 use super::engines_tiles::{TilesConfig, TilesEngine, TilesMode};
                 let mut cfg = TilesConfig { seed, ..Default::default() };
@@ -543,6 +603,48 @@ impl EffectDoc {
                 // Mirror of the shared bar_beats key — the predator's clock.
                 cfg.bar_beats = r.f32(live_id!(bar_beats), cfg.bar_beats).clamp(1.0, 32.0);
                 Engine::Flock(FlockEngine::new(cfg))
+            }
+            "raymarch" => {
+                use super::engines_raymarch::{RaymarchCam, RaymarchConfig, RaymarchEngine};
+                let mut cfg = RaymarchConfig::default();
+                cfg.steps = r.usize(live_id!(steps), cfg.steps).clamp(16, 120);
+                cfg.max_dist = r.f32(live_id!(max_dist), cfg.max_dist);
+                if let Some(cam) = r.string(live_id!(cam)) {
+                    match RaymarchCam::parse(&cam) {
+                        Some(c) => cfg.cam = c,
+                        None => r
+                            .warnings
+                            .push(format!("cam '{cam}' unknown (orbit/fly/dolly)")),
+                    }
+                }
+                cfg.cam_speed = r.f32(live_id!(cam_speed), cfg.cam_speed);
+                cfg.cam_dist = r.f32(live_id!(cam_dist), cfg.cam_dist);
+                cfg.cam_height = r.f32(live_id!(cam_height), cfg.cam_height);
+                cfg.fov = r.f32(live_id!(cam_fov), cfg.fov);
+                cfg.shadow = r.f32(live_id!(shadow), cfg.shadow);
+                Engine::Raymarch(RaymarchEngine::new(cfg))
+            }
+            "mountainjet" | "jet" => {
+                use super::engines_jet::{JetConfig, JetEngine, JetLook};
+                let mut cfg = JetConfig { seed, ..Default::default() };
+                cfg.res = r.usize(live_id!(res), cfg.res).clamp(8, 220);
+                cfg.size = r.f32(live_id!(size), cfg.size);
+                cfg.height = r.f32(live_id!(height), cfg.height);
+                cfg.noise_scale = r.f32(live_id!(noise_scale), cfg.noise_scale);
+                cfg.scroll = r.f32(live_id!(scroll), cfg.scroll);
+                cfg.ridged = r.f32(live_id!(ridged), cfg.ridged).clamp(0.0, 1.0);
+                cfg.cells = r.f32(live_id!(cells), cfg.cells);
+                cfg.jet_size = r.f32(live_id!(jet_size), cfg.jet_size);
+                cfg.weave = r.f32(live_id!(weave), cfg.weave);
+                if let Some(look) = r.string(live_id!(look)) {
+                    match JetLook::parse(&look) {
+                        Some(l) => cfg.look = l,
+                        None => r.warnings.push(format!(
+                            "look '{look}' unknown (solid/wire/nightvision)"
+                        )),
+                    }
+                }
+                Engine::MountainJet(JetEngine::new(cfg))
             }
             "city" => {
                 use super::engines_city::{CityConfig, CityEngine, CityStyle};
@@ -604,12 +706,42 @@ impl EffectDoc {
                 cfg.scan = r.f32(live_id!(scan), cfg.scan);
                 Engine::Charts(ChartsEngine::new(cfg))
             }
+            "simswarm" | "swarm" | "gpuparticles" => {
+                use super::engines_simfx::{SwarmConfig, SwarmEngine};
+                let mut cfg = SwarmConfig { seed, ..Default::default() };
+                cfg.count = r.usize(live_id!(count), cfg.count).clamp(256, 25_600);
+                cfg.size = r.f32(live_id!(size), cfg.size);
+                cfg.stretch = r.f32(live_id!(stretch), cfg.stretch);
+                cfg.speed_color = r.f32(live_id!(speed_color), cfg.speed_color);
+                // bound/life are also (animatable) field keys; the engine
+                // only needs constants for framing + the age fade.
+                if let Animatable::Const(v) = r.anim(live_id!(bound), cfg.bound) {
+                    cfg.bound = v;
+                }
+                if let Animatable::Const(v) = r.anim(live_id!(life), cfg.life) {
+                    cfg.life = v;
+                }
+                if let Some(f) = r.string(live_id!(state_field)) {
+                    cfg.state_field = f;
+                }
+                Engine::Swarm(SwarmEngine::new(cfg))
+            }
+            "fluid" => {
+                use super::engines_simfx::{FluidConfig, FluidEngine};
+                let mut cfg = FluidConfig::default();
+                cfg.grid = r.usize(live_id!(grid), cfg.grid).clamp(32, 256);
+                if let Some(f) = r.string(live_id!(field)) {
+                    cfg.field = f;
+                }
+                Engine::Fluid(FluidEngine::new(cfg))
+            }
             "screen" => Engine::Screen,
             other => {
                 return Err(format!(
                     "engine '{other}' unknown — one of particles, lsystem, metaballs, \
                      heightmap, ribbons, tunnel, grass, emitters, firefly, harmonograph, \
-                     domino, tiles, flock, city, pipes, stockcharts, screen"
+                     domino, forge, copperbars, tiles, flock, raymarch, mountainjet, city, \
+                     pipes, stockcharts, simswarm, fluid, screen"
                 ));
             }
         };
@@ -660,6 +792,41 @@ impl EffectDoc {
         };
 
         let input0 = r.string(live_id!(input0));
+
+        // -- sim fields (float GPU state textures — sim.rs) -----------------
+        // Declared in `fields: [...]`; the sim engines synthesize the field
+        // they need from DOCUMENT-level keys when none is declared, and a
+        // named-but-missing wind field materializes with defaults (an
+        // AI-authored doc degrades, never vanishes).
+        let mut fields = super::sim::parse_fields(&mut r);
+        let wind_field = r.string(live_id!(wind_field));
+        match &engine {
+            Engine::Swarm(e) => {
+                if !fields.iter().any(|f| f.name == e.cfg.state_field) {
+                    let mut cfg = super::sim::SimFieldCfg::swarm(&e.cfg.state_field, e.side);
+                    super::sim::read_field_keys(&mut r, &mut cfg);
+                    // The engine's quad sheet defines the texel count.
+                    cfg.res = e.side;
+                    fields.push(cfg);
+                }
+            }
+            Engine::Fluid(e) => {
+                if !fields.iter().any(|f| f.name == e.cfg.field) {
+                    let mut cfg = super::sim::SimFieldCfg::fluid(&e.cfg.field, e.cfg.grid);
+                    super::sim::read_field_keys(&mut r, &mut cfg);
+                    cfg.res = e.cfg.grid;
+                    fields.push(cfg);
+                }
+            }
+            _ => {}
+        }
+        if let Some(wf) = &wind_field {
+            if !fields.iter().any(|f| f.name == *wf) {
+                let mut cfg = super::sim::SimFieldCfg::wind(wf);
+                super::sim::read_field_keys(&mut r, &mut cfg);
+                fields.push(cfg);
+            }
+        }
 
         // -- post stages ----------------------------------------------------
         let stage_objs = r.object_list(live_id!(stages));
@@ -766,6 +933,8 @@ impl EffectDoc {
             stages,
             shader_hooks,
             frame_fn,
+            fields,
+            wind_field,
         })
     }
 }
