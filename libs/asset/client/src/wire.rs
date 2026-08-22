@@ -162,6 +162,24 @@ pub fn path_blob_upload(ns: &str) -> String {
     format!("/v1/blobs?ns={ns}")
 }
 
+/// Admit a SERVER-LOCAL file by reference: the store hashes it where it lies
+/// and catalogues it without copying (see the server's `blob_ref_admit`).
+///
+/// Only meaningful when the client and the store share a filesystem — the
+/// path travels, the bytes do not. Servers with the policy off answer 404,
+/// which is the caller's signal to fall back to a real upload.
+pub fn path_blob_ref(ns: &str) -> String {
+    format!("/v1/blobs/ref?ns={ns}")
+}
+
+/// Re-scan reference blobs (admin). Bounded page; `after` resumes.
+pub fn path_blob_refs(after: Option<&BlobId>, limit: u32) -> String {
+    match after {
+        Some(a) => format!("/v1/blob-refs?after={a}&limit={limit}"),
+        None => format!("/v1/blob-refs?limit={limit}"),
+    }
+}
+
 pub fn path_asset_register() -> String {
     "/v1/assets".to_string()
 }
@@ -487,6 +505,9 @@ pub const MAX_PAGE_ENTRIES: usize = 512;
 pub const MAX_CURSOR_BYTES: usize = 1024;
 /// Longest namespace string accepted in a DTO.
 pub const MAX_NAMESPACE_BYTES: usize = 64;
+/// Longest server-local path a reference admission may name. Matches the
+/// store's own bound so a refusal happens here, before a round trip.
+pub const MAX_BLOB_REF_PATH_BYTES: usize = 4096;
 /// Longest title accepted in a DTO.
 pub const MAX_TITLE_BYTES: usize = 512;
 /// Longest snippet accepted in a DTO (server budget is 320).

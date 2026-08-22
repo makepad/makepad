@@ -36,6 +36,10 @@ makepad-asset-client = { path = "../client" }
 # resolve; without these entries cargo never compiles them.
 #
 [[test]]
+name = "http_blob_refs_http"
+path = "tests/http/blob_refs_http.rs"
+
+[[test]]
 name = "http_chat_http"
 path = "tests/http/chat_http.rs"
 

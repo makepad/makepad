@@ -449,6 +449,28 @@ impl AssetClient {
         self.api.gc_blobs(request)
     }
 
+    /// Re-scan one bounded page of the store's reference blobs — the
+    /// content it catalogued without copying — reporting what each named
+    /// file looks like on the server's disk right now.
+    pub fn blob_refs_page(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ClientResult<crate::api::BlobRefsPage> {
+        self.api.blob_refs_page(after, limit)
+    }
+
+    /// Admit a file the SERVER can see as a reference blob: hashed in place,
+    /// catalogued, never copied. Only meaningful when this client and the
+    /// store share a filesystem.
+    pub fn admit_blob_ref(
+        &self,
+        ns: &str,
+        path: &str,
+    ) -> ClientResult<crate::api::BlobRefAdmission> {
+        self.api.admit_blob_ref(ns, path)
+    }
+
     pub fn gc_status(&self) -> ClientResult<crate::dto::GcStatusDto> {
         self.api.gc_status()
     }
