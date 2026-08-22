@@ -25,8 +25,7 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::{CxWindow, WindowId},
-        window::WindowVisuals,
+        window::{CxWindow, WindowId, WindowVisuals},
     },
     std::{
         any::{Any, TypeId},
@@ -35,6 +34,8 @@ use {
         rc::Rc,
     },
 };
+#[cfg(target_os = "windows")]
+use crate::window::{DcompChildGeom, DcompChildId, DcompChildZ, DcompContent};
 pub enum OpenUrlInPlace {
     Yes,
     No,
@@ -429,6 +430,47 @@ pub enum CxOsOp {
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
+
+    /// DirectComposition child visual on a `window.direct_composition` HWND.
+    #[cfg(target_os = "windows")]
+    DcompCreateChild {
+        window_id: WindowId,
+        child_id: DcompChildId,
+        z: DcompChildZ,
+    },
+    #[cfg(target_os = "windows")]
+    DcompSetChildContent {
+        window_id: WindowId,
+        child_id: DcompChildId,
+        content: Option<DcompContent>,
+    },
+    /// Fill a child visual with one opaque colour instead of a caller-owned
+    /// swap chain. Meant for a [`DcompChildZ::BACKDROP`] child.
+    #[cfg(target_os = "windows")]
+    DcompSetChildSolid {
+        window_id: WindowId,
+        child_id: DcompChildId,
+        color: crate::makepad_math::Vec4,
+    },
+    #[cfg(target_os = "windows")]
+    DcompSetChildGeom {
+        window_id: WindowId,
+        child_id: DcompChildId,
+        geom: DcompChildGeom,
+    },
+    /// Move an existing child to a different z. The host restacks every child,
+    /// so the new order does not depend on creation time.
+    #[cfg(target_os = "windows")]
+    DcompSetChildZ {
+        window_id: WindowId,
+        child_id: DcompChildId,
+        z: DcompChildZ,
+    },
+    #[cfg(target_os = "windows")]
+    DcompRemoveChild {
+        window_id: WindowId,
+        child_id: DcompChildId,
+    },
 }
 
 impl std::fmt::Debug for CxOsOp {
@@ -521,6 +563,18 @@ impl std::fmt::Debug for CxOsOp {
             Self::XrSetLocalAnchor(_) => write!(f, "XrSetLocalAnchor"),
             Self::XrSetLocalFloor(_) => write!(f, "XrSetLocalFloor"),
             Self::XrDiscoverAnchor(_) => write!(f, "XrDiscoverAnchor"),
+            #[cfg(target_os = "windows")]
+            Self::DcompCreateChild { .. } => write!(f, "DcompCreateChild"),
+            #[cfg(target_os = "windows")]
+            Self::DcompSetChildContent { .. } => write!(f, "DcompSetChildContent"),
+            #[cfg(target_os = "windows")]
+            Self::DcompSetChildSolid { .. } => write!(f, "DcompSetChildSolid"),
+            #[cfg(target_os = "windows")]
+            Self::DcompSetChildGeom { .. } => write!(f, "DcompSetChildGeom"),
+            #[cfg(target_os = "windows")]
+            Self::DcompSetChildZ { .. } => write!(f, "DcompSetChildZ"),
+            #[cfg(target_os = "windows")]
+            Self::DcompRemoveChild { .. } => write!(f, "DcompRemoveChild"),
         }
     }
 }
