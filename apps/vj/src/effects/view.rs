@@ -29,7 +29,9 @@ use super::doc::{EffectDoc, GrowMode, StageCfg};
 use super::engines::{CamPose, EmitterInst, Engine, ShaderKind};
 use super::engines_domino::DrawVjFxDomino;
 use super::engines_firefly::DrawVjFxFirefly;
+use super::engines_flock::DrawVjFxFlock;
 use super::engines_harmonograph::DrawVjFxHarmono;
+use super::engines_tiles::DrawVjFxTiles;
 use super::expr::Signals;
 use super::mesh::FxMesh;
 use super::post::{PostChain, PostDraws, ResolvedStage};
@@ -84,6 +86,10 @@ pub struct VjFxView {
     draw_harmono: DrawVjFxHarmono,
     #[live]
     draw_domino: DrawVjFxDomino,
+    #[live]
+    draw_tiles: DrawVjFxTiles,
+    #[live]
+    draw_flock: DrawVjFxFlock,
     // Post + present quads.
     #[live]
     draw_feedback: DrawVjFxFeedback,
@@ -259,6 +265,8 @@ impl VjFxView {
                         ShaderKind::Firefly => live_id!(DrawVjFxFirefly),
                         ShaderKind::Harmono => live_id!(DrawVjFxHarmono),
                         ShaderKind::Domino => live_id!(DrawVjFxDomino),
+                        ShaderKind::Tiles => live_id!(DrawVjFxTiles),
+                        ShaderKind::Flock => live_id!(DrawVjFxFlock),
                     };
                     let modules = vm.bx.heap.modules;
                     let draw_mod = vm.bx.heap.value(modules, live_id!(draw).into(), NoTrap);
@@ -298,6 +306,12 @@ impl VjFxView {
                 }
                 ShaderKind::Domino => {
                     self.draw_domino.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Tiles => {
+                    self.draw_tiles.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Flock => {
+                    self.draw_flock.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
             }
         });
@@ -508,6 +522,10 @@ impl VjFxView {
             }
             Engine::Harmono(_) => (vec3f(0.0, 0.0, 0.0), 8.8, 1.4),
             Engine::Domino(e) => (vec3f(0.0, 0.0, 0.0), e.extent * 1.9, e.extent * 0.95),
+            Engine::Flock(e) => {
+                let b = if e.cfg.bound.is_finite() { e.cfg.bound.clamp(1.0, 40.0) } else { 6.0 };
+                (vec3f(0.0, 0.0, 0.0), b * 2.0, b * 0.32)
+            }
             Engine::Emitters(_) => (vec3f(0.0, 2.0, 0.0), 16.0, 4.0),
             _ => (vec3f(0.0, 1.2, 0.0), 7.0, 1.8),
         };
@@ -807,6 +825,13 @@ impl VjFxView {
             ShaderKind::Firefly => draw_engine!(&mut self.draw_firefly),
             ShaderKind::Harmono => draw_engine!(&mut self.draw_harmono),
             ShaderKind::Domino => draw_engine!(&mut self.draw_domino),
+            ShaderKind::Tiles => {
+                if let Some(tex) = &input0 {
+                    self.draw_tiles.draw_vars.set_texture(0, tex);
+                }
+                draw_engine!(&mut self.draw_tiles)
+            }
+            ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
             ShaderKind::Particles => {
                 if let Some(tex) = &input0 {
                     self.draw_particles.draw_vars.set_texture(0, tex);

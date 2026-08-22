@@ -505,12 +505,51 @@ impl EffectDoc {
                 cfg.flash = r.f32(live_id!(flash), cfg.flash);
                 Engine::Domino(DominoEngine::new(cfg))
             }
+            "tiles" => {
+                use super::engines_tiles::{TilesConfig, TilesEngine, TilesMode};
+                let mut cfg = TilesConfig { seed, ..Default::default() };
+                if let Some(mode) = r.string(live_id!(mode)) {
+                    match TilesMode::parse(&mode) {
+                        Some(m) => cfg.mode = m,
+                        None => r.warnings.push(format!(
+                            "mode '{mode}' unknown (wave/shatter/conveyor/spiral)"
+                        )),
+                    }
+                }
+                cfg.grid = r.usize(live_id!(grid), cfg.grid).clamp(4, 64);
+                cfg.spread = r.f32(live_id!(spread), cfg.spread);
+                cfg.aspect = r.f32(live_id!(aspect), cfg.aspect);
+                cfg.gap = r.f32(live_id!(gap), cfg.gap);
+                cfg.amp = r.f32(live_id!(amp), cfg.amp);
+                cfg.freq = r.f32(live_id!(freq), cfg.freq);
+                cfg.spin = r.f32(live_id!(spin), cfg.spin);
+                cfg.scatter = r.f32(live_id!(scatter), cfg.scatter);
+                Engine::Tiles(TilesEngine::new(cfg))
+            }
+            "flock" | "murmuration" => {
+                use super::engines_flock::{FlockConfig, FlockEngine};
+                let mut cfg = FlockConfig { seed, ..Default::default() };
+                cfg.birds = r.usize(live_id!(birds), cfg.birds).clamp(8, 600);
+                cfg.size = r.f32(live_id!(size), cfg.size);
+                cfg.speed = r.f32(live_id!(flight_speed), cfg.speed);
+                cfg.flap = r.f32(live_id!(flap), cfg.flap);
+                cfg.bound = r.f32(live_id!(bound), cfg.bound);
+                cfg.spacing = r.f32(live_id!(spacing), cfg.spacing);
+                cfg.vision = r.f32(live_id!(vision), cfg.vision);
+                cfg.goal_beats = r.f32(live_id!(goal_beats), cfg.goal_beats);
+                cfg.predator = r.f32(live_id!(predator), cfg.predator);
+                cfg.additive = r.f32(live_id!(additive), cfg.additive);
+                cfg.bank = r.f32(live_id!(bank), cfg.bank);
+                // Mirror of the shared bar_beats key — the predator's clock.
+                cfg.bar_beats = r.f32(live_id!(bar_beats), cfg.bar_beats).clamp(1.0, 32.0);
+                Engine::Flock(FlockEngine::new(cfg))
+            }
             "screen" => Engine::Screen,
             other => {
                 return Err(format!(
                     "engine '{other}' unknown — one of particles, lsystem, metaballs, \
                      heightmap, ribbons, tunnel, grass, emitters, firefly, harmonograph, \
-                     domino, screen"
+                     domino, tiles, flock, screen"
                 ));
             }
         };

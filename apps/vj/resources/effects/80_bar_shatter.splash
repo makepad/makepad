@@ -1,0 +1,39 @@
+// BAR SHATTER — the picture EXPLODES on the downbeat and reassembles
+// pixel-perfect before the next one. Pattern taught here: the tiles
+// engine's "shatter" mode is bar-clocked in the shader (flight vectors are
+// BAKED per tile — rim tiles fly further, every tile tumbles on its own
+// hashed axis), so the doc only shapes the mood: spin, scatter reach, a
+// p0 kicker that adds a pulse-snap to the launch, and grout glow that
+// burns while the tiles are airborne.
+{
+    name: "Bar Shatter"
+    engine: "tiles"
+    mode: "shatter"
+    seed: 12
+
+    grid: 22
+    spread: 7.0
+    aspect: 0.75
+    gap: 0.04
+    scatter: 1.3
+    spin: 1.7
+
+    bar_beats: 4
+    beat_pulse: 0.9
+    // Extra launch bite right on the downbeat (bar-gated pulse).
+    p0: "0.22 * env(bar) * pulse"
+    p2: "0.30 * pulse"
+
+    input0: "test"
+
+    color_bg: #x0a0614
+    color_a: #x8899ff
+    color_b: #xff3f88
+    color_c: #xcfd8ff
+
+    stages: [
+        {kind: "feedback", amount: "0.35 + 0.3 * env(bar)", zoom: 1.006,
+         rotate: 0.0, dim: 0.94},
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3}
+    ]
+}

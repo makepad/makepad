@@ -1,0 +1,34 @@
+// CONVEYOR WALL — the endless belt: alternate tile rows stream the picture
+// in opposite directions forever, rolling away over the lip at each edge.
+// Pattern taught here: the conveyor's motion NEVER speed-modulates (a
+// time-scaled position would jump when a binding moved) — the beat lives
+// in the light instead: lanes flash in golden-ratio sequence every beat
+// (shader-side) and p2 pumps the grout lattice.
+{
+    name: "Conveyor Wall"
+    engine: "tiles"
+    mode: "conveyor"
+    seed: 31
+
+    grid: 30
+    spread: 8.5
+    aspect: 0.72
+    gap: 0.08
+    amp: 0.35
+    freq: 1.5
+
+    beat_pulse: 0.8
+    p2: "0.10 + 0.30 * pulse"
+
+    input0: "test"
+
+    color_bg: #x120806
+    color_a: #xffb35a
+    color_b: #xd84518
+    color_c: #xffd9a8
+
+    stages: [
+        {kind: "chroma", p1: "0.10 + 0.14 * pulse", p2: 0.0},
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 3}
+    ]
+}

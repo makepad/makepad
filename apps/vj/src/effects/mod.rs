@@ -170,6 +170,35 @@
 //! * bindings: `p0` nudges the front (beats), `p1` adds impact flash,
 //!   `p2` adds anticipation glow; hooks: `fx_color` (engines_domino.rs)
 //!
+//! ### `engine: "tiles"` — the input image shattered into a tile grid
+//! One textured quad per tile; each tile carries its uv window + grid
+//! coords + seeds on the stream and the vertex shader runs an endless
+//! motion program. The pixel stage samples input0 (animated dummy when
+//! nothing is bound). The engine flies its own gently swaying front-on
+//! camera (doc cam keys ignored, tunnel-style).
+//! * `mode`: `wave` (traveling swell, tiles tilt with the slope) |
+//!   `shatter` (BAR-SYNCED explode + pixel-perfect reassembly) |
+//!   `conveyor` (endless belt, alternate rows opposite ways, edge rolls) |
+//!   `spiral` (differential whirlpool with a beat funnel)
+//! * `grid` (24, 4..64 per side), `spread` (7 plane width), `aspect` (1.0),
+//!   `gap` (0.06 grout), `amp` (0.5), `freq` (1.0 — wave freq / conveyor
+//!   speed / spiral spin), `spin` (1.0 shatter tumble), `scatter` (1.2
+//!   shatter flight distance)
+//! * bindings: `p0` ADDS shatter drive (strobe the explosion), `p1` scales
+//!   wave amp, `p2` adds grout glow; hooks: `fx_tint(c, attr, flash)`
+//!
+//! ### `engine: "flock"` — boid murmuration of oriented gliders
+//! CPU boids (O(N²), regen-per-frame family) emit banked wing/fin
+//! triangles; the wing FLAP runs in the vertex shader off per-vertex flap
+//! amplitude + phase. The goal point jumps every `goal_beats` beats (the
+//! flock swings with the music); an optional predator dives through the
+//! flock on every bar.
+//! * `birds` (320, ≤600), `size` (0.14), `flight_speed` (2.4), `flap`
+//!   (3.0/s), `bound` (6.0), `spacing` (0.45), `vision` (1.6),
+//!   `goal_beats` (2), `predator` (0..1 bar-scatter), `additive` (0 dusk
+//!   silhouettes .. 1 neon), `bank` (1.0 roll-into-turns)
+//! * hooks: `fx_color` (t = speed01 — see engines_flock.rs)
+//!
 //! ### `engine: "grass"` — waving meadow (thousands of blades)
 //! * `blades` (7000, ≤20000), `area` (9 half-extent), `height` (0.85),
 //!   `width` (0.035), `clump` (0..1 clustering). Gusts travel: the wind is
@@ -207,7 +236,9 @@ pub mod doc;
 pub mod engines;
 pub mod engines_domino;
 pub mod engines_firefly;
+pub mod engines_flock;
 pub mod engines_harmonograph;
+pub mod engines_tiles;
 pub mod expr;
 pub mod lsys;
 pub mod mesh;
@@ -227,5 +258,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     engines_firefly::script_mod(vm);
     engines_harmonograph::script_mod(vm);
     engines_domino::script_mod(vm);
+    engines_tiles::script_mod(vm);
+    engines_flock::script_mod(vm);
     view::script_mod(vm);
 }
