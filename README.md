@@ -11,6 +11,27 @@ It also has a large set of AI backends integrated for embedding llms or generati
 
 This repository contains the core engine, widgets, tools, and examples.
 
+## Building (quick start)
+
+Rust stable is the toolchain everywhere: https://rustup.rs
+
+**macOS** — install Rust and the Xcode command line tools, then:
+
+```bash
+git checkout work
+cargo run -p makepad-vj --release
+```
+
+**Windows** — install Rust, Visual Studio 2022 (Desktop development with
+C++), and the NVIDIA CUDA toolkit (any recent version; the build finds it
+by itself). Then the same `cargo run -p makepad-vj --release`. Without a
+CUDA toolkit the build still links — the GPU-AI lanes just stub out.
+
+**Linux** — the VJ currently only compiles with CUDA present, and the
+lane is not regularly tested; expect to fix small things. The errors are
+shallow — point an AI coding assistant at them and it will get you
+building.
+
 ## What Makepad Is
 
 - A cross-platform UI runtime for native and web targets.
