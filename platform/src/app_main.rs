@@ -353,6 +353,9 @@ macro_rules! app_main {
             }
             //cx.borrow_mut().init_websockets("");
             cx.borrow_mut().init_cx_os();
+            // `--remote`: a localhost HTTP control surface for agents / tests.
+            // No-op unless the flag (or MAKEPAD_REMOTE) is present.
+            $crate::remote::start_if_requested();
             Cx::event_loop(cx);
         }
 

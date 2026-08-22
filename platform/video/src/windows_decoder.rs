@@ -11,7 +11,7 @@ use {
         DecodedAudioChunk, DecodedVideoFrame, VideoFileCodec, VideoFileError, VideoFileInfo,
     },
     windows::{
-        core::PCWSTR,
+        core::{GUID, PCWSTR},
         Win32::Media::MediaFoundation::{
             IMFSample, IMFSourceReader, MFAudioFormat_PCM,
             MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL,
@@ -26,9 +26,17 @@ use {
             MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             MF_SOURCE_READER_MEDIASOURCE,
         },
-        Win32::System::Variant::VT_UI8,
+        Win32::System::Com::StructuredStorage::{
+            PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+        },
+        Win32::System::Variant::{VARENUM, VT_UI8},
     },
 };
+
+/// `VT_I8` — the trimmed vendored windows crate generates only the `VARENUM`
+/// values it already uses. `IMFSourceReader::SetCurrentPosition` with a NULL
+/// time format wants the position as a signed 100ns `LONGLONG`, i.e. VT_I8.
+const VT_I8: VARENUM = VARENUM(20);
 
 pub struct WindowsVideoFileDecoder {
     reader: IMFSourceReader,
@@ -386,5 +394,48 @@ impl WindowsVideoFileDecoder {
                 samples,
             }))
         }
+    }
+
+    /// Position the demuxer at or before `target_100ns` and re-arm both
+    /// streams. Landing exactly on the target is the facade's job: Media
+    /// Foundation can only seek to a *sync sample*, so the reader restarts at
+    /// the key frame at or before the target and the caller decodes forward
+    /// from there.
+    pub fn seek_to(&mut self, target_100ns: i64) -> Result<(), VideoFileError> {
+        // How a media source answers a request to position past its own end is
+        // source-specific — some accept it and report end-of-stream, some fail
+        // the call. Clamping inside the file makes it the former everywhere,
+        // so a past-the-end seek reaches EOS instead of erroring.
+        let position_100ns = if self.info.duration_100ns > 0 {
+            target_100ns.min(self.info.duration_100ns - 1)
+        } else {
+            target_100ns
+        };
+        unsafe {
+            // NULL time format => position is 100ns units as a signed
+            // LONGLONG. Built by hand rather than dropped through a
+            // conversion so nothing can reinterpret the tag.
+            let position = PROPVARIANT {
+                Anonymous: PROPVARIANT_0 {
+                    Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                        vt: VT_I8,
+                        wReserved1: 0,
+                        wReserved2: 0,
+                        wReserved3: 0,
+                        Anonymous: PROPVARIANT_0_0_0 {
+                            hVal: position_100ns,
+                        },
+                    }),
+                },
+            };
+            self.reader
+                .SetCurrentPosition(&GUID::zeroed(), &position)
+                .map_err(|e| hr_err("IMFSourceReader::SetCurrentPosition", e))?;
+        }
+        // The seek re-arms both streams: whatever end-of-stream we had reached
+        // before is no longer where we are.
+        self.video_eos = false;
+        self.audio_eos = false;
+        Ok(())
     }
 }

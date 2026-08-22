@@ -17,7 +17,8 @@ use {
         Win32::Media::MediaFoundation::{
             eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8, IMFAttributes,
             IMFByteStream, IMFMediaBuffer, IMFSample, IMFSinkWriter, IMFSinkWriterEx,
-            IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
+            IMFTransform, CODECAPI_AVEncMPVGOPSize,
+            MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
             MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
             MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFStartup,
             MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_HEVC,
@@ -38,6 +39,11 @@ use {
 };
 
 const HNS_PER_SECOND: u128 = 10_000_000;
+
+/// `MF_MT_MAX_KEYFRAME_SPACING` (missing from the pinned windows crate
+/// version): max frames between key frames; 1 = all-intra.
+const MF_MT_MAX_KEYFRAME_SPACING: windows::core::GUID =
+    windows::core::GUID::from_u128(0xc16eb52b_73a1_476f_8d62_839d6a020652);
 
 pub(crate) fn hr_err(context: &str, err: windows::core::Error) -> VideoFileError {
     VideoFileError::with_code(format!("{}: {}", context, err.message()), err.code().0)
@@ -190,6 +196,13 @@ impl WindowsVideoFileEncoder {
             out_type
                 .SetUINT32(&MF_MT_VIDEO_PROFILE, profile as u32)
                 .map_err(|e| hr_err("set video profile", e))?;
+            if options.keyframe_only {
+                // GOP size 1: every output frame is an IDR frame, so the
+                // file decodes at any frame in any order (bounce loops).
+                out_type
+                    .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
+                    .map_err(|e| hr_err("set keyframe spacing", e))?;
+            }
             let video_stream = sink
                 .AddStream(&out_type)
                 .map_err(|e| hr_err("IMFSinkWriter::AddStream(video)", e))?;
@@ -220,8 +233,33 @@ impl WindowsVideoFileEncoder {
             in_type
                 .SetUINT32(&MF_MT_DEFAULT_STRIDE, options.width)
                 .map_err(|e| hr_err("set input stride", e))?;
-            sink.SetInputMediaType(video_stream, &in_type, None::<&IMFAttributes>)
-                .map_err(|e| hr_err("IMFSinkWriter::SetInputMediaType(video NV12)", e))?;
+            if options.keyframe_only {
+                // MEASURED on this MFT: every route that pokes ICodecAPI from
+                // outside — GetServiceForStream before SetInputMediaType,
+                // before BeginWriting, after BeginWriting, or the encoder MFT
+                // straight from GetTransformForStream — returns S_OK, reads
+                // the value back as 1, and still ships 48-frame GOPs. The sink
+                // writer owns the encoder's configuration order, so the only
+                // control that binds is the one IT applies: codec-api
+                // properties handed to SetInputMediaType as
+                // pEncodingParameters. Failing here is an ERROR, not a
+                // downgrade — callers asked for all-intra because reverse and
+                // bounce playback depend on every frame being a sync sample.
+                let mut enc_params = None;
+                MFCreateAttributes(&mut enc_params, 1)
+                    .map_err(|e| hr_err("MFCreateAttributes(encoder params)", e))?;
+                let enc_params = enc_params.unwrap();
+                enc_params
+                    .SetUINT32(&CODECAPI_AVEncMPVGOPSize, 1)
+                    .map_err(|e| hr_err("set CODECAPI_AVEncMPVGOPSize", e))?;
+                sink.SetInputMediaType(video_stream, &in_type, &enc_params)
+                    .map_err(|e| {
+                        hr_err("IMFSinkWriter::SetInputMediaType(video NV12, GOP 1)", e)
+                    })?;
+            } else {
+                sink.SetInputMediaType(video_stream, &in_type, None::<&IMFAttributes>)
+                    .map_err(|e| hr_err("IMFSinkWriter::SetInputMediaType(video NV12)", e))?;
+            }
 
             // Optional audio track: PCM in, AAC out.
             let mut audio_stream = None;
