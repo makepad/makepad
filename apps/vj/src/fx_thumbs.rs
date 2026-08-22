@@ -63,10 +63,13 @@ pub const CELL_H: usize = 80;
 /// Sheet columns.
 pub const SHEET_COLS: usize = 6;
 pub const FRAME_COUNT: usize = 30;
-/// The offscreen pass renders at cell size (times the display's dpi
-/// factor); anything larger is readback bytes no tile can show.
-const SLOT_W: f64 = CELL_W as f64;
-const SLOT_H: f64 = CELL_H as f64;
+/// Supersampling: the offscreen pass renders at 4x the cell on each axis
+/// and the box downscale below averages the whole 4x4 footprint per output
+/// pixel — 16-tap SSAA, which is what keeps thin geometry (L-system twigs,
+/// candle flames, chart wicks) from shimmering in a 128x80 tile.
+const SUPERSAMPLE: usize = 4;
+const SLOT_W: f64 = (CELL_W * SUPERSAMPLE) as f64;
+const SLOT_H: f64 = (CELL_H * SUPERSAMPLE) as f64;
 /// Seconds of effect time the sheet spans. One second at 30 frames: the
 /// operator judged the earlier 6 fps sheet "a bit too low framerate" —
 /// half a bar of genuinely smooth motion beats a whole bar of slideshow.
@@ -112,10 +115,11 @@ pub fn sheet_cells() -> ThumbnailCells {
     }
 }
 
-/// Nearest-neighbour ASPECT-FILL resample of a BGRA readback into one RGBA
-/// cell. Cover, not stretch: if the source aspect ever differs from the
-/// cell's (a dpi quirk, a future slot-size change) the overflow crops
-/// instead of squashing the picture.
+/// Box-filtered ASPECT-FILL downscale of a BGRA readback into one RGBA
+/// cell: every output pixel averages its whole source footprint, which is
+/// the "render 4x then downscale nicely" anti-aliasing. Cover, not
+/// stretch: a source aspect that differs from the cell's crops instead of
+/// squashing the picture.
 fn cell_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
     let mut out = vec![0u8; CELL_W * CELL_H * 4];
     if sw == 0 || sh == 0 || src.len() < sw * sh * 4 {
@@ -131,18 +135,30 @@ fn cell_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
     };
     let (off_x, off_y) = ((sw as f64 - win_w) * 0.5, (sh as f64 - win_h) * 0.5);
     for y in 0..CELL_H {
-        let sy = (off_y + (y as f64 + 0.5) * win_h / CELL_H as f64) as usize;
-        let sy = sy.min(sh - 1);
+        let y0 = (off_y + y as f64 * win_h / CELL_H as f64) as usize;
+        let y1 = ((off_y + (y + 1) as f64 * win_h / CELL_H as f64) as usize)
+            .clamp(y0 + 1, sh);
         for x in 0..CELL_W {
-            let sx = (off_x + (x as f64 + 0.5) * win_w / CELL_W as f64) as usize;
-            let sx = sx.min(sw - 1);
-            let si = (sy * sw + sx) * 4;
+            let x0 = (off_x + x as f64 * win_w / CELL_W as f64) as usize;
+            let x1 = ((off_x + (x + 1) as f64 * win_w / CELL_W as f64) as usize)
+                .clamp(x0 + 1, sw);
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let si = (sy.min(sh - 1) * sw + sx.min(sw - 1)) * 4;
+                    // BGRA source.
+                    b += src[si] as u32;
+                    g += src[si + 1] as u32;
+                    r += src[si + 2] as u32;
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)) as u32;
             let di = (y * CELL_W + x) * 4;
-            // BGRA -> RGBA, alpha forced opaque (render targets carry
-            // whatever alpha the effect blended; the thumbnail is a picture).
-            out[di] = src[si + 2];
-            out[di + 1] = src[si + 1];
-            out[di + 2] = src[si];
+            // RGBA out, alpha forced opaque (render targets carry whatever
+            // alpha the effect blended; the thumbnail is a picture).
+            out[di] = (r / count) as u8;
+            out[di + 1] = (g / count) as u8;
+            out[di + 2] = (b / count) as u8;
             out[di + 3] = 0xff;
         }
     }
