@@ -1,0 +1,51 @@
+// CANDY TORUS — a plain ring (p=1, q=0 degenerates the knot into a torus)
+// striped like a candy cane, bright and bouncy.
+{
+    name: "Candy Torus"
+    engine: "tunnel"
+
+    knot_p: 1.0
+    knot_q: 0.0
+    major: 6.0
+    tube: 1.6
+    rings: 520
+    sides: 24
+    fly: 4.5
+    bands: 220.0
+
+    beat_pulse: "0.7 * (0.2 + 1.6*p0)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "FLARE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x12040a
+    color_a: #xff6688
+    color_b: #xffffff
+    color_c: #xffccdd
+
+    fog: 0.07
+    glow: "1.25 * (0.25 + 1.5*p1)"
+
+    stages: [
+        {kind: "bloom", threshold: "clamp(0.5 - (p2-0.5)*0.6, 0.02, 0.95)", strength: 1.3, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash, radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            return self.col_a.mix(self.col_b, t)
+        }
+    }
+}

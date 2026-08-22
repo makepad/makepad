@@ -1,0 +1,68 @@
+// PRESSURE MANIFOLD — hard-techno pipes: a dense acid-green lattice that
+// GROWS ON THE KICK. The growth front is beat-locked (eight-beat rebuild)
+// and `p0` shoves it forward on every pulse, so new lengths of pipe LURCH
+// out of the manifold with the drum; the freshly grown stretch burns
+// white through heavy bloom. Pattern taught: p0 is the front nudge — the
+// binding turns steady growth into growth BURSTS.
+{
+    name: "Pressure Manifold"
+    engine: "pipes"
+    seed: 66
+
+    pipes: 10
+    bound: 7
+    cell: 0.48
+    radius: 0.14
+    sides: 8
+    steps: 1600
+    turn_chance: 0.45
+    pop: 0.7
+    hot: 6.0
+
+    grow: "loop"
+    grow_beats: 8
+    beat_pulse: 0.8
+    p0: "0.06*env(phase)"        // the kick shoves the front forward
+    p1: "0.5 + 1.2*pulse"        // hot tail slams with the beat
+    p2: 0.6                      // hard specular
+
+    // PERFORMANCE DIALS — the pipes engine's own p-levers; touching
+    // FRONT or HEAT holds its beat binding above at a fixed level.
+    dials: [
+        {name: "FRONT", bind: "p0", default: 0.1},
+        {name: "HEAT", bind: "p1", default: 0.5},
+        {name: "SHINE", bind: "p2", default: 0.6}
+    ]
+
+    color_bg: #x050803
+    color_a: #x7dff1e
+    color_b: #x1e9840
+    color_c: #xf0ffd8
+
+    cam_orbit: 0.22
+    cam_fov: 54
+    fog: 0.040
+    glow: 1.3
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.9, levels: 3},
+        {kind: "feedback", amount: "0.25 + 0.20*pulse", zoom: 1.006, rotate: 0.002, dim: 0.95}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = birth order 0..1, attr = (pipe, birth, hue, radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxPipes {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, attr.z)
+            let shade = 0.85 + 0.15 * sin(attr.z * 6.2831853)
+            return vec4(base.xyz * shade, 1.0)
+        }
+    }
+}

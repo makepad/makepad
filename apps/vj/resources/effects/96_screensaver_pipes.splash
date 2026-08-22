@@ -1,0 +1,66 @@
+// SCREENSAVER PIPES — the calm homage: six glossy plastic pipes walking
+// the lattice with bulged elbow balls, growing in over twenty-four beats
+// and starting over when the front loops (the screensaver clear-screen,
+// now beat-locked). Pattern taught: the pipes engine's whole animation IS
+// the shared growth front — `grow: "loop"` + `grow_beats` replays the
+// birth-ordered build, and every segment pops in with a soft overshoot.
+{
+    name: "Screensaver Pipes"
+    engine: "pipes"
+    seed: 41
+
+    pipes: 6
+    bound: 6
+    cell: 0.55
+    radius: 0.17
+    sides: 12
+    steps: 1000
+    turn_chance: 0.34
+    pop: 0.45
+    hot: 3.0
+
+    grow: "loop"
+    grow_beats: 24
+    beat_pulse: 0.25
+    p1: 0.3                      // gentle hot-tip glow
+
+    // PERFORMANCE DIALS — the pipes engine's own p-levers: FRONT shoves
+    // the growth front forward, HEAT gains the fresh-growth burn, SHINE
+    // hardens the plastic specular.
+    dials: [
+        {name: "FRONT", bind: "p0", default: 0.0},
+        {name: "HEAT", bind: "p1", default: 0.3},
+        {name: "SHINE", bind: "p2", default: 0.0}
+    ]
+
+    color_bg: #x0a0e16
+    color_a: #x37c8b4
+    color_b: #xb45fd8
+    color_c: #xf2f6ff
+
+    cam_orbit: 0.10
+    cam_fov: 48
+    fog: 0.030
+    glow: 1.1
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 0.9, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = birth order 0..1, attr = (pipe, birth, hue, radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxPipes {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, attr.z)
+            let shade = 0.85 + 0.15 * sin(attr.z * 6.2831853)
+            return vec4(base.xyz * shade, 1.0)
+        }
+    }
+}

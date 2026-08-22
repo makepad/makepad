@@ -1,0 +1,93 @@
+// VIGIL — the same firefly engine wearing a sacred mood: flies become
+// candle flames just above a dark floor. Pattern taught: soft blink_sharp
+// (2.5) turns the strobe spike into slow breathing, tiny wander holds each
+// flame in place, and a gentle half-time sync swell (`env(bar)` at
+// beat_rate 0.5) makes the congregation of flames lean together per bar.
+{
+    name: "Vigil"
+    engine: "firefly"
+    seed: 33
+
+    flies: 520
+    blades: 1600
+    area: 6.5
+    fly_height: 0.5           // flames hover near the floor
+    fly_size: 0.17
+    sync: 0.4
+    p0: "0.3 * env(bar)"
+    blink_rate: 0.25
+    blink_sharp: 2.5          // breathing, not blinking
+    wander: 0.1
+    moon: 0.15
+    grass_height: 0.35
+    clump: 0.75
+
+    beat_pulse: 0.35
+    beat_rate: 0.5
+
+    sway: 0.2
+    sway_freq: 0.5
+
+    // PERFORMANCE DIALS — SYNC/WANDER are the engine's own p0/p1 levers
+    // (touching SYNC overrides the bar-swell binding above with a held
+    // lean); GLOW routes p2 through the glow binding.
+    p2: 0.5
+    glow: "1.15 * (0.25 + 1.5*p2)"
+    dials: [
+        {name: "SYNC", bind: "p0", default: 0.5},
+        {name: "WANDER", bind: "p1", default: 0.0},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x070302
+    color_a: #x180d04
+    color_b: #xffaa33
+    color_c: #xfff0c8
+
+    cam_orbit: 0.035
+    cam_height: 0.9
+    cam_dist: 6.0
+    fog: 0.07
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.5, levels: 3},
+        {kind: "tiltshift", focus: 0.6, width: 0.3, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: blades (attr.y < 1.5) and flies (attr.y >= 2) share one hook.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFirefly {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            if attr.y > 1.5 {
+                let mut body = self.col_b.mix(self.col_c, t * t).xyz
+                if cmix > 0.001 {
+                    body = mix(
+                        body,
+                        content.xyz * (0.75 + 0.85 * t),
+                        clamp(cmix * 1.6, 0.0, 1.0)
+                    )
+                }
+                return vec4(body, 1.0)
+            }
+            let base = self.col_a.mix(self.col_b, t * 0.7 + attr.z * 0.15)
+            let moon = self.shape.w * (0.25 + 0.75 * t)
+            let breath = 1.0 + self.time_beat.w * 0.18
+            return vec4(base.xyz * ((0.16 + moon) * breath * self.fog.y), 1.0)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.35, d)
+            let halo = 1.0 - smoothstep(0.08, 1.0, d)
+            let a = clamp(core + halo * 0.6, 0.0, 1.0)
+            return vec4(tint.xyz * a, 0.0)
+        }
+    }
+}

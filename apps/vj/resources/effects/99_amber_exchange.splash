@@ -1,0 +1,88 @@
+// AMBER EXCHANGE — the after-hours amber terminal: a faster two-candles-
+// per-beat tape in old-monitor amber, drifting sideways with a slow orbit
+// so the plane catches parallax, and a soft feedback smear that makes the
+// phosphor linger. Pattern taught: the chart is a MESH in 3D space — a
+// whisper of cam_orbit turns the flat terminal into a floating pane.
+{
+    name: "Amber Exchange"
+    engine: "stockcharts"
+    seed: 58
+
+    candles: 140
+    per_beat: 2
+    vol: 1.2
+    drift: 0.0
+    spike: 1.2
+    ma: 8
+    grid_x: 8
+    grid_y: 6
+    scan: 12
+    width: 16
+    height: 7
+
+    beat_pulse: 0.4
+    p0: 0.1
+    p1: "0.2 + 0.5*pulse"
+
+    // PERFORMANCE DIALS — the chart engine's own p-levers: GAIN drives
+    // the phosphor, XHAIR holds the crosshair pump when touched, PANIC
+    // floods the board red.
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.1},
+        {name: "XHAIR", bind: "p1", default: 0.5},
+        {name: "PANIC", bind: "p2", default: 0.0}
+    ]
+
+    color_bg: #x0a0602
+    color_a: #xffb433
+    color_b: #x8a5410
+    color_c: #xffe6b0
+
+    cam_orbit: 0.045
+    cam_fov: 42
+    fog: 0.0
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.1, levels: 2},
+        {kind: "feedback", amount: 0.35, zoom: 1.0, rotate: 0.0, dim: 0.94}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = candle age 0..1, attr = (element class, age, up/down, move size).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCharts {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let class = attr.x
+            if class < 0.5 {
+                // Candle body: col_a up / col_b down, big moves burn.
+                let base = self.col_b.mix(self.col_a, step(0.5, attr.z))
+                let burn = 0.75 + attr.w * 0.7 + self.time_beat.w * (1.0 - t) * 0.6
+                return vec4(base.xyz * burn, 1.0 - t * 0.55)
+            }
+            if class < 1.5 {
+                let base = self.col_b.mix(self.col_a, step(0.5, attr.z))
+                return vec4(base.xyz * 0.55, (1.0 - t * 0.55) * 0.8)
+            }
+            if class < 2.5 {
+                return vec4(self.col_a.xyz * 0.16, 0.5)
+            }
+            if class < 3.5 {
+                // Kept modest: the bloom stage amplifies this line, and an
+                // over-gained crosshair blows out into a white bar.
+                let g = 0.55 + self.user.y * 0.5 + self.time_beat.w * 0.25
+                return vec4(self.col_c.xyz * g, 0.8)
+            }
+            if class < 4.5 {
+                return vec4(self.col_c.xyz * 0.5 + self.col_a.xyz * 0.4, 0.85)
+            }
+            return vec4(self.col_a.xyz * 0.6, 0.9)
+        }
+    }
+}

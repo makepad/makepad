@@ -1,0 +1,61 @@
+// SERPENT STROBE — hard techno dominoes: two thousand black tiles on a
+// boustrophedon serpentine, sixteen per beat, neon pips flaring white-hot
+// at the impact front. Pattern taught: `resurrect: 0` = the front is a
+// SAW — when the run completes, every tile snaps upright at once (the
+// hard reset IS the drop); high jitter roughs the ranks up.
+{
+    name: "Serpent Strobe"
+    engine: "domino"
+    seed: 9
+
+    layout: "serpent"
+    count: 2000
+    per_beat: 16
+    spacing: 0.26
+    resurrect: 0            // saw front: full-run snap reset
+    pause_beats: 0
+    flash: 2.5
+    jitter: 0.30
+
+    beat_pulse: 0.9
+    p1: "0.8 * pulse"
+    p2: 0.8
+
+    // PERFORMANCE DIALS — the engine's own p-levers; touching FLASH
+    // overrides the pulse binding above with a held gain.
+    dials: [
+        {name: "NUDGE", bind: "p0", default: 0.0},
+        {name: "FLASH", bind: "p1", default: 0.5},
+        {name: "ANTIC", bind: "p2", default: 0.8}
+    ]
+
+    color_bg: #x030308
+    color_a: #x323a4e
+    color_b: #x48586c
+    color_c: #x40f0ff
+
+    cam_orbit: 0.12
+    fog: 0.010
+    glow: 1.4
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 2.0, levels: 3},
+        {kind: "feedback", amount: 0.35, zoom: 1.003, rotate: 0.0, dim: 0.92}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = topple ease 0..1, attr = (branch, arc index, tile hash, yaw).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxDomino {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let mix_t = clamp(attr.x * 0.23 + attr.z * 0.12, 0.0, 1.0)
+            return self.col_a.mix(self.col_b, mix_t)
+        }
+    }
+}

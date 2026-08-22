@@ -1,0 +1,61 @@
+// EMBER PIT — Kick Forge with the shard material OVERRIDDEN: obsidian
+// chips at rest that ignite ember→white while airborne and cool as they
+// fall (the hook's `t` is flight heat — 1 at launch, 0 landed). Pattern
+// taught: `shader:` must SUBCLASS the engine's draw shader
+// (draw.DrawVjFxForge), and a feedback stage streaks the embers into
+// fire-trails. Low glint: this one glows, it doesn't sparkle.
+{
+    name: "Ember Pit"
+    engine: "forge"
+    seed: 23
+
+    shards: 2600
+    radius: 4.0
+    impulse: 9.5
+    gravity: 38.0
+    spin: 0.8
+    membrane_wave: 0.4
+    shard_size: 0.15
+    scatter: 0.7
+    falloff: 0.45
+    pile: 0.75
+    glint: 0.3
+
+    beat_pulse: 0.5
+    p0: "0.5 + 2.8*bass"
+    p1: "0.25 + 1.0*bass"
+    p2: 0.1
+
+    // PERFORMANCE DIALS — the engine's own p-levers (impulse gain,
+    // membrane ring, glint fire).
+    dials: [
+        {name: "HEAT", bind: "p0", default: 0.5},
+        {name: "RING", bind: "p1", default: 0.5},
+        {name: "EMBER", bind: "p2", default: 0.1}
+    ]
+
+    color_bg: #x0a0505
+    color_a: #x232030      // obsidian
+    color_b: #x3a2a28      // scorched rock
+    color_c: #xffc890      // ember light
+
+    cam_orbit: 0.08
+    cam_fov: 50.0
+    fog: 0.040
+    glow: 1.2
+
+    // The material hook: cold obsidian → ember → white-hot by flight heat.
+    shader: draw.DrawVjFxForge {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let ember = vec4(1.0, 0.42, 0.08, 1.0)
+            let hot = ember.mix(vec4(1.0, 0.95, 0.85, 1.0), pow(t, 3.0))
+            let cold = self.col_a.mix(self.col_b, fract(attr.w * 7.9))
+            return cold.mix(hot, pow(clamp(t, 0.0, 1.0), 0.7))
+        }
+    }
+
+    stages: [
+        {kind: "feedback", amount: "0.5 + 0.25*pulse", zoom: 1.006, dim: 0.94},
+        {kind: "bloom", threshold: 0.45, strength: 1.6, levels: 3}
+    ]
+}

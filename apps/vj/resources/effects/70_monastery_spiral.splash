@@ -1,0 +1,63 @@
+// MONASTERY SPIRAL — seven hundred ivory dominoes on an Archimedean
+// spiral, toppling at exactly four per beat (sixteenths in 4/4), candle
+// light flaring at each impact. When the run completes it rests four
+// beats, then the whole liturgy RESURRECTS in reverse (the front is a
+// triangle wave of the beat — pure shader math). Pattern taught: the
+// domino engine's musical clock is `per_beat`; anticipation glow (`p2`)
+// makes the pins ahead of the line breathe on the pulse.
+{
+    name: "Monastery Spiral"
+    engine: "domino"
+    seed: 47
+
+    layout: "spiral"
+    count: 700
+    per_beat: 4
+    spacing: 0.30
+    resurrect: 1
+    pause_beats: 4
+    flash: 1.0
+    jitter: 0.10
+
+    beat_pulse: 0.4
+    p2: 0.4                 // soft anticipation ahead of the front
+
+    // PERFORMANCE DIALS — the engine's own p-levers: NUDGE scratches the
+    // topple front forward (in beats), FLASH gains the impact light,
+    // ANTIC breathes the pins ahead of the line.
+    dials: [
+        {name: "NUDGE", bind: "p0", default: 0.0},
+        {name: "FLASH", bind: "p1", default: 0.0},
+        {name: "ANTIC", bind: "p2", default: 0.4}
+    ]
+
+    color_bg: #x120a04
+    color_a: #xf2e8d0
+    color_b: #x8a6a3a
+    color_c: #xffd890
+
+    cam_orbit: 0.07
+    fog: 0.018
+    glow: 1.3
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.1, levels: 2},
+        {kind: "tiltshift", focus: 0.5, width: 0.35, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = topple ease 0..1, attr = (branch, arc index, tile hash, yaw).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxDomino {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let mix_t = clamp(attr.x * 0.23 + attr.z * 0.12, 0.0, 1.0)
+            return self.col_a.mix(self.col_b, mix_t)
+        }
+    }
+}

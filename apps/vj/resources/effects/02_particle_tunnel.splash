@@ -1,0 +1,68 @@
+// PARTICLE FLOW TUNNEL — rings of particles streaming past the camera,
+// feedback-zoomed into an infinite warp.
+{
+    name: "Warp Tunnel"
+    engine: "particles"
+    mode: "tunnel"
+    seed: 4
+
+    count: 6000
+    spread: 3.2
+    size: 0.10
+    rate: 0.55
+    swirl: 1.4
+    stretch: 3.0
+
+    beat_pulse: "0.8 * (0.2 + 1.6*p2)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TRAIL", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x030310
+    color_a: #x2ff0ff
+    color_b: #xff36c8
+    color_c: #xffffff
+
+    cam_dist: 3.2
+    cam_height: 0.0
+    cam_orbit: 0.0
+    cam_fov: 78.0
+    fog: 0.03
+
+    stages: [
+        {kind: "feedback", amount: "min(0.78 + (p0-0.5)*0.44, 0.97)", zoom: 1.035, rotate: "0.006 + (p1-0.5)*0.05", dim: 0.96},
+        {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, spawn phase, hue, rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxParticles {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, attr.z)
+            let hot = base.xyz + vec3(0.5, 0.4, 0.3) * pow(1.0 - t, 6.0)
+            let fade = (1.0 - t) * smoothstep(0.0, 0.08, t)
+            let boost = 0.85 + self.time_beat.w * 0.9
+            return vec4(hot * boost, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.5, d)
+            let halo = 1.0 - smoothstep(0.15, 1.0, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
+}

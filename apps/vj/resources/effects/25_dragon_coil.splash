@@ -1,0 +1,66 @@
+// DRAGON COIL — the dragon-curve rewriting system drawn as a glowing
+// space-filling ribbon. Pattern taught: structure symbols X/Y carry the
+// program; only F draws — 90-degree angles give the classic fold.
+{
+    name: "Dragon Coil"
+    engine: "lsystem"
+    seed: 3
+
+    axiom: "FX"
+    rules: ["X=X+YF+", "Y=-FX-Y"]
+    iterations: 12
+    angle: 90.0
+    step: 0.10
+    radius: 0.035
+    sides: 4
+
+    grow: "loop"
+    grow_beats: 16
+    sway: 0.15
+    sway_freq: 0.4
+    beat_pulse: "0.5 * (0.2 + 1.6*p1)"
+    twist: 0.04
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TRAIL", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x0a0312
+    color_a: #xff3fd8
+    color_b: #x3fd8ff
+    color_c: #xffffff
+
+    cam_orbit: 0.11
+    fog: 0.03
+    glow: "1.35 * (0.25 + 1.5*p2)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.4, levels: 3},
+        {kind: "feedback", amount: "min(0.45 + (p0-0.5)*0.8, 0.97)", zoom: 1.003, rotate: 0.002, dim: 0.94}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc from the root 0..1, attr = (depth, arc, hue, tube radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}
