@@ -1,0 +1,24 @@
+// BLINDS — venetian slats: every strip reveals deck B in parallel.
+// SLATS sets the count, SOFT the feather on each slat's edge.
+{
+    name: "Blinds"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.15},
+        {name: "SLATS", bind: "p1", default: 0.4},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 4.0 + floor(self.user.y * 12.0)
+            let f = fract(uv.x * n)
+            let soft = 0.02 + self.user.x * 0.3
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, f)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            // DIP: duck through black mid-fade (0 = off).
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

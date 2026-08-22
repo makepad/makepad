@@ -1,0 +1,32 @@
+// ADDITIVE MIX — the MX50's luminance add: deck B's light POURS INTO deck
+// A instead of replacing it (white areas bloom, black adds nothing).
+// GAIN pushes B hotter before the add. Ride the fader for how much light.
+{
+    name: "Additive Mix"
+    engine: "transition"
+    // Overlay semantics: ridden to the fader's end the key STAYS fully
+    // applied (the composite is the destination) — never a snap to
+    // plain B. Zero only at the A end.
+    engage: "ramp"
+    p1: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "CURVE", bind: "p1", default: 0.5},
+        {name: "KEY", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let gain = 0.5 + self.user.x * 1.5
+            // CURVE bends the pour's fader response (1:1 at mid-knob).
+            let tt = pow(clamp(t, 0.0, 1.0), pow(4.0, self.user.y * 2.0 - 1.0))
+            // KEY gates the add by B's own luminance: 0 = plain add,
+            // full = only B's bright parts pour.
+            let luma = dot(b.xyz, vec3(0.2126, 0.7152, 0.0722))
+            let gate = mix(1.0, smoothstep(0.25, 0.75, luma), self.user.z)
+            let c = a.xyz + b.xyz * gain * tt * gate
+            return vec4(min(c.x, 1.0), min(c.y, 1.0), min(c.z, 1.0), 1.0)
+        }
+    }
+}

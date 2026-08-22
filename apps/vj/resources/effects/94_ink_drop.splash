@@ -1,0 +1,74 @@
+// INK DROP — the STABLE-FLUIDS engine: advect, divergence, a budgeted
+// jacobi pressure solve (`iters`) and projection run on a float GPU grid
+// every frame; dye splats inject ON THE KICK at a per-beat hashed point,
+// in a palette color that cycles per beat. The ink then genuinely FLOWS —
+// filaments curl, collide and fade like drops in dark water.
+{
+    name: "Ink Drop"
+    engine: "fluid"
+    seed: 4
+
+    grid: 176
+    iters: 24
+
+    force: 2.6
+    dissipation: 0.10
+    swirl: 0.35
+    splat: "(2.2 + pulse * 0.9) * (0.2 + 1.6*p2)"
+    dye_fade: 0.12
+    radius: 0.075
+    vortex: 3.2
+
+    beat_pulse: 0.4
+    beat_rate: 0.5
+
+    // p0 = flow-warp of the (unused) input, p1 = input mix: pure ink here.
+    p0: 0.0
+    p1: 0.0
+    p2: 0.5
+
+    // PERFORMANCE DIALS — WARP/MIX are the fluid engine's own p0/p1
+    // levers (MIX up brings the channel content through the ink, WARP
+    // bends it with the flow); SPLAT routes p2 through the dye splats.
+    dials: [
+        {name: "WARP", bind: "p0", default: 0.0},
+        {name: "MIX", bind: "p1", default: 0.0},
+        {name: "SPLAT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x06060a
+    color_a: #x30c8ff
+    color_b: #xff3a9a
+    color_c: #xb0ff5a
+
+    glow: 2.6
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: uv, the dye and flow texels, and the base under the ink.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFluidView {
+        fx_shade: fn(uv: vec2, dye: vec4, flow: vec4, base: vec3) -> vec4 {
+            let glow = self.u_view.x
+            let ink = vec3(dye.x, dye.y, dye.z) * glow
+            let shimmer = clamp(length(flow.xy) * 0.35, 0.0, 0.6)
+            let mut lit = ink + ink * shimmer
+            // Soft-knee tone map: color survives density; only genuinely
+            // dense ink approaches white.
+            lit = lit / (vec3(1.0, 1.0, 1.0) + lit * 0.45)
+            let rgb = vec3(1.0, 1.0, 1.0)
+                - (vec3(1.0, 1.0, 1.0) - base)
+                * clamp(vec3(1.0, 1.0, 1.0) - lit, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            return vec4(rgb, 1.0)
+        }
+    }
+}

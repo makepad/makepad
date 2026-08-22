@@ -1,0 +1,61 @@
+// LIQUID METAL — marching-tetrahedra metaballs, blob radii swelling on the
+// beat. The one genuinely per-frame-regenerated mesh in the library (the
+// honest slow path: field sample + march every frame, recycled buffers).
+{
+    name: "Liquid Metal"
+    engine: "metaballs"
+    seed: 3
+
+    blobs: 7
+    grid: 32
+    extent: 3.2
+    blob_radius: 1.0
+    orbit: 1.6
+    orbit_speed: 0.8
+    beat_swell: 0.5
+
+    beat_pulse: "0.45 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    glow: "0.25 + 1.5*p2"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FLARE", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050210
+    color_a: #x20e0c8
+    color_b: #xff3ca8
+    color_c: #xffffff
+
+    cam_orbit: 0.16
+    fog: 0.03
+
+    stages: [
+        {kind: "bloom", threshold: "clamp(0.5 - (p1-0.5)*0.6, 0.02, 0.95)", strength: 1.4, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = height 0..1, attr = (blob, height, blob hue, distance).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}

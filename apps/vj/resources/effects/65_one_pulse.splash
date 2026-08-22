@@ -1,0 +1,92 @@
+// ONE PULSE — the firefly field driven almost fully into sync: fourteen
+// hundred cold-blue flies flashing as one heartbeat on every beat. Pattern
+// taught: high base sync + sharp blink = the whole meadow becomes a strobe
+// that IS the beat; `p1` (wander scale) goes NEGATIVE on the pulse so the
+// swarm freezes for the flash and drifts between beats.
+{
+    name: "One Pulse"
+    engine: "firefly"
+    seed: 7
+
+    flies: 1400
+    blades: 3000
+    area: 8.0
+    fly_height: 2.2
+    fly_size: 0.09
+    sync: 0.85
+    p0: "0.12 * env(phase)"       // lock even harder right on the beat
+    p1: "0.0 - 0.55 * pulse"      // the swarm stills for the flash
+    blink_rate: 0.8
+    blink_sharp: 16.0
+    wander: 0.7
+    moon: 0.12
+    grass_height: 0.7
+    clump: 0.4
+
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    sway: 0.3
+    sway_freq: 0.6
+
+    // PERFORMANCE DIALS — SYNC/WANDER are the engine's own p0/p1 levers
+    // (touching one overrides its music binding above with a held value);
+    // GLOW routes p2 through the glow binding.
+    p2: 0.5
+    glow: "1.2 * (0.25 + 1.5*p2)"
+    dials: [
+        {name: "SYNC", bind: "p0", default: 0.5},
+        {name: "WANDER", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x02040c
+    color_a: #x0a1428
+    color_b: #x66c8ff
+    color_c: #xffffff
+
+    cam_orbit: 0.08
+    cam_height: 1.8
+    fog: 0.04
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.9, levels: 3},
+        {kind: "feedback", amount: 0.5, zoom: 1.004, rotate: 0.0, dim: 0.90}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: blades (attr.y < 1.5) and flies (attr.y >= 2) share one hook.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFirefly {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            if attr.y > 1.5 {
+                let mut body = self.col_b.mix(self.col_c, t * t).xyz
+                if cmix > 0.001 {
+                    body = mix(
+                        body,
+                        content.xyz * (0.75 + 0.85 * t),
+                        clamp(cmix * 1.6, 0.0, 1.0)
+                    )
+                }
+                return vec4(body, 1.0)
+            }
+            let base = self.col_a.mix(self.col_b, t * 0.7 + attr.z * 0.15)
+            let moon = self.shape.w * (0.25 + 0.75 * t)
+            let breath = 1.0 + self.time_beat.w * 0.18
+            return vec4(base.xyz * ((0.16 + moon) * breath * self.fog.y), 1.0)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.35, d)
+            let halo = 1.0 - smoothstep(0.08, 1.0, d)
+            let a = clamp(core + halo * 0.6, 0.0, 1.0)
+            return vec4(tint.xyz * a, 0.0)
+        }
+    }
+}
