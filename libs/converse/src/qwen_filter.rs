@@ -1,4 +1,4 @@
-//! The local filtering LLM: a Qwen3.5 instruct model on `makepad-llama`
+//! The local filtering LLM: a Qwen3.5 instruct model on `makepad-ai-llm`
 //! judging which utterances are actually directed at the assistant.
 //!
 //! An open microphone hears everything. Sending it all to the cloud agent is
@@ -13,7 +13,7 @@
 //! [`crate::filter::FilterWorker`] thread pay for the load.
 
 use crate::filter::{FilterDecision, TranscriptFilter};
-use makepad_llama::{LlamaSession, LlamaSessionConfig};
+use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
 use makepad_widgets::log;
 
 /// Cap on generated tokens per judgement: one SEND/SKIP line, never an essay.

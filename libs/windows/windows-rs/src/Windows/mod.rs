@@ -42800,9 +42800,133 @@ impl IMFASFStreamPrioritization {
         unsafe { (windows_core::Interface::vtable(self).AddStream)(windows_core::Interface::as_raw(self), wstreamnumber, wstreamflags).ok() }
     }
     }
+pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
+windows_core::imp::define_interface!(ICodecAPI, ICodecAPI_Vtbl, 0x901db4c7_31ce_41a2_85dc_8fa0bf41b8da);
+windows_core::imp::interface_hierarchy!(ICodecAPI, windows_core::IUnknown);
+impl ICodecAPI {
+    pub unsafe fn IsSupported(&self, api: *const windows_core::GUID) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).IsSupported)(windows_core::Interface::as_raw(self), api).ok() }
+    }
+    pub unsafe fn IsModifiable(&self, api: *const windows_core::GUID) -> windows_core::HRESULT {
+        unsafe { (windows_core::Interface::vtable(self).IsModifiable)(windows_core::Interface::as_raw(self), api) }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn GetParameterRange(&self, api: *const windows_core::GUID, valuemin: *mut super::super::System::Variant::VARIANT, valuemax: *mut super::super::System::Variant::VARIANT, steppingdelta: *mut super::super::System::Variant::VARIANT) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetParameterRange)(windows_core::Interface::as_raw(self), api, core::mem::transmute(valuemin), core::mem::transmute(valuemax), core::mem::transmute(steppingdelta)).ok() }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn GetParameterValues(&self, api: *const windows_core::GUID, values: *mut *mut super::super::System::Variant::VARIANT, valuescount: *mut u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetParameterValues)(windows_core::Interface::as_raw(self), api, values as _, valuescount as _).ok() }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn GetDefaultValue(&self, api: *const windows_core::GUID) -> windows_core::Result<super::super::System::Variant::VARIANT> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetDefaultValue)(windows_core::Interface::as_raw(self), api, &mut result__).map(|| core::mem::transmute(result__))
+        }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn GetValue(&self, api: *const windows_core::GUID) -> windows_core::Result<super::super::System::Variant::VARIANT> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetValue)(windows_core::Interface::as_raw(self), api, &mut result__).map(|| core::mem::transmute(result__))
+        }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn SetValue(&self, api: *const windows_core::GUID, value: *const super::super::System::Variant::VARIANT) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetValue)(windows_core::Interface::as_raw(self), api, core::mem::transmute(value)).ok() }
+    }
+    pub unsafe fn RegisterForEvent(&self, api: *const windows_core::GUID, userdata: isize) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).RegisterForEvent)(windows_core::Interface::as_raw(self), api, userdata).ok() }
+    }
+    pub unsafe fn UnregisterForEvent(&self, api: *const windows_core::GUID) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).UnregisterForEvent)(windows_core::Interface::as_raw(self), api).ok() }
+    }
+    pub unsafe fn SetAllDefaults(&self) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetAllDefaults)(windows_core::Interface::as_raw(self)).ok() }
+    }
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub unsafe fn SetValueWithNotify(&self, api: *const windows_core::GUID, value: *const super::super::System::Variant::VARIANT, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetValueWithNotify)(windows_core::Interface::as_raw(self), api, core::mem::transmute(value), changedparam as _, changedparamcount as _).ok() }
+    }
+    pub unsafe fn SetAllDefaultsWithNotify(&self, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetAllDefaultsWithNotify)(windows_core::Interface::as_raw(self), changedparam as _, changedparamcount as _).ok() }
+    }
+    #[cfg(feature = "Win32_System_Com")]
+    pub unsafe fn GetAllSettings<P0>(&self, __midl__icodecapi0000: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<super::super::System::Com::IStream>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).GetAllSettings)(windows_core::Interface::as_raw(self), __midl__icodecapi0000.param().abi()).ok() }
+    }
+    #[cfg(feature = "Win32_System_Com")]
+    pub unsafe fn SetAllSettings<P0>(&self, __midl__icodecapi0001: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<super::super::System::Com::IStream>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetAllSettings)(windows_core::Interface::as_raw(self), __midl__icodecapi0001.param().abi()).ok() }
+    }
+    #[cfg(feature = "Win32_System_Com")]
+    pub unsafe fn SetAllSettingsWithNotify<P0>(&self, __midl__icodecapi0002: P0, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<super::super::System::Com::IStream>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetAllSettingsWithNotify)(windows_core::Interface::as_raw(self), __midl__icodecapi0002.param().abi(), changedparam as _, changedparamcount as _).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct ICodecAPI_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub IsSupported: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
+    pub IsModifiable: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub GetParameterRange: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT, *mut super::super::System::Variant::VARIANT, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    GetParameterRange: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub GetParameterValues: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut *mut super::super::System::Variant::VARIANT, *mut u32) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    GetParameterValues: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub GetDefaultValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    GetDefaultValue: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub GetValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    GetValue: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub SetValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *const super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    SetValue: usize,
+    pub RegisterForEvent: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, isize) -> windows_core::HRESULT,
+    pub UnregisterForEvent: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
+    pub SetAllDefaults: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
+    pub SetValueWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *const super::super::System::Variant::VARIANT, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
+    SetValueWithNotify: usize,
+    pub SetAllDefaultsWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_System_Com")]
+    pub GetAllSettings: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_System_Com"))]
+    GetAllSettings: usize,
+    #[cfg(feature = "Win32_System_Com")]
+    pub SetAllSettings: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_System_Com"))]
+    SetAllSettings: usize,
+    #[cfg(feature = "Win32_System_Com")]
+    pub SetAllSettingsWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_System_Com"))]
+    SetAllSettingsWithNotify: usize,
+}
 windows_core::imp::define_interface!(IMFSinkWriter, IMFSinkWriter_Vtbl, 0x3137f1cd_fe5e_4805_a5d8_fb477448cb3d);
 windows_core::imp::interface_hierarchy!(IMFSinkWriter, windows_core::IUnknown);
 impl IMFSinkWriter {
+    pub unsafe fn GetServiceForStream(&self, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetServiceForStream)(windows_core::Interface::as_raw(self), dwstreamindex, guidservice, riid, ppvobject as _).ok() }
+    }
     pub unsafe fn AddStream<P0>(&self, ptargetmediatype: P0) -> windows_core::Result<u32>
     where
         P0: windows_core::Param<IMFMediaType>,

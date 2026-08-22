@@ -2,18 +2,21 @@ workspace.members = [
     # === app ===
     "apps/route",
     "apps/asset-ui",
+    "apps/asset-server",
     "apps/vj",
     "libs/asset/importer",
     "libs/asset/data",
     "libs/asset/client",
+    "libs/asset/widgets",
     "libs/asset/store",
     "libs/asset/chat",
+    "libs/asset/chat_ui",
+    "libs/asset/annotate",
     "libs/render",
     "libs/sim",
     "libs/sim/math",
     "libs/show_control",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
-    "libs/pbr_paint",
     "libs/remesh",
     "libs/xatlas",
     # === examples ===
@@ -27,7 +30,9 @@ workspace.members = [
     "examples/video_player",
     "examples/video_codec_test",
     "examples/charts",
+    "examples/datagrid",
     "examples/todo",
+    "examples/portallist_hit",
     "examples/vector",
     "examples/aichat",
     "examples/pdf",
@@ -43,14 +48,31 @@ workspace.members = [
     "examples/bugfix",
     "examples/move_after_draw",
     "examples/xr",
+    "examples/splat_bench",
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",
+    "examples/render_to_texture",
     # === xr app ===
     "xr",
     # === studio ===
     "studio/hub",
     "studio/desktop",
+    # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
+    "libs/sqlite_query",
+    # === own MP3 / Ogg Vorbis decoders ===
+    "libs/audio_decode",
+    # === own Ogg Vorbis encoder (stem side-channels) ===
+    "libs/audio_encode",
+    # === shared karaoke alignment core + lyrics schema ===
+    "libs/audio_lyrics",
+    # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
+    "libs/audio_sidechannels",
+    # === pictures of audio (spectrogram, wave strip, composite) ===
+    "libs/audio_picture",
+    # === mkfl motion payload + classical optical flow + all-intra re-encode
+    # (shared by the enhance backend and the VJ's flow-warp import) ===
+    "libs/video_flow",
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
@@ -71,13 +93,9 @@ workspace.exclude = [
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/asset/ai",
     "libs/diffusion",
-    "libs/ggml",
-    # standalone CUDA FFI workspace (own [workspace] table; reached as a
-    # target-specific path dep of libs/llama)
-    "libs/cuda",
+    # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
+    "libs/ai",
     "libs/voice",
-    "libs/voice2",
-    "libs/tts",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
