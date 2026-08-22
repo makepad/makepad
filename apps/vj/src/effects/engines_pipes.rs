@@ -32,6 +32,10 @@
 //! growth front (kick bursts: `"0.06*pulse"`), `p1` adds hot-tail gain,
 //! `p2` adds specular gain. Hook: `fx_color` (t = birth 0..1,
 //! attr = (pipe, birth, hue, radius)).
+//!
+//! Content coupling (`content:` → `fog.z`): the glossy pipes reflect the
+//! channel video — a fake env map by the mirror direction, folded into
+//! the specular/rim term.
 
 use super::engines::EngineUniforms;
 use super::mesh::{FxMesh, FxRng};
@@ -417,7 +421,17 @@ script_mod! {
             let hot = self.col_c.xyz * heat * (0.8 + self.time_beat.w * 0.9)
             let d = length(self.v_world - cam_pos)
             let fogf = exp(0.0 - d * self.fog.x)
-            let rgb = (self.v_color.xyz * (lit + fill) * self.fog.y
+            // CONTENT: glossy pipes reflect the channel video — a fake env
+            // map addressed by the mirror direction, folded into the
+            // specular/rim term (chrome under the video, plastic dims a
+            // touch so reflections read). fog.z = pre-gated `content`.
+            let cm = self.fog.z
+            let mr = n * (2.0 * dot(n, vd)) - vd
+            let env = self.tex0.sample_as_bgra(
+                vec2(0.5 + mr.x * 0.32, 0.5 - mr.y * 0.32)
+            )
+            let rgb = (self.v_color.xyz * (lit + fill) * (1.0 - cm * 0.30) * self.fog.y
+                + env.xyz * ((rim * 3.0 + spec * 1.6 + 0.16) * cm)
                 + self.col_c.xyz * (spec + rim) + hot)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
             return vec4(rgb, 1.0)

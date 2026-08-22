@@ -46,6 +46,11 @@
 //! render graph today (the scene pass runs at output size), so the budget
 //! lives in `steps` — presets ship with conservative counts and the
 //! measured costs are reported in MANIFEST.md.
+//!
+//! Content coupling (`content:` → `fog.z`): solid materials project the
+//! channel video planar by the dominant normal axis (floors/walls become
+//! frescoes, lit and occluded like the material). The glass family already
+//! refracts input0 and is untouched.
 
 use super::engines::EngineUniforms;
 use super::mesh::FxMesh;
@@ -422,7 +427,20 @@ script_mod! {
                 let base = self.fx_palette(mat)
                 let key = dif * sh * (0.85 + self.time_beat.w * 0.55)
                 let amb = 0.16 + 0.10 * clamp(n.y, 0.0, 1.0)
-                col = base * ((amb + key) * ao) * self.fog.y
+                // CONTENT: the channel video projects onto the field, planar
+                // by the dominant normal axis (floors xz, walls xy/zy),
+                // folded into the albedo at low strength and lit like the
+                // material. fog.z = the pre-gated `content` strength.
+                let an = abs(n)
+                let mut cuv = vec2(p.x, 0.0 - p.y)
+                if an.y > max(an.x, an.z) {
+                    cuv = vec2(p.x, p.z)
+                } else { if an.x > an.z {
+                    cuv = vec2(p.z, 0.0 - p.y)
+                } }
+                let tx = self.tex0.sample_as_bgra(fract(cuv * 0.09))
+                let alb = base.mix(base * 0.35 + tx.xyz * 0.9, self.fog.z * 0.7)
+                col = alb * ((amb + key) * ao) * self.fog.y
                     + self.col_c.xyz * (spec * sh * 0.35)
             }
             let fogf = exp(0.0 - t * self.fog.x)
