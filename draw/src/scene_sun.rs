@@ -36,25 +36,51 @@ impl Default for SceneSun {
     }
 }
 
+/// The fixed (early-summer) solar declination the whole engine's
+/// time-of-day model uses: a look, not an ephemeris — "18:00" then means the
+/// same thing in every game, on every day.
+pub const SOLAR_DECLINATION_DEG: f32 = 15.0;
+
+/// The sun's TRUE direction for a local solar hour, map space (x east, y
+/// south, z up), unclamped — below the horizon it points below the horizon.
+/// Hour angle from `hours` (0..24) at [`SOLAR_DECLINATION_DEG`].
+///
+/// [`SceneSun::from_time_of_day`] clamps this to a daylight rig (the map's
+/// bake has no night); a GAME wants the real thing, so its night sky and
+/// stars can come up — see `makepad_render::sun::solar_dir`.
+pub fn solar_dir(hours: f32, latitude_deg: f32) -> Vec3f {
+    let decl = SOLAR_DECLINATION_DEG.to_radians();
+    let lat = latitude_deg.to_radians();
+    let hour_angle = ((hours - 12.0) * 15.0).to_radians();
+    let sin_elev =
+        (lat.sin() * decl.sin() + lat.cos() * decl.cos() * hour_angle.cos()).clamp(-1.0, 1.0);
+    let elev = sin_elev.asin();
+    // Azimuth from north, clockwise (compass), toward the sun.
+    let az = (hour_angle.sin() * decl.cos())
+        .atan2(hour_angle.cos() * decl.cos() * lat.sin() - decl.sin() * lat.cos())
+        + std::f32::consts::PI;
+    let cos_e = elev.cos();
+    // north component -> map -y (y is south/screen-down).
+    vec3f(az.sin() * cos_e, -az.cos() * cos_e, elev.sin()).normalize()
+}
+
 impl SceneSun {
-    /// Simple solar-position model good enough for a map light: hour angle
-    /// from local solar `hours` (0..24), fixed early-summer declination.
-    /// Clamps elevation to stay a daylight rig — this drives a look, not
-    /// an ephemeris.
+    /// Simple solar-position model good enough for a map light: [`solar_dir`]
+    /// with the elevation clamped up to ~4.6 degrees, so this stays a
+    /// DAYLIGHT rig at every hour — the map bakes one lit image and has no
+    /// night to fall back to. Games take the unclamped direction instead
+    /// (`makepad_render::sun::SunLight::from_time_of_day`).
     pub fn from_time_of_day(hours: f32, latitude_deg: f32) -> Self {
-        let decl = 15.0f32.to_radians();
-        let lat = latitude_deg.to_radians();
-        let hour_angle = ((hours - 12.0) * 15.0).to_radians();
-        let sin_elev =
-            (lat.sin() * decl.sin() + lat.cos() * decl.cos() * hour_angle.cos()).clamp(-1.0, 1.0);
-        let elev = sin_elev.asin().max(0.08);
-        // Azimuth from north, clockwise (compass), toward the sun.
-        let az = (hour_angle.sin() * decl.cos())
-            .atan2(hour_angle.cos() * decl.cos() * lat.sin() - decl.sin() * lat.cos())
-            + std::f32::consts::PI;
+        let true_dir = solar_dir(hours, latitude_deg);
+        let elev = true_dir.z.clamp(-1.0, 1.0).asin().max(0.08);
+        let horiz = (true_dir.x * true_dir.x + true_dir.y * true_dir.y).sqrt().max(1.0e-5);
         let cos_e = elev.cos();
-        // north component -> map -y (y is south/screen-down).
-        let dir = vec3f(az.sin() * cos_e, -az.cos() * cos_e, elev.sin()).normalize();
+        let dir = vec3f(
+            true_dir.x / horiz * cos_e,
+            true_dir.y / horiz * cos_e,
+            elev.sin(),
+        )
+        .normalize();
         // Warm the sun and dim the sky toward the horizon hours.
         let warmth = (1.0 - (elev / 0.9).clamp(0.0, 1.0)).powi(2);
         let color = vec3f(

@@ -73,16 +73,174 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 /// AVAssetReaderStatus values.
 const READER_STATUS_FAILED: i64 = 3;
 
+/// 100ns ticks per second, as a CMTime timescale.
+const HNS_TIMESCALE: i32 = 10_000_000;
+
+/// How far before the seek target the reader's time range actually starts.
+///
+/// MEASURED: an AVAssetReader whose `timeRange` begins mid-frame does not drop
+/// the frame it lands inside — it TRIMS it and rewrites its presentation
+/// timestamp to the range start. Ask for the target exactly and the frame
+/// before it comes back wearing the target's timestamp, so a pts-based discard
+/// loop cannot tell it apart from the frame actually wanted. Seeking to
+/// frame 1 of a 24 fps clip returned frame 0 at frame 1's pts, because
+/// 1/24 s is 416666.67 ticks and the pts the decoder reports for it truncates
+/// to 416666 — a hair inside frame 0.
+///
+/// Starting 100 µs early makes the trimmed straddler carry a timestamp
+/// strictly below the target, so the loop drops it and the first frame kept is
+/// the real one. 100 µs is far below the shortest plausible frame (1/240 s =
+/// 41666 ticks), so backing off can never skip a frame, and far above the
+/// sub-tick rounding it exists to absorb.
+const SEEK_BACKOFF_100NS: i64 = 1_000;
+
 pub struct MacosVideoFileDecoder {
-    // Held to keep the object graph alive; the reader/outputs do the work.
-    _asset: RcObjcId,
-    _reader: RcObjcId,
-    reader_id: ObjcId,
+    // The asset and its tracks outlive any single reader: an AVAssetReader
+    // cannot rewind, so `seek` throws its reader away and builds a new one
+    // over these.
+    asset: RcObjcId,
+    video_track: RcObjcId,
+    audio_track: Option<RcObjcId>,
+    reader: RcObjcId,
     video_output: RcObjcId,
     audio_output: Option<RcObjcId>,
     info: VideoFileInfo,
     video_eos: bool,
     audio_eos: bool,
+}
+
+/// One reader and the outputs attached to it. Rebuilt wholesale on seek.
+struct ReaderSet {
+    reader: RcObjcId,
+    video_output: RcObjcId,
+    audio_output: Option<RcObjcId>,
+}
+
+/// Build an AVAssetReader over `asset` reading `video_track` as NV12 and
+/// `audio_track` (when present) as 16-bit interleaved PCM, started.
+///
+/// `start_100ns: Some(t)` sets the reader's `timeRange` to `[t, +inf)`, which
+/// is the only way AVFoundation offers to begin reading anywhere but zero —
+/// AVAssetReader has no seek, and restarting one from the top and discarding
+/// forward would make a late seek cost the whole file. The reader still lands
+/// on the sync sample at or before `t` and trims the frame straddling it (see
+/// [`SEEK_BACKOFF_100NS`]), so callers finish the job by discarding frames
+/// before the target.
+unsafe fn build_reader(
+    asset: ObjcId,
+    video_track: ObjcId,
+    audio_track: Option<ObjcId>,
+    start_100ns: Option<i64>,
+) -> Result<ReaderSet, VideoFileError> {
+    let mut error: ObjcId = nil;
+    let reader: ObjcId =
+        msg_send![class!(AVAssetReader), assetReaderWithAsset: asset error: &mut error];
+    if reader == nil {
+        return Err(nserror_to_video_error("AVAssetReader init", error));
+    }
+    if let Some(start) = start_100ns {
+        let range = CMTimeRange {
+            start: CMTime {
+                value: start,
+                timescale: HNS_TIMESCALE,
+                flags: kCMTimeFlags_Valid,
+                epoch: 0,
+            },
+            duration: kCMTimePositiveInfinity,
+        };
+        let _: () = msg_send![reader, setTimeRange: range];
+    }
+
+    let nv12_number: ObjcId = msg_send![
+        class!(NSNumber),
+        numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    ];
+    let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
+    let values: &[ObjcId] = &[nv12_number];
+    let video_settings: ObjcId = msg_send![
+        class!(NSDictionary),
+        dictionaryWithObjects: values.as_ptr()
+        forKeys: keys.as_ptr()
+        count: 1usize
+    ];
+    let video_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
+    let video_output: ObjcId = msg_send![
+        video_output,
+        initWithTrack: video_track
+        outputSettings: video_settings
+    ];
+    if video_output == nil {
+        return Err(VideoFileError::new(
+            "AVAssetReaderTrackOutput(video NV12) init failed",
+        ));
+    }
+    // We repack into our own buffer before releasing the sample, so
+    // the vended buffer may be recycled.
+    let _: () = msg_send![video_output, setAlwaysCopiesSampleData: NO];
+    let can_add: BOOL = msg_send![reader, canAddOutput: video_output];
+    if can_add == NO {
+        let _: () = msg_send![video_output, release];
+        return Err(VideoFileError::new("AVAssetReader rejected video output"));
+    }
+    let _: () = msg_send![reader, addOutput: video_output];
+
+    // Optional audio track -> 16-bit interleaved PCM at native rate/layout.
+    let mut audio_output_obj: ObjcId = nil;
+    if let Some(audio_track) = audio_track {
+        let format_number: ObjcId = msg_send![
+            class!(NSNumber),
+            numberWithUnsignedInt: AudioFormatId::LinearPCM as u32
+        ];
+        let bits_number: ObjcId = msg_send![class!(NSNumber), numberWithInt: 16i32];
+        let no_number: ObjcId = msg_send![class!(NSNumber), numberWithBool: NO];
+        let keys: &[ObjcId] = &[
+            AVFormatIDKey,
+            AVLinearPCMBitDepthKey,
+            AVLinearPCMIsFloatKey,
+            AVLinearPCMIsBigEndianKey,
+            AVLinearPCMIsNonInterleaved,
+        ];
+        let values: &[ObjcId] = &[format_number, bits_number, no_number, no_number, no_number];
+        let audio_settings: ObjcId = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObjects: values.as_ptr()
+            forKeys: keys.as_ptr()
+            count: keys.len()
+        ];
+        let audio_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
+        let audio_output: ObjcId = msg_send![
+            audio_output,
+            initWithTrack: audio_track
+            outputSettings: audio_settings
+        ];
+        if audio_output != nil {
+            let _: () = msg_send![audio_output, setAlwaysCopiesSampleData: NO];
+            let can_add: BOOL = msg_send![reader, canAddOutput: audio_output];
+            if can_add == YES {
+                let _: () = msg_send![reader, addOutput: audio_output];
+                audio_output_obj = audio_output;
+            } else {
+                let _: () = msg_send![audio_output, release];
+            }
+        }
+    }
+
+    let started: BOOL = msg_send![reader, startReading];
+    if started == NO {
+        let error: ObjcId = msg_send![reader, error];
+        if audio_output_obj != nil {
+            let _: () = msg_send![audio_output_obj, release];
+        }
+        let _: () = msg_send![video_output, release];
+        return Err(nserror_to_video_error("AVAssetReader startReading", error));
+    }
+
+    Ok(ReaderSet {
+        reader: RcObjcId::from_unowned(NonNull::new(reader).unwrap()),
+        // initWithTrack: returned +1; from_owned takes that reference.
+        video_output: RcObjcId::from_owned(NonNull::new(video_output).unwrap()),
+        audio_output: NonNull::new(audio_output_obj).map(RcObjcId::from_owned),
+    })
 }
 
 // The decoder is pulled from one thread at a time; the ObjC objects it wraps
@@ -177,61 +335,18 @@ impl MacosVideoFileDecoder {
             let duration: CMTime = msg_send![asset, duration];
             let duration_100ns = cmtime_to_100ns(duration);
 
-            // --- Reader + NV12 video output. ---
-            let mut error: ObjcId = nil;
-            let reader: ObjcId =
-                msg_send![class!(AVAssetReader), assetReaderWithAsset: asset error: &mut error];
-            if reader == nil {
-                return Err(nserror_to_video_error("AVAssetReader init", error));
-            }
-
-            let nv12_number: ObjcId = msg_send![
-                class!(NSNumber),
-                numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            ];
-            let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
-            let values: &[ObjcId] = &[nv12_number];
-            let video_settings: ObjcId = msg_send![
-                class!(NSDictionary),
-                dictionaryWithObjects: values.as_ptr()
-                forKeys: keys.as_ptr()
-                count: 1usize
-            ];
-            let video_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
-            let video_output: ObjcId = msg_send![
-                video_output,
-                initWithTrack: video_track
-                outputSettings: video_settings
-            ];
-            if video_output == nil {
-                return Err(VideoFileError::new(
-                    "AVAssetReaderTrackOutput(video NV12) init failed",
-                ));
-            }
-            // We repack into our own buffer before releasing the sample, so
-            // the vended buffer may be recycled.
-            let _: () = msg_send![video_output, setAlwaysCopiesSampleData: NO];
-            let can_add: BOOL = msg_send![reader, canAddOutput: video_output];
-            if can_add == NO {
-                let _: () = msg_send![video_output, release];
-                return Err(VideoFileError::new("AVAssetReader rejected video output"));
-            }
-            let _: () = msg_send![reader, addOutput: video_output];
-
-            // --- Optional audio track -> 16-bit interleaved PCM at native
-            // rate/layout. ---
-            let mut has_audio = false;
+            // --- Optional audio track: native rate/layout from its stream
+            // description; the output itself is built with the reader. ---
             let mut audio_sample_rate = 0u32;
             let mut audio_channels = 0u16;
-            let mut audio_output_obj: ObjcId = nil;
+            let mut audio_track_obj: ObjcId = nil;
             let audio_tracks: ObjcId = msg_send![asset, tracksWithMediaType: AVMediaTypeAudio];
             let audio_track_count: usize = msg_send![audio_tracks, count];
             if audio_track_count > 0 {
-                let audio_track: ObjcId = msg_send![audio_tracks, objectAtIndex: 0usize];
-                // Native rate/channel count from the track's stream description.
+                audio_track_obj = msg_send![audio_tracks, objectAtIndex: 0usize];
                 let mut rate = 48000u32;
                 let mut channels = 2u16;
-                let audio_descs: ObjcId = msg_send![audio_track, formatDescriptions];
+                let audio_descs: ObjcId = msg_send![audio_track_obj, formatDescriptions];
                 let audio_desc_count: usize = msg_send![audio_descs, count];
                 if audio_desc_count > 0 {
                     let desc: CMFormatDescriptionRef =
@@ -247,66 +362,32 @@ impl MacosVideoFileDecoder {
                         }
                     }
                 }
-
-                let format_number: ObjcId = msg_send![
-                    class!(NSNumber),
-                    numberWithUnsignedInt: AudioFormatId::LinearPCM as u32
-                ];
-                let bits_number: ObjcId = msg_send![class!(NSNumber), numberWithInt: 16i32];
-                let no_number: ObjcId = msg_send![class!(NSNumber), numberWithBool: NO];
-                let keys: &[ObjcId] = &[
-                    AVFormatIDKey,
-                    AVLinearPCMBitDepthKey,
-                    AVLinearPCMIsFloatKey,
-                    AVLinearPCMIsBigEndianKey,
-                    AVLinearPCMIsNonInterleaved,
-                ];
-                let values: &[ObjcId] =
-                    &[format_number, bits_number, no_number, no_number, no_number];
-                let audio_settings: ObjcId = msg_send![
-                    class!(NSDictionary),
-                    dictionaryWithObjects: values.as_ptr()
-                    forKeys: keys.as_ptr()
-                    count: keys.len()
-                ];
-                let audio_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
-                let audio_output: ObjcId = msg_send![
-                    audio_output,
-                    initWithTrack: audio_track
-                    outputSettings: audio_settings
-                ];
-                if audio_output != nil {
-                    let _: () = msg_send![audio_output, setAlwaysCopiesSampleData: NO];
-                    let can_add: BOOL = msg_send![reader, canAddOutput: audio_output];
-                    if can_add == YES {
-                        let _: () = msg_send![reader, addOutput: audio_output];
-                        audio_output_obj = audio_output;
-                        audio_sample_rate = rate;
-                        audio_channels = channels;
-                        has_audio = true;
-                    } else {
-                        let _: () = msg_send![audio_output, release];
-                    }
-                }
+                audio_sample_rate = rate;
+                audio_channels = channels;
             }
 
-            let started: BOOL = msg_send![reader, startReading];
-            if started == NO {
-                let error: ObjcId = msg_send![reader, error];
-                if audio_output_obj != nil {
-                    let _: () = msg_send![audio_output_obj, release];
-                }
-                let _: () = msg_send![video_output, release];
-                return Err(nserror_to_video_error("AVAssetReader startReading", error));
+            let set = build_reader(
+                asset,
+                video_track,
+                (audio_track_obj != nil).then_some(audio_track_obj),
+                None,
+            )?;
+            // The track only counts as audio if the reader took its output;
+            // dropping it here also stops `seek` from re-attempting it.
+            let has_audio = set.audio_output.is_some();
+            if !has_audio {
+                audio_track_obj = nil;
+                audio_sample_rate = 0;
+                audio_channels = 0;
             }
 
             Ok(Self {
-                _asset: RcObjcId::from_unowned(NonNull::new(asset).unwrap()),
-                _reader: RcObjcId::from_unowned(NonNull::new(reader).unwrap()),
-                reader_id: reader,
-                // initWithTrack: returned +1; from_owned takes that reference.
-                video_output: RcObjcId::from_owned(NonNull::new(video_output).unwrap()),
-                audio_output: NonNull::new(audio_output_obj).map(RcObjcId::from_owned),
+                asset: RcObjcId::from_unowned(NonNull::new(asset).unwrap()),
+                video_track: RcObjcId::from_unowned(NonNull::new(video_track).unwrap()),
+                audio_track: NonNull::new(audio_track_obj).map(RcObjcId::from_unowned),
+                reader: set.reader,
+                video_output: set.video_output,
+                audio_output: set.audio_output,
                 info: VideoFileInfo {
                     width,
                     height,
@@ -340,9 +421,10 @@ impl MacosVideoFileDecoder {
         if !sample.is_null() {
             return Ok(Some(sample));
         }
-        let status: i64 = msg_send![self.reader_id, status];
+        let reader = self.reader.as_id();
+        let status: i64 = msg_send![reader, status];
         if status == READER_STATUS_FAILED {
-            let error: ObjcId = msg_send![self.reader_id, error];
+            let error: ObjcId = msg_send![reader, error];
             return Err(nserror_to_video_error(context, error));
         }
         Ok(None)
@@ -464,12 +546,59 @@ impl MacosVideoFileDecoder {
             }))
         }
     }
+
+    /// Position the demuxer at or before `target_100ns` and re-arm both
+    /// streams. Landing exactly on the target is the facade's job.
+    ///
+    /// AVAssetReader is a one-shot forward pipeline with no seek, so this
+    /// replaces it: a fresh reader over the same asset whose `timeRange`
+    /// starts at the target. AVFoundation begins at the sync sample at or
+    /// before it, and the caller decodes forward from there.
+    ///
+    /// Standing that reader up is what a seek costs here — MEASURED on a
+    /// 320x192 clip, a seek plus one frame is 8.7 ms on an all-intra file and
+    /// 11.2 ms on a GOP file, so the ~2.5 ms of GOP walking is small beside
+    /// the rebuild both pay. AVFoundation's cheaper-looking alternative,
+    /// `supportsRandomAccess` + `resetForReadingTimeRanges:`, was tried and
+    /// does not survive contact: it raises an Objective-C exception here even
+    /// with random access enabled before `startReading` and a finite range,
+    /// and an ObjC exception unwinding into Rust aborts the process. A faster
+    /// seek is not worth a crash the type system cannot see.
+    pub fn seek_to(&mut self, target_100ns: i64) -> Result<(), VideoFileError> {
+        let mut start = (target_100ns - SEEK_BACKOFF_100NS).max(0);
+        if self.info.duration_100ns > 0 {
+            // A range beginning at or past the end is not a range
+            // AVAssetReader accepts — `startReading` fails outright. Clamp
+            // inside the asset so a past-the-end target reaches EOS instead.
+            start = start.min(self.info.duration_100ns - 1);
+        }
+        let _pool = AutoreleasePool::new();
+        unsafe {
+            let set = build_reader(
+                self.asset.as_id(),
+                self.video_track.as_id(),
+                self.audio_track.as_ref().map(|t| t.as_id()),
+                Some(start),
+            )?;
+            // Only now that the replacement is reading: a failed build leaves
+            // the decoder exactly where it was.
+            let old_reader = self.reader.as_id();
+            let _: () = msg_send![old_reader, cancelReading];
+            self.reader = set.reader;
+            self.video_output = set.video_output;
+            self.audio_output = set.audio_output;
+        }
+        self.video_eos = false;
+        self.audio_eos = false;
+        Ok(())
+    }
 }
 
 impl Drop for MacosVideoFileDecoder {
     fn drop(&mut self) {
         unsafe {
-            let _: () = msg_send![self.reader_id, cancelReading];
+            let reader = self.reader.as_id();
+            let _: () = msg_send![reader, cancelReading];
         }
     }
 }

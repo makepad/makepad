@@ -767,12 +767,14 @@ pub struct ScriptParser {
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     pub had_error: bool,
-    /// Formatted parse errors, mirroring what `report_error` logged. Parse
-    /// errors never reach the VM's trap queue (the parser recovers and the
-    /// module still runs), so hosts capturing diagnostics (validation, AI
-    /// repair loops) read them from here — the eval paths drain this into
-    /// `ScriptVmBase::captured_errors` when a sink is installed.
-    pub errors: Vec<String>,
+    /// The formatted messages behind `had_error`, bounded. A host that
+    /// installs a captured-error sink gets these routed into it after each
+    /// streaming parse (vm::eval_with_append_source), so a structural parse
+    /// error FAILS a game eval instead of logging into the void while the
+    /// recovered parse runs something else entirely — `let loop = [...]`
+    /// recovered into an infinite empty loop and burned the whole
+    /// instruction budget before this existed.
+    pub parse_errors: Vec<String>,
 
     state: Vec<State>,
     pub file: String,
@@ -816,7 +818,7 @@ impl Default for ScriptParser {
             opcodes: Default::default(),
             source_map: Default::default(),
             had_error: false,
-            errors: Default::default(),
+            parse_errors: Default::default(),
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -857,13 +859,15 @@ impl ScriptParser {
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
-        self.errors.push(format!(
-            "{}:{}:{} - {}",
-            self.file,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            msg
-        ));
+        if self.parse_errors.len() < 16 {
+            self.parse_errors.push(format!(
+                "{}:{}:{}: {}",
+                self.file,
+                line as usize + self.line_offset + 1,
+                col as usize + self.col_offset + 1,
+                msg
+            ));
+        }
         log_with_level(
             &self.file,
             line as u32 + self.line_offset as u32,
@@ -1012,10 +1016,6 @@ impl ScriptParser {
             names[*slot as usize] = *name;
         }
         self.slot_frames.push((ctx.slots_frame_at, names));
-    }
-
-    fn slot_ctx(&mut self) -> Option<&mut SlotCtx> {
-        self.slot_ctxs.last_mut()
     }
 
     /// A name that must stay dynamic in the innermost body.
