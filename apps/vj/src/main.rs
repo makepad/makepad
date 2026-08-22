@@ -1479,6 +1479,15 @@ script_mod! {
                                                 chip_mesh := PillButton{width: Fill text: "MESH"}
                                                 chip_map := PillButton{width: Fill text: "MAP"}
                                                 import_toggle := ChromeButton{width: Fill text: "IMPORT"}
+                                                // VARIABLE FRAMERATE VIDEO
+                                                // IMPORT: ticked, video is
+                                                // CONVERTED on the way in
+                                                // (optical flow + all-intra)
+                                                // and owned by the library,
+                                                // so the decks can scratch it
+                                                // at any rate. Unticked, the
+                                                // usual no-copy reference.
+                                                import_flow := CheckBox{width: Fill text: "FLOW"}
                                                 // (No count readout: the
                                                 // scrollbar + pager already
                                                 // say where you are.)
@@ -9578,12 +9587,19 @@ p2 {}
     /// rest, live "done/total" while working (lit, click = cancel), back
     /// to quiet when finished — summaries go to the log, the new tiles to
     /// the grid.
+    ///
+    /// A CONVERTING file takes over the label with its own percentage: on
+    /// that phase "3/40" would sit still for minutes and read as a hang.
     fn sync_import_ui(&mut self, cx: &mut Cx) {
         use crate::import_ui::ImportPhase;
         let (label, lit) = match &self.import.phase {
             ImportPhase::Scanning { found } => (format!("SCAN {found}"), true),
-            ImportPhase::Importing { done, total, .. } => {
-                (format!("{done}/{total}"), true)
+            ImportPhase::Importing { done, total, phase, file_fraction, .. } => {
+                if phase.is_empty() {
+                    (format!("{done}/{total}"), true)
+                } else {
+                    (format!("CONV {:.0}%", file_fraction * 100.0), true)
+                }
             }
             _ => ("IMPORT".to_string(), false),
         };
@@ -10360,9 +10376,10 @@ p2 {}
             prompt,
             u8::from(self.gen_panel_open),
         ) + &format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
             u8::from(self.lights_tab),
             u8::from(self.monitor_audio),
+            u8::from(self.import.convert_video),
         );
         let path = Self::gen_panel_path();
         if let Some(dir) = path.parent() {
@@ -10390,6 +10407,12 @@ p2 {}
         // (the TCC prompt was answered on the deliberate first flip).
         if lines.next().map(|l| l == "1").unwrap_or(false) {
             self.set_monitor_audio(cx, true);
+        }
+        // The import's FLOW tick — absent in files written before it
+        // existed, which reads as off, which is the old behaviour exactly.
+        if lines.next().map(|l| l == "1").unwrap_or(false) {
+            self.import.convert_video = true;
+            self.ui.check_box(cx, ids!(import_flow)).set_active(cx, true, Animate::No);
         }
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
@@ -14170,6 +14193,23 @@ impl MatchEvent for App {
             } else {
                 self.open_import_picker(cx);
             }
+        }
+        // FLOW: the import's one setting, and it changes what an import
+        // COSTS — converting is minutes per clip and a second copy of the
+        // bytes — so it is a deliberate tick that survives restarts, never a
+        // per-run surprise.
+        if let Some(on) = self.ui.check_box(cx, ids!(import_flow)).changed(actions) {
+            self.import.convert_video = on;
+            log!(
+                "import: flow conversion {} — video is {}",
+                if on { "ON" } else { "OFF" },
+                if on {
+                    "converted (optical flow + all-intra) and stored in the library"
+                } else {
+                    "referenced where it lies"
+                }
+            );
+            self.save_gen_panel();
         }
         // The native picker answers in a LATER actions pass; the pick
         // starts the import on the spot — no panel, no second click.

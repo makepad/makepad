@@ -47,3 +47,8 @@ makepad-asset-store = { path = "../../libs/asset/store" }
 # Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
 # pictures for audio, and the dimension probes for stills.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
+# VARIABLE-FRAMERATE IMPORT: the `mkfl` payload the player reads, the
+# classical (model-free) optical flow that fills it, and the all-intra
+# re-encode. Shared with the enhance backend, which fills the same box from
+# RIFE — one format, one parser, two producers.
+makepad-video-flow = { path = "../../libs/video_flow" }

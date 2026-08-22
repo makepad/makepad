@@ -1,8 +1,14 @@
-//! Reader for the `mkfl` motion-vector box the enhance service appends to
-//! its output mp4s (see libs/asset/ai/src/enhance_backend.rs for the writer
-//! and the payload spec). The box rides INSIDE the mp4 — a trailing
-//! top-level box every decoder skips — so a flow-aware player just re-scans
-//! the same file it plays.
+//! Reader for the `mkfl` motion-vector box its two producers append to their
+//! mp4s: the enhance service (RIFE fields, see
+//! libs/asset/ai/src/enhance_backend.rs) and this app's own import converter
+//! (classical fields, see libs/video_flow). The box rides INSIDE the mp4 — a
+//! trailing top-level box every decoder skips — so a flow-aware player just
+//! re-scans the same file it plays.
+//!
+//! The box walk and the header parse are the SHARED ones
+//! (`makepad_video_flow::payload`), so a file this machine writes is a file
+//! this player reads — including the 64-bit `largesize` `mdat` AVFoundation
+//! puts in every mp4 it produces.
 //!
 //! Payload v1, all little-endian after the 4CC:
 //!
@@ -61,58 +67,18 @@ impl FlowMap {
 /// declared geometry does not match its byte count — a truncated payload
 /// must never become a half-usable map.
 pub fn parse_mkfl(mp4: &[u8]) -> Option<FlowMap> {
-    let payload = find_box(mp4, b"mkfl")?;
-    if payload.len() < 28 || &payload[..4] != b"MKFL" {
-        return None;
-    }
-    let u16at = |at: usize| u16::from_le_bytes([payload[at], payload[at + 1]]);
-    let u32at = |at: usize| {
-        u32::from_le_bytes([payload[at], payload[at + 1], payload[at + 2], payload[at + 3]])
-    };
-    let version = u16at(4);
-    if version != 1 {
-        return None;
-    }
-    let pairs = u32at(8);
-    let grid_w = u16at(12);
-    let grid_h = u16at(14);
-    let vid_w = u16at(16);
-    let vid_h = u16at(18);
-    let fps_num = u32at(20);
-    let fps_den = u32at(24);
-    let stride = grid_w as usize * grid_h as usize * 5;
-    let expected = pairs as usize * stride;
-    let samples = &payload[28..];
-    if grid_w == 0 || grid_h == 0 || samples.len() != expected {
-        return None;
-    }
+    let payload = makepad_video_flow::find_mkfl_box(mp4)?;
+    let (header, samples) = makepad_video_flow::parse_flow_payload(payload)?;
     Some(FlowMap {
-        pairs,
-        grid_w,
-        grid_h,
-        vid_w,
-        vid_h,
-        fps_num,
-        fps_den,
+        pairs: header.pairs,
+        grid_w: header.grid_w,
+        grid_h: header.grid_h,
+        vid_w: header.vid_w,
+        vid_h: header.vid_h,
+        fps_num: header.fps_num,
+        fps_den: header.fps_den,
         samples: Arc::from(samples),
     })
-}
-
-fn find_box<'a>(mp4: &'a [u8], four_cc: &[u8; 4]) -> Option<&'a [u8]> {
-    let mut at = 0usize;
-    while at + 8 <= mp4.len() {
-        let size =
-            u32::from_be_bytes([mp4[at], mp4[at + 1], mp4[at + 2], mp4[at + 3]]) as usize;
-        if size < 8 {
-            return None;
-        }
-        if &mp4[at + 4..at + 8] == four_cc {
-            let end = at.checked_add(size)?;
-            return mp4.get(at + 8..end);
-        }
-        at = at.checked_add(size)?;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -177,5 +143,43 @@ mod tests {
         assert!(parse_mkfl(&wrap(&future)).is_none());
         // Zero grid fails closed.
         assert!(parse_mkfl(&wrap(&payload(0, 0, 2, &[]))).is_none());
+    }
+
+    #[test]
+    fn what_the_shared_writer_produces_is_what_this_reader_takes() {
+        // The import converter's own path, end to end in miniature: a
+        // grid-native field, quantized and framed by makepad-video-flow, then
+        // read back HERE. This is the byte-compatibility contract between the
+        // two producers and this player, and it is the reason both sides use
+        // one crate.
+        let (gw, gh) = (4usize, 3usize);
+        let n = gw * gh;
+        let f0 = vec![[-1.25f32, 0.5]; n];
+        let f1 = vec![[1.25f32, -0.5]; n];
+        let mask = vec![0.5f32; n];
+        let samples = makepad_video_flow::quantize_flow_grid(&f0, &f1, &mask, gw, gh);
+        let payload = makepad_video_flow::encode_flow_payload(
+            1, gw as u16, gh as u16, 640, 360, 30, 1, &samples,
+        );
+        // Framed after a 64-bit `largesize` mdat, which is what every mp4 the
+        // macOS encoder writes actually looks like.
+        let mut mp4 = Vec::new();
+        mp4.extend_from_slice(&1u32.to_be_bytes());
+        mp4.extend_from_slice(b"mdat");
+        mp4.extend_from_slice(&24u64.to_be_bytes());
+        mp4.extend_from_slice(&[0u8; 8]);
+        makepad_video_flow::append_mkfl_box(&mut mp4, &payload);
+
+        let map = parse_mkfl(&mp4).expect("the shared writer's box parses here");
+        assert_eq!((map.pairs, map.grid_w, map.grid_h), (1, gw as u16, gh as u16));
+        assert_eq!((map.vid_w, map.vid_h, map.fps_num, map.fps_den), (640, 360, 30, 1));
+        let pair = map.pair(0).expect("pair 0");
+        assert_eq!(pair.len(), map.pair_stride());
+        // -1.25 grid px = -5 quarter-cell units; +0.5 = +2; mask 0.5 = 128.
+        assert!(pair[..n].iter().all(|&b| b as i8 == -5));
+        assert!(pair[n..2 * n].iter().all(|&b| b as i8 == 2));
+        assert!(pair[2 * n..3 * n].iter().all(|&b| b as i8 == 5));
+        assert!(pair[3 * n..4 * n].iter().all(|&b| b as i8 == -2));
+        assert!(pair[4 * n..].iter().all(|&b| b == 128));
     }
 }

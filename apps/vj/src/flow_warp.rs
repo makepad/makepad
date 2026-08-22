@@ -781,6 +781,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_import_converter_aims_at_exactly_these_budgets() {
+        // The two numbers that decide whether a converted clip warps at all
+        // live in TWO crates: the player's budgets here, the converter's
+        // targets there. They are the same numbers, and a drift would show
+        // up as "conversion succeeded, playback is plain video" — silent,
+        // and expensive to chase. So it fails here instead.
+        assert_eq!(
+            MAX_FLOW_CACHE_BYTES,
+            makepad_video_flow::convert::DEFAULT_FIT_CACHE_BYTES
+        );
+        assert_eq!(
+            MAX_FLOW_SCAN_BYTES,
+            makepad_video_flow::convert::DEFAULT_MAX_OUTPUT_BYTES
+        );
+    }
+
+    #[test]
     fn stride_maps_the_shipped_shapes_and_refuses_misfits() {
         // job 1 regate: 281 frames, 140 pairs — tweened, stride 2.
         assert_eq!(endpoint_stride(281, 140), Some(2));
