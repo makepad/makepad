@@ -544,12 +544,72 @@ impl EffectDoc {
                 cfg.bar_beats = r.f32(live_id!(bar_beats), cfg.bar_beats).clamp(1.0, 32.0);
                 Engine::Flock(FlockEngine::new(cfg))
             }
+            "city" => {
+                use super::engines_city::{CityConfig, CityEngine, CityStyle};
+                let mut cfg = CityConfig { seed, ..Default::default() };
+                if let Some(style) = r.string(live_id!(style)) {
+                    match CityStyle::parse(&style) {
+                        Some(st) => cfg.style = st,
+                        None => r.warnings.push(format!(
+                            "style '{style}' unknown (night/retro/tron)"
+                        )),
+                    }
+                }
+                cfg.blocks = r.usize(live_id!(blocks), cfg.blocks).clamp(2, 14);
+                cfg.block = r.f32(live_id!(block), cfg.block);
+                cfg.street = r.f32(live_id!(street), cfg.street);
+                cfg.towers = r.usize(live_id!(towers), cfg.towers).clamp(4, 900);
+                cfg.max_h = r.f32(live_id!(max_h), cfg.max_h);
+                cfg.win = r.f32(live_id!(win), cfg.win);
+                cfg.density = r.f32(live_id!(density), cfg.density);
+                cfg.flicker = r.f32(live_id!(flicker), cfg.flicker);
+                cfg.trails = r.usize(live_id!(trails), cfg.trails).min(16);
+                cfg.trail_beats = r.f32(live_id!(trail_beats), cfg.trail_beats);
+                cfg.wall_h = r.f32(live_id!(wall_h), cfg.wall_h);
+                cfg.alt = r.f32(live_id!(alt), cfg.alt);
+                cfg.fly = r.f32(live_id!(fly), cfg.fly);
+                cfg.bank = r.f32(live_id!(bank), cfg.bank);
+                Engine::City(CityEngine::new(cfg))
+            }
+            "pipes" => {
+                use super::engines_pipes::{PipesConfig, PipesEngine};
+                let mut cfg = PipesConfig { seed, ..Default::default() };
+                cfg.pipes = r.usize(live_id!(pipes), cfg.pipes).clamp(1, 16);
+                cfg.bound = r.usize(live_id!(bound), cfg.bound as usize).clamp(2, 10) as i32;
+                cfg.cell = r.f32(live_id!(cell), cfg.cell);
+                cfg.radius = r.f32(live_id!(radius), cfg.radius);
+                cfg.sides = r.usize(live_id!(sides), cfg.sides).clamp(3, 16);
+                cfg.steps = r.usize(live_id!(steps), cfg.steps).clamp(32, 2600);
+                cfg.turn_chance = r.f32(live_id!(turn_chance), cfg.turn_chance);
+                cfg.pop = r.f32(live_id!(pop), cfg.pop);
+                cfg.hot = r.f32(live_id!(hot), cfg.hot);
+                Engine::Pipes(PipesEngine::new(cfg))
+            }
+            "stockcharts" | "charts" | "candles" => {
+                use super::engines_charts::{ChartsConfig, ChartsEngine};
+                let mut cfg = ChartsConfig { seed, ..Default::default() };
+                cfg.candles = r.usize(live_id!(candles), cfg.candles).clamp(16, 400);
+                cfg.per_beat = r.f32(live_id!(per_beat), cfg.per_beat);
+                cfg.vol = r.f32(live_id!(vol), cfg.vol);
+                cfg.drift = r.f32(live_id!(drift), cfg.drift);
+                cfg.spike = r.f32(live_id!(spike), cfg.spike);
+                cfg.cascade = r.f32(live_id!(cascade), cfg.cascade);
+                cfg.bar = r.f32(live_id!(bar), cfg.bar);
+                cfg.width = r.f32(live_id!(width), cfg.width);
+                cfg.height = r.f32(live_id!(height), cfg.height);
+                cfg.body_w = r.f32(live_id!(body_w), cfg.body_w);
+                cfg.ma = r.usize(live_id!(ma), cfg.ma).min(64);
+                cfg.grid_x = r.usize(live_id!(grid_x), cfg.grid_x).clamp(0, 64);
+                cfg.grid_y = r.usize(live_id!(grid_y), cfg.grid_y).clamp(0, 24);
+                cfg.scan = r.f32(live_id!(scan), cfg.scan);
+                Engine::Charts(ChartsEngine::new(cfg))
+            }
             "screen" => Engine::Screen,
             other => {
                 return Err(format!(
                     "engine '{other}' unknown — one of particles, lsystem, metaballs, \
                      heightmap, ribbons, tunnel, grass, emitters, firefly, harmonograph, \
-                     domino, tiles, flock, screen"
+                     domino, tiles, flock, city, pipes, stockcharts, screen"
                 ));
             }
         };

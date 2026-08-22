@@ -1,0 +1,43 @@
+// BULL TERMINAL — the green-on-black trading floor. A random-walk OHLC
+// tape commits ONE candle per beat (beats detected from the phase wrap —
+// no wiring needed), the live candle ticks every frame with volatility
+// that spikes on the beat envelope, and the whole terminal is mono
+// phosphor: bright green up-candles, dim green down-candles, scanlines,
+// a glowing crosshair riding the live price. NO text — the effect stack
+// has no glyph path, so the axis is dash ticks, which is the terminal
+// anyway. Pattern taught: per_beat is the tape clock; drift > 0 = bull.
+{
+    name: "Bull Terminal"
+    engine: "stockcharts"
+    seed: 21
+
+    candles: 110
+    per_beat: 1
+    vol: 1.1
+    drift: 0.15
+    spike: 1.6
+    ma: 14
+    grid_x: 4
+    grid_y: 7
+    scan: 16
+    width: 15
+    height: 7.5
+
+    beat_pulse: 0.5
+    p0: 0.15                     // phosphor gain
+    p1: "0.3 + 0.7*pulse"        // crosshair pumps on the beat
+
+    color_bg: #x020604
+    color_a: #x39ff6a
+    color_b: #x117a34
+    color_c: #xd8ffe4
+
+    cam_orbit: 0.0
+    cam_fov: 40
+    fog: 0.0
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.3, levels: 2}
+    ]
+}

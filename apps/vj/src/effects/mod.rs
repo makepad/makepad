@@ -209,6 +209,44 @@
 //!   `frame: fn(fx) { ... return [spawns] }` tick — see CONTRACT.md for the
 //!   spawn-object keys, budget, and the slot-respawn = move rule.
 //!
+//! ### `engine: "city"` — procedural city flyover, banking camera
+//! Static towers + ground + sky + (tron) trail walls; windows are a PIXEL
+//! grid of the facade uv, per-window flicker = hash(tower, window,
+//! floor(beat)); the camera drifts a Lissajous over the blocks and BANKS
+//! (view-space roll — see engines_city.rs CAMERA CONTRACT).
+//! * `style`: `night` | `retro` (wireframe-neon + sun-stripe horizon) |
+//!   `tron` (grid floor + beat-swept light trails)
+//! * `blocks` (8, ≤14), `block` (6 pitch), `street` (0.34), `towers`
+//!   (240 cap), `max_h` (10), `win` (0.30), `density` (0.55 lit),
+//!   `flicker` (0.12 re-rolled/beat), `trails` (0, ≤16), `trail_beats`
+//!   (8), `wall_h` (1.3), `alt` (auto), `fly` (1.0), `bank` (1.0)
+//! * bindings: `p0` ADDS window density (city wakes with energy), `p1` =
+//!   sun/trail-head gain, `p2` = beacon/edge gain; hook: `fx_color`
+//!
+//! ### `engine: "pipes"` — the 3D-pipes lattice, growth replayed in tempo
+//! Self-avoiding turtle walks with elbow balls; stuck pipes teleport (the
+//! screensaver respawn). Birth order rides the stream; `grow: "loop"` +
+//! `grow_beats` replays the build on the beat clock — segments POP in with
+//! an overshoot bulge, the newest length burns white-hot, the loop is the
+//! respawn (engines_pipes.rs).
+//! * `pipes` (6, ≤16), `bound` (6 cells, ≤10), `cell` (0.55), `radius`
+//!   (0.16), `sides` (10), `steps` (900, ≤2600), `turn_chance` (0.35),
+//!   `pop` (0.4 overshoot), `hot` (2.5 %-of-run hot tail)
+//! * bindings: `p0` nudges the growth front (kick lurch), `p1` = hot-tail
+//!   gain, `p2` = specular gain; hook: `fx_color`
+//!
+//! ### `engine: "stockcharts"` — candlestick terminal (regen family)
+//! Random-walk OHLC on the CPU; candles COMMIT at `per_beat` per beat
+//! (beats detected from the phase wrap), the live candle ticks with
+//! beat-spiked volatility, cascades slam multi-beat crashes. NO text/
+//! numbers (no glyph path in the fx stack — ticks are dash quads).
+//! * `candles` (96, ≤400), `per_beat` (1), `vol` (0.9 %/step), `drift`
+//!   (0), `spike` (1.2), `cascade` (0..1 chance/bar), `bar` (4),
+//!   `width`/`height` (14/7), `body_w` (0.62), `ma` (12, 0 = off),
+//!   `grid_x` (4), `grid_y` (7), `scan` (14 scanlines, 0 = off)
+//! * bindings: `p0` = brightness, `p1` = crosshair glow, `p2` = panic red
+//!   wash 0..1; hook: `fx_color` (engines_charts.rs)
+//!
 //! ### `engine: "screen"` — fullscreen family (no mesh)
 //! input0 goes straight into the stage chain; the warp stages (`kaleido`,
 //! `mirror`, `chroma`, `pixelate`, `swirl`, `ripple`, `glitch`,
@@ -234,10 +272,13 @@
 
 pub mod doc;
 pub mod engines;
+pub mod engines_charts;
+pub mod engines_city;
 pub mod engines_domino;
 pub mod engines_firefly;
 pub mod engines_flock;
 pub mod engines_harmonograph;
+pub mod engines_pipes;
 pub mod engines_tiles;
 pub mod expr;
 pub mod lsys;
@@ -260,5 +301,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     engines_domino::script_mod(vm);
     engines_tiles::script_mod(vm);
     engines_flock::script_mod(vm);
+    engines_city::script_mod(vm);
+    engines_pipes::script_mod(vm);
+    engines_charts::script_mod(vm);
     view::script_mod(vm);
 }

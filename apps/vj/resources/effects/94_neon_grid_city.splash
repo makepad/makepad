@@ -1,0 +1,41 @@
+// NEON GRID CITY — the retro synthwave flyover: wireframe-neon towers on
+// glowing grid streets under a striped sun. Style "retro" swaps the window
+// fills for neon cell edges and paints the sky cylinder with the banded
+// sun disc; the street grid runs hot pink and pumps on the pulse. Pattern
+// taught: one engine, three looks — `style` reskins the same static mesh
+// entirely in the pixel shader, so a doc flip is a full genre change.
+{
+    name: "Neon Grid City"
+    engine: "city"
+    seed: 84
+
+    style: "retro"
+    blocks: 8
+    block: 6.5
+    street: 0.36
+    towers: 220
+    max_h: 9.0
+    win: 0.42
+    density: 0.30
+    flicker: 0.10
+    alt: 10.0
+    fly: 1.35
+    bank: 1.6
+
+    beat_pulse: 0.6
+    p1: "0.4 + 0.8*pulse"       // the sun flares on the beat
+    p2: 0.5                      // extra edge glow
+
+    color_bg: #x16082c
+    color_a: #x2cf6ff
+    color_b: #xff3fa8
+    color_c: #xffd24a
+
+    fog: 0.016
+    glow: 1.3
+
+    stages: [
+        {kind: "bloom", threshold: 0.42, strength: 1.6, levels: 3},
+        {kind: "feedback", amount: 0.30, zoom: 1.004, rotate: 0.0, dim: 0.96}
+    ]
+}

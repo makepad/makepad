@@ -48,10 +48,10 @@ Every idea from the user's directives, mapped to its status. Statuses:
 | Scriptable fireworks choreography | done | 19_fireworks_show — beat-sequenced launches, pops, rings, sparkle field from the doc's frame fn |
 | Clouds (billboard puff clusters) | done | particle mode "clouds" (cluster centers + soft sprites + wind wrap); calm preset 33 (sunset cumulus, tiltshifted) + storm preset 84 (lightning-inside-the-cloud via gated beat_pulse binding + fx_color subclass) — both verified |
 | Flock / murmuration | done | `flock` engine (engines_flock.rs): CPU boids (O(N²), 0.77 ms @ 500 birds) emit banked glider tris per frame; wing flap in the VS off per-vertex amplitude+phase; goal jumps every `goal_beats`, drifting anchor keeps it streaming, predator scatters on the bar; presets 82/83 verified |
-| Animated pipes (3D-pipes lattice) | planned | lattice walk + elbow joints reusing tube emission; growth by birth order |
-| Procedural city flyover | planned | instanced tower boxes + window-grid pixel shader + beat-flicker via hash(tower, window, beat idx); camera path |
+| Animated pipes (3D-pipes lattice) | done | `pipes` engine (engines_pipes.rs): self-avoiding lattice turtles + bulged elbow balls, teleport respawn; birth order on the stream, growth REPLAYED by grow/grow_beats (pop-in overshoot + hot tail); presets 96 (calm homage) / 97 (kick-lurch industrial) verified |
+| Procedural city flyover | done | `city` engine (engines_city.rs): static towers/ground/sky/trails, facade uv baked in WINDOW units, per-window flicker = hash(tower, window, floor(beat)); engine-authored Lissajous cam with view-space banking (CAMERA CONTRACT); presets 93/94/95 verified |
 | Boned/animated dancers (splash-constructed puppets) | planned | bones as uniforms (≤32 mat4 or pos+quat vec4 pairs), per-vertex bone index on the stream, binding-driven bone curves; crowd via instances |
-| Stockcharts (procedural candlesticks, retro terminal) | planned | random-walk OHLC on CPU (regen-per-frame family), candle quads + wick lines, beat volatility |
+| Stockcharts (procedural candlesticks, retro terminal) | done | `stockcharts` engine (engines_charts.rs): beat-committed OHLC (phase-wrap beat detection), live candle w/ pulse-spiked volatility, bar-armed crash cascades, MA ribbon + crosshair + scanlines; NO glyphs (no text path — axis = dash ticks); presets 98/99/100 verified |
 | GPU fluid sim (float render passes) | planned | needs float render-target formats (RenderRGBAf16/32 — to verify in platform/src/texture.rs); stable-fluids advect/project ping-pong; budgeted jacobi iters |
 | Stateful GPU particles (state in float sim textures, VS-fetched) | planned | same float-pass primitive; vertex-stage `sample_nearest(uv, lod)` is verified available |
 | Sim-texture FIELDS consumed by mesh engines (living wind for trees) | planned | named field node in the render graph, VS-sampled by any engine — design noted in CONTRACT.md once the float-pass primitive lands |
@@ -64,8 +64,8 @@ Every idea from the user's directives, mapped to its status. Statuses:
 | Voronoi shatter, DLA growth, IFS fractal instancing, Verlet cloth, greeble skylines, boolean skylines | rejected (this pass) | each is a full engine build; revisit after the sim-texture primitive exists |
 | GPS map renderer as an effect | rejected (data-gated) | widgets/src/map needs mbtiles data + its own draw architecture (DrawVector aligned-instance law); designed as "wrap MapView in a slot pass" but not worth shipping blank — revisit with the map session |
 | Shadertoy technique mining (plasma/aurora/palette cycling) | partial | cosine-palette technique used (own constants); more looks land with the raymarch family; NO verbatim ports (user's boundary) |
-| Tron light-cycle arenas (grid floor, trail walls, chase cam) | planned | ribbon-wall trails + emitter-script steered turns + grid-floor engine reuse |
-| Retro city flyover (wireframe/neon towers, sun-stripe horizon) | planned | sibling palette/material family of the city engine |
+| Tron light-cycle arenas (grid floor, trail walls, chase cam) | done | city engine style "tron" + `trails`: beat-swept wall fronts on the street lattice (collapse ahead of the front in the VS), fine-grid floor; ridden cycles not modeled (trails + grid are the energy); preset 95_lightcycle_arena |
+| Retro city flyover (wireframe/neon towers, sun-stripe horizon) | done | city engine style "retro": neon cell-edge facades, banded sun disc on the sky cylinder, glowing grid streets; preset 94_neon_grid_city |
 | Endless mountain range + virtual fighter jet | planned | heightmap already scrolls endlessly; jet = primitive-built foreground mesh, banked turns, afterburner pulse; wireframe/sunset/night-vision variants |
 | Feedback-driven particle class (prev-frame texture as particle input) | planned | folds into the sim-texture family |
 

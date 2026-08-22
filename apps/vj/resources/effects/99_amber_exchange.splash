@@ -1,0 +1,41 @@
+// AMBER EXCHANGE — the after-hours amber terminal: a faster two-candles-
+// per-beat tape in old-monitor amber, drifting sideways with a slow orbit
+// so the plane catches parallax, and a soft feedback smear that makes the
+// phosphor linger. Pattern taught: the chart is a MESH in 3D space — a
+// whisper of cam_orbit turns the flat terminal into a floating pane.
+{
+    name: "Amber Exchange"
+    engine: "stockcharts"
+    seed: 58
+
+    candles: 140
+    per_beat: 2
+    vol: 1.2
+    drift: 0.0
+    spike: 1.2
+    ma: 8
+    grid_x: 8
+    grid_y: 6
+    scan: 12
+    width: 16
+    height: 7
+
+    beat_pulse: 0.4
+    p0: 0.1
+    p1: "0.2 + 0.5*pulse"
+
+    color_bg: #x0a0602
+    color_a: #xffb433
+    color_b: #x8a5410
+    color_c: #xffe6b0
+
+    cam_orbit: 0.045
+    cam_fov: 42
+    fog: 0.0
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.1, levels: 2},
+        {kind: "feedback", amount: 0.35, zoom: 1.0, rotate: 0.0, dim: 0.94}
+    ]
+}

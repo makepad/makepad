@@ -1,0 +1,44 @@
+// MIDNIGHT METROPOLIS — a realistic night city flown over by a slow
+// banking camera. The whole city is one static mesh; every lit window is
+// pixel math on the facade uv (baked in window units), and each beat a
+// fraction of the windows re-roll their state: hash(tower, window,
+// floor(beat)) — the city itself flickers in tempo. Rooftop beacons blink
+// on tall towers, and the tiltshift stage turns the blocks into a
+// miniature. Pattern taught: the city engine's camera is engine-authored
+// (a Lissajous drift with view-space banking) — cam_* keys don't steer it,
+// `alt`/`fly`/`bank` do.
+{
+    name: "Midnight Metropolis"
+    engine: "city"
+    seed: 12
+
+    style: "night"
+    blocks: 9
+    block: 6.0
+    street: 0.32
+    towers: 300
+    max_h: 11.0
+    win: 0.30
+    density: 0.52
+    flicker: 0.14
+    alt: 12.5
+    fly: 1.1
+    bank: 1.2
+
+    beat_pulse: 0.35
+    p0: "0.05 + 0.10*energy"    // the city wakes up with the music
+    p2: 0.6                      // beacon gain
+
+    color_bg: #x060a18
+    color_a: #x36405c
+    color_b: #x141a30
+    color_c: #xffe6b0
+
+    fog: 0.022
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.0, levels: 2},
+        {kind: "tiltshift", focus: 0.62, width: 0.30, levels: 2}
+    ]
+}

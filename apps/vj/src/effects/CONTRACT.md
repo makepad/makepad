@@ -171,6 +171,9 @@ subclasses can always read them, no ceremony:
 | domino | branch id | arc index (dominoes) | tile hash | yaw (rad) | GROUND PIVOT (x, z) | LOCAL face normal (pos = LOCAL corner) |
 | tiles | tile index (grid coords + uv window derive from it) | radial 0..1 from plane centre | rnd (stagger/shade) | rnd (tumble) | corner 0/1 (tile-local uv) | SHATTER FLIGHT VECTOR (unit dir × flight distance, baked; pos = rest centre) |
 | flock | bird id | speed01 | hue | FLAP AMPLITUDE at this vertex (0 spine, wingspan at tips) | (along-body 0..1, flap phase hash) | banked UP vector (the flap axis) |
+| city | tower/trail id | CLASS: 0 tower 1 ground 2 sky 3 trail | tower hash / trail hue | tower height / trail phase | tower: facade uv in WINDOW units; ground: world xz; sky: (azimuth01, h01); trail: (arc01, h01) | face normal |
+| pipes | pipe id | birth order 0..1 (THE growth axis) | pipe hue | local radius (balls bulged) | (around01, along/elevation) | radial outward |
+| stockcharts | element class 0..5 (body/wick/grid/crosshair/MA/tick) | candle age 0..1 | up/down (crosshair: axis) | move size 0..1 | quad-local uv | +Z |
 
 Encode MORE data when your engine knows more — spare channels are the
 vertex shader's raw material. Document any new channel here.
@@ -183,9 +186,13 @@ vertex shader's raw material. Document any new channel here.
 `harmonograph` (pendulum ribbon, engines_harmonograph.rs), `domino`
 (topple run, engines_domino.rs), `tiles` (input texture as a tile grid:
 wave/shatter/conveyor/spiral, engines_tiles.rs), `flock` (boid
-murmuration of gliders, engines_flock.rs), `screen` (no mesh — input0
-straight into the stage chain: the fullscreen effect family). Engine
-keys: see the module docs in `mod.rs` (kept current) and `engines.rs`.
+murmuration of gliders, engines_flock.rs), `city` (flyover:
+night/retro/tron styles + light-cycle trails, engines_city.rs), `pipes`
+(the 3D-pipes lattice, growth replayed on the beat, engines_pipes.rs),
+`stockcharts` (beat-clocked candlestick terminal, engines_charts.rs),
+`screen` (no mesh — input0 straight into the stage chain: the fullscreen
+effect family). Engine keys: see the module docs in `mod.rs` (kept
+current) and `engines.rs`.
 
 ### The emitters engine + `frame:` tick
 
