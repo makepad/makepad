@@ -659,7 +659,20 @@ impl WaylandCx {
                     if cx.windows[window_id].backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
                     }
+                    // Same as every other backend (x11/windows/macos/...): the Cx window
+                    // only becomes usable once its OS window exists. Without `is_created`,
+                    // `Cx::dpi_override_scale()` and `get_delegated_dpi_factor()` silently
+                    // no-op, so pointer `abs` keeps arriving in native surface points while
+                    // widget rects live in (zoomed) layout points and every click misses.
+                    // Seed the geom too: the default `dpi_factor` is 0.0, which would make
+                    // `get_pass_rect()` produce NaN once the flag is on.
+                    let native_geom = window.window_geom.clone();
                     state.windows.push(window);
+                    let cx_window = &mut cx.windows[window_id];
+                    cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
+                    let layout_geom = cx_window.native_window_geom_to_layout(native_geom);
+                    cx_window.window_geom = layout_geom;
+                    cx_window.is_created = true;
                 }
                 CxOsOp::CreatePopupWindow {
                     window_id,
@@ -695,7 +708,14 @@ impl WaylandCx {
                         cx.windows[window_id].popup_position = Some(position);
                         cx.windows[window_id].popup_size = Some(size);
                         cx.windows[window_id].popup_grab_keyboard = grab_keyboard;
+                        // See CreateWindow above.
+                        let native_geom = popup.window_geom.clone();
                         state.popups.push(popup);
+                        let cx_window = &mut cx.windows[window_id];
+                        cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
+                        let layout_geom = cx_window.native_window_geom_to_layout(native_geom);
+                        cx_window.window_geom = layout_geom;
+                        cx_window.is_created = true;
                     }
                 }
                 CxOsOp::CloseWindow(window_id) => {
