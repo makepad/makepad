@@ -11,7 +11,6 @@ use crate::{
     makepad_network::WebSocketMessage,
     media_api::CxMediaApi,
     midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
-    thread::MessageThreadPool,
     video::{VideoFormatId, VideoInputFn, VideoInputId},
     Cx,
 };
@@ -67,13 +66,21 @@ pub struct CxOs {
     pub(crate) no_draw: bool,
     pub(crate) no_draw_initialized: bool,
     pub(crate) draw_cycles: Option<usize>,
-    pub(crate) render_pool: Option<MessageThreadPool<()>>,
-    pub(crate) render_pool_threads: usize,
     /// BGRA -> RGBAf32 conversions of sampled textures, kept ACROSS frames.
     /// Rebuilding this per frame re-converted the whole glyph atlas on every
     /// draw, which cost more than rasterising the window did. Entries carry a
     /// signature and are redone when the texture reports pending updates.
     pub(crate) texture_conversions: crate::os::headless::raster::TextureConversionCache,
+    /// Offscreen (render-to-texture) pass framebuffers, kept ACROSS frames:
+    /// a parent pass that repaints while its child stayed clean must still
+    /// sample the child's last contents, and reusing the buffers keeps a
+    /// window-sized 3D pass to one allocation instead of one per frame.
+    pub(crate) render_targets: crate::os::headless::raster::HeadlessRenderTargets,
+    /// One framebuffer per window, kept across frames. Re-mapping tens of
+    /// megabytes of colour and depth every frame costs more in first-touch page
+    /// faults than the clear that follows it.
+    pub(crate) window_framebuffers:
+        std::collections::HashMap<usize, crate::os::headless::virtual_gpu::Framebuffer>,
 }
 
 impl Default for CxOs {
@@ -86,9 +93,9 @@ impl Default for CxOs {
             no_draw: false,
             no_draw_initialized: false,
             draw_cycles: None,
-            render_pool: None,
-            render_pool_threads: 0,
             texture_conversions: Default::default(),
+            render_targets: Default::default(),
+            window_framebuffers: Default::default(),
         }
     }
 }

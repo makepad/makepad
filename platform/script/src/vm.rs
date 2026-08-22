@@ -1329,7 +1329,7 @@ impl<'a> ScriptVm<'a> {
             // Parse errors never enter the trap queue (the parser recovers);
             // surface them to a captured-diagnostics sink here or a validating
             // host reports success for a script that failed to parse.
-            let parse_errors = std::mem::take(&mut body.parser.errors);
+            let parse_errors = std::mem::take(&mut body.parser.parse_errors);
             drop(bodies);
             if let Some(sink) = self.bx.captured_errors.as_mut() {
                 sink.extend(parse_errors);
@@ -1436,6 +1436,7 @@ impl<'a> ScriptVm<'a> {
             let unfinished = body.tokenizer.intern_unfinished_string(&mut self.bx.heap);
 
             // Incremental parse: continue from checkpoint, auto-close for execution
+            let errors_before = body.parser.parse_errors.len();
             let cp = body.parser.parse_streaming(
                 &body.tokenizer,
                 &existing_mod.file,
@@ -1446,11 +1447,19 @@ impl<'a> ScriptVm<'a> {
 
             body.checkpoint = Some(cp);
 
-            // Same parse-error surfacing as the non-streaming eval above.
-            let parse_errors = std::mem::take(&mut body.parser.errors);
+            // A host that installed a captured-error sink is running a GAME
+            // eval and needs structural parse errors to FAIL it — the
+            // tolerant recovery otherwise runs something else entirely
+            // (`let loop` recovered into an infinite empty loop and burned
+            // the instruction budget). Live-typing paths install no sink and
+            // keep the log-only tolerance.
+            let new_parse_errors: Vec<String> =
+                body.parser.parse_errors[errors_before.min(body.parser.parse_errors.len())..]
+                    .to_vec();
+
             drop(bodies);
-            if let Some(sink) = self.bx.captured_errors.as_mut() {
-                sink.extend(parse_errors);
+            if let Some(sink) = &mut self.bx.captured_errors {
+                sink.extend(new_parse_errors);
             }
             // Silence runtime errors during incremental eval — incomplete code
             // will inevitably produce errors that are meaningless until the
