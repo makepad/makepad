@@ -1,0 +1,42 @@
+// INK LOOM — a Victorian harmonograph drawing pale ink in the dark: one
+// ribbon traces the damped pendulum sum, redrawn pen-first every 16 beats
+// (grow: "loop"), and the FIGURE ITSELF morphs to a fresh coefficient set
+// on the same 16-beat clock — it never draws the same rosette twice.
+// Pattern taught: grow_beats aligned with morph_beats = each figure gets
+// exactly one complete drawing before the loom re-threads.
+{
+    name: "Ink Loom"
+    engine: "harmonograph"
+    seed: 24
+
+    segments: 1800
+    strands: 1
+    freq_x: 2.0
+    freq_y: 3.0            // 2:3 — the classic rosette family
+    freq_z: 1.0
+    damping: 0.6
+    detune: 0.05
+    turns: 6.0
+    width: 0.05
+    morph_beats: 16
+
+    grow: "loop"
+    grow_beats: 16
+    beat_pulse: 0.4
+    p1: "0.35 * pulse"     // the nib presses harder on the beat
+
+    color_bg: #x05060d
+    color_a: #xd8d0c0
+    color_b: #x8090b8
+    color_c: #xffffff
+
+    cam_orbit: 0.06
+    cam_dist: 5.2
+    fog: 0.02
+    glow: 1.1
+
+    stages: [
+        {kind: "feedback", amount: 0.55, zoom: 1.0, rotate: 0.0, dim: 0.955},
+        {kind: "bloom", threshold: 0.45, strength: 1.1, levels: 2}
+    ]
+}

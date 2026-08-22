@@ -1,0 +1,45 @@
+// ONE PULSE — the firefly field driven almost fully into sync: fourteen
+// hundred cold-blue flies flashing as one heartbeat on every beat. Pattern
+// taught: high base sync + sharp blink = the whole meadow becomes a strobe
+// that IS the beat; `p1` (wander scale) goes NEGATIVE on the pulse so the
+// swarm freezes for the flash and drifts between beats.
+{
+    name: "One Pulse"
+    engine: "firefly"
+    seed: 7
+
+    flies: 1400
+    blades: 3000
+    area: 8.0
+    fly_height: 2.2
+    fly_size: 0.09
+    sync: 0.85
+    p0: "0.12 * env(phase)"       // lock even harder right on the beat
+    p1: "0.0 - 0.55 * pulse"      // the swarm stills for the flash
+    blink_rate: 0.8
+    blink_sharp: 16.0
+    wander: 0.7
+    moon: 0.12
+    grass_height: 0.7
+    clump: 0.4
+
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    sway: 0.3
+    sway_freq: 0.6
+
+    color_bg: #x02040c
+    color_a: #x0a1428
+    color_b: #x66c8ff
+    color_c: #xffffff
+
+    cam_orbit: 0.08
+    cam_height: 1.8
+    fog: 0.04
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.9, levels: 3},
+        {kind: "feedback", amount: 0.5, zoom: 1.004, rotate: 0.0, dim: 0.90}
+    ]
+}

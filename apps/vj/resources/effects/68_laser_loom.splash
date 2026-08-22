@@ -1,0 +1,44 @@
+// LASER LOOM — three chorus strands of the harmonograph at hue offsets,
+// drawn as additive laser light with feedback trails. Pattern taught: the
+// strand channel (each strand offsets the pendulum phases slightly) turns
+// one curve into a braid; `p0` scales DETUNE with the bar so the braid
+// breathes apart and snaps back; width pumps on the pulse.
+{
+    name: "Laser Loom"
+    engine: "harmonograph"
+    seed: 68
+
+    segments: 1400
+    strands: 3
+    freq_x: 3.0
+    freq_y: 4.0            // 3:4 — the shell family
+    freq_z: 2.0
+    damping: 0.6
+    detune: 0.10
+    turns: 5.0
+    width: 0.042
+    morph_beats: 8
+
+    grow: "loop"
+    grow_beats: 8
+    beat_pulse: 0.7
+    p0: "0.5 + 0.5 * sin(bar * tau)"   // braid breathes over the bar
+    p1: "0.5 * pulse"                  // width slams on the beat
+    p3: "beat * 0.02"                  // slow hue spin
+
+    color_bg: #x030309
+    color_a: #x40ffcc
+    color_b: #xff40cc
+    color_c: #xffffff
+
+    cam_orbit: 0.10
+    cam_dist: 6.0
+    fog: 0.015
+    glow: 1.0
+
+    stages: [
+        {kind: "feedback", amount: "0.42 + 0.15 * pulse", zoom: 1.006,
+         rotate: 0.003, dim: 0.90},
+        {kind: "bloom", threshold: 0.5, strength: 1.15, levels: 3}
+    ]
+}

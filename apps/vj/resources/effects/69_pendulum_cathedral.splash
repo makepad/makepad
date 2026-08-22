@@ -1,0 +1,43 @@
+// PENDULUM CATHEDRAL — the camera stands INSIDE a huge, slowly morphing
+// harmonograph figure with real z-depth. Pattern taught: `p2` adds depth
+// to the third pendulum axis so the figure becomes architecture; grow is
+// OFF (the figure stands complete) and the drama comes from the 32-beat
+// figure morph + a width swell that follows the bar like an organ.
+{
+    name: "Pendulum Cathedral"
+    engine: "harmonograph"
+    seed: 12
+
+    segments: 2400
+    strands: 2
+    freq_x: 2.0
+    freq_y: 3.0
+    freq_z: 2.0
+    damping: 0.3
+    detune: 0.07
+    turns: 9.0
+    width: 0.09
+    morph_beats: 32        // the liturgy pace
+
+    grow: "off"
+    beat_pulse: 0.5
+    p1: "0.5 * env(bar)"   // organ swell per bar
+    p2: 1.4                // the cathedral depth
+
+    color_bg: #x060410
+    color_a: #x8060ff
+    color_b: #x30a0c0
+    color_c: #xfff8f0
+
+    cam_orbit: 0.16
+    cam_dist: 3.6
+    cam_height: 0.4
+    cam_fov: 70
+    fog: 0.10
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.4, levels: 3},
+        {kind: "feedback", amount: 0.4, zoom: 1.002, rotate: 0.0, dim: 0.93}
+    ]
+}
