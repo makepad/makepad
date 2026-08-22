@@ -20,6 +20,10 @@ pub struct JsonParser {
     pub root: ScriptValue,
     pub(crate) state: Vec<State>,
     pub errors: Vec<(u32, String)>,
+    /// A `-` seen in value position, waiting for its number. The tokenizer
+    /// emits the sign as its own Operator token, so without this every
+    /// negative value (and, in an object, its whole key) was dropped.
+    negate: bool,
 }
 
 impl JsonParser {
@@ -29,6 +33,16 @@ impl JsonParser {
         self.state.clear();
         self.state.push(State::Root);
         self.errors.clear();
+        self.negate = false;
+    }
+
+    /// Applies a pending `-` to a freshly-read number.
+    fn signed(&mut self, v: f64) -> f64 {
+        if self.negate {
+            self.negate = false;
+            return -v;
+        }
+        v
     }
 }
 
@@ -61,6 +75,13 @@ impl JsonParser {
                 }
             }
             State::Root => {
+                if let ScriptToken::Operator(op) = tok {
+                    if op == id!(-) {
+                        self.negate = true;
+                        self.state.push(State::Root);
+                        return;
+                    }
+                }
                 match tok {
                     ScriptToken::Identifier(id) => match id {
                         id!(true) => self.root = TRUE.into(),
@@ -76,11 +97,13 @@ impl JsonParser {
                         self.state.push(State::RootMaybeObject);
                     }
                     ScriptToken::U40(v) => {
-                        self.root = (v as f64).into();
+                        let n = self.signed(v as f64);
+                        self.root = n.into();
                         self.state.push(State::RootMaybeObject);
                     }
                     ScriptToken::F64(v) => {
-                        self.root = v.into();
+                        let n = self.signed(v);
+                        self.root = n.into();
                         self.state.push(State::RootMaybeObject);
                     }
                     ScriptToken::Color(v) => {
@@ -198,6 +221,15 @@ impl JsonParser {
                 }
             },
             State::ObjectValue(obj, key) => {
+                // A leading `-` is its own token; keep waiting for the number
+                // it belongs to instead of consuming the value slot.
+                if let ScriptToken::Operator(op) = tok {
+                    if op == id!(-) {
+                        self.negate = true;
+                        self.state.push(State::ObjectValue(obj, key));
+                        return;
+                    }
+                }
                 self.state.push(State::ObjectKey(obj));
                 match tok {
                     ScriptToken::Identifier(id) => match id {
@@ -210,10 +242,12 @@ impl JsonParser {
                         heap.set_value_def(obj, key, v);
                     }
                     ScriptToken::U40(v) => {
-                        heap.set_value_def(obj, key, (v as f64).into());
+                        let n = self.signed(v as f64);
+                        heap.set_value_def(obj, key, n.into());
                     }
                     ScriptToken::F64(v) => {
-                        heap.set_value_def(obj, key, v.into());
+                        let n = self.signed(v);
+                        heap.set_value_def(obj, key, n.into());
                     }
                     ScriptToken::Color(v) => {
                         heap.set_value_def(obj, key, v.into());
@@ -260,6 +294,13 @@ impl JsonParser {
                 }
             }
             State::Array(arr) => {
+                if let ScriptToken::Operator(op) = tok {
+                    if op == id!(-) {
+                        self.negate = true;
+                        self.state.push(State::Array(arr));
+                        return;
+                    }
+                }
                 self.state.push(State::Array(arr));
                 // alright we can parse a value or ]
                 match tok {
@@ -273,10 +314,12 @@ impl JsonParser {
                         heap.array_push_unchecked(arr, v);
                     }
                     ScriptToken::U40(v) => {
-                        heap.array_push_unchecked(arr, (v as f64).into());
+                        let n = self.signed(v as f64);
+                        heap.array_push_unchecked(arr, n.into());
                     }
                     ScriptToken::F64(v) => {
-                        heap.array_push_unchecked(arr, v.into());
+                        let n = self.signed(v);
+                        heap.array_push_unchecked(arr, n.into());
                     }
                     ScriptToken::Color(v) => {
                         heap.array_push_unchecked(arr, ScriptValue::from_color(v));

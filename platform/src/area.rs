@@ -62,6 +62,20 @@ impl Into<Area> for InstanceArea {
     }
 }
 
+/// Live `Area::Rect` slot, or `None` when the draw list was rebuilt (stale
+/// `redraw_id`) or `rect_id` is past `rect_areas` (partial/sibling redraw).
+fn live_rect_area<'a>(
+    ra: &RectArea,
+    cx: &'a Cx,
+) -> Option<(&'a crate::draw_list::CxDrawList, &'a crate::draw_list::CxRectArea)> {
+    let draw_list = cx.draw_lists.checked_index(ra.draw_list_id)?;
+    if draw_list.redraw_id != ra.redraw_id {
+        return None;
+    }
+    let rect_area = draw_list.rect_areas.get(ra.rect_id)?;
+    Some((draw_list, rect_area))
+}
+
 impl Area {
     pub fn area(&self) -> Self {
         self.clone()
@@ -158,15 +172,7 @@ impl Area {
                 }
                 return false;
             }
-            Area::Rect(list) => {
-                if let Some(draw_list) = cx.draw_lists.checked_index(list.draw_list_id) {
-                    if draw_list.redraw_id != list.redraw_id {
-                        return false;
-                    }
-                    return true;
-                }
-                return false;
-            }
+            Area::Rect(list) => live_rect_area(list, cx).is_some(),
             _ => false,
         };
     }
@@ -239,14 +245,10 @@ impl Area {
                 Rect::default()
             }
             Area::Rect(ra) => {
-                // we need to clip this drawlist too
-                let draw_list = &cx.draw_lists[ra.draw_list_id];
-                // A stale area outlives the draw that made it, and its rect_id
-                // can then be past the end of a shorter list.
-                if draw_list.redraw_id != ra.redraw_id {
-                    return Rect::default();
-                }
-                let Some(rect_area) = draw_list.rect_areas.get(ra.rect_id) else {
+                // Clip this draw list too. Stale rect areas are common after a
+                // hide/rebuild; Instance already bails on redraw_id, Rect must
+                // too, and must bounds-check — Win32 WndProc cannot unwind.
+                let Some((draw_list, rect_area)) = live_rect_area(ra, cx) else {
                     return Rect::default();
                 };
                 if draw_list.draw_list_has_clip {
@@ -311,15 +313,9 @@ impl Area {
                 }
                 Rect::default()
             }
-            Area::Rect(ra) => {
-                let draw_list = &cx.draw_lists[ra.draw_list_id];
-                if draw_list.redraw_id == ra.redraw_id {
-                    if let Some(rect_area) = draw_list.rect_areas.get(ra.rect_id) {
-                        return rect_area.rect;
-                    }
-                }
-                Rect::default()
-            }
+            Area::Rect(ra) => live_rect_area(ra, cx)
+                .map(|(_, rect_area)| rect_area.rect)
+                .unwrap_or_default(),
             _ => Rect::default(),
         };
     }
@@ -350,19 +346,13 @@ impl Area {
                 }
                 abs
             }
-            Area::Rect(ra) => {
-                let draw_list = &cx.draw_lists[ra.draw_list_id];
-                if draw_list.redraw_id != ra.redraw_id {
-                    return abs;
-                }
-                let Some(rect_area) = draw_list.rect_areas.get(ra.rect_id) else {
-                    return abs;
-                };
-                Vec2d {
+            Area::Rect(ra) => match live_rect_area(ra, cx) {
+                Some((_, rect_area)) => Vec2d {
                     x: abs.x - rect_area.rect.pos.x,
                     y: abs.y - rect_area.rect.pos.y,
-                }
-            }
+                },
+                None => abs,
+            },
             _ => abs,
         };
     }
@@ -421,7 +411,7 @@ impl Area {
                     return;
                 }
                 if let Some(rect_area) = draw_list.rect_areas.get_mut(ra.rect_id) {
-                    rect_area.rect = *rect
+                    rect_area.rect = *rect;
                 }
             }
             _ => (),
