@@ -1073,33 +1073,51 @@ script_mod! {
                                                         draw_bg +: { color: #x000000 }
                                                     }
                                                 }
+                                                // THE NO-PUSH ROW LAW,
+                                                // structurally: the × is
+                                                // right-PINNED on its own
+                                                // overlay lane — NOTHING a
+                                                // sibling grows by can ever
+                                                // shove it past the panel
+                                                // edge again (the shuttle
+                                                // did, the timecode before
+                                                // it). The cluster is also
+                                                // budgeted to fit the
+                                                // panel's 252.
                                                 deck_a_controls := View{
-                                                    width: Fill height: 26 flow: Right spacing: 3
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    deck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
-                                                    deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
-                                                    deck_a_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
-                                                    deck_a_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
-                                                    deck_a_rate := ChromeButton{width: 30 text: "1"}
-                                                    deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
-                                                    // SCRATCH / SHUTTLE:
-                                                    // centre neutral, right
-                                                    // forward, left reverse,
-                                                    // sprung home on release
-                                                    // — a jog for testing
-                                                    // the frame tweening.
-                                                    Tip{ text: "Scratch / shuttle"
-                                                        deck_a_scratch := VjShuttle{width: 72}
+                                                    width: Fill height: 26 flow: Overlay
+                                                    View{
+                                                        width: Fill height: Fill flow: Right spacing: 2
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        deck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                        deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        deck_a_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
+                                                        deck_a_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
+                                                        // Beats-per-sweep as
+                                                        // a real dropdown:
+                                                        // 1/2/4/8/16, — free.
+                                                        Tip{ text: "Beats per sweep"
+                                                            deck_a_rate := VjBeatsDrop{width: 34}
+                                                        }
+                                                        deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                        // SCRATCH / SHUTTLE:
+                                                        // sprung jog — right
+                                                        // forward, left back.
+                                                        Tip{ text: "Scratch / shuttle"
+                                                            deck_a_scratch := VjShuttle{width: 56}
+                                                        }
+                                                        Tip{ text: "Auto-spin 3D content"
+                                                            slot_a_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                        }
                                                     }
-                                                    Tip{ text: "Auto-spin 3D content"
-                                                        slot_a_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                    View{
+                                                        width: Fill height: Fill flow: Right
+                                                        align: Align{x: 1.0, y: 0.5}
+                                                        // UNSLOT: eject the
+                                                        // clip (the effect
+                                                        // slots' × idiom).
+                                                        deck_a_eject := ChromeButton{width: 22 text: "×"}
                                                     }
-                                                    View{width: Fill height: 1}
-                                                    // UNSLOT: eject the clip,
-                                                    // deck back to its empty
-                                                    // cue state (the effect
-                                                    // slots' × idiom).
-                                                    deck_a_eject := ChromeButton{width: 22 text: "×"}
                                                 }
                                                 slot_a_anim_box := View{
                                                     width: Fill
@@ -1138,21 +1156,31 @@ script_mod! {
                                                 // resolves against the OUTER
                                                 // context and inflates the
                                                 // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width: a Fill gutter
+                                                // between the two knob+label
+                                                // pairs pushes the right pair
+                                                // flush to the tile's right
+                                                // edge — the inner column is
+                                                // symmetric in the card, not
+                                                // left-packed.
                                                 View{
-                                                    width: Fit height: Fit flow: Down spacing: 2
+                                                    width: 142 height: Fit flow: Down spacing: 2
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_a_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_a_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
@@ -1203,21 +1231,25 @@ script_mod! {
                                                 // resolves against the OUTER
                                                 // context and inflates the
                                                 // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width (see FX A).
                                                 View{
-                                                    width: Fit height: Fit flow: Down spacing: 2
+                                                    width: 142 height: Fit flow: Down spacing: 2
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_t_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_t_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
@@ -1268,21 +1300,25 @@ script_mod! {
                                                 // resolves against the OUTER
                                                 // context and inflates the
                                                 // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width (see FX A).
                                                 View{
-                                                    width: Fit height: Fit flow: Down spacing: 2
+                                                    width: 142 height: Fit flow: Down spacing: 2
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_b_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
-                                                        width: Fit height: Fit flow: Right spacing: 1
+                                                        width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
                                                         fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_b_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
                                                         fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
                                                         fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
@@ -1335,33 +1371,51 @@ script_mod! {
                                                         draw_bg +: { color: #x000000 }
                                                     }
                                                 }
+                                                // THE NO-PUSH ROW LAW,
+                                                // structurally: the × is
+                                                // right-PINNED on its own
+                                                // overlay lane — NOTHING a
+                                                // sibling grows by can ever
+                                                // shove it past the panel
+                                                // edge again (the shuttle
+                                                // did, the timecode before
+                                                // it). The cluster is also
+                                                // budgeted to fit the
+                                                // panel's 252.
                                                 deck_b_controls := View{
-                                                    width: Fill height: 26 flow: Right spacing: 3
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    deck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
-                                                    deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
-                                                    deck_b_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
-                                                    deck_b_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
-                                                    deck_b_rate := ChromeButton{width: 30 text: "1"}
-                                                    deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
-                                                    // SCRATCH / SHUTTLE:
-                                                    // centre neutral, right
-                                                    // forward, left reverse,
-                                                    // sprung home on release
-                                                    // — a jog for testing
-                                                    // the frame tweening.
-                                                    Tip{ text: "Scratch / shuttle"
-                                                        deck_b_scratch := VjShuttle{width: 72}
+                                                    width: Fill height: 26 flow: Overlay
+                                                    View{
+                                                        width: Fill height: Fill flow: Right spacing: 2
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        deck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                        deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        deck_b_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
+                                                        deck_b_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
+                                                        // Beats-per-sweep as
+                                                        // a real dropdown:
+                                                        // 1/2/4/8/16, — free.
+                                                        Tip{ text: "Beats per sweep"
+                                                            deck_b_rate := VjBeatsDrop{width: 34}
+                                                        }
+                                                        deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                        // SCRATCH / SHUTTLE:
+                                                        // sprung jog — right
+                                                        // forward, left back.
+                                                        Tip{ text: "Scratch / shuttle"
+                                                            deck_b_scratch := VjShuttle{width: 56}
+                                                        }
+                                                        Tip{ text: "Auto-spin 3D content"
+                                                            slot_b_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                        }
                                                     }
-                                                    Tip{ text: "Auto-spin 3D content"
-                                                        slot_b_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                    View{
+                                                        width: Fill height: Fill flow: Right
+                                                        align: Align{x: 1.0, y: 0.5}
+                                                        // UNSLOT: eject the
+                                                        // clip (the effect
+                                                        // slots' × idiom).
+                                                        deck_b_eject := ChromeButton{width: 22 text: "×"}
                                                     }
-                                                    View{width: Fill height: 1}
-                                                    // UNSLOT: eject the clip,
-                                                    // deck back to its empty
-                                                    // cue state (the effect
-                                                    // slots' × idiom).
-                                                    deck_b_eject := ChromeButton{width: 22 text: "×"}
                                                 }
                                                 slot_b_anim_box := View{
                                                     width: Fill
@@ -6095,7 +6149,7 @@ p2 {}
         let bounce = self.slot_pingpong[i];
         let scratching = self.slot_scratch[i].is_some();
         let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
-        let beats = self.slot_beat_rate[i].round().clamp(1.0, 8.0) as f64;
+        let beats = self.slot_beat_rate[i].round().clamp(1.0, 16.0) as f64;
         let beat_secs = self
             .current_beat()
             .map(|beat| beat.period.as_secs_f64())
@@ -6124,19 +6178,6 @@ p2 {}
             crate::media::PlayMode::Loop
         } else {
             crate::media::PlayMode::Once
-        }
-    }
-
-    /// The ♪ chip face for a (synced, rate) pair.
-    fn rate_chip_label(sync: bool, rate: f32) -> &'static str {
-        if !sync {
-            return "—";
-        }
-        match rate {
-            r if r > 6.0 => "8",
-            r if r > 3.0 => "4",
-            r if r > 1.5 => "2",
-            _ => "1",
         }
     }
 
@@ -6336,12 +6377,28 @@ p2 {}
         }
         if self.slot_scratch[i].is_none() {
             // Entering the scratch: the chip says MANUAL.
-            self.ui
-                .button(cx, Self::deck_rate_path(slot))
-                .set_text(cx, "—");
+            if let Some(mut chip) = self
+                .ui
+                .widget(cx, Self::deck_rate_path(slot))
+                .borrow_mut::<views::VjBeatsDrop>()
+            {
+                chip.set_dash(cx, true);
+            };
         }
         self.slot_scratch[i] = Some(pos);
-        let mag = 4.0f64.powf(pos.abs() as f64);
+        // THE JOG LAW: VFR is a slow-mo instrument. Most of the well is
+        // sub-1x — |p| 0..0.7 sweeps 0..1x on a square curve, so near the
+        // detent lots of travel maps to crawl territory (flow-warp's
+        // silk). Only the outer stretch 0.7..1 climbs, and just to 2x:
+        // fast is what the beat chip is for. Floored so a held deflection
+        // always creeps rather than freezing.
+        let t = pos.abs() as f64;
+        let mag = if t <= 0.7 {
+            let n = t / 0.7;
+            (n * n).max(0.02)
+        } else {
+            1.0 + (t - 0.7) / 0.3
+        };
         if self.flow_active(i) {
             // The warp clock runs any rate, both directions.
             self.slot_flow_rate[i] = mag * if pos < 0.0 { -1.0 } else { 1.0 };
@@ -6427,7 +6484,7 @@ p2 {}
         // THE CHIP IS BEATS PER SWEEP now (8/4/2/1) — never a playback
         // rate. The player's pacer runs at 1.0 and the sweep's own step
         // math sets the on-screen speed from the range and the grid.
-        let beats = self.slot_beat_rate[i].round().clamp(1.0, 8.0) as u8;
+        let beats = self.slot_beat_rate[i].round().clamp(1.0, 16.0) as u8;
         let hint = self
             .current_beat()
             .map(|beat| (beat.period.as_secs_f64() * 1e7) as i64)
@@ -6593,7 +6650,13 @@ p2 {}
                     ] {
                         self.paint_icon_face(cx, path, LatchPaint::ghost());
                     }
-                    self.paint_text_face(cx, Self::deck_rate_path(slot), LatchPaint::ghost());
+                    if let Some(mut chip) = self
+                        .ui
+                        .widget(cx, Self::deck_rate_path(slot))
+                        .borrow_mut::<views::VjBeatsDrop>()
+                    {
+                        chip.set_inert(cx, true);
+                    };
                     self.paint_text_face(cx, Self::deck_eject_path(slot), LatchPaint::ghost());
                 }
                 self.ui.button(cx, Self::slot_spin_path(slot)).set_visible(cx, is_3d);
@@ -6609,13 +6672,22 @@ p2 {}
                     self.paint_icon_button(cx, Self::deck_loop2_path(slot), shape.looping);
                     self.paint_icon_button(cx, Self::deck_bounce_path(slot), self.slot_pingpong[i]);
                     self.paint_icon_button(cx, Self::deck_mute_path(slot), self.slot_video_muted[i]);
-                    // ONE compact chip = sync mode + rate + status: ♪N
-                    // lit while beat-synced, ♪— dim while free-running.
-                    self.ui.button(cx, Self::deck_rate_path(slot)).set_text(
-                        cx,
-                        Self::rate_chip_label(shape.beat_sync, shape.beat_rate),
-                    );
-                    self.paint_lit(cx, Self::deck_rate_path(slot), shape.beat_sync);
+                    // The beats dropdown mirrors the deck: the value when
+                    // synced, — when free (a scratch dash is transient,
+                    // painted by apply_scratch).
+                    if let Some(mut chip) = self
+                        .ui
+                        .widget(cx, Self::deck_rate_path(slot))
+                        .borrow_mut::<views::VjBeatsDrop>()
+                    {
+                        chip.set_inert(cx, false);
+                        if shape.beat_sync {
+                            chip.set_value(cx, shape.beat_rate.round().clamp(1.0, 16.0) as u32);
+                            chip.set_dash(cx, false);
+                        } else {
+                            chip.set_dash(cx, true);
+                        }
+                    };
                 }
                 if is_3d {
                     self.paint_icon_button(cx, Self::slot_spin_path(slot), spinning);
@@ -9948,7 +10020,22 @@ p2 {}
             .keys()
             .map(|r| bytes(self.thumb_anims.get(r).map(|(f, _)| f.len()).unwrap_or(0)))
             .sum();
-        if total <= THUMB_CACHE_BYTES {
+        // Anything wanted by the current rebuild is off limits, or a bank
+        // wider than the budget would evict the very tiles being drawn.
+        let keep_after = self.thumb_clock.saturating_sub(1);
+        // THE FLOOR: whatever the static budget says, at least FOUR grid
+        // pages of the size on screen right now stay resident — flicking
+        // across filter tabs must be a RAM hit even when big animated
+        // pages outgrow 512MB. One page = the bytes this rebuild stamped
+        // as wanted, real frame counts included.
+        let page: usize = self
+            .thumbs
+            .keys()
+            .filter(|r| self.thumb_used.get(*r).copied().unwrap_or(0) >= keep_after)
+            .map(|r| bytes(self.thumb_anims.get(r).map(|(f, _)| f.len()).unwrap_or(0)))
+            .sum();
+        let budget = THUMB_CACHE_BYTES.max(page.saturating_mul(4));
+        if total <= budget {
             return;
         }
         let mut by_age: Vec<(u64, AssetRevisionId)> = self
@@ -9957,11 +10044,8 @@ p2 {}
             .map(|r| (self.thumb_used.get(r).copied().unwrap_or(0), *r))
             .collect();
         by_age.sort_unstable();
-        // Anything wanted by the current rebuild is off limits, or a bank
-        // wider than the budget would evict the very tiles being drawn.
-        let keep_after = self.thumb_clock.saturating_sub(1);
         for (used, revision) in by_age {
-            if total <= THUMB_CACHE_BYTES || used >= keep_after {
+            if total <= budget || used >= keep_after {
                 break;
             }
             total = total.saturating_sub(bytes(
@@ -13771,32 +13855,36 @@ impl MatchEvent for App {
                 self.save_clip_profile(slot);
                 self.video_pump = cx.new_next_frame();
             }
-            // THE BEAT CHIP — the number IS the beats one sweep spans:
-            // click cycles 8 → 4 → 2 → 1 (beat-synced, lit) → — (free,
-            // dim) → 8 … (8 = slowest, a sweep stretched over 8 beats;
-            // 1 = a sweep per beat.)
-            if self.ui.button(cx, Self::deck_rate_path(slot)).clicked(actions) {
-                let (sync, rate) = if !self.slot_beat_sync[i] {
-                    (true, 8.0)
-                } else {
-                    match self.slot_beat_rate[i] {
-                        r if r > 6.0 => (true, 4.0),
-                        r if r > 3.0 => (true, 2.0),
-                        r if r > 1.5 => (true, 1.0),
-                        _ => (false, 4.0),
+            // THE BEATS DROPDOWN — the number IS the beats one sweep
+            // spans (1 fastest … 16 slowest, — free). The list is the
+            // value authority; a pick lands directly.
+            {
+                let uid = self.ui.widget(cx, Self::deck_rate_path(slot)).widget_uid();
+                let mut picked = None;
+                for action in actions.iter() {
+                    if let Some(wa) = action.as_widget_action() {
+                        if wa.widget_uid == uid {
+                            if let views::VjBeatsDropAction::Picked(n) = wa.cast() {
+                                picked = Some(n);
+                            }
+                        }
                     }
-                };
-                self.slot_beat_sync[i] = sync;
-                self.slot_beat_rate[i] = rate;
-                self.slot_sync_beats[i] = 1;
-                self.ui
-                    .button(cx, Self::deck_rate_path(slot))
-                    .set_text(cx, Self::rate_chip_label(sync, rate));
-                self.paint_lit(cx, Self::deck_rate_path(slot), sync);
-                self.apply_slot_beat_sync(slot);
-                self.apply_loop_fit(slot);
-                self.save_clip_profile(slot);
-                self.video_pump = cx.new_next_frame();
+                }
+                if let Some(n) = picked {
+                    if n == 0 {
+                        self.slot_beat_sync[i] = false;
+                    } else {
+                        self.slot_beat_sync[i] = true;
+                        self.slot_beat_rate[i] = n as f32;
+                    }
+                    self.slot_sync_beats[i] = 1;
+                    self.strip_shape[i] = None;
+                    self.apply_slot_beat_sync(slot);
+                    self.apply_loop_fit(slot);
+                    self.save_clip_profile(slot);
+                    self.sync_slot_controls_ui(cx);
+                    self.video_pump = cx.new_next_frame();
+                }
             }
             // BOUNCE (ping-pong) — the same latch the strip's pp button flips.
             if self.ui.button(cx, Self::deck_bounce_path(slot)).clicked(actions) {

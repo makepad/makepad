@@ -953,6 +953,56 @@ script_mod! {
             return sdf.result
         }
     }
+    // BEATS-PER-SWEEP DROPDOWN: a chip that opens a compact list
+    // (1/2/4/8/16 beats, — = free) in an overlay under itself.
+    set_type_default() do #(DrawVjBeatsChip::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        hover: uniform(0.0)
+        open: uniform(0.0)
+        inert: uniform(0.0)
+        color: uniform(#x272e38)
+        color_hover: uniform(#x2f3842)
+        border_color: uniform(#xffffff26)
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0)
+            sdf.fill(self.color.mix(self.color_hover, max(self.hover, self.open)))
+            sdf.stroke(self.border_color, 1.0)
+            // tiny drop arrow at the right edge
+            let ax = self.rect_size.x - 8.0
+            let ay = self.rect_size.y * 0.5 - 1.0
+            sdf.move_to(ax - 2.5, ay)
+            sdf.line_to(ax + 2.5, ay)
+            sdf.line_to(ax, ay + 3.0)
+            sdf.close_path()
+            sdf.fill(vec4(0.66, 0.70, 0.75, 1.0 - self.inert * 0.6))
+            return sdf.result * (1.0 - self.inert * 0.45)
+        }
+    }
+    mod.widgets.VjBeatsDropBase = #(VjBeatsDrop::register_widget(vm))
+    mod.widgets.VjBeatsDrop = set_type_default() do mod.widgets.VjBeatsDropBase{
+        width: 34
+        height: 22
+        draw_text +: {
+            color: #xf4f7fa
+            text_style: theme.font_bold{font_size: 9}
+        }
+        draw_panel +: {
+            color: #x181c23
+            border_color: #xffffff2e
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0)
+                sdf.fill(self.color)
+                sdf.stroke(self.border_color, 1.0)
+                return sdf.result
+            }
+        }
+        draw_hover +: {
+            color: #xff5c39
+        }
+    }
+
     mod.widgets.VjShuttleBase = #(VjShuttle::register_widget(vm))
     mod.widgets.VjShuttle = set_type_default() do mod.widgets.VjShuttleBase{
         width: 72
@@ -1976,6 +2026,284 @@ pub struct DrawBeatLed {
 /// over it proves the clock is on that audio. Both are drawn by one quad
 /// from one small texture, so the picture costs a 512-byte upload per pump
 /// and nothing at all per frame.
+/// A pick from the beats dropdown: beats-per-sweep, 0 = free-running.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum VjBeatsDropAction {
+    Picked(u32),
+    #[default]
+    None,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawVjBeatsChip {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+/// The rows, top to bottom: 1 = a sweep per beat (fastest) … 16 =
+/// slowest, then free-running.
+const BEATS_ROWS: [(u32, &str); 6] =
+    [(1, "1"), (2, "2"), (4, "4"), (8, "8"), (16, "16"), (0, "—")];
+const BEATS_ROW_H: f64 = 18.0;
+const BEATS_PANEL_W: f64 = 42.0;
+const BEATS_PANEL_PAD: f64 = 4.0;
+const BEATS_PANEL_GAP: f64 = 4.0;
+
+/// BEATS-PER-SWEEP as a real little dropdown (the cycle button grew too
+/// many stops): click opens the list, pick closes it. The chip shows the
+/// value — or "—" while a scratch hand overrides the transport.
+#[derive(Script, Widget)]
+pub struct VjBeatsDrop {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawVjBeatsChip,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_panel: DrawQuad,
+    #[live]
+    draw_hover: DrawColor,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust(1u32)]
+    value: u32,
+    /// Transient display override (the scratch hand's "—").
+    #[rust]
+    dash: bool,
+    #[rust]
+    inert: bool,
+    #[rust]
+    open: bool,
+    #[rust]
+    hover_row: Option<usize>,
+    #[rust]
+    area: Area,
+}
+
+impl VjBeatsDrop {
+    fn panel_rect(&self, cx: &mut Cx) -> Rect {
+        let chip = self.area.rect(cx);
+        Rect {
+            pos: dvec2(
+                chip.pos.x + (chip.size.x - BEATS_PANEL_W) * 0.5,
+                chip.pos.y + chip.size.y + BEATS_PANEL_GAP,
+            ),
+            size: dvec2(
+                BEATS_PANEL_W,
+                BEATS_ROWS.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0,
+            ),
+        }
+    }
+
+    fn face(&self) -> &'static str {
+        if self.dash {
+            return "—";
+        }
+        BEATS_ROWS
+            .iter()
+            .find(|(v, _)| *v == self.value)
+            .map(|(_, label)| *label)
+            .unwrap_or("—")
+    }
+
+    pub fn set_value(&mut self, cx: &mut Cx, value: u32) {
+        if self.value != value {
+            self.value = value;
+            self.area.redraw(cx);
+        }
+    }
+
+    pub fn set_dash(&mut self, cx: &mut Cx, dash: bool) {
+        if self.dash != dash {
+            self.dash = dash;
+            self.area.redraw(cx);
+        }
+    }
+
+    pub fn set_inert(&mut self, cx: &mut Cx, inert: bool) {
+        if self.inert != inert {
+            self.inert = inert;
+            self.draw_bg.set_uniform(cx, id!(inert), &[if inert { 1.0 } else { 0.0 }]);
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Select the row under `y` (if any), emit, close.
+    fn pick_at(&mut self, cx: &mut Cx, uid: WidgetUid, panel: Rect, y: f64) {
+        let index = ((y - panel.pos.y - BEATS_PANEL_PAD) / BEATS_ROW_H).floor();
+        if index >= 0.0 && (index as usize) < BEATS_ROWS.len() {
+            let (value, _) = BEATS_ROWS[index as usize];
+            if value != 0 {
+                self.value = value;
+            }
+            cx.widget_action(uid, VjBeatsDropAction::Picked(value));
+        }
+        self.set_open(cx, false);
+    }
+
+    fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        if self.open != open {
+            self.open = open;
+            self.hover_row = None;
+            self.draw_bg.set_uniform(cx, id!(open), &[if open { 1.0 } else { 0.0 }]);
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+            self.area.redraw(cx);
+        }
+    }
+}
+
+impl ScriptHook for VjBeatsDrop {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+}
+
+impl Widget for VjBeatsDrop {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.draw_bg.draw_abs(cx, rect);
+        // centre the face text, biased left of the drop arrow
+        let face = self.face();
+        self.draw_text.draw_abs(
+            cx,
+            dvec2(
+                rect.pos.x + (rect.size.x - 10.0) * 0.5 - 2.0 * face.len() as f64 + 1.0,
+                rect.pos.y + 5.0,
+            ),
+            face,
+        );
+        cx.end_turtle_with_area(&mut self.area);
+
+        if self.open {
+            if let Some(draw_list) = self.draw_list.as_mut() {
+                // The proven popup idiom: turtle content at the overlay
+                // root, shifted under the chip.
+                draw_list.begin_overlay_reuse(cx);
+                let size = cx.current_pass_size();
+                cx.begin_root_turtle(size, Layout::flow_down());
+                let h = BEATS_ROWS.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0;
+                self.draw_panel.begin(
+                    cx,
+                    Walk::fixed(BEATS_PANEL_W, h),
+                    Layout::default(),
+                );
+                let panel = cx.turtle().rect();
+                if let Some(row) = self.hover_row {
+                    self.draw_hover.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(
+                                panel.pos.x + 2.0,
+                                panel.pos.y + BEATS_PANEL_PAD + row as f64 * BEATS_ROW_H,
+                            ),
+                            size: dvec2(BEATS_PANEL_W - 4.0, BEATS_ROW_H),
+                        },
+                    );
+                }
+                for (row, (_, label)) in BEATS_ROWS.iter().enumerate() {
+                    self.draw_text.draw_abs(
+                        cx,
+                        dvec2(
+                            panel.pos.x + 14.0,
+                            panel.pos.y + BEATS_PANEL_PAD + row as f64 * BEATS_ROW_H + 3.0,
+                        ),
+                        label,
+                    );
+                }
+                self.draw_panel.end(cx);
+                let chip = self.area.rect(cx);
+                cx.end_pass_sized_turtle_with_shift(
+                    self.area,
+                    dvec2((chip.size.x - BEATS_PANEL_W) * 0.5, chip.size.y + BEATS_PANEL_GAP),
+                );
+                draw_list.end(cx);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        if self.open {
+            let panel = self.panel_rect(cx);
+            match event {
+                Event::MouseMove(me) => {
+                    let row = if panel.contains(me.abs) {
+                        let index = ((me.abs.y - panel.pos.y - BEATS_PANEL_PAD)
+                            / BEATS_ROW_H)
+                            .floor();
+                        (index >= 0.0 && (index as usize) < BEATS_ROWS.len())
+                            .then(|| index as usize)
+                    } else {
+                        None
+                    };
+                    if row != self.hover_row {
+                        self.hover_row = row;
+                        if let Some(draw_list) = &self.draw_list {
+                            draw_list.redraw(cx);
+                        }
+                    }
+                }
+                Event::MouseDown(me) => {
+                    if panel.contains(me.abs) {
+                        self.pick_at(cx, uid, panel, me.abs.y);
+                    } else {
+                        let chip = self.area.rect(cx);
+                        if !chip.contains(me.abs) {
+                            self.set_open(cx, false);
+                        }
+                    }
+                }
+                Event::MouseUp(me) => {
+                    // THE MENU GESTURE (macOS/DAW standard): press on the
+                    // chip, DRAG onto an item, release = select + close —
+                    // one fluid motion. A release back on the chip keeps
+                    // the list open (the click-then-click mode); a release
+                    // in dead space dismisses.
+                    if panel.contains(me.abs) {
+                        self.pick_at(cx, uid, panel, me.abs.y);
+                    } else {
+                        let chip = self.area.rect(cx);
+                        if !chip.contains(me.abs) {
+                            self.set_open(cx, false);
+                        }
+                    }
+                }
+                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                    self.set_open(cx, false);
+                }
+                _ => {}
+            }
+        }
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(_) => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerDown(_) if !self.inert => {
+                self.set_open(cx, !self.open);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// What the operator's hand is doing to the shuttle. `Scratch(0.0)` is
 /// the release settling home — the host restores the beat transport on it.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -2059,7 +2387,9 @@ impl Widget for VjShuttle {
         let uid = self.widget_uid();
         // The spring: ease home after release, one action per step so the
         // host rides the whole return (beat transport re-engages at 0).
-        if self.next_frame.is_event(event).is_some() && self.springing {
+        // NEVER while a finger holds the knob — a stale NextFrame from a
+        // previous spring cycle once fired a phantom mid-hold release.
+        if self.next_frame.is_event(event).is_some() && self.springing && !self.dragging {
             let pos = self.pos * 0.55;
             let pos = if pos.abs() < 0.02 { 0.0 } else { pos };
             self.set_pos(cx, uid, pos);
@@ -2077,10 +2407,12 @@ impl Widget for VjShuttle {
                 self.set_pos(cx, uid, pos);
             }
             Hit::FingerMove(fe) if self.dragging => {
+                // A held finger owns the knob outright.
+                self.springing = false;
                 let pos = self.pos_at(cx, fe.abs.x);
                 self.set_pos(cx, uid, pos);
             }
-            Hit::FingerUp(_) if self.dragging => {
+            Hit::FingerUp(fe) if self.dragging && fe.is_primary_hit() => {
                 self.dragging = false;
                 self.springing = true;
                 self.next_frame = cx.new_next_frame();
