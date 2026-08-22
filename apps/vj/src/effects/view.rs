@@ -29,16 +29,25 @@ use super::doc::{EffectDoc, GrowMode, StageCfg};
 use super::engines::{CamPose, EmitterInst, Engine, ShaderKind};
 use super::engines_charts::DrawVjFxCharts;
 use super::engines_city::DrawVjFxCity;
+use super::engines_copper::DrawVjFxCopper;
 use super::engines_domino::DrawVjFxDomino;
 use super::engines_firefly::DrawVjFxFirefly;
 use super::engines_flock::DrawVjFxFlock;
+use super::engines_forge::DrawVjFxForge;
 use super::engines_harmonograph::DrawVjFxHarmono;
+use super::engines_jet::DrawVjFxJet;
 use super::engines_pipes::DrawVjFxPipes;
+use super::engines_raymarch::DrawVjFxRaymarch;
 use super::engines_tiles::DrawVjFxTiles;
 use super::expr::Signals;
 use super::mesh::FxMesh;
 use super::post::{PostChain, PostDraws, ResolvedStage};
 use super::shaders::*;
+use super::sim::{
+    DrawVjFxFluidAdvect, DrawVjFxFluidDiv, DrawVjFxFluidDye, DrawVjFxFluidJacobi,
+    DrawVjFxFluidProject, DrawVjFxFluidView, DrawVjFxMeshField, DrawVjFxSimSwarm,
+    DrawVjFxSimSwarmDraw, DrawVjFxSimWind, SimDraws, SimFields, SimKind,
+};
 use makepad_widgets::*;
 
 script_mod! {
@@ -90,15 +99,44 @@ pub struct VjFxView {
     #[live]
     draw_domino: DrawVjFxDomino,
     #[live]
+    draw_forge: DrawVjFxForge,
+    #[live]
+    draw_copper: DrawVjFxCopper,
+    #[live]
     draw_tiles: DrawVjFxTiles,
     #[live]
     draw_flock: DrawVjFxFlock,
+    #[live]
+    draw_raymarch: DrawVjFxRaymarch,
+    #[live]
+    draw_jet: DrawVjFxJet,
     #[live]
     draw_city: DrawVjFxCity,
     #[live]
     draw_pipes: DrawVjFxPipes,
     #[live]
     draw_charts: DrawVjFxCharts,
+    // Sim-field family (sim.rs): update quads + the stateful consumers.
+    #[live]
+    draw_mesh_field: DrawVjFxMeshField,
+    #[live]
+    draw_swarm: DrawVjFxSimSwarmDraw,
+    #[live]
+    draw_sim_wind: DrawVjFxSimWind,
+    #[live]
+    draw_sim_swarm: DrawVjFxSimSwarm,
+    #[live]
+    draw_fluid_advect: DrawVjFxFluidAdvect,
+    #[live]
+    draw_fluid_div: DrawVjFxFluidDiv,
+    #[live]
+    draw_fluid_jacobi: DrawVjFxFluidJacobi,
+    #[live]
+    draw_fluid_project: DrawVjFxFluidProject,
+    #[live]
+    draw_fluid_dye: DrawVjFxFluidDye,
+    #[live]
+    draw_fluid_view: DrawVjFxFluidView,
     // Post + present quads.
     #[live]
     draw_feedback: DrawVjFxFeedback,
@@ -207,6 +245,16 @@ pub struct VjFxView {
     /// the next load can restore that shader to its registered base first.
     #[rust]
     hooked_kind: Option<ShaderKind>,
+    /// Sim update shaders currently carrying a document's `update:`
+    /// subclass (restored to base on the next load, like `hooked_kind`).
+    #[rust]
+    hooked_sim: Vec<SimKind>,
+    /// The document's sim fields (float GPU state — sim.rs).
+    #[rust]
+    sim: SimFields,
+    /// CPU encode cost of the last sim update (uniforms + pass encodes).
+    #[rust]
+    pub sim_ms: f32,
 }
 
 impl VjFxView {
@@ -224,19 +272,37 @@ impl VjFxView {
         // Post chain rebuilt for the new stage list (textures/passes only
         // allocated for what the doc asks for).
         self.post.configure(cx, &doc.stages);
+        // Sim fields rebuilt for the new field list (sim.rs).
+        self.sim.configure(cx, &doc.fields);
         // A previous document's hook overrides must not leak into this one:
         // restore that shader family to its registered base first.
         if let Some(kind) = self.hooked_kind.take() {
             self.apply_shader_value(cx, kind, None);
+        }
+        for kind in std::mem::take(&mut self.hooked_sim) {
+            self.apply_sim_update(cx, kind, None);
         }
         // Apply the document's shader hooks (a SUBCLASS object of the base
         // shader — validated at parse): recompiles the family's draw shader
         // with the doc's fn overrides.
         if let Some(hooks) = &doc.shader_hooks {
             let value: ScriptValue = hooks.as_object().into();
-            let kind = doc.engine.shader_kind();
+            let kind = Self::effective_shader_kind(&doc);
             self.apply_shader_value(cx, kind, Some(value));
             self.hooked_kind = Some(kind);
+        }
+        // Field `update:` subclasses recompile the kind's update shader.
+        for (kind, hook) in doc
+            .fields
+            .iter()
+            .filter_map(|f| f.update_hook.as_ref().map(|h| (f.kind, h.as_object())))
+            .collect::<Vec<_>>()
+        {
+            let value: ScriptValue = hook.into();
+            self.apply_sim_update(cx, kind, Some(value));
+            if !self.hooked_sim.contains(&kind) {
+                self.hooked_sim.push(kind);
+            }
         }
         let warn = if doc.warnings.is_empty() {
             String::new()
@@ -278,11 +344,18 @@ impl VjFxView {
                         ShaderKind::Firefly => live_id!(DrawVjFxFirefly),
                         ShaderKind::Harmono => live_id!(DrawVjFxHarmono),
                         ShaderKind::Domino => live_id!(DrawVjFxDomino),
+                        ShaderKind::Forge => live_id!(DrawVjFxForge),
+                        ShaderKind::Copper => live_id!(DrawVjFxCopper),
                         ShaderKind::Tiles => live_id!(DrawVjFxTiles),
                         ShaderKind::Flock => live_id!(DrawVjFxFlock),
+                        ShaderKind::Raymarch => live_id!(DrawVjFxRaymarch),
+                        ShaderKind::Jet => live_id!(DrawVjFxJet),
                         ShaderKind::City => live_id!(DrawVjFxCity),
                         ShaderKind::Pipes => live_id!(DrawVjFxPipes),
                         ShaderKind::Charts => live_id!(DrawVjFxCharts),
+                        ShaderKind::MeshField => live_id!(DrawVjFxMeshField),
+                        ShaderKind::SimSwarm => live_id!(DrawVjFxSimSwarmDraw),
+                        ShaderKind::FluidView => live_id!(DrawVjFxFluidView),
                     };
                     let modules = vm.bx.heap.modules;
                     let draw_mod = vm.bx.heap.value(modules, live_id!(draw).into(), NoTrap);
@@ -323,11 +396,23 @@ impl VjFxView {
                 ShaderKind::Domino => {
                     self.draw_domino.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
+                ShaderKind::Forge => {
+                    self.draw_forge.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Copper => {
+                    self.draw_copper.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
                 ShaderKind::Tiles => {
                     self.draw_tiles.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
                 ShaderKind::Flock => {
                     self.draw_flock.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Raymarch => {
+                    self.draw_raymarch.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Jet => {
+                    self.draw_jet.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
                 ShaderKind::City => {
                     self.draw_city.script_apply(vm, &Apply::Eval, &mut scope, value)
@@ -337,6 +422,66 @@ impl VjFxView {
                 }
                 ShaderKind::Charts => {
                     self.draw_charts.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::MeshField => {
+                    self.draw_mesh_field.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::SimSwarm => {
+                    self.draw_swarm.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::FluidView => {
+                    self.draw_fluid_view.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+            }
+        });
+    }
+
+    /// The shader family a document actually draws with: the engine's kind,
+    /// except mesh-family docs that opt into a wind SIM FIELD
+    /// (`wind_field:`), which draw with the field-sampling mesh shader.
+    fn effective_shader_kind(doc: &EffectDoc) -> ShaderKind {
+        let kind = doc.engine.shader_kind();
+        if kind == ShaderKind::Mesh && doc.wind_field.is_some() {
+            ShaderKind::MeshField
+        } else {
+            kind
+        }
+    }
+
+    /// Apply a field's `update:` subclass onto that kind's update shader;
+    /// `None` restores the registered base (mirror of `apply_shader_value`).
+    fn apply_sim_update(&mut self, cx: &mut Cx, kind: SimKind, value: Option<ScriptValue>) {
+        cx.with_vm(|vm| {
+            let value = match value {
+                Some(v) => v,
+                None => {
+                    let name = match kind {
+                        SimKind::Wind => live_id!(DrawVjFxSimWind),
+                        SimKind::Swarm => live_id!(DrawVjFxSimSwarm),
+                        // The fluid's subclassable pass is the advect step
+                        // (its force/motion character).
+                        SimKind::Fluid => live_id!(DrawVjFxFluidAdvect),
+                    };
+                    let modules = vm.bx.heap.modules;
+                    let draw_mod = vm.bx.heap.value(modules, live_id!(draw).into(), NoTrap);
+                    let Some(dm) = draw_mod.as_object() else { return };
+                    let base = vm.bx.heap.value(dm, name.into(), NoTrap);
+                    if base.is_err() || base.is_nil() {
+                        return;
+                    }
+                    base
+                }
+            };
+            let mut scope = Scope::default();
+            match kind {
+                SimKind::Wind => {
+                    self.draw_sim_wind.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                SimKind::Swarm => {
+                    self.draw_sim_swarm.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                SimKind::Fluid => {
+                    self.draw_fluid_advect.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
             }
         });
@@ -556,11 +701,28 @@ impl VjFxView {
             }
             Engine::Harmono(_) => (vec3f(0.0, 0.0, 0.0), 8.8, 1.4),
             Engine::Domino(e) => (vec3f(0.0, 0.0, 0.0), e.extent * 1.9, e.extent * 0.95),
+            Engine::Forge(e) => {
+                let r = e.cfg.radius.clamp(1.0, 40.0);
+                (vec3f(0.0, 1.1, 0.0), r * 2.15, r * 0.95)
+            }
+            Engine::Copper(e) => (
+                vec3f(0.0, 0.0, 0.0),
+                e.cfg.width.clamp(2.0, 80.0) * 0.85,
+                e.cfg.span.clamp(0.5, 40.0) * 0.30,
+            ),
             Engine::Flock(e) => {
                 let b = if e.cfg.bound.is_finite() { e.cfg.bound.clamp(1.0, 40.0) } else { 6.0 };
                 (vec3f(0.0, 0.0, 0.0), b * 2.0, b * 0.32)
             }
             Engine::Emitters(_) => (vec3f(0.0, 2.0, 0.0), 16.0, 4.0),
+            // Mountain-jet: heightmap-style corridor framing (presets pin
+            // cam_orbit: 0.0 so yaw stays 0 = a fixed camera); the jet
+            // itself is view-space and always framed.
+            Engine::MountainJet(e) => (
+                vec3f(0.0, e.cfg.height * 0.35, -e.cfg.size * 0.22),
+                e.cfg.size * 0.40,
+                e.cfg.height * 1.15 + 1.4,
+            ),
             Engine::Pipes(e) => {
                 let ext = e.extent.clamp(0.5, 40.0);
                 (vec3f(0.0, 0.0, 0.0), ext * 2.6, ext * 0.85)
@@ -572,6 +734,10 @@ impl VjFxView {
                 e.cfg.width.clamp(2.0, 60.0) * 0.72,
                 e.cfg.height.clamp(1.0, 40.0) * 0.12,
             ),
+            Engine::Swarm(e) => {
+                let b = e.cfg.bound.clamp(1.0, 60.0);
+                (vec3f(0.0, 0.0, 0.0), b * 2.0, b * 0.4)
+            }
             _ => (vec3f(0.0, 1.2, 0.0), 7.0, 1.8),
         };
         // L-systems: frame the actual plant.
@@ -825,11 +991,43 @@ impl VjFxView {
             sig.0[Signals::DT],
         );
 
-        // Texture input 0, with the animated fallback when nothing is bound.
-        let input0 = match self.input0.clone() {
+        // Texture input 0: a doc-requested sim field wins ("field:<name>"),
+        // then the host's texture, then the animated fallback.
+        let field_input = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.input0.as_deref())
+            .and_then(|s| s.strip_prefix("field:"))
+            .and_then(|n| self.sim.texture(n));
+        let input0 = match field_input.or_else(|| self.input0.clone()) {
             Some(tex) => Some(tex),
             None => Some(self.update_fallback_input(cx.cx, time, pulse)),
         };
+        // Sim-field consumers: bind state textures + mapping uniforms
+        // before the draw list opens.
+        let (wind_field, state_field) = {
+            let doc = self.doc.as_ref().unwrap();
+            (
+                doc.wind_field.clone(),
+                match &doc.engine {
+                    Engine::Swarm(e) => Some(e.cfg.state_field.clone()),
+                    _ => None,
+                },
+            )
+        };
+        if let Some(wf) = &wind_field {
+            if let Some(tex) = self.sim.texture(wf) {
+                self.draw_mesh_field.draw_vars.set_texture(0, &tex);
+            }
+            if let Some(u) = self.sim.wind_uniform(wf) {
+                self.draw_mesh_field.draw_vars.set_uniform(cx.cx, live_id!(u_wind), &u);
+            }
+        }
+        if let Some(sf) = &state_field {
+            if let Some(tex) = self.sim.texture(sf) {
+                self.draw_swarm.draw_vars.set_texture(0, &tex);
+            }
+        }
         let doc = self.doc.as_ref().unwrap();
         let cx3d = &mut Cx3d::new(cx.cx);
         self.draw_list.begin_always(cx3d);
@@ -857,8 +1055,13 @@ impl VjFxView {
                 }
             }};
         }
-        match doc.engine.shader_kind() {
+        match Self::effective_shader_kind(doc) {
             ShaderKind::Mesh => draw_engine!(&mut self.draw_mesh),
+            ShaderKind::MeshField => draw_engine!(&mut self.draw_mesh_field),
+            ShaderKind::SimSwarm => draw_engine!(&mut self.draw_swarm),
+            // Fluid never reaches the mesh scene pass (draw_walk routes it
+            // through the field's view shader).
+            ShaderKind::FluidView => {}
             ShaderKind::Terrain => {
                 if let Some(tex) = &input0 {
                     self.draw_terrain.draw_vars.set_texture(0, tex);
@@ -869,6 +1072,8 @@ impl VjFxView {
             ShaderKind::Tunnel => draw_engine!(&mut self.draw_tunnel),
             ShaderKind::Firefly => draw_engine!(&mut self.draw_firefly),
             ShaderKind::Harmono => draw_engine!(&mut self.draw_harmono),
+            ShaderKind::Forge => draw_engine!(&mut self.draw_forge),
+            ShaderKind::Copper => draw_engine!(&mut self.draw_copper),
             ShaderKind::Domino => draw_engine!(&mut self.draw_domino),
             ShaderKind::Tiles => {
                 if let Some(tex) = &input0 {
@@ -877,6 +1082,16 @@ impl VjFxView {
                 draw_engine!(&mut self.draw_tiles)
             }
             ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
+            ShaderKind::Raymarch => {
+                if let Some(tex) = &input0 {
+                    self.draw_raymarch.draw_vars.set_texture(0, tex);
+                }
+                // The marcher builds its rays in-shader; it needs only the
+                // viewport aspect (the pass camera is ignored).
+                self.draw_raymarch.rm = vec4(aspect, 0.0, 0.0, 0.0);
+                draw_engine!(&mut self.draw_raymarch)
+            }
+            ShaderKind::Jet => draw_engine!(&mut self.draw_jet),
             ShaderKind::City => draw_engine!(&mut self.draw_city),
             ShaderKind::Pipes => draw_engine!(&mut self.draw_pipes),
             ShaderKind::Charts => draw_engine!(&mut self.draw_charts),
@@ -981,6 +1196,27 @@ impl Widget for VjFxView {
         };
         let sig = self.signals();
         let is_screen = matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Screen));
+        let is_fluid = matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Fluid(_)));
+
+        // -- sim fields (updated BEFORE anything samples them) -------------
+        if !self.sim.is_empty() {
+            let palette = self.doc.as_ref().map(|d| d.palette).unwrap_or_default();
+            self.sim.update(
+                cx,
+                &sig,
+                &palette,
+                &mut SimDraws {
+                    wind: &mut self.draw_sim_wind,
+                    swarm: &mut self.draw_sim_swarm,
+                    fluid_advect: &mut self.draw_fluid_advect,
+                    fluid_div: &mut self.draw_fluid_div,
+                    fluid_jacobi: &mut self.draw_fluid_jacobi,
+                    fluid_project: &mut self.draw_fluid_project,
+                    fluid_dye: &mut self.draw_fluid_dye,
+                },
+            );
+            self.sim_ms = self.sim.last_ms();
+        }
 
         // -- scene pass (skipped by the fullscreen `screen` engine) --------
         let chain_input = if is_screen {
@@ -991,6 +1227,40 @@ impl Widget for VjFxView {
                     let p = sig.0[Signals::PULSE];
                     self.update_fallback_input(cx.cx, t, p)
                 }
+            }
+        } else if is_fluid {
+            // Fluid: the scene pass IS the field's view shader (dye through
+            // the palette over an optionally dye-warped input0).
+            let input0 = match self.input0.clone() {
+                Some(tex) => tex,
+                None => {
+                    let t = sig.0[Signals::TIME];
+                    let p = sig.0[Signals::PULSE];
+                    self.update_fallback_input(cx.cx, t, p)
+                }
+            };
+            let (name, view_par, palette) = {
+                let doc = self.doc.as_ref().unwrap();
+                let name = match &doc.engine {
+                    Engine::Fluid(e) => e.cfg.field.clone(),
+                    _ => String::new(),
+                };
+                let glow = doc.glow.value(&sig).max(0.0);
+                let warp = doc.params[0].value(&sig);
+                let texmix = doc.params[1].value(&sig).clamp(0.0, 1.0);
+                (name, [glow, warp, texmix, 0.0], doc.palette)
+            };
+            match self.sim.fluid_view(
+                cx,
+                &name,
+                pass_rect.size,
+                &mut self.draw_fluid_view,
+                &input0,
+                view_par,
+                &palette,
+            ) {
+                Some(tex) => tex,
+                None => self.color_texture.clone(),
             }
         } else {
             let clear = self.doc.as_ref().map(|d| d.palette[0]).unwrap_or_default();
@@ -1047,7 +1317,7 @@ impl Widget for VjFxView {
             self.draw_present.draw_vars.set_texture(0, &final_texture);
             self.draw_present.draw_abs(cx, rect);
             self.area = self.draw_present.area();
-            if !is_screen {
+            if !is_screen && !is_fluid {
                 cx.set_pass_area(&self.pass, self.area);
             }
         }

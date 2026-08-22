@@ -174,6 +174,10 @@ subclasses can always read them, no ceremony:
 | city | tower/trail id | CLASS: 0 tower 1 ground 2 sky 3 trail | tower hash / trail hue | tower height / trail phase | tower: facade uv in WINDOW units; ground: world xz; sky: (azimuth01, h01); trail: (arc01, h01) | face normal |
 | pipes | pipe id | birth order 0..1 (THE growth axis) | pipe hue | local radius (balls bulged) | (around01, along/elevation) | radial outward |
 | stockcharts | element class 0..5 (body/wick/grid/crosshair/MA/tick) | candle age 0..1 | up/down (crosshair: axis) | move size 0..1 | quad-local uv | +Z |
+| raymarch | corner idx | 0 | 0 | 0 | screen uv (0,0 = top-left) | +Z (pos = CLIP-SPACE corner; the pixel shader is the whole effect) |
+| mountainjet (terrain) | checker cell | 0 | vertex hash | 0 | grid uv | +Y |
+| mountainjet (jet hull) | 0 | 2.0 + part hash | face shade tint | 0 | face uv (edge-wire material) | LOCAL face normal (pos = LOCAL jet coords, nose = -z) |
+| mountainjet (burner) | 0 | 4.0 + flicker seed | flicker seed | along plume 0..1 | (across, along) | +Z |
 
 Encode MORE data when your engine knows more — spare channels are the
 vertex shader's raw material. Document any new channel here.
@@ -190,6 +194,10 @@ murmuration of gliders, engines_flock.rs), `city` (flyover:
 night/retro/tron styles + light-cycle trails, engines_city.rs), `pipes`
 (the 3D-pipes lattice, growth replayed on the beat, engines_pipes.rs),
 `stockcharts` (beat-clocked candlestick terminal, engines_charts.rs),
+`raymarch` (fullscreen SDF marcher; the scene is a `scene_sdf` shader
+SUBCLASS — engines_raymarch.rs documents the contract + SDF toolkit),
+`mountainjet` (endless range + view-space fighter jet, three looks,
+engines_jet.rs),
 `screen` (no mesh — input0 straight into the stage chain: the fullscreen
 effect family). Engine keys: see the module docs in `mod.rs` (kept
 current) and `engines.rs`.
@@ -244,5 +252,9 @@ particles are stateless vertex-shader work. The tick touches emitters only
 - Buffer sizes stay constant per frame (pad to high water) — a changed
   byte length reallocates the GPU buffer every frame.
 - Vertex-stage texture fetch: `sample_nearest(uv, 0.0)`.
+- A shader helper fn binds to ONE stage: a fn the vertex path calls
+  (directly or transitively) cannot also be called from `pixel` — the
+  generated Metal signature mismatches and the whole shader dies. Inline
+  the math on the second stage instead (engines_jet.rs grain).
 - Wind/growth displacement must be a function of CONTINUOUS per-vertex
   data (rest position, arc length) or connected geometry tears.

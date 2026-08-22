@@ -1,0 +1,41 @@
+// GUILLOTINE — thin chrome bars scissor-crossing on eighth notes: the
+// whole stack mirrors through the centre once per pulse, odd/even bars
+// parting in depth as they pass. Pattern taught: `beat_rate: 2` drives
+// the crossing clock (the choreography reads beat*rate directly, so the
+// document's rate IS the choreography tempo); hard `metal` + a bright
+// specular line make chrome out of the same two-stop gradient.
+{
+    name: "Guillotine"
+    engine: "copperbars"
+    seed: 13
+
+    bars: 30
+    mode: "scissor"
+    width: 16.0
+    span: 9.0
+    thickness: 0.22
+    depth: 0.9
+    amplitude: 1.5
+    weave: 1.7
+    metal: 6.0
+    beat_rate: 2
+
+    beat_pulse: 0.7
+    p0: "0.35 + 0.8*bass + 0.4*pulse"
+    p1: "0.5 + 0.7*env(phase)"
+
+    color_bg: #x05060a
+    color_a: #xf2f6fa      // chrome highlight
+    color_b: #x14181d      // near-black steel shadow
+    color_c: #xd0f0ff      // ice-white spec
+
+    cam_orbit: 0.035
+    cam_height: 0.5
+    cam_fov: 48.0
+    fog: 0.018
+    glow: 1.5
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: "1.0 + 0.9*pulse", levels: 2}
+    ]
+}

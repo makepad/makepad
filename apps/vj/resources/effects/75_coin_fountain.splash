@@ -1,0 +1,43 @@
+// COIN FOUNTAIN — the greedy Kick Forge variant: fewer, FAT gold chips
+// with high spin and maximum glint, tossed in slower arcs (moderate
+// gravity = lower but longer flights) so the payout hangs tumbling and
+// strobing. Pattern taught: the glint channel driven hard by `high` —
+// hats literally make the money sparkle — and low `falloff` so the whole
+// drum pays out, not just the centre.
+{
+    name: "Coin Fountain"
+    engine: "forge"
+    seed: 77
+
+    shards: 1200
+    radius: 3.6
+    impulse: 8.0
+    gravity: 34.0
+    spin: 2.6
+    membrane_wave: 0.35
+    shard_size: 0.26
+    scatter: 0.8
+    falloff: 0.35
+    pile: 0.5
+    glint: 2.6
+
+    beat_pulse: 0.5
+    p0: "0.7 + 2.0*bass"
+    p1: "0.2 + 0.8*bass"
+    p2: "0.4 + 2.5*high"
+
+    color_bg: #x0a0806
+    color_a: #xc9a12c      // old gold
+    color_b: #xffd86a      // bright gold
+    color_c: #xfff7d0      // glint white
+
+    cam_orbit: 0.14
+    cam_fov: 54.0
+    fog: 0.028
+    glow: 1.25
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: "1.3 + 1.0*high", levels: 3},
+        {kind: "tiltshift", focus: 0.5, width: 0.35, levels: 2}
+    ]
+}

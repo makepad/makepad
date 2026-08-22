@@ -170,6 +170,29 @@
 //! * bindings: `p0` nudges the front (beats), `p1` adds impact flash,
 //!   `p2` adds anticipation glow; hooks: `fx_color` (engines_domino.rs)
 //!
+//! ### `engine: "forge"` — kick-launched shard pile on a drum membrane
+//! Static shards + membrane disc; every pulse re-hashes stateless ballistic
+//! launches (`v·t − ½g·t²` from phase/bpm/seeds) and rings the membrane.
+//! * `shards` (2000, ≤6000), `radius` (4), `impulse` (7), `gravity` (42 —
+//!   high gravity = HIGH jumps: launches land before the next hit, so
+//!   reachable height is g·T²/8), `spin` (1), `membrane_wave` (0.5),
+//!   `shard_size` (0.16), `scatter` (0.55), `falloff` (0.55), `pile`
+//!   (0.55), `auto_pump` (1 — constant launch floor for the free-running
+//!   clock; 0 = silence-still with real audio), `glint` (1)
+//! * bindings: `p0` = impulse gain (THE binding — `"0.6 + 2.6*bass"`),
+//!   `p1` adds membrane wave, `p2` boosts glints (hats);
+//!   hooks: `fx_color` (t = flight heat — see engines_forge.rs)
+//!
+//! ### `engine: "copperbars"` — rasterbar slabs with beat choreography
+//! Static full-width boxes; the VS runs a per-bar choreography (`mode`:
+//! sine / pile / scissor / curtain), crossfading to `mode_b` by `p3`.
+//! * `bars` (24, 4..64), `mode`/`mode_b`, `width` (15), `span` (6.5),
+//!   `thickness` (0.42), `depth` (1.2), `amplitude` (1.6), `weave` (1.2),
+//!   `metal` (3 gradient hardness), `drop` (7 pile drop height)
+//! * bindings: `p0` = amplitude gain, `p1` = thickness pump
+//!   (`"0.4 + 0.9*env(phase)"`), `p3` = mode crossfade 0..1;
+//!   hooks: `fx_color` (the bar gradient fn — see engines_copper.rs)
+//!
 //! ### `engine: "tiles"` — the input image shattered into a tile grid
 //! One textured quad per tile; each tile carries its uv window + grid
 //! coords + seeds on the stream and the vertex shader runs an endless
@@ -208,6 +231,30 @@
 //! * `particles` (768 sheet size), `size`, `gravity`, plus the per-frame
 //!   `frame: fn(fx) { ... return [spawns] }` tick — see CONTRACT.md for the
 //!   spawn-object keys, budget, and the slot-respawn = move rule.
+//!
+//! ### `engine: "raymarch"` — fullscreen SDF raymarcher, subclassable scene
+//! One quad; the pixel shader sphere-traces a distance field. THE variant
+//! mechanism is the `scene_sdf` shader-hook subclass (see
+//! engines_raymarch.rs for the contract + the SDF toolkit helpers).
+//! * `steps` (64, 16..120 — the march budget/cost dial), `max_dist` (40),
+//!   `cam` (orbit/fly/dolly), `cam_speed` (0.25), `cam_dist` (7),
+//!   `cam_height` (2.2), `shadow` (1 — 0 skips the soft-shadow march)
+//! * shared `twist` bends the whole field; `p0`-`p2` = free scene levers,
+//!   `p3` = glass IOR bend; hooks: `scene_sdf`, `fx_palette`
+//! * a scene material < 0 marks GLASS: the ray refracts once (Snell) and
+//!   samples input0 — the optics family (needs `input0`)
+//!
+//! ### `engine: "mountainjet"` — endless mountains + a foreground fighter jet
+//! Terrain grid (heightmap streaming technique) + a primitive-built jet in
+//! VIEW space (banked weaving turns, beat-pulsed afterburner) in one static
+//! stream (engines_jet.rs).
+//! * terrain: `res` (120), `size` (34), `height` (4.6), `noise_scale`
+//!   (0.17), `scroll` (3.2), `ridged` (0.7), `cells` (40)
+//! * `look`: `solid` (alpenglow) | `wire` (Battlezone vector) |
+//!   `nightvision` (mono ramp + grain)
+//! * jet: `jet_size` (1.0), `weave` (1.0)
+//! * bindings: `p0` ADDS afterburner, `p1` scales weave rate, `p2` adds
+//!   glow; hook: `fx_jet_color`
 //!
 //! ### `engine: "city"` — procedural city flyover, banking camera
 //! Static towers + ground + sky + (tron) trail walls; windows are a PIXEL
@@ -274,11 +321,16 @@ pub mod doc;
 pub mod engines;
 pub mod engines_charts;
 pub mod engines_city;
+pub mod engines_copper;
 pub mod engines_domino;
 pub mod engines_firefly;
 pub mod engines_flock;
+pub mod engines_forge;
 pub mod engines_harmonograph;
+pub mod engines_jet;
 pub mod engines_pipes;
+pub mod engines_raymarch;
+pub mod engines_simfx;
 pub mod engines_tiles;
 pub mod expr;
 pub mod lsys;
@@ -286,6 +338,7 @@ pub mod mesh;
 pub mod post;
 pub mod seed;
 pub mod shaders;
+pub mod sim;
 pub mod view;
 
 pub use doc::EffectDoc;
@@ -299,10 +352,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
     engines_firefly::script_mod(vm);
     engines_harmonograph::script_mod(vm);
     engines_domino::script_mod(vm);
+    engines_forge::script_mod(vm);
+    engines_copper::script_mod(vm);
     engines_tiles::script_mod(vm);
     engines_flock::script_mod(vm);
+    engines_raymarch::script_mod(vm);
+    engines_jet::script_mod(vm);
     engines_city::script_mod(vm);
     engines_pipes::script_mod(vm);
     engines_charts::script_mod(vm);
+    sim::script_mod(vm);
     view::script_mod(vm);
 }

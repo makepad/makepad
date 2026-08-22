@@ -19,7 +19,7 @@
 //! - PNG encode + cache write happen on a worker thread, never the UI
 //!   thread.
 //!
-//! Cache: `<cache_parent>/cache-vjfx-thumbs/<revision>.png`, keyed by the
+//! Cache: `<cache_parent>/cache-vjfx-thumbs-30/<revision>.png`, keyed by the
 //! immutable revision id (the content digest of the published revision), a
 //! layout-stamped PNG (`anim_icon::stamp_layout`) so the file describes its
 //! own cell grid. A relaunch decodes the file instead of re-rendering.
@@ -57,17 +57,17 @@ script_mod! {
 /// the animated tile draws close to full-bleed under the grid's aspect-fit.
 pub const CELL_W: usize = 160;
 pub const CELL_H: usize = 100;
-/// Sheet columns; 12 frames pack 4x3 into a 640x300 PNG.
-pub const SHEET_COLS: usize = 4;
-pub const FRAME_COUNT: usize = 12;
+/// Sheet columns; 30 frames pack 6x5 into a 960x500 PNG.
+pub const SHEET_COLS: usize = 6;
+pub const FRAME_COUNT: usize = 30;
 /// The offscreen pass renders at cell size (times the display's dpi
 /// factor); anything larger is readback bytes no tile can show.
 const SLOT_W: f64 = CELL_W as f64;
 const SLOT_H: f64 = CELL_H as f64;
-/// Seconds of effect time the sheet spans — one bar at the free-running
-/// 120bpm default — and the seconds to let the effect settle first
-/// (emitters need time to spawn their first shells).
-const CAPTURE_SPAN: f64 = 2.0;
+/// Seconds of effect time the sheet spans. One second at 30 frames: the
+/// operator judged the earlier 6 fps sheet "a bit too low framerate" —
+/// half a bar of genuinely smooth motion beats a whole bar of slideshow.
+const CAPTURE_SPAN: f64 = 1.0;
 const PREROLL_SECS: f64 = 0.9;
 /// Draw frames before the clock starts: the pass must have rendered at
 /// least once before the first readback can see anything.
