@@ -127,11 +127,52 @@ pub fn preset_alias(name: &str) -> String {
     format!("vjfx/{name}")
 }
 
+/// The catalog tag that marks an effect as TRANSITION-SUITED — the VJ's
+/// TRANSITION filter chip queries it, and the transition slot's arm gesture
+/// prefers that lane.
+pub const TRANSITION_TAG: &str = "transition";
+
+/// Bundled presets that work as CROSSFADE TRANSITIONS: the screen/warp
+/// family plus the input-driven tiles/lens looks — every one of them shapes
+/// `input0` (the program mix, in transition-slot mode) rather than replacing
+/// it with an unrelated scene.
+pub const TRANSITION_PRESETS: &[&str] = &[
+    "16_kaleido_video",
+    "17_video_trails",
+    "18_video_tiltshift",
+    "48_mirror_hall",
+    "49_vhs_breakup",
+    "50_mosaic_pump",
+    "51_uv_maelstrom",
+    "52_spectral_smear",
+    "58_kaleido_bloom_feed",
+    "59_zoom_echo",
+    "79_tile_lagoon",
+    "80_bar_shatter",
+    "81_conveyor_wall",
+    "89_beat_lens",
+];
+
+pub fn is_transition_preset(name: &str) -> bool {
+    TRANSITION_PRESETS.contains(&name)
+}
+
+fn preset_tags(name: &str) -> Vec<String> {
+    let mut tags = vec!["vjeffect".to_string(), "builtin".to_string()];
+    if is_transition_preset(name) {
+        tags.push(TRANSITION_TAG.to_string());
+    }
+    tags
+}
+
 /// One seeding outcome, for an honest startup log line.
 #[derive(Default, Debug)]
 pub struct SeedReport {
     pub present: usize,
     pub published: usize,
+    /// Already-seeded presets whose search annotation gained the
+    /// `transition` tag (stores seeded before the tag existed).
+    pub retagged: usize,
     pub failed: Vec<(String, String)>,
 }
 
@@ -140,6 +181,9 @@ pub struct SeedReport {
 /// rest.
 pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
     let mut report = SeedReport::default();
+    // Lazily-built tag sets for the retag pass (one search each, first time
+    // a present transition preset needs the check).
+    let mut tagged = RetagSets::default();
     for (name, source) in bundled_presets() {
         let alias_str = preset_alias(name);
         let Ok(alias) = alias_str.parse() else {
@@ -147,9 +191,20 @@ pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
             continue;
         };
         match client.resolve_alias(&alias) {
-            Ok(_) => {
-                // Present (possibly a user's newer revision) — never touch.
+            Ok(dto) => {
+                // Present (possibly a user's newer revision) — the CONTENT is
+                // never touched. The search ANNOTATION is updatable in place,
+                // so a store seeded before the transition tag existed still
+                // gets its TRANSITION lane: our own heads are retagged, a
+                // user-edited head (different generator) is left alone.
                 report.present += 1;
+                if is_transition_preset(name) {
+                    match retag_transition(client, &dto, name, source, &mut tagged) {
+                        Ok(true) => report.retagged += 1,
+                        Ok(false) => {}
+                        Err(e) => report.failed.push((alias_str, format!("retag: {e}"))),
+                    }
+                }
                 continue;
             }
             Err(ClientError::NotFound { .. }) => {}
@@ -166,6 +221,82 @@ pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
         }
     }
     report
+}
+
+/// Which assets carry `tag`, from ONE tag-filtered search (paged; bounded).
+fn assets_with_tag(
+    client: &mut AssetClient,
+    tag: &str,
+) -> Result<std::collections::HashSet<makepad_asset_data::AssetId>, String> {
+    let mut out = std::collections::HashSet::new();
+    let mut query = makepad_asset_client::CatalogQuery::browse(100);
+    query.kind = Some(AssetKind::VjEffect);
+    query.tag = Some(tag.to_string());
+    let mut cursor = None;
+    for _ in 0..8 {
+        let page = client
+            .catalog_search(&query, cursor.as_ref())
+            .map_err(|e| e.to_string())?;
+        out.extend(page.hits.iter().map(|hit| hit.asset_id));
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// The two lazily-built ownership/state sets the retag pass consults.
+#[derive(Default)]
+struct RetagSets {
+    /// Assets already carrying the transition tag (nothing to do).
+    transition: Option<std::collections::HashSet<makepad_asset_data::AssetId>>,
+    /// Assets carrying the `builtin` tag — OUR seeds. A user edit publishes
+    /// a fresh asset under the alias without it, and is never touched.
+    builtin: Option<std::collections::HashSet<makepad_asset_data::AssetId>>,
+}
+
+/// Add the transition tag to an already-seeded preset's search annotation.
+/// Manifest CONTENT is immutable and untouched — annotations are updatable
+/// in place, and only a `builtin`-tagged (seeded-by-us) head is rewritten.
+/// Returns whether a write happened.
+fn retag_transition(
+    client: &mut AssetClient,
+    dto: &makepad_asset_client::AliasDto,
+    name: &str,
+    source: &str,
+    sets: &mut RetagSets,
+) -> Result<bool, String> {
+    if sets.transition.is_none() {
+        sets.transition = Some(assets_with_tag(client, TRANSITION_TAG)?);
+    }
+    if sets.transition.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
+        return Ok(false);
+    }
+    if sets.builtin.is_none() {
+        sets.builtin = Some(assets_with_tag(client, "builtin")?);
+    }
+    if !sets.builtin.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
+        return Ok(false);
+    }
+    let ann = makepad_asset_client::AnnotationUpload {
+        title: title_of(source, name),
+        description: description_of(source),
+        kind: Some(AssetKind::VjEffect),
+        categories: Vec::new(),
+        tags: preset_tags(name),
+        creator: String::new(),
+        generator: "makepad-vj effects".to_string(),
+        backend: String::new(),
+        model: String::new(),
+        prompt: String::new(),
+        provenance: "bundled preset library (apps/vj/resources/effects)".to_string(),
+        private: false,
+    };
+    client
+        .put_annotation(&dto.asset_id, &ann)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn seed_one(
@@ -195,7 +326,7 @@ fn seed_one(
     );
     bundle.alias = alias_str.parse().ok();
     bundle.description = description;
-    bundle.tags = vec!["vjeffect".to_string(), "builtin".to_string()];
+    bundle.tags = preset_tags(name);
     bundle.generator = "makepad-vj effects".to_string();
     bundle.provenance = "bundled preset library (apps/vj/resources/effects)".to_string();
     client

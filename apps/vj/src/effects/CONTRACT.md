@@ -227,6 +227,14 @@ particles are stateless vertex-shader work. The tick touches emitters only
   mode (pass renders at SLOT_PASS; a host can wrap it in a small widget
   rect with composite on), feed a few beats, grab frames. The runtime hook
   is exactly the slot-mode API above; the VJ-side cache is follow-up work.
+- Host param overrides (the VJ's EFFECT-SLOT knobs, fx_slot.rs):
+  `set_user_override([Option<f32>; 4])` pins any of `p0..p3` over the
+  document's binding (`None` = the doc's value stays in charge), and
+  `set_speed_scale(f32)` multiplies the document's own clock. TRANSITION
+  slot convention: the host drives `p3` with `triangle(program_mix)` (0 at
+  the fader ends, 1 mid-fade), so a transition-suited document can bind its
+  intensity to `p3`. Transition-suited presets carry the `transition`
+  catalog tag (seed.rs `TRANSITION_PRESETS`/`TRANSITION_TAG`).
 
 ## Preset conventions
 
