@@ -10,6 +10,12 @@ default = []
 metal-precompile = []
 
 [dependencies]
+# THE CUDA store. Must NOT be target-specific: cargo 1.92 drops target-cfg deps
+# when this crate is a path dep of another standalone `[workspace]`, and the
+# `links = "makepad_ai_cuda"` handshake (DEP_MAKEPAD_AI_CUDA_KERNELS, read in
+# build.rs) only arrives for an unconditional dependency. On macOS/iOS the
+# crate compiles to empty stubs — no CUDA symbols are referenced or linked.
+makepad-ai-cuda = { path = "../ai/cuda" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
@@ -25,3 +31,7 @@ path = "src/bin/vad_test.rs"
 [[bin]]
 name = "apple-speech-test"
 path = "src/bin/apple_speech_test.rs"
+
+[[bin]]
+name = "whisper-parity"
+path = "src/bin/whisper_parity.rs"

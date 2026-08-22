@@ -1,3 +1,8 @@
+mod accel;
+#[path = "cpu/align.rs"]
+mod align;
+#[path = "cuda/backend.rs"]
+mod cuda_backend;
 #[path = "cpu/decode_loop.rs"]
 mod decode_loop;
 #[path = "cpu/decoder.rs"]
@@ -22,7 +27,9 @@ mod vad;
 #[path = "apple/speech.rs"]
 pub mod apple_speech;
 
-pub use decode_loop::{Segment, WhisperParams, WhisperState};
+pub use accel::{backend_name as accel_backend_name, set_enabled as set_accel_enabled};
+pub use align::{AlignmentHeads, WordSpan, AUDIO_FRAME_MS};
+pub use decode_loop::{AlignedSegment, Segment, WhisperParams, WhisperState};
 pub use model::WhisperModel;
 pub use transcriber::{
     NativeAppleTranscriber, VoiceBackendKind, VoiceTranscribeError, VoiceTranscribeParams,
@@ -34,6 +41,38 @@ pub use vad::{
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// --- token trace ----------------------------------------------------------
+//
+// Off unless `MAKEPAD_VOICE_TOKEN_TRACE` is set. When on, every greedily
+// sampled token id is appended to a process-wide buffer so a parity harness
+// can compare backends at the token level instead of only on rendered text.
+// Zero cost and zero behaviour change when off.
+
+static TOKEN_TRACE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+fn token_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_VOICE_TOKEN_TRACE").is_some())
+}
+
+pub(crate) fn record_token(id: i32) {
+    if !token_trace_enabled() {
+        return;
+    }
+    if let Ok(mut buf) = TOKEN_TRACE.lock() {
+        buf.push(id);
+    }
+}
+
+/// Drain the sampled-token trace collected since the last call. Empty unless
+/// `MAKEPAD_VOICE_TOKEN_TRACE` is set in the environment.
+pub fn take_token_trace() -> Vec<i32> {
+    match TOKEN_TRACE.lock() {
+        Ok(mut buf) => std::mem::take(&mut *buf),
+        Err(_) => Vec::new(),
+    }
+}
 
 pub(crate) static PROF_MATMUL_RAW: AtomicU64 = AtomicU64::new(0);
 pub(crate) static PROF_MATMUL_RAW_CALLS: AtomicU64 = AtomicU64::new(0);

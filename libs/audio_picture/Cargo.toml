@@ -1,0 +1,19 @@
+# Pictures of audio: the log-frequency spectrogram and the antialiased
+# waveform strip, and the composite that carries both.
+#
+# ONE definition of the recipe. The importer bakes these into catalog
+# thumbnails; the shared preview widgets render the same pictures live from
+# decoded samples. Before this crate the ramp, the window and the band lived
+# in the importer, so the only way a widget could show a spectrogram was to
+# fetch one somebody had already baked.
+#
+# Zero dependencies, by design: an iterative radix-2 FFT and a coverage
+# rasteriser, nothing else. That is what lets a widget crate and a headless
+# importer share it without either dragging the other's world along.
+
+[package]
+name = "makepad-audio-picture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
