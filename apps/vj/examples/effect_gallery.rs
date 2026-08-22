@@ -74,6 +74,11 @@ pub struct App {
     current: usize,
     #[rust]
     started: bool,
+    /// `VJFX_INPUT=<image path>`: decoded once, bound as REAL content on
+    /// input 0 for every shown effect — the content-coupling verify lever
+    /// (without it, effects run standalone on the animated fallback).
+    #[rust]
+    input_tex: Option<Texture>,
 }
 
 impl App {
@@ -121,8 +126,24 @@ impl App {
             .unwrap_or(122.0);
         view.set_bpm(bpm);
         let result = view.set_effect_source(cx, &key, &source);
-        // Texture-input docs get the runtime's built-in animated fallback
-        // automatically — the gallery binds nothing.
+        // Content coupling verify lever: VJFX_INPUT=<image> binds a real
+        // texture to input 0 (a stand-in for the channel's live video).
+        if let Ok(path) = std::env::var("VJFX_INPUT") {
+            if self.input_tex.is_none() && !path.is_empty() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => match decode_image_from_data(&bytes) {
+                        Ok(buf) => self.input_tex = Some(buf.into_new_texture(cx)),
+                        Err(e) => log!("VJFX_INPUT {path}: decode failed: {e:?}"),
+                    },
+                    Err(e) => log!("VJFX_INPUT {path}: {e}"),
+                }
+            }
+            if let Some(tex) = &self.input_tex {
+                view.set_input_texture(0, Some(tex.clone()));
+            }
+        }
+        // Otherwise texture-input docs get the runtime's built-in animated
+        // fallback automatically — the gallery binds nothing.
         let (title, status) = match result {
             Ok(_) => (
                 format!("[{}/{}] {}", self.current + 1, self.docs.len(), key),

@@ -299,6 +299,12 @@ pub struct EffectDoc {
     pub twist: Animatable,
     pub fog: Animatable,
     pub glow: Animatable,
+    /// CONTENT COUPLING strength 0..1 (doc key `content`, animatable):
+    /// how strongly the effect folds the live input0 video into its look.
+    /// Reaches shaders as `self.fog.z`, PRE-GATED to 0 by the host when no
+    /// REAL content is bound (the animated fallback pattern must never
+    /// leak through a coupling — the standalone look stays classic).
+    pub content: Animatable,
     pub grow: GrowMode,
     /// Beats per growth sweep.
     pub grow_beats: f32,
@@ -843,6 +849,10 @@ impl EffectDoc {
         let twist = r.anim(live_id!(twist), 0.0);
         let fog = r.anim(live_id!(fog), 0.045);
         let glow = r.anim(live_id!(glow), 1.0);
+        // Content coupling strength (`content:` — number or binding). The
+        // 0.5 default is the ENGINE-TUNED sweet spot: every family scales
+        // its own coupling so mid-strength infuses without pasting.
+        let content = r.anim(live_id!(content), 0.5);
         let grow = match r.string(live_id!(grow)).as_deref() {
             None | Some("off") => GrowMode::Off,
             Some("loop") => GrowMode::Loop,
@@ -1063,6 +1073,7 @@ impl EffectDoc {
             twist,
             fog,
             glow,
+            content,
             grow,
             grow_beats,
             params,

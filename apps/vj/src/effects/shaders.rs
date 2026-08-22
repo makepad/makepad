@@ -15,7 +15,13 @@
 //! | `self.anim`    | (sway, sway_freq, growth, twist)                    |
 //! | `self.shape` `self.flow` | engine-specific (engines.rs uniforms()) |
 //! | `self.col_a/b/c/bg` | the document palette                           |
-//! | `self.fog`     | (fog density, emissive gain, tex mix, unused)       |
+//! | `self.fog`     | (fog density, emissive gain, CONTENT MIX, unused)   |
+//!
+//! CONTENT COUPLING: `self.fog.z` is the document's `content` strength,
+//! PRE-GATED by the host to 0 when input0 holds no real channel video (the
+//! animated fallback). Every family folds input0 into its look scaled by
+//! it — 0 = exactly the classic standalone look. `tex0` carries input0;
+//! `has_content: uniform(0.0)` is the raw gate for behavioral switches.
 //!
 //! Hook functions a document may override via its `shader:` object:
 //! `fx_displace`, `fx_color`, `fx_center` (particles), `fx_sprite`
@@ -48,6 +54,8 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -156,6 +164,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -262,6 +271,8 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: true
         depth_write: false
@@ -331,6 +342,8 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -402,6 +415,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: true
         depth_write: false
@@ -629,6 +643,8 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: true
         depth_write: false
@@ -1072,6 +1088,10 @@ pub struct DrawVjFxEmitter {
     pub e_col_a: Vec4f,
     #[live(vec4(1.0, 0.3, 0.1, 1.0))]
     pub e_col_b: Vec4f,
+    /// (fog density, emissive gain, CONTENT MIX, unused) — the standard
+    /// slot; emitters read only .z (the pre-gated content strength).
+    #[live(vec4(0.05, 1.0, 0.0, 0.0))]
+    pub fog: Vec4f,
 }
 
 #[derive(Script, ScriptHook)]
