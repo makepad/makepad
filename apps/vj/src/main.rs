@@ -1082,6 +1082,15 @@ script_mod! {
                                                     deck_a_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
                                                     deck_a_rate := ChromeButton{width: 30 text: "1"}
                                                     deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                    // SCRATCH / SHUTTLE:
+                                                    // centre neutral, right
+                                                    // forward, left reverse,
+                                                    // sprung home on release
+                                                    // — a jog for testing
+                                                    // the frame tweening.
+                                                    Tip{ text: "Scratch / shuttle"
+                                                        deck_a_scratch := VjShuttle{width: 72}
+                                                    }
                                                     Tip{ text: "Auto-spin 3D content"
                                                         slot_a_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
                                                     }
@@ -1335,6 +1344,15 @@ script_mod! {
                                                     deck_b_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
                                                     deck_b_rate := ChromeButton{width: 30 text: "1"}
                                                     deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                    // SCRATCH / SHUTTLE:
+                                                    // centre neutral, right
+                                                    // forward, left reverse,
+                                                    // sprung home on release
+                                                    // — a jog for testing
+                                                    // the frame tweening.
+                                                    Tip{ text: "Scratch / shuttle"
+                                                        deck_b_scratch := VjShuttle{width: 72}
+                                                    }
                                                     Tip{ text: "Auto-spin 3D content"
                                                         slot_b_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
                                                     }
@@ -4231,6 +4249,10 @@ pub struct App {
     /// RESETS it to muted; the button is the per-clip unmute.
     #[rust([true, true])]
     slot_video_muted: [bool; 2],
+    /// A live SCRATCH on a deck's shuttle: the manual transport override
+    /// (None = the beat machinery owns the transport).
+    #[rust]
+    slot_scratch: [Option<f32>; 2],
     /// Per-deck IN/OUT trim (fractions) from the source monitor's range
     /// handles. Session state: reset to (0, 1) on every cue.
     #[rust([(0.0f64, 1.0f64); 2])]
@@ -6260,6 +6282,44 @@ p2 {}
         }
     }
 
+    /// A shuttle move. `pos` -1..1; 0 = the spring landed home and the
+    /// beat machinery re-owns the transport. Exponential speed with
+    /// distance (4^|pos|). FLOW-WARP clips scratch bidirectionally through
+    /// the warp clock — smooth frame tweening is the whole point; a plain
+    /// decoder clip has no reverse (yet — the sync lane's override API
+    /// lands here when it exists), so its left side is slow-motion.
+    fn apply_scratch(&mut self, cx: &mut Cx, slot: SlotId, pos: f32) {
+        let i = slot.index();
+        if pos == 0.0 {
+            if self.slot_scratch[i].take().is_some() {
+                // Release: rate + beat transport + the chip face all come
+                // back from the one authority.
+                self.apply_slot_beat_sync(slot);
+                self.strip_shape[i] = None;
+                self.sync_slot_controls_ui(cx);
+            }
+            self.video_pump = cx.new_next_frame();
+            return;
+        }
+        if self.slot_scratch[i].is_none() {
+            // Entering the scratch: the chip says MANUAL.
+            self.ui
+                .button(cx, Self::deck_rate_path(slot))
+                .set_text(cx, "—");
+        }
+        self.slot_scratch[i] = Some(pos);
+        let mag = 4.0f64.powf(pos.abs() as f64);
+        if self.flow_active(i) {
+            // The warp clock runs any rate, both directions.
+            self.slot_flow_rate[i] = mag * if pos < 0.0 { -1.0 } else { 1.0 };
+        } else if let Some(player) = self.players[i].as_mut() {
+            player.set_beat_transport(false);
+            let rate = if pos > 0.0 { mag } else { (1.0 / mag).max(MIN_VIDEO_PLAYBACK_RATE) };
+            player.set_playback_rate(rate);
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
     /// × on the source cluster: EJECT the deck's clip — stop playback,
     /// release the player, deck back to its empty cue state. The same
     /// teardown a fresh cue runs, minus the new clip.
@@ -6323,6 +6383,12 @@ p2 {}
     /// fast through a fixed range.
     fn apply_slot_beat_sync(&mut self, slot: SlotId) {
         let i = slot.index();
+        // A hand on the SHUTTLE owns the transport outright: nothing
+        // (refresh tick, trim release, chip write) may reassert the beat
+        // rate until the spring lands the knob home.
+        if self.slot_scratch[i].is_some() {
+            return;
+        }
         let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
         let chip = self.slot_beat_rate[i] as f64;
         self.applied_fit[i] = None;
@@ -13583,6 +13649,26 @@ impl MatchEvent for App {
             // ghost faces already say so).
             if self.slot_media[i] == SlotMedia::Empty {
                 continue;
+            }
+            {
+                let path: &[LiveId] = match slot {
+                    SlotId::A => ids!(deck_a_scratch),
+                    SlotId::B => ids!(deck_b_scratch),
+                };
+                let uid = self.ui.widget(cx, path).widget_uid();
+                let mut scratch = None;
+                for action in actions.iter() {
+                    if let Some(wa) = action.as_widget_action() {
+                        if wa.widget_uid == uid {
+                            if let views::VjShuttleAction::Scratch(v) = wa.cast() {
+                                scratch = Some(v);
+                            }
+                        }
+                    }
+                }
+                if let Some(v) = scratch {
+                    self.apply_scratch(cx, slot, v);
+                }
             }
             if self.ui.button(cx, Self::deck_eject_path(slot)).clicked(actions) {
                 self.unslot_deck(cx, slot);

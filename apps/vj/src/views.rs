@@ -924,6 +924,41 @@ script_mod! {
         height: 22
     }
 
+    // SCRATCH SHUTTLE: a jog well with a sprung knob. `pos` -1..1 drawn
+    // from the uniform alone; the widget springs it home on release.
+    set_type_default() do #(DrawVjShuttle::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        shuttle: uniform(0.0)
+        active: uniform(0.0)
+        color_well: uniform(#x1d222a)
+        color_rim: uniform(#xffffff26)
+        color_detent: uniform(#x39404a)
+        color_knob: uniform(#xe8eef4)
+        color_hot: uniform(#xff5c39)
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            sdf.box(0.5, 2.0, w - 1.0, h - 4.0, 5.0)
+            sdf.fill(self.color_well)
+            sdf.stroke(self.color_rim, 1.0)
+            // centre detent tick
+            sdf.box(w * 0.5 - 0.75, 4.5, 1.5, h - 9.0, 0.75)
+            sdf.fill(self.color_detent)
+            // sprung knob: centre at the shuttle position
+            let half = w * 0.5 - 7.0
+            let kx = w * 0.5 + self.shuttle * half
+            sdf.box(kx - 3.0, 3.5, 6.0, h - 7.0, 3.0)
+            sdf.fill(self.color_knob.mix(self.color_hot, self.active))
+            return sdf.result
+        }
+    }
+    mod.widgets.VjShuttleBase = #(VjShuttle::register_widget(vm))
+    mod.widgets.VjShuttle = set_type_default() do mod.widgets.VjShuttleBase{
+        width: 72
+        height: 22
+    }
+
     mod.widgets.VjPadMatrixBase = #(VjPadMatrix::register_widget(vm))
     mod.widgets.VjPadMatrix = set_type_default() do mod.widgets.VjPadMatrixBase{
         width: Fill
@@ -1941,6 +1976,120 @@ pub struct DrawBeatLed {
 /// over it proves the clock is on that audio. Both are drawn by one quad
 /// from one small texture, so the picture costs a 512-byte upload per pump
 /// and nothing at all per frame.
+/// What the operator's hand is doing to the shuttle. `Scratch(0.0)` is
+/// the release settling home — the host restores the beat transport on it.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum VjShuttleAction {
+    Scratch(f32),
+    #[default]
+    None,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawVjShuttle {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+/// SCRATCH / SHUTTLE: centre = neutral, drag right = forward (faster with
+/// distance), drag left = reverse, and the knob SPRINGS home on release —
+/// a performance jog, never a latched rate.
+#[derive(Script, ScriptHook, Widget)]
+pub struct VjShuttle {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawVjShuttle,
+    #[rust]
+    area: Area,
+    #[rust]
+    pos: f32,
+    #[rust]
+    dragging: bool,
+    #[rust]
+    springing: bool,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl VjShuttle {
+    fn set_pos(&mut self, cx: &mut Cx, uid: WidgetUid, pos: f32) {
+        let pos = pos.clamp(-1.0, 1.0);
+        if (pos - self.pos).abs() > f32::EPSILON {
+            self.pos = pos;
+            cx.widget_action(uid, VjShuttleAction::Scratch(pos));
+            self.area.redraw(cx);
+        }
+    }
+
+    fn pos_at(&self, cx: &mut Cx, x: f64) -> f32 {
+        let rect = self.area.rect(cx);
+        if rect.size.x <= 14.0 {
+            return 0.0;
+        }
+        let half = rect.size.x * 0.5 - 7.0;
+        (((x - rect.pos.x) - rect.size.x * 0.5) / half) as f32
+    }
+}
+
+impl Widget for VjShuttle {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.draw_bg.set_uniform(cx, id!(shuttle), &[self.pos]);
+        self.draw_bg.set_uniform(
+            cx,
+            id!(active),
+            &[if self.dragging || self.pos.abs() > 0.01 { 1.0 } else { 0.0 }],
+        );
+        self.draw_bg.draw_abs(cx, rect);
+        cx.end_turtle_with_area(&mut self.area);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        // The spring: ease home after release, one action per step so the
+        // host rides the whole return (beat transport re-engages at 0).
+        if self.next_frame.is_event(event).is_some() && self.springing {
+            let pos = self.pos * 0.55;
+            let pos = if pos.abs() < 0.02 { 0.0 } else { pos };
+            self.set_pos(cx, uid, pos);
+            if pos == 0.0 {
+                self.springing = false;
+            } else {
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+        match event.hits(cx, self.area) {
+            Hit::FingerDown(fe) => {
+                self.dragging = true;
+                self.springing = false;
+                let pos = self.pos_at(cx, fe.abs.x);
+                self.set_pos(cx, uid, pos);
+            }
+            Hit::FingerMove(fe) if self.dragging => {
+                let pos = self.pos_at(cx, fe.abs.x);
+                self.set_pos(cx, uid, pos);
+            }
+            Hit::FingerUp(_) if self.dragging => {
+                self.dragging = false;
+                self.springing = true;
+                self.next_frame = cx.new_next_frame();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct VjBeatWave {
     #[uid]
