@@ -178,6 +178,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: false
         depth_write: false

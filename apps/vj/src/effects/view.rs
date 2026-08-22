@@ -1041,6 +1041,18 @@ impl VjFxView {
         };
         fx_set_pass_camera(cx.cx, &self.pass, &scene_state);
 
+        // CONTENT COUPLING GATE: true only when REAL host content sits in
+        // input0 (channel video in effect-pass mode). The animated fallback
+        // pattern and a doc-requested sim field both gate to false, so a
+        // coupling can never leak the test pattern into the standalone look.
+        let has_content = {
+            let field_request = self
+                .doc
+                .as_ref()
+                .and_then(|d| d.input0.as_deref())
+                .is_some_and(|s| s.starts_with("field:"));
+            self.input0.is_some() && !field_request
+        };
         let (eng_u, user, anim, fog, palette) = {
             let doc = self.doc.as_ref().unwrap();
             (
@@ -1057,7 +1069,18 @@ impl VjFxView {
                     growth,
                     doc.twist.value(sig),
                 ),
-                vec4(doc.fog.value(sig).max(0.0), doc.glow.value(sig), 0.0, 0.0),
+                vec4(
+                    doc.fog.value(sig).max(0.0),
+                    doc.glow.value(sig),
+                    // fog.z = the doc's `content` strength, pre-gated: 0
+                    // means "exactly the classic standalone look" by law.
+                    if has_content {
+                        doc.content.value(sig).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                ),
                 doc.palette,
             )
         };
@@ -1113,8 +1136,25 @@ impl VjFxView {
             Mat4f::identity();
 
         macro_rules! draw_engine {
+            // Default: input0 (real content, else the animated fallback)
+            // lands on texture slot 0 — the family's `tex0` — and the raw
+            // `has_content` gate uniform is published (both no-ops for
+            // shaders that declare neither).
             ($draw:expr) => {{
                 let d = $draw;
+                if let Some(tex) = &input0 {
+                    d.draw_vars.set_texture(0, tex);
+                }
+                draw_engine!(@common d)
+            }};
+            // `notex`: the arm manages its own texture slots (duo decks,
+            // sim consumers whose state texture owns slot 0).
+            ($draw:expr, notex) => {{
+                let d = $draw;
+                draw_engine!(@common d)
+            }};
+            (@common $d:expr) => {{
+                let d = $d;
                 d.time_beat = time_beat;
                 d.sig = sig_v;
                 d.user = user;
@@ -1126,6 +1166,11 @@ impl VjFxView {
                 d.col_b = palette[2];
                 d.col_c = palette[3];
                 d.fog = fog;
+                d.draw_vars.set_uniform(
+                    cx3d.cx,
+                    live_id!(has_content),
+                    &[if has_content { 1.0 } else { 0.0 }],
+                );
                 d.draw_vars.geometry_id = Some(geometry_id);
                 if d.draw_vars.can_instance() {
                     let new_area = cx3d.add_instance(&d.draw_vars);
@@ -1135,17 +1180,24 @@ impl VjFxView {
         }
         match Self::effective_shader_kind(doc) {
             ShaderKind::Mesh => draw_engine!(&mut self.draw_mesh),
-            ShaderKind::MeshField => draw_engine!(&mut self.draw_mesh_field),
-            ShaderKind::SimSwarm => draw_engine!(&mut self.draw_swarm),
+            ShaderKind::MeshField => {
+                // wind_tex owns slot 0; content rides slot 1 (`tex0`).
+                if let Some(tex) = &input0 {
+                    self.draw_mesh_field.draw_vars.set_texture(1, tex);
+                }
+                draw_engine!(&mut self.draw_mesh_field, notex)
+            }
+            ShaderKind::SimSwarm => {
+                // state_tex owns slot 0; content rides slot 1 (`tex0`).
+                if let Some(tex) = &input0 {
+                    self.draw_swarm.draw_vars.set_texture(1, tex);
+                }
+                draw_engine!(&mut self.draw_swarm, notex)
+            }
             // Fluid never reaches the mesh scene pass (draw_walk routes it
             // through the field's view shader).
             ShaderKind::FluidView => {}
-            ShaderKind::Terrain => {
-                if let Some(tex) = &input0 {
-                    self.draw_terrain.draw_vars.set_texture(0, tex);
-                }
-                draw_engine!(&mut self.draw_terrain)
-            }
+            ShaderKind::Terrain => draw_engine!(&mut self.draw_terrain),
             ShaderKind::Ribbon => draw_engine!(&mut self.draw_ribbon),
             ShaderKind::Tunnel => draw_engine!(&mut self.draw_tunnel),
             ShaderKind::Firefly => draw_engine!(&mut self.draw_firefly),
@@ -1153,17 +1205,9 @@ impl VjFxView {
             ShaderKind::Forge => draw_engine!(&mut self.draw_forge),
             ShaderKind::Copper => draw_engine!(&mut self.draw_copper),
             ShaderKind::Domino => draw_engine!(&mut self.draw_domino),
-            ShaderKind::Tiles => {
-                if let Some(tex) = &input0 {
-                    self.draw_tiles.draw_vars.set_texture(0, tex);
-                }
-                draw_engine!(&mut self.draw_tiles)
-            }
+            ShaderKind::Tiles => draw_engine!(&mut self.draw_tiles),
             ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
             ShaderKind::Raymarch => {
-                if let Some(tex) = &input0 {
-                    self.draw_raymarch.draw_vars.set_texture(0, tex);
-                }
                 // The marcher builds its rays in-shader; it needs only the
                 // viewport aspect (the pass camera is ignored).
                 self.draw_raymarch.rm = vec4(aspect, 0.0, 0.0, 0.0);
@@ -1182,23 +1226,27 @@ impl VjFxView {
                     None => self.draw_duo.draw_vars.empty_texture(1),
                 }
                 self.draw_duo.rm = vec4(aspect, 0.0, 0.0, 0.0);
-                draw_engine!(&mut self.draw_duo)
+                draw_engine!(&mut self.draw_duo, notex)
             }
             ShaderKind::Jet => draw_engine!(&mut self.draw_jet),
             ShaderKind::City => draw_engine!(&mut self.draw_city),
             ShaderKind::Pipes => draw_engine!(&mut self.draw_pipes),
             ShaderKind::Charts => draw_engine!(&mut self.draw_charts),
-            ShaderKind::Particles => {
-                if let Some(tex) = &input0 {
-                    self.draw_particles.draw_vars.set_texture(0, tex);
-                }
-                draw_engine!(&mut self.draw_particles)
-            }
+            ShaderKind::Particles => draw_engine!(&mut self.draw_particles),
             ShaderKind::Emitters => {
                 if let Engine::Emitters(e) = &doc.engine {
                     let d = &mut self.draw_emitter;
                     d.time_beat = time_beat;
                     d.sig = sig_v;
+                    d.fog = fog;
+                    if let Some(tex) = &input0 {
+                        d.draw_vars.set_texture(0, tex);
+                    }
+                    d.draw_vars.set_uniform(
+                        cx3d.cx,
+                        live_id!(has_content),
+                        &[if has_content { 1.0 } else { 0.0 }],
+                    );
                     d.draw_vars.geometry_id = Some(geometry_id);
                     for em in &e.emitters {
                         d.e_origin = vec4(em.pos.x, em.pos.y, em.pos.z, em.age);

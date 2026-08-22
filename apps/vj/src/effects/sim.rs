@@ -1211,6 +1211,9 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         state_tex: texture_2d(float)
+        // Content coupling: state_tex owns slot 0, so input0 rides slot 1.
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         backface_culling: false
         alpha_blend: true
         depth_write: false
@@ -1299,6 +1302,9 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         wind_tex: texture_2d(float)
+        // Content coupling: wind_tex owns slot 0, so input0 rides slot 1.
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
         u_wind: uniform(vec4(0.0416, 1.0, 1.6, 0.0))
         backface_culling: false
         alpha_blend: false

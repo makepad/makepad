@@ -175,7 +175,37 @@ subclasses can always read them, no ceremony:
 - `self.user` = (p0, p1, p2, p3) — the document's bound user params
 - `self.anim` = (sway, sway_freq, growth, twist)
 - `self.shape`, `self.flow` — engine-specific (see engines.rs)
-- `self.col_a/col_b/col_c/col_bg`, `self.fog` = (density, glow, texmix, 0)
+- `self.col_a/col_b/col_c/col_bg`, `self.fog` = (density, glow, CONTENT
+  MIX, 0)
+
+### Content coupling (every engine does something nice with input0)
+
+When a real channel video is bound to input 0 (the VJ's effect-pass
+mode), EVERY engine family folds it into its look — tint, texture, light;
+the effect's identity stays primary. The shared plumbing (pinned names):
+
+- Doc key **`content`** (animatable, 0..1, default 0.5): the coupling
+  strength. It reaches every fx shader as **`self.fog.z`**, PRE-GATED by
+  the host to 0.0 whenever input0 holds no real content — the animated
+  fallback pattern and `field:` inputs gate it off, so a coupling can
+  never leak the test pattern and `fog.z == 0` is BY LAW exactly the
+  classic standalone look. Mix your classic term toward your content term
+  by `self.fog.z`; tune so 0.5 infuses tastefully.
+- Uniform **`has_content: uniform(0.0)`** (declared on every fx family
+  shader): the raw gate — 1.0 real content, 0.0 fallback/field — for
+  BEHAVIORAL switches (engines like tiles/terrain/particles-image that
+  deliberately render the fallback keep doing so; new couplings that
+  want real-only behavior read this).
+- Texture **`tex0`**: input0 is bound to texture slot 0 on every engine
+  draw automatically (view.rs `draw_engine!`), EXCEPT the sim consumers
+  — `DrawVjFxMeshField` (wind_tex) and `DrawVjFxSimSwarmDraw` (state_tex)
+  own slot 0, their `tex0` is declared second and fed on slot 1 — and
+  the duo transition engine (deck textures, never the fallback). Vertex
+  stage sampling: `sample_nearest(uv, 0.0)`.
+- Presets: a doc may re-bind `content` (`content: "0.3 + 0.6*p2"`) or
+  declare a dial on a p-param routed into it — but never break an
+  existing 3-dial set for it; a bare `content:` key without a dial is
+  fine. Docs that omit the key get the 0.5 default.
 
 ### Vertex attribute conventions (the CubeVertex layout, 12 floats)
 
