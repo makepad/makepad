@@ -438,8 +438,23 @@ impl SlotPlayer {
             self.clock_base = Some(Instant::now());
         }
         let media = self.media_now_100ns();
-        let mut due = None;
-        while frames.front().is_some_and(|f| f.pts_100ns <= media) {
+        let mut due: Option<Frame> = None;
+        while let Some(front) = frames.front() {
+            if front.pts_100ns > media {
+                break;
+            }
+            // STOP at a wrap boundary: a looping cache queues the restart
+            // behind the tail, and draining past it in one call plays the
+            // whole buffered next pass in fast-forward (seen live as "the
+            // clip replays fast, twice" — once per buffered pass until the
+            // wrap happened to sit at the front when the rebase looks).
+            // Leaving the wrapped frame queued lets the NEXT call's rebase
+            // land on it and restart the clock at normal speed.
+            if let Some(d) = &due {
+                if front.pts_100ns + 5_000_000 < d.pts_100ns {
+                    break;
+                }
+            }
             due = frames.pop_front();
         }
         if let Some(frame) = &due {
