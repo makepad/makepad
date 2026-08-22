@@ -201,7 +201,9 @@ impl Preset {
     /// Catalog lanes to ask the server for.
     pub fn kinds(self) -> Vec<AssetKind> {
         match self {
-            Preset::Video => vec![AssetKind::Video],
+            // Effects live on the VIDEO chip: they are program-slot visual
+            // content the same way a clip is.
+            Preset::Video => vec![AssetKind::Video, AssetKind::VjEffect],
             Preset::ThreeD => vec![
                 AssetKind::Mesh,
                 AssetKind::Character,
@@ -230,6 +232,7 @@ pub fn shelf_of(kind: Option<AssetKind>, alias: Option<&str>, category: Option<&
     let in_path = |seg: &str| path.split('/').any(|p| p == seg);
     match kind {
         Some(AssetKind::Video) => "video",
+        Some(AssetKind::VjEffect) => "effect",
         Some(AssetKind::Texture) => "image",
         Some(AssetKind::Billboard) => "sprite",
         Some(AssetKind::Character) => "character",
@@ -272,7 +275,7 @@ pub fn preset_of(
     category: Option<&str>,
 ) -> Option<Preset> {
     match shelf_of(kind, alias, category) {
-        "video" => Some(Preset::Video),
+        "video" | "effect" => Some(Preset::Video),
         "image" | "sprite" => Some(Preset::Image),
         "music" | "sfx" => Some(Preset::Audio),
         "mesh" | "character" | "prop" | "weapon" | "vehicle" | "map" | "3D scene" => {
@@ -359,6 +362,7 @@ impl<C: Clone> BrowseModel<C> {
             AssetKind::Texture,
             AssetKind::Billboard,
             AssetKind::World,
+            AssetKind::VjEffect,
         ]
     }
 
@@ -466,18 +470,17 @@ impl<C: Clone> BrowseModel<C> {
         self.order = merged;
     }
 
-    /// The head column plus the body, in display order. `None` is a
-    /// reserved-but-empty pending cell: the column keeps its full height
-    /// from the moment it opens, so filling it never moves the body.
+    /// The head column plus the body, in display order — CONTIGUOUS. The
+    /// head used to reserve its full column height with `None` cells so the
+    /// body never moved while it filled; on screen those reservations read
+    /// as random holes punched into the grid (the operator's words), which
+    /// is worse than the body stepping one cell per arrival. The `Option`
+    /// stays in the signature for the callers' sake, but every cell is
+    /// `Some` now.
     pub fn display_order(&self) -> Vec<Option<AssetId>> {
-        let mut out: Vec<Option<AssetId>> = Vec::with_capacity(
-            if self.pending.is_empty() { 0 } else { PENDING_COLUMN } + self.order.len(),
-        );
-        if !self.pending.is_empty() {
-            for slot in 0..PENDING_COLUMN {
-                out.push(self.pending.get(slot).copied());
-            }
-        }
+        let mut out: Vec<Option<AssetId>> =
+            Vec::with_capacity(self.pending.len() + self.order.len());
+        out.extend(self.pending.iter().map(|a| Some(*a)));
         out.extend(self.order.iter().map(|a| Some(*a)));
         out
     }
@@ -960,13 +963,13 @@ mod tests {
 
         let shown = m.display_order();
         assert_eq!(m.pending_len(), 2);
-        // A whole column is reserved from the moment it opens, so the body
-        // sits at a fixed offset while the column fills.
-        assert_eq!(shown.len(), PENDING_COLUMN + 6);
+        // CONTIGUOUS: the head holds exactly the tiles that exist — no
+        // reserved empty cells (those read as holes punched into the grid).
+        assert_eq!(shown.len(), 2 + 6);
         assert_eq!(shown[0], Some(hit(7).asset));
         assert_eq!(shown[1], Some(hit(8).asset));
-        assert_eq!(&shown[2..PENDING_COLUMN], &[None, None, None]);
-        assert_eq!(&shown[PENDING_COLUMN..], &body.iter().map(|a| Some(*a)).collect::<Vec<_>>()[..]);
+        assert!(shown.iter().all(|cell| cell.is_some()), "no gap cells ever");
+        assert_eq!(&shown[2..], &body.iter().map(|a| Some(*a)).collect::<Vec<_>>()[..]);
 
         // Three more publishes fill the column exactly; it folds into the
         // body and a fresh empty one opens.
@@ -1106,6 +1109,9 @@ mod tests {
         assert!(!kind_may_be_sheet(Some(AssetKind::World)));
         assert!(!kind_may_be_sheet(Some(AssetKind::Video)));
         assert!(!kind_may_be_sheet(Some(AssetKind::Audio)));
+        // An effect's SEEDED placeholder is a plain still; the animated
+        // sheet that replaces it always declares its own cells.
+        assert!(!kind_may_be_sheet(Some(AssetKind::VjEffect)));
         assert!(!kind_may_be_sheet(None));
     }
 
@@ -1267,6 +1273,10 @@ mod preset_tests {
     #[test]
     fn video_images_sprites_and_audio_land_where_they_belong() {
         assert_eq!(preset_of(Some(AssetKind::Video), None, None), Some(Preset::Video));
+        // Effects browse beside clips: they land on the program slots too.
+        assert_eq!(preset_of(Some(AssetKind::VjEffect), None, None), Some(Preset::Video));
+        assert_eq!(shelf_of(Some(AssetKind::VjEffect), None, None), "effect");
+        assert!(Preset::Video.kinds().contains(&AssetKind::VjEffect));
         assert_eq!(preset_of(Some(AssetKind::Texture), None, None), Some(Preset::Image));
         // A sprite actor is a picture as far as browsing goes.
         assert_eq!(preset_of(Some(AssetKind::Billboard), None, None), Some(Preset::Image));
