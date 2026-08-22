@@ -2598,10 +2598,10 @@ enum GridLane {
 }
 
 impl Default for GridLane {
-    /// The natural landing place for a VJ set: VIDEO. One category is
+    /// The natural landing place for a VJ set: EFFECT. One category is
     /// always selected — the unfiltered mixed view is gone.
     fn default() -> Self {
-        GridLane::Kind(AssetKind::Video)
+        GridLane::Kind(AssetKind::VjEffect)
     }
 }
 
@@ -2610,7 +2610,7 @@ impl Default for GridLane {
 /// box — a VJ set never browses them by chip.
 const LANE_CHIPS: [(&[LiveId], GridLane, &str); 6] = [
     // Performance lanes first (user order law), content lanes below;
-    // the BOOT default stays VIDEO.
+    // the BOOT default stays EFFECT.
     (ids!(preset_transition), GridLane::Transition, "TRANSITION"),
     (ids!(preset_effect), GridLane::Kind(AssetKind::VjEffect), "EFFECT"),
     (ids!(preset_video), GridLane::Kind(AssetKind::Video), "VIDEO"),
@@ -9051,10 +9051,10 @@ p2 {}
                             }
                         }
                     }
-                    // The grid BOOTS on its default lane (VIDEO) — the
+                    // The grid BOOTS on its default lane (EFFECT) — the
                     // chip is lit, so the query must match it; without
                     // this the model's everything-default listed the whole
-                    // store under a lit VIDEO chip.
+                    // store under a lit chip that didn't match it.
                     self.set_lane(cx, self.grid_lane);
                     for surface in SURFACES {
                         let cmds = self.model(surface).refresh();
