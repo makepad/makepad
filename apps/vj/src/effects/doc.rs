@@ -750,10 +750,12 @@ impl EffectDoc {
                         )),
                     }
                 }
-                cfg.blocks = r.usize(live_id!(blocks), cfg.blocks).clamp(2, 14);
+                cfg.blocks = r.usize(live_id!(blocks), cfg.blocks)
+                    .clamp(2, super::engines_city::MAX_BLOCKS);
                 cfg.block = r.f32(live_id!(block), cfg.block);
                 cfg.street = r.f32(live_id!(street), cfg.street);
-                cfg.towers = r.usize(live_id!(towers), cfg.towers).clamp(4, 900);
+                cfg.towers = r.usize(live_id!(towers), cfg.towers)
+                    .clamp(4, super::engines_city::MAX_TOWERS);
                 cfg.max_h = r.f32(live_id!(max_h), cfg.max_h);
                 cfg.win = r.f32(live_id!(win), cfg.win);
                 cfg.density = r.f32(live_id!(density), cfg.density);

@@ -7,16 +7,23 @@
 // miniature. Pattern taught: the city engine's camera is engine-authored
 // (a Lissajous drift with view-space banking) — cam_* keys don't steer it,
 // `alt`/`fly`/`bank` do.
+//
+// SCALE: `blocks` is the DEPTH dial. The drift radius, the look-ahead, the
+// ground and the sky all scale with the city's half-extent, so raising the
+// block count at a FIXED `block` pitch keeps the near field exactly as it
+// framed and adds rows RECEDING TO THE HORIZON — 18 blocks is ~1060 towers,
+// four times the old nine-block cluster, and the fog is thinned to match so
+// the far rows read as a dim glittering skyline instead of being eaten.
 {
     name: "Midnight Metropolis"
     engine: "city"
     seed: 12
 
     style: "night"
-    blocks: 9
+    blocks: 18
     block: 6.0
     street: 0.32
-    towers: 300
+    towers: 1100
     max_h: 11.0
     win: 0.30
     density: 0.52
@@ -43,7 +50,7 @@
     color_b: #x141a30
     color_c: #xffe6b0
 
-    fog: 0.022
+    fog: 0.015
     glow: 1.15
 
     stages: [
