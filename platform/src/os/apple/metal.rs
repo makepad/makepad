@@ -1823,19 +1823,6 @@ impl CxOsDrawShader {
                     let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::R32Float];
                     let () = msg_send![color_attachment, setBlendingEnabled: NO];
                 }
-                crate::draw_shader::DrawShaderColorFormat::Rgba16F => {
-                    // Four-channel float sim target (RenderRGBAf16); data
-                    // pass, no blending (same law as Rf32).
-                    let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::RGBA16Float];
-                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
-                }
-                crate::draw_shader::DrawShaderColorFormat::Rgba32F => {
-                    // Four-channel float sim target (RenderRGBAf32); data
-                    // pass, no blending. Consumers read with sample_nearest —
-                    // Apple GPUs do not filter 32-bit float textures.
-                    let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::RGBA32Float];
-                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
-                }
             }
 
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
