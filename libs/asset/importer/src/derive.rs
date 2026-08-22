@@ -690,6 +690,7 @@ impl<'d> DeriveCoordinator<'d> {
                     lod: f.lod,
                     media: f.media,
                     bytes: f.bytes,
+                    reference: None,
                     dims: f.dims,
                 })
                 .collect(),
@@ -775,6 +776,12 @@ impl<'d> DeriveCoordinator<'d> {
 fn publish_permille(stage: &PublishStage) -> u16 {
     match stage {
         PublishStage::Validating => 805,
+        // Reference admission happens before the uploads and costs a
+        // server-side read per file; it shares the pre-upload band rather
+        // than pretending nothing is happening.
+        PublishStage::ReferencingFile { index, of } => {
+            815 + ((*index).min(*of) as u32 * 5 / (*of).max(1) as u32) as u16
+        }
         PublishStage::RegisteringAsset => 815,
         PublishStage::UploadingBlob { index, of, .. } => {
             820 + ((*index).min(*of) as u32 * 120 / (*of).max(1) as u32) as u16
@@ -1369,6 +1376,7 @@ mod tests {
                     lod: f.lod,
                     media: f.media,
                     bytes: f.bytes,
+                    reference: None,
                     dims: f.dims,
                 })
                 .collect(),

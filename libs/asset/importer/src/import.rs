@@ -1441,6 +1441,7 @@ fn into_publication(
         lod: 0,
         media: request.artifact.media,
         bytes: request.artifact.bytes,
+        reference: None,
         dims: request.artifact.dims,
     }];
     for slot in attached {
@@ -1462,6 +1463,7 @@ fn into_publication(
             lod: slot.lod,
             media: slot.media,
             bytes,
+            reference: None,
             dims,
         });
     }
