@@ -27,6 +27,18 @@
     sway: 0.5
     sway_freq: 0.7
 
+    // PERFORMANCE DIALS — SYNC/WANDER are the engine's own p0/p1 levers
+    // (touching SYNC overrides the bar-swell binding above with a held
+    // sync level); GLOW routes p2 through the glow binding. Untouched
+    // knobs leave every doc binding in charge.
+    p2: 0.5
+    glow: "1.1 * (0.25 + 1.5*p2)"
+    dials: [
+        {name: "SYNC", bind: "p0", default: 0.5},
+        {name: "WANDER", bind: "p1", default: 0.0},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x040a06
     color_a: #x0a2412
     color_b: #xaaff44
@@ -35,7 +47,6 @@
     cam_orbit: 0.05
     cam_height: 1.4
     fog: 0.05
-    glow: 1.1
 
     stages: [
         {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3}

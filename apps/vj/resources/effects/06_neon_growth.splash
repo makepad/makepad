@@ -17,10 +17,18 @@
 
     grow: "loop"
     grow_beats: 8
-    sway: 0.8
+    sway: "0.8 * (0.25 + 1.5*p0)"
     sway_freq: 0.7
-    beat_pulse: 0.4
+    beat_pulse: "0.4 * (0.2 + 1.6*p1)"
     beat_rate: 1.0
+    glow: "0.25 + 1.5*p2"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x020608
     color_a: #x2affd0

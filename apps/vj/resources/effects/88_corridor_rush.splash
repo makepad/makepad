@@ -16,10 +16,18 @@
     cam_fov: 74.0
     shadow: 0            // an interior lit by its own walls needs no sun
 
-    beat_pulse: 0.6
+    beat_pulse: "0.6 * (0.2 + 1.6*p0)"
     beat_rate: 1.0
     fog: 0.075
-    glow: 1.15
+    glow: "1.15 * (0.25 + 1.5*p1)"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "SPLIT", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x03050a
     color_a: #x2050ff
@@ -28,7 +36,7 @@
 
     stages: [
         {kind: "bloom", threshold: 0.45, strength: 1.5, levels: 3},
-        {kind: "chroma", p1: "0.10 + 0.25 * pulse", p2: 0.0}
+        {kind: "chroma", p1: "(0.10 + 0.25 * pulse) * (0.2 + 1.6*p2)", p2: 0.0}
     ]
 
     shader: draw.DrawVjFxRaymarch {

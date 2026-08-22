@@ -21,6 +21,14 @@
     p1: "0.8 * pulse"
     p2: 0.8
 
+    // PERFORMANCE DIALS — the engine's own p-levers; touching FLASH
+    // overrides the pulse binding above with a held gain.
+    dials: [
+        {name: "NUDGE", bind: "p0", default: 0.0},
+        {name: "FLASH", bind: "p1", default: 0.5},
+        {name: "ANTIC", bind: "p2", default: 0.8}
+    ]
+
     color_bg: #x030308
     color_a: #x323a4e
     color_b: #x48586c

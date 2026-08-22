@@ -18,13 +18,21 @@
     attract: 2.6
     swirl: 1.9
     gravity: 0.0
-    impulse: "1.2 + pulse * 3.2"
+    impulse: "(1.2 + pulse * 3.2) * (0.2 + 1.6*p0)"
     drag: 0.55
     max_speed: 11.0
     life: 30.0
     bound: 6.5
 
     beat_pulse: 0.4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "KICK", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x0c0508
     color_a: #x8f2a2a
@@ -36,7 +44,7 @@
     glow: 1.3
 
     stages: [
-        {kind: "feedback", amount: 0.6, zoom: 1.008, rotate: 0.003, dim: 0.93},
-        {kind: "bloom", threshold: 0.45, strength: 1.4, levels: 3}
+        {kind: "feedback", amount: "min(0.6 + (p1-0.5)*0.7, 0.97)", zoom: 1.008, rotate: 0.003, dim: 0.93},
+        {kind: "bloom", threshold: 0.45, strength: "1.4 * (0.25 + 1.5*p2)", levels: 3}
     ]
 }

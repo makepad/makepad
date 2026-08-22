@@ -11,10 +11,17 @@
     width: 0.03
     clump: 0.7
 
-    sway: 0.5
+    sway: "0.5 * (0.25 + 1.5*p1)"
     sway_freq: 0.5
-    beat_pulse: 0.5
-    glow: "0.35 + env(phase) * 1.9"
+    beat_pulse: "0.5 * (0.2 + 1.6*p2)"
+    glow: "(0.35 + env(phase) * 1.9) * (0.2 + 1.6*p0)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FLASH", bind: "p0", default: 0.5},
+        {name: "WIND", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x020608
     color_a: #x0a3344

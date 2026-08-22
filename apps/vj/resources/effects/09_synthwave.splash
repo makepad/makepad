@@ -11,8 +11,15 @@
     noise_scale: 0.14
     scroll: 3.0
 
-    beat_pulse: 0.6
+    beat_pulse: "0.6 * (0.2 + 1.6*p0)"
     beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "FLARE", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x0c0018
     color_a: #xff2cd8
@@ -21,9 +28,9 @@
 
     cam_fov: 62.0
     fog: 0.05
-    glow: 1.2
+    glow: "1.2 * (0.25 + 1.5*p1)"
 
     stages: [
-        {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3}
+        {kind: "bloom", threshold: "clamp(0.4 - (p2-0.5)*0.6, 0.02, 0.95)", strength: 1.6, levels: 3}
     ]
 }

@@ -5,9 +5,17 @@
     engine: "screen"
     input0: "test"
 
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TRAIL", bind: "p0", default: 0.5},
+        {name: "SPLIT", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
     stages: [
-        {kind: "feedback", amount: "0.7 + pulse * 0.25", zoom: 1.02,
-         rotate: "sin(bar * tau) * 0.01", dim: 0.96},
-        {kind: "chroma", p1: "pulse * 0.6", p2: "bar"}
+        {kind: "feedback", amount: "min((0.7 + pulse * 0.25) * (0.25 + 1.5*p0), 0.97)", zoom: 1.02,
+         rotate: "sin(bar * tau) * 0.01 + (p2-0.5)*0.04", dim: 0.96},
+        {kind: "chroma", p1: "(pulse * 0.6) * (0.2 + 1.6*p1)", p2: "bar"}
     ]
 }

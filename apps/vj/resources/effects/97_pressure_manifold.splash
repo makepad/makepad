@@ -26,6 +26,14 @@
     p1: "0.5 + 1.2*pulse"        // hot tail slams with the beat
     p2: 0.6                      // hard specular
 
+    // PERFORMANCE DIALS — the pipes engine's own p-levers; touching
+    // FRONT or HEAT holds its beat binding above at a fixed level.
+    dials: [
+        {name: "FRONT", bind: "p0", default: 0.1},
+        {name: "HEAT", bind: "p1", default: 0.5},
+        {name: "SHINE", bind: "p2", default: 0.6}
+    ]
+
     color_bg: #x050803
     color_a: #x7dff1e
     color_b: #x1e9840

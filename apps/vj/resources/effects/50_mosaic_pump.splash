@@ -6,8 +6,16 @@
     engine: "screen"
     input0: "test"
 
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BLOCK", bind: "p0", default: 0.5},
+        {name: "SNAP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     stages: [
-        {kind: "pixelate", p1: 0.55, p2: "pulse"},
-        {kind: "bloom", threshold: 0.55, strength: 1.15, levels: 2}
+        {kind: "pixelate", p1: "0.55 * (0.2 + 1.6*p0)", p2: "pulse * (0.2 + 1.6*p1)"},
+        {kind: "bloom", threshold: 0.55, strength: "1.15 * (0.25 + 1.5*p2)", levels: 2}
     ]
 }

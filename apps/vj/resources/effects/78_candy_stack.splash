@@ -25,6 +25,15 @@
     p0: "0.3 + 0.7*bass + 0.4*pulse"
     p1: "0.35 + 0.8*env(phase)"
 
+    // PERFORMANCE DIALS — DANCE/THICK are the engine's own p0/p1 levers;
+    // GLOW routes p2 through the glow key.
+    p2: 0.5
+    dials: [
+        {name: "DANCE", bind: "p0", default: 0.5},
+        {name: "THICK", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x14101c
     color_a: #xffb3d9      // strawberry cream
     color_b: #x7fd4ff      // sky mint
@@ -33,7 +42,7 @@
     cam_orbit: 0.09
     cam_fov: 52.0
     fog: 0.016
-    glow: 1.15
+    glow: "1.15 * (0.25 + 1.5*p2)"
 
     // Candy ramp hook: pastel hue per bar, soft band, no hard metal.
     shader: draw.DrawVjFxCopper {

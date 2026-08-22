@@ -26,6 +26,14 @@
     p1: "0.25 + 1.0*bass"
     p2: 0.1
 
+    // PERFORMANCE DIALS — the engine's own p-levers (impulse gain,
+    // membrane ring, glint fire).
+    dials: [
+        {name: "HEAT", bind: "p0", default: 0.5},
+        {name: "RING", bind: "p1", default: 0.5},
+        {name: "EMBER", bind: "p2", default: 0.1}
+    ]
+
     color_bg: #x0a0505
     color_a: #x232030      // obsidian
     color_b: #x3a2a28      // scorched rock

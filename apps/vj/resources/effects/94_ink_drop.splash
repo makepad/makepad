@@ -14,7 +14,7 @@
     force: 2.6
     dissipation: 0.10
     swirl: 0.35
-    splat: "2.2 + pulse * 0.9"
+    splat: "(2.2 + pulse * 0.9) * (0.2 + 1.6*p2)"
     dye_fade: 0.12
     radius: 0.075
     vortex: 3.2
@@ -25,6 +25,16 @@
     // p0 = flow-warp of the (unused) input, p1 = input mix: pure ink here.
     p0: 0.0
     p1: 0.0
+    p2: 0.5
+
+    // PERFORMANCE DIALS — WARP/MIX are the fluid engine's own p0/p1
+    // levers (MIX up brings the channel content through the ink, WARP
+    // bends it with the flow); SPLAT routes p2 through the dye splats.
+    dials: [
+        {name: "WARP", bind: "p0", default: 0.0},
+        {name: "MIX", bind: "p1", default: 0.0},
+        {name: "SPLAT", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x06060a
     color_a: #x30c8ff

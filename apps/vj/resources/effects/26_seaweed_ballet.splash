@@ -16,10 +16,17 @@
     sides: 5
     copies: 5
 
-    sway: "1.1 + pulse * 0.9"
+    sway: "(1.1 + pulse * 0.9) * (0.25 + 1.5*p0)"
     sway_freq: 0.35
-    beat_pulse: 0.3
+    beat_pulse: "0.3 * (0.2 + 1.6*p1)"
     beat_rate: 0.5
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SURGE", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x02141c
     color_a: #x0f8866
@@ -28,7 +35,7 @@
 
     cam_orbit: 0.07
     fog: 0.06
-    glow: 1.1
+    glow: "1.1 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}

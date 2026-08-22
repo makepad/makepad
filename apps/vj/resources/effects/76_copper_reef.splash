@@ -26,6 +26,15 @@
     p1: "0.4 + 0.9*env(phase)"          // the thickness pump
     p3: "0.5 - 0.5*cos(bar*tau)"        // sine <-> curtain each bar
 
+    // PERFORMANCE DIALS — DANCE/THICK are the engine's own p0/p1 levers
+    // (touching one holds its binding above); GLOW routes p2.
+    p2: 0.5
+    dials: [
+        {name: "DANCE", bind: "p0", default: 0.5},
+        {name: "THICK", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x0a0708
     color_a: #xff9a3c      // copper core
     color_b: #x571f10      // lacquer edge
@@ -34,7 +43,7 @@
     cam_orbit: 0.045
     cam_fov: 50.0
     fog: 0.020
-    glow: 1.1
+    glow: "1.1 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.55, strength: 1.0, levels: 3},

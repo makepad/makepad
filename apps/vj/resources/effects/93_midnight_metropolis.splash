@@ -29,6 +29,15 @@
     p0: "0.05 + 0.10*energy"    // the city wakes up with the music
     p2: 0.6                      // beacon gain
 
+    // PERFORMANCE DIALS — the city engine's own p-levers: DENS lights
+    // extra windows (touching it holds the energy binding), RUSH scrubs
+    // the window re-roll front forward, BEACON gains the rooftop blinks.
+    dials: [
+        {name: "DENS", bind: "p0", default: 0.1},
+        {name: "RUSH", bind: "p1", default: 0.0},
+        {name: "BEACON", bind: "p2", default: 0.6}
+    ]
+
     color_bg: #x060a18
     color_a: #x36405c
     color_b: #x141a30

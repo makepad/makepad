@@ -13,14 +13,23 @@
     particles: 1024
     size: 0.14
 
+    // PERFORMANCE DIALS — the tick reads the dial params as fx.p0..fx.p3;
+    // mid-knob reproduces the stock show exactly.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BURST", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x030309
     cam_dist: 15.0
     cam_height: 4.0
     cam_orbit: 0.03
 
     stages: [
-        {kind: "bloom", threshold: 0.3, strength: 1.7, levels: 3},
-        {kind: "feedback", amount: 0.5, zoom: 1.0, rotate: 0.0, dim: 0.88}
+        {kind: "bloom", threshold: 0.3, strength: "1.7 * (0.25 + 1.5*p2)", levels: 3},
+        {kind: "feedback", amount: "min(0.5 + (p1-0.5)*0.8, 0.97)", zoom: 1.0, rotate: 0.0, dim: 0.88}
     ]
 
     frame: fn(fx) {
@@ -60,8 +69,9 @@
                 pos: vec3(lane2 * 4.0 - lane2 * 0.4, 3.0, 0.0)
                 vel: vec3(0.0, 0.6, 0.0)
                 life: 2.6
-                speed: 5.5
-                size: 0.16
+                // BURST dial: the pop's reach and spark size ride fx.p0.
+                speed: 5.5 * (0.5 + fx.p0)
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
                 gravity: 1.0
                 stagger: 0.05
                 color: col

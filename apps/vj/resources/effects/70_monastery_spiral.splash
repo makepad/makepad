@@ -22,6 +22,15 @@
     beat_pulse: 0.4
     p2: 0.4                 // soft anticipation ahead of the front
 
+    // PERFORMANCE DIALS — the engine's own p-levers: NUDGE scratches the
+    // topple front forward (in beats), FLASH gains the impact light,
+    // ANTIC breathes the pins ahead of the line.
+    dials: [
+        {name: "NUDGE", bind: "p0", default: 0.0},
+        {name: "FLASH", bind: "p1", default: 0.0},
+        {name: "ANTIC", bind: "p2", default: 0.4}
+    ]
+
     color_bg: #x120a04
     color_a: #xf2e8d0
     color_b: #x8a6a3a
