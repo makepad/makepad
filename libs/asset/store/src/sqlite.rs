@@ -7,43 +7,43 @@
 //! single-threaded state machine and worker concurrency is modeled logically
 //! through leases, not shared connections.
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 use crate::error::{ServerError, ServerResult};
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 use std::ffi::CString;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 use std::os::raw::{c_char, c_int, c_void};
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 use std::path::Path;
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 #[allow(non_camel_case_types)]
 enum sqlite3 {}
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 #[allow(non_camel_case_types)]
 enum sqlite3_stmt {}
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_OK: c_int = 0;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_ROW: c_int = 100;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_DONE: c_int = 101;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 // SQLITE_TRANSIENT: tells SQLite to copy the bound bytes immediately, so the
 // Rust slice only needs to live for the duration of the bind call.
 fn transient() -> *const c_void {
     -1isize as *const c_void
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 /// Checked length conversion for every byte count handed to SQLite. A length
 /// that does not fit `c_int` would silently truncate or go negative in the C
 /// API, so it is refused instead. Budgets keep real payloads far below this.
@@ -55,7 +55,7 @@ fn len_c_int(len: usize, what: &'static str) -> ServerResult<c_int> {
     })
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 #[link(name = "sqlite3")]
 extern "C" {
     fn sqlite3_open_v2(
@@ -109,15 +109,15 @@ extern "C" {
     fn sqlite3_changes(db: *mut sqlite3) -> c_int;
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 const SQLITE_NULL: c_int = 5;
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 pub struct Db {
     raw: *mut sqlite3,
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 impl Db {
     pub fn open(path: &Path, busy_timeout_ms: u32) -> ServerResult<Db> {
         let bytes = path.as_os_str().as_encoded_bytes();
@@ -238,21 +238,21 @@ impl Db {
     }
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 impl Drop for Db {
     fn drop(&mut self) {
         unsafe { sqlite3_close(self.raw) };
     }
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 pub struct Stmt<'db> {
     raw: *mut sqlite3_stmt,
     db: &'db Db,
     op: &'static str,
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 impl<'db> Stmt<'db> {
     fn check(&self, rc: c_int) -> ServerResult<()> {
         if rc != SQLITE_OK {
@@ -365,7 +365,7 @@ impl<'db> Stmt<'db> {
     }
 }
 
-#[cfg(not(feature = "own-db"))]
+#[cfg(all(not(feature = "own-db"), not(windows)))]
 impl<'db> Drop for Stmt<'db> {
     fn drop(&mut self) {
         unsafe { sqlite3_finalize(self.raw) };
@@ -380,7 +380,7 @@ impl<'db> Drop for Stmt<'db> {
 /// same file format, same locking, no FFI and no `unsafe`. Selected with
 /// `--features own-db`; the C path stays the default until this has run in
 /// production for a while.
-#[cfg(feature = "own-db")]
+#[cfg(any(feature = "own-db", windows))]
 mod own_db {
     use crate::error::{ServerError, ServerResult};
     use makepad_sqlite::{Connection, Value};
@@ -597,5 +597,5 @@ mod own_db {
     }
 }
 
-#[cfg(feature = "own-db")]
+#[cfg(any(feature = "own-db", windows))]
 pub use own_db::{Db, Stmt};
