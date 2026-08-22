@@ -2021,6 +2021,14 @@ pub enum DecodeDone {
         revision: AssetRevisionId,
         result: Result<ThumbPixels, String>,
     },
+    /// A queued thumbnail the lane threw away UNSTARTED — its view scrolled
+    /// off (stale epoch) or the pending stack overflowed. Not a failure and
+    /// not a picture: the caller must clear its in-flight mark so the tile
+    /// asks again next time it is wanted. Without this the drop was silent
+    /// and the tile stayed blank for the rest of the session.
+    ThumbDropped {
+        revision: AssetRevisionId,
+    },
 }
 
 /// Admission gate for parsed skinned meshes — checked on the worker BEFORE
@@ -2647,17 +2655,32 @@ pub fn key_sprite_alpha(pixels: &mut [u32]) {
 /// more threads just add disk/GPU-upload contention without shortening the
 /// queue).
 ///
-/// Thumb lane: deliberately small (2..=4) and only loosely tied to core
-/// count. A thumbnail decode is a few milliseconds of work bounded by
-/// `MAX_THUMB_DIM`, so throughput isn't core-starved the way heavy jobs
-/// are — a handful of dedicated workers is enough to keep a scrolling grid
-/// fed, and a bigger lane would only buy more `MAX_THUMB_DIM²` buffers live
-/// at once (see the memory note on `DecodePool`) for no real gain.
+/// Thumb lane: one worker per core, capped at [`MAX_THUMB_WORKERS`]. A
+/// thumbnail is not "a few milliseconds" any more — a 30-cell effect sheet
+/// is a 768x400 PNG that decodes, keys and cuts into 31 buffers, measured
+/// at 30-50ms apiece — and filling a library is hundreds of them at once.
+/// Four workers made the decode stage a queue; the machine has the cores,
+/// so the lane takes them WHILE NOBODY IS ON STAGE. What keeps that from
+/// stealing the picture during a set is not a small pool but
+/// [`DecodePool::set_thumb_width`], which narrows how many of these workers
+/// may decode AT ONCE the moment the program window opens or a deck plays.
+///
+/// Peak resident pixels stay bounded the same way (see the memory note on
+/// `DecodePool`): the live cap is on active decodes, not on threads.
 fn lane_sizes(cpus: usize) -> (usize, usize) {
     let heavy = cpus.clamp(2, 8);
-    let thumb = (cpus / 2).clamp(2, 4);
+    let thumb = cpus.clamp(2, MAX_THUMB_WORKERS);
     (heavy, thumb)
 }
+
+/// Ceiling on thumb-lane worker threads. Past this the decodes contend for
+/// memory bandwidth instead of shortening the queue.
+pub const MAX_THUMB_WORKERS: usize = 12;
+
+/// Active thumb decodes allowed while a set is RUNNING — the program window
+/// is up or a deck is playing. The grid keeps filling; it just stops taking
+/// the cores the picture needs.
+pub const THUMB_WIDTH_PERFORMING: usize = 2;
 
 /// Bound on the thumb lane's pending stack: past this many queued-but-not-
 /// started thumbnails, the OLDEST pending job (the one furthest from the
@@ -2678,6 +2701,14 @@ struct ThumbQueueState {
     stack: VecDeque<PendingThumb>,
     newest_epoch: u64,
     closed: bool,
+    /// Decodes running right now, and how many may. The threads exist
+    /// whatever the width is; narrowing just parks the surplus on the
+    /// condvar, so widening again costs nothing.
+    active: usize,
+    width: usize,
+    /// Jobs thrown away UNSTARTED, waiting to be reported so the caller can
+    /// clear their in-flight marks. A silent drop is a blank tile forever.
+    dropped: Vec<AssetRevisionId>,
 }
 
 /// LIFO job source shared by the thumb lane's workers. See `DecodePool`'s
@@ -2688,15 +2719,44 @@ struct ThumbQueue {
 }
 
 impl ThumbQueue {
-    fn new() -> ThumbQueue {
+    fn new(width: usize) -> ThumbQueue {
         ThumbQueue {
             state: Mutex::new(ThumbQueueState {
                 stack: VecDeque::new(),
                 newest_epoch: 0,
                 closed: false,
+                active: 0,
+                width,
+                dropped: Vec::new(),
             }),
             cv: Condvar::new(),
         }
+    }
+
+    /// How many workers may decode at once. Raising it wakes the parked
+    /// ones; lowering it lets the ones already decoding finish.
+    fn set_width(&self, width: usize) {
+        let mut state = self.state.lock().unwrap();
+        let width = width.max(1);
+        if state.width == width {
+            return;
+        }
+        state.width = width;
+        drop(state);
+        self.cv.notify_all();
+    }
+
+    fn take_dropped(&self) -> Vec<AssetRevisionId> {
+        let mut state = self.state.lock().unwrap();
+        std::mem::take(&mut state.dropped)
+    }
+
+    /// One decode finished: free its slot and wake whoever is waiting.
+    fn finished(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.active = state.active.saturating_sub(1);
+        drop(state);
+        self.cv.notify_one();
     }
 
     fn push(&self, job: PendingThumb) {
@@ -2707,11 +2767,21 @@ impl ThumbQueue {
             // dead weight. Dropping them HERE rather than at pop keeps the
             // backlog honest: a fast scroll leaves no queue behind it.
             let newest = state.newest_epoch;
+            let stale: Vec<AssetRevisionId> = state
+                .stack
+                .iter()
+                .filter(|j| j.epoch < newest)
+                .map(|j| j.revision)
+                .collect();
             state.stack.retain(|j| j.epoch >= newest);
+            state.dropped.extend(stale);
         }
         state.stack.push_back(job);
         while state.stack.len() > MAX_PENDING_THUMBS {
-            state.stack.pop_front(); // drop the oldest pending job
+            // Drop the oldest pending job — and SAY SO.
+            if let Some(job) = state.stack.pop_front() {
+                state.dropped.push(job.revision);
+            }
         }
         self.cv.notify_one();
     }
@@ -2723,10 +2793,13 @@ impl ThumbQueue {
     fn pop(&self) -> Option<PendingThumb> {
         let mut state = self.state.lock().unwrap();
         loop {
-            while let Some(job) = state.stack.pop_back() {
+            while state.active < state.width {
+                let Some(job) = state.stack.pop_back() else { break };
                 if job.epoch >= state.newest_epoch {
+                    state.active += 1;
                     return Some(job);
                 }
+                state.dropped.push(job.revision);
             }
             if state.closed {
                 return None;
@@ -2864,7 +2937,7 @@ impl DecodePool {
                 });
         }
 
-        let thumb_queue = Arc::new(ThumbQueue::new());
+        let thumb_queue = Arc::new(ThumbQueue::new(thumb_workers));
         for i in 0..thumb_workers {
             let queue = thumb_queue.clone();
             let done = done_tx.clone();
@@ -2873,6 +2946,7 @@ impl DecodePool {
                 .spawn(move || loop {
                     let Some(job) = queue.pop() else { return };
                     let result = decode_thumb(&job.path, job.sheet, job.legacy_may_be_sheet);
+                    queue.finished();
                     let out = DecodeDone::Thumb { revision: job.revision, result };
                     if done.send(out).is_err() {
                         return;
@@ -2895,8 +2969,20 @@ impl DecodePool {
         }
     }
 
+    /// Narrow or widen the thumb lane's ACTIVE decodes (never its threads).
+    /// Politeness lever: the full lane while browsing, a sliver during a
+    /// set. See [`THUMB_WIDTH_PERFORMING`].
+    pub fn set_thumb_width(&self, width: usize) {
+        self.thumb_queue.set_width(width);
+    }
+
     pub fn poll(&self) -> Vec<DecodeDone> {
-        let mut out = Vec::new();
+        let mut out: Vec<DecodeDone> = self
+            .thumb_queue
+            .take_dropped()
+            .into_iter()
+            .map(|revision| DecodeDone::ThumbDropped { revision })
+            .collect();
         loop {
             match self.rx.try_recv() {
                 Ok(done) => out.push(done),
@@ -3442,7 +3528,8 @@ mod tests {
                 | DecodeDone::Still { .. }
                 | DecodeDone::Billboard { .. }
                 | DecodeDone::FlowClip { .. }
-                | DecodeDone::Thumb { .. } => {
+                | DecodeDone::Thumb { .. }
+                | DecodeDone::ThumbDropped { .. } => {
                     panic!("no mesh/flow/thumb job submitted")
                 }
             }
@@ -3453,17 +3540,94 @@ mod tests {
     fn lane_sizes_scale_heavy_and_cap_thumb() {
         // 1 cpu: both lanes floor at their minimum (2 workers each).
         assert_eq!(lane_sizes(1), (2, 2));
-        // 4 cpus: heavy tracks the core count; thumb stays at its floor.
-        assert_eq!(lane_sizes(4), (4, 2));
-        // 32 cpus: heavy caps at 8; thumb caps at 4.
-        assert_eq!(lane_sizes(32), (8, 4));
+        // 4 cpus: both lanes track the core count.
+        assert_eq!(lane_sizes(4), (4, 4));
+        // 32 cpus: heavy caps at 8; the thumb lane takes MAX_THUMB_WORKERS
+        // threads — what keeps it from stealing a live set is the ACTIVE
+        // width (`set_thumb_width`), not a small pool.
+        assert_eq!(lane_sizes(32), (8, MAX_THUMB_WORKERS));
+    }
+
+    /// The thumb lane's politeness valve: narrowing parks the surplus
+    /// workers, widening wakes them, and neither loses a job.
+    #[test]
+    fn thumb_width_bounds_active_decodes() {
+        let queue = ThumbQueue::new(1);
+        for i in 0..3u32 {
+            queue.push(PendingThumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path: PathBuf::from(format!("w{i}.png")),
+                sheet: None,
+                legacy_may_be_sheet: false,
+                epoch: 0,
+            });
+        }
+        // Width 1: one job out, and the next only after it finishes.
+        let first = queue.pop().expect("first job");
+        {
+            let state = queue.state.lock().unwrap();
+            assert_eq!(state.active, 1);
+            assert_eq!(state.stack.len(), 2);
+        }
+        queue.finished();
+        let second = queue.pop().expect("second job");
+        assert_ne!(first.revision, second.revision);
+        // Widening lets a third start while the second is still running.
+        queue.set_width(4);
+        let third = queue.pop().expect("third job");
+        assert_ne!(second.revision, third.revision);
+        let state = queue.state.lock().unwrap();
+        assert_eq!(state.active, 2, "the second and third; the first reported finished");
+        assert!(state.stack.is_empty());
+    }
+
+    /// A job the lane throws away UNSTARTED must be reported, or the tile
+    /// that asked for it stays blank for the rest of the session.
+    #[test]
+    fn dropped_thumbs_are_reported() {
+        let queue = ThumbQueue::new(4);
+        let stale = AssetRevisionId::from_bytes([1u8; 32]);
+        queue.push(PendingThumb {
+            revision: stale,
+            path: PathBuf::from("stale.png"),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+        });
+        // A newer epoch retires the pending job for the old one.
+        queue.push(PendingThumb {
+            revision: AssetRevisionId::from_bytes([2u8; 32]),
+            path: PathBuf::from("live.png"),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 2,
+        });
+        assert_eq!(queue.take_dropped(), vec![stale]);
+        assert!(queue.take_dropped().is_empty(), "reported once, not forever");
+
+        // Overflow drops the OLDEST pending job — and says which.
+        let queue = ThumbQueue::new(4);
+        for i in 0..(MAX_PENDING_THUMBS + 2) {
+            queue.push(PendingThumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path: PathBuf::from(format!("o{i}.png")),
+                sheet: None,
+                legacy_may_be_sheet: false,
+                epoch: 5,
+            });
+        }
+        let dropped = queue.take_dropped();
+        assert_eq!(dropped.len(), 2, "two over the cap, two reported");
+        assert_eq!(dropped[0], AssetRevisionId::from_bytes([0u8; 32]));
     }
 
     #[test]
     fn thumb_queue_is_lifo_and_prunes_stale_and_bounds_pending() {
         // LIFO: with every job at the same epoch (none stale), the queue
-        // must hand back the most recently pushed job first.
-        let queue = ThumbQueue::new();
+        // must hand back the most recently pushed job first. Width is not
+        // what is under test here, so it is wide enough to never bind (a
+        // worker that never reports `finished` would otherwise fill it).
+        let queue = ThumbQueue::new(64);
         for i in 0..10u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
@@ -3480,7 +3644,7 @@ mod tests {
 
         // Staleness: jobs stamped with an epoch older than the newest one
         // this queue has seen are skipped (dropped, not decoded).
-        let queue = ThumbQueue::new();
+        let queue = ThumbQueue::new(64);
         for i in 0..5u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
@@ -3505,7 +3669,7 @@ mod tests {
         );
 
         // Cap: pushing past MAX_PENDING_THUMBS drops the OLDEST pending job.
-        let queue = ThumbQueue::new();
+        let queue = ThumbQueue::new(64);
         for i in 0..(MAX_PENDING_THUMBS + 3) {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([0; 32]),
@@ -3598,7 +3762,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
     /// A DECLARED layout is cut exactly as declared: the producer's frame
     /// count, the producer's cell size, the producer's origin. None of it is
     /// measured, so a picture the legacy guess would refuse (or chop wrong)
