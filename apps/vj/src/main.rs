@@ -38,7 +38,10 @@ mod flow;
 // FLOW-WARP PLAYBACK: GPU warp pre-pass over the mkfl motion fields — also
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
-mod fx;
+// EFFECT SLOTS: the vjeffect content category's home in the mixer — three
+// slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
+// clicking FX tiles in the browse grid (see fx_slot.rs).
+mod fx_slot;
 // Lazy ANIMATED thumbnails for vjeffect tiles: a hidden slot-mode VjFxView
 // renders each effect offscreen into a declared-cells sheet the grid
 // already knows how to animate (digest-keyed disk cache; see fx_thumbs.rs).
@@ -99,7 +102,9 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
-use crate::fx::FxState;
+use crate::fx_slot::{
+    FxSlotKind, FxSlotTileAction, FxSlotTileState, FxSlots, PremixJob, VjFxSlotHost, VjFxSlotTile,
+};
 use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
@@ -113,7 +118,7 @@ use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
-use crate::mix::{FxBus, MixId, MixState};
+use crate::mix::{MixId, MixState};
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
@@ -193,20 +198,6 @@ script_mod! {
             color: #xb4bfca
             color_hover: #x3ee0b0
             text_style: theme.font_bold{font_size: 10}
-        }
-    }
-
-    // FX bank button: chrome at rest, accent-filled when it is the live effect
-    // (the host paints `selected` through draw_bg.color).
-    let FxButton = ChromeButton{
-        width: Fill
-        height: 24
-        draw_bg +: {
-            color_focus: #x1f262f
-        }
-        draw_text +: {
-            color_focus: #xd6dee6
-            text_style: theme.font_bold{font_size: 9}
         }
     }
 
@@ -525,6 +516,21 @@ script_mod! {
                             // hidden slot-mode effect pass at a time, its
                             // sheets fed back through the thumb decode lane.
                             fx_thumbs := VjFxThumbs{}
+                            // Offscreen EFFECT-SLOT passes (fx_slot.rs): the
+                            // per-deck effect passes and the transition
+                            // effect, each a program-sized slot-mode
+                            // VjFxView behind a 4x4 placeholder. They live
+                            // in the always-drawn bar so the program keeps
+                            // its effects even when the mixer column
+                            // scrolls out of view.
+                            fx_host_a := VjFxSlotHost{}
+                            fx_host_t := VjFxSlotHost{}
+                            fx_host_b := VjFxSlotHost{}
+                            // Offscreen CONTENT-mode effect hosts: an FX
+                            // tile cued onto a deck (no slot armed) renders
+                            // here and feeds the slot like any clip.
+                            fx_content_a := VjFxSlotHost{}
+                            fx_content_b := VjFxSlotHost{}
                             // Three MODES, not five content lanes: VJ is the
                             // visual surface (one explorer, preset chips
                             // inside it), DJ the two-deck music mode, SFX the
@@ -943,73 +949,106 @@ script_mod! {
                                         // tile). Wheel/trackpad and the scrollbar
                                         // itself keep working.
                                         scroll_bars.scroll_bar_y.drag_scrolling: false
-                                        // ---- console: FX bank, then mix + FX knobs in one row ----
-                                        View{
-                                            width: Fill height: Fit flow: Right spacing: 4
-                                            fx_btn_0 := FxButton{text: "OFF"}
-                                            fx_btn_1 := FxButton{text: "KALEIDO"}
-                                            fx_btn_2 := FxButton{text: "TUNNEL"}
-                                            fx_btn_3 := FxButton{text: "MIRROR"}
-                                            fx_btn_4 := FxButton{text: "RGB"}
-                                            fx_btn_5 := FxButton{text: "STROBE"}
-                                            fx_btn_6 := FxButton{text: "PIXEL"}
-                                            fx_btn_7 := FxButton{text: "SWIRL"}
-                                            fx_btn_8 := FxButton{text: "RIPPLE"}
-                                            fx_btn_9 := FxButton{text: "GLITCH"}
-                                            fx_btn_10 := FxButton{text: "HUE"}
-                                            fx_btn_11 := FxButton{text: "ZOOM"}
-                                            fx_btn_12 := FxButton{text: "FISH"}
-                                        }
+                                        // ---- console: mix controls + EFFECT SLOTS on ONE row.
+                                        // The old hardwired FX bank (13 buttons + its knob strip)
+                                        // is GONE — effects and transitions are catalog content
+                                        // now, loaded into the three slots. The surviving mix
+                                        // controls (autofade time, downstream mix mode + its two
+                                        // knobs, audio mute) stack compactly LEFT of the slots;
+                                        // the vertical space they used to take belongs to the
+                                        // content grid below.
+                                        //
+                                        // Slots: EFFECT A | TRANSITION | EFFECT B, each with a
+                                        // few controls — ON, SPD (effect clock), P1/P2 (the
+                                        // doc's p0/p1 levers), CLEAR. Click a slot to ARM it,
+                                        // then click an FX tile in the grid to load it; an
+                                        // unarmed FX-tile click cues the effect AS CONTENT onto
+                                        // a deck, autofade included, like any clip.
                                         View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
-                                            spacing: 8
-                                            align: Align{x: 0.0, y: 0.5}
-                                            KnobCol{
-                                                Tick{text: "FADE"}
-                                                video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
-                                            }
-                                            // Downstream stage: how B reaches
-                                            // the program (dissolve, over, key,
-                                            // wipe) and the two knobs that mode
-                                            // reads. Hidden for the modes that
-                                            // have nothing to read.
-                                            mix_mode := DropDown{width: 92 labels: ["MIX"]}
-                                            mix_knobs := View{
-                                                width: Fit
-                                                height: Fit
-                                                flow: Right
-                                                spacing: 8
-                                                align: Align{x: 0.0, y: 0.5}
-                                                KnobCol{
-                                                    mix_p1_lab := Tick{text: "—"}
-                                                    mix_p1 := ApcKnob{default: 0.5}
+                                            spacing: 14
+                                            align: Align{x: 0.5, y: 0.5}
+                                            View{width: Fill height: 1}
+                                            View{
+                                                width: Fit height: Fit flow: Down spacing: 4
+                                                align: Align{x: 0.0, y: 0.0}
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 8
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    // Downstream stage: how B reaches the
+                                                    // program (dissolve, over, key, wipe).
+                                                    mix_mode := DropDown{width: 92 labels: ["MIX"]}
+                                                    video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
                                                 }
-                                                KnobCol{
-                                                    mix_p2_lab := Tick{text: "—"}
-                                                    mix_p2 := ApcKnob{default: 0.35}
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 8
+                                                    align: Align{x: 0.0, y: 0.0}
+                                                    KnobCol{
+                                                        Tick{text: "FADE"}
+                                                        video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
+                                                    }
+                                                    // The two knobs the mix mode reads; hidden
+                                                    // for the modes that have nothing to read.
+                                                    mix_knobs := View{
+                                                        width: Fit
+                                                        height: Fit
+                                                        flow: Right
+                                                        spacing: 8
+                                                        align: Align{x: 0.0, y: 0.0}
+                                                        KnobCol{
+                                                            mix_p1_lab := Tick{text: "—"}
+                                                            mix_p1 := ApcKnob{default: 0.5}
+                                                        }
+                                                        KnobCol{
+                                                            mix_p2_lab := Tick{text: "—"}
+                                                            mix_p2 := ApcKnob{default: 0.35}
+                                                        }
+                                                    }
                                                 }
                                             }
-                                            video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
-                                            View{width: 16 height: 1}
-                                            // Which bus the FX chain sits on.
-                                            fx_bus := ChromeButton{width: 60 text: "FX A+B"}
-                                            KnobCol{
-                                                fx_p1_lab := Tick{text: "—"}
-                                                fx_p1 := ApcKnob{default: 0.45}
+                                            View{
+                                                width: Fit height: Fit flow: Down spacing: 3
+                                                align: Align{x: 0.5, y: 0.0}
+                                                fx_slot_a_tile := VjFxSlotTile{}
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 3
+                                                    align: Align{x: 0.5, y: 0.5}
+                                                    fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
+                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_a_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_a_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_a_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    fx_slot_a_clear := ChromeButton{width: 24 text: "×"}
+                                                }
                                             }
-                                            fx_beat1 := Toggle{text: "♪"}
-                                            KnobCol{
-                                                fx_p2_lab := Tick{text: "—"}
-                                                fx_p2 := ApcKnob{default: 0.35}
+                                            View{
+                                                width: Fit height: Fit flow: Down spacing: 3
+                                                align: Align{x: 0.5, y: 0.0}
+                                                fx_slot_t_tile := VjFxSlotTile{}
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 3
+                                                    align: Align{x: 0.5, y: 0.5}
+                                                    fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
+                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_t_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_t_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_t_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    fx_slot_t_clear := ChromeButton{width: 24 text: "×"}
+                                                }
                                             }
-                                            fx_beat2 := Toggle{text: "♪"}
-                                            // Whole-unit speed multiplier for synced FX motion.
-                                            fx_mult := ChromeButton{width: 40 text: "×1"}
-                                            KnobCol{
-                                                Tick{text: "SHIFT"}
-                                                beat_shift := ApcKnob{default: 0.0}
+                                            View{
+                                                width: Fit height: Fit flow: Down spacing: 3
+                                                align: Align{x: 0.5, y: 0.0}
+                                                fx_slot_b_tile := VjFxSlotTile{}
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 3
+                                                    align: Align{x: 0.5, y: 0.5}
+                                                    fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
+                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_b_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_b_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_b_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
+                                                    fx_slot_b_clear := ChromeButton{width: 24 text: "×"}
+                                                }
                                             }
                                             View{width: Fill height: 1}
                                         }
@@ -1053,6 +1092,10 @@ script_mod! {
                                             // no separate MESH surface.
                                             preset_all := PillButton{text: "ALL"}
                                             preset_video := PillButton{text: "VIDEO"}
+                                            // The vjeffect category, and its
+                                            // transition-tagged sub-lane.
+                                            preset_effect := PillButton{text: "EFFECT"}
+                                            preset_transition := PillButton{text: "TRANSITION"}
                                             preset_3d := PillButton{text: "3D"}
                                             preset_image := PillButton{text: "IMAGE"}
                                             preset_audio := PillButton{text: "AUDIO"}
@@ -1876,6 +1919,10 @@ enum SlotMedia {
     /// Gaussian splat scene in the slot's offscreen XrSceneView.
     Splat,
     Billboard,
+    /// A vjeffect running AS CONTENT in the slot's offscreen VjFxSlotHost
+    /// (fx_slot.rs) — an FX tile clicked with no effect slot armed cues
+    /// like any clip, autofade included.
+    Effect,
 }
 
 /// Slow orbit for a parked splat scene (radians per second).
@@ -2033,27 +2080,18 @@ const MODE_BUTTONS: [(&[LiveId], ApcSurface); 3] = [
 ];
 
 /// The explorer's hot presets, in row order. `None` is ALL.
-const PRESET_CHIPS: [(&[LiveId], Option<catalog::Preset>); 5] = [
+const PRESET_CHIPS: [(&[LiveId], Option<catalog::Preset>); 7] = [
     (ids!(preset_all), None),
     (ids!(preset_video), Some(catalog::Preset::Video)),
+    (ids!(preset_effect), Some(catalog::Preset::Effect)),
+    (ids!(preset_transition), Some(catalog::Preset::Transition)),
     (ids!(preset_3d), Some(catalog::Preset::ThreeD)),
     (ids!(preset_image), Some(catalog::Preset::Image)),
     (ids!(preset_audio), Some(catalog::Preset::Audio)),
 ];
 
-/// Per-effect phase rates (units/s) driven by the two knobs: KALEIDO spin,
-/// TUNNEL depth + spin, STROBE rate. Everything else is static or pure-time.
-fn fx_phase_rates(fx: crate::fx::FxState) -> (f32, f32) {
-    match fx.kind.0 {
-        1 => (0.0, fx.p2 * 1.2),
-        2 => (fx.p1 * 1.5, (fx.p2 - 0.5) * 0.5),
-        5 => (1.0 + fx.p1 * 11.0, 0.0),
-        _ => (0.0, 0.0),
-    }
-}
-
 /// The four-state colour set of a LATCHING toggle (ROTATE, PLAY, LOOP,
-/// MUTE, the FX bank, the kind/preset chips).
+/// MUTE, the kind/preset chips).
 ///
 /// A latch has to read lit in EVERY interaction state. Painting only `color`
 /// (and `color_focus`) leaves `color_hover` / `color_down` at their theme
@@ -2136,23 +2174,6 @@ impl LatchPaint {
     }
 }
 
-/// FX bank buttons, index == `FxId` (0 = OFF). Same order as `fx::FX_INFO`.
-const FX_BUTTONS: [&[LiveId]; crate::fx::FxId::COUNT as usize] = [
-    ids!(fx_btn_0),
-    ids!(fx_btn_1),
-    ids!(fx_btn_2),
-    ids!(fx_btn_3),
-    ids!(fx_btn_4),
-    ids!(fx_btn_5),
-    ids!(fx_btn_6),
-    ids!(fx_btn_7),
-    ids!(fx_btn_8),
-    ids!(fx_btn_9),
-    ids!(fx_btn_10),
-    ids!(fx_btn_11),
-    ids!(fx_btn_12),
-];
-
 /// What a catalog-runtime request was for.
 #[derive(Clone, Debug)]
 enum CatPurpose {
@@ -2163,6 +2184,10 @@ enum CatPurpose {
     /// A vjeffect's splash source, fetched to render its ANIMATED thumbnail
     /// offscreen (see fx_thumbs.rs).
     FxSource { asset: AssetId, revision: AssetRevisionId },
+    /// A vjeffect's splash source, fetched to LOAD into an effect slot
+    /// (fx_slot.rs). `title` rides along so the tile can wear the catalog
+    /// name even when the document's own name differs.
+    FxSlotSource { slot: FxSlotKind, revision: AssetRevisionId, title: String },
     JobProfiles,
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
@@ -3717,6 +3742,30 @@ pub struct App {
     /// simply asked again a few seconds later (the cache file is idempotent).
     #[rust]
     fx_decode_pending: HashMap<AssetRevisionId, f64>,
+    /// EFFECT SLOTS (fx_slot.rs): assignment/arm/knob state for the three
+    /// mixer slots.
+    #[rust]
+    fx_slots: FxSlots,
+    /// Source fetches in flight for slot loads, per slot (latest wins).
+    #[rust]
+    fx_slot_inflight: [Option<AssetRevisionId>; 3],
+    /// Transition engage envelope 0..1 (eased toward "the fader is
+    /// travelling"), and the fader-motion detector feeding it.
+    #[rust]
+    fx_tri_env: f32,
+    #[rust]
+    fx_mix_last: f32,
+    #[rust]
+    fx_mix_moving_until: f64,
+    /// Stamp of the last transition-envelope step (host seconds).
+    #[rust]
+    fx_env_last: Option<f64>,
+    /// This frame's transition engagement (envelope × triangle) and the
+    /// quantized value last pushed to the tile UI.
+    #[rust]
+    fx_engage_now: f32,
+    #[rust]
+    fx_engage_synced: f32,
     /// `VJ_TRACE_THUMBS=1` — log every tile texture transition.
     #[rust(std::env::var_os("VJ_TRACE_THUMBS").is_some())]
     trace_thumbs: bool,
@@ -3781,18 +3830,6 @@ pub struct App {
     slot_video_muted: [bool; 2],
     #[rust]
     slot_sync_beats: [u32; 2],
-    /// Whole-unit FX speed multiplier (×1 ×2 ×4 ×8) and the operator's beat
-    /// phase shift (0 = now … 1 = next beat).
-    #[rust(1u32)]
-    fx_mult: u32,
-    #[rust]
-    beat_shift: f32,
-    /// Smoothed beat phase: a phase-locked oscillator steered toward the
-    /// analyzer so visuals never jump when the estimate re-settles.
-    #[rust]
-    beat_pll_phase: f64,
-    #[rust]
-    beat_pll_last: Option<f64>,
     /// Cue-well drag in progress: (slot, last pointer position).
     #[rust]
     well_drag: Option<(SlotId, DVec2)>,
@@ -3833,14 +3870,7 @@ pub struct App {
     /// Hands-free crossfade (the AUTOFADE button).
     #[rust]
     auto_fade: AutoFade,
-    /// FX speed phases (see fx_phase_rates) and the completed fade already
-    /// landed on the mixer.
-    #[rust]
-    fx_phase1: f32,
-    #[rust]
-    fx_phase2: f32,
-    #[rust]
-    fx_phase_last: Option<f64>,
+    /// The completed fade already landed on the mixer.
     #[rust]
     consumed_transition: Option<mixer::VideoTransitionId>,
     /// Last event-driven refresh per surface (see EVENT_REFRESH_COOLDOWN_S).
@@ -3877,8 +3907,6 @@ pub struct App {
     /// its two knobs, and which bus the FX chain is inserted on.
     #[rust]
     mix: MixState,
-    #[rust]
-    fx: FxState,
     #[rust]
     slot_media: [SlotMedia; 2],
     #[rust]
@@ -4356,6 +4384,436 @@ impl App {
         Some((view.color_texture(), 16.0 / 9.0))
     }
 
+    // ---- EFFECT SLOTS (fx_slot.rs) ------------------------------------------
+    //
+    // The vjeffect category's runtime: three offscreen hosts in the status
+    // bar, three tiles + control strips in the mixer column, and the
+    // program seam in `apply_fx_slots`.
+
+    fn fx_slot_host_path(kind: FxSlotKind) -> &'static [LiveId] {
+        match kind {
+            FxSlotKind::EffectA => ids!(fx_host_a),
+            FxSlotKind::Transition => ids!(fx_host_t),
+            FxSlotKind::EffectB => ids!(fx_host_b),
+        }
+    }
+
+    /// The CONTENT-mode host: an FX tile cued onto the deck (no slot armed)
+    /// renders here and feeds `slot_textures`-level compositing like a clip.
+    fn fx_content_host_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(fx_content_a),
+            SlotId::B => ids!(fx_content_b),
+        }
+    }
+
+    fn clear_slot_fx_content(&mut self, cx: &mut Cx, slot: SlotId) {
+        let widget = self.ui.widget(cx, Self::fx_content_host_path(slot));
+        if let Some(mut host) = widget.borrow_mut::<VjFxSlotHost>() {
+            host.set_enabled(cx, false);
+            host.clear(cx);
+        };
+    }
+
+    /// The deck's picture when its content IS an effect. Ungated by run
+    /// state so a HELD slot keeps its frozen last frame, like a parked clip.
+    fn slot_fx_content_source(&self, cx: &mut Cx, slot: SlotId) -> Option<(Texture, f32)> {
+        if self.slot_media[slot.index()] != SlotMedia::Effect {
+            return None;
+        }
+        let widget = self.ui.widget(cx, Self::fx_content_host_path(slot));
+        let host = widget.borrow::<VjFxSlotHost>()?;
+        host.preview_output().map(|tex| (tex, 16.0 / 9.0))
+    }
+
+    /// Clock + run-state for the content-mode hosts: live while their slot's
+    /// content is an effect and the slot is not parked.
+    fn pump_fx_content(&mut self, cx: &mut Cx) {
+        let beat = self
+            .clock_secs(Instant::now())
+            .filter(|_| self.beat_clock.running())
+            .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
+            .filter(|(_, bpm)| *bpm > 0.0);
+        for slot in [SlotId::A, SlotId::B] {
+            let active = self.slot_media[slot.index()] == SlotMedia::Effect
+                && !self.slot_held[slot.index()];
+            let widget = self.ui.widget(cx, Self::fx_content_host_path(slot));
+            let Some(mut host) = widget.borrow_mut::<VjFxSlotHost>() else { continue };
+            let run = active && host.has_effect();
+            host.set_enabled(cx, run);
+            if active {
+                if let Some((pos, bpm)) = beat {
+                    host.set_beat(pos, bpm);
+                }
+            }
+        }
+    }
+
+    fn fx_slot_tile_path(kind: FxSlotKind) -> &'static [LiveId] {
+        match kind {
+            FxSlotKind::EffectA => ids!(fx_slot_a_tile),
+            FxSlotKind::Transition => ids!(fx_slot_t_tile),
+            FxSlotKind::EffectB => ids!(fx_slot_b_tile),
+        }
+    }
+
+    fn fx_slot_on_path(kind: FxSlotKind) -> &'static [LiveId] {
+        match kind {
+            FxSlotKind::EffectA => ids!(fx_slot_a_on),
+            FxSlotKind::Transition => ids!(fx_slot_t_on),
+            FxSlotKind::EffectB => ids!(fx_slot_b_on),
+        }
+    }
+
+    fn fx_slot_clear_path(kind: FxSlotKind) -> &'static [LiveId] {
+        match kind {
+            FxSlotKind::EffectA => ids!(fx_slot_a_clear),
+            FxSlotKind::Transition => ids!(fx_slot_t_clear),
+            FxSlotKind::EffectB => ids!(fx_slot_b_clear),
+        }
+    }
+
+    /// Knob 0 = SPD, 1 = P1 (doc p0), 2 = P2 (doc p1).
+    fn fx_slot_knob_path(kind: FxSlotKind, knob: usize) -> &'static [LiveId] {
+        match (kind, knob) {
+            (FxSlotKind::EffectA, 0) => ids!(fx_slot_a_spd),
+            (FxSlotKind::EffectA, 1) => ids!(fx_slot_a_p1),
+            (FxSlotKind::EffectA, _) => ids!(fx_slot_a_p2),
+            (FxSlotKind::Transition, 0) => ids!(fx_slot_t_spd),
+            (FxSlotKind::Transition, 1) => ids!(fx_slot_t_p1),
+            (FxSlotKind::Transition, _) => ids!(fx_slot_t_p2),
+            (FxSlotKind::EffectB, 0) => ids!(fx_slot_b_spd),
+            (FxSlotKind::EffectB, 1) => ids!(fx_slot_b_p1),
+            (FxSlotKind::EffectB, _) => ids!(fx_slot_b_p2),
+        }
+    }
+
+    /// An FX tile was clicked with slot `kind` armed: fetch its splash
+    /// source and load it into that slot.
+    fn fx_effect_tile_clicked(&mut self, cx: &mut Cx, kind: FxSlotKind, asset: AssetId) {
+        let Some(tile) = self.video_model.tile(&asset) else { return };
+        let (Some(revision), Some(media)) = (tile.revision, tile.media.clone()) else {
+            // Manifest still resolving: the click fires the moment it lands
+            // (the same latch the cue path uses).
+            self.pending_click = Some(asset);
+            let cmds = self.video_model.resolve_first(asset);
+            self.run_cat_cmds(Surface::Video, cmds);
+            self.grids_dirty = true;
+            return;
+        };
+        self.pending_click = None;
+        if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
+            log!("fx slot: {} has no loadable effect document", tile.title);
+            return;
+        }
+        let title = tile.title.clone();
+        let Some(up) = self.up.as_mut() else { return };
+        if let Ok(id) = up.catalog.submit_with(
+            ClientRequest::FetchBlob {
+                blob: media.blob,
+                expected_len: Some(media.len),
+                pin: false,
+            },
+            makepad_asset_client::SubmitOptions::newest_first(),
+        ) {
+            self.cat_reqs
+                .insert(id, CatPurpose::FxSlotSource { slot: kind, revision, title });
+            self.fx_slot_inflight[kind.index()] = Some(revision);
+            self.fx_slots.slot_mut(kind).note = Some("loading…".to_string());
+            self.sync_fx_slots_ui(cx);
+            self.grids_dirty = true;
+        }
+    }
+
+    /// Load splash text into a slot's offscreen host and take the name onto
+    /// the tile. `persist` is off during the startup restore.
+    fn load_fx_slot(
+        &mut self,
+        cx: &mut Cx,
+        kind: FxSlotKind,
+        title: &str,
+        source: &str,
+        persist: bool,
+    ) {
+        let widget = self.ui.widget(cx, Self::fx_slot_host_path(kind));
+        let result = widget
+            .borrow_mut::<VjFxSlotHost>()
+            .map(|mut host| host.load(cx, &format!("vjfx_slot_{}", kind.key()), source));
+        match result {
+            Some(Ok(name)) => {
+                let title = if title.is_empty() { name } else { title.to_string() };
+                self.fx_slots.loaded(kind, title);
+                if persist {
+                    self.save_fx_slot_source(kind, source);
+                    self.save_fx_slots();
+                }
+            }
+            Some(Err(error)) => {
+                log!("fx slot {kind:?}: load failed — {error}");
+                self.fx_slots.slot_mut(kind).note = Some("load failed".to_string());
+            }
+            None => {}
+        }
+        self.sync_fx_slots_ui(cx);
+        self.video_pump = cx.new_next_frame();
+    }
+
+    fn clear_fx_slot(&mut self, cx: &mut Cx, kind: FxSlotKind) {
+        let widget = self.ui.widget(cx, Self::fx_slot_host_path(kind));
+        if let Some(mut host) = widget.borrow_mut::<VjFxSlotHost>() {
+            host.set_enabled(cx, false);
+            host.clear(cx);
+        }
+        self.fx_slots.clear(kind);
+        let _ = std::fs::remove_file(Self::fx_slot_source_path(kind));
+        self.save_fx_slots();
+        self.sync_fx_slot_knobs(cx, kind);
+        self.sync_fx_slots_ui(cx);
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Mirror the model onto the three tiles + ON buttons. Equality-gated
+    /// inside the widgets, so calling this on every state change is cheap.
+    fn sync_fx_slots_ui(&mut self, cx: &mut Cx) {
+        for kind in FxSlotKind::ALL {
+            let slot = self.fx_slots.slot(kind).clone();
+            let armed = self.fx_slots.armed == Some(kind);
+            let engage = if kind == FxSlotKind::Transition {
+                self.fx_engage_synced
+            } else {
+                0.0
+            };
+            let note = if let Some(note) = &slot.note {
+                note.clone()
+            } else if slot.title.is_none() {
+                if armed { "pick an FX tile".to_string() } else { String::new() }
+            } else if slot.bypass {
+                "BYP".to_string()
+            } else if kind == FxSlotKind::Transition {
+                if engage > 0.05 { "FADE".to_string() } else { "on fade".to_string() }
+            } else {
+                String::new()
+            };
+            let widget = self.ui.widget(cx, Self::fx_slot_tile_path(kind));
+            if let Some(mut tile) = widget.borrow_mut::<VjFxSlotTile>() {
+                tile.set_labels(kind.tag(), kind.hint());
+                tile.set_state(
+                    cx,
+                    FxSlotTileState {
+                        title: slot.title.clone(),
+                        note,
+                        armed,
+                        bypass: slot.bypass,
+                        engage,
+                    },
+                );
+            }
+            self.paint_lit(cx, Self::fx_slot_on_path(kind), slot.running());
+        }
+    }
+
+    /// Push the model's knob positions onto the widgets — only on load,
+    /// restore and clear, never while a hand is on them.
+    fn sync_fx_slot_knobs(&mut self, cx: &mut Cx, kind: FxSlotKind) {
+        let slot = self.fx_slots.slot(kind).clone();
+        self.ui
+            .slider(cx, Self::fx_slot_knob_path(kind, 0))
+            .set_value(cx, slot.speed as f64);
+        for p in 0..2 {
+            self.ui
+                .slider(cx, Self::fx_slot_knob_path(kind, p + 1))
+                .set_value(cx, slot.p[p].unwrap_or(0.5) as f64);
+        }
+    }
+
+    /// THE PROGRAM SEAM. Channel slots: the deck's source becomes the
+    /// effect's `input0` and the effect's output replaces the deck's
+    /// contribution (an empty deck runs the effect standalone — generator
+    /// engines become playable content). Transition slot: while the
+    /// crossfader travels, the A/B mix is premixed offscreen, fed to the
+    /// effect, and the effect's output is dissolved over the program by
+    /// `triangle(mix)` — zero at the ends, full mid-fade, so engagement
+    /// never pops. Empty/bypassed slots leave everything byte-identical.
+    fn apply_fx_slots(
+        &mut self,
+        cx: &mut Cx,
+        a: Option<(Texture, f32)>,
+        b: Option<(Texture, f32)>,
+        mix: f32,
+        mix_state: MixState,
+    ) -> (Option<(Texture, f32)>, Option<(Texture, f32)>, f32, MixState) {
+        let now = cx.seconds_since_app_start();
+        let beat = self
+            .clock_secs(Instant::now())
+            .filter(|_| self.beat_clock.running())
+            .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
+            .filter(|(_, bpm)| *bpm > 0.0);
+        let mut a = a;
+        let mut b = b;
+        for (kind, chan) in [(FxSlotKind::EffectA, &mut a), (FxSlotKind::EffectB, &mut b)] {
+            let slot = self.fx_slots.slot(kind).clone();
+            let widget = self.ui.widget(cx, Self::fx_slot_host_path(kind));
+            let Some(mut host) = widget.borrow_mut::<VjFxSlotHost>() else { continue };
+            let want = slot.running() && host.has_effect();
+            host.set_enabled(cx, want);
+            if !want {
+                continue;
+            }
+            if let Some((pos, bpm)) = beat {
+                host.set_beat(pos, bpm);
+            }
+            host.set_speed(FxSlots::speed_scale(slot.speed));
+            host.set_user([slot.p[0], slot.p[1], None, None]);
+            host.set_channel_input(chan.as_ref().map(|(tex, _)| tex.clone()));
+            // First frame after a load has no output yet: pass the deck
+            // through rather than a black frame.
+            if let Some(tex) = host.output() {
+                *chan = Some((tex, 16.0 / 9.0));
+            }
+        }
+        // Transition: engage while the fader is actually travelling (hand,
+        // AUTOFADE, or a device-clock cue fade — all of them MOVE the mix).
+        if (mix - self.fx_mix_last).abs() > 5e-4 {
+            self.fx_mix_moving_until = now + 0.4;
+        }
+        self.fx_mix_last = mix;
+        let tri = 1.0 - (2.0 * mix - 1.0).abs();
+        let slot = self.fx_slots.slot(FxSlotKind::Transition).clone();
+        let widget = self.ui.widget(cx, Self::fx_slot_host_path(FxSlotKind::Transition));
+        let mut out = (a, b, mix, mix_state);
+        if let Some(mut host) = widget.borrow_mut::<VjFxSlotHost>() {
+            let travelling = self.auto_fade.active() || now < self.fx_mix_moving_until;
+            let target = if slot.running() && host.has_effect() && travelling && tri > 0.02 {
+                1.0f32
+            } else {
+                0.0
+            };
+            let dt = (now - self.fx_env_last.replace(now).unwrap_or(now)).clamp(0.0, 0.25) as f32;
+            let step = 6.0 * dt; // full engage/disengage in ~a sixth of a second
+            self.fx_tri_env = (self.fx_tri_env + (target - self.fx_tri_env).clamp(-step, step))
+                .clamp(0.0, 1.0);
+            let engage = self.fx_tri_env * tri;
+            self.fx_engage_now = engage;
+            let run = slot.running() && host.has_effect() && self.fx_tri_env > 0.002;
+            host.set_enabled(cx, run);
+            if run {
+                if let Some((pos, bpm)) = beat {
+                    host.set_beat(pos, bpm);
+                }
+                host.set_speed(FxSlots::speed_scale(slot.speed));
+                // p3 carries the fade triangle: transition-aware documents
+                // can bind their own intensity to `p3`.
+                host.set_user([slot.p[0], slot.p[1], None, Some(tri)]);
+                host.set_premix(PremixJob {
+                    a: out.0.clone(),
+                    b: out.1.clone(),
+                    mix: out.2,
+                    state: out.3,
+                });
+                // Only splice into the program once both textures exist
+                // (the first engaged frame renders them).
+                if engage > 0.004 {
+                    if let (Some(premix), Some(fx)) = (host.premix_output(), host.output()) {
+                        out = (
+                            Some((premix, 16.0 / 9.0)),
+                            Some((fx, 16.0 / 9.0)),
+                            engage,
+                            MixState::default(),
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Per-pump tile upkeep: live preview textures (identity-gated) and the
+    /// transition engage meter (quantized so idle frames cost nothing).
+    fn pump_fx_slot_tiles(&mut self, cx: &mut Cx) {
+        for kind in FxSlotKind::ALL {
+            let preview = self
+                .ui
+                .widget(cx, Self::fx_slot_host_path(kind))
+                .borrow::<VjFxSlotHost>()
+                .and_then(|host| host.preview_output());
+            let widget = self.ui.widget(cx, Self::fx_slot_tile_path(kind));
+            if let Some(mut tile) = widget.borrow_mut::<VjFxSlotTile>() {
+                tile.set_preview(cx, preview);
+            };
+        }
+        let quantized = (self.fx_engage_now * 24.0).round() / 24.0;
+        if (quantized - self.fx_engage_synced).abs() > 1e-3 {
+            self.fx_engage_synced = quantized;
+            self.sync_fx_slots_ui(cx);
+        }
+    }
+
+    // Persistence: gen-panel.txt style — the knob/bypass lines plus the
+    // loaded documents' splash text, so slots restore with no store round
+    // trip (and before the store is even connected).
+
+    fn fx_slots_state_path() -> PathBuf {
+        service::session_config_from_env().cache_parent.join("fx-slots.txt")
+    }
+
+    fn fx_slot_source_path(kind: FxSlotKind) -> PathBuf {
+        service::session_config_from_env()
+            .cache_parent
+            .join(format!("fx-slot-{}.splash", kind.key()))
+    }
+
+    fn save_fx_slots(&self) {
+        let path = Self::fx_slots_state_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.fx_slots.encode());
+    }
+
+    fn save_fx_slot_source(&self, kind: FxSlotKind, source: &str) {
+        let path = Self::fx_slot_source_path(kind);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, source);
+    }
+
+    fn load_fx_slots_panel(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::fx_slots_state_path()) else {
+            self.sync_fx_slots_ui(cx);
+            return;
+        };
+        let decoded = FxSlots::decode(&body);
+        for kind in FxSlotKind::ALL {
+            let slot = decoded.slot(kind).clone();
+            let bypass = slot.bypass;
+            let has_doc = slot.title.is_some();
+            self.fx_slots.slots[kind.index()] = slot;
+            if has_doc {
+                match std::fs::read_to_string(Self::fx_slot_source_path(kind)) {
+                    Ok(source) => {
+                        let title = self
+                            .fx_slots
+                            .slot(kind)
+                            .title
+                            .clone()
+                            .unwrap_or_default();
+                        self.load_fx_slot(cx, kind, &title, &source, false);
+                        // `loaded()` switches a slot on; the operator's
+                        // saved bypass wins over that.
+                        self.fx_slots.slot_mut(kind).bypass = bypass;
+                    }
+                    Err(_) => {
+                        self.fx_slots.clear(kind);
+                    }
+                }
+            }
+            self.sync_fx_slot_knobs(cx, kind);
+        }
+        self.sync_fx_slots_ui(cx);
+        self.video_pump = cx.new_next_frame();
+    }
+
     /// Mirror the downstream mix stage: the mode list, the two knob
     /// legends and values, the FX bus button, and deck B's role readout.
     fn sync_mix_mode_ui(&mut self, cx: &mut Cx) {
@@ -4373,8 +4831,6 @@ impl App {
         self.ui.view(cx, ids!(mix_knobs)).set_visible(cx, has_knobs);
         self.ui.slider(cx, ids!(mix_p1)).set_value(cx, self.mix.p1 as f64);
         self.ui.slider(cx, ids!(mix_p2)).set_value(cx, self.mix.p2 as f64);
-        self.ui.button(cx, ids!(fx_bus)).set_text(cx, self.mix.bus.label());
-        self.paint_lit(cx, ids!(fx_bus), self.mix.bus != FxBus::Both);
         self.video_pump = cx.new_next_frame();
     }
 
@@ -4488,8 +4944,12 @@ impl App {
             Some(p) => p.kinds(),
             None => catalog::BrowseModel::<makepad_asset_client::PageCursor>::visual_kinds(),
         };
+        let tag = preset
+            .and_then(|p| p.tag())
+            .unwrap_or_default()
+            .to_string();
         self.kind_filter.clear();
-        let cmds = self.video_model.set_kinds(lanes);
+        let cmds = self.video_model.set_lanes(lanes, tag);
         self.run_cat_cmds(Surface::Video, cmds);
         self.sync_kind_chips_ui(cx);
     }
@@ -4500,79 +4960,6 @@ impl App {
         self.apc.surface = surface;
         self.apc.bank = 0;
         self.show_apc_surface(cx);
-    }
-
-    fn sync_fx_ui(&mut self, cx: &mut Cx) {
-        let info = self.fx.kind.info();
-        // FX bank: the live effect is the accent-filled button.
-        for (index, id) in FX_BUTTONS.iter().enumerate() {
-            let on = self.fx.kind.0 as usize == index;
-            let mut button = self.ui.button(cx, id);
-            let p = LatchPaint::icon(on);
-            let (bg, bg_hover, bg_down, fg, fg_hover) =
-                (p.bg(), p.bg_hover(), p.bg_down(), p.fg(), p.fg_hover());
-            // Paint every state, not just rest: the theme would otherwise
-            // flash the clicked button in its blue focus colour, and paint
-            // the button the operator's pointer is resting on as UNLIT.
-            script_apply_eval!(cx, button, {
-                draw_bg +: {
-                    color: #(bg)
-                    color_focus: #(bg)
-                    color_hover: #(bg_hover)
-                    color_down: #(bg_down)
-                }
-                draw_text +: {
-                    color: #(fg)
-                    color_focus: #(fg)
-                    color_hover: #(fg_hover)
-                    color_down: #(fg)
-                }
-            });
-        }
-        self.ui.label(cx, ids!(fx_p1_lab)).set_text(cx, info.p1);
-        self.ui.label(cx, ids!(fx_p2_lab)).set_text(cx, info.p2);
-        self.ui.slider(cx, ids!(fx_p1)).set_value(cx, self.fx.p1 as f64);
-        self.ui.slider(cx, ids!(fx_p2)).set_value(cx, self.fx.p2 as f64);
-        self.ui
-            .check_box(cx, ids!(fx_beat1))
-            .set_active(cx, self.fx.beat1, Animate::No);
-        self.ui
-            .check_box(cx, ids!(fx_beat2))
-            .set_active(cx, self.fx.beat2, Animate::No);
-        self.video_pump = cx.new_next_frame();
-    }
-
-    /// Raw analyzer phase (0 = on the beat, →1 until the next).
-    fn analyzer_beat_phase(&self) -> Option<(f64, f64)> {
-        let beat = self.current_beat()?;
-        if beat.period.is_zero() {
-            return None;
-        }
-        let now = Instant::now();
-        let beat = extrapolate_beat(&beat, now);
-        let until = beat.next_beat.saturating_duration_since(now).as_secs_f64();
-        let period = beat.period.as_secs_f64().max(0.001);
-        Some(((1.0 - until / period).clamp(0.0, 1.0), period))
-    }
-
-    /// Advance the visual beat phase one frame.
-    ///
-    /// This used to be a second phase-locked loop steering toward the raw
-    /// analyzer, because the raw analyzer jumped. It no longer does: the
-    /// published clock is continuous by contract, so the visuals ride it
-    /// directly and only free-run when there is no clock at all.
-    fn pump_beat_pll(&mut self, now: f64) {
-        let dt = (now - self.beat_pll_last.replace(now).unwrap_or(now)).clamp(0.0, 0.25);
-        let Some((target, _period)) = self.analyzer_beat_phase() else {
-            self.beat_pll_phase = (self.beat_pll_phase + dt / 0.5).fract();
-            return;
-        };
-        self.beat_pll_phase = target;
-    }
-
-    /// Beat phase for the visuals: smoothed + the operator's SHIFT knob.
-    fn beat_phase_01(&self) -> f32 {
-        ((self.beat_pll_phase + self.beat_shift as f64).fract()) as f32
     }
 
     fn set_visual_mix(&mut self, cx: &mut Cx, value: f32) {
@@ -5970,7 +6357,7 @@ impl App {
             // the picture away because the audio mixer refused the fade.
             if matches!(
                 self.slot_media[to.index()],
-                SlotMedia::Still | SlotMedia::Mesh | SlotMedia::Billboard
+                SlotMedia::Still | SlotMedia::Mesh | SlotMedia::Billboard | SlotMedia::Effect
             ) {
                 if self.trace_cue {
                     log!("cue: mixer refused schedule {schedule} ({error:?}); host cut to {to:?}");
@@ -6628,6 +7015,7 @@ impl App {
                     self.light_samples[slot.index()] = None;
                     self.light_analyzers[slot.index()].reset();
                     self.clear_slot_mesh(cx, slot);
+                    self.clear_slot_fx_content(cx, slot);
                     self.slot_media[slot.index()] = SlotMedia::Empty;
                     self.billboards[slot.index()] = None;
                     self.awaiting_preroll[slot.index()] = None;
@@ -6660,6 +7048,51 @@ impl App {
                         continue;
                     }
                     match item.media {
+                        // A vjeffect cued AS CONTENT: evaluate the splash
+                        // document into the slot's offscreen effect host —
+                        // ready immediately, so the same arm/fade the clips
+                        // ride starts at once (silent bus, like meshes).
+                        MediaType::Text if item.kind == Some(AssetKind::VjEffect) => {
+                            let source = match std::fs::read_to_string(&path) {
+                                Ok(source) => source,
+                                Err(error) => {
+                                    let follow = self.cue.preroll_failed(
+                                        slot,
+                                        gen,
+                                        format!("effect source unreadable: {error}"),
+                                    );
+                                    self.run_cue_cmds(cx, follow);
+                                    continue;
+                                }
+                            };
+                            let widget =
+                                self.ui.widget(cx, Self::fx_content_host_path(slot));
+                            let result = widget.borrow_mut::<VjFxSlotHost>().map(
+                                |mut host| {
+                                    let key = format!("vjfx_deck_{}", slot.index());
+                                    let loaded = host.load(cx, &key, &source);
+                                    host.set_enabled(cx, loaded.is_ok());
+                                    loaded
+                                },
+                            );
+                            match result {
+                                Some(Ok(_)) => {
+                                    self.mixer.open_slot(slot);
+                                    self.mixer.set_slot_paused(slot, true);
+                                    self.slot_media[slot.index()] = SlotMedia::Effect;
+                                    self.slot_aspect[slot.index()] = 16.0 / 9.0;
+                                    let cmds = self.cue.preroll_ready(slot, gen);
+                                    self.run_cue_cmds(cx, cmds);
+                                    self.video_pump = cx.new_next_frame();
+                                }
+                                Some(Err(error)) => {
+                                    let follow =
+                                        self.cue.preroll_failed(slot, gen, error);
+                                    self.run_cue_cmds(cx, follow);
+                                }
+                                None => {}
+                            }
+                        }
                         MediaType::Glb => {
                             // Silent mixer bus so the existing fade arm
                             // accepts a picture-only destination.
@@ -6823,6 +7256,7 @@ impl App {
                     self.slot_media[slot.index()] = SlotMedia::Empty;
                     self.billboards[slot.index()] = None;
                     self.clear_slot_mesh(cx, slot);
+                    self.clear_slot_fx_content(cx, slot);
                     self.light_samples[slot.index()] = None;
                     self.slot_scan[slot.index()] = None;
                     self.applied_fit[slot.index()] = None;
@@ -7197,9 +7631,10 @@ impl App {
                                     let report =
                                         crate::effects::seed::seed_presets(&mut client);
                                     log!(
-                                        "vjfx preset seeding: {} present, {} published, {} failed{}",
+                                        "vjfx preset seeding: {} present, {} published, {} retagged, {} failed{}",
                                         report.present,
                                         report.published,
+                                        report.retagged,
                                         report.failed.len(),
                                         report
                                             .failed
@@ -7387,6 +7822,15 @@ impl App {
                             self.fx_source_inflight.remove(&revision);
                             log!("fx thumb: source fetch FAILED {revision}: {error}");
                         }
+                        CatPurpose::FxSlotSource { slot, revision, .. } => {
+                            if self.fx_slot_inflight[slot.index()] == Some(revision) {
+                                self.fx_slot_inflight[slot.index()] = None;
+                            }
+                            self.fx_slots.slot_mut(slot).note =
+                                Some("fetch failed".to_string());
+                            self.sync_fx_slots_ui(cx);
+                            log!("fx slot {:?}: source fetch FAILED {revision}: {error}", slot);
+                        }
                         CatPurpose::JobProfiles => {
                             self.gen.profiles_failed(error.to_string());
                         }
@@ -7554,6 +7998,25 @@ impl App {
                     }
                     Err(error) => {
                         log!("fx thumb: {title} source unreadable: {error}");
+                    }
+                }
+            }
+            (
+                CatPurpose::FxSlotSource { slot, revision, title },
+                ClientOutput::Blob { path, .. },
+            ) => {
+                // The splash text is here: load it into the slot's offscreen
+                // host. A newer click on the same slot supersedes this one.
+                if self.fx_slot_inflight[slot.index()] != Some(revision) {
+                    return;
+                }
+                self.fx_slot_inflight[slot.index()] = None;
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => self.load_fx_slot(cx, slot, &title, &source, true),
+                    Err(error) => {
+                        self.fx_slots.slot_mut(slot).note = Some("unreadable".to_string());
+                        self.sync_fx_slots_ui(cx);
+                        log!("fx slot {slot:?}: {title} source unreadable: {error}");
                     }
                 }
             }
@@ -10570,15 +11033,24 @@ impl App {
         // texture for that slot; everything downstream is untouched.
         let flow_a = self.slot_flow_source(cx, SlotId::A);
         let flow_b = self.slot_flow_source(cx, SlotId::B);
+        // Content-mode effects: run their clocks, then read their pictures
+        // exactly like the mesh/splat offscreen slots.
+        self.pump_fx_content(cx);
+        let fxc_a = self.slot_fx_content_source(cx, SlotId::A);
+        let fxc_b = self.slot_fx_content_source(cx, SlotId::B);
         let source = |index: usize,
                       kind: SlotMedia,
                       mesh: Option<(Texture, f32)>,
                       flow: Option<(Texture, f32)>,
+                      fx_content: Option<(Texture, f32)>,
                       players: &[Option<SlotPlayer>; 2],
                       textures: &[Option<Texture>; 2],
                       aspects: &[f32; 2]| {
             if kind == SlotMedia::Mesh || kind == SlotMedia::Splat {
                 return mesh;
+            }
+            if kind == SlotMedia::Effect {
+                return fx_content;
             }
             if kind == SlotMedia::Video {
                 if let Some(flow) = flow {
@@ -10597,6 +11069,7 @@ impl App {
             self.slot_media[0],
             mesh_a,
             flow_a,
+            fxc_a,
             &self.players,
             &self.slot_textures,
             &self.slot_aspect,
@@ -10606,31 +11079,23 @@ impl App {
             self.slot_media[1],
             mesh_b,
             flow_b,
+            fxc_b,
             &self.players,
             &self.slot_textures,
             &self.slot_aspect,
         );
         let mix_state = self.mix;
-        let fx = self.fx;
-        let beat = self.beat_phase_01();
-        let time = cx.seconds_since_app_start() as f32;
-        // Speed knobs advance phases; turning a knob changes the RATE, the
-        // picture never jumps.
-        let (rate1, rate2) = fx_phase_rates(fx);
-        let (rate1, rate2) = (rate1 * self.fx_mult as f32, rate2 * self.fx_mult as f32);
-        let now = cx.seconds_since_app_start();
-        self.pump_beat_pll(now);
-        let dt = (now - self.fx_phase_last.replace(now).unwrap_or(now)).clamp(0.0, 0.25) as f32;
-        self.fx_phase1 = (self.fx_phase1 + rate1 * dt) % 1.0e4;
-        self.fx_phase2 = (self.fx_phase2 + rate2 * dt) % 1.0e4;
-        let phases = (self.fx_phase1, self.fx_phase2);
+        // EFFECT SLOTS: per-deck effect passes over the deck sources, and
+        // the transition effect while the crossfader travels. Empty or
+        // bypassed slots leave a/b/mix untouched.
+        let (a, b, mix, mix_state) = self.apply_fx_slots(cx, a, b, mix, mix_state);
+        self.pump_fx_slot_tiles(cx);
         let karaoke = self.karaoke_overlay();
         for target in [ids!(program), ids!(preview)] {
             let widget = self.ui.widget(cx, target);
             let borrow = widget.borrow_mut::<views::VideoProgram>();
             if let Some(mut program) = borrow {
                 program.set_sources(cx, a.clone(), b.clone(), mix, mix_state);
-                program.set_fx(cx, fx, beat, time, phases);
                 program.set_karaoke(cx, karaoke.clone());
             }
         }
@@ -10663,7 +11128,9 @@ impl App {
                 .flatten()
                 .any(SlotPlayer::needs_frame_pump)
             || self.slot_media.iter().any(|kind| *kind != SlotMedia::Empty)
-            || self.fx.kind.0 != 0
+            // A loaded, switched-on effect slot keeps the pump alive: a
+            // standalone generator effect on an empty deck IS the program.
+            || self.fx_slots.any_running()
             // The sweep across the current line moves every frame, so
             // karaoke keeps the pump alive on its own — a black program
             // with subtitles is a legitimate output. The condition is the
@@ -10791,6 +11258,18 @@ impl App {
         // The ring follows the hand, not the cue: it marks the tile the
         // operator last touched even while its manifest is still resolving.
         self.last_clicked = Some(asset);
+        // An FX tile has TWO roles. With an effect slot ARMED, the click
+        // loads it there (effect-pass over that channel). With nothing
+        // armed it falls through to the cue engine like any clip — the
+        // effect cues AS CONTENT onto a deck, autofade included (the
+        // OpenSlot arm below routes MediaType::Text + VjEffect into the
+        // deck's content-mode effect host).
+        if tile.kind == Some(AssetKind::VjEffect) {
+            if let Some(kind) = self.fx_slots.armed {
+                self.fx_effect_tile_clicked(cx, kind, asset);
+                return;
+            }
+        }
         let Some(item) = CueItem::from_tile(tile) else {
             // Manifest not resolved yet: the click is not lost — it fires
             // the moment the manifest lands (otherwise a fresh tile needs a
@@ -11245,7 +11724,9 @@ impl MatchEvent for App {
         }
         self.paint_gen_tab(cx);
         self.sync_mix_mode_ui(cx);
-        self.sync_fx_ui(cx);
+        // Effect slots restore from their local splash files — before (and
+        // independent of) the store connection.
+        self.load_fx_slots_panel(cx);
         self.sync_slot_controls_ui(cx);
         self.sync_pads();
         self.grids_dirty = true;
@@ -11799,20 +12280,6 @@ impl MatchEvent for App {
             self.refresh_program_lighting();
             self.sync_slot_controls_ui(cx);
         }
-        if self.ui.button(cx, ids!(fx_mult)).clicked(actions) {
-            self.fx_mult = match self.fx_mult {
-                1 => 2,
-                2 => 4,
-                4 => 8,
-                _ => 1,
-            };
-            self.ui.button(cx, ids!(fx_mult)).set_text(cx, &format!("×{}", self.fx_mult));
-            self.video_pump = cx.new_next_frame();
-        }
-        if let Some(v) = self.ui.slider(cx, ids!(beat_shift)).slided(actions) {
-            self.beat_shift = v as f32;
-            self.video_pump = cx.new_next_frame();
-        }
         if let Some(v) = self.ui.slider(cx, ids!(video_fade)).slided(actions) {
             self.fade_secs = v as f32;
         }
@@ -11901,31 +12368,57 @@ impl MatchEvent for App {
             self.mix.p2 = (v as f32).clamp(0.0, 1.0);
             self.video_pump = cx.new_next_frame();
         }
-        if self.ui.button(cx, ids!(fx_bus)).clicked(actions) {
-            self.mix.bus = self.mix.bus.next();
-            self.sync_mix_mode_ui(cx);
-        }
-        for (index, id) in FX_BUTTONS.iter().enumerate() {
-            if self.ui.button(cx, id).clicked(actions) {
-                self.fx.kind = crate::fx::FxId(index as u8);
-                self.sync_fx_ui(cx);
+        // ---- effect slots (fx_slot.rs) ----
+        for kind in FxSlotKind::ALL {
+            let tile = self.ui.widget(cx, Self::fx_slot_tile_path(kind));
+            if let Some(item) = actions.find_widget_action(tile.widget_uid()) {
+                if let FxSlotTileAction::Pressed = item.cast() {
+                    // Click a slot to arm it (the next FX-tile click loads
+                    // here); click it again to disarm. Arming also points
+                    // the explorer at the matching lane: the TRANSITION
+                    // slot prefers the transition-tagged effects.
+                    if self.fx_slots.toggle_arm(kind) {
+                        let preset = match kind {
+                            FxSlotKind::Transition => catalog::Preset::Transition,
+                            _ => catalog::Preset::Effect,
+                        };
+                        self.select_preset(cx, Some(preset));
+                    }
+                    self.sync_fx_slots_ui(cx);
+                }
             }
-        }
-        if let Some(v) = self.ui.slider(cx, ids!(fx_p1)).slided(actions) {
-            self.fx.p1 = v as f32;
-            self.video_pump = cx.new_next_frame();
-        }
-        if let Some(v) = self.ui.slider(cx, ids!(fx_p2)).slided(actions) {
-            self.fx.p2 = v as f32;
-            self.video_pump = cx.new_next_frame();
-        }
-        if let Some(on) = self.ui.check_box(cx, ids!(fx_beat1)).changed(actions) {
-            self.fx.beat1 = on;
-            self.video_pump = cx.new_next_frame();
-        }
-        if let Some(on) = self.ui.check_box(cx, ids!(fx_beat2)).changed(actions) {
-            self.fx.beat2 = on;
-            self.video_pump = cx.new_next_frame();
+            if self.ui.button(cx, Self::fx_slot_on_path(kind)).clicked(actions)
+                && self.fx_slots.slot(kind).title.is_some()
+            {
+                let bypass = !self.fx_slots.slot(kind).bypass;
+                self.fx_slots.slot_mut(kind).bypass = bypass;
+                self.save_fx_slots();
+                self.sync_fx_slots_ui(cx);
+                self.video_pump = cx.new_next_frame();
+            }
+            if self.ui.button(cx, Self::fx_slot_clear_path(kind)).clicked(actions) {
+                self.clear_fx_slot(cx, kind);
+            }
+            if let Some(v) = self
+                .ui
+                .slider(cx, Self::fx_slot_knob_path(kind, 0))
+                .slided(actions)
+            {
+                self.fx_slots.slot_mut(kind).speed = (v as f32).clamp(0.0, 1.0);
+                self.save_fx_slots();
+                self.video_pump = cx.new_next_frame();
+            }
+            for p in 0..2 {
+                if let Some(v) = self
+                    .ui
+                    .slider(cx, Self::fx_slot_knob_path(kind, p + 1))
+                    .slided(actions)
+                {
+                    self.fx_slots.slot_mut(kind).p[p] = Some((v as f32).clamp(0.0, 1.0));
+                    self.save_fx_slots();
+                    self.video_pump = cx.new_next_frame();
+                }
+            }
         }
         let fade_ids = [
             ids!(light_fader_0),
@@ -12147,6 +12640,7 @@ impl AppMain for App {
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);
+        crate::fx_slot::script_mod(vm);
         self::script_mod(vm)
     }
 

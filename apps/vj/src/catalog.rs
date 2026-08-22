@@ -186,6 +186,11 @@ pub enum Preset {
     ThreeD,
     Image,
     Audio,
+    /// The vjeffect content category on its own.
+    Effect,
+    /// Transition-suited vjeffects: the same lane narrowed to the
+    /// `transition` tag (see effects/seed.rs `TRANSITION_TAG`).
+    Transition,
 }
 
 impl Preset {
@@ -195,6 +200,8 @@ impl Preset {
             Preset::ThreeD => "3D",
             Preset::Image => "IMAGE",
             Preset::Audio => "AUDIO",
+            Preset::Effect => "EFFECT",
+            Preset::Transition => "TRANSITION",
         }
     }
 
@@ -214,6 +221,15 @@ impl Preset {
             ],
             Preset::Image => vec![AssetKind::Texture, AssetKind::Billboard],
             Preset::Audio => vec![AssetKind::Audio],
+            Preset::Effect | Preset::Transition => vec![AssetKind::VjEffect],
+        }
+    }
+
+    /// Positive tag filter the preset narrows by, if any.
+    pub fn tag(self) -> Option<&'static str> {
+        match self {
+            Preset::Transition => Some(crate::effects::seed::TRANSITION_TAG),
+            _ => None,
         }
     }
 }
@@ -291,6 +307,8 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     pub kinds: Vec<AssetKind>,
     pub text: String,
     pub category: String,
+    /// Positive tag narrowing (the TRANSITION preset); empty = none.
+    pub tag: String,
     gen: CatGen,
     tiles: Vec<Tile>,
     index: HashMap<AssetId, usize>,
@@ -371,13 +389,22 @@ impl<C: Clone> BrowseModel<C> {
         Self::new_multi(Self::visual_kinds(), "")
     }
 
-    /// Change the kind lanes (kind chips) and re-query from page one.
+    /// Change the kind lanes (kind chips) and re-query from page one. A
+    /// plain kind change drops any preset tag narrowing — the chips are a
+    /// different gesture than the tag presets.
     pub fn set_kinds(&mut self, kinds: Vec<AssetKind>) -> Vec<CatCmd<C>> {
+        self.set_lanes(kinds, String::new())
+    }
+
+    /// Change the kind lanes AND the positive tag filter together (the
+    /// EFFECT / TRANSITION presets) and re-query from page one.
+    pub fn set_lanes(&mut self, kinds: Vec<AssetKind>, tag: String) -> Vec<CatCmd<C>> {
         let kinds = if kinds.is_empty() { Self::visual_kinds() } else { kinds };
-        if self.kinds == kinds {
+        if self.kinds == kinds && self.tag == tag {
             return Vec::new();
         }
         self.kinds = kinds;
+        self.tag = tag;
         self.next_cursors = vec![None; self.kinds.len()];
         self.refresh()
     }
@@ -391,6 +418,7 @@ impl<C: Clone> BrowseModel<C> {
             kinds,
             text: String::new(),
             category: category.to_string(),
+            tag: String::new(),
             gen: 0,
             tiles: Vec::new(),
             index: HashMap::new(),
@@ -433,6 +461,9 @@ impl<C: Clone> BrowseModel<C> {
         q.kind = Some(self.kinds[slot.min(self.kinds.len() - 1)]);
         if !self.category.is_empty() {
             q.category = Some(self.category.clone());
+        }
+        if !self.tag.is_empty() {
+            q.tag = Some(self.tag.clone());
         }
         // Program surfaces show a run's PRODUCT only. The asset-ui tags the
         // source image, the untextured mesh, mattes and PBR maps of a
