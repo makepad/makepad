@@ -672,6 +672,60 @@ mod registry_tests {
         assert!(screens > 0, "the screen family vanished — update this test");
     }
 
+    /// THE BOUNDED-CLOCK TRIPWIRE (CONTRACT.md, "a look must be a BOUNDED
+    /// function of `time` and `beat`").
+    ///
+    /// `self.time_beat.y` is the BEAT COUNT — the host's song clock, which
+    /// on a deck is already in the thousands when the effect is cued and
+    /// grows all night. Every use of it has to be bounded at the point it
+    /// steers something (`fract`, a `sin`/`cos` phase, a clamp); a raw
+    /// monotone term walks the look off the screen. 86_fractal_descent
+    /// shipped `angle = 0.52 + beat * 0.010`, which is a lovely fold for
+    /// the two seconds a gallery capture ever runs and a BLACK FRAME on
+    /// the deck, and that is what this list exists to stop repeating.
+    ///
+    /// Sound analysis of "is this use bounded?" needs dataflow we do not
+    /// have here, so this is a REVIEW GATE, not a checker: a preset that
+    /// reaches for the beat count must be named here, and naming it means
+    /// someone looked. If this test fails, do not just add the file —
+    /// grab it at t = 0 / 60 / 600 / 3600 s first:
+    ///   `VJFX_ONLY=<name> VJFX_CAPTURE=600@1.0 VJFX_SWEEP=/tmp/x \
+    ///    ./target/release/examples/effect_gallery`
+    #[test]
+    fn every_beat_count_use_is_reviewed() {
+        // name -> why the unbounded beat count is safe in that preset.
+        const REVIEWED: &[(&str, &str)] = &[
+            ("15_acid_bloom", "sine phase — the term only ever enters sin()"),
+            ("86_fractal_descent", "two slow sines + clamp into the live band"),
+            ("87_molten_glass", "fract() — a material band index"),
+        ];
+        let mut unreviewed = Vec::new();
+        for (name, source) in bundled_presets() {
+            if !source.contains("time_beat.y") {
+                continue;
+            }
+            if !REVIEWED.iter().any(|(n, _)| n == name) {
+                unreviewed.push(*name);
+            }
+        }
+        assert!(
+            unreviewed.is_empty(),
+            "these presets steer their look with the raw BEAT COUNT and are \
+             not in the reviewed list: {unreviewed:?} — see CONTRACT.md \
+             \"a look must be a BOUNDED function of time and beat\", verify \
+             the preset still renders at t = 600 s, then add it here"
+        );
+        for (name, _) in REVIEWED {
+            assert!(
+                bundled_presets()
+                    .iter()
+                    .any(|(n, s)| n == name && s.contains("time_beat.y")),
+                "{name} no longer uses the beat count — drop it from the \
+                 reviewed list"
+            );
+        }
+    }
+
     #[test]
     fn transition_set_names_only_registered_presets() {
         for name in TRANSITION_PRESETS {
