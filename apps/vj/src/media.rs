@@ -21,7 +21,7 @@ use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_
 use crate::pads::PadKey;
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
-use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
+use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
@@ -209,9 +209,26 @@ impl PlayMode {
     }
 }
 
-/// Decoded-frame cache ceiling for ping-pong (RGB bytes). A 2.7 s loop at
-/// 640×352 is ~44 MB; the longest sanctioned clip at 960×544 is ~200 MB.
-const MAX_PINGPONG_CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// Decoded-frame cache ceiling for ping-pong (BGRA bytes). Sized so the
+/// enhance service's 1280×704 outputs bounce from memory: 281 frames at
+/// 3.6 MB is ~1.01 GB — but an enhanced clip normally carries a flow map
+/// and bounces through the WARP path from its 508 MB endpoint cache
+/// instead, so this ceiling serves plain clips: a 5.9 s 640×352 loop is
+/// 127 MB, a 1280×704 clip fits up to ~7 s (177 frames at 24 fps). Bigger
+/// clips fall through to the seek-bounce tier below.
+const MAX_PINGPONG_CACHE_BYTES: usize = 640 * 1024 * 1024;
+
+/// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
+/// is a typical GOP, so most of what the in-seek discard walk decodes is
+/// the window itself.
+const REVERSE_WINDOW_100NS: i64 = 20_000_000;
+
+/// Byte cap on one collected reverse window. When 2 s of frames exceed it
+/// (large formats), the window keeps its NEWEST frames and the next hop
+/// re-decodes the trimmed head — reverse stays correct, just costs more
+/// decode. 96 MB holds a full 2 s window up to ~1 MB/frame (e.g. 640×352
+/// and 720p), and ~26 frames of 1280×704.
+const REVERSE_WINDOW_MAX_BYTES: usize = 96 * 1024 * 1024;
 
 struct SlotShared {
     stop: AtomicBool,
@@ -461,6 +478,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     let mut pingpong_cache_bytes: usize = 0;
     let mut pingpong_cache_complete = false;
     let mut pingpong_over_budget = false;
+    // Latched when this decoder's seek fails: never retry a broken seam.
+    let mut seek_bounce_broken = false;
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -654,6 +673,33 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     cache_playback(&shared, &pingpong_cache);
                     continue;
                 }
+                if mode == PlayMode::PingPong
+                    && pingpong_over_budget
+                    && silent
+                    && !seek_bounce_broken
+                    && info.duration_100ns > 0
+                {
+                    // TIER 3: too big for the frame cache, but a bounce was
+                    // asked for — GOP-batch reverse via decoder seeks. Falls
+                    // through to the reopen below when it hands back control
+                    // (mode change / seek / a decoder that cannot seek).
+                    match seek_bounce_playback(&mut decoder, &shared, &info) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            seek_bounce_broken = true;
+                            eprintln!(
+                                "vj-slot {slot:?}: decoder cannot seek; over-budget bounce falls back to loop"
+                            );
+                        }
+                        Err(e) => {
+                            *shared.failure.lock().unwrap() = Some(e);
+                            return;
+                        }
+                    }
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                }
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
                 if mode != PlayMode::Once {
                     match VideoFileDecoder::open(&path) {
@@ -728,8 +774,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     }
 }
 
-fn push_frame(
-    shared: &Arc<SlotShared>,
+/// Decoded NV12 → the ring's BGRA frame (no queueing).
+fn convert_frame(
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
     rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
@@ -740,12 +786,17 @@ fn push_frame(
             0xff00_0000 | ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32,
         );
     }
-    let out = Frame { pts_100ns: frame.pts_100ns, bgra: bgra.clone() };
-    shared
-        .frames
-        .lock()
-        .unwrap()
-        .push_back(Frame { pts_100ns: frame.pts_100ns, bgra });
+    Frame { pts_100ns: frame.pts_100ns, bgra }
+}
+
+fn push_frame(
+    shared: &Arc<SlotShared>,
+    frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
+    rgb_scratch: &mut Vec<u8>,
+) -> Frame {
+    let converted = convert_frame(frame, rgb_scratch);
+    let out = Frame { pts_100ns: converted.pts_100ns, bgra: converted.bgra.clone() };
+    shared.frames.lock().unwrap().push_back(converted);
     shared.video_ready.store(true, Ordering::Release);
     out
 }
@@ -819,6 +870,142 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             pts_100ns: synth_pts,
             bgra: cache[idx].bgra.clone(),
         });
+    }
+}
+
+/// TIER-3 bounce: a clip too big for the decoded-frame cache still plays
+/// forward-backward, by GOP-BATCH REVERSE. A reverse leg walks windows from
+/// the end of the clip: seek [`REVERSE_WINDOW_100NS`] back, forward-decode
+/// that window ONCE into a bounded buffer, serve it newest-first — one seek
+/// (plus the GOP walk hidden inside it) amortizes over the whole window's
+/// backwards frames. Forward legs just decode. pts are synthesized
+/// monotonically so the pacer never sees time reverse (the cache_playback
+/// rule). Windows over [`REVERSE_WINDOW_MAX_BYTES`] keep their NEWEST
+/// frames; the trimmed head is re-decoded by the next hop, so reverse stays
+/// frame-exact on any format at the price of extra decode.
+///
+/// Runs while the mode stays PingPong and the slot stays silent (the bounce
+/// law: reversed audio is not a thing). Returns Ok(true) when control goes
+/// back to the normal loop (mode change / seek request / unmute / stop),
+/// Ok(false) when the decoder's seek seam failed (the caller latches that
+/// and falls back to loop), Err only for a real decode failure.
+fn seek_bounce_playback(
+    decoder: &mut VideoFileDecoder,
+    shared: &Arc<SlotShared>,
+    info: &VideoFileInfo,
+) -> Result<bool, String> {
+    /// Anything that hands control back to the normal decode loop.
+    fn must_exit(shared: &SlotShared, has_audio: bool) -> bool {
+        shared.stop.load(Ordering::Acquire)
+            || shared.seek_100ns.load(Ordering::Acquire) >= 0
+            || PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::PingPong
+            || (has_audio && !shared.muted.load(Ordering::Acquire))
+    }
+    /// Pause-aware ring backpressure; true = exit requested.
+    fn wait_ring(shared: &SlotShared, has_audio: bool) -> bool {
+        loop {
+            if must_exit(shared, has_audio) {
+                return true;
+            }
+            if shared.paused.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(8));
+                continue;
+            }
+            if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            }
+            return false;
+        }
+    }
+    let has_audio = info.has_audio;
+    let duration = info.duration_100ns.max(0);
+    let delta = if info.fps_num > 0 {
+        ((10_000_000 * info.fps_den.max(1) as i64) / info.fps_num as i64).max(1)
+    } else {
+        416_667 // assume 24 fps when the container is silent about it
+    };
+    let mut rgb_scratch = Vec::new();
+    // Continue the presentation clock from wherever the forward pass ended.
+    let mut synth_pts = shared
+        .frames
+        .lock()
+        .unwrap()
+        .back()
+        .map(|f| f.pts_100ns)
+        .unwrap_or(0)
+        .max(shared.position_100ns.load(Ordering::Acquire));
+    let mut serve = |shared: &SlotShared, bgra: Vec<u32>, synth_pts: &mut i64| {
+        *synth_pts += delta;
+        shared
+            .frames
+            .lock()
+            .unwrap()
+            .push_back(Frame { pts_100ns: *synth_pts, bgra });
+        shared.video_ready.store(true, Ordering::Release);
+    };
+    loop {
+        // ---- reverse leg: end → start, in seek-batched windows.
+        let mut hi = duration;
+        while hi > 0 {
+            if wait_ring(shared, has_audio) {
+                return Ok(true);
+            }
+            let lo = (hi - REVERSE_WINDOW_100NS).max(0);
+            if decoder.seek(lo).is_err() {
+                return Ok(false);
+            }
+            let mut window: VecDeque<Frame> = VecDeque::new();
+            let mut bytes = 0usize;
+            loop {
+                if shared.stop.load(Ordering::Acquire) {
+                    return Ok(true);
+                }
+                match decoder.next_frame() {
+                    Ok(Some(f)) if f.pts_100ns < hi => {
+                        let frame = convert_frame(f, &mut rgb_scratch);
+                        bytes += frame.bgra.len() * 4;
+                        window.push_back(frame);
+                        while bytes > REVERSE_WINDOW_MAX_BYTES && window.len() > 1 {
+                            let dropped = window.pop_front().unwrap();
+                            bytes -= dropped.bgra.len() * 4;
+                        }
+                    }
+                    Ok(Some(_)) | Ok(None) => break,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            let Some(first_kept) = window.front().map(|f| f.pts_100ns) else {
+                // Dead air (no frames in the window): keep walking down.
+                hi = lo;
+                continue;
+            };
+            while let Some(frame) = window.pop_back() {
+                if wait_ring(shared, has_audio) {
+                    return Ok(true);
+                }
+                serve(shared, frame.bgra, &mut synth_pts);
+            }
+            // Strictly decreasing: every kept frame had pts < hi.
+            hi = first_kept;
+        }
+        // ---- forward leg: start → end, a plain decode pass.
+        if decoder.seek(0).is_err() {
+            return Ok(false);
+        }
+        loop {
+            if wait_ring(shared, has_audio) {
+                return Ok(true);
+            }
+            match decoder.next_frame() {
+                Ok(Some(f)) => {
+                    let frame = convert_frame(f, &mut rgb_scratch);
+                    serve(shared, frame.bgra, &mut synth_pts);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
     }
 }
 
@@ -1105,6 +1292,10 @@ pub enum DecodeJob {
     },
     /// Decode a still (PNG/JPEG) for a program slot.
     Still { gen: u64, slot: usize, path: PathBuf },
+    /// Probe a freshly cued video for an embedded `mkfl` motion payload and,
+    /// when present and within budget, decode the whole clip into the
+    /// flow-warp endpoint cache (see `crate::flow_warp::prepare_flow_clip`).
+    FlowClip { gen: u64, slot: usize, path: PathBuf },
     /// Local `.billboard` manifest with one PNG per frame beside it.
     Billboard { gen: u64, slot: usize, path: PathBuf },
     /// Catalog sprite actor: ONE packed sheet plus the `stateful-billboard`
@@ -1213,6 +1404,13 @@ pub enum DecodeDone {
         gen: u64,
         slot: usize,
         result: Result<(Vec<u32>, usize, usize), String>,
+    },
+    /// `Ok(None)` is the honest no-flow outcome (no mkfl / over budget /
+    /// unmappable geometry): the slot keeps playing exactly as today.
+    FlowClip {
+        gen: u64,
+        slot: usize,
+        result: Result<Option<Box<crate::flow_warp::FlowClipData>>, String>,
     },
     Billboard {
         gen: u64,
@@ -1984,6 +2182,15 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
             let result = decode_still(&path);
             DecodeDone::Still { gen, slot, result }
         }
+        DecodeJob::FlowClip { gen, slot, path } => {
+            // The platform decoder needs an extension-bearing path for
+            // digest-named cache objects; the alias lease drops (and the
+            // link is removed) only after the full decode finished.
+            let result = DecoderInput::prepare(&path, MediaType::Mp4).and_then(|input| {
+                crate::flow_warp::prepare_flow_clip(Path::new(&input.path))
+            });
+            DecodeDone::FlowClip { gen, slot, result }
+        }
         DecodeJob::Billboard { gen, slot, path } => {
             let result = crate::billboard::prepare(&path).map(Box::new);
             DecodeDone::Billboard { gen, slot, result }
@@ -2121,6 +2328,147 @@ mod tests {
             "makepad-vj-{label}-{}-{ticket}",
             std::process::id()
         ))
+    }
+
+    /// TIER-3 seek-bounce, on a REAL encoded GOP clip: the reverse leg must
+    /// hand out every frame in exact reverse order (identity read from the
+    /// picture, not the pts) and the synthesized pts must never go
+    /// backwards. macOS-only: the platform file codec this exercises runs
+    /// here; Windows takes the same facade.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seek_bounce_reverses_a_gop_clip_frame_exact() {
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        const W: u32 = 320;
+        const H: u32 = 192;
+        const FPS: u32 = 24;
+        const FRAMES: usize = 60;
+        const BITS: usize = 6;
+        const BLOCK_W: usize = W as usize / BITS;
+        const BLOCK_H: usize = 24;
+        // Frame index painted as a bit strip (the file_seek.rs trick): it
+        // survives the codec round trip as exact bits, not a luma level.
+        fn frame_rgb8(index: usize) -> Vec<u8> {
+            let bar = (index * 5) % W as usize;
+            let mut out = vec![0u8; W as usize * H as usize * 3];
+            for y in 0..H as usize {
+                for x in 0..W as usize {
+                    let luma = if y < BLOCK_H {
+                        let bit = (x / BLOCK_W).min(BITS - 1);
+                        if index >> bit & 1 == 1 { 235 } else { 16 }
+                    } else if y >= H as usize / 2 && x.abs_diff(bar) < 20 {
+                        220
+                    } else {
+                        90
+                    };
+                    let at = (y * W as usize + x) * 3;
+                    out[at] = luma;
+                    out[at + 1] = luma;
+                    out[at + 2] = luma;
+                }
+            }
+            out
+        }
+        fn identity_of(bgra: &[u32]) -> usize {
+            let mut index = 0;
+            for bit in 0..BITS {
+                let x0 = bit * BLOCK_W + BLOCK_W / 4;
+                let x1 = bit * BLOCK_W + BLOCK_W * 3 / 4;
+                let mut sum = 0u32;
+                let mut count = 0u32;
+                for y in BLOCK_H / 4..BLOCK_H * 3 / 4 {
+                    for x in x0..x1 {
+                        sum += (bgra[y * W as usize + x] >> 16) & 0xff;
+                        count += 1;
+                    }
+                }
+                if sum / count.max(1) > 128 {
+                    index |= 1 << bit;
+                }
+            }
+            index
+        }
+
+        let dir = test_dir("seek-bounce");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gop.mp4");
+        let path_str = path.to_str().unwrap();
+        let mut encoder = VideoFileEncoder::new(
+            path_str,
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: W,
+                height: H,
+                fps_num: FPS,
+                fps_den: 1,
+                video_bitrate_bps: 8_000_000,
+                audio: None,
+                keyframe_only: false, // a REAL GOP clip: reverse must batch
+            },
+        )
+        .expect("encoder");
+        for index in 0..FRAMES {
+            encoder.push_frame_rgb8(&frame_rgb8(index), None).expect("push");
+        }
+        encoder.finish().expect("finish");
+
+        // Put the decoder where decode_loop enters tier 3: at end of stream.
+        let mut decoder = VideoFileDecoder::open(path_str).expect("open");
+        let info = decoder.info().clone();
+        assert!(info.duration_100ns > 0);
+        while decoder.next_frame().expect("forward decode").is_some() {}
+
+        let shared = Arc::new(SlotShared {
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            mode: AtomicU8::new(PlayMode::PingPong as u8),
+            muted: AtomicBool::new(true),
+            seek_100ns: AtomicI64::new(-1),
+            position_100ns: AtomicI64::new(info.duration_100ns),
+            video_ready: AtomicBool::new(false),
+            preroll_status: AtomicU8::new(PrerollStatus::Ready as u8),
+            playback_rate_bits: AtomicU64::new(1.0f64.to_bits()),
+            end_of_stream: AtomicBool::new(false),
+            frames: Mutex::new(VecDeque::new()),
+            failure: Mutex::new(None),
+        });
+        let worker_shared = shared.clone();
+        let worker = std::thread::spawn(move || {
+            seek_bounce_playback(&mut decoder, &worker_shared, &info)
+        });
+
+        // Consume one full reverse leg plus a taste of the forward leg.
+        let want = FRAMES + 10;
+        let mut seen: Vec<(i64, usize)> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while seen.len() < want {
+            assert!(Instant::now() < deadline, "seek bounce starved: {seen:?}");
+            let frame = shared.frames.lock().unwrap().pop_front();
+            match frame {
+                Some(frame) => seen.push((frame.pts_100ns, identity_of(&frame.bgra))),
+                None => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        shared.mode.store(PlayMode::Once as u8, Ordering::Release);
+        let outcome = worker.join().expect("worker join");
+        assert_eq!(outcome.ok(), Some(true), "bounce must exit on the mode change");
+
+        // pts never go backwards — the pacer's contract.
+        for pair in seen.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "pts reversed: {pair:?}");
+        }
+        // The reverse leg: every frame, newest to oldest, frame-exact.
+        let reverse: Vec<usize> = seen[..FRAMES].iter().map(|s| s.1).collect();
+        let expect: Vec<usize> = (0..FRAMES).rev().collect();
+        assert_eq!(reverse, expect, "reverse leg must be frame-exact");
+        // Then the forward leg starts over from the head of the clip.
+        let forward: Vec<usize> = seen[FRAMES..].iter().map(|s| s.1).collect();
+        let expect: Vec<usize> = (0..forward.len()).collect();
+        assert_eq!(forward, expect, "forward leg must restart in order");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2416,8 +2764,9 @@ mod tests {
                 | DecodeDone::SlotMesh { .. }
                 | DecodeDone::Still { .. }
                 | DecodeDone::Billboard { .. }
+                | DecodeDone::FlowClip { .. }
                 | DecodeDone::Thumb { .. } => {
-                    panic!("no mesh/thumb job submitted")
+                    panic!("no mesh/flow/thumb job submitted")
                 }
             }
         }
