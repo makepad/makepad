@@ -35,27 +35,35 @@
 //!   AI_CONTENT_AUTO="audio sfx" AI_CONTENT_PROMPT="sword clash" \
 //!   AI_CONTENT_QUEUE="speech;image" AI_CONTENT_CAPTURE=/tmp/shot.png \
 //!   AI_CONTENT_CAPTURE_AT_S=5 AI_CONTENT_SURFACE=import AI_CONTENT_EXIT=1 \
+//!   AI_CONTENT_SAMPLE=mesh AI_CONTENT_SAMPLE_MESH=x.glb AI_CONTENT_DARK=1 \
 //!   cargo run -p makepad-app-asset-ui --release
 
 pub use makepad_widgets;
 
+mod analysis;
 mod artifact_io;
 mod asset_store_state;
 mod audio;
 mod billboard_view;
 mod chat;
 mod enhance_meta;
+mod fast_presets;
 mod fleet_poll;
 mod http;
 mod import;
 mod import_classic;
+mod store_content;
 mod library;
+mod mask_paint;
 mod mesh_view;
+mod music_page;
+use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
 mod scheduler;
 mod store_views;
 mod thumbnail_renderer;
 mod video_player;
+mod webcam;
 
 use crate::artifact_io::{
     ArtifactIo, IoDone, IoPurpose, IoRequest, PendingOpen, PreviewPixels, ViewerContent,
@@ -64,26 +72,172 @@ use crate::artifact_io::{
 use crate::fleet_poll::FleetPoll;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
-use crate::library::{collect_tag_stats, Library, TagStat, ThumbnailBackfillJob};
+use crate::music_page::MusicImportPage;
+use crate::library::{Library, ThumbnailBackfillJob};
 use crate::billboard_view::BillboardView;
 use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
-    server_kind_label, session_config_from_env, AssetStoreState, LocalLibraryFilters,
-    Remote, SERVER_KINDS,
+    server_kind_label, session_config_from_env, AssetStoreState, KindChoice, LibraryFilters,
+    MAX_CATALOG_ROWS,
+    Remote,
 };
+use makepad_asset_client::GcStatusDto;
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
+use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
+use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipeline::{
-    format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
+    ENHANCE_FACTORS,
+    consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
-    IMAGE_SIZES, IMAGE_STEPS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
+    EDIT_STRENGTHS, LORA_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
+// The shared preview widgets: the same set the VJ and DJ surfaces adopt.
+use makepad_asset_widgets::{AudioAction, ClipFormat, ContentPreview, PreviewContent};
+// The transcript panel over an analysed track: typed rows in, seek events
+// out. The host owns the transport; the widget only draws and reports.
+use makepad_asset_widgets::lyric_reader::{LyricEvent, LyricReader, LyricRow};
+// "Split audio layers": the bake queue, and what a track already carries.
+use crate::analysis::{AnalysisQueue, SideChannels};
+
+/// The readable name of an imported item: the model's own stem.
+///
+/// A pack item's id is `pack:<source>:<pack>:<stem>:<fingerprint>`, so the
+/// LAST segment is a content hash — or the literal word `premade` for an
+/// item that needs no render. Reading the tail blindly titled every card in
+/// the import feed "premade" instead of naming the thing arriving.
+fn import_item_name(file: &str) -> String {
+    if let Some((_, _, stem, _)) = crate::import::parse_pack_icon_key(file) {
+        if !stem.is_empty() {
+            return stem;
+        }
+    }
+    let tail = file
+        .rsplit(|c| c == ':' || c == '/')
+        .next()
+        .unwrap_or(file);
+    if tail.is_empty() { file.to_string() } else { tail.to_string() }
+}
+
+/// Where it came from: the pack (or the wad, the folder), so a grid of
+/// imports says what is arriving from where.
+fn import_item_source(file: &str) -> String {
+    if let Some((_, pack, _, _)) = crate::import::parse_pack_icon_key(file) {
+        return pack;
+    }
+    let mut parts: Vec<&str> = file.split(|c| c == ':' || c == '/').filter(|s| !s.is_empty()).collect();
+    parts.pop();
+    parts.pop().unwrap_or("").to_string()
+}
+
+/// An import preview PNG as the frames a card draws: the cells the picture
+/// DECLARED when it is a packed sheet (a sprite actor, a model turntable),
+/// otherwise the one picture it is. Interpretation and cutting are the ONE
+/// shared path (`makepad_asset_widgets::thumb`); the stamp read here is a
+/// declaration the packer wrote, never a measurement.
+fn import_thumb_frames(cx: &mut Cx, png: &[u8]) -> Option<(Vec<Texture>, f32)> {
+    let image = ImageBuffer::from_png(png).ok()?;
+    let plan = match makepad_asset_importer::anim_icon::read_layout(png) {
+        Some((cells, fps)) => makepad_asset_widgets::ThumbPlan::Cells(cells, fps),
+        None => makepad_asset_widgets::ThumbPlan::Whole,
+    };
+    let (w, h) = (image.width, image.height);
+    let level0 = w.saturating_mul(h);
+    let pixels = if image.data.len() >= level0 { &image.data[..level0] } else { &image.data[..] };
+    match makepad_asset_widgets::cut_plan_bgra(w, h, pixels, &plan) {
+        makepad_asset_widgets::ThumbPixels::Frames { width, height, frames, fps } => {
+            let textures = frames
+                .into_iter()
+                .map(|data| {
+                    Texture::new_with_format(
+                        cx,
+                        TextureFormat::VecBGRAu8_32 {
+                            width,
+                            height,
+                            data: Some(data),
+                            updated: TextureUpdated::Full,
+                        },
+                    )
+                })
+                .collect();
+            Some((textures, fps))
+        }
+        // A still — the whole picture, or a single packed cell. Keep the
+        // encoded buffer's mip path for the whole-image case.
+        makepad_asset_widgets::ThumbPixels::Still { width, height, bgra }
+            if width != w || height != h =>
+        {
+            Some((
+                vec![Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width,
+                        height,
+                        data: Some(bgra),
+                        updated: TextureUpdated::Full,
+                    },
+                )],
+                0.0,
+            ))
+        }
+        makepad_asset_widgets::ThumbPixels::Still { .. } => {
+            Some((vec![image.into_new_texture(cx)], 0.0))
+        }
+    }
+}
+
+/// Which container a track's bytes are in. The well does not sniff — the
+/// host is the one that knows what it fetched, from the catalog's own
+/// content type, with the file name as a second opinion.
+///
+/// And the bytes themselves as the last word, because the first two can both
+/// be wrong at once: a store payload is a digest-named cache object with no
+/// extension, and the content type is only as good as what put it there. A
+/// clip handed to the wrong decoder does not error — it produces no picture,
+/// which looks exactly like a well that was never given the file.
+fn clip_format(path: &std::path::Path, content_type: &str, bytes: &[u8]) -> Option<ClipFormat> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match (content_type, ext.as_str()) {
+        (t, _) if t.contains("mpeg") || t.contains("mp3") => Some(ClipFormat::Mp3),
+        (t, _) if t.contains("ogg") || t.contains("vorbis") => Some(ClipFormat::Ogg),
+        (t, _) if t.contains("wav") && is_riff_wave(bytes) => Some(ClipFormat::Wav),
+        (_, "mp3") => Some(ClipFormat::Mp3),
+        (_, "ogg") => Some(ClipFormat::Ogg),
+        (_, "wav") if is_riff_wave(bytes) => Some(ClipFormat::Wav),
+        _ => sniff_clip_format(bytes),
+    }
+}
+
+fn is_riff_wave(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+/// The container from the bytes. `makepad_audio_decode::sniff` tolerates a
+/// leading ID3 tag and junk before the first frame sync, which real files
+/// have plenty of.
+fn sniff_clip_format(bytes: &[u8]) -> Option<ClipFormat> {
+    if is_riff_wave(bytes) {
+        return Some(ClipFormat::Wav);
+    }
+    match makepad_audio_decode::sniff(bytes)? {
+        makepad_audio_decode::AudioFormat::Mp3 => Some(ClipFormat::Mp3),
+        makepad_audio_decode::AudioFormat::OggVorbis => Some(ClipFormat::Ogg),
+    }
+}
 use crate::store_views::{
-    admin_rows, candidate_cards, catalog_rows, format_bytes, runs_rows, short_digest, truncate,
+    admin_rows, candidate_cards, catalog_tiles, format_bytes, format_when,
+    runs_rows,
+    short_digest, truncate,
     should_start_file_drag, upstream_preview_allowed, CandidateSheet, GalleryEntry, InputAsset,
-    InputTray, LibraryGallery, LibraryGrid, PreviewWork, RowAction, StoreListPanel, StoreRow,
+    CatalogGrid, CatalogTile, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
+    RunTrayMember,
+    StoreListPanel, StoreRow,
     TileDelete,
 };
 use crate::video_player::VideoPlayer;
@@ -91,14 +245,15 @@ use crate::video_player::VideoPlayer;
 use makepad_micro_serde::SerJson;
 use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet, VecDeque};
+use makepad_asset_ai::fleet::BoxSnapshot;
+use std::path::{Path, PathBuf};
 
 app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
-    use mod.widgets.ContentChat
+    use mod.widgets.AssetChatList
     use mod.widgets.*
 
     // ---- design language ----------------------------------------------------
@@ -190,7 +345,135 @@ script_mod! {
             border_color_focus: #xffffff1e
         }
     }
+    // View toggle: the two glyphs an asset browser uses, and the ACTIVE one
+    // is lit. `focus` is the button's own instance, and this app never
+    // keyboard-focuses these, so it carries "this is the current view".
+    let ViewChip = ChipButton{
+        width: 30
+        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+        draw_text +: {
+            color: #x6f7883
+            color_focus: #x7db8f0
+            color_hover: #xe6ebf0
+            text_style: theme.font_regular{font_size: 11}
+        }
+        draw_bg +: {
+            color_focus: #x14283c
+            border_color_focus: #x3d9bf066
+        }
+    }
+    // The two view glyphs are DRAWN, not typed. Borrowed box-drawing
+    // characters gave the app a lopsided single rectangle for "tiles"
+    // against three clean lines for "list" — not a pair. Both are SDF now:
+    // the chip is a fixed 30x24 box, and each glyph is a 12x12 block laid
+    // out from the RECT CENTRE, so neither can drift and the active style
+    // (which only moves colours) cannot move them either.
+    let ViewGlyphChip = ViewChip{
+        text: ""
+        width: 30
+        height: 24
+        padding: 0
+        draw_bg +: {
+            color_glyph: uniform(#x6f7883)
+            color_glyph_hover: uniform(#xe6ebf0)
+            color_glyph_focus: uniform(#x7db8f0)
+        }
+    }
+    // Tiles: a classic 2x2 grid — four 5px rounded squares, 2px gutters.
+    let ViewGridChip = ViewGlyphChip{
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let edge = self.border_size
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_down, self.down)
+                let ink = self.color_glyph
+                    .mix(self.color_glyph_focus, self.focus)
+                    .mix(self.color_glyph_hover, self.hover)
+                sdf.box(edge, edge, self.rect_size.x - edge * 2.0, self.rect_size.y - edge * 2.0, self.border_radius)
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, edge)
+                // The glyph block is 12x12 laid out from the rect centre.
+                let gx = self.rect_size.x * 0.5 - 6.0
+                let gy = self.rect_size.y * 0.5 - 6.0
+                sdf.box(gx, gy, 5.0, 5.0, 0.75)
+                sdf.box(gx + 7.0, gy, 5.0, 5.0, 0.75)
+                sdf.box(gx, gy + 7.0, 5.0, 5.0, 0.75)
+                sdf.box(gx + 7.0, gy + 7.0, 5.0, 5.0, 0.75)
+                sdf.fill(ink)
+                return sdf.result
+            }
+        }
+    }
+    // List: three 2px rounded bars across the same 12x12 block.
+    let ViewRowsChip = ViewGlyphChip{
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let edge = self.border_size
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_down, self.down)
+                let ink = self.color_glyph
+                    .mix(self.color_glyph_focus, self.focus)
+                    .mix(self.color_glyph_hover, self.hover)
+                sdf.box(edge, edge, self.rect_size.x - edge * 2.0, self.rect_size.y - edge * 2.0, self.border_radius)
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, edge)
+                let gx = self.rect_size.x * 0.5 - 6.0
+                let gy = self.rect_size.y * 0.5 - 6.0
+                sdf.box(gx, gy, 12.0, 2.0, 0.5)
+                sdf.box(gx, gy + 5.0, 12.0, 2.0, 0.5)
+                sdf.box(gx, gy + 10.0, 12.0, 2.0, 0.5)
+                sdf.fill(ink)
+                return sdf.result
+            }
+        }
+    }
+
     // Quiet control: queue reorder, transport, sample loaders.
+    // The clear glyph that lives INSIDE the search box: same flat weight
+    // as the dropdown chevrons beside it, visible only while there is text.
+    // `×` and not `✕`: the theme font has no U+2715 and draws tofu, and the
+    // rest of this app already says × (see "× Retire shown").
+    let SearchClearChip = ButtonFlat{
+        width: 16 height: 16
+        margin: 0
+        padding: 0
+        visible: false
+        text: "×"
+        draw_text +: {
+            color: #x6a7178
+            color_hover: #xe6ebf0
+            color_down: #xffffff
+            color_focus: #x6a7178
+            text_style: theme.font_regular{font_size: 7.5}
+        }
+        draw_bg +: {
+            border_radius: 2.0
+            border_size: 0.0
+            color: #x00000000
+            color_hover: #xffffff14
+            color_down: #xffffff20
+            color_focus: #x00000000
+            border_color: #x00000000
+            border_color_hover: #x00000000
+            border_color_down: #x00000000
+            border_color_focus: #x00000000
+        }
+    }
+
     let GhostButton = ChipButton{
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
         draw_text +: {
@@ -218,6 +501,26 @@ script_mod! {
             color_down: #x452020
             border_color_hover: #xff8a8030
             border_color_down: #xff8a8042
+        }
+    }
+    // Always-visible deletion affordance. Destructive red is still reserved
+    // for hover/down, but the normal-state × is deliberately high contrast.
+    // Defined HERE, next to DangerButton, because `let` bindings only resolve
+    // backwards: the fleet job row (far above the library) uses it too, and
+    // it silently failed to resolve while this lived further down.
+    let LibraryDeleteButton = DangerButton{
+        width: 22 height: 22
+        padding: 0
+        draw_text +: {
+            color: #xc6cfd8
+            color_hover: #xffffff
+            color_down: #xffffff
+            text_style: theme.font_bold{font_size: 11}
+        }
+        draw_bg +: {
+            color: #xffffff0b
+            border_color: #xffffff14
+            border_size: 1.0
         }
     }
 
@@ -332,10 +635,211 @@ script_mod! {
     // size — it does NOT center the result in the slot. Each card wraps one
     // of these in a fixed-size aligning box; the box is what visibly
     // centers portrait/square/strip textures, with no stretch and no crop.
+    //
+    // LIVE-PICTURE slots ONLY (webcam frames, in-flight generation
+    // candidates, input-tray stills the host composed): an ASSET's
+    // thumbnail is always mod.widgets.AssetThumb, which obeys the asset's
+    // declared views — never a bare Image.
     let ThumbFitImage = Image{
         width: Fill
         height: Fill
         fit: ImageFit.Smallest
+    }
+    // One fleet box: status light + host + what it is busy with. Click =
+    // per-box model list (enable/disable for routing).
+    let BoxCard = RoundedView{
+        width: 126 height: Fit
+        flow: Down spacing: 2
+        padding: Inset{left: 6 right: 6 top: 5 bottom: 5}
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            color: #x161619
+            border_color: #xffffff10
+            border_size: 1.0
+            border_radius: 3.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.0,
+                    self.rect_size.y - self.border_size * 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(self.color)
+                sdf.stroke(self.border_color, self.border_size)
+                return sdf.result
+            }
+        }
+        View{
+            width: Fill height: Fit flow: Right spacing: 5
+            align: Align{y: 0.5}
+            light := SolidView{
+                width: 8 height: 8
+                draw_bg +: {
+                    color: #x5a616a
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                        sdf.fill(self.color)
+                        return sdf.result
+                    }
+                }
+            }
+            host := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 8} } }
+        }
+        // Activity line sits under the host text (past the light), not at
+        // the card's left edge, so the two lines read as one block.
+        busy := HintLabel{
+            text: ""
+            margin: Inset{left: 13}
+            draw_text +: { text_style: theme.font_regular{font_size: 7.5} }
+        }
+    }
+    // One live job on a box (ours or another client's) with its Cancel.
+    let FleetJobRow = View{
+        width: Fill height: 22 flow: Right spacing: 6
+        align: Align{y: 0.5}
+        visible: false
+        jstate := SolidView{
+            width: 7 height: 7
+            draw_bg +: {
+                color: #xf0a33d
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
+        }
+        jtext := BrightLabel{
+            width: Fill text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+            draw_text +: { text_style: theme.font_regular{font_size: 8.5} }
+        }
+        jcancel := LibraryDeleteButton{ text: "×" }
+    }
+    // Chip sized for a one-line table row: the routing list is forty rows
+    // deep, so its buttons are shorter and tighter than a panel chip.
+    let RoutingChip = ChipButton{
+        height: 16
+        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+        draw_text +: { text_style: theme.font_regular{font_size: 8} }
+    }
+    // One model on a box, inside the box popup — a TABLE row, not a flow:
+    // check | light | name | domain | state | ack | ★. Every column past the
+    // name has a fixed width, so the ack and ★ buttons line up down the list
+    // instead of jittering with their own label lengths, and the state text
+    // gets a bounded box of its own. It used to be the `Fill` column between
+    // the name and the buttons, which left it 20-40px on ★-wide rows and cut
+    // "ready · 24 GB" down to "rea" right where the buttons start. Only the
+    // name flexes now; anything that overflows ellipsizes.
+    let FleetModelRow = View{
+        width: Fill height: 18 flow: Right spacing: 4
+        // Keeps the ★ column clear of the scroll bar's overlay track.
+        padding: Inset{left: 0 right: 6 top: 0 bottom: 0}
+        align: Align{y: 0.5}
+        visible: false
+        enable := CheckBox{
+            width: 17
+            text: ""
+            active: true
+            padding: Inset{left: 2 right: 2 top: 1 bottom: 1}
+        }
+        mstate := SolidView{
+            width: 7 height: 7
+            draw_bg +: {
+                color: #x5a616a
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
+        }
+        mname := BrightLabel{
+            width: Fill text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+            draw_text +: { text_style: theme.font_regular{font_size: 8.5} }
+        }
+        mdomain := HintLabel{
+            width: 46 text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+        }
+        // Widest real value is "downloading 100%"; every other state is
+        // "<state> · <n> GB" and lands well inside this.
+        mnote := HintLabel{
+            width: 74 text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+        }
+        terms := RoutingChip{ width: 38 text: "ack" }
+        // Per-box, per-domain preference: "on THIS box use THIS model for
+        // that domain" (a 3090 gets the small image model, the 5090 the
+        // big one, same request). Routing hides the domain's other models
+        // on the box while a preference stands.
+        // Wide enough for the longest label it takes, "★ preferred".
+        prefer := RoutingChip{ width: 70 text: "prefer" }
+    }
+    // One artifact of the selected run in the run tray: thumb + kind. Click
+    // = open in the viewer AND pin as the next transform run's input.
+    let RunChip = RoundedView{
+        width: 54 height: 58
+        flow: Down spacing: 2
+        padding: 3
+        align: Align{x: 0.5}
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            color: #x161619
+            border_color: #xffffff10
+            border_color_selected: #x3d9bf0
+            selected: instance(0.0)
+            border_size: 1.0
+            border_radius: 3.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.0,
+                    self.rect_size.y - self.border_size * 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(self.color)
+                sdf.stroke(
+                    self.border_color.mix(self.border_color_selected, self.selected),
+                    self.border_size
+                )
+                return sdf.result
+            }
+        }
+        animator: Animator{
+            select: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Play.Snap}
+                    apply: {draw_bg: {selected: 0.0}}
+                }
+                on: AnimatorState{
+                    from: {all: Play.Snap}
+                    apply: {draw_bg: {selected: 1.0}}
+                }
+            }
+        }
+        View{
+            width: 46 height: 36
+            align: Align{x: 0.5 y: 0.5}
+            thumb := mod.widgets.AssetThumb{}
+        }
+        kind := HintLabel{
+            text: ""
+            draw_text +: { text_style: theme.font_regular{font_size: 6.5} }
+        }
     }
     // Doom/Quake sprites: point sample so authored texels stay crisp when
     // the card scales them up. Linear filtering turns them to mush.
@@ -368,23 +872,6 @@ script_mod! {
         padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
         draw_text +: {
             text_style: theme.font_regular{font_size: 7.5}
-        }
-    }
-    // Always-visible deletion affordance. Destructive red is still reserved
-    // for hover/down, but the normal-state × is deliberately high contrast.
-    let LibraryDeleteButton = DangerButton{
-        width: 22 height: 22
-        padding: 0
-        draw_text +: {
-            color: #xc6cfd8
-            color_hover: #xffffff
-            color_down: #xffffff
-            text_style: theme.font_bold{font_size: 11}
-        }
-        draw_bg +: {
-            color: #xffffff0b
-            border_color: #xffffff14
-            border_size: 1.0
         }
     }
     // Compact grab affordance. Claims and sweep-locks the pointer on
@@ -425,6 +912,21 @@ script_mod! {
     // cards. One compact tile per pipeline-run group, fronted by the run's
     // final artifact; the library cap is 64 records, and every reachable
     // tile scrolls by wheel/trackpad drag or the visible scrollbar.
+    // The selected run spread out: one horizontal, virtualized row of chips
+    // (imports bring hundreds of members; fixed slots would not do).
+    mod.widgets.RunTrayBase = #(RunTray::register_widget(vm))
+    mod.widgets.RunTray = set_type_default() do mod.widgets.RunTrayBase{
+        width: Fill
+        height: 70
+        list := PortalList{
+            width: Fill
+            height: Fill
+            flow: Right
+            spacing: 4
+            scroll_bar: ScrollBar{}
+            Chip := RunChip{}
+        }
+    }
     mod.widgets.LibraryGalleryBase = #(LibraryGallery::register_widget(vm))
     mod.widgets.LibraryGallery = set_type_default() do mod.widgets.LibraryGalleryBase{
         width: Fill
@@ -457,7 +959,7 @@ script_mod! {
                         View{
                             width: Fill height: Fill
                             align: Align{x: 0.5 y: 0.5}
-                            thumb := ThumbFitImage{}
+                            thumb := mod.widgets.AssetThumb{}
                         }
                         // Member-count badge over the thumbnail: the cue
                         // that this tile IS a multi-artifact run and its ×
@@ -528,11 +1030,12 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             flow: Down
-            spacing: 8
             scroll_bar: ScrollBar{}
             Row := View{
                 width: Fill height: Fit
-                flow: Right spacing: 8
+                flow: Right spacing: 10
+                // PortalList stacks items flush; the row gap is padding.
+                padding: Inset{bottom: 10}
                 c1 := CandidateCell{} c2 := CandidateCell{}
                 c3 := CandidateCell{} c4 := CandidateCell{}
             }
@@ -544,92 +1047,141 @@ script_mod! {
         }
     }
 
-    // Library-surface grid card: title uses the full caption row; a
-    // 18px grip is the only chrome (no kind badge — that ate the name).
-    let GridCell = GalleryCard{
-        width: 150 height: 126
+    // Library tile: one catalog asset, its thumbnail streamed from the
+    // store by digest. No file drag handle — a catalog asset is not a file
+    // on this machine until something asks for it.
+    // Sized by the Rust side every draw: the row divides the panel width
+    // among its columns so a wall of cards spans the whole panel instead of
+    // leaving a growing gutter down the right. The numbers here are the
+    // shape, not the size.
+    let CatalogCell = GalleryCard{
+        width: 150 height: 150
+        // spacing/padding MUST equal store_views::GRID_CARD_SPACING /
+        // GRID_CARD_PAD — the per-draw card-height math assumes them.
         flow: Down spacing: 4
-        padding: 5
-        View{
-            width: 140 height: 88
+        padding: 6
+        // The picture WELL: a visible frame the thumbnail floats in, so an
+        // aspect-fitted picture's letterboxing reads as matting, not as
+        // stray card padding — and the well's left edge lines up with the
+        // title below it.
+        grid_thumb_box := RoundedView{
+            width: Fill height: 88
             align: Align{x: 0.5 y: 0.5}
-            grid_thumb := ThumbFitImage{}
-            grid_sprite := SpriteFitImage{ visible: false }
-        }
-        View{
-            width: Fill height: Fit flow: Right spacing: 3
-            align: Align{y: 0.0}
-            grid_title := Label{
-                width: Fill
-                draw_text +: {
-                    color: #xc6cfd8
-                    text_style: theme.font_regular{font_size: 8}
-                }
+            // Breathing room INSIDE the well: a picture that fills the
+            // well's height still keeps clear of its walls.
+            padding: 3
+            draw_bg +: {
+                color: #x101013
+                border_color: #xffffff08
+                border_size: 1.0
+                border_radius: 2.0
             }
-            file_drag := FileDragHandle{}
+            // THE thumbnail widget — obeys the asset's declared views.
+            grid_thumb := mod.widgets.AssetThumb{}
+        }
+        // Exactly two lines, reserved whether the title needs them or not,
+        // so no card's text straddles its own bottom edge and every card in
+        // a row is the same height. A longer title wraps once and ends line
+        // two in an ellipsis (the layouter's max_rows machinery, tested in
+        // draw::text::layouter). Height is re-applied per draw from
+        // GRID_TITLE_H; 30 here only covers the pre-sized first frame.
+        grid_title := Label{
+            width: Fill
+            height: 30
+            max_lines: 2
+            text_overflow: TextOverflow.Ellipsis
+            draw_text +: {
+                color: #xc6cfd8
+                text_style: theme.font_regular{font_size: 8}
+            }
         }
     }
 
-    // Wrapping, virtualized thumbnail grid: PortalList rows of up to eight
-    // card slots; the Rust side shows `columns(width)` of them per row.
-    mod.widgets.LibraryGridBase = #(LibraryGrid::register_widget(vm))
-    mod.widgets.LibraryGrid = set_type_default() do mod.widgets.LibraryGridBase{
+    // Wrapping, virtualized catalog grid: PortalList rows of up to eight
+    // card slots; the Rust side shows `columns(width)` of them per row and
+    // sizes the range from the SERVER's match count.
+    mod.widgets.CatalogGridBase = #(CatalogGrid::register_widget(vm))
+    mod.widgets.CatalogGrid = set_type_default() do mod.widgets.CatalogGridBase{
         width: Fill
         height: Fill
         list := PortalList{
             width: Fill height: Fill
             flow: Down
-            spacing: 8
             scroll_bar: ScrollBar{}
+            // The gaps — between the columns AND below the row — are
+            // re-applied per draw from store_views::GRID_GAP (PortalList adds
+            // no spacing between its items, so the row gap is bottom
+            // padding). The literals here only cover the pre-sized frame.
             Row := View{
                 width: Fill height: Fit
-                flow: Right spacing: 8
-                c1 := GridCell{} c2 := GridCell{} c3 := GridCell{} c4 := GridCell{}
-                c5 := GridCell{} c6 := GridCell{} c7 := GridCell{} c8 := GridCell{}
+                flow: Right spacing: 10
+                padding: Inset{bottom: 10}
+                c1 := CatalogCell{} c2 := CatalogCell{} c3 := CatalogCell{} c4 := CatalogCell{}
+                c5 := CatalogCell{} c6 := CatalogCell{} c7 := CatalogCell{} c8 := CatalogCell{}
+            }
+            // One asset per row: its picture, then everything the catalog
+            // knows about it, reading left to right. The bottom padding is
+            // the gap between rows — PortalList itself stacks items flush.
+            ListRow := View{
+                width: Fill height: Fit
+                padding: Inset{bottom: 6}
+                // Fit, not fixed: the row is as tall as its content needs,
+                // so the alias line can never straddle the card's bottom
+                // edge. Every row has the same content shape, so rows stay
+                // uniform anyway.
+                lr_card := GalleryCard{
+                    width: Fill height: Fit
+                    flow: Right spacing: 10
+                    padding: Inset{left: 6 right: 10 top: 6 bottom: 8}
+                    align: Align{y: 0.5}
+                    View{
+                        width: 96 height: 64
+                        align: Align{x: 0.5 y: 0.5}
+                        lr_thumb := mod.widgets.AssetThumb{}
+                    }
+                    View{
+                        width: Fill height: Fit flow: Down spacing: 2
+                        lr_title := Label{
+                            width: Fill
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                            draw_text +: {
+                                color: #xdfe6ec
+                                text_style: theme.font_bold{font_size: 9}
+                            }
+                        }
+                        lr_meta := Label{
+                            width: Fill
+                            draw_text +: {
+                                color: #x9ec4ea
+                                text_style: theme.font_regular{font_size: 8}
+                            }
+                        }
+                        lr_alias := Label{
+                            width: Fill
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                            draw_text +: {
+                                color: #x8a939d
+                                text_style: theme.font_regular{font_size: 7.5}
+                            }
+                        }
+                    }
+                    lr_when := Label{
+                        width: 190
+                        draw_text +: {
+                            color: #x707a85
+                            text_style: theme.font_regular{font_size: 7.5}
+                        }
+                    }
+                }
             }
             Empty := View{
-                width: Fill height: 140
+                width: Fill height: 160
                 flow: Down spacing: 4
                 align: Align{x: 0.5 y: 0.5}
-                HintLabel{ text: "Nothing here matches." }
-                HintLabel{ text: "Clear the filters, or generate something from Create." }
-            }
-        }
-    }
-
-    // One active Library filter chip. Instances are shown/hidden from Rust.
-    let FilterTagChip = RoundedView{
-        visible: false
-        width: Fit height: 22
-        flow: Right
-        spacing: 3
-        padding: Inset{left: 8 right: 3 top: 0 bottom: 0}
-        align: Align{y: 0.5}
-        draw_bg +: {
-            color: #x14283c
-            border_color: #x3d9bf066
-            border_size: 1.0
-            border_radius: 11.0
-        }
-        chip_name := Label{
-            width: Fit
-            height: Fill
-            align: Align{y: 0.5}
-            draw_text +: {
-                color: #x9ec4ea
-                text_style: theme.font_bold{font_size: 8}
-            }
-        }
-        chip_x := GhostButton{
-            width: 16 height: Fill
-            margin: 0
-            padding: 0
-            align: Align{x: 0.5 y: 0.5}
-            text: "×"
-            draw_text +: {
-                color: #x8a939d
-                color_hover: #xe6ebf0
-                text_style: theme.font_bold{font_size: 10}
+                padding: 20
+                empty_note := HintLabel{ width: Fill text: "" }
             }
         }
     }
@@ -672,13 +1224,20 @@ script_mod! {
                 align: Align{y: 0.5}
                 stage_title := Label{
                     width: 190
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
                         color: #xdfe6ec
                         text_style: theme.font_regular{font_size: 8.5}
                     }
                 }
+                // ONE line, always: a long status wrapping to two lines
+                // grew the row and made the whole Loading strip bounce
+                // while an import streamed status updates.
                 stage_meta := Label{
                     width: Fill
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
                         color: #x8a939d
                         text_style: theme.font_regular{font_size: 8}
@@ -777,29 +1336,66 @@ script_mod! {
         }
     }
 
-    // Scrolling DropDown2 popup: selected row stays under the field, list
-    // clamps to the window, ▲/▼ arrows scroll. Used for every select in
-    // this app (preset lists are long enough that DropDownFlat clips).
-    let FieldDrop = DropDown2Flat{
+    // Filtering ComboBox: a text field with a disclosure arrow. Typing
+    // filters the closed set live, Enter commits the highlighted match, Esc
+    // restores the previous pick; past 12 rows the popup scrolls on a real
+    // scrollbar. Used for every select in this app.
+    let FieldCaption = HintLabel{
+        width: 92
+        height: Fit
+        align: Align{y: 0.5}
+    }
+    // One separated layer's audibility. Checked = audible, which is how the
+    // track arrives: the sum of all four IS the mixed song.
+    let LayerToggle = CheckBox{
+        active: true
+        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+        draw_text +: {
+            color: #x828a93
+            text_style: theme.font_regular{font_size: 8.5}
+        }
+    }
+    let DropField = View{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: 6
+        align: Align{y: 0.5}
+    }
+
+    let FieldDrop = ComboBox{
         width: Fill
         margin: 0
         padding: Inset{left: 8 right: 24 top: 5 bottom: 5}
         item_height: 22.0
-        arrow_height: 16.0
+        max_visible_items: 12
         popup_margin: 8.0
-        draw_text +: {
-            color: #xaab3bd
-            color_hover: #xe6ebf0
-            color_focus: #xc6cfd8
-            color_down: #xe6ebf0
-            text_style: theme.font_regular{font_size: 8.5}
+        popup_font_px: 8.5
+        input +: {
+            draw_text +: {
+                color: #xaab3bd
+                color_hover: #xe6ebf0
+                color_focus: #xe6ebf0
+                color_down: #xe6ebf0
+                color_empty: #x5a616a
+                color_empty_hover: #x6a7178
+                color_empty_focus: #x6a7178
+                text_style: theme.font_regular{font_size: 8.5}
+            }
+        }
+        scroll_bar +: {
+            draw_bg +: {
+                color: #xffffff1e
+                color_hover: #xffffff38
+                color_drag: #xffffff50
+            }
         }
         draw_item_text +: {
-            hover: instance(0.0)
-            active: instance(0.0)
             color: #xc6cfd8
             color_hover: #xe6ebf0
             color_active: #xe6ebf0
+            color_match: #x3d9bf0
+            color_dim: #x6a7178
             text_style: theme.font_regular{font_size: 8.5}
         }
         draw_bg +: {
@@ -851,17 +1447,9 @@ script_mod! {
             border_color: #xffffff22
         }
         draw_item +: {
-            hover: instance(0.0)
-            active: instance(0.0)
             color: #x00000000
             color_hover: #x2a2a32
             color_active: #x243044
-        }
-        draw_scroll_arrow +: {
-            up: instance(0.0)
-            enabled: instance(1.0)
-            color: #xc6cfd8
-            color_disabled: #x4a5158
         }
     }
     let FieldDrop2 = FieldDrop{}
@@ -982,6 +1570,10 @@ script_mod! {
                 window.inner_size: vec2(1560, 980)
                 window.title: "Asset UI"
                 body +: {
+                    flow: Overlay
+                    shell := View{
+                    width: Fill
+                    height: Fill
                     flow: Right
                     show_bg: true
                     // Plain-View DrawQuad ignores `color` (its pixel returns
@@ -999,10 +1591,37 @@ script_mod! {
                         flow: Down
                         draw_bg +: { color: #x121215 }
 
-                        // The whole panel scrolls: on a short window nothing
-                        // (Fleet included) falls off the bottom — it scrolls
-                        // into reach instead.
-                        left_scroll := QuietScrollY{
+                        // Top: the whole authoring panel scrolls. Bottom: the
+                        // Fleet box stays put (own splitter pane) so the box
+                        // cards never scroll out of reach.
+                        left_split := Splitter{
+                            width: Fill
+                            height: Fill
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(150.0)
+                            size: 6.0
+                            draw_bg +: {
+                                color: #x1a1a1f
+                                color_hover: #x3d9bf0
+                                color_drag: #x3d9bf0
+                            }
+                            // The chat is the OTHER front door to the same
+                            // generation machinery, so it lives next to the
+                            // form rather than on a page of its own: form on
+                            // top, chat under it, both above the Fleet box,
+                            // and the user drags how much room each gets.
+                            a: Splitter{
+                            width: Fill
+                            height: Fill
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(300.0)
+                            size: 6.0
+                            draw_bg +: {
+                                color: #x1a1a1f
+                                color_hover: #x3d9bf0
+                                color_drag: #x3d9bf0
+                            }
+                            a: QuietScrollY{
                         width: Fill
                         height: Fill
                         flow: Down
@@ -1018,88 +1637,53 @@ script_mod! {
                             spinner := LoadingSpinner{ width: 22 height: 22 visible: false }
                         }
 
-                        PanelHeading{ text: "What to make" margin: Inset{top: 4} }
-                        ChainRow{
-                            GroupTag{ text: "IMAGE" }
-                            ChainChips{
-                                qp_img := ChipButton{ text: "Image" }
-                                qp_expimg := ChipButton{ text: "Expand → Image" }
-                                qp_cutout := ChipButton{ text: "Image → Cutout" }
-                                qp_depth := ChipButton{ text: "Image → Depth" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "3D" }
-                            ChainChips{
-                                qp_mesh := ChipButton{ text: "Image → Mesh" }
-                                qp_mesh_pbr := ChipButton{ text: "Image → Mesh → PBR" }
-                                qp_mesh_pbr_test := ChipButton{ text: "Image → Mesh → PBR (test)" }
-                                qp_character := ChipButton{ text: "Character" }
-                                qp_character_pbr := ChipButton{ text: "Character → PBR" }
-                                qp_character_pbr_test := ChipButton{ text: "Character → PBR (test)" }
-                                qp_world := ChipButton{ text: "Image → World" }
-                                qp_expworld := ChipButton{ text: "Expand → Image → World" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "VIDEO" }
-                            ChainChips{
-                                qp_vid := ChipButton{ text: "Video" }
-                                qp_expvid := ChipButton{ text: "Expand → Video" }
-                                qp_i2v := ChipButton{ text: "Image → Video" }
-                                qp_expi2v := ChipButton{ text: "Expand → Img → Video" }
-                                qp_fleet_i2v := ChipButton{ text: "Fleet Images → Choose → Video" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "SOUND" }
-                            ChainChips{
-                                qp_sfx := ChipButton{ text: "SFX (sa3)" }
-                                qp_sfx_moss := ChipButton{ text: "SFX (moss)" }
-                                qp_sfx_woosh := ChipButton{ text: "SFX (woosh)" }
-                                qp_expsfx_sa3 := ChipButton{ text: "Expand → SFX (sa3)" }
-                                qp_expsfx_moss := ChipButton{ text: "Expand → SFX (moss)" }
-                                qp_expsfx_woosh := ChipButton{ text: "Expand → SFX (woosh)" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "MUSIC" }
-                            ChainChips{
-                                qp_music := ChipButton{ text: "Music (Music3 native)" }
-                                qp_music_ace := ChipButton{ text: "Music (ACE-Step)" }
-                                qp_expmusic := ChipButton{ text: "Expand → Music3" }
-                                qp_expmusic_ace := ChipButton{ text: "Expand → ACE" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "VOICE" }
-                            ChainChips{
-                                qp_speech := ChipButton{ text: "Speech (kokoro)" }
-                                qp_indextts := ChipButton{ text: "Voice clone (IndexTTS)" }
-                            }
-                        }
-
-                        // Persistent selected-input chip: the managed asset
-                        // the next transform run consumes. Populated by an
-                        // explicit click on a History tile / Library card;
-                        // its × unpins without deleting anything.
-                        input_tray := Card{
-                            visible: false
+                        PanelHeading{ text: "Saved" margin: Inset{top: 4} }
+                        saved_presets := View{
                             width: Fill height: Fit
-                            flow: Right spacing: 8
-                            padding: 6
+                            flow: Flow.Right{wrap: true}
+                            spacing: 4
+                            fp0 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp0_go := ChipButton{ text: "" }
+                                fp0_del := GhostButton{ text: "×" }
+                            }
+                            fp1 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp1_go := ChipButton{ text: "" }
+                                fp1_del := GhostButton{ text: "×" }
+                            }
+                            fp2 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp2_go := ChipButton{ text: "" }
+                                fp2_del := GhostButton{ text: "×" }
+                            }
+                            fp3 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp3_go := ChipButton{ text: "" }
+                                fp3_del := GhostButton{ text: "×" }
+                            }
+                            fp4 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp4_go := ChipButton{ text: "" }
+                                fp4_del := GhostButton{ text: "×" }
+                            }
+                            fp5 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp5_go := ChipButton{ text: "" }
+                                fp5_del := GhostButton{ text: "×" }
+                            }
+                            fp6 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp6_go := ChipButton{ text: "" }
+                                fp6_del := GhostButton{ text: "×" }
+                            }
+                            fp7 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp7_go := ChipButton{ text: "" }
+                                fp7_del := GhostButton{ text: "×" }
+                            }
+                        }
+                        save_preset_row := View{
+                            width: Fill height: Fit flow: Right spacing: 6
                             align: Align{y: 0.5}
-                            View{
-                                width: 44 height: 33
-                                align: Align{x: 0.5 y: 0.5}
-                                input_chip_thumb := ThumbFitImage{}
+                            preset_name_input := TextInputFlat{
+                                width: Fill
+                                height: 28
+                                empty_text: "preset name"
                             }
-                            View{
-                                width: Fill height: Fit flow: Down spacing: 2
-                                input_chip_kind := HintLabel{ text: "" }
-                                input_chip_title := BrightLabel{ text: "" }
-                            }
-                            input_clear := LibraryDeleteButton{ text: "×" }
+                            save_preset_btn := GhostButton{ text: "Save preset" }
                         }
 
                         View{
@@ -1143,30 +1727,9 @@ script_mod! {
                             }
                         }
 
-                        PanelHeading{ text: "Pipeline & routing" }
-                        preset_drop := FieldDrop{}
-                        model_drop := FieldDrop{}
-                        box_drop := FieldDrop{}
-                        voice_drop := FieldDrop{}
-                        params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            size_drop := FieldDrop{ width: Fill }
-                            steps_drop := FieldDrop{ width: Fill }
-                        }
-                        mesh_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            texture_size_drop := FieldDrop{ width: Fill }
-                        }
-                        vid_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            vid_size_drop := FieldDrop{ width: Fill }
-                            vid_len_drop := FieldDrop{ width: Fill }
-                        }
-                        music_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            music_len_drop := FieldDrop{ width: Fill }
-                        }
-
+                        // The fire button lives right under the prompt — it
+                        // must never scroll out of view in a short window
+                        // (the chat pane's Send is NOT this button).
                         action_row := View{
                             width: Fill height: Fit flow: Right spacing: 6
                             margin: Inset{top: 4}
@@ -1174,6 +1737,283 @@ script_mod! {
                             pull_btn := GhostButton{ text: "Pull model" }
                             retry_btn := ChipButton{ text: "Retry last" visible: false }
                         }
+                        // One run per IDLE capable box (not up, not busy with
+                        // another job, not already holding one of our stages),
+                        // each its own History item — a quick spread of
+                        // variations across the fleet. Off = the normal single
+                        // run placed by affinity.
+                        parallel_toggle := CheckBox{
+                            text: "all free boxes in parallel"
+                            active: false
+                            padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                            draw_text +: {
+                                color: #x828a93
+                                text_style: theme.font_regular{font_size: 8.5}
+                            }
+                        }
+
+                        PanelHeading{ text: "Pipeline & routing" }
+                        DropField{
+                            FieldCaption{ text: "Type" }
+                            preset_drop := FieldDrop{}
+                        }
+                        md_text_row := DropField{ visible: false FieldCaption{ text: "Text model" } md_text := FieldDrop{} }
+                        md_image_row := DropField{ visible: false FieldCaption{ text: "Image model" } md_image := FieldDrop{} }
+                        md_audio_row := DropField{ visible: false FieldCaption{ text: "Audio model" } md_audio := FieldDrop{} }
+                        md_speech_row := DropField{ visible: false FieldCaption{ text: "Speech model" } md_speech := FieldDrop{} }
+                        md_music_row := DropField{ visible: false FieldCaption{ text: "Music model" } md_music := FieldDrop{} }
+                        md_video_row := DropField{ visible: false FieldCaption{ text: "Video model" } md_video := FieldDrop{} }
+                        md_mesh_row := DropField{ visible: false FieldCaption{ text: "Mesh model" } md_mesh := FieldDrop{} }
+                        md_matte_row := DropField{ visible: false FieldCaption{ text: "Matte model" } md_matte := FieldDrop{} }
+                        md_depth_row := DropField{ visible: false FieldCaption{ text: "Depth model" } md_depth := FieldDrop{} }
+                        md_segment_row := DropField{ visible: false FieldCaption{ text: "Segment model" } md_segment := FieldDrop{} }
+                        md_paint_row := DropField{ visible: false FieldCaption{ text: "Paint model" } md_paint := FieldDrop{} }
+                        md_world_row := DropField{ visible: false FieldCaption{ text: "World model" } md_world := FieldDrop{} }
+                        md_rig_row := DropField{ visible: false FieldCaption{ text: "Rig model" } md_rig := FieldDrop{} }
+                        md_motion_row := DropField{ visible: false FieldCaption{ text: "Motion model" } md_motion := FieldDrop{} }
+                        md_edit_row := DropField{ visible: false FieldCaption{ text: "Edit model" } md_edit := FieldDrop{} }
+                        md_upscale_row := DropField{ visible: false FieldCaption{ text: "Upscale model" } md_upscale := FieldDrop{} }
+                        md_control_row := DropField{ visible: false FieldCaption{ text: "Control model" } md_control := FieldDrop{} }
+                        md_inpaint_row := DropField{ visible: false FieldCaption{ text: "Inpaint model" } md_inpaint := FieldDrop{} }
+                        md_splat_row := DropField{ visible: false FieldCaption{ text: "Splat model" } md_splat := FieldDrop{} }
+                        DropField{
+                            FieldCaption{ text: "Box" }
+                            box_drop := FieldDrop{}
+                        }
+                        speech_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Speech voice" }
+                            voice_drop := FieldDrop{}
+                        }
+                        image_size_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Image size" }
+                            size_drop := FieldDrop{}
+                        }
+                        image_steps_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Image steps" }
+                            steps_drop := FieldDrop{}
+                        }
+                        // FLUX.1 LoRA adapters (files the boxes list via
+                        // /loras); none = pristine model.
+                        lora_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "LoRA" }
+                            lora_drop := FieldDrop{}
+                        }
+                        lora_strength_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "LoRA strength" }
+                            lora_strength_drop := FieldDrop{}
+                        }
+                        mesh_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Mesh texture" }
+                            texture_size_drop := FieldDrop{}
+                        }
+                        mesh_faces_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Mesh faces" }
+                            mesh_faces_drop := FieldDrop{}
+                        }
+                        // TRELLIS bakes its own colors; mesh-only chains keep
+                        // them, PBR-paint chains skip the tex flow unless asked.
+                        // Rig/motion chains: leave empty for the playable
+                        // idle/walk/jump/run/dance set (the backend's own body-
+                        // action prompts); type a motion to get ONE prompted
+                        // take instead ("A person dances the robot").
+                        motion_prompt_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Motion prompt" }
+                            motion_prompt_input := TextInputFlat{
+                                width: Fill
+                                height: 28
+                                margin: 0
+                                padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
+                                empty_text: "empty = playable set · e.g. A person dances the robot"
+                                draw_text +: {
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                    color: #xdfe6ec
+                                    color_hover: #xe6ebf0
+                                    color_focus: #xe6ebf0
+                                    color_down: #xdfe6ec
+                                    color_empty: #x5a616a
+                                    color_empty_hover: #x6a7178
+                                    color_empty_focus: #x6a7178
+                                }
+                            }
+                        }
+                        mesh_colors_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "TRELLIS colors" }
+                            trellis_colors_toggle := CheckBox{
+                                text: "keep on mesh stage before PBR paint"
+                                active: false
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                        }
+                        vid_size_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Video size" }
+                            vid_size_drop := FieldDrop{}
+                        }
+                        vid_len_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Video length" }
+                            vid_len_drop := FieldDrop{}
+                        }
+                        // H3 always denoises video+audio jointly; off just
+                        // skips the service's audio VAE decode + AAC mux
+                        // (silent mp4, no audio track).
+                        vid_interp_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Frame interpolation" }
+                            vid_interp_drop := FieldDrop{}
+                        }
+                        vid_audio_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Video audio" }
+                            video_audio_toggle := CheckBox{
+                                text: "generate audio track"
+                                active: true
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                        }
+                        // Edit chains: how much of the input survives.
+                        edit_strength_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Keep input" }
+                            edit_strength_drop := FieldDrop{}
+                        }
+                        music_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Music length" }
+                            music_len_drop := FieldDrop{}
+                        }
+                        // Video post-process (enhance): each transform is
+                        // independently optional.
+                        enh_upscale_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Uprez" }
+                            enh_upscale_drop := FieldDrop{}
+                        }
+                        enh_tween_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Frame tween" }
+                            enh_tween_drop := FieldDrop{}
+                        }
+                        enh_flow_row := View{
+                            visible: false
+                            width: Fill height: Fit
+                            enh_flow_toggle := CheckBox{
+                                text: "motion vectors (arbitrary-rate playback)"
+                                active: true
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                        }
+
+                        // Persistent selected-input chip: the managed asset
+                        // the next transform run consumes. Populated by an
+                        // explicit click on a History tile / Library card;
+                        // its × unpins without deleting anything.
+                        input_tray := Card{
+                            visible: false
+                            width: Fill height: Fit
+                            flow: Right spacing: 8
+                            padding: 6
+                            align: Align{y: 0.5}
+                            View{
+                                width: 44 height: 33
+                                align: Align{x: 0.5 y: 0.5}
+                                input_chip_thumb := ThumbFitImage{}
+                            }
+                            View{
+                                width: Fill height: Fit flow: Down spacing: 2
+                                input_chip_kind := HintLabel{ text: "" }
+                                input_chip_title := BrightLabel{ text: "" }
+                            }
+                            // Extra references for multi-reference editors
+                            // (⇧ double-click on any image adds one; click a
+                            // thumb here to drop it).
+                            input_refs := View{
+                                visible: false
+                                width: Fit height: Fit flow: Right spacing: 4
+                                align: Align{y: 0.5}
+                                input_ref0 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref0_thumb := ThumbFitImage{} }
+                                input_ref1 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref1_thumb := ThumbFitImage{} }
+                                input_ref2 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref2_thumb := ThumbFitImage{} }
+                            }
+                            input_clear := LibraryDeleteButton{ text: "×" }
+                        }
+
+                        // Webcam as an input tile: live preview, "Snap" makes
+                        // the current frame a PNG input asset; "auto-run"
+                        // keeps snapping + generating with the selected
+                        // img2X preset while nothing else is running.
+                        webcam_tray := Card{
+                            width: Fill height: Fit
+                            flow: Right spacing: 8
+                            padding: 6
+                            align: Align{y: 0.5}
+                            webcam_toggle := CheckBox{
+                                text: "Webcam"
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                            webcam_live := View{
+                                visible: false
+                                width: Fit height: Fit flow: Right spacing: 8
+                                align: Align{y: 0.5}
+                                View{
+                                    width: 44 height: 33
+                                    align: Align{x: 0.5 y: 0.5}
+                                    webcam_thumb := ThumbFitImage{}
+                                }
+                                webcam_snap := ChipButton{ text: "Snap → input" }
+                                webcam_auto := CheckBox{
+                                    text: "auto-run"
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                    draw_text +: {
+                                        color: #x828a93
+                                        text_style: theme.font_regular{font_size: 8.5}
+                                    }
+                                }
+                            }
+                            webcam_status := HintLabel{ width: Fill text: "" }
+                        }
+
+                        // The selected run, spread out: every artifact the
+                        // pipeline produced (source image, matte, mesh, paint,
+                        // rig, …) as clickable chips. History keeps ONE tile
+                        // per run; this is where its members are reachable —
+                        // click a chip to view it, and it becomes the pinned
+                        // input, so a "mesh only" preset re-meshes exactly
+                        // that image.
+                        run_tray := Card{
+                            visible: false
+                            width: Fill height: Fit
+                            flow: Down spacing: 4
+                            padding: 6
+                            run_tray_title := HintLabel{ text: "" }
+                            run_tray_list := mod.widgets.RunTray{}
+                        }
+
 
                         PanelHeading{ text: "Now running" }
                         now_card := Card{
@@ -1227,14 +2067,184 @@ script_mod! {
                             height: 170
                             stages_label := DimLabel{ text: "No pipeline yet — pick a chain above and Generate." }
                         }
-
-                        Divider{}
-                        PanelHeading{ text: "Fleet" margin: Inset{top: 0} }
-                        fleet_scroll := QuietScrollY{
-                            width: Fill
-                            height: 110
-                            fleet_label := DimLabel{ text: "Discovering fleet…" }
+                            }
+                            // Say it in words and the same run appears in the
+                            // queue above: one prompt box, one fleet, one
+                            // library.
+                            b: View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 top: 6 bottom: 8}
+                                spacing: 4
+                                View{
+                                    width: Fill height: Fit flow: Right
+                                    align: Align{y: 0.5}
+                                    PanelHeading{ text: "Chat" margin: Inset{top: 0} }
+                                    View{ width: Fill height: Fit }
+                                    chat_cancel_btn := DangerButton{ text: "Stop" visible: false }
+                                    chat_clear_btn := GhostButton{ text: "Clear" }
+                                }
+                                chat_status := HintLabel{
+                                    width: Fill
+                                    text: "Waiting for the asset server…"
+                                }
+                                chat_list := AssetChatList{}
+                                View{
+                                    width: Fill height: Fit flow: Right spacing: 6
+                                    align: Align{y: 1.0}
+                                    chat_input := TextInputFlat{
+                                        width: Fill
+                                        height: 46
+                                        is_multiline: true
+                                        submit_on_enter: true
+                                        empty_text: "make me a picture of a unicorn"
+                                        draw_text +: {
+                                            text_style: theme.font_regular{font_size: 9}
+                                            color: #xdfe6ec
+                                            color_empty: #x5a616a
+                                        }
+                                        draw_bg +: {
+                                            border_radius: 3.0
+                                            border_size: 1.0
+                                            color: #x161619
+                                            border_color: #xffffff14
+                                            border_color_focus: #x3d9bf066
+                                        }
+                                    }
+                                    chat_send_btn := PrimaryButton{ text: "Send" }
+                                }
+                            }
+                            }
+                            // Fleet box: one card per box — status light
+                            // (idle / busy with what / down), host, the
+                            // model it is busy with. Click a card for its
+                            // model list with per-box enable toggles.
+                            b: View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 top: 6 bottom: 8}
+                                spacing: 4
+                                View{
+                                    width: Fill height: Fit flow: Right
+                                    align: Align{y: 0.5}
+                                    PanelHeading{ text: "Fleet" margin: Inset{top: 0} }
+                                    View{ width: Fill height: Fit }
+                                    fleet_label := HintLabel{ text: "discovering…" }
+                                }
+                                fleet_cards := QuietScrollY{
+                                    width: Fill
+                                    height: Fill
+                                    flow: Flow.Right{wrap: true}
+                                    spacing: 6
+                                    wrap_spacing: 6
+                                    fb0 := BoxCard{ visible: false }
+                                    fb1 := BoxCard{ visible: false }
+                                    fb2 := BoxCard{ visible: false }
+                                    fb3 := BoxCard{ visible: false }
+                                    fb4 := BoxCard{ visible: false }
+                                    fb5 := BoxCard{ visible: false }
+                                    fb6 := BoxCard{ visible: false }
+                                    fb7 := BoxCard{ visible: false }
+                                    fb8 := BoxCard{ visible: false }
+                                    fb9 := BoxCard{ visible: false }
+                                    fb10 := BoxCard{ visible: false }
+                                    fb11 := BoxCard{ visible: false }
+                                }
+                            }
                         }
+                    }
+
+                    // Fleet node config: a column between the authoring panel
+                    // and the content, opened by a box card, closed with ×.
+                    // Every model the box advertises, a per-box enable
+                    // toggle and a per-domain ★ prefer; "Defaults" picks the
+                    // largest present model that fits the GPU per domain.
+                    fleet_node_panel := SolidView{
+                        visible: false
+                        width: 440
+                        height: Fill
+                        flow: Down spacing: 6
+                        padding: Inset{left: 12 right: 12 top: 12 bottom: 10}
+                        draw_bg +: { color: #x141418 }
+                        View{
+                            width: Fill height: Fit flow: Right spacing: 8
+                            align: Align{y: 0.5}
+                            fleet_box_title := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 11} } }
+                            View{ width: Fill height: Fit }
+                            fleet_box_defaults := ChipButton{ text: "Defaults" }
+                            fleet_box_close := LibraryDeleteButton{ text: "×" }
+                        }
+                        // Both header lines are bounded to the panel: without
+                        // a width they were Fit, so they ran straight off the
+                        // right edge and read as truncated mid-word.
+                        fleet_box_status := HintLabel{
+                            width: Fill text: ""
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                        }
+                        fleet_box_hint := HintLabel{
+                            width: Fill
+                            max_lines: 2
+                            text_overflow: TextOverflow.Ellipsis
+                            text: "Unchecked = not routed here. ★ = this box's only model for that domain."
+                        }
+                        // Live jobs on the box (ours AND other clients'), each
+                        // with its own Cancel → POST /job/<id>/cancel.
+                        fleet_box_jobs := View{
+                            visible: false
+                            width: Fill height: Fit flow: Down spacing: 2
+                            PanelHeading{ text: "Jobs on this box" margin: Inset{top: 2} }
+                            fj0 := FleetJobRow{} fj1 := FleetJobRow{} fj2 := FleetJobRow{}
+                            fj3 := FleetJobRow{} fj4 := FleetJobRow{} fj5 := FleetJobRow{}
+                            fj6 := FleetJobRow{} fj7 := FleetJobRow{}
+                        }
+                        PanelHeading{ text: "Models" margin: Inset{top: 2} }
+                        fleet_box_rows := QuietScrollY{
+                            width: Fill
+                            height: Fill
+                            flow: Down spacing: 1
+                            fm0 := FleetModelRow{}
+                            fm1 := FleetModelRow{}
+                            fm2 := FleetModelRow{}
+                            fm3 := FleetModelRow{}
+                            fm4 := FleetModelRow{}
+                            fm5 := FleetModelRow{}
+                            fm6 := FleetModelRow{}
+                            fm7 := FleetModelRow{}
+                            fm8 := FleetModelRow{}
+                            fm9 := FleetModelRow{}
+                            fm10 := FleetModelRow{}
+                            fm11 := FleetModelRow{}
+                            fm12 := FleetModelRow{}
+                            fm13 := FleetModelRow{}
+                            fm14 := FleetModelRow{}
+                            fm15 := FleetModelRow{}
+                            fm16 := FleetModelRow{}
+                            fm17 := FleetModelRow{}
+                            fm18 := FleetModelRow{}
+                            fm19 := FleetModelRow{}
+                            fm20 := FleetModelRow{}
+                            fm21 := FleetModelRow{}
+                            fm22 := FleetModelRow{}
+                            fm23 := FleetModelRow{}
+                            fm24 := FleetModelRow{}
+                            fm25 := FleetModelRow{}
+                            fm26 := FleetModelRow{}
+                            fm27 := FleetModelRow{}
+                            fm28 := FleetModelRow{}
+                            fm29 := FleetModelRow{}
+                            fm30 := FleetModelRow{}
+                            fm31 := FleetModelRow{}
+                            fm32 := FleetModelRow{}
+                            fm33 := FleetModelRow{}
+                            fm34 := FleetModelRow{}
+                            fm35 := FleetModelRow{}
+                            fm36 := FleetModelRow{}
+                            fm37 := FleetModelRow{}
+                            fm38 := FleetModelRow{}
+                            fm39 := FleetModelRow{}
                         }
                     }
 
@@ -1251,6 +2261,21 @@ script_mod! {
                         thumbnail_renderer := ThumbnailRenderer{
                             abs_pos: vec2(0.0, 0.0)
                         }
+                        // Offscreen splat-thumbnail scene (gaussian .ply
+                        // History previews): a 256² XrSceneView parked far
+                        // off-screen; its color target is read back once the
+                        // splat has loaded + sorted. Same lifecycle home as
+                        // the mesh thumbnail renderer above.
+                        splat_thumb_scene := XrSceneView{
+                            abs_pos: vec2(-6000.0, -6000.0)
+                            width: 256
+                            height: 256
+                            camera.distance: 6.0
+                            camera.distance_min: 0.5
+                            splat_thumb := ViewSplat{
+                                scale: vec3(1.0, -1.0, 1.0)
+                            }
+                        }
 
                         surface_nav := SolidView{
                             width: Fill height: Fit flow: Right spacing: 2
@@ -1258,16 +2283,18 @@ script_mod! {
                             padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
                             draw_bg +: { color: #x0f0f12 }
                             nav_create := SurfaceTab{ text: "● CREATE" }
-                            nav_chat := SurfaceTab{ text: "CHAT" }
                             nav_library := SurfaceTab{ text: "LIBRARY" }
                             nav_import := SurfaceTab{ text: "LOAD" }
                             nav_runs := SurfaceTab{ text: "RUNS + WORKERS" }
                             nav_admin := SurfaceTab{ text: "ADMIN + AUDIT" }
                             View{ width: Fill height: Fit }
+                            // The ONE place the store address is written.
+                            // Quiet grey, not alarm red: which host answered
+                            // is reference, not news.
                             remote_connection := Label{
                                 text: "SERVER · DISCONNECTED"
                                 draw_text +: {
-                                    color: #xc47d74
+                                    color: #x6a7178
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
@@ -1395,12 +2422,26 @@ script_mod! {
                                         image_tools := View{
                                             width: Fill height: Fit flow: Right
                                             padding: Inset{left: 10 right: 10 top: 6}
+                                            // Inpaint/outpaint mask tools (inpaint preset + a
+                                            // pinned picture): paint on the picture below.
+                                            mask_tools := View{
+                                                visible: false
+                                                width: Fit height: Fit flow: Right spacing: 6
+                                                align: Align{y: 0.5}
+                                                HintLabel{ text: "MASK · drag = paint, ⌥drag = erase" }
+                                                mask_brush_drop := FieldDrop{ width: 120 }
+                                                mask_clear_btn := ChipButton{ text: "Clear" }
+                                                mask_invert_btn := ChipButton{ text: "Invert" }
+                                                mask_outpaint_btn := ChipButton{ text: "Outpaint +25%" }
+                                                mask_status := HintLabel{ text: "" }
+                                            }
                                             View{ width: Fill height: Fit }
                                             alpha_btn := ChipButton{ text: "Alpha matte" }
                                         }
                                         image_body := View{
                                             width: Fill height: Fill
                                             align: Align{x: 0.5 y: 0.5}
+                                            mask_paint := mod.widgets.MaskPaint{ visible: false }
                                             image_view := Image{
                                                 width: Fill
                                                 height: Fill
@@ -1491,10 +2532,10 @@ script_mod! {
                                             margin: Inset{left: 16 top: 10}
                                             text: "Video results (mp4) appear here."
                                         }
-                                        video_img := Image{
+                                        viewer_video := VideoView{
                                             width: Fill
                                             height: Fill
-                                            fit: ImageFit.Smallest
+                                            margin: Inset{left: 8 right: 8 bottom: 8}
                                         }
                                     }
 
@@ -1507,9 +2548,51 @@ script_mod! {
                                         // (MeshView draws its own orbit/zoom hint.)
                                         View{
                                             width: Fill height: Fit flow: Right
+                                            align: Align{y: 0.5}
                                             padding: Inset{left: 10 right: 10 top: 4 bottom: 6}
+                                            spacing: 8
+                                            HintLabel{ text: "Scene" }
                                             View{ width: Fill height: Fit }
-                                            sample_mesh_btn := GhostButton{ text: "load sample mesh" }
+                                            shadows_toggle := CheckBox{
+                                                text: "Shadows"
+                                                active: true
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            dark_toggle := CheckBox{
+                                                text: "Dark"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            // PBR lane only: softbox environment + strong key so
+                                            // metallic/roughness maps actually read.
+                                            studio_toggle := CheckBox{
+                                                text: "Studio light"
+                                                active: true
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            speculars_toggle := CheckBox{
+                                                text: "Speculars"
+                                                active: true
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            HintLabel{ text: "View" }
+                                            pbr_view_drop := FieldDrop{ width: 110 }
                                         }
                                     }
 
@@ -1574,53 +2657,7 @@ script_mod! {
                                 }
                             }
 
-                            // ---- Chat: local Fleet Qwen + generation tools ----
-                            chat_surface := SolidView{
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                padding: 12
-                                spacing: 8
-                                draw_bg +: { color: #x0d0d10 }
-                                View{
-                                    width: Fill height: Fit flow: Down spacing: 3
-                                    PanelHeading{ text: "Qwen · fleet" margin: Inset{top: 0} }
-                                    chat_status := DimLabel{
-                                        text: "Waiting for Qwen fleet…"
-                                    }
-                                    HintLabel{
-                                        text: "Ask for an image, video, sfx, speech, music, mesh, world, or character. Qwen calls the matching *.generate tool."
-                                    }
-                                }
-                                chat_list := ContentChat{}
-                                View{
-                                    width: Fill height: Fit flow: Right spacing: 6
-                                    align: Align{y: 1.0}
-                                    chat_input := TextInputFlat{
-                                        width: Fill
-                                        height: 56
-                                        is_multiline: true
-                                        submit_on_enter: true
-                                        empty_text: "hey make me an image of a rusty trawler at dawn"
-                                        draw_text +: {
-                                            text_style: theme.font_regular{font_size: 9}
-                                            color: #xdfe6ec
-                                            color_empty: #x5a616a
-                                        }
-                                        draw_bg +: {
-                                            border_radius: 3.0
-                                            border_size: 1.0
-                                            color: #x161619
-                                            border_color: #xffffff14
-                                            border_color_focus: #x3d9bf066
-                                        }
-                                    }
-                                    chat_send_btn := PrimaryButton{ text: "Send" }
-                                    chat_cancel_btn := DangerButton{ text: "Stop" visible: false }
-                                }
-                            }
-
-                            // ---- Library: the Local/Server asset browser ----
+                            // ---- Library: the server catalog, and only it ----
                             library_surface := SolidView{
                                 width: Fill
                                 height: Fill
@@ -1633,68 +2670,185 @@ script_mod! {
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
                                     SurfaceTitle{ text: "Library" width: Fit }
-                                    lib_local_tab := ChipButton{ text: "● Local" }
-                                    lib_server_tab := ChipButton{ text: "Server" }
+                                    lib_source_note := HintLabel{ width: Fit text: "asset store catalog" }
                                     View{ width: Fill height: Fit }
                                     lib_count := HintLabel{ text: "" }
                                 }
                                 View{
-                                    width: Fill height: Fit flow: Down spacing: 6
+                                    width: Fill height: Fit flow: Right spacing: 6
+                                    align: Align{y: 0.5}
+                                    // The box and its own ×: a search you
+                                    // can undo where you typed it, rather
+                                    // than by hunting for a button that
+                                    // also resets the two dropdowns.
                                     View{
-                                        width: Fill height: Fit flow: Right spacing: 6
-                                        align: Align{y: 0.5}
-                                        lib_search := FilterInput{ width: 250 empty_text: "Search label, prompt, id…" }
-                                        lib_tag_drop := FieldDrop{ width: 280 }
-                                        lib_clear_btn := GhostButton{ text: "Clear" }
-                                        lib_enhance_btn := GhostButton{ text: "Enhance metadata" }
-                                    }
-                                    lib_tag_chips := View{
-                                        visible: false
-                                        width: Fill height: 22
-                                        flow: Right
-                                        spacing: 6
-                                        align: Align{y: 0.5}
-                                        lib_tag_chips_label := HintLabel{
-                                            text: "filters"
-                                            width: Fit
-                                            height: Fill
-                                            align: Align{y: 0.5}
+                                        width: 250 height: Fit
+                                        flow: Overlay
+                                        lib_search := FilterInput{
+                                            width: Fill
+                                            padding: Inset{left: 8 right: 26 top: 5 bottom: 5}
+                                            empty_text: "Search the catalog: title, alias, #tag…"
                                         }
-                                        ft0 := FilterTagChip{}
-                                        ft1 := FilterTagChip{}
-                                        ft2 := FilterTagChip{}
-                                        ft3 := FilterTagChip{}
-                                        ft4 := FilterTagChip{}
-                                        ft5 := FilterTagChip{}
-                                        ft6 := FilterTagChip{}
-                                        ft7 := FilterTagChip{}
+                                        View{
+                                            width: Fill height: 28
+                                            align: Align{x: 1.0 y: 0.5}
+                                            padding: Inset{right: 5}
+                                            lib_search_clear := SearchClearChip{}
+                                        }
                                     }
+                                    FieldCaption{ text: "Kind" }
+                                    lib_kind_drop := FieldDrop{ width: 150 }
+                                    FieldCaption{ text: "Tags" }
+                                    lib_label_drop := FieldDrop{ width: 220 }
+                                    lib_clear_btn := GhostButton{ text: "Clear" }
+                                    // The two glyphs every asset browser uses:
+                                    // a grid of squares, and stacked lines.
+                                    lib_grid_btn := ViewGridChip{}
+                                    lib_list_btn := ViewRowsChip{}
+                                    lib_analyse_shown_btn := GhostButton{ text: "Analyse shown" }
+                                    lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
-                                View{
-                                    width: Fill height: Fill flow: Right spacing: 8
-                                    lib_pages := PageFlip{
-                                        width: Fill
-                                        height: Fill
-                                        active_page: @lib_local_page
-                                        lib_local_page := View{
-                                            width: Fill height: Fill
-                                            lib_grid := mod.widgets.LibraryGrid{}
-                                        }
-                                        lib_server_page := View{
-                                            width: Fill height: Fill flow: Down spacing: 6
-                                            lib_server_note := HintLabel{ width: Fill text: "" }
-                                            lib_server_list := mod.widgets.StoreListPanel{}
+                                // Grid | rail split, user-adjustable: the
+                                // rail starts at a sane 330 and never has to
+                                // steal more of the grid than its owner
+                                // wants to give it.
+                                lib_split := Splitter{
+                                    width: Fill height: Fill
+                                    axis: SplitterAxis.Horizontal
+                                    align: SplitterAlign.FromB(330.0)
+                                    size: 6.0
+                                    draw_bg +: {
+                                        color: #x1a1a1f
+                                        color_hover: #x3d9bf0
+                                        color_drag: #x3d9bf0
+                                    }
+                                    a: View{
+                                        width: Fill height: Fill flow: Down spacing: 6
+                                        padding: Inset{right: 6}
+                                        // The catalog starts straight under the
+                                        // filters: nothing stands between what
+                                        // the user typed and what it found.
+                                        lib_grid := mod.widgets.CatalogGrid{}
+                                        // Maintenance: ONE box at the foot of
+                                        // the panel holding every control that
+                                        // trims the store — the retention
+                                        // switch, the run status, the cancel
+                                        // and the collect. Destructive, rare,
+                                        // and no longer floating in the
+                                        // catalog's prime real estate.
+                                        gc_group := RoundedView{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
+                                            draw_bg +: {
+                                                color: #x121215
+                                                border_color: #xffffff10
+                                                border_size: 1.0
+                                                border_radius: 3.0
+                                            }
+                                            FieldCaption{ width: Fit text: "Maintenance" }
+                                            gc_retain_check := CheckBox{
+                                                text: "trim history: keep newest 3 revisions"
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            View{ width: Fill height: Fit }
+                                            gc_status := HintLabel{ width: Fit text: "" }
+                                            gc_cancel_btn := GhostButton{ text: "Cancel GC" visible: false }
+                                            gc_collect_btn := DangerButton{ text: "Collect garbage" }
                                         }
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
-                                    detail_panel := StorePanel{
-                                        width: 330
+                                    // The SPLITTER owns its width.
+                                    b: StorePanel{
+                                        width: Fill
                                         height: Fill
                                         detail_scroll := QuietScrollY{
                                             width: Fill height: Fill
                                             flow: Down
                                             spacing: 4
+                                            // Look at the thing without leaving the
+                                            // Library: a mesh orbits here, a picture
+                                            // shows itself, audio shows its waveform.
+                                            PanelHeading{ text: "Preview" }
+                                            // The well is as tall as what it
+                                            // is SHOWING wants to be: a track
+                                            // is a band and a transport row,
+                                            // a mesh earns the tall panel.
+                                            // The policy lives in the shared
+                                            // widget (ContentPreview::
+                                            // natural_height); this asks for
+                                            // it by fitting.
+                                            detail_preview := SolidView{
+                                                width: Fill height: Fit
+                                                flow: Overlay
+                                                draw_bg +: { color: #x0d0d10 }
+                                                detail_preview_pages := PageFlip{
+                                                    width: Fill height: Fit
+                                                    active_page: @detail_preview_shared
+                                                    // Stills, cycling sheets
+                                                    // and audio come from the
+                                                    // SHARED widget set; the
+                                                    // mesh face is this app's
+                                                    // viewer until it moves
+                                                    // into the same crate.
+                                                    detail_preview_shared := View{
+                                                        width: Fill height: Fit
+                                                        detail_content := mod.widgets.ContentPreview{}
+                                                    }
+                                                    // This app's mesh viewer
+                                                    // has no natural height
+                                                    // of its own; a turntable
+                                                    // wants the tall panel.
+                                                    detail_preview_mesh := View{
+                                                        width: Fill height: 300
+                                                        detail_mesh_view := MeshView{}
+                                                    }
+                                                    // An actor PLAYS here:
+                                                    // the same viewer the
+                                                    // Create surface mounts,
+                                                    // with its state list and
+                                                    // its eight rotations.
+                                                    detail_preview_billboard := View{
+                                                        width: Fill height: 300
+                                                        detail_billboard_view := BillboardView{}
+                                                    }
+                                                }
+                                            }
+                                            // The separated layers, when the
+                                            // asset carries them: four mute
+                                            // toggles over one shared
+                                            // playhead. Unchecking one is
+                                            // the whole gesture — the sum of
+                                            // all four IS the track.
+                                            detail_layers_row := View{
+                                                visible: false
+                                                width: Fill height: Fit flow: Right spacing: 6
+                                                align: Align{y: 0.5}
+                                                FieldCaption{ text: "layers" }
+                                                layer_drums_toggle := LayerToggle{ text: "drums" }
+                                                layer_bass_toggle := LayerToggle{ text: "bass" }
+                                                layer_vocals_toggle := LayerToggle{ text: "vocals" }
+                                                layer_other_toggle := LayerToggle{ text: "other" }
+                                            }
+                                            // The transcript, when the asset
+                                            // carries one: it follows the
+                                            // playhead and a click on a line
+                                            // seeks the transport to it.
+                                            detail_lyrics_panel := View{
+                                                visible: false
+                                                width: Fill height: 200
+                                                flow: Down
+                                                spacing: 4
+                                                PanelHeading{ text: "Lyrics" }
+                                                detail_lyrics := mod.widgets.LyricReader{
+                                                    width: Fill height: Fill
+                                                }
+                                            }
                                             View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 align: Align{y: 0.5}
@@ -1734,13 +2888,41 @@ script_mod! {
                                             detail_rev := MonoLabel{ text: "—" }
                                             PanelHeading{ text: "Publish" }
                                             detail_publish := MonoLabel{ text: "—" }
-                                            detail_actions := View{
+                                            // "Split audio layers" for ONE
+                                            // track. Never automatic: it is
+                                            // minutes of GPU, so it is a
+                                            // button, and it says when the
+                                            // asset already carries the
+                                            // analysis instead of offering a
+                                            // click that only re-proves it.
+                                            detail_analysis_actions := View{
+                                                width: Fill height: Fit flow: Down spacing: 4
+                                                margin: Inset{top: 10}
+                                                visible: false
+                                                View{
+                                                    width: Fill height: Fit flow: Right spacing: 6
+                                                    align: Align{y: 0.5}
+                                                    detail_analyse_btn := GhostButton{ text: "Analyse stems" }
+                                                    detail_analyse_lyrics := CheckBox{
+                                                        text: "+ lyrics"
+                                                        active: false
+                                                        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                        draw_text +: {
+                                                            color: #x828a93
+                                                            text_style: theme.font_regular{font_size: 8.5}
+                                                        }
+                                                    }
+                                                    View{ width: Fill height: Fit }
+                                                    detail_analyse_stop := ChipButton{ text: "Stop" visible: false }
+                                                }
+                                                detail_analysis_status := HintLabel{ width: Fill text: "" }
+                                            }
+                                            detail_server_actions := View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 margin: Inset{top: 10}
                                                 visible: false
-                                                detail_open_btn := ChipButton{ text: "Open in viewer" }
-                                                detail_reuse_btn := GhostButton{ text: "Reuse prompt" }
-                                                detail_delete_btn := DangerButton{ text: "Delete" }
+                                                detail_retire_version_btn := GhostButton{ text: "Delete this version" }
+                                                detail_retire_asset_btn := DangerButton{ text: "Delete from store" }
                                             }
                                         }
                                     }
@@ -1794,50 +2976,15 @@ script_mod! {
                                         width: Fill
                                         height: 40
                                     }
-                                    import_preview := View{
-                                        width: Fill height: 72
+                                    // The SAME card the Library grid draws,
+                                    // fed by the import queue: a row of
+                                    // imports leads with its pictures, and
+                                    // every improvement to the catalog card
+                                    // lands here too.
+                                    import_grid := mod.widgets.CatalogGrid{
+                                        width: Fill
+                                        height: 260
                                         visible: false
-                                        flow: Right spacing: 4
-                                        it0 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t0 := ThumbFitImage{}
-                                        }
-                                        it1 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t1 := ThumbFitImage{}
-                                        }
-                                        it2 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t2 := ThumbFitImage{}
-                                        }
-                                        it3 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t3 := ThumbFitImage{}
-                                        }
-                                        it4 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t4 := ThumbFitImage{}
-                                        }
-                                        it5 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t5 := ThumbFitImage{}
-                                        }
-                                        it6 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t6 := ThumbFitImage{}
-                                        }
-                                        it7 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t7 := ThumbFitImage{}
-                                        }
                                     }
                                 }
                                 import_scroll := QuietScrollY{
@@ -1965,6 +3112,48 @@ script_mod! {
                                         HintLabel{ text: "© The Dark Mod team (thedarkmod.com). Credit required, non-commercial, share-alike. Fan missions stay with their authors. Not CC0, not BSD. Load fetches official tdm_installer.ini and reconstructs tdm_*.pk4 from the HTTP zipsync mirrors." }
                                     }
 
+                                    music_card := ImportRow{
+                                        flow: Down spacing: 2
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            music_import_btn := PrimaryButton{ text: "Load" }
+                                            music_pick_btn := GhostButton{ text: "Choose folder…" }
+                                            BrightLabel{ text: "Music" width: 88 }
+                                            music_dir_label := HintLabel{ text: "no folder chosen" }
+                                            View{ width: Fill height: Fit }
+                                            music_status_label := BrightLabel{ text: "" width: 340 }
+                                        }
+                                        // The analysis bake, OFF by default:
+                                        // minutes of GPU per track, so it is
+                                        // never something an import does on
+                                        // its own.
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 10
+                                            align: Align{y: 0.5}
+                                            split_layers_toggle := CheckBox{
+                                                text: "split audio layers"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            lyrics_toggle := CheckBox{
+                                                text: "+ lyrics"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            music_analysis_label := HintLabel{ width: Fill text: "" }
+                                        }
+                                        HintLabel{ text: "Your own music directory. Every track becomes one audio asset; every folder name under the picked root becomes a searchable tag, beside the constant `music` tag. ID3/Vorbis title, artist and album name the row when the file carries them. mp3/ogg/wav publish; flac and m4a are listed as unsupported for now. Your library, your rights: all rights reserved, LAN-local, local-preview derivatives." }
+                                    }
+
                                     kaykit_card := ImportRow{
                                         flow: Down spacing: 2
                                         View{
@@ -2008,6 +3197,210 @@ script_mod! {
                                     HintLabel{ text: "games · rooms · namespaces · audit — all server records" }
                                 }
                                 admin_list := mod.widgets.StoreListPanel{}
+                            }
+                        }
+                    }
+
+                    }
+                    license_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 540
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                license_title := BrightLabel{
+                                    text: "Model license"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                license_model := HintLabel{ text: "" }
+                                license_kind := HintLabel{ text: "" }
+                                license_summary := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                license_link := LinkLabel{ text: "Read the full license" }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    license_decline := ChipButton{ text: "Decline" }
+                                    license_accept := PrimaryButton{ text: "Accept and clear" }
+                                }
+                            }
+                        }
+                    }
+                    lib_analyse_shown_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                lib_analyse_shown_title := BrightLabel{
+                                    text: "Split the shown tracks into layers?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                lib_analyse_shown_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                lib_analyse_shown_lyrics := CheckBox{
+                                    text: "+ lyrics (transcribe the vocals stem)"
+                                    active: false
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                    draw_text +: {
+                                        color: #x828a93
+                                        text_style: theme.font_regular{font_size: 8.5}
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    lib_analyse_shown_cancel := ChipButton{ text: "Cancel" }
+                                    lib_analyse_shown_confirm := PrimaryButton{ text: "Analyse" }
+                                }
+                            }
+                        }
+                    }
+                    lib_retire_shown_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                lib_retire_shown_title := BrightLabel{
+                                    text: "Retire the shown catalog assets?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                lib_retire_shown_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    lib_retire_shown_cancel := ChipButton{ text: "Cancel" }
+                                    lib_retire_shown_confirm := DangerButton{ text: "Retire" }
+                                }
+                            }
+                        }
+                    }
+                    store_delete_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                store_delete_title := BrightLabel{
+                                    text: "Delete from store?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                store_delete_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    store_delete_cancel := ChipButton{ text: "Cancel" }
+                                    store_delete_confirm := DangerButton{ text: "Delete" }
+                                }
+                            }
+                        }
+                    }
+                    gc_confirm_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                gc_confirm_title := BrightLabel{
+                                    text: "Collect garbage?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                gc_confirm_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    gc_confirm_cancel := ChipButton{ text: "Cancel" }
+                                    gc_confirm_collect := DangerButton{ text: "Collect now" }
+                                }
                             }
                         }
                     }
@@ -2139,6 +3532,8 @@ fn repo_path(rel: &str) -> String {
 }
 
 const QUEUE_ROWS: usize = 6;
+/// Box cards in the Fleet box.
+const FLEET_CARD_SLOTS: usize = 12;
 
 /// The immutable input attachment of a seeded (transform) run: the exact
 /// managed payload bytes snapshotted at ENQUEUE, so deleting or evicting
@@ -2159,6 +3554,45 @@ struct RunSeed {
     /// and validated by [`pipeline::seed_replaces_prefix`] at spec time,
     /// so it is always a valid in-bounds stage index.
     skip: usize,
+    /// Extra edit references (content type, bytes), in tray order.
+    references: Vec<(String, std::sync::Arc<Vec<u8>>)>,
+    /// Inpaint mask PNG (white = repaint) painted over `bytes` (which is
+    /// then the painter's canvas, possibly outpainted).
+    mask: Option<std::sync::Arc<Vec<u8>>>,
+}
+
+/// One gaussian-splat thumbnail in flight on the offscreen scene.
+struct SplatThumbJob {
+    file: String,
+    /// Timer ticks since the file was set (load + sort are async).
+    ticks: u8,
+    /// Readbacks that came back empty/clear so far.
+    attempts: u8,
+}
+
+/// Brush radii (canvas px) for the inpaint mask painter.
+const MASK_BRUSH_SIZES: &[f32] = &[8.0, 24.0, 48.0, 96.0, 160.0];
+
+/// Webcam input tile: capture wiring + auto-run bookkeeping.
+#[derive(Default)]
+struct WebcamState {
+    /// Camera descriptors from the last `Event::VideoInputs`.
+    descs: Vec<makepad_widgets::makepad_platform::video::VideoInputDesc>,
+    /// Shared newest-frame slot written by the capture thread.
+    frames: webcam::WebcamFrames,
+    /// Capture callback registered (once per process).
+    callback_installed: bool,
+    /// `use_video_input` is active.
+    capturing: bool,
+    /// Serial of the frame currently on the preview texture.
+    shown_serial: u64,
+    preview: Option<Texture>,
+    /// History group for this session's snapshots.
+    group_id: Option<String>,
+    /// Auto-run: the run group id we started and are waiting on.
+    auto_run_group: Option<String>,
+    /// Auto-run: earliest time (seconds) the next snapshot may fire.
+    auto_next_at: f64,
 }
 
 /// A pipeline waiting in the app-side run queue.
@@ -2166,7 +3600,7 @@ struct RunSeed {
 struct PendingRun {
     prompt: String,
     preset: usize,
-    model_override: Option<(String, String)>,
+    model_overrides: Vec<(String, String)>,
     box_override: Option<String>,
     /// Voice pack for speech stages (None = backend default).
     voice: Option<String>,
@@ -2191,6 +3625,23 @@ impl PendingRun {
             None => all,
         }
     }
+}
+
+/// Weight-license text the operator must accept before a model is cleared
+/// for pull or generation.
+#[derive(Clone)]
+struct LicensePrompt {
+    model_id: String,
+    name: String,
+    url: String,
+    summary: String,
+    restriction: String,
+    identity: String,
+}
+
+enum LicenseResume {
+    Dispatch(PendingRun),
+    Pull,
 }
 
 /// One dispatched pipeline. Several may run concurrently on distinct fleet
@@ -2222,21 +3673,12 @@ const VOICES: &[&str] = &[
 enum Surface {
     #[default]
     Create,
-    Chat,
     Library,
     Import,
     Runs,
     Admin,
 }
 
-/// Which side of the Library the browser shows: the disk-backed local
-/// History, or the session-backed server catalog.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum LibSource {
-    #[default]
-    Local,
-    Server,
-}
 
 #[derive(Default)]
 struct AutoRun {
@@ -2261,6 +3703,13 @@ struct AutoRun {
     exit: bool,
     fired: bool,
     captured: bool,
+}
+
+/// What the store-delete confirm modal retires once the user confirms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingStoreDelete {
+    Asset(makepad_asset_data::AssetId),
+    Revision(makepad_asset_data::AssetId, makepad_asset_data::AssetRevisionId),
 }
 
 #[derive(Script, ScriptHook)]
@@ -2300,9 +3749,12 @@ pub struct App {
     sample_timer: Timer,
     #[rust]
     exit_timer: Timer,
-    /// (domain, model) pairs behind the model selector (minus "auto").
+    /// Per-domain model ids behind each stage-model dropdown (minus "auto").
     #[rust]
-    model_choices: Vec<(String, String)>,
+    model_choices: Vec<(String, Vec<String>)>,
+    /// User-saved one-click pipeline snapshots.
+    #[rust]
+    saved_presets: Vec<SavedFastPreset>,
     /// Box urls behind the box selector (minus "auto").
     #[rust]
     box_choices: Vec<String>,
@@ -2310,6 +3762,15 @@ pub struct App {
     library: Option<Library>,
     #[rust]
     video: Option<VideoPlayer>,
+    /// The file the viewer's current video came from — Restart and the loop
+    /// toggle re-open it.
+    video_path: Option<PathBuf>,
+    /// Which library row the rail's video player currently belongs to, so a
+    /// well refresh does not reopen (and restart) the playing clip.
+    library_video_file: Option<String>,
+    /// Latest scrub target while a seek is still in flight — drags emit
+    /// faster than the decoder lands them, so only the newest matters.
+    pending_scrub: Option<f64>,
     #[rust]
     video_texture: Option<Texture>,
     #[rust]
@@ -2358,6 +3819,77 @@ pub struct App {
     /// thumbnail refreshes and drops stale async chip previews.
     #[rust]
     input_chip_file: Option<String>,
+    /// Files shown in the extra-reference thumbs (index-parallel to
+    /// `input_ref0..2`), for async preview installs.
+    #[rust]
+    input_ref_files: Vec<String>,
+    /// History group every OS-dropped file of this session lands in.
+    #[rust]
+    dropped_group_id: Option<String>,
+    /// Webcam input tile state.
+    #[rust]
+    webcam: WebcamState,
+    /// File loaded into the inpaint mask painter (None = mask mode off).
+    #[rust]
+    mask_file: Option<String>,
+    /// LoRA names behind the LoRA dropdown (index 0 = none).
+    #[rust]
+    lora_names: Vec<String>,
+    /// Gaussian-splat thumbnail lane: pending (file, payload path, object?)
+    /// and the one job in flight.
+    #[rust]
+    splat_thumb_queue: VecDeque<(String, PathBuf, bool)>,
+    #[rust]
+    splat_thumb_job: Option<SplatThumbJob>,
+    #[rust]
+    splat_thumb_scanned: bool,
+    /// Members of the selected run shown in the run tray, pipeline order
+    /// (oldest first), one per chip slot.
+    #[rust]
+    run_tray_files: Vec<String>,
+    /// Per-box model opt-outs: (box base_url, model id) this app never
+    /// routes to. Persisted in `fleet_prefs.json`; routing sees filtered
+    /// snapshots (`routing_snapshots`), display sees the raw fleet.
+    #[rust]
+    fleet_disabled: HashSet<(String, String)>,
+    /// Accepted weight licenses: (model id, license identity). Identity is
+    /// the pinned sha256 when present, otherwise the license URL — a text
+    /// change forces a fresh acknowledgement.
+    #[rust]
+    license_acks: HashSet<(String, String)>,
+    #[rust]
+    license_prompt: Option<LicensePrompt>,
+    #[rust]
+    license_resume: Option<LicenseResume>,
+    /// What `store_delete_confirm` retires — set when the detail panel's
+    /// "Delete from store" / "Delete this version" button opens
+    /// `store_delete_modal`.
+    #[rust]
+    pending_store_delete: Option<PendingStoreDelete>,
+    /// The `GcStatusDto::run_id` `gc_confirm_modal` was last opened for —
+    /// a finished dry run only prompts once; a NEW dry run always carries a
+    /// different run_id, so no explicit reset is needed between runs.
+    #[rust]
+    gc_dry_run_prompted: Option<u64>,
+    /// Per-box, per-domain preferred model: (box base_url, domain) → model.
+    /// Routing drops the domain's OTHER models on that box while it stands.
+    #[rust]
+    fleet_prefer: HashMap<(String, String), String>,
+    /// Box base_url shown in the fleet box popup + its row → model map.
+    #[rust]
+    fleet_modal_box: Option<String>,
+    #[rust]
+    fleet_modal_models: Vec<String>,
+    /// Job ids per jobs row in the node column (for Cancel).
+    #[rust]
+    fleet_modal_jobs: Vec<String>,
+    /// Box base_url per fleet card slot (click → popup).
+    #[rust]
+    fleet_card_boxes: Vec<String>,
+    /// Preview decodes wanted by non-gallery widgets (run tray chips) —
+    /// drained by `pump_gallery_previews` alongside the gallery caches.
+    #[rust]
+    extra_preview_work: Vec<(String, PreviewWork)>,
     /// Native outbound file drag is one OS session per pointer gesture. It is
     /// cleared only by DragEnd so repeated move actions cannot start twice.
     #[rust(false)]
@@ -2386,34 +3918,30 @@ pub struct App {
     /// Active right-pane surface (nav tabs).
     #[rust]
     surface: Surface,
-    /// Library browser source: local History vs server catalog.
+    /// Live Library filters (query/kind/category/tag). They are mirrored
+    /// straight onto the server query — the Library surface has no other
+    /// source than the catalog.
     #[rust]
-    lib_source: LibSource,
-    /// Live filters over the local History (query/kind/category/tag).
-    #[rust]
-    lib_filters: LocalLibraryFilters,
+    lib_filters: LibraryFilters,
     /// Server-side state backed by one Asset Server session:
     /// discovery/auth/retry and all catalog work live on its worker threads;
     /// `poll` only drains typed results on the UI thread.
     #[rust]
     store: AssetStoreState,
-    /// Local Fleet Qwen chat (never blocks the UI).
+    /// The Qwen chat: a session on the store's chat broker, pumped by the
+    /// shared feed's worker thread (never blocks the UI).
     #[rust]
     chat: ChatBridge,
-    /// Last fleet URL set sent to the chat worker (retry / membership).
-    #[rust]
-    chat_fleet_bases: Vec<String>,
-    #[rust]
-    chat_qwen_retry_at: Option<std::time::Instant>,
-    /// Asset Server catalog tools have been handed to the chat worker.
-    #[rust]
-    chat_asset_linked: bool,
     /// Hardcoded OSS pack catalog (Kenney compile + honest empty states).
     #[rust]
     import_page: ImportPage,
     /// Freedoom / LibreQuake / Duke3D / Quake II / Quake III Import cards.
     #[rust]
     classic_import_page: ClassicImportPage,
+    /// "Import music directory" card: a folder the user picked in the native
+    /// dialog, published one `audio` asset per track.
+    #[rust]
+    music_import_page: MusicImportPage,
     /// One running import plus a user-editable wait list.
     #[rust]
     import_queue: ImportQueue,
@@ -2424,16 +3952,88 @@ pub struct App {
     /// responsive without ever blocking the UI thread.
     #[rust]
     asset_store_timer: Timer,
-    /// Kind strings behind the Library kind filter dropdown (minus "all").
+    /// Kind labels behind the Library kind dropdown, in dropdown order and
+    /// WITHOUT the leading "all kinds" row — index `n` of this list is row
+    /// `n + 1` of the dropdown. Every entry is a real `AssetKind` the
+    /// server filters on.
+    /// Catalog assets pulled into the Create surface (see [`CatalogWork`]).
     #[rust]
-    lib_kind_options: Vec<String>,
-    /// Category (domain) strings behind the category dropdown (minus "all").
+    catalog_work: CatalogWork,
+    /// Library body: tiles (default) or the row list.
     #[rust]
-    lib_cat_options: Vec<String>,
-    /// Tag catalog behind the add-tag dropdown (minus the "add tag…" row).
-    /// Sorted by how many items carry the tag, most-used first.
+    lib_tiles: LibViewMode,
+    /// Which asset the rail's mini mesh viewer is currently holding, so a
+    /// redraw does not re-upload the same model every frame.
     #[rust]
-    lib_tag_options: Vec<TagStat>,
+    library_preview_file: Option<String>,
+    /// Cut sheet cells for the rail's preview well, keyed by asset id: the
+    /// same frames the card cycles, so a billboard animates there too.
+    #[rust]
+    catalog_preview_frames: HashMap<String, (Vec<Texture>, f32)>,
+    /// Which asset the rail's audio transport currently holds, so selecting
+    /// the same track twice does not restart it.
+    #[rust]
+    library_audio_file: Option<String>,
+    /// "Split audio layers": the serial stems/lyrics bake queue and the
+    /// side-channel fetch lane. Started on first use — an app that never
+    /// touches audio never spawns them.
+    #[rust]
+    analysis: Option<AnalysisQueue>,
+    /// What the SELECTED track's head revision carries, per the fetch lane.
+    /// Cleared on every new selection so the Analyse button can never
+    /// describe the previous track.
+    #[rust]
+    side_channels: SideChannels,
+    /// Which asset [`App::side_channels`] describes, and the fetch
+    /// generation that answered — latest-selection-wins over a slow fetch.
+    #[rust]
+    side_channels_asset: Option<makepad_asset_data::AssetId>,
+    #[rust]
+    side_channels_generation: u64,
+    /// The mixer clip generation the selected track's audio was requested
+    /// under. Handed to `audio::set_stems` so a fetch that finishes after
+    /// the user has moved on cannot play one track's layers over another.
+    #[rust]
+    audio_clip_generation: u64,
+    /// The rail is currently showing a transcript, so the follow pump is
+    /// worth running.
+    #[rust(false)]
+    lyrics_visible: bool,
+    /// Per-frame lyric-follow pump: alive only while a transcript is on the
+    /// Library rail and the track is audibly playing.
+    #[rust]
+    lyrics_pump: NextFrame,
+    /// Materialised thumbnail objects for catalog tiles, keyed by asset id.
+    /// The path is a digest-named cache object, so a tile can never show a
+    /// picture that belongs to another revision. The manifest's declared
+    /// views travel WITH the path: the decode obeys the declaration.
+    #[rust]
+    catalog_thumb_paths: HashMap<String, (PathBuf, Vec<makepad_asset_data::ThumbnailView>)>,
+    /// Assets whose thumbnail is being materialised right now.
+    #[rust]
+    catalog_thumb_pending: HashSet<String>,
+    /// Assets whose SOURCE-role file is being materialised right now — the
+    /// second blob a stateful billboard needs before it can be played.
+    #[rust]
+    catalog_source_pending: HashSet<String>,
+    #[rust]
+    lib_kind_options: Vec<KindChoice>,
+    /// Rows behind the tag dropdown, same row offset: the catalog's own
+    /// labels for the current result set, merged into one vocabulary and
+    /// most used first.
+    #[rust]
+    lib_label_options: Vec<TagFacet>,
+    /// The counted facets exactly as the server sent them, kept because
+    /// building a query still has to know which wire vocabulary carries a
+    /// name — the one thing the merged list deliberately forgets.
+    #[rust]
+    lib_facets: Vec<makepad_asset_client::CatalogFacet>,
+    /// The filter state the Library list was last drawn for. When it changes
+    /// the RESULT SET changes, so both list viewports go back to the top —
+    /// a filter that shrinks the results under a scrolled viewport otherwise
+    /// leaves the user looking past the end and reading it as "no results".
+    #[rust]
+    lib_view_signature: String,
     #[rust(AutoRun::default())]
     auto: AutoRun,
 }
@@ -2444,21 +4044,19 @@ impl App {
     fn setup(&mut self, cx: &mut Cx) {
         let _ = std::fs::create_dir_all(artifacts_dir());
         self.artifact_io = Some(ArtifactIo::start());
+        self.load_fleet_prefs();
         self.library = Some(Library::open(repo_path("local/ai_content_library")));
+        self.saved_presets = fast_presets::load(&fast_presets::store_path());
         if let Some(library) = &mut self.library {
             crate::enhance_meta::apply_catalog_names(library);
         }
         // One shared, real Asset Server session. Discovery/auth/retry happen
         // off-thread; this call only starts the lifecycle.
-        self.store.start();
+        // The store hosts the embedded Asset Server; hand it the library it
+        // must publish. Library::open ran above, so the product backfill is
+        // already on disk when the watcher's first poll reads index.json.
+        self.store.start(PathBuf::from(repo_path("local/ai_content_library")));
         self.asset_store_timer = cx.start_interval(0.2);
-        ChatData::push(
-            ChatRole::System,
-            "Qwen on the GPU fleet. Ask for an image, an image turned into a \
-             3D mesh, what models/sizes exist, or to change the default \
-             model / resolution / steps. It works through tool calls — it \
-             will not invent a finished image.",
-        );
         // Opening stays metadata-only; every missing preview is queued here
         // and regenerated a bounded slice at a time once frames are flowing.
         self.thumbnail_backfill = self
@@ -2471,81 +4069,133 @@ impl App {
         // empty library changes nothing.
         self.refresh_gallery(cx, true);
 
-        // GPU boxes join via the LAN beacon. No seed file.
+        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
+        // fleet so the sandbox `game` box (.123) never lands in this UI.
+        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
+            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
+        }
         self.discovered = Some(makepad_asset_ai::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
-        self.maybe_connect_chat();
+        self.maybe_connect_chat(cx);
         self.fleet_timer = cx.start_interval(3.0);
         self.job_timer = cx.start_interval(0.25);
         self.audio_timer = cx.start_interval(0.1);
         self.thumbnail_timer = cx.start_interval(0.5);
 
-        // Preset dropdown.
-        let labels: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
+        // Type dropdown (pipeline). Field captions sit beside the control;
+        // items are the choices only.
+        let labels: Vec<String> = crate::pipeline::presets_sorted_order()
+            .iter()
+            .map(|&i| PRESETS[i].name.to_string())
+            .collect();
         self.ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .set_labels(cx, labels);
         self.ui
-            .drop_down2(cx, ids!(model_drop))
-            .set_labels(cx, vec!["model: auto (affinity)".to_string()]);
-        self.ui
-            .drop_down2(cx, ids!(box_drop))
-            .set_labels(cx, vec!["box: auto (affinity)".to_string()]);
-        self.ui.drop_down2(cx, ids!(voice_drop)).set_labels(
+            .combo_box(cx, ids!(box_drop))
+            .set_labels(cx, vec!["auto (affinity)".to_string()]);
+        self.ui.combo_box(cx, ids!(voice_drop)).set_labels(
             cx,
-            std::iter::once(format!("voice: default ({})", VOICES[0]))
-                .chain(VOICES[1..].iter().map(|v| format!("voice: {v}")))
+            std::iter::once(format!("default ({})", VOICES[0]))
+                .chain(VOICES[1..].iter().map(|v| (*v).to_string()))
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(size_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(size_drop)).set_labels(
             cx,
             IMAGE_SIZES
                 .iter()
                 .enumerate()
                 .map(|(i, (w, h))| {
                     if i == 0 {
-                        format!("image: {w}×{h} (default)")
+                        format!("{w}×{h} (default)")
                     } else {
-                        format!("image: {w}×{h}")
+                        format!("{w}×{h}")
                     }
                 })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(steps_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(steps_drop)).set_labels(
             cx,
-            std::iter::once("steps: model default".to_string())
-                .chain(IMAGE_STEPS.iter().map(|s| format!("steps: {s}")))
+            std::iter::once("model default".to_string())
+                .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
+                .collect(),
+        );
+        self.ui.combo_box(cx, ids!(lora_strength_drop)).set_labels(
+            cx,
+            LORA_STRENGTHS.iter().map(|s| format!("{s:.1}")).collect(),
+        );
+        self.ui.combo_box(cx, ids!(lora_drop)).set_labels(cx, vec!["none".to_string()]);
+        self.ui.combo_box(cx, ids!(vid_interp_drop)).set_labels(
+            cx,
+            VIDEO_INTERPOLATE
+                .iter()
+                .map(|f| if *f <= 1 { "off (native 24 fps)".to_string() } else { format!("RIFE ×{f} ({} fps)", 24 * f) })
+                .collect(),
+        );
+        self.ui.combo_box(cx, ids!(mask_brush_drop)).set_labels(
+            cx,
+            MASK_BRUSH_SIZES.iter().map(|r| format!("brush {r:.0}px")).collect(),
+        );
+        self.ui.combo_box(cx, ids!(mask_brush_drop)).set_selected_item(cx, 1);
+        self.ui.combo_box(cx, ids!(edit_strength_drop)).set_labels(
+            cx,
+            EDIT_STRENGTHS
+                .iter()
+                .map(|s| {
+                    if *s >= 1.0 {
+                        "full edit (strength 1.0)".to_string()
+                    } else {
+                        format!("strength {s:.2} (keeps {:.0}%)", (1.0 - s) * 100.0)
+                    }
+                })
                 .collect(),
         );
         self.ui
-            .drop_down2(cx, ids!(texture_size_drop))
+            .combo_box(cx, ids!(texture_size_drop))
             .set_labels(
                 cx,
                 MESH_TEXTURE_SIZES
                     .iter()
                     .enumerate()
                     .map(|(index, size)| match index {
-                        0 => format!("mesh texture: {size} (fast default)"),
-                        1 => format!("mesh texture: {size} (high)"),
-                        _ => format!("mesh texture: {size} (ultra)"),
+                        0 => format!("{size} (fast default)"),
+                        1 => format!("{size} (high)"),
+                        _ => format!("{size} (ultra)"),
                     })
                     .collect(),
             );
-        self.ui.drop_down2(cx, ids!(vid_size_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(pbr_view_drop)).set_labels(
+            cx,
+            crate::mesh_view::pbr_preview::PbrViewMode::ALL
+                .iter()
+                .map(|mode| mode.label().to_string())
+                .collect(),
+        );
+        self.ui.combo_box(cx, ids!(mesh_faces_drop)).set_labels(
+            cx,
+            MESH_FACE_COUNTS
+                .iter()
+                .map(|count| match *count {
+                    0 => "auto (12–20k)".to_string(),
+                    n => format!("{}k", n / 1000),
+                })
+                .collect(),
+        );
+        self.ui.combo_box(cx, ids!(vid_size_drop)).set_labels(
             cx,
             VIDEO_SIZES
                 .iter()
                 .enumerate()
                 .map(|(i, (w, h))| {
                     if i == 0 {
-                        format!("video: {w}×{h} (default)")
+                        format!("{w}×{h} (default)")
                     } else {
-                        format!("video: {w}×{h}")
+                        format!("{w}×{h}")
                     }
                 })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(vid_len_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(vid_len_drop)).set_labels(
             cx,
             VIDEO_LENGTHS
                 .iter()
@@ -2553,9 +4203,9 @@ impl App {
                 .map(|(i, (frames, steps))| {
                     let seconds = *frames as f64 / 16.0;
                     if i == 0 {
-                        format!("length: {seconds:.1}s · {steps} steps (default)")
+                        format!("{seconds:.1}s · {steps} steps (default)")
                     } else {
-                        format!("length: {seconds:.1}s · {steps} steps")
+                        format!("{seconds:.1}s · {steps} steps")
                     }
                 })
                 .collect(),
@@ -2564,7 +4214,7 @@ impl App {
             .iter()
             .position(|seconds| *seconds == MUSIC_DEFAULT_SECONDS)
             .expect("default music duration must be a UI preset");
-        let music_len_drop = self.ui.drop_down2(cx, ids!(music_len_drop));
+        let music_len_drop = self.ui.combo_box(cx, ids!(music_len_drop));
         music_len_drop.set_labels(
             cx,
             MUSIC_LENGTHS
@@ -2572,14 +4222,32 @@ impl App {
                 .map(|seconds| {
                     let clock = format_music_duration(*seconds);
                     if *seconds == MUSIC_DEFAULT_SECONDS {
-                        format!("song target: {clock} (default; may end early)")
+                        format!("{clock} (default; may end early)")
                     } else {
-                        format!("song target: {clock} (may end early)")
+                        format!("{clock} (may end early)")
                     }
                 })
                 .collect(),
         );
         music_len_drop.set_selected_item(cx, music_default);
+        for (id, default_ix) in [(ids!(enh_upscale_drop), 1usize), (ids!(enh_tween_drop), 1)] {
+            let drop = self.ui.combo_box(cx, id);
+            drop.set_labels(
+                cx,
+                ENHANCE_FACTORS
+                    .iter()
+                    .map(|f| match f {
+                        1 => "off".to_string(),
+                        f => format!("x{f}"),
+                    })
+                    .collect(),
+            );
+            drop.set_selected_item(cx, default_ix);
+        }
+        self.refresh_saved_presets_ui(cx);
+        self.refresh_model_ui(cx, true);
+        self.refresh_voice_ui(cx);
+        self.sync_preset_name_box(cx);
 
         // Speakers: wav artifacts + video soundtrack.
         cx.audio_output(0, move |info, output| {
@@ -2629,68 +4297,1195 @@ impl App {
 
     // -- fleet ----------------------------------------------------------------
 
-    fn refresh_fleet_ui(&mut self, cx: &mut Cx) {
-        let Some(fleet) = &self.fleet else { return };
-        self.ui
-            .label(cx, ids!(fleet_label))
-            .set_text(cx, &fleet.panel_text());
+    /// The fleet as routing sees it: every snapshot minus the models the
+    /// user switched off for that box. Display keeps the raw snapshots.
+    /// The fleet as the scheduler sees it: disabled models removed, and per
+    /// domain only the box's preferred model kept (explicit ★ or the rule's
+    /// pick) — EXCEPT models a run names explicitly (UI model override or
+    /// preset pin): an explicit pick must stay routable even where it is
+    /// not the box's preference, and a not-yet-pulled model must stay
+    /// pickable so "pull + run" works. Runs in flight/queued contribute
+    /// their pins; `extra_keep` is for a run being dispatched right now.
+    fn routing_snapshots(&self) -> Vec<BoxSnapshot> {
+        self.routing_snapshots_keeping(&[])
+    }
 
-        // Model selector = every available model across the fleet.
-        let mut labels = vec!["model: auto (affinity)".to_string()];
-        let mut choices = Vec::new();
-        let mut box_labels = vec!["box: auto (affinity)".to_string()];
+    fn routing_snapshots_keeping(&self, extra_keep: &[String]) -> Vec<BoxSnapshot> {
+        let Some(fleet) = &self.fleet else {
+            return Vec::new();
+        };
+        let mut keep: HashSet<String> = extra_keep.iter().cloned().collect();
+        for run in &self.runs {
+            keep.extend(run.pipeline.pinned_models());
+        }
+        for run in &self.run_queue {
+            keep.extend(run.model_overrides.iter().map(|(_, model)| model.clone()));
+            keep.extend(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()));
+        }
+        fleet
+            .snapshots
+            .iter()
+            .map(|snap| {
+                let mut snap = snap.clone();
+                let url = snap.base_url.clone();
+                snap.models
+                    .retain(|model| !self.fleet_disabled.contains(&(url.clone(), model.id.clone())));
+                // A preference only bites while the preferred model is
+                // actually advertised (and enabled) on the box; otherwise
+                // the domain keeps its full choice there.
+                let mut preferred: Vec<(String, String)> = self
+                    .fleet_prefer
+                    .iter()
+                    .filter(|((pref_url, _), model)| {
+                        *pref_url == url && snap.models.iter().any(|m| &m.id == *model)
+                    })
+                    .map(|((_, domain), model)| (domain.clone(), model.clone()))
+                    .collect();
+                // Domains without an explicit preference get the rule's
+                // pick (largest present model that fits this GPU).
+                let mut domains: Vec<String> = snap.models.iter().map(|m| m.domain.clone()).collect();
+                domains.sort();
+                domains.dedup();
+                for domain in domains {
+                    if preferred.iter().any(|(d, _)| d == &domain) {
+                        continue;
+                    }
+                    if let Some(model) = Self::default_preference(&snap, &domain) {
+                        preferred.push((domain, model));
+                    }
+                }
+                snap.models.retain(|model| {
+                    keep.contains(&model.id)
+                        || preferred
+                            .iter()
+                            .all(|(domain, keep)| model.domain != *domain || model.id == *keep)
+                });
+                snap
+            })
+            .collect()
+    }
+
+    /// Dropdown contents: every enabled, available model any up box serves
+    /// for `domain` (plus edit-capable image tiers for `edit`). Explicit
+    /// choices are never narrowed by the per-box preference — that only
+    /// decides "auto (affinity)".
+    fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
+        let Some(fleet) = &self.fleet else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for snap in &fleet.snapshots {
+            if !snap.is_up() {
+                continue;
+            }
+            for model in &snap.models {
+                if model.available
+                    && !self.fleet_disabled.contains(&(snap.base_url.clone(), model.id.clone()))
+                    && model_serves_domain(&model.id, &model.domain, domain)
+                    && !ids.contains(&model.id)
+                {
+                    ids.push(model.id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    fn fleet_prefs_path() -> PathBuf {
+        PathBuf::from(repo_path("local/ai_content_library/fleet_prefs.json"))
+    }
+
+    fn load_fleet_prefs(&mut self) {
+        let Ok(text) = std::fs::read_to_string(Self::fleet_prefs_path()) else {
+            return;
+        };
+        // One "url\tmodel" per line inside a JSON string array, micro-serde
+        // free: the file is ours alone.
+        for line in text.lines() {
+            let line = line.trim().trim_matches(|c| c == '[' || c == ']' || c == ',' || c == '"');
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.as_slice() {
+                ["disable", url, model] | [url, model] if !url.is_empty() && !model.is_empty() => {
+                    self.fleet_disabled.insert((url.to_string(), model.to_string()));
+                }
+                ["prefer", url, domain, model] if !url.is_empty() && !model.is_empty() => {
+                    self.fleet_prefer
+                        .insert((url.to_string(), domain.to_string()), model.to_string());
+                }
+                ["license", model, identity] if !model.is_empty() && !identity.is_empty() => {
+                    self.license_acks
+                        .insert((model.to_string(), identity.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_fleet_prefs(&self) {
+        let mut lines: Vec<String> = self
+            .fleet_disabled
+            .iter()
+            .map(|(url, model)| format!("\"disable\t{url}\t{model}\""))
+            .chain(
+                self.fleet_prefer
+                    .iter()
+                    .map(|((url, domain), model)| format!("\"prefer\t{url}\t{domain}\t{model}\"")),
+            )
+            .chain(
+                self.license_acks.iter().map(|(model, identity)| {
+                    format!("\"license\t{model}\t{identity}\"")
+                }),
+            )
+            .collect();
+        lines.sort();
+        let text = format!("[\n{}\n]\n", lines.join(",\n"));
+        if let Err(error) = std::fs::write(Self::fleet_prefs_path(), text) {
+            log!("fleet prefs: save failed: {error}");
+        }
+    }
+
+    fn license_is_acked(&self, prompt: &LicensePrompt) -> bool {
+        self.license_acks
+            .contains(&(prompt.model_id.clone(), prompt.identity.clone()))
+    }
+
+    fn license_prompt_for(&self, model_id: &str) -> LicensePrompt {
+        if let Some(info) = self.fleet.as_ref().and_then(|fleet| {
+            fleet
+                .snapshots
+                .iter()
+                .flat_map(|snap| snap.models.iter())
+                .find(|model| model.id == model_id)
+        }) {
+            if let (Some(name), Some(url), Some(summary), Some(restriction)) = (
+                info.license_name.clone(),
+                info.license_url.clone(),
+                info.license_summary.clone(),
+                info.license_restriction.clone(),
+            ) {
+                let identity = info
+                    .license_sha256
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| url.clone());
+                return LicensePrompt {
+                    model_id: model_id.to_string(),
+                    name,
+                    url,
+                    summary,
+                    restriction,
+                    identity,
+                };
+            }
+        }
+        if let Some(license) = makepad_asset_ai::registry::license_for_model(model_id) {
+            let identity = license.identity();
+            return LicensePrompt {
+                model_id: model_id.to_string(),
+                name: license.name,
+                url: license.url,
+                summary: license.summary,
+                restriction: license.restriction.as_str().to_string(),
+                identity,
+            };
+        }
+        LicensePrompt {
+            model_id: model_id.to_string(),
+            name: "Unknown weight license".to_string(),
+            url: "https://huggingface.co/".to_string(),
+            summary: format!(
+                "{model_id} has no license record in the embedded registry. It will not be cleared for download or generation until a license is recorded and acknowledged."
+            ),
+            restriction: "restricted".to_string(),
+            identity: "missing".to_string(),
+        }
+    }
+
+    fn first_unacked_model<'a, I>(&self, model_ids: I) -> Option<LicensePrompt>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        for id in model_ids {
+            if id.is_empty() || id == "auto (affinity)" {
+                continue;
+            }
+            let prompt = self.license_prompt_for(id);
+            if !self.license_is_acked(&prompt) {
+                return Some(prompt);
+            }
+        }
+        None
+    }
+
+    fn models_for_run(&self, run: &PendingRun) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut push = |id: String| {
+            if !id.is_empty() && !ids.iter().any(|existing| existing == &id) {
+                ids.push(id);
+            }
+        };
+        for (_, model) in &run.model_overrides {
+            push(model.clone());
+        }
+        for (_, model) in PRESETS[run.preset].pins {
+            push((*model).to_string());
+        }
+        if let Some(fleet) = &self.fleet {
+            for domain in run.domains() {
+                if run.model_overrides.iter().any(|(d, _)| d == domain) {
+                    continue;
+                }
+                if PRESETS[run.preset]
+                    .pins
+                    .iter()
+                    .any(|(d, _)| d == domain)
+                {
+                    continue;
+                }
+                let mut picked = None;
+                for snap in &fleet.snapshots {
+                    if let Some(model) = Self::default_preference(snap, domain) {
+                        picked = Some(model);
+                        break;
+                    }
+                }
+                if let Some(model) = picked {
+                    push(model);
+                }
+            }
+        }
+        ids
+    }
+
+    fn open_license_modal(&mut self, cx: &mut Cx, prompt: LicensePrompt) {
+        let kind = match prompt.restriction.as_str() {
+            "non-commercial" => "Non-commercial weights. Personal / research use only.",
+            "community" => "Community license. Read the terms before any product use.",
+            "restricted" => "Restricted license. Review the full terms before use.",
+            _ => "Permissive weight license. Acknowledgement is still required to clear the model.",
+        };
+        self.ui
+            .label(cx, ids!(license_title))
+            .set_text(cx, &format!("Clear {}?", prompt.model_id));
+        self.ui
+            .label(cx, ids!(license_model))
+            .set_text(cx, &prompt.name);
+        self.ui.label(cx, ids!(license_kind)).set_text(cx, kind);
+        self.ui
+            .label(cx, ids!(license_summary))
+            .set_text(cx, &prompt.summary);
+        let link = self.ui.link_label(cx, ids!(license_link));
+        link.set_text(cx, &prompt.url);
+        link.set_url(&prompt.url);
+        self.license_prompt = Some(prompt);
+        self.ui.modal(cx, ids!(license_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_license_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(license_modal)).close(cx);
+        self.license_prompt = None;
+        self.ui.redraw(cx);
+    }
+
+    fn accept_license_prompt(&mut self, cx: &mut Cx) {
+        let Some(prompt) = self.license_prompt.clone() else {
+            return;
+        };
+        self.license_acks
+            .insert((prompt.model_id.clone(), prompt.identity.clone()));
+        self.save_fleet_prefs();
+        log!(
+            "license: acked {} ({})",
+            prompt.model_id,
+            prompt.restriction
+        );
+        self.close_license_modal(cx);
+        match self.license_resume.take() {
+            Some(LicenseResume::Dispatch(run)) => {
+                if let Some(next) = self.first_unacked_model(
+                    self.models_for_run(&run).iter().map(|id| id.as_str()),
+                ) {
+                    self.license_resume = Some(LicenseResume::Dispatch(run));
+                    self.open_license_modal(cx, next);
+                    return;
+                }
+                self.dispatch_run(cx, run, &[]);
+            }
+            Some(LicenseResume::Pull) => self.pull_model(cx),
+            None => {
+                self.refresh_fleet_cards(cx);
+                if self.fleet_modal_box.is_some() {
+                    self.refresh_fleet_modal(cx);
+                }
+            }
+        }
+        self.try_dispatch_pending(cx);
+    }
+
+    fn decline_license_prompt(&mut self, cx: &mut Cx) {
+        let model = self
+            .license_prompt
+            .as_ref()
+            .map(|p| p.model_id.clone())
+            .unwrap_or_else(|| "model".to_string());
+        self.close_license_modal(cx);
+        self.license_resume = None;
+        self.set_caption(
+            cx,
+            "LICENSE",
+            &format!("{model} not cleared — license declined"),
+        );
+    }
+
+    fn fleet_card_ids() -> [&'static [LiveId]; FLEET_CARD_SLOTS] {
+        [
+            ids!(fb0), ids!(fb1), ids!(fb2), ids!(fb3), ids!(fb4), ids!(fb5),
+            ids!(fb6), ids!(fb7), ids!(fb8), ids!(fb9), ids!(fb10), ids!(fb11),
+        ]
+    }
+
+    fn fleet_job_row_ids() -> [&'static [LiveId]; 8] {
+        [
+            ids!(fj0), ids!(fj1), ids!(fj2), ids!(fj3), ids!(fj4), ids!(fj5), ids!(fj6), ids!(fj7),
+        ]
+    }
+
+    fn fleet_model_row_ids() -> Vec<&'static [LiveId]> {
+        vec![
+            ids!(fm0), ids!(fm1), ids!(fm2), ids!(fm3), ids!(fm4), ids!(fm5), ids!(fm6), ids!(fm7),
+            ids!(fm8), ids!(fm9), ids!(fm10), ids!(fm11), ids!(fm12), ids!(fm13), ids!(fm14), ids!(fm15),
+            ids!(fm16), ids!(fm17), ids!(fm18), ids!(fm19), ids!(fm20), ids!(fm21), ids!(fm22), ids!(fm23),
+            ids!(fm24), ids!(fm25), ids!(fm26), ids!(fm27), ids!(fm28), ids!(fm29), ids!(fm30), ids!(fm31),
+            ids!(fm32), ids!(fm33), ids!(fm34), ids!(fm35), ids!(fm36), ids!(fm37), ids!(fm38), ids!(fm39),
+        ]
+    }
+
+    /// What a box is doing right now, for its card: our own stage there
+    /// (with progress), else the service's queue depth, else idle.
+    fn box_busy_text(&self, base_url: &str, snap: &BoxSnapshot) -> (String, Vec4f) {
+        const DOWN: Vec4f = Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 };
+        const IDLE: Vec4f = Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 };
+        const BUSY: Vec4f = Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 };
+        if !snap.is_up() {
+            return ("down".to_string(), DOWN);
+        }
+        for run in &self.runs {
+            let p = &run.pipeline;
+            if !p.is_running() || !p.active_boxes().contains(&base_url) {
+                continue;
+            }
+            if let Some(stage) = p.stages.get(p.current) {
+                let pct = (stage.progress * 100.0).round() as u32;
+                return (
+                    format!("{} {}% (ours)", stage_display_name(&stage.domain), pct),
+                    BUSY,
+                );
+            }
+        }
+        let pending = snap.jobs_pending();
+        if pending > 0 {
+            // The service's own job list names what is actually running.
+            let running = self.fleet.as_ref().and_then(|fleet| {
+                fleet
+                    .snapshots
+                    .iter()
+                    .position(|s| s.base_url == base_url)
+                    .and_then(|i| fleet.jobs.get(i))
+                    .and_then(|jobs| jobs.first().cloned())
+            });
+            if let Some(job) = running {
+                let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
+                let what = job.model.clone().unwrap_or_else(|| "job".to_string());
+                let stage = job.stage.clone().unwrap_or_else(|| job.state.clone());
+                let more = pending.saturating_sub(1);
+                let tail = if more > 0 { format!(" +{more} queued") } else { String::new() };
+                return (format!("{what} · {stage} {pct}%{tail}"), BUSY);
+            }
+            return (format!("{pending} job{} (other client)", if pending == 1 { "" } else { "s" }), BUSY);
+        }
+        let loaded = snap
+            .health
+            .as_ref()
+            .map(|h| h.models_loaded.len())
+            .unwrap_or(0);
+        (format!("idle · {loaded} loaded"), IDLE)
+    }
+
+    fn refresh_fleet_cards(&mut self, cx: &mut Cx) {
+        let Some(fleet) = &self.fleet else { return };
+        let mut snaps: Vec<BoxSnapshot> = fleet.snapshots.clone();
+        snaps.sort_by(|a, b| a.base_url.cmp(&b.base_url));
+        let up = snaps.iter().filter(|s| s.is_up()).count();
+        self.ui.label(cx, ids!(fleet_label)).set_text(
+            cx,
+            &format!("{up}/{} up · click a box for its models", snaps.len()),
+        );
+        self.fleet_card_boxes = snaps.iter().map(|s| s.base_url.clone()).collect();
+        for (slot, card) in Self::fleet_card_ids().iter().enumerate() {
+            let view = self.ui.view(cx, card);
+            let Some(snap) = snaps.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let host = snap
+                .base_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string();
+            let (busy, color) = self.box_busy_text(&snap.base_url, snap);
+            let mut host_id = card.to_vec();
+            host_id.push(live_id!(host));
+            self.ui.label(cx, &host_id).set_text(cx, &host);
+            let mut busy_id = card.to_vec();
+            busy_id.push(live_id!(busy));
+            self.ui.label(cx, &busy_id).set_text(cx, &busy);
+            let mut light_id = card.to_vec();
+            light_id.push(live_id!(light));
+            let mut light = self.ui.view(cx, &light_id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
+        if self.fleet_modal_box.is_some() {
+            self.refresh_fleet_modal(cx);
+        }
+    }
+
+    /// Fill the per-box popup from the raw snapshot: every advertised model,
+    /// its load state light, and the per-box enable toggle.
+    fn refresh_fleet_modal(&mut self, cx: &mut Cx) {
+        let Some(url) = self.fleet_modal_box.clone() else { return };
+        let Some(snap) = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| fleet.snapshots.iter().find(|s| s.base_url == url).cloned())
+        else {
+            return;
+        };
+        let host = url.trim_start_matches("http://").to_string();
+        self.ui.label(cx, ids!(fleet_box_title)).set_text(cx, &host);
+        // Busy state and VRAM first, GPU name last: the line is one
+        // ellipsized row in the panel, and the model name is the half that
+        // can afford to lose its tail.
+        let status = match &snap.health {
+            Some(h) => {
+                let (busy, _) = self.box_busy_text(&url, &snap);
+                format!(
+                    "{busy} · vram {}/{} MB · {}",
+                    h.vram_free_mb.unwrap_or(0),
+                    h.vram_total_mb.unwrap_or(0),
+                    h.gpu.as_deref().unwrap_or("no gpu info"),
+                )
+            }
+            None => "down — last known models".to_string(),
+        };
+        self.ui.label(cx, ids!(fleet_box_status)).set_text(cx, &status);
+        // Live jobs (running first, then queued) — other clients' included.
+        let jobs: Vec<makepad_asset_ai::protocol::JobStatusJson> = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| {
+                fleet
+                    .snapshots
+                    .iter()
+                    .position(|s| s.base_url == url)
+                    .and_then(|i| fleet.jobs.get(i).cloned())
+            })
+            .unwrap_or_default();
+        self.fleet_modal_jobs = jobs.iter().map(|j| j.job_id.clone()).collect();
+        self.ui.widget(cx, ids!(fleet_box_jobs)).set_visible(cx, !jobs.is_empty());
+        let ours: Vec<String> = self
+            .runs
+            .iter()
+            .flat_map(|run| run.pipeline.job_ids_on(&url))
+            .collect();
+        for (slot, row) in Self::fleet_job_row_ids().iter().enumerate() {
+            let view = self.ui.view(cx, row);
+            let Some(job) = jobs.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
+            let who = if ours.iter().any(|id| id == &job.job_id) { "ours" } else { "other client" };
+            let text = format!(
+                "{} · {} · {}{} · {} · {}",
+                job.model.clone().unwrap_or_else(|| "?".to_string()),
+                job.state,
+                job.stage.clone().unwrap_or_default(),
+                if job.state == "running" { format!(" {pct}%") } else { String::new() },
+                who,
+                job.job_id
+            );
+            let mut id = row.to_vec();
+            id.push(live_id!(jtext));
+            self.ui.label(cx, &id).set_text(cx, &text);
+            let color = if job.state == "running" {
+                Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 }
+            } else {
+                Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 }
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(jstate));
+            let mut light = self.ui.view(cx, &id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
+        let mut models: Vec<_> = snap.models.iter().filter(|m| m.available).cloned().collect();
+        models.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.id.cmp(&b.id)));
+        self.fleet_modal_models = models.iter().map(|m| m.id.clone()).collect();
+        for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+            let view = self.ui.view(cx, row);
+            let Some(model) = models.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let enabled = !self.fleet_disabled.contains(&(url.clone(), model.id.clone()));
+            let mut id = row.to_vec();
+            id.push(live_id!(enable));
+            self.ui.check_box(cx, &id).set_active(cx, enabled, Animate::No);
+            let mut id = row.to_vec();
+            id.push(live_id!(mname));
+            self.ui.label(cx, &id).set_text(cx, &model.id);
+            let mut id = row.to_vec();
+            id.push(live_id!(mdomain));
+            self.ui.label(cx, &id).set_text(cx, &model.domain);
+            let mut id = row.to_vec();
+            id.push(live_id!(mnote));
+            let note = match model.state.as_str() {
+                "loaded" => "loaded".to_string(),
+                "ready" => "ready".to_string(),
+                "downloading" => format!(
+                    "downloading {}%",
+                    model
+                        .progress_total
+                        .filter(|t| *t > 0)
+                        .map(|t| model.progress_done.unwrap_or(0) * 100 / t)
+                        .unwrap_or(0)
+                ),
+                other => other.to_string(),
+            };
+            let vram = model.vram_gb.map(|g| format!(" · {g:.0} GB")).unwrap_or_default();
+            self.ui.label(cx, &id).set_text(cx, &format!("{note}{vram}"));
+            let explicit = self.fleet_prefer.get(&(url.clone(), model.domain.clone()));
+            let label = match explicit {
+                Some(m) if m == &model.id => "★ preferred",
+                Some(_) => "prefer",
+                None if Self::default_preference(&snap, &model.domain).as_deref() == Some(model.id.as_str()) => "★ default",
+                None => "prefer",
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(prefer));
+            self.ui.button(cx, &id).set_text(cx, label);
+            let prompt = self.license_prompt_for(&model.id);
+            let terms = if self.license_is_acked(&prompt) {
+                "terms"
+            } else {
+                "ack"
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(terms));
+            self.ui.button(cx, &id).set_text(cx, terms);
+            let color = match model.state.as_str() {
+                "loaded" => Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 },
+                "ready" => Vec4f { x: 0.33, y: 0.55, z: 0.85, w: 1.0 },
+                "downloading" => Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 },
+                _ => Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 },
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(mstate));
+            let mut light = self.ui.view(cx, &id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
+    }
+
+    fn open_fleet_modal(&mut self, cx: &mut Cx, base_url: String) {
+        self.fleet_modal_box = Some(base_url);
+        self.refresh_fleet_modal(cx);
+        self.ui.widget(cx, ids!(fleet_node_panel)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn close_fleet_modal(&mut self, cx: &mut Cx) {
+        self.fleet_modal_box = None;
+        self.ui.widget(cx, ids!(fleet_node_panel)).set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    /// Sensible per-domain preference for a box when the user set none: the
+    /// largest model that is PRESENT on the box (loaded/ready — never a
+    /// download trigger) and fits its total VRAM minus the service reserve;
+    /// reference/oracle/test variants never win. None = leave the domain to
+    /// plain affinity.
+    fn default_preference(snap: &BoxSnapshot, domain: &str) -> Option<String> {
+        let health = snap.health.as_ref()?;
+        let total_mb = health.vram_total_mb?;
+        let budget_gb = (total_mb.saturating_sub(health.vram_reserve_mb.unwrap_or(2048))) as f64 / 1024.0;
+        snap.models
+            .iter()
+            .filter(|m| m.available && m.domain == domain)
+            .filter(|m| matches!(m.state.as_str(), "loaded" | "ready"))
+            .filter(|m| {
+                let id = m.id.to_ascii_lowercase();
+                !id.contains("oracle") && !id.contains("python") && !id.contains("testpattern")
+            })
+            .filter(|m| m.vram_gb.map_or(true, |g| g <= budget_gb))
+            .max_by(|a, b| {
+                a.vram_gb
+                    .unwrap_or(0.0)
+                    .partial_cmp(&b.vram_gb.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // Same size: the lexically smaller id wins ("flux1-dev"
+                    // before "flux1-schnell", "-bf16" before "-q4").
+                    .then_with(|| b.id.cmp(&a.id))
+            })
+            .map(|m| m.id.clone())
+    }
+
+    /// Write the rule's picks as explicit ★ preferences for every domain
+    /// the box serves (replacing whatever was set).
+    fn apply_default_preferences(&mut self, base_url: &str) {
+        let Some(snap) = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| fleet.snapshots.iter().find(|s| s.base_url == base_url).cloned())
+        else {
+            return;
+        };
+        let mut domains: Vec<String> = snap.models.iter().map(|m| m.domain.clone()).collect();
+        domains.sort();
+        domains.dedup();
+        for domain in domains {
+            let key = (base_url.to_string(), domain.clone());
+            match Self::default_preference(&snap, &domain) {
+                Some(model) => {
+                    self.fleet_prefer.insert(key, model);
+                }
+                None => {
+                    self.fleet_prefer.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn refresh_fleet_ui(&mut self, cx: &mut Cx) {
+        self.refresh_fleet_cards(cx);
+        let Some(fleet) = &self.fleet else { return };
+
+        let mut box_labels = vec!["auto (affinity)".to_string()];
         let mut boxes = Vec::new();
         for snap in &fleet.snapshots {
             if !snap.is_up() {
                 continue;
             }
-            box_labels.push(format!("box: {}", snap.base_url.trim_start_matches("http://")));
+            box_labels.push(snap.base_url.trim_start_matches("http://").to_string());
             boxes.push(snap.base_url.clone());
-            for model in &snap.models {
-                if !model.available {
-                    continue;
+        }
+        if boxes != self.box_choices {
+            self.ui.combo_box(cx, ids!(box_drop)).set_labels(cx, box_labels);
+        }
+        self.box_choices = boxes;
+        self.refresh_model_ui(cx, false);
+        self.refresh_voice_ui(cx);
+    }
+
+    fn current_preset_index(&self, cx: &mut Cx) -> usize {
+        let order = crate::pipeline::presets_sorted_order();
+        let row = self
+            .ui
+            .combo_box(cx, ids!(preset_drop))
+            .selected_item()
+            .min(order.len() - 1);
+        order[row]
+    }
+
+
+
+    fn selected_stage_model(&self, cx: &mut Cx, domain: &str) -> Option<String> {
+        let drop = match domain {
+            "text" => self.ui.combo_box(cx, ids!(md_text)),
+            "image" => self.ui.combo_box(cx, ids!(md_image)),
+            "audio" => self.ui.combo_box(cx, ids!(md_audio)),
+            "speech" => self.ui.combo_box(cx, ids!(md_speech)),
+            "music" => self.ui.combo_box(cx, ids!(md_music)),
+            "video" => self.ui.combo_box(cx, ids!(md_video)),
+            "mesh" => self.ui.combo_box(cx, ids!(md_mesh)),
+            "matte" => self.ui.combo_box(cx, ids!(md_matte)),
+            "depth" => self.ui.combo_box(cx, ids!(md_depth)),
+            "segment" => self.ui.combo_box(cx, ids!(md_segment)),
+            "paint" => self.ui.combo_box(cx, ids!(md_paint)),
+            "world" => self.ui.combo_box(cx, ids!(md_world)),
+            "rig" => self.ui.combo_box(cx, ids!(md_rig)),
+            "motion" => self.ui.combo_box(cx, ids!(md_motion)),
+            "edit" => self.ui.combo_box(cx, ids!(md_edit)),
+            "upscale" => self.ui.combo_box(cx, ids!(md_upscale)),
+            "control" => self.ui.combo_box(cx, ids!(md_control)),
+            "inpaint" => self.ui.combo_box(cx, ids!(md_inpaint)),
+            "splat" => self.ui.combo_box(cx, ids!(md_splat)),
+            _ => return None,
+        };
+        let index = drop.selected_item().checked_sub(1)?;
+        self.model_choices
+            .iter()
+            .find(|(name, _)| name == domain)
+            .and_then(|(_, ids)| ids.get(index))
+            .cloned()
+    }
+
+    fn collected_stage_models(&self, cx: &mut Cx, domains: &[&str]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for domain in domains {
+            if let Some(model) = self.selected_stage_model(cx, domain) {
+                out.push(((*domain).to_string(), model));
+            }
+        }
+        out
+    }
+
+    fn refresh_one_stage_model(
+        &mut self,
+        cx: &mut Cx,
+        domain: &str,
+        row: &[LiveId],
+        drop: &[LiveId],
+        active: bool,
+        apply_preset_pin: bool,
+        pin: Option<&str>,
+    ) {
+        self.ui.widget(cx, row).set_visible(cx, active);
+        if !active {
+            return;
+        }
+        let previous = self.selected_stage_model(cx, domain);
+        let ids = self.fleet_models_for_domain(domain);
+        let labels: Vec<String> = std::iter::once("auto (affinity)".to_string())
+            .chain(ids.iter().cloned())
+            .collect();
+        let mut select = 0usize;
+        if apply_preset_pin {
+            if let Some(pin) = pin {
+                if let Some(index) = ids.iter().position(|id| id == pin) {
+                    select = index + 1;
                 }
-                let key = (model.domain.clone(), model.id.clone());
-                if !choices.contains(&key) {
-                    labels.push(format!("model: {} ({})", model.id, model.domain));
-                    choices.push(key);
+            }
+        } else if let Some(previous) = previous {
+            if let Some(index) = ids.iter().position(|id| id == &previous) {
+                select = index + 1;
+            }
+        }
+        let slot = self
+            .model_choices
+            .iter()
+            .position(|(name, _)| name == domain);
+        let changed = match slot {
+            Some(index) => self.model_choices[index].1 != ids,
+            None => true,
+        };
+        if changed {
+            self.ui.combo_box(cx, drop).set_labels(cx, labels);
+            match slot {
+                Some(index) => self.model_choices[index].1 = ids,
+                None => self.model_choices.push((domain.to_string(), ids)),
+            }
+        }
+        self.ui.combo_box(cx, drop).set_selected_item(cx, select);
+    }
+
+    /// Show a model dropdown for each step in the selected pipeline, the
+    /// same way image size / music length already splat out.
+    fn refresh_model_ui(&mut self, cx: &mut Cx, apply_preset_pin: bool) {
+        let preset = self.current_preset_index(cx);
+        let domains = PRESETS[preset].domains;
+        let pin_for = |domain: &str| {
+            PRESETS[preset]
+                .pins
+                .iter()
+                .find(|(pin_domain, _)| *pin_domain == domain)
+                .map(|(_, model)| *model)
+        };
+        let active = |domain: &str| domains.iter().any(|want| *want == domain);
+        self.refresh_one_stage_model(
+            cx, "text", ids!(md_text_row), ids!(md_text), active("text"), apply_preset_pin, pin_for("text"),
+        );
+        self.refresh_one_stage_model(
+            cx, "image", ids!(md_image_row), ids!(md_image), active("image"), apply_preset_pin, pin_for("image"),
+        );
+        self.refresh_one_stage_model(
+            cx, "audio", ids!(md_audio_row), ids!(md_audio), active("audio"), apply_preset_pin, pin_for("audio"),
+        );
+        self.refresh_one_stage_model(
+            cx, "speech", ids!(md_speech_row), ids!(md_speech), active("speech"), apply_preset_pin, pin_for("speech"),
+        );
+        self.refresh_one_stage_model(
+            cx, "music", ids!(md_music_row), ids!(md_music), active("music"), apply_preset_pin, pin_for("music"),
+        );
+        self.refresh_one_stage_model(
+            cx, "video", ids!(md_video_row), ids!(md_video), active("video"), apply_preset_pin, pin_for("video"),
+        );
+        self.refresh_one_stage_model(
+            cx, "mesh", ids!(md_mesh_row), ids!(md_mesh), active("mesh"), apply_preset_pin, pin_for("mesh"),
+        );
+        self.refresh_one_stage_model(
+            cx, "matte", ids!(md_matte_row), ids!(md_matte), active("matte"), apply_preset_pin, pin_for("matte"),
+        );
+        self.refresh_one_stage_model(
+            cx, "depth", ids!(md_depth_row), ids!(md_depth), active("depth"), apply_preset_pin, pin_for("depth"),
+        );
+        self.refresh_one_stage_model(
+            cx, "segment", ids!(md_segment_row), ids!(md_segment), active("segment"), apply_preset_pin, pin_for("segment"),
+        );
+        self.refresh_one_stage_model(
+            cx, "paint", ids!(md_paint_row), ids!(md_paint), active("paint"), apply_preset_pin, pin_for("paint"),
+        );
+        self.refresh_one_stage_model(
+            cx, "world", ids!(md_world_row), ids!(md_world), active("world"), apply_preset_pin, pin_for("world"),
+        );
+        self.refresh_one_stage_model(
+            cx, "rig", ids!(md_rig_row), ids!(md_rig), active("rig"), apply_preset_pin, pin_for("rig"),
+        );
+        self.refresh_one_stage_model(
+            cx, "motion", ids!(md_motion_row), ids!(md_motion), active("motion"), apply_preset_pin, pin_for("motion"),
+        );
+        self.refresh_one_stage_model(
+            cx, "edit", ids!(md_edit_row), ids!(md_edit), active("edit"), apply_preset_pin, pin_for("edit"),
+        );
+        self.refresh_one_stage_model(
+            cx, "upscale", ids!(md_upscale_row), ids!(md_upscale), active("upscale"), apply_preset_pin, pin_for("upscale"),
+        );
+        self.refresh_one_stage_model(
+            cx, "control", ids!(md_control_row), ids!(md_control), active("control"), apply_preset_pin, pin_for("control"),
+        );
+        self.refresh_one_stage_model(
+            cx, "inpaint", ids!(md_inpaint_row), ids!(md_inpaint), active("inpaint"), apply_preset_pin, pin_for("inpaint"),
+        );
+        self.refresh_one_stage_model(
+            cx, "splat", ids!(md_splat_row), ids!(md_splat), active("splat"), apply_preset_pin, pin_for("splat"),
+        );
+        self.ui
+            .widget(cx, ids!(speech_params_row))
+            .set_visible(cx, active("speech"));
+        self.ui
+            .widget(cx, ids!(image_size_row))
+            .set_visible(cx, active("image"));
+        self.ui
+            .widget(cx, ids!(image_steps_row))
+            .set_visible(cx, active("image"));
+        self.ui
+            .widget(cx, ids!(edit_strength_row))
+            .set_visible(cx, active("edit"));
+        self.refresh_lora_ui(cx);
+        self.ui
+            .widget(cx, ids!(lora_row))
+            .set_visible(cx, active("image"));
+        let lora_on = active("image") && self.selected_lora(cx).is_some();
+        self.ui
+            .widget(cx, ids!(lora_strength_row))
+            .set_visible(cx, lora_on);
+        self.ui
+            .widget(cx, ids!(mesh_params_row))
+            .set_visible(cx, active("mesh") || active("paint"));
+        self.ui
+            .widget(cx, ids!(mesh_faces_row))
+            .set_visible(cx, active("mesh"));
+        self.ui
+            .widget(cx, ids!(mesh_colors_row))
+            .set_visible(cx, active("mesh") && active("paint"));
+        self.ui
+            .widget(cx, ids!(motion_prompt_row))
+            .set_visible(cx, active("motion"));
+        self.ui
+            .widget(cx, ids!(vid_size_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(vid_len_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(vid_audio_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(vid_interp_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(music_params_row))
+            .set_visible(cx, active("music"));
+        self.ui
+            .widget(cx, ids!(enh_upscale_row))
+            .set_visible(cx, active("enhance"));
+        self.ui
+            .widget(cx, ids!(enh_tween_row))
+            .set_visible(cx, active("enhance"));
+        self.ui
+            .widget(cx, ids!(enh_flow_row))
+            .set_visible(cx, active("enhance"));
+        self.sync_preset_name_box(cx);
+    }
+
+    fn current_panel_gen(&self, cx: &mut Cx) -> GenParams {
+        let size = IMAGE_SIZES[self
+            .ui
+            .combo_box(cx, ids!(size_drop))
+            .selected_item()
+            .min(IMAGE_SIZES.len() - 1)];
+        let steps_index = self.ui.combo_box(cx, ids!(steps_drop)).selected_item();
+        let image_steps = steps_index
+            .checked_sub(1)
+            .and_then(|i| IMAGE_STEPS.get(i).copied());
+        let mesh_texture_size = MESH_TEXTURE_SIZES[self
+            .ui
+            .combo_box(cx, ids!(texture_size_drop))
+            .selected_item()
+            .min(MESH_TEXTURE_SIZES.len() - 1)];
+        let mesh_faces_n = MESH_FACE_COUNTS[self
+            .ui
+            .combo_box(cx, ids!(mesh_faces_drop))
+            .selected_item()
+            .min(MESH_FACE_COUNTS.len() - 1)];
+        let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
+        let vid_size = VIDEO_SIZES[self
+            .ui
+            .combo_box(cx, ids!(vid_size_drop))
+            .selected_item()
+            .min(VIDEO_SIZES.len() - 1)];
+        let (video_frames, video_steps) = VIDEO_LENGTHS[self
+            .ui
+            .combo_box(cx, ids!(vid_len_drop))
+            .selected_item()
+            .min(VIDEO_LENGTHS.len() - 1)];
+        let music_seconds = MUSIC_LENGTHS[self
+            .ui
+            .combo_box(cx, ids!(music_len_drop))
+            .selected_item()
+            .min(MUSIC_LENGTHS.len() - 1)];
+        GenParams {
+            image_size: size,
+            image_steps,
+            mesh_texture_size,
+            mesh_faces,
+            mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
+            motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
+            edit_strength: EDIT_STRENGTHS[self
+                .ui
+                .combo_box(cx, ids!(edit_strength_drop))
+                .selected_item()
+                .min(EDIT_STRENGTHS.len() - 1)],
+            video_size: vid_size,
+            video_frames,
+            video_steps,
+            video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
+            video_interpolate: VIDEO_INTERPOLATE[self
+                .ui
+                .combo_box(cx, ids!(vid_interp_drop))
+                .selected_item()
+                .min(VIDEO_INTERPOLATE.len() - 1)],
+            image_lora: self.selected_lora(cx),
+            music_seconds,
+            enhance_upscale: ENHANCE_FACTORS[self
+                .ui
+                .combo_box(cx, ids!(enh_upscale_drop))
+                .selected_item()
+                .min(ENHANCE_FACTORS.len() - 1)],
+            enhance_interpolate: ENHANCE_FACTORS[self
+                .ui
+                .combo_box(cx, ids!(enh_tween_drop))
+                .selected_item()
+                .min(ENHANCE_FACTORS.len() - 1)],
+            enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
+        }
+    }
+
+    fn sync_preset_name_box(&mut self, cx: &mut Cx) {
+        let preset = self.current_preset_index(cx);
+        let models = self.collected_stage_models(cx, PRESETS[preset].domains);
+        let gen = self.current_panel_gen(cx);
+        let name = fast_presets::auto_name(PRESETS[preset].name, &models, &gen);
+        self.ui
+            .text_input(cx, ids!(preset_name_input))
+            .set_text(cx, &name);
+    }
+
+    fn persist_saved_presets(&self) {
+        if let Err(error) = fast_presets::save(&fast_presets::store_path(), &self.saved_presets) {
+            log!("fast preset save failed: {error}");
+        }
+    }
+
+    fn refresh_saved_presets_ui(&mut self, cx: &mut Cx) {
+        let slots = [
+            (ids!(fp0), ids!(fp0_go), ids!(fp0_del)),
+            (ids!(fp1), ids!(fp1_go), ids!(fp1_del)),
+            (ids!(fp2), ids!(fp2_go), ids!(fp2_del)),
+            (ids!(fp3), ids!(fp3_go), ids!(fp3_del)),
+            (ids!(fp4), ids!(fp4_go), ids!(fp4_del)),
+            (ids!(fp5), ids!(fp5_go), ids!(fp5_del)),
+            (ids!(fp6), ids!(fp6_go), ids!(fp6_del)),
+            (ids!(fp7), ids!(fp7_go), ids!(fp7_del)),
+        ];
+        for (i, (row, go, _)) in slots.iter().enumerate() {
+            if let Some(saved) = self.saved_presets.get(i) {
+                self.ui.widget(cx, *row).set_visible(cx, true);
+                self.ui.button(cx, *go).set_text(cx, &saved.name);
+            } else {
+                self.ui.widget(cx, *row).set_visible(cx, false);
+            }
+        }
+    }
+
+    fn save_current_preset(&mut self, cx: &mut Cx) {
+        if self.saved_presets.len() >= MAX_FAST_PRESETS {
+            self.set_caption(cx, "PRESET", "delete one first (8 max)");
+            return;
+        }
+        let preset = self.current_preset_index(cx);
+        let models = self.collected_stage_models(cx, PRESETS[preset].domains);
+        let gen = self.current_panel_gen(cx);
+        let typed = self.ui.text_input(cx, ids!(preset_name_input)).text();
+        let name = {
+            let trimmed = typed.trim();
+            if trimmed.is_empty() {
+                fast_presets::auto_name(PRESETS[preset].name, &models, &gen)
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let voice_index = self.ui.combo_box(cx, ids!(voice_drop)).selected_item();
+        let voice = if voice_index == 0 || !self.voice_drop_is_kokoro {
+            None
+        } else {
+            VOICES.get(voice_index).map(|v| v.to_string())
+        };
+        self.saved_presets.push(fast_presets::snapshot(
+            PRESETS[preset].name,
+            models,
+            voice,
+            &gen,
+            name,
+        ));
+        self.persist_saved_presets();
+        self.refresh_saved_presets_ui(cx);
+        self.sync_preset_name_box(cx);
+    }
+
+    fn apply_saved_preset(&mut self, cx: &mut Cx, index: usize) {
+        let Some(saved) = self.saved_presets.get(index).cloned() else {
+            return;
+        };
+        let Some(preset) = fast_presets::pipeline_index(&saved.pipeline) else {
+            self.set_caption(cx, "PRESET", &format!("missing pipeline {}", saved.pipeline));
+            return;
+        };
+        self.ui
+            .combo_box(cx, ids!(preset_drop))
+            .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset));
+        self.refresh_model_ui(cx, false);
+        for pin in &saved.models {
+            let ids = self.fleet_models_for_domain(&pin.domain);
+            if let Some(pos) = ids.iter().position(|id| id == &pin.model) {
+                if let Some(drop) = Self::stage_model_drop_id(&pin.domain) {
+                    self.ui
+                        .combo_box(cx, drop)
+                        .set_selected_item(cx, pos + 1);
                 }
             }
         }
-        // Compare the SETS, not the lengths: a box swapping one model for
-        // another keeps the count while changing the choices — the selector
-        // must always list every available /models entry across the fleet.
-        if choices != self.model_choices {
-            self.ui
-                .drop_down2(cx, ids!(model_drop))
-                .set_labels(cx, labels);
-        }
-        if boxes != self.box_choices {
-            self.ui.drop_down2(cx, ids!(box_drop)).set_labels(cx, box_labels);
-        }
-        self.model_choices = choices;
-        self.box_choices = boxes;
+        self.ui
+            .combo_box(cx, ids!(size_drop))
+            .set_selected_item(cx, fast_presets::nearest_image_size(saved.image_w, saved.image_h));
+        self.ui.combo_box(cx, ids!(steps_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_image_steps(saved.image_steps),
+        );
+        self.ui.combo_box(cx, ids!(texture_size_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_mesh_texture(saved.mesh_texture),
+        );
+        self.ui.combo_box(cx, ids!(mesh_faces_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_mesh_faces(saved.mesh_faces),
+        );
+        self.ui
+            .check_box(cx, ids!(trellis_colors_toggle))
+            .set_active(cx, saved.mesh_trellis_texture.unwrap_or(false), Animate::No);
+        self.ui
+            .text_input(cx, ids!(motion_prompt_input))
+            .set_text(cx, saved.motion_prompt.as_deref().unwrap_or(""));
+        self.ui.combo_box(cx, ids!(vid_size_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_size(saved.video_w, saved.video_h),
+        );
+        self.ui.combo_box(cx, ids!(vid_len_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_len(saved.video_frames, saved.video_steps),
+        );
+        self.ui
+            .check_box(cx, ids!(video_audio_toggle))
+            .set_active(cx, saved.video_audio.unwrap_or(true), Animate::No);
+        self.ui.combo_box(cx, ids!(edit_strength_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_edit_strength(saved.edit_strength.unwrap_or(1.0)),
+        );
+        self.ui.combo_box(cx, ids!(vid_interp_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_interpolate(saved.video_interpolate.unwrap_or(1)),
+        );
+        self.refresh_lora_ui(cx);
+        let lora_index = saved
+            .image_lora
+            .as_ref()
+            .and_then(|name| self.lora_names.iter().position(|n| n == name))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.ui.combo_box(cx, ids!(lora_drop)).set_selected_item(cx, lora_index);
+        let strength = saved.image_lora_strength.unwrap_or(1.0);
+        let strength_index = LORA_STRENGTHS
+            .iter()
+            .position(|s| (*s - strength).abs() < 0.05)
+            .unwrap_or(0);
+        self.ui
+            .combo_box(cx, ids!(lora_strength_drop))
+            .set_selected_item(cx, strength_index);
+        self.ui.combo_box(cx, ids!(music_len_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_music_len(saved.music_seconds),
+        );
         self.refresh_voice_ui(cx);
+        self.sync_preset_name_box(cx);
+        self.start_generate(cx);
+    }
+
+    fn stage_model_drop_id(domain: &str) -> Option<&'static [LiveId]> {
+        Some(match domain {
+            "text" => ids!(md_text),
+            "image" => ids!(md_image),
+            "audio" => ids!(md_audio),
+            "speech" => ids!(md_speech),
+            "music" => ids!(md_music),
+            "video" => ids!(md_video),
+            "mesh" => ids!(md_mesh),
+            "matte" => ids!(md_matte),
+            "depth" => ids!(md_depth),
+            "segment" => ids!(md_segment),
+            "paint" => ids!(md_paint),
+            "world" => ids!(md_world),
+            "rig" => ids!(md_rig),
+            "motion" => ids!(md_motion),
+            _ => return None,
+        })
     }
 
     /// The speech model the NEXT run would use: an explicit speech model
     /// override wins, else the selected preset's speech pin, else Kokoro by
     /// affinity convention (the only pack-based backend).
     fn effective_speech_model(&mut self, cx: &mut Cx) -> Option<String> {
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        if let Some((domain, model)) = model_index
-            .checked_sub(1)
-            .and_then(|index| self.model_choices.get(index))
-        {
-            if domain == "speech" {
-                return Some(model.clone());
-            }
+        if let Some(model) = self.selected_stage_model(cx, "speech") {
+            return Some(model);
         }
-        let preset = self
-            .ui
-            .drop_down2(cx, ids!(preset_drop))
-            .selected_item()
-            .min(PRESETS.len() - 1);
+        let preset = self.current_preset_index(cx);
         PRESETS[preset]
             .pins
             .iter()
@@ -2709,12 +5504,12 @@ impl App {
             return;
         }
         self.voice_drop_is_kokoro = kokoro;
-        let drop = self.ui.drop_down2(cx, ids!(voice_drop));
+        let drop = self.ui.combo_box(cx, ids!(voice_drop));
         if kokoro {
             drop.set_labels(
                 cx,
-                std::iter::once(format!("voice: default ({})", VOICES[0]))
-                    .chain(VOICES[1..].iter().map(|voice| format!("voice: {voice}")))
+                std::iter::once(format!("default ({})", VOICES[0]))
+                    .chain(VOICES[1..].iter().map(|voice| (*voice).to_string()))
                     .collect(),
             );
         } else {
@@ -2722,7 +5517,7 @@ impl App {
             drop.set_labels(
                 cx,
                 vec![format!(
-                    "voice: n/a — {model} uses reference audio + emotion (not wired here yet)"
+                    "n/a — {model} uses reference audio + emotion (not wired here yet)"
                 )],
             );
         }
@@ -2736,7 +5531,9 @@ impl App {
             return;
         }
         let Some(preset_sub) = self.auto.preset.clone() else { return };
-        let Some(fleet) = &self.fleet else { return };
+        if self.fleet.is_none() {
+            return;
+        }
         let Some(preset_index) = PRESETS
             .iter()
             .position(|p| p.name.contains(preset_sub.as_str()))
@@ -2746,7 +5543,7 @@ impl App {
             return;
         };
         let first_domain = PRESETS[preset_index].domains[0];
-        if makepad_asset_ai::fleet::pick_for_domain(&fleet.snapshots, first_domain).is_none() {
+        if makepad_asset_ai::fleet::pick_for_domain(&self.routing_snapshots(), first_domain).is_none() {
             return; // wait for discovery
         }
         self.auto.fired = true;
@@ -2756,8 +5553,9 @@ impl App {
                 .set_text(cx, prompt);
         }
         self.ui
-            .drop_down2(cx, ids!(preset_drop))
-            .set_selected_item(cx, preset_index);
+            .combo_box(cx, ids!(preset_drop))
+            .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset_index));
+        self.refresh_model_ui(cx, true);
         // Extra queued runs, to exercise the run queue. Each is its own
         // History group, exactly like distinct Generate clicks.
         for sub in self.auto.queue.clone() {
@@ -2777,7 +5575,7 @@ impl App {
                     group_label,
                     prompt,
                     preset,
-                    model_override: None,
+                    model_overrides: Vec::new(),
                     box_override: None,
                     voice: None,
                     gen: GenParams::default(),
@@ -2800,24 +5598,16 @@ impl App {
         if prompt.trim().is_empty() {
             prompt = "a weathered fishing trawler at dawn, misty harbor".to_string();
         }
-        let preset = self
-            .ui
-            .drop_down2(cx, ids!(preset_drop))
-            .selected_item()
-            .min(PRESETS.len() - 1);
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        let model_override = if model_index == 0 {
-            None
-        } else {
-            self.model_choices.get(model_index - 1).cloned()
-        };
-        let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
+        let preset = self.current_preset_index(cx);
+        let model_overrides =
+            self.collected_stage_models(cx, PRESETS[preset].domains);
+        let box_index = self.ui.combo_box(cx, ids!(box_drop)).selected_item();
         let box_override = if box_index == 0 {
             None
         } else {
             self.box_choices.get(box_index - 1).cloned()
         };
-        let voice_index = self.ui.drop_down2(cx, ids!(voice_drop)).selected_item();
+        let voice_index = self.ui.combo_box(cx, ids!(voice_drop)).selected_item();
         // No pack when the dropdown is in its non-Kokoro (n/a) state.
         let voice = if voice_index == 0 || !self.voice_drop_is_kokoro {
             None
@@ -2825,29 +5615,35 @@ impl App {
             VOICES.get(voice_index).map(|v| v.to_string())
         };
         let size = IMAGE_SIZES
-            [self.ui.drop_down2(cx, ids!(size_drop)).selected_item().min(IMAGE_SIZES.len() - 1)];
-        let steps_index = self.ui.drop_down2(cx, ids!(steps_drop)).selected_item();
+            [self.ui.combo_box(cx, ids!(size_drop)).selected_item().min(IMAGE_SIZES.len() - 1)];
+        let steps_index = self.ui.combo_box(cx, ids!(steps_drop)).selected_item();
         let image_steps = steps_index
             .checked_sub(1)
             .and_then(|i| IMAGE_STEPS.get(i).copied());
         let mesh_texture_size = MESH_TEXTURE_SIZES[self
             .ui
-            .drop_down2(cx, ids!(texture_size_drop))
+            .combo_box(cx, ids!(texture_size_drop))
             .selected_item()
             .min(MESH_TEXTURE_SIZES.len() - 1)];
+        let mesh_faces_n = MESH_FACE_COUNTS[self
+            .ui
+            .combo_box(cx, ids!(mesh_faces_drop))
+            .selected_item()
+            .min(MESH_FACE_COUNTS.len() - 1)];
+        let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
         let vid_size = VIDEO_SIZES[self
             .ui
-            .drop_down2(cx, ids!(vid_size_drop))
+            .combo_box(cx, ids!(vid_size_drop))
             .selected_item()
             .min(VIDEO_SIZES.len() - 1)];
         let (video_frames, video_steps) = VIDEO_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(vid_len_drop))
+            .combo_box(cx, ids!(vid_len_drop))
             .selected_item()
             .min(VIDEO_LENGTHS.len() - 1)];
         let music_seconds = MUSIC_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(music_len_drop))
+            .combo_box(cx, ids!(music_len_drop))
             .selected_item()
             .min(MUSIC_LENGTHS.len() - 1)];
         // Seeded transform: a compatible pinned input becomes the run's
@@ -2857,18 +5653,71 @@ impl App {
             Some(asset) => {
                 match seed_replaces_prefix(PRESETS[preset].domains, &asset.content_type) {
                     Some(skip) => {
-                        let bytes = std::fs::read(&asset.path).map_err(|error| {
+                        let mut bytes = std::fs::read(&asset.path).map_err(|error| {
                             format!(
                                 "selected input \u{201c}{}\u{201d} could not be read ({error}) — run not queued",
                                 asset.label
                             )
                         })?;
+                        // Inpaint: the painter's canvas (maybe outpainted) is
+                        // the picture the service repaints, its mask says where.
+                        let mut mask = None;
+                        if PRESETS[preset].domains.contains(&"inpaint") {
+                            let painted = self
+                                .ui
+                                .widget(cx, ids!(mask_paint))
+                                .borrow::<MaskPaint>()
+                                .filter(|paint| paint.has_image())
+                                .map(|paint| (paint.has_mask(), paint.canvas_png(), paint.mask_png()));
+                            match painted {
+                                Some((true, Some(canvas), Some(mask_png))) => {
+                                    bytes = canvas;
+                                    mask = Some(std::sync::Arc::new(mask_png));
+                                }
+                                Some((false, _, _)) => {
+                                    return Err(
+                                        "paint a mask on the picture first (drag in the viewer; Outpaint grows the canvas) — run not queued"
+                                            .to_string(),
+                                    );
+                                }
+                                _ => {
+                                    return Err(
+                                        "the mask painter has no picture loaded — select an image first"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        // Extra references only matter to edit chains; for
+                        // anything else they stay in the tray, unused (the
+                        // pipeline would refuse them), so don't even read.
+                        let mut references = Vec::new();
+                        if PRESETS[preset].domains.contains(&"edit") {
+                            for extra in self.input_tray.extras() {
+                                let bytes = std::fs::read(&extra.path).map_err(|error| {
+                                    format!(
+                                        "reference \u{201c}{}\u{201d} could not be read ({error}) — run not queued",
+                                        extra.label
+                                    )
+                                })?;
+                                references.push((
+                                    extra.content_type.clone(),
+                                    std::sync::Arc::new(bytes),
+                                ));
+                            }
+                        }
                         Some(RunSeed {
                             source_file: asset.file.clone(),
                             source_label: asset.label.clone(),
-                            content_type: asset.content_type.clone(),
+                            content_type: if mask.is_some() {
+                                "image/png".to_string()
+                            } else {
+                                asset.content_type.clone()
+                            },
                             bytes: std::sync::Arc::new(bytes),
                             skip,
+                            references,
+                            mask,
                         })
                     }
                     None => {
@@ -2893,6 +5742,18 @@ impl App {
             }
             None => None,
         };
+        // A chain whose first stage CONSUMES an input it cannot make itself
+        // (mesh-first rig chains: TRELLIS needs an image, and the only thing
+        // that can stand in is a selected GLB) is refused without a seed —
+        // the stage would just fail on the box with "needs an input image".
+        let first = PRESETS[preset].domains.first().copied().unwrap_or("");
+        if input.is_none() && (first == "mesh" || consumer_only_domain(first)) {
+            let needs = if first == "mesh" { "mesh" } else { "image" };
+            return Err(format!(
+                "\u{201c}{}\u{201d} needs a selected {needs} — click one in History or a run-tray chip first",
+                PRESETS[preset].name
+            ));
+        }
         let group_label = match &input {
             // Provenance in the run's durable group identity: this chain
             // was seeded FROM that exact managed artifact.
@@ -2912,17 +5773,43 @@ impl App {
             group_label,
             prompt,
             preset,
-            model_override,
+            model_overrides,
             box_override,
             voice,
             gen: GenParams {
                 image_size: size,
                 image_steps,
                 mesh_texture_size,
+                mesh_faces,
+                mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
+                motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
+                edit_strength: EDIT_STRENGTHS[self
+                    .ui
+                    .combo_box(cx, ids!(edit_strength_drop))
+                    .selected_item()
+                    .min(EDIT_STRENGTHS.len() - 1)],
                 video_size: vid_size,
                 video_frames,
                 video_steps,
+                video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
+                video_interpolate: VIDEO_INTERPOLATE[self
+                    .ui
+                    .combo_box(cx, ids!(vid_interp_drop))
+                    .selected_item()
+                    .min(VIDEO_INTERPOLATE.len() - 1)],
+                image_lora: self.selected_lora(cx),
                 music_seconds,
+                enhance_upscale: ENHANCE_FACTORS[self
+                    .ui
+                    .combo_box(cx, ids!(enh_upscale_drop))
+                    .selected_item()
+                    .min(ENHANCE_FACTORS.len() - 1)],
+                enhance_interpolate: ENHANCE_FACTORS[self
+                    .ui
+                    .combo_box(cx, ids!(enh_tween_drop))
+                    .selected_item()
+                    .min(ENHANCE_FACTORS.len() - 1)],
+                enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
             },
             input,
         })
@@ -2933,15 +5820,16 @@ impl App {
     /// about seeding a SPECIFIC box, exactly the case affinity won't route.
     /// Progress shows on the box's fleet entry (model state + queue).
     fn pull_model(&mut self, cx: &mut Cx) {
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        let Some((_, model)) = model_index
-            .checked_sub(1)
-            .and_then(|i| self.model_choices.get(i))
+        let preset = self.current_preset_index(cx);
+        let Some((_, model)) = self
+            .collected_stage_models(cx, PRESETS[preset].domains)
+            .into_iter()
+            .next()
         else {
-            self.set_caption(cx, "PULL", "pick a model in the model pin first");
+            self.set_caption(cx, "PULL", "pick a model in a stage dropdown first");
             return;
         };
-        let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
+        let box_index = self.ui.combo_box(cx, ids!(box_drop)).selected_item();
         let Some(box_url) = box_index
             .checked_sub(1)
             .and_then(|i| self.box_choices.get(i))
@@ -2949,6 +5837,11 @@ impl App {
             self.set_caption(cx, "PULL", "pick a box in the box pin first");
             return;
         };
+        if let Some(prompt) = self.first_unacked_model(std::iter::once(model.as_str())) {
+            self.license_resume = Some(LicenseResume::Pull);
+            self.open_license_modal(cx, prompt);
+            return;
+        }
         let request = makepad_asset_ai::protocol::GenerateRequestJson {
             model: model.clone(),
             pull_only: Some(true),
@@ -2970,7 +5863,37 @@ impl App {
     /// Generate: every click enqueues its own run (own group id); the
     /// fleet-aware planner starts as many as free compatible slots allow.
     fn start_generate(&mut self, cx: &mut Cx) {
+        let parallel = self.ui.check_box(cx, ids!(parallel_toggle)).active(cx);
         match self.current_run_spec(cx) {
+            Ok(run) if parallel => {
+                let boxes = self.idle_capable_boxes(&run);
+                if boxes.is_empty() {
+                    self.set_caption(
+                        cx,
+                        "FLEET",
+                        "no idle capable box right now — queued one run by affinity",
+                    );
+                    self.run_queue.push(run);
+                } else {
+                    let count = boxes.len();
+                    for base_url in boxes {
+                        // Own group id per box: each spread run is its own
+                        // History item; the label says where it ran.
+                        let host = base_url
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .to_string();
+                        self.run_queue.push(PendingRun {
+                            box_override: Some(base_url),
+                            group_id: crate::library::new_group_id("run"),
+                            group_label: format!("{} @ {host}", run.group_label),
+                            ..run.clone()
+                        });
+                    }
+                    self.set_caption(cx, "FLEET", &format!("spread across {count} idle boxes"));
+                }
+                self.try_dispatch_pending(cx);
+            }
             Ok(run) => {
                 self.run_queue.push(run);
                 self.try_dispatch_pending(cx);
@@ -2980,6 +5903,30 @@ impl App {
                 self.set_caption(cx, "INPUT", &message);
             }
         }
+    }
+
+    /// Boxes that could take `run`'s first stage RIGHT NOW and are doing
+    /// nothing else: up, capable (advertised model + VRAM fit), zero
+    /// service-reported jobs (nobody's video in flight), none of our own
+    /// stages committed there. One per physical GPU slot.
+    fn idle_capable_boxes(&self, run: &PendingRun) -> Vec<String> {
+        let (_, loads) = self.endpoint_loads(run);
+        let mut seen_slots = Vec::new();
+        let mut out = Vec::new();
+        for load in loads {
+            if !load.up || !load.capable || load.vram_waiting {
+                continue;
+            }
+            if load.reported_pending > 0 || load.ours_active > 0 {
+                continue;
+            }
+            if seen_slots.contains(&load.slot_key) {
+                continue;
+            }
+            seen_slots.push(load.slot_key.clone());
+            out.push(load.base_url.clone());
+        }
+        out
     }
 
     /// Runs currently occupying a GPU slot.
@@ -3020,20 +5967,27 @@ impl App {
             .copied()
             .unwrap_or("image")
             .to_string();
-        let pinned_model = match &run.model_override {
-            Some((override_domain, model)) if *override_domain == domain => Some(model.clone()),
-            _ => PRESETS[run.preset]
-                .pins
-                .iter()
-                .find(|(pin_domain, _)| *pin_domain == domain)
-                .map(|(_, model)| (*model).to_string()),
-        };
+        let pinned_model = run
+            .model_overrides
+            .iter()
+            .find(|(override_domain, _)| override_domain == &domain)
+            .map(|(_, model)| model.clone())
+            .or_else(|| {
+                PRESETS[run.preset]
+                    .pins
+                    .iter()
+                    .find(|(pin_domain, _)| *pin_domain == domain)
+                    .map(|(_, model)| (*model).to_string())
+            });
         let ours = self.our_endpoint_use();
-        let loads = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.as_slice())
-            .unwrap_or(&[])
+        let keep: Vec<String> = run
+            .model_overrides
+            .iter()
+            .map(|(_, model)| model.clone())
+            .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
+            .collect();
+        let routing = self.routing_snapshots_keeping(&keep);
+        let loads = routing
             .iter()
             .filter(|snapshot| {
                 run.box_override
@@ -3067,9 +6021,24 @@ impl App {
                         .iter()
                         .find(|(url, _)| *url == snapshot.base_url)
                         .map_or(0, |(_, count)| *count),
-                    // The service does not advertise a GPU count; never
-                    // assume more than one per slot.
-                    capacity: 1,
+                    // Extra GPUs still never arrive as extra ports — that
+                    // part of the old comment stood. But a chat/text box's
+                    // advertised decode LANES are real concurrent capacity
+                    // on ONE card (see `LanesJson` in asset-ai/protocol.rs):
+                    // four idle lanes must not look like a full GPU. Every
+                    // other domain is a whole-GPU job and stays at 1.
+                    // Absent advert or non-chat domain: floor of 1, exactly
+                    // today's behaviour.
+                    capacity: if domain == "chat" || domain == "text" {
+                        snapshot
+                            .health
+                            .as_ref()
+                            .and_then(|health| health.lanes.as_ref())
+                            .map(|lanes| lanes.slots_total.clamp(1, u32::MAX as u64) as u32)
+                            .unwrap_or(1)
+                    } else {
+                        1
+                    },
                 }
             })
             .collect();
@@ -3117,6 +6086,28 @@ impl App {
     /// a mesh run behind it whose slot is free. Bounded by
     /// [`MAX_ACTIVE_RUNS`] on top of per-endpoint capacity.
     fn try_dispatch_pending(&mut self, cx: &mut Cx) {
+        if self.ui.modal(cx, ids!(license_modal)).is_open() {
+            if !self.run_queue.is_empty() {
+                self.set_caption(
+                    cx,
+                    "LICENSE",
+                    "run queued — accept or decline the license to start it",
+                );
+            }
+            return;
+        }
+        // A pending license resume with no modal on screen is a wedge (the
+        // modal was dismissed some other way). Drop the stale resume — the
+        // dispatch below re-detects the unacked model and reopens the modal
+        // properly, instead of parking every future run in silence.
+        if let Some(resume) = self.license_resume.take() {
+            log!("license: stale resume with modal closed — recovering and re-dispatching");
+            // The parked run was already removed from the queue when the
+            // modal opened; put it back so it isn't lost.
+            if let LicenseResume::Dispatch(run) = resume {
+                self.run_queue.insert(0, run);
+            }
+        }
         let mut index = 0;
         while index < self.run_queue.len() {
             if self.active_run_count() >= MAX_ACTIVE_RUNS {
@@ -3136,7 +6127,10 @@ impl App {
                     self.dispatch_run(cx, run, &[]);
                 }
                 DispatchPlan::Wait { reason } => {
+                    // A held run must say so on screen, not just in the log —
+                    // a silent park reads as "Generate does nothing".
                     log!("scheduler: run held — {reason}");
+                    self.set_caption(cx, "QUEUE", &format!("run held — {reason}"));
                     index += 1;
                 }
             }
@@ -3145,13 +6139,29 @@ impl App {
     }
 
     fn dispatch_run(&mut self, cx: &mut Cx, run: PendingRun, avoid: &[String]) {
-        let Some(fleet) = &self.fleet else { return };
-        let snapshots = fleet.snapshots.clone();
+        if self.fleet.is_none() {
+            self.set_caption(cx, "FLEET", "no fleet discovered yet — run dropped, press Generate again");
+            return;
+        }
+        if let Some(prompt) = self.first_unacked_model(
+            self.models_for_run(&run).iter().map(|id| id.as_str()),
+        ) {
+            self.license_resume = Some(LicenseResume::Dispatch(run));
+            self.open_license_modal(cx, prompt);
+            return;
+        }
+        let keep: Vec<String> = run
+            .model_overrides
+            .iter()
+            .map(|(_, model)| model.clone())
+            .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
+            .collect();
+        let snapshots = self.routing_snapshots_keeping(&keep);
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
             PRESETS[run.preset].pins,
-            run.model_override.clone(),
+            run.model_overrides.clone(),
             run.box_override.clone(),
             run.voice.clone(),
             run.gen.clone(),
@@ -3174,6 +6184,23 @@ impl App {
                 pipeline.set_seed_input(seed.content_type.clone(), seed.bytes.as_ref().clone())
             {
                 log!("run: seed input rejected at dispatch: {error}");
+                self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
+                return;
+            }
+            if let Some(mask) = &seed.mask {
+                if let Err(error) = pipeline.set_seed_mask(mask.as_ref().clone()) {
+                    log!("run: mask rejected at dispatch: {error}");
+                    self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
+                    return;
+                }
+            }
+            if let Err(error) = pipeline.set_seed_references(
+                seed.references
+                    .iter()
+                    .map(|(ct, bytes)| (ct.clone(), bytes.as_ref().clone()))
+                    .collect(),
+            ) {
+                log!("run: extra references rejected at dispatch: {error}");
                 self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
                 return;
             }
@@ -3604,11 +6631,7 @@ impl App {
             .active_candidate_set()
             .map(|set| set.id.clone())
             .expect("candidate set was found above");
-        let snapshots = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.clone())
-            .unwrap_or_default();
+        let snapshots = self.routing_snapshots();
         let avoid = self.avoid_for_run(index);
         let run_id = self.runs[index].id;
         let result = if early {
@@ -3639,11 +6662,7 @@ impl App {
             .active_candidate_set()
             .map(|set| set.id.clone())
             .expect("candidate set was found above");
-        let snapshots = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.clone())
-            .unwrap_or_default();
+        let snapshots = self.routing_snapshots();
         let avoid = self.avoid_for_run(index);
         let run_id = self.runs[index].id;
         match self.runs[index]
@@ -3794,6 +6813,15 @@ impl App {
                         .flatten();
                     let (domain, content_type, bytes) =
                         (s.domain.clone(), ct.clone(), bytes.clone());
+                    // The RUN's own chain decides product vs intermediate —
+                    // a seeded (transform) run has fewer stages than its
+                    // preset, so the preset must not be consulted here.
+                    let product = run_artifact_product(
+                        stage,
+                        pipeline.stages.len(),
+                        &domain,
+                        &content_type,
+                    );
                     let (prompt, group_id, group_label) = (
                         run.prompt.clone(),
                         run.group_id.clone(),
@@ -3809,6 +6837,7 @@ impl App {
                         Some((&group_id, &group_label)),
                         None,
                         true,
+                        product,
                     );
                 }
                 PipelineEvent::CandidateSetStarted { stage, set_id } => {
@@ -3925,6 +6954,10 @@ impl App {
                             Some((&group_id, &group_label)),
                             Some(&label),
                             false,
+                            // A candidate is a choice offered, never the
+                            // run's product — only the committed one is
+                            // promoted into the chain.
+                            Some(false),
                         );
                     }
                     self.refresh_candidate_ui(cx, run_id);
@@ -3981,6 +7014,18 @@ impl App {
                             "✓ CHOSEN · {model} @ {} · seed {seed}",
                             endpoint.trim_start_matches("http://")
                         );
+                        let product = self
+                            .runs
+                            .iter()
+                            .find(|run| run.id == run_id)
+                            .and_then(|run| {
+                                run_artifact_product(
+                                    stage,
+                                    run.pipeline.stages.len(),
+                                    "image",
+                                    &content_type,
+                                )
+                            });
                         let _ = self.route_artifact(
                             cx,
                             "image",
@@ -3991,6 +7036,7 @@ impl App {
                             Some((&group_id, &group_label)),
                             Some(&label),
                             false,
+                            product,
                         );
                     }
                     self.refresh_candidate_ui(cx, run_id);
@@ -4046,10 +7092,17 @@ impl App {
         group: Option<(&str, &str)>,
         label_override: Option<&str>,
         show_in_viewer: bool,
+        // PRODUCT vs intermediate for a pipeline run (see
+        // `run_artifact_product`); None for routes that are not a run stage
+        // — drops, webcam frames, manual imports.
+        product: Option<bool>,
     ) -> Option<String> {
         self.artifact_count += 1;
         let n = self.artifact_count;
         log!("artifact #{n}: {domain} {content_type} {} bytes", bytes.len());
+        // Paint sidecars (albedo/normal/ORM/manifest) stay in History but
+        // must not replace the textured GLB in the viewer or steal selection.
+        let show_in_viewer = show_in_viewer && auto_show_artifact(domain, content_type);
         // Persist FIRST — History readiness never depends on what surface
         // is up. (Audio-thumbnail provenance is enforced INSIDE the library:
         // any caller thumbnail for audio is discarded there.)
@@ -4070,9 +7123,12 @@ impl App {
                 &bytes,
                 thumbnail,
                 group,
+                product,
             ) {
                 Ok(file) => {
-                    self.selected_file = Some(file.clone());
+                    if show_in_viewer {
+                        self.selected_file = Some(file.clone());
+                    }
                     managed_file = Some(file);
                 }
                 Err(error) => log!("library: could not persist artifact: {error}"),
@@ -4080,13 +7136,14 @@ impl App {
         }
         if let Some(file) = &managed_file {
             self.queue_glb_thumbnail(cx, file, &bytes);
+            self.queue_splat_thumbnail(cx, file, content_type, domain);
         }
         // Display/play ONLY while the Create viewer is actually up. On other
         // surfaces the completion is persisted + selected (ready in the
         // strip/grid); returning to Create reopens it through the async
         // loading path (ViewerContent::needs_reopen).
         if show_in_viewer && self.surface == Surface::Create {
-            if self.display_artifact(cx, domain, content_type, &bytes, n, None) {
+            if self.display_artifact(cx, domain, content_type, &bytes, n, None, true) {
                 // An unpersisted display (library write failed) is
                 // TRANSIENT: not library-bound, so it must never trip the
                 // deleted-item viewer reset; the next open replaces it.
@@ -4142,6 +7199,10 @@ impl App {
         bytes: &[u8],
         n: u64,
         prewritten: Option<&std::path::Path>,
+        // True only for a freshly accepted generated clip. History / Library
+        // reopen must stay paused: `audio::play()` restarts at end-of-clip,
+        // so a second display of a short Quake/Doom shot is a speaker loop.
+        audition: bool,
     ) -> bool {
         let ct = content_type.to_ascii_lowercase();
         let is_glb = bytes.starts_with(b"glTF") || ct.contains("gltf");
@@ -4150,11 +7211,10 @@ impl App {
         // Only a stateful manifest goes to BillboardView.
         let is_billboard = ct.contains("billboard") || ct.contains("x-stateful-billboard");
         if is_billboard {
-            let path = self.selected_file.as_ref().and_then(|file| {
-                self.library
-                    .as_ref()
-                    .and_then(|library| library.payload_path(file).ok())
-            });
+            let path = self
+                .selected_file
+                .clone()
+                .and_then(|file| self.payload_path_of(&file));
             if let Some(path) = path {
                 if let Some(mut view) = self
                     .ui
@@ -4210,10 +7270,10 @@ impl App {
                         .image(cx, ids!(wave_img))
                         .set_texture(cx, Some(texture));
                     if audio::load(pcm.clone()) {
-                        // SFX/short-line one-shot audition: play once right
-                        // away; long-form audio stays paused with the scrub
-                        // transport armed (policy + rationale in audio.rs).
-                        if audio::autoplay_one_shot(domain, pcm.seconds()) {
+                        // Accept-path only. A gallery reopen of the same
+                        // WAV must not call play() or a 200ms DS_* / Quake
+                        // shot becomes a loop (play-at-end restarts).
+                        if audition && audio::autoplay_one_shot(domain, pcm.seconds()) {
                             crate::video_player::stop_audio();
                             audio::play();
                             self.arm_audio_pump(cx);
@@ -4243,7 +7303,14 @@ impl App {
             let path = match prewritten {
                 Some(path) => path.to_path_buf(),
                 None => {
-                    let path = artifacts_dir().join(format!("artifact-{n}.mp4"));
+                    // UNIQUE path per open: the previous clip's DETACHED
+                    // decode thread may still hold the old file open, and
+                    // clobbering it mid-read kills the new decoder at birth
+                    // (the "no first frame until scrub" storm).
+                    static VIDEO_OPEN_SEQ: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let seq = VIDEO_OPEN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let path = artifacts_dir().join(format!("artifact-{n}-{seq}.mp4"));
                     if let Err(e) = std::fs::write(&path, bytes) {
                         log!("video artifact write failed: {e}");
                         return false;
@@ -4262,6 +7329,8 @@ impl App {
                         &format!("{}x{}  {}", player.width, player.height, path.display()),
                     );
                     self.video = Some(player);
+                    self.video_path = Some(path.clone());
+                    self.sync_video_transport(cx);
                     self.video_pump = cx.new_next_frame();
                     self.show_page(cx, id!(video_page));
                     true
@@ -4291,8 +7360,18 @@ impl App {
                 let (aomesh, ao_png) = self
                     .selected_file
                     .as_ref()
-                    .and_then(|file| self.library.as_ref().map(|lib| lib.ao_sidecar_bytes(file)))
+                    .and_then(|file| self.ao_sidecars_of(file))
                     .unwrap_or((None, None));
+                // A playable rig's baked rest bundle caches beside the payload
+                // (`<stem>.skinao`), like the sandbox's cast does.
+                let rig_cache = self
+                    .selected_file
+                    .as_ref()
+                    .and_then(|file| self.rig_cache_of(file));
+                // The rig-preview API rode an uncommitted mesh_view change
+                // that a git cleanup discarded; until that lane relands it,
+                // the viewer shows the model without the skeletal overlay.
+                let _ = rig_cache;
                 mesh.set_model_bytes_ao(cx, bytes.to_vec(), None, aomesh, ao_png);
                 if let Some(spawn) = spawn {
                     mesh.enable_walk(cx, spawn);
@@ -4302,21 +7381,31 @@ impl App {
                 {
                     if let Some(place) = library.world_place(file) {
                         let mut sprites = Vec::new();
+                        let mut models = Vec::new();
                         for p in &place.places {
-                            if p.align != "face" || p.asset.is_empty() {
+                            if p.asset.is_empty() {
                                 continue;
                             }
                             let Some(path) = library.find_place_asset(&p.asset) else {
                                 continue;
                             };
-                            sprites.push((
-                                vec3f(p.pos[0], p.pos[1], p.pos[2]),
-                                p.width,
-                                p.height,
-                                path,
-                            ));
+                            if p.align == "face" {
+                                sprites.push((
+                                    vec3f(p.pos[0], p.pos[1], p.pos[2]),
+                                    p.width,
+                                    p.height,
+                                    path,
+                                ));
+                            } else {
+                                models.push((
+                                    vec3f(p.pos[0], p.pos[1], p.pos[2]),
+                                    p.yaw,
+                                    path,
+                                ));
+                            }
                         }
                         mesh.set_placed_sprites(cx, sprites);
+                        mesh.set_placed_models(cx, models);
                     }
                 }
             }
@@ -4334,7 +7423,10 @@ impl App {
                     path
                 }
             };
-            self.set_splat_file(cx, &path.to_string_lossy(), false);
+            // TripoSplat writes y-down like scans (flip); world splats are y-up.
+            let object = domain.eq_ignore_ascii_case("splat");
+            self.set_splat_file(cx, &path.to_string_lossy(), object);
+            self.frame_splat_camera(cx, object);
             self.show_page(cx, id!(splat_page));
             true
         } else {
@@ -4404,10 +7496,34 @@ impl App {
     }
 
     fn refresh_gallery(&mut self, cx: &mut Cx, clear_thumbnails: bool) {
-        let (entries, count) = match &self.library {
+        // Catalog assets the user pulled in sit at the FRONT of the rail:
+        // they are what this surface is working on right now, and they are
+        // backed by verified cache objects rather than library files.
+        let mut entries: Vec<GalleryEntry> = self
+            .catalog_work
+            .rows()
+            .map(|item| GalleryEntry {
+                meta: item.meta.clone(),
+                path: item.payload.clone().unwrap_or_default(),
+                preview_path: item.thumbnail.clone(),
+                selected: self.selected_file.as_deref() == Some(item.meta.file.as_str()),
+            })
+            .collect();
+        let adopted = entries.len();
+        let (local, count) = match &self.library {
             Some(library) => {
                 let entries = library
                     .newest_items()
+                    // This strip is the GENERATOR's own output rail: what
+                    // this app made, plus what the user handed it directly
+                    // (drops, webcam). Imported packs are catalog content —
+                    // they land in the store, are browsed on the Library
+                    // surface, and the thousands of historical `import:`
+                    // rows an older pipeline left in the local index are
+                    // not what anyone is looking for here. Same rule the
+                    // publisher uses, so the rail and the catalog agree
+                    // about what "generated" means.
+                    .filter(|item| rail_shows(item))
                     .filter_map(|item| {
                         let path = library.payload_path(&item.file).ok()?;
                         let ct = item.content_type.to_ascii_lowercase();
@@ -4428,10 +7544,13 @@ impl App {
                         })
                     })
                     .collect::<Vec<_>>();
-                (entries, library.len())
+                let count = entries.len();
+                (entries, count)
             }
             None => (Vec::new(), 0),
         };
+        entries.extend(local);
+        let count = count + adopted;
         if let Some(mut gallery) = self
             .ui
             .widget(cx, ids!(library_gallery))
@@ -4442,17 +7561,138 @@ impl App {
         self.ui.label(cx, ids!(library_hint)).set_text(
             cx,
             &format!(
-                "{count} resources · one tile per run · click to view · drag audio/video by DRAG · × removes the whole run"
+                "{count} generated · one tile per run · click to view · double-click = use as input · drag audio/video by DRAG · × removes the whole run · imports live in LIBRARY"
             ),
         );
         // The Library surface browses the same disk-backed store; keep its
         // grid, counts and detail rail in lockstep with every mutation.
-        self.refresh_library_ui(cx, clear_thumbnails);
+        self.refresh_library_ui(cx);
         // Every library mutation funnels through here — the input tray's
         // deletion sweep rides along so it can never advertise a payload
         // that no longer exists.
         self.sync_input_tray(cx);
+        self.sync_run_tray(cx);
         self.ui.redraw(cx);
+    }
+
+    /// Spread the SELECTED run out into the run tray: one chip per member
+    /// artifact in pipeline order (oldest first), the viewer's current file
+    /// highlighted. Hidden for ungrouped records and single-artifact runs.
+    /// Decodes the History strip already holds are seeded into the tray's
+    /// cache; the rest arrive through the shared async preview worker.
+    fn sync_run_tray(&mut self, cx: &mut Cx) {
+        let selected_group: Option<String> = match (&self.library, &self.selected_file) {
+            (Some(library), Some(selected)) => {
+                library.get(selected).and_then(|item| item.group_id.clone())
+            }
+            _ => None,
+        };
+        let members: Vec<crate::library::LibraryMeta> = match (&self.library, &selected_group) {
+            (Some(library), Some(group)) => {
+                let mut members: Vec<_> = library
+                    .newest_items()
+                    .filter(|item| item.group_id.as_deref() == Some(group.as_str()))
+                    .cloned()
+                    .collect();
+                members.reverse();
+                members
+            }
+            _ => Vec::new(),
+        };
+        let files: Vec<String> = members.iter().map(|m| m.file.clone()).collect();
+        let changed = files != self.run_tray_files;
+        self.run_tray_files = files;
+        // The tray exists to walk one pipeline run's own stage artifacts
+        // (source image, mesh, PBR maps, final product) — never a pack
+        // import's whole haul (a Kenney kit or a Doom shareware pull can
+        // land hundreds of unrelated members under one `import:` group id).
+        let show = members.len() > 1
+            && !selected_group
+                .as_deref()
+                .is_some_and(crate::library::is_import_pack_group);
+        self.ui.widget(cx, ids!(run_tray)).set_visible(cx, show);
+        if !show {
+            return;
+        }
+        let label = members
+            .iter()
+            .find_map(|m| m.group_label.clone())
+            .unwrap_or_else(|| "run".to_string());
+        self.ui.label(cx, ids!(run_tray_title)).set_text(
+            cx,
+            &format!(
+                "RUN · {} · {} artifacts — click to view · double-click = use as input",
+                truncate(&label, 34),
+                members.len()
+            ),
+        );
+        let library = self.library.as_ref().expect("members imply a library");
+        let tray_members: Vec<RunTrayMember> = members
+            .iter()
+            .filter_map(|member| {
+                let path = library.payload_path(&member.file).ok()?;
+                let ct = member.content_type.to_ascii_lowercase();
+                // Same preview_path rule as the History strip and Library
+                // grid (`refresh_gallery` / `refresh_library_ui`): billboard
+                // and image payloads are their own preview, everything else
+                // falls back to the rendered `.thumb` sidecar. Keeping this
+                // identical across all three views is what lets one shared
+                // `store_views::preview_work` decode path (and the async
+                // pump/broadcast in `pump_gallery_previews`) serve whichever
+                // widget recorded the miss.
+                let preview_path = if member.domain.eq_ignore_ascii_case("billboard")
+                    || ct.contains("billboard")
+                    || ct.starts_with("image/")
+                {
+                    Some(path.clone())
+                } else {
+                    library.thumbnail_path(&member.file).ok().flatten()
+                };
+                // Stage-ish label: the domain (matte, mesh, paint, rig, …)
+                // says more than the payload kind; plain images keep the kind.
+                let kind = if member.domain.is_empty() || member.domain.eq_ignore_ascii_case("image") {
+                    crate::asset_store_state::local_kind(&member.domain, &member.content_type).to_string()
+                } else {
+                    member.domain.to_ascii_lowercase()
+                };
+                Some(RunTrayMember {
+                    entry: GalleryEntry {
+                        meta: member.clone(),
+                        path,
+                        preview_path,
+                        selected: false,
+                    },
+                    kind,
+                })
+            })
+            .collect();
+        // Seed decodes the History strip already has, then hand the members
+        // to the tray; its own draw records the remaining misses.
+        let seeds: Vec<(String, Texture)> = {
+            let gallery = self.ui.widget(cx, ids!(library_gallery));
+            tray_members
+                .iter()
+                .filter_map(|m| {
+                    gallery
+                        .borrow::<LibraryGallery>()
+                        .and_then(|g| g.cached_texture(&m.entry.meta.file))
+                        .map(|t| (m.entry.meta.file.clone(), t))
+                })
+                .collect()
+        };
+        if let Some(mut tray) = self
+            .ui
+            .widget(cx, ids!(run_tray_list))
+            .borrow_mut::<RunTray>()
+        {
+            for (file, texture) in seeds {
+                tray.seed_texture(&file, texture);
+            }
+            tray.set_members(cx, tray_members, self.selected_file.clone(), false);
+        }
+        if changed {
+            self.pump_gallery_previews(cx);
+        }
     }
 
     /// Input tray chip + honest transform-action labels. Cheap when nothing
@@ -4464,17 +7704,44 @@ impl App {
         self.input_tray
             .retain_existing(|file| library.is_some_and(|library| library.get(file).is_some()));
         let current = self.input_tray.current().cloned();
-        if current.as_ref().map(|asset| asset.file.clone()) == self.input_chip_file {
+        let extras: Vec<InputAsset> = self.input_tray.extras().to_vec();
+        let extra_files: Vec<String> = extras.iter().map(|a| a.file.clone()).collect();
+        if current.as_ref().map(|asset| asset.file.clone()) == self.input_chip_file
+            && extra_files == self.input_ref_files
+        {
             return;
         }
         self.input_chip_file = current.as_ref().map(|asset| asset.file.clone());
+        self.input_ref_files = extra_files;
+        // Extra-reference thumbs: typed badge now, decoded preview async.
+        self.ui
+            .widget(cx, ids!(input_refs))
+            .set_visible(cx, !extras.is_empty());
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            match extras.get(slot) {
+                Some(asset) => {
+                    self.ui.view(cx, row).set_visible(cx, true);
+                    let badge = crate::store_views::badge_texture(cx, &asset.domain);
+                    let mut id = row.to_vec();
+                    id.push(Self::input_ref_thumb_id(slot));
+                    self.ui.image(cx, &id).set_texture(cx, Some(badge));
+                    self.request_input_chip_preview(cx, asset);
+                }
+                None => self.ui.view(cx, row).set_visible(cx, false),
+            }
+        }
         match current {
             Some(asset) => {
                 self.ui.widget(cx, ids!(input_tray)).set_visible(cx, true);
+                let refs = match extras.len() {
+                    0 => String::new(),
+                    1 => " · +1 reference".to_string(),
+                    n => format!(" · +{n} references"),
+                };
                 self.ui.label(cx, ids!(input_chip_kind)).set_text(
                     cx,
                     &format!(
-                        "INPUT · {}",
+                        "INPUT · {}{refs}",
                         crate::asset_store_state::local_kind(&asset.domain, &asset.content_type)
                     ),
                 );
@@ -4494,7 +7761,446 @@ impl App {
             }
         }
         self.refresh_transform_labels(cx);
+        self.sync_mask_mode(cx);
         self.ui.redraw(cx);
+    }
+
+    /// Inpaint mask mode: on when the selected preset has an `inpaint` stage
+    /// AND a picture is pinned — the viewer shows the mask painter over that
+    /// picture instead of the plain image. Off otherwise (plain viewer back).
+    fn sync_mask_mode(&mut self, cx: &mut Cx) {
+        let preset = self.current_preset_index(cx);
+        let wants = PRESETS[preset].domains.contains(&"inpaint");
+        let pinned = self
+            .input_tray
+            .current()
+            .filter(|asset| asset.content_type.to_ascii_lowercase().starts_with("image/"))
+            .cloned();
+        let target = if wants { pinned } else { None };
+        match target {
+            Some(asset) => {
+                if self.mask_file.as_deref() != Some(asset.file.as_str()) {
+                    let decoded = std::fs::read(&asset.path)
+                        .ok()
+                        .and_then(|bytes| decode_image_from_data(&bytes).ok());
+                    match decoded {
+                        Some(image) => {
+                            if let Some(mut paint) =
+                                self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>()
+                            {
+                                paint.set_image(cx, &image);
+                            }
+                            self.mask_file = Some(asset.file.clone());
+                        }
+                        None => {
+                            self.set_caption(cx, "INPAINT", "pinned picture could not be decoded for masking");
+                            self.mask_file = None;
+                            return;
+                        }
+                    }
+                }
+                self.ui.widget(cx, ids!(mask_tools)).set_visible(cx, true);
+                self.ui.widget(cx, ids!(mask_paint)).set_visible(cx, true);
+                self.ui.widget(cx, ids!(image_view)).set_visible(cx, false);
+                self.show_page(cx, id!(image_page));
+                self.refresh_mask_status(cx);
+            }
+            None => {
+                if self.mask_file.take().is_some() {
+                    if let Some(mut paint) =
+                        self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>()
+                    {
+                        paint.clear(cx);
+                    }
+                }
+                self.ui.widget(cx, ids!(mask_tools)).set_visible(cx, false);
+                self.ui.widget(cx, ids!(mask_paint)).set_visible(cx, false);
+                self.ui.widget(cx, ids!(image_view)).set_visible(cx, true);
+            }
+        }
+        self.ui.redraw(cx);
+    }
+
+    /// LoRA dropdown = "none" + every adapter any up box lists via /loras;
+    /// keeps the current pick when the list changes.
+    fn refresh_lora_ui(&mut self, cx: &mut Cx) {
+        let names = self
+            .fleet
+            .as_ref()
+            .map(|fleet| fleet.all_loras())
+            .unwrap_or_default();
+        if names == self.lora_names {
+            return;
+        }
+        let previous = self.selected_lora(cx).map(|(name, _)| name);
+        self.lora_names = names;
+        let labels: Vec<String> = std::iter::once("none".to_string())
+            .chain(self.lora_names.iter().cloned())
+            .collect();
+        self.ui.combo_box(cx, ids!(lora_drop)).set_labels(cx, labels);
+        let select = previous
+            .and_then(|name| self.lora_names.iter().position(|n| *n == name))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.ui.combo_box(cx, ids!(lora_drop)).set_selected_item(cx, select);
+    }
+
+    fn selected_lora(&self, cx: &mut Cx) -> Option<(String, f32)> {
+        let index = self.ui.combo_box(cx, ids!(lora_drop)).selected_item().checked_sub(1)?;
+        let name = self.lora_names.get(index)?.clone();
+        let strength = LORA_STRENGTHS[self
+            .ui
+            .combo_box(cx, ids!(lora_strength_drop))
+            .selected_item()
+            .min(LORA_STRENGTHS.len() - 1)];
+        Some((name, strength))
+    }
+
+    fn refresh_mask_status(&mut self, cx: &mut Cx) {
+        let (has_mask, size) = self
+            .ui
+            .widget(cx, ids!(mask_paint))
+            .borrow::<MaskPaint>()
+            .map(|paint| (paint.has_mask(), paint.canvas_size()))
+            .unwrap_or((false, (0, 0)));
+        let text = if has_mask {
+            format!("{}×{} · mask set", size.0, size.1)
+        } else {
+            format!("{}×{} · paint the area to repaint", size.0, size.1)
+        };
+        self.ui.label(cx, ids!(mask_status)).set_text(cx, &text);
+    }
+
+    fn input_ref_ids() -> [&'static [LiveId]; 3] {
+        [ids!(input_ref0), ids!(input_ref1), ids!(input_ref2)]
+    }
+
+    fn input_ref_thumb_id(slot: usize) -> LiveId {
+        match slot {
+            0 => live_id!(input_ref0_thumb),
+            1 => live_id!(input_ref1_thumb),
+            _ => live_id!(input_ref2_thumb),
+        }
+    }
+
+    /// A decoded preview for `file` lands on every input-tray thumb that
+    /// shows it (primary chip and/or extra-reference slots).
+    fn install_input_thumb(&mut self, cx: &mut Cx, file: &str, texture: Texture) {
+        if self.input_chip_file.as_deref() == Some(file) {
+            self.ui
+                .image(cx, ids!(input_chip_thumb))
+                .set_texture(cx, Some(texture.clone()));
+        }
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            if self.input_ref_files.get(slot).map(String::as_str) == Some(file) {
+                let mut id = row.to_vec();
+                id.push(Self::input_ref_thumb_id(slot));
+                self.ui.image(cx, &id).set_texture(cx, Some(texture.clone()));
+            }
+        }
+    }
+
+    // -- webcam input tile ------------------------------------------------
+
+    fn set_webcam_status(&mut self, cx: &mut Cx, text: &str) {
+        self.ui.label(cx, ids!(webcam_status)).set_text(cx, text);
+    }
+
+    /// Toggle on: ask for the camera, pick the first device's best raw YUV
+    /// format and start capturing. Frames land in the shared slot from the
+    /// capture thread; `pump_webcam` (timer) uploads the newest one.
+    fn webcam_start(&mut self, cx: &mut Cx) {
+        use makepad_widgets::makepad_platform::permission::Permission;
+        if self.webcam.capturing {
+            return;
+        }
+        if !self.webcam.callback_installed {
+            let frames = self.webcam.frames.clone();
+            cx.camera_frame_input(0, move |frame| frames.push(&frame));
+            self.webcam.callback_installed = true;
+        }
+        let Some(desc) = self.webcam.descs.first().cloned() else {
+            // No descriptors yet: permission/enumeration is in flight; the
+            // VideoInputs / PermissionResult events retry this.
+            cx.request_permission(Permission::Camera);
+            self.set_webcam_status(cx, "looking for a camera…");
+            return;
+        };
+        let Some(format) = webcam::pick_format(&desc).cloned() else {
+            self.set_webcam_status(cx, &format!("{}: no raw YUV format (MJPEG-only?)", desc.name));
+            return;
+        };
+        cx.use_video_input(&[(desc.input_id, format.format_id)]);
+        self.webcam.capturing = true;
+        self.webcam.shown_serial = 0;
+        self.ui.view(cx, ids!(webcam_live)).set_visible(cx, true);
+        self.set_webcam_status(
+            cx,
+            &format!("{} {}×{} · live", desc.name, format.width, format.height),
+        );
+        self.ui.redraw(cx);
+    }
+
+    fn webcam_stop(&mut self, cx: &mut Cx) {
+        if self.webcam.capturing {
+            cx.use_video_input(&[]);
+        }
+        self.webcam.capturing = false;
+        self.webcam.auto_run_group = None;
+        self.ui.check_box(cx, ids!(webcam_auto)).set_active(cx, false, Animate::No);
+        self.ui.view(cx, ids!(webcam_live)).set_visible(cx, false);
+        self.set_webcam_status(cx, "");
+        self.ui.redraw(cx);
+    }
+
+    /// Timer: upload the newest frame to the preview thumb (only when it
+    /// changed) and drive auto-run.
+    fn pump_webcam(&mut self, cx: &mut Cx) {
+        if let Some(frame) = self.webcam.frames.take_newer(self.webcam.shown_serial) {
+            self.webcam.shown_serial = frame.serial;
+            let texture = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: frame.width,
+                    height: frame.height,
+                    data: Some(frame.bgra),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            self.ui
+                .image(cx, ids!(webcam_thumb))
+                .set_texture(cx, Some(texture.clone()));
+            self.webcam.preview = Some(texture);
+            self.ui.widget(cx, ids!(webcam_thumb)).redraw(cx);
+        }
+        if !self.ui.check_box(cx, ids!(webcam_auto)).active(cx) {
+            return;
+        }
+        // Auto-run: one run of ours at a time, never while anything else of
+        // ours is running, with a short breather between runs.
+        let now = cx.seconds_since_app_start();
+        if now < self.webcam.auto_next_at {
+            return;
+        }
+        let waiting = self.webcam.auto_run_group.as_ref().is_some_and(|group| {
+            self.runs
+                .iter()
+                .any(|run| &run.group_id == group && run.pipeline.is_running())
+                || self.run_queue.iter().any(|run| &run.group_id == group)
+        });
+        if waiting || self.any_run_running() || !self.run_queue.is_empty() {
+            return;
+        }
+        self.webcam.auto_next_at = now + 1.5;
+        self.webcam_snap(cx, true);
+    }
+
+    /// Encode the newest frame as PNG, store it in History ("Webcam" group),
+    /// pin it as the input and — for auto-run — start the selected preset.
+    fn webcam_snap(&mut self, cx: &mut Cx, auto_run: bool) {
+        let Some(frame) = self.webcam.frames.latest() else {
+            self.set_webcam_status(cx, "no frame yet");
+            return;
+        };
+        let rgba = webcam::bgra_to_rgba8(&frame.bgra);
+        let Ok(png) = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, frame.width, frame.height)
+        else {
+            self.set_webcam_status(cx, "snapshot PNG encode failed");
+            return;
+        };
+        let group_id = self
+            .webcam
+            .group_id
+            .get_or_insert_with(|| crate::library::new_group_id("webcam"))
+            .clone();
+        let label = format!("webcam {}×{}", frame.width, frame.height);
+        let Some(file) = self.route_artifact(
+            cx,
+            "image",
+            "image/png",
+            png,
+            None,
+            &label,
+            Some((&group_id, "Webcam")),
+            Some(&label),
+            !auto_run,
+            None,
+        ) else {
+            self.set_webcam_status(cx, "snapshot could not be stored");
+            return;
+        };
+        self.refresh_gallery(cx, false);
+        self.open_gallery(cx, &file);
+        if !auto_run {
+            self.set_webcam_status(cx, "snapped → input");
+            return;
+        }
+        // The preset must consume an image; otherwise auto-run would just
+        // generate from the prompt forever.
+        let preset = self.current_preset_index(cx);
+        if seed_replaces_prefix(PRESETS[preset].domains, "image/png").is_none() {
+            self.ui.check_box(cx, ids!(webcam_auto)).set_active(cx, false, Animate::No);
+            self.set_webcam_status(
+                cx,
+                "auto-run off: the selected type does not take an image input",
+            );
+            return;
+        }
+        let before: Vec<String> = self
+            .runs
+            .iter()
+            .map(|run| run.group_id.clone())
+            .chain(self.run_queue.iter().map(|run| run.group_id.clone()))
+            .collect();
+        self.start_generate(cx);
+        let started = self
+            .runs
+            .iter()
+            .map(|run| run.group_id.clone())
+            .chain(self.run_queue.iter().map(|run| run.group_id.clone()))
+            .find(|group| !before.contains(group));
+        match started {
+            Some(group) => {
+                self.webcam.auto_run_group = Some(group);
+                self.set_webcam_status(cx, "auto-run: snapped, generating…");
+            }
+            None => {
+                // start_generate refused (caption explains); back off.
+                self.webcam.auto_next_at = cx.seconds_since_app_start() + 5.0;
+            }
+        }
+    }
+
+    /// A file dropped from the OS: read it, normalise images to PNG (the
+    /// service's image inputs are PNG), add it to the library under a
+    /// "Dropped files" group (byte-identical re-drops reuse the existing
+    /// record), then pin it as the input — or add it as an extra edit
+    /// reference when ⇧ is held.
+    fn import_dropped_file(&mut self, cx: &mut Cx, path: &Path, as_reference: bool) {
+        let Some((domain, content_type, needs_png)) = dropped_file_kind(path) else {
+            self.set_caption(
+                cx,
+                "INPUT",
+                &format!(
+                    "unsupported drop {:?} (images, .glb, .wav, .mp4)",
+                    path.file_name().unwrap_or_default()
+                ),
+            );
+            return;
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.set_caption(cx, "INPUT", &format!("drop could not be read: {error}"));
+                return;
+            }
+        };
+        let bytes = if needs_png {
+            match decode_image_from_data(&bytes).ok().and_then(|image| {
+                let mut rgba = Vec::with_capacity(image.data.len() * 4);
+                for px in &image.data {
+                    rgba.extend_from_slice(&[
+                        (px >> 16) as u8,
+                        (px >> 8) as u8,
+                        *px as u8,
+                        (px >> 24) as u8,
+                    ]);
+                }
+                makepad_asset_ai::testpattern::encode_png_rgba(&rgba, image.width, image.height)
+                    .ok()
+            }) {
+                Some(png) => png,
+                None => {
+                    self.set_caption(cx, "INPUT", "dropped image could not be decoded");
+                    return;
+                }
+            }
+        } else {
+            bytes
+        };
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "dropped file".to_string());
+        let existing = self
+            .library
+            .as_ref()
+            .and_then(|library| library.find_exact_payload(&bytes));
+        let file = match existing {
+            Some(file) => Some(file),
+            None => {
+                let group_id = self
+                    .dropped_group_id
+                    .get_or_insert_with(|| crate::library::new_group_id("drop"))
+                    .clone();
+                self.route_artifact(
+                    cx,
+                    domain,
+                    content_type,
+                    bytes,
+                    None,
+                    &label,
+                    Some((&group_id, "Dropped files")),
+                    Some(&label),
+                    !as_reference,
+                    None,
+                )
+            }
+        };
+        let Some(file) = file else {
+            self.set_caption(cx, "INPUT", "dropped file could not be stored in the library");
+            return;
+        };
+        self.refresh_gallery(cx, false);
+        if as_reference {
+            self.add_input_reference(cx, &file);
+        } else {
+            self.open_gallery(cx, &file);
+        }
+        log!("drop: imported {} as {file} ({content_type})", path.display());
+    }
+
+    /// ⇧ double-click: add `file` as an extra edit reference (first one
+    /// without a primary becomes the primary input).
+    fn add_input_reference(&mut self, cx: &mut Cx, file: &str) {
+        let Some(item) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.get(file).cloned())
+        else {
+            return;
+        };
+        if !item.content_type.to_ascii_lowercase().starts_with("image/") {
+            self.set_caption(cx, "INPUT", "only images can be extra references");
+            return;
+        }
+        let Some(path) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.payload_path(&item.file).ok())
+        else {
+            return;
+        };
+        let changed = self.input_tray.add_extra(InputAsset {
+            file: item.file.clone(),
+            label: item.label.clone(),
+            domain: item.domain.clone(),
+            content_type: item.content_type.clone(),
+            path: path.clone(),
+            preview_path: Some(path),
+        });
+        if !changed {
+            self.set_caption(
+                cx,
+                "INPUT",
+                &format!(
+                    "reference not added (duplicate, or already {} references)",
+                    InputTray::MAX_EXTRAS
+                ),
+            );
+        }
+        self.reopen_gallery(cx, file);
+        self.sync_input_tray(cx);
     }
 
     /// Route the chip's display thumbnail through the bounded preview
@@ -4511,12 +8217,28 @@ impl App {
                 group_label: None,
                 tags: None,
                 enhanced_tags: None,
+                product: None,
             },
             path: asset.path.clone(),
             preview_path: asset.preview_path.clone(),
             selected: false,
         };
-        if crate::store_views::preview_work(&entry).is_some() {
+        // The History strip usually already decoded this file — reuse it.
+        // Otherwise queue the decode ourselves: the gallery only records a
+        // miss while IT draws the tile, so a chip for an off-screen (or
+        // already-cached) file would never get a texture.
+        let cached = self
+            .ui
+            .widget(cx, ids!(library_gallery))
+            .borrow::<LibraryGallery>()
+            .and_then(|gallery| gallery.cached_texture(&asset.file));
+        if let Some(texture) = cached {
+            self.install_input_thumb(cx, &asset.file, texture);
+            return;
+        }
+        if let Some(work) = crate::store_views::preview_work(&entry) {
+            self.extra_preview_work.retain(|(f, _)| f != &asset.file);
+            self.extra_preview_work.push((asset.file.clone(), work));
             self.pump_gallery_previews(cx);
         }
     }
@@ -4536,12 +8258,6 @@ impl App {
                 ids!(qp_mesh_pbr),
                 "image → mesh → hunyuan PBR",
                 "Image → Mesh → PBR",
-                "PBR",
-            ),
-            (
-                ids!(qp_mesh_pbr_test),
-                "image → mesh → PBR (testpattern)",
-                "Image → Mesh → PBR (test)",
                 "PBR",
             ),
             (ids!(qp_cutout), "image → cutout (alpha)", "Image → Cutout", "Cutout"),
@@ -4578,12 +8294,6 @@ impl App {
                 "Character → PBR",
                 "Character",
             ),
-            (
-                ids!(qp_character_pbr_test),
-                "character (playable + PBR test)",
-                "Character → PBR (test)",
-                "Character",
-            ),
         ] {
             let seeded_kind = seed_ct.as_deref().and_then(|ct| {
                 let preset = PRESETS
@@ -4600,15 +8310,200 @@ impl App {
         }
     }
 
+    // -- gaussian-splat thumbnails ------------------------------------------
+
+    /// A freshly landed `.ply` (splat/world) gets an offscreen splat render
+    /// as its History preview; other payloads are ignored here.
+    fn queue_splat_thumbnail(&mut self, cx: &mut Cx, file: &str, content_type: &str, domain: &str) {
+        if !content_type.to_ascii_lowercase().contains("ply") {
+            return;
+        }
+        let Some(path) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.payload_path(file).ok())
+        else {
+            return;
+        };
+        if self.splat_thumb_queue.iter().any(|(f, _, _)| f == file) {
+            return;
+        }
+        let object = domain.eq_ignore_ascii_case("splat");
+        self.splat_thumb_queue.push_back((file.to_string(), path, object));
+        let _ = cx;
+    }
+
+    /// Once per session: every `.ply` in the library without a preview
+    /// sidecar joins the queue (newest first).
+    fn scan_splat_thumbnail_backfill(&mut self) {
+        let Some(library) = self.library.as_ref() else {
+            return;
+        };
+        let mut jobs = Vec::new();
+        for item in library.newest_items() {
+            let ct = item.content_type.to_ascii_lowercase();
+            if !(ct.contains("ply") || item.file.ends_with(".ply")) {
+                continue;
+            }
+            if !matches!(library.thumbnail_path(&item.file), Ok(None)) {
+                continue;
+            }
+            if let Ok(path) = library.payload_path(&item.file) {
+                let object = item.domain.eq_ignore_ascii_case("splat");
+                jobs.push((item.file.clone(), path, object));
+            }
+        }
+        for job in jobs {
+            if !self.splat_thumb_queue.iter().any(|(f, _, _)| f == &job.0) {
+                self.splat_thumb_queue.push_back(job);
+            }
+        }
+    }
+
+    /// One step per thumbnail-timer tick: start the next queued splat on
+    /// the offscreen scene, or harvest the one in flight once it has had a
+    /// few ticks to load + sort. Readbacks that are still clear retry a
+    /// bounded number of times; failures keep the typed badge.
+    fn pump_splat_thumbnails(&mut self, cx: &mut Cx) {
+        if !self.splat_thumb_scanned && self.library.is_some() {
+            self.splat_thumb_scanned = true;
+            self.scan_splat_thumbnail_backfill();
+        }
+        const TICKS_BEFORE_READ: u8 = 3;
+        const MAX_ATTEMPTS: u8 = 12;
+        if self.splat_thumb_job.is_none() {
+            let Some((file, path, object)) = self.splat_thumb_queue.pop_front() else {
+                return;
+            };
+            // Deleted meanwhile, or a preview landed another way.
+            let still_needed = self
+                .library
+                .as_ref()
+                .is_some_and(|library| library.get(&file).is_some()
+                    && matches!(library.thumbnail_path(&file), Ok(None)));
+            if !still_needed {
+                return;
+            }
+            let mut splat = self.ui.widget(cx, ids!(splat_thumb));
+            let abs_path = path.to_string_lossy().to_string();
+            script_apply_eval!(cx, splat, {
+                src: mod.res.file_resource(#(abs_path))
+            });
+            if let Some(mut view) = splat.borrow_mut::<ViewSplat>() {
+                view.set_scale(vec3f(1.0, if object { -1.0 } else { 1.0 }, 1.0));
+            }
+            if let Some(mut scene) = self
+                .ui
+                .widget(cx, ids!(splat_thumb_scene))
+                .borrow_mut::<makepad_xr::scene::XrSceneView>()
+            {
+                let camera = scene.camera_mut();
+                if object {
+                    camera.distance = 6.0;
+                    camera.distance_min = 0.5;
+                    camera.orbit_yaw = 0.55;
+                    camera.orbit_pitch = -0.25;
+                } else {
+                    camera.distance = 1.5;
+                    camera.distance_min = 0.03;
+                    camera.orbit_yaw = 0.0;
+                    camera.orbit_pitch = 0.0;
+                }
+            }
+            self.ui.widget(cx, ids!(splat_thumb_scene)).redraw(cx);
+            self.splat_thumb_job = Some(SplatThumbJob { file, ticks: 0, attempts: 0 });
+            return;
+        }
+        let Some(job) = self.splat_thumb_job.as_mut() else {
+            return;
+        };
+        job.ticks = job.ticks.saturating_add(1);
+        // Keep the offscreen scene drawing while we wait for load + sort.
+        self.ui.widget(cx, ids!(splat_thumb_scene)).redraw(cx);
+        if job.ticks < TICKS_BEFORE_READ {
+            return;
+        }
+        let readback = self
+            .ui
+            .widget(cx, ids!(splat_thumb_scene))
+            .borrow::<makepad_xr::scene::XrSceneView>()
+            .map(|scene| scene.color_texture().clone())
+            .and_then(|texture| cx.debug_read_render_texture(&texture));
+        let file = job.file.clone();
+        let mut done = false;
+        if let Some((width, height, mut bgra)) = readback {
+            if width > 0 && height > 0 && bgra.len() == width * height * 4 {
+                for px in bgra.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                    px[3] = 255;
+                }
+                // Still clear? (no splats drawn yet) — count pixels that
+                // differ from the top-left one.
+                let first = [bgra[0], bgra[1], bgra[2]];
+                let differing = bgra
+                    .chunks_exact(4)
+                    .filter(|px| {
+                        (px[0] as i16 - first[0] as i16).abs() > 6
+                            || (px[1] as i16 - first[1] as i16).abs() > 6
+                            || (px[2] as i16 - first[2] as i16).abs() > 6
+                    })
+                    .count();
+                if differing * 200 > width * height {
+                    if let Ok(png) =
+                        makepad_asset_ai::testpattern::encode_png_rgba(&bgra, width, height)
+                    {
+                        match self
+                            .library
+                            .as_ref()
+                            .map(|library| library.replace_thumbnail_png(&file, &png))
+                        {
+                            Some(Ok(())) => {
+                                log!("library: rendered splat thumbnail for {file} ({width}x{height})");
+                                self.refresh_gallery(cx, false);
+                            }
+                            other => log!("library: splat thumbnail for {file} not stored: {other:?}"),
+                        }
+                    }
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            let job = self.splat_thumb_job.as_mut().unwrap();
+            job.attempts = job.attempts.saturating_add(1);
+            if job.attempts >= MAX_ATTEMPTS {
+                log!("library: splat thumbnail for {file} gave up (still clear after {MAX_ATTEMPTS} reads)");
+                done = true;
+            }
+        }
+        if done {
+            self.splat_thumb_job = None;
+        }
+    }
+
     fn queue_glb_thumbnail(&mut self, cx: &mut Cx, file: &str, bytes: &[u8]) {
         let (aomesh, ao_png) = self
             .library
             .as_ref()
             .map(|library| library.ao_sidecar_bytes(file))
             .unwrap_or((None, None));
-        self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png);
+        let spawn = self.library.as_ref().and_then(|library| library.world_spawn(file));
+        let _ = self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png, spawn);
     }
 
+    /// `spawn` is passed in explicitly (rather than looked up from `file`
+    /// here) so this queues equally well for a LIBRARY row (caller reads
+    /// `library.world_spawn`) or a staged PACK item that has no library row
+    /// at all (caller reads the staged `.spawn` sidecar directly via
+    /// `library::parse_world_spawn`) — see `land_imported_pack`.
+    ///
+    /// Returns whether this file is now IN FLIGHT on the renderer — queued
+    /// by this call, or already queued/active from an earlier one. The
+    /// pack-import icon handshake parks until every in-flight icon reports
+    /// back (`ImportPage::icons_busy`), so a caller that registers a file
+    /// for that wait MUST only do so when this said `true`; registering a
+    /// job that was never queued parks the import thread forever.
+    #[must_use]
     fn queue_glb_thumbnail_ao(
         &mut self,
         cx: &mut Cx,
@@ -4616,28 +8511,26 @@ impl App {
         bytes: &[u8],
         aomesh: Option<Vec<u8>>,
         ao_png: Option<Vec<u8>>,
-    ) {
+        spawn: Option<([f32; 3], f32, f32)>,
+    ) -> bool {
         if !bytes.starts_with(b"glTF") {
-            return;
+            log!("thumbnail: {file} is not a GLB — no icon render queued");
+            return false;
         }
-        if let Some(mut renderer) = self
-            .ui
-            .widget(cx, ids!(thumbnail_renderer))
-            .borrow_mut::<ThumbnailRenderer>()
-        {
-            let spawn = self
-                .library
-                .as_ref()
-                .and_then(|library| library.world_spawn(file));
-            renderer.queue_library_thumbnail_ao_spawn(
-                cx,
-                file.to_string(),
-                bytes.to_vec(),
-                aomesh,
-                ao_png,
-                spawn,
-            );
-        }
+        let widget = self.ui.widget(cx, ids!(thumbnail_renderer));
+        let Some(mut renderer) = widget.borrow_mut::<ThumbnailRenderer>() else {
+            error!("thumbnail: renderer widget unavailable — no icon render queued for {file}");
+            return false;
+        };
+        renderer.queue_library_thumbnail_ao_spawn(
+            cx,
+            file.to_string(),
+            bytes.to_vec(),
+            aomesh,
+            ao_png,
+            spawn,
+        );
+        true
     }
 
     /// Commit completed model-only renders after the headless renderer's
@@ -4669,6 +8562,31 @@ impl App {
             log!("library: thumbnail load failed for {file}");
         }
         for rendered in completed {
+            // Pack items never get a library row (`land_imported_pack`
+            // queues them under `crate::import::pack_icon_key`, never a
+            // `lib-N` id) — persist those into the pack icon store instead
+            // of `Library::replace_thumbnail_png`, which would reject them
+            // outright (no row to revalidate against).
+            if let Some((source_id, pack, stem, fingerprint)) =
+                crate::import::parse_pack_icon_key(&rendered.file)
+            {
+                let dir = crate::import::pack_icons_dir(&source_id, &pack);
+                match crate::import::write_pack_icon(&dir, &stem, &fingerprint, &rendered.png) {
+                    Ok(()) => {
+                        if self
+                            .import_page
+                            .note_rendered_icon(&rendered.file, &rendered.png)
+                        {
+                            import_preview_changed = true;
+                        }
+                        log!("import: rendered pack icon for {source_id}/{pack}/{stem}");
+                    }
+                    Err(error) => log!(
+                        "import: could not persist pack icon for {source_id}/{pack}/{stem}: {error}"
+                    ),
+                }
+                continue;
+            }
             let result = self
                 .library
                 .as_ref()
@@ -4756,10 +8674,7 @@ impl App {
 
     /// Hand one preview-source read to the worker (bounded to one in flight).
     fn request_thumb_read(&mut self, file: &str, purpose: IoPurpose) {
-        let path = self
-            .library
-            .as_ref()
-            .and_then(|library| library.payload_path(file).ok());
+        let path = self.payload_path_of(file);
         let (Some(path), Some(io)) = (path, &self.artifact_io) else {
             return;
         };
@@ -4767,6 +8682,7 @@ impl App {
             file: file.to_string(),
             path,
             purpose,
+            store: None,
         });
         self.thumb_read_in_flight = true;
     }
@@ -4781,6 +8697,81 @@ impl App {
             .unwrap_or_default();
         for done in completed {
             match done {
+                IoDone::CatalogSource { file, path } => {
+                    self.catalog_source_pending.remove(&file);
+                    match path {
+                        Ok(path) => {
+                            self.catalog_work.set_source(&file, path);
+                            // The well is waiting for exactly this to play
+                            // the actor instead of cycling its picture.
+                            self.refresh_library_preview(cx);
+                        }
+                        Err(error) => {
+                            log!("catalog: {file} has no source file: {error}")
+                        }
+                    }
+                }
+                IoDone::CatalogFile {
+                    file,
+                    payload,
+                    role,
+                    media,
+                    revision,
+                    path,
+                    views,
+                } => {
+                    self.catalog_work.pending.remove(&file);
+                    match path {
+                        Ok(path) if payload => {
+                            // A catalog asset now has bytes on disk that the
+                            // local tools can open. Its kind comes from the
+                            // ROLE the manifest gave it, never from guessing
+                            // at the file name — and its container from the
+                            // MEDIA the same manifest declares, because the
+                            // role does not say which one an audio file is in.
+                            if let Some(item) = self.catalog_work.items.get_mut(&file) {
+                                if let Some(role) = role {
+                                    let (domain, content_type) = role_media(role, media);
+                                    item.meta.domain = domain.to_string();
+                                    item.meta.content_type = content_type.to_string();
+                                }
+                            }
+                            self.catalog_work.set_payload(&file, path, revision);
+                            if self.selected_file.as_deref() == Some(file.as_str()) {
+                                self.sync_input_tray(cx);
+                            }
+                            self.refresh_gallery(cx, false);
+                            // The rail is waiting for exactly this to draw
+                            // the model.
+                            self.refresh_library_preview(cx);
+                        }
+                        Ok(path) => {
+                            if let Some(asset) = file.strip_prefix("store:") {
+                                self.catalog_thumb_pending.remove(asset);
+                                self.catalog_thumb_paths
+                                    .insert(asset.to_string(), (path.clone(), views));
+                            }
+                            // A Library tile's picture only needs a redraw:
+                            // rebuilding the whole rail for each of a
+                            // thousand thumbnails would be quadratic. A card
+                            // the Create surface adopted does need the rail
+                            // rebuilt, because its entry carries the path.
+                            if self.catalog_work.get(&file).is_some() {
+                                self.catalog_work.set_thumbnail(&file, path);
+                                self.refresh_gallery(cx, false);
+                            } else {
+                                self.ui.redraw(cx);
+                            }
+                        }
+
+                        Err(error) => {
+                            if let Some(asset) = file.strip_prefix("store:") {
+                                self.catalog_thumb_pending.remove(asset);
+                            }
+                            log!("catalog: {file} could not be materialised: {error}");
+                        }
+                    }
+                }
                 IoDone::ViewerOpen {
                     file,
                     generation,
@@ -4811,6 +8802,54 @@ impl App {
                             continue;
                         }
                     };
+                    // A store open has no library row by design: what it
+                    // is comes from the BYTES the catalog served, and its
+                    // caption from the catalog row.
+                    if let Some(asset) = file.strip_prefix("store:") {
+                        let (domain, content_type) = store_media_of(&bytes);
+                        let title = self.store_asset_title(asset);
+                        let clip_before = audio::clip_generation();
+                        let displayed = self.display_artifact(
+                            cx, domain, content_type, &bytes, 0, copy_to.as_deref(), false,
+                        );
+                        if displayed && content_type.starts_with("video/") {
+                            // ONE player serves both faces: the rail must
+                            // know this file's clip is already open, or its
+                            // own refresh opens a second player and the two
+                            // fight over the decoder.
+                            self.library_video_file = Some(file.clone());
+                            self.refresh_library_preview(cx);
+                        }
+                        if displayed {
+                            // A clicked CATALOG audio row plays immediately —
+                            // music, sfx and speech alike; a library where
+                            // every row needs a second Play click auditions
+                            // like a filing cabinet. Gated on the clip
+                            // GENERATION so it only fires when this display
+                            // actually decoded new audio (never for images,
+                            // never on a redraw that reused the clip) — the
+                            // History-reopen loop guard in display_artifact
+                            // stays what it is.
+                            if audio::clip_generation() != clip_before
+                                && audio::is_ready()
+                                && !audio::is_playing()
+                            {
+                                crate::video_player::stop_audio();
+                                audio::play();
+                                self.arm_audio_pump(cx);
+                                self.sync_audio_ui(cx);
+                            }
+                            self.viewer = ViewerContent::Showing(file.clone());
+                            self.set_caption(cx, kind_label(domain, content_type), &title);
+                        } else {
+                            self.show_viewer_error(
+                                cx,
+                                &file,
+                                &format!("catalog asset could not be displayed ({content_type})."),
+                            );
+                        }
+                        continue;
+                    }
                     let Some(item) = self
                         .library
                         .as_ref()
@@ -4828,6 +8867,7 @@ impl App {
                         &bytes,
                         0,
                         copy_to.as_deref(),
+                        false,
                     ) {
                         self.viewer = ViewerContent::Showing(file.clone());
                         self.set_caption(
@@ -4940,20 +8980,44 @@ impl App {
                             );
                         }
                     }
-                    if self.input_chip_file.as_deref() == Some(file.as_str()) {
-                        self.ui
-                            .image(cx, ids!(input_chip_thumb))
-                            .set_texture(cx, Some(texture.clone()));
+                    self.install_input_thumb(cx, &file, texture.clone());
+                    // The same decoded picture is what the Library tile
+                    // wanted: one decode serves the rail card and the grid
+                    // card of the same asset.
+                    if let Some(asset) = file.strip_prefix("store:").map(str::to_string) {
+                        if let Some(mut grid) =
+                            self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
+                        {
+                            // A billboard's thumbnail IS its animation sheet:
+                            // the cells cycle on the card. Anything else is a
+                            // still.
+                            if frames.len() > 1 {
+                                grid.install_anim(cx, asset.clone(), frames.clone(), fps);
+                            } else {
+                                grid.install_thumb(cx, asset.clone(), texture.clone());
+                            }
+                        }
+                        if frames.len() > 1 {
+                            self.catalog_preview_frames
+                                .insert(asset, (frames.clone(), fps.max(1.0)));
+                        }
+                        self.refresh_library_preview(cx);
                     }
-                    if let Some(mut grid) = self
+                    if let Some(mut tray) = self
                         .ui
-                        .widget(cx, ids!(lib_grid))
-                        .borrow_mut::<LibraryGrid>()
+                        .widget(cx, ids!(run_tray_list))
+                        .borrow_mut::<RunTray>()
                     {
                         if frames.len() > 1 {
-                            grid.install_anim_preview(cx, file, cache_source, frames, fps);
+                            tray.install_anim_preview(
+                                cx,
+                                file.clone(),
+                                cache_source.clone(),
+                                frames.clone(),
+                                fps,
+                            );
                         } else {
-                            grid.install_preview(cx, file, cache_source, texture);
+                            tray.install_preview(cx, file.clone(), cache_source.clone(), texture.clone());
                         }
                     }
                     self.pump_gallery_previews(cx);
@@ -4965,6 +9029,54 @@ impl App {
     /// Route draw-recorded preview misses to the LIFO decode pool. Newly
     /// visible cards are requested last so they inflate first; several
     /// cores run at once.
+    /// Pictures for the Library tiles. A tile's thumbnail is a store object
+    /// named by its digest: materialise it into the verified cache once,
+    /// then decode it on the worker like any other encoded preview. Nothing
+    /// on this machine is consulted — the picture belongs to the revision
+    /// the catalog is showing.
+    fn pump_catalog_thumbs(&mut self, cx: &mut Cx) {
+        let wanted = match self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>() {
+            Some(mut grid) => grid.take_wanted(),
+            None => return,
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        for asset_id in wanted {
+            let file = format!("store:{asset_id}");
+            if let Some((path, views)) = self.catalog_thumb_paths.get(&asset_id) {
+                // Already on disk: straight to the decode queue the gallery
+                // and tray share, with the manifest's declaration riding
+                // along so the worker cuts what the producer declared.
+                self.extra_preview_work.retain(|(f, _)| f != &file);
+                self.extra_preview_work
+                    .push((file, PreviewWork::Declared(path.clone(), views.clone())));
+                continue;
+            }
+            if !self.catalog_thumb_pending.insert(asset_id.clone()) {
+                continue;
+            }
+            let Ok(asset) = asset_id.parse::<makepad_asset_data::AssetId>() else {
+                continue;
+            };
+            if let Some(io) = &self.artifact_io {
+                io.request(IoRequest {
+                    file,
+                    path: PathBuf::new(),
+                    purpose: IoPurpose::CatalogThumb,
+                    store: Some(crate::artifact_io::StoreSource {
+                        asset,
+                        prefer: crate::store_content::default_viewable_roles(),
+                        session: session.clone(),
+                    }),
+                });
+            }
+        }
+    }
+
     fn pump_gallery_previews(&mut self, cx: &mut Cx) {
         let mut wanted = Vec::new();
         if let Some(mut gallery) = self
@@ -4974,20 +9086,30 @@ impl App {
         {
             wanted.extend(gallery.take_preview_work());
         }
-        if let Some(mut grid) = self
+        if let Some(mut tray) = self
             .ui
-            .widget(cx, ids!(lib_grid))
-            .borrow_mut::<LibraryGrid>()
+            .widget(cx, ids!(run_tray_list))
+            .borrow_mut::<RunTray>()
         {
-            wanted.extend(grid.take_preview_work());
+            wanted.extend(tray.take_preview_work());
         }
+        wanted.append(&mut self.extra_preview_work);
         let Some(io) = &self.artifact_io else { return };
         for (file, work) in wanted {
             if self.preview_in_flight.iter().any(|f| f == &file) {
                 continue;
             }
             let (path, purpose) = match work {
-                PreviewWork::Encoded(path) => (path, IoPurpose::GalleryPreviewEncoded),
+                // A local sidecar carries no manifest: its own stamped
+                // layout (a declaration too) is read on the worker, and an
+                // unstamped picture draws whole. Nothing is measured.
+                PreviewWork::Encoded(path) => {
+                    (path, IoPurpose::GalleryPreviewEncoded { views: Vec::new() })
+                }
+                // A catalog thumbnail's manifest declaration rides along.
+                PreviewWork::Declared(path, views) => {
+                    (path, IoPurpose::GalleryPreviewEncoded { views })
+                }
                 PreviewWork::WavPayload(path) => (path, IoPurpose::GalleryPreviewWav),
                 PreviewWork::StatefulBillboard(path) => {
                     (path, IoPurpose::GalleryPreviewBillboard)
@@ -4997,7 +9119,8 @@ impl App {
                 file: file.clone(),
                 path,
                 purpose,
-            });
+            store: None,
+        });
             self.preview_in_flight.push(file);
         }
     }
@@ -5022,6 +9145,55 @@ impl App {
         }
     }
 
+    /// Draw a catalog asset from the store: the IO worker resolves it to its
+    /// newest published revision, picks the file a viewer can draw, and
+    /// streams that blob. No library row, no staging file, nothing that can
+    /// be stale — a digest either matches the revision or it is refused.
+    fn open_store_asset(&mut self, cx: &mut Cx, asset: makepad_asset_data::AssetId) {
+        let Some(session) = self.import_server_session() else {
+            log!("asset store: no session — cannot open {asset}");
+            return;
+        };
+        let file = format!("store:{asset}");
+        let source = crate::artifact_io::StoreSource {
+            asset,
+            prefer: crate::store_content::default_viewable_roles(),
+            session,
+        };
+        // Same latest-click-wins gate the library uses: a fast second click
+        // must not race the first read onto the screen.
+        if let Some(open) =
+            self.viewer_gate
+                .click(&file, PathBuf::new(), None, Some(source))
+        {
+            self.submit_viewer_open(open);
+        }
+        let _ = cx;
+    }
+
+    /// Is the viewer currently showing this catalog asset?
+    fn viewer_shows_store_asset(&self, asset: &makepad_asset_data::AssetId) -> bool {
+        let wanted = format!("store:{asset}");
+        matches!(&self.viewer, ViewerContent::Showing(file) if *file == wanted)
+            || self.selected_file.as_deref() == Some(wanted.as_str())
+    }
+
+    /// The catalog row's title for a store open, so the caption says what
+    /// the user clicked instead of a raw id.
+    fn store_asset_title(&self, asset: &str) -> String {
+        self.store
+            .search
+            .ready()
+            .and_then(|results| {
+                results
+                    .hits
+                    .iter()
+                    .find(|hit| hit.asset_id.to_string() == asset)
+                    .map(|hit| hit.title.clone())
+            })
+            .unwrap_or_else(|| format!("catalog asset {asset}"))
+    }
+
     fn submit_viewer_open(&self, open: PendingOpen) {
         if let Some(io) = &self.artifact_io {
             io.request(IoRequest {
@@ -5031,17 +9203,131 @@ impl App {
                     generation: open.generation,
                     copy_to: open.copy_to,
                 },
+                // The catalog source rides along — dropping it here is how
+                // "view this store video" once became a read of an empty
+                // path ("No such file or directory").
+                store: open.store,
             });
         }
     }
 
+    /// What this identity IS — a local library row, or a catalog asset the
+    /// Create surface is working with. Every tool that needs a label, a
+    /// domain or a content type asks here, so both kinds of item answer the
+    /// same question the same way.
+    fn meta_of(&self, file: &str) -> Option<crate::library::LibraryMeta> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return Some(item.meta.clone());
+        }
+        self.library.as_ref().and_then(|library| library.get(file).cloned())
+    }
+
+    /// WHERE this identity's bytes are. For a catalog asset that is the
+    /// client's verified cache object — digest-named and re-hashed before
+    /// the path was handed out, so it cannot be a stale copy of a revision
+    /// that has moved on. `None` means "not materialised yet", never "use
+    /// something older".
+    fn payload_path_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.payload.clone();
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.payload_path(file).ok())
+    }
+
+    /// The AO bake beside this identity's payload. A catalog asset's bake
+    /// is published INSIDE its revision (roles `AoMesh` + `AoTexture`), so
+    /// the store-backed path is a future materialisation rather than a
+    /// sidecar hunt — until then a catalog asset simply has no local bake,
+    /// which is the honest answer.
+    fn ao_sidecars_of(&self, file: &str) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        if self.catalog_work.get(file).is_some() {
+            return None;
+        }
+        self.library.as_ref().map(|library| library.ao_sidecar_bytes(file))
+    }
+
+    /// Where a playable rig's baked rest bundle caches for this identity.
+    /// Catalog content caches beside its verified object, so a rig baked
+    /// once is not re-baked on every open.
+    fn rig_cache_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.payload.as_ref().map(|p| p.with_extension("skinao"));
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.rig_cache_path(file))
+    }
+
+    /// The picture for this identity: a catalog asset's own thumbnail from
+    /// the verified cache, or the library's rendered sidecar.
+    fn thumbnail_path_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.thumbnail.clone();
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.thumbnail_path(file).ok().flatten())
+    }
+
+    /// Pull a catalog asset into the Create surface: it joins the rail, and
+    /// its payload and thumbnail are materialised into the verified cache
+    /// off-thread. Selecting it is what makes the local tools — AO bake,
+    /// rig, transform inputs, drag-out — able to work on catalog content at
+    /// all; before this they could only ever open a library file.
+    fn adopt_catalog_asset(
+        &mut self,
+        cx: &mut Cx,
+        asset: makepad_asset_data::AssetId,
+        select: bool,
+    ) {
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        let file = store_file_id(&asset);
+        let title = self.store_asset_title(&asset.to_string());
+        let meta = crate::library::LibraryMeta {
+            file: file.clone(),
+            label: title,
+            // Filled in from the manifest's file ROLE the moment the
+            // payload lands; until then the card shows an honest neutral
+            // badge rather than a guess.
+            domain: "asset".into(),
+            content_type: "application/octet-stream".into(),
+            prompt: String::new(),
+            group_id: None,
+            group_label: Some("catalog".into()),
+            tags: Some(vec!["catalog".into()]),
+            enhanced_tags: None,
+            product: Some(true),
+        };
+        self.catalog_work.track(&file, meta);
+        if self.catalog_work.pending.insert(file.clone()) {
+            if let Some(io) = &self.artifact_io {
+                for purpose in [IoPurpose::CatalogPayload, IoPurpose::CatalogThumb] {
+                    io.request(IoRequest {
+                        file: file.clone(),
+                        path: PathBuf::new(),
+                        purpose,
+                        store: Some(crate::artifact_io::StoreSource {
+                            asset,
+                            prefer: crate::store_content::default_viewable_roles(),
+                            session: session.clone(),
+                        }),
+                    });
+                }
+            }
+        }
+        if select {
+            self.selected_file = Some(file);
+        }
+        self.refresh_gallery(cx, false);
+    }
+
     /// Select a library card without opening the viewer.
     fn select_gallery(&mut self, cx: &mut Cx, file: &str) {
-        let Some(item) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.get(file).cloned())
-        else {
+        let Some(item) = self.meta_of(file) else {
             return;
         };
         self.selected_file = Some(item.file.clone());
@@ -5063,11 +9349,7 @@ impl App {
     }
 
     fn open_gallery_impl(&mut self, cx: &mut Cx, file: &str, pin_input: bool) {
-        let Some(item) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.get(file).cloned())
-        else {
+        let Some(item) = self.meta_of(file) else {
             log!("library: {file} is not in the index");
             return;
         };
@@ -5080,18 +9362,12 @@ impl App {
         // run's input (exact payload path + stored content type; the chip
         // thumbnail is display-only).
         if pin_input {
-            if let Some(path) = self
-                .library
-                .as_ref()
-                .and_then(|library| library.payload_path(&item.file).ok())
-            {
+            if let Some(path) = self.payload_path_of(&item.file) {
                 let preview_path = if item.content_type.to_ascii_lowercase().starts_with("image/")
                 {
                     Some(path.clone())
                 } else {
-                    self.library
-                        .as_ref()
-                        .and_then(|library| library.thumbnail_path(&item.file).ok().flatten())
+                    self.thumbnail_path_of(&item.file)
                 };
                 self.input_tray.select(InputAsset {
                     file: item.file.clone(),
@@ -5106,11 +9382,7 @@ impl App {
         }
         self.enter_viewer_loading(cx, &item.file, &item.label);
         self.refresh_gallery(cx, false);
-        let Some(path) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.payload_path(file).ok())
-        else {
+        let Some(path) = self.payload_path_of(file) else {
             return;
         };
         let ct = item.content_type.to_ascii_lowercase();
@@ -5121,7 +9393,7 @@ impl App {
         } else {
             None
         };
-        if let Some(open) = self.viewer_gate.click(file, path, copy_to) {
+        if let Some(open) = self.viewer_gate.click(file, path, copy_to, None) {
             self.submit_viewer_open(open);
         }
     }
@@ -5193,6 +9465,20 @@ impl App {
     }
 
     fn delete_gallery(&mut self, cx: &mut Cx, file: &str) {
+        // A catalog asset's card is a working-set entry, not a copy: the
+        // `×` puts it away. Deleting the ASSET is a different, explicit act
+        // with its own confirmation on the Library surface — a rail tile
+        // must never quietly retire published content.
+        if self.catalog_work.items.remove(file).is_some() {
+            self.catalog_work.order.retain(|have| have != file);
+            self.catalog_work.pending.remove(file);
+            if self.selected_file.as_deref() == Some(file) {
+                self.selected_file = None;
+            }
+            self.reset_viewer_if_gone(cx);
+            self.refresh_gallery(cx, false);
+            return;
+        }
         let result = self
             .library
             .as_mut()
@@ -5218,6 +9504,80 @@ impl App {
             }
         }
         self.refresh_gallery(cx, true);
+    }
+
+    /// Short human description of the active Library filter, for the
+    /// confirm popup's "matching '<filter>'" text.
+    fn library_filter_description(&self) -> String {
+        let mut parts = Vec::new();
+        let query = self.lib_filters.query.trim();
+        if !query.is_empty() {
+            parts.push(format!("'{query}'"));
+        }
+        if !self.lib_filters.kind.is_any() {
+            parts.push(format!("kind {}", self.lib_filters.kind.row_text()));
+        }
+        if let Some(label) = &self.lib_filters.label {
+            parts.push(format!("tag {label}"));
+        }
+        if parts.is_empty() {
+            "the current filter".to_string()
+        } else {
+            parts.join(" + ")
+        }
+    }
+
+    /// Catalog assets the Library's active filter currently shows — the
+    /// exact hits the list renders, so the confirm popup's count and the
+    /// bulk retire can never disagree about what "shown" means.
+    fn shown_catalog_assets(&self) -> Vec<makepad_asset_data::AssetId> {
+        self.store
+            .search
+            .ready()
+            .map(|results| results.hits.iter().map(|hit| hit.asset_id).collect())
+            .unwrap_or_default()
+    }
+
+    fn open_retire_shown_modal(&mut self, cx: &mut Cx) {
+        let shown = self.shown_catalog_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        self.ui.label(cx, ids!(lib_retire_shown_body)).set_text(
+            cx,
+            &format!(
+                "Retire {} catalog asset{} matching {filter_desc}? Every revision, alias and search row goes, and the bytes are handed to blob garbage collection. This cannot be undone.",
+                shown.len(),
+                if shown.len() == 1 { "" } else { "s" }
+            ),
+        );
+        self.ui.modal(cx, ids!(lib_retire_shown_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_retire_shown_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(lib_retire_shown_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// Retire every catalog asset the Library's active filter shows, one
+    /// server retire per asset — the same operation the per-asset "Delete
+    /// from store" button issues.
+    fn retire_shown_assets(&mut self, cx: &mut Cx) {
+        let shown = self.shown_catalog_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        for id in &shown {
+            self.store.retire_asset(*id);
+        }
+        log!(
+            "asset store: retired {} shown asset(s) matching {filter_desc}",
+            shown.len()
+        );
+        self.refresh_library_ui(cx);
     }
 
     // -- surfaces + Library browser --------------------------------------------
@@ -5250,7 +9610,6 @@ impl App {
         }
         let page = match surface {
             Surface::Create => id!(create_surface),
-            Surface::Chat => id!(chat_surface),
             Surface::Library => id!(library_surface),
             Surface::Import => id!(import_surface),
             Surface::Runs => id!(runs_surface),
@@ -5261,7 +9620,6 @@ impl App {
         flip.set_active_page(cx, page.into());
         for (tab, label, target) in [
             (ids!(nav_create), "CREATE", Surface::Create),
-            (ids!(nav_chat), "CHAT", Surface::Chat),
             (ids!(nav_library), "LIBRARY", Surface::Library),
             (ids!(nav_import), "LOAD", Surface::Import),
             (ids!(nav_runs), "RUNS + WORKERS", Surface::Runs),
@@ -5288,8 +9646,7 @@ impl App {
         }
         match surface {
             Surface::Create => {}
-            Surface::Chat => self.refresh_chat_ui(cx),
-            Surface::Library => self.refresh_library_ui(cx, false),
+            Surface::Library => self.refresh_library_ui(cx),
             Surface::Import => self.refresh_import_ui(cx),
             Surface::Runs => self.refresh_runs_panel(cx),
             Surface::Admin => self.refresh_admin_panel(cx),
@@ -5298,6 +9655,7 @@ impl App {
     }
 
     fn refresh_chat_ui(&mut self, cx: &mut Cx) {
+        self.publish_form_defaults(cx);
         let mut status = ChatData::status();
         let defaults = self.chat.defaults_summary();
         if !defaults.is_empty() && !status.contains("defaults") {
@@ -5307,60 +9665,43 @@ impl App {
                 status = format!("{status} · {defaults}");
             }
         }
-        if let Ok(data) = crate::chat::CHAT.read() {
-            if !data.activity.is_empty() && !status.contains(&data.activity) {
-                if status.is_empty() {
-                    status = data.activity.clone();
-                } else {
-                    status = format!("{status} · {}", data.activity);
-                }
+        let activity = ChatData::activity();
+        if !activity.is_empty() && !status.contains(&activity) {
+            if status.is_empty() {
+                status = activity;
+            } else {
+                status = format!("{status} · {activity}");
             }
+        }
+        // The live number has ONE home while a reply streams: this strip.
+        // (The landed message keeps its own average as a footnote.) It is
+        // the serving box's real generation rate, `· thinking` included.
+        if let Some(rate) = ChatData::live_rate_label() {
+            status = if status.is_empty() { rate } else { format!("{status} · {rate}") };
         }
         self.ui
             .label(cx, ids!(chat_status))
             .set_text(cx, &status);
-        let streaming = crate::chat::CHAT
-            .read()
-            .map(|d| d.is_streaming)
-            .unwrap_or(false);
+        let streaming = ChatData::is_streaming();
         self.ui
             .button(cx, ids!(chat_cancel_btn))
             .set_visible(cx, streaming);
         self.ui.widget(cx, ids!(chat_list)).redraw(cx);
     }
 
-    fn maybe_connect_chat(&mut self) {
-        let bases: Vec<String> = self
-            .fleet
-            .as_ref()
-            .map(|fleet| {
-                fleet
-                    .snapshots
-                    .iter()
-                    .map(|snap| snap.base_url.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let now = std::time::Instant::now();
-        let bases_changed = self.chat_fleet_bases != bases;
-        let due = self.chat_qwen_retry_at.map(|t| now >= t).unwrap_or(true);
-        if bases_changed || (!self.chat.is_connected() && !bases.is_empty() && due) {
-            self.chat_fleet_bases = bases.clone();
-            self.chat_qwen_retry_at = Some(now + std::time::Duration::from_secs(8));
-            self.chat.set_fleet(bases);
-        }
-        if !self.chat_asset_linked {
-            if let (Some(endpoints), Some(server)) =
-                (self.store.endpoints, self.store.server.as_ref())
-            {
+    /// The chat lives on the STORE's chat broker — the server picks the
+    /// serving box and executes the catalog/operation tools itself — so all
+    /// this app has to do is hand over the session once it is up.
+    fn maybe_connect_chat(&mut self, cx: &mut Cx) {
+        if !self.chat.is_linked() {
+            if let Some(endpoints) = self.store.endpoints {
                 let cache = session_config_from_env().cache_parent.join("cache-chat");
-                self.chat.connect_asset(
-                    endpoints,
-                    self.store.token.clone(),
-                    cache,
-                    server.server_id,
-                );
-                self.chat_asset_linked = true;
+                self.chat.connect(endpoints, self.store.token.clone(), cache);
+                // The pane says "waiting for the asset server" until
+                // something redraws it, and the feed only marks itself
+                // dirty once a turn runs — so the line would sit there
+                // lying until the user typed.
+                self.refresh_chat_ui(cx);
             }
         }
         self.push_fleet_view();
@@ -5380,14 +9721,52 @@ impl App {
             return;
         }
         for job in jobs {
-            self.enqueue_chat_job(job);
+            self.enqueue_chat_job(cx, job);
         }
         self.try_dispatch_pending(cx);
         self.refresh_chat_ui(cx);
         self.ui.redraw(cx);
     }
 
-    fn enqueue_chat_job(&mut self, job: ChatJob) {
+    /// Publish the Generate form's current settings to the chat's tools.
+    ///
+    /// The chat is an alternative front door to this same form, so the form
+    /// is the source of truth: `defaults.get` answers with what the user can
+    /// see, and a generate call that names no size or steps runs what
+    /// Generate would run.
+    fn publish_form_defaults(&mut self, cx: &mut Cx) {
+        let size = IMAGE_SIZES[self
+            .ui
+            .combo_box(cx, ids!(size_drop))
+            .selected_item()
+            .min(IMAGE_SIZES.len() - 1)];
+        let steps = self
+            .ui
+            .combo_box(cx, ids!(steps_drop))
+            .selected_item()
+            .checked_sub(1)
+            .and_then(|i| IMAGE_STEPS.get(i).copied());
+        let image_model = self
+            .collected_stage_models(cx, &["image"])
+            .into_iter()
+            .find(|(domain, _)| domain == "image")
+            .map(|(_, model)| model);
+        self.chat.set_form_defaults(crate::chat::FormDefaults {
+            image_model,
+            width: size.0,
+            height: size.1,
+            steps,
+        });
+    }
+
+    /// One queued run, from the chat instead of the button.
+    ///
+    /// It goes through the FORM's own spec builder: same params, same model
+    /// picks, same box choice, same queue, same History group, same publish
+    /// — the conversation only overrides what it actually asked for. If the
+    /// form's own state cannot make a spec right now (it wants a seed the
+    /// user has not picked), the chat still runs, from defaults.
+    fn enqueue_chat_job(&mut self, cx: &mut Cx, job: ChatJob) {
         let preset_name = job.kind.preset_name(job.then, job.model.as_deref());
         let Some(preset) = PRESETS.iter().position(|p| p.name == preset_name) else {
             ChatData::push(
@@ -5396,10 +9775,45 @@ impl App {
             );
             return;
         };
-        let model_override = job
-            .model
+        let base = self.current_run_spec(cx).ok();
+        let mut gen = base
             .as_ref()
-            .map(|model| (job.kind.model_domain().to_string(), model.clone()));
+            .map(|run| run.gen.clone())
+            .unwrap_or_default();
+        // The model's explicit numbers win over the form's.
+        match job.kind {
+            crate::chat::ChatJobKind::Video => {
+                if job.width > 0 && job.height > 0 {
+                    gen.video_size = (job.width, job.height);
+                }
+                if job.frames > 0 {
+                    gen.video_frames = job.frames;
+                    gen.video_steps = job.video_steps;
+                }
+            }
+            _ => {
+                if job.width > 0 && job.height > 0 {
+                    gen.image_size = (job.width, job.height);
+                }
+                if job.steps.is_some() {
+                    gen.image_steps = job.steps;
+                }
+            }
+        }
+        if job.seconds > 0 {
+            gen.music_seconds = job.seconds;
+        }
+        // Keep the form's per-stage model picks, but let a model the
+        // conversation named take its own domain.
+        let mut model_overrides = base
+            .as_ref()
+            .map(|run| run.model_overrides.clone())
+            .unwrap_or_default();
+        if let Some(model) = &job.model {
+            let domain = job.kind.model_domain().to_string();
+            model_overrides.retain(|(d, _)| d != &domain);
+            model_overrides.push((domain, model.clone()));
+        }
         let group_label = format!(
             "{} — \"{}\"",
             PRESETS[preset].name,
@@ -5408,14 +9822,14 @@ impl App {
         let note = match job.kind {
             crate::chat::ChatJobKind::Video => format!(
                 "queued {preset_name} · {}×{} · {}f · {}",
-                job.width,
-                job.height,
-                job.frames,
+                gen.video_size.0,
+                gen.video_size.1,
+                gen.video_frames,
                 job.model.as_deref().unwrap_or("affinity")
             ),
             crate::chat::ChatJobKind::Music => format!(
                 "queued {preset_name} · {}s · {}",
-                job.seconds,
+                gen.music_seconds,
                 job.model.as_deref().unwrap_or("affinity")
             ),
             crate::chat::ChatJobKind::Audio | crate::chat::ChatJobKind::Speech => format!(
@@ -5424,37 +9838,22 @@ impl App {
             ),
             _ => format!(
                 "queued {preset_name} · {}×{} · {}",
-                job.width,
-                job.height,
+                gen.image_size.0,
+                gen.image_size.1,
                 job.model.as_deref().unwrap_or("affinity")
             ),
         };
-        let mut gen = GenParams::default();
-        if job.width > 0 && job.height > 0 {
-            match job.kind {
-                crate::chat::ChatJobKind::Video => {
-                    gen.video_size = (job.width, job.height);
-                    gen.video_frames = job.frames;
-                    gen.video_steps = job.video_steps;
-                }
-                _ => {
-                    gen.image_size = (job.width, job.height);
-                    gen.image_steps = job.steps;
-                }
-            }
-        }
-        if job.seconds > 0 {
-            gen.music_seconds = job.seconds;
-        }
         self.run_queue.push(PendingRun {
             group_id: crate::library::new_group_id("run"),
             group_label,
             prompt: job.prompt,
             preset,
-            model_override,
-            box_override: None,
-            voice: job.voice,
+            model_overrides,
+            box_override: base.as_ref().and_then(|run| run.box_override.clone()),
+            voice: job.voice.or_else(|| base.as_ref().and_then(|run| run.voice.clone())),
             gen,
+            // A spoken "make me a picture of X" is a fresh generation: the
+            // image sitting selected in the form is NOT a silent seed for it.
             input: None,
         });
         ChatData::push(ChatRole::System, note);
@@ -5485,243 +9884,187 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    fn set_lib_source(&mut self, cx: &mut Cx, source: LibSource) {
-        self.lib_source = source;
-        let page = match source {
-            LibSource::Local => id!(lib_local_page),
-            LibSource::Server => id!(lib_server_page),
-        };
-        self.ui
-            .page_flip(cx, ids!(lib_pages))
-            .set_active_page(cx, page.into());
-        self.refresh_library_ui(cx, false);
-    }
-
-    /// Pull the four filter controls into the local filter state and mirror
+    /// Pull the filter controls into the Library filter state and mirror
     /// them onto the real server query. A changed server query cancels and
     /// replaces its in-flight search; presentation-only refreshes do not.
     fn read_filters_from_ui(&mut self, cx: &mut Cx) {
         let query = self.ui.text_input(cx, ids!(lib_search)).text();
-        let kind = None;
-        let category = self.lib_filters.tags.iter().find_map(|tag| {
-            matches!(
-                tag.as_str(),
-                "maps"
-                    | "characters"
-                    | "props"
-                    | "weapons"
-                    | "billboards"
-                    | "images"
-                    | "video"
-                    | "music"
-                    | "speech"
-                    | "sfx"
-                    | "splats"
-                    | "meshes"
-                    | "other"
-            )
-            .then(|| tag.clone())
-        });
-        let server_kind = kind
-            .as_deref()
-            .and_then(|label| {
-                SERVER_KINDS
-                    .into_iter()
-                    .find(|candidate| server_kind_label(*candidate) == label)
-            });
-        let server_category = category.clone();
-        let server_tag = self.lib_filters.tags.first().cloned();
-        let server_changed = self.store.filters.text != query
-            || self.store.filters.category != server_category
+        // The Kind picker carries the structural filter: a content-contract
+        // kind, and for audio the music/sfx shelf every publisher writes as
+        // the asset's category.
+        let (server_kind, structural) = self.lib_filters.kind.query();
+        // The search box and the tag picker both name TAGS — one vocabulary
+        // — and which of the store's two label kinds carries a given name is
+        // worked out from the counted facets, not from anything the user has
+        // to know.
+        let terms = catalog_filter_terms(
+            &query,
+            self.lib_filters.label.as_ref(),
+            structural,
+            &self.lib_facets,
+        );
+        let CatalogFilterTerms { category, tag, text } = terms;
+        let server_changed = self.store.filters.text != text
             || self.store.filters.kind != server_kind
-            || self.store.filters.tag != server_tag;
-        self.store.filters.text = query.clone();
-        self.store.filters.category = server_category;
+            || self.store.filters.category != category
+            || self.store.filters.tag != tag;
+        self.store.filters.text = text;
         self.store.filters.kind = server_kind;
-        self.store.filters.tag = server_tag;
+        self.store.filters.category = category;
+        self.store.filters.tag = tag;
+        // `lib_filters.query` stays what the user TYPED: it is what the
+        // confirm popups quote back and what the view signature watches.
         self.lib_filters.query = query;
-        self.lib_filters.category = category;
-        self.lib_filters.kind = kind;
         if server_changed {
             self.store.submit_search();
         }
     }
 
-    /// Library surface: source tabs, filter options, grid, counts, server
-    /// pane and the detail rail. `clear_thumbnails` forces thumbnail
-    /// re-decode (library content changed); filter edits keep the cache.
-    fn run_enhance_metadata(&mut self, cx: &mut Cx) {
-        let Some(library) = &mut self.library else {
-            return;
-        };
-        let named = crate::enhance_meta::apply_catalog_names(library);
-        let models: Vec<String> = match &self.store.profiles {
-            Remote::Ready(profiles) => profiles
-                .iter()
-                .flat_map(|p| [p.id.clone(), p.domain.clone(), p.kind.clone()])
-                .collect(),
-            _ => Vec::new(),
-        };
-        let vision = crate::enhance_meta::fleet_has_vision(&models);
-        let dir = std::path::PathBuf::from(repo_path("local/ai_content_library"));
-        let skipped = if vision {
-            0
-        } else {
-            crate::enhance_meta::stamp_skipped_vision(
-                &dir,
-                &library.index.items,
-                "Qwen-VL not provisioned on this fleet — name table applied, no vision blob",
-            )
-        };
-        log!(
-            "enhance-metadata: renamed {named} · vision {} · stamped {skipped}",
-            if vision { "ready (captions not wired this pass)" } else { "skipped" }
-        );
-        self.ui.label(cx, ids!(lib_count)).set_text(
-            cx,
-            &if vision {
-                format!("enhanced {named} names · vision model present (caption loop next)")
-            } else {
-                format!("enhanced {named} names · no Qwen-VL on fleet (skipped {skipped})")
-            },
-        );
-        self.refresh_library_ui(cx, false);
-    }
+    /// Library surface: filter options, catalog rows, counts, session note
+    /// and the detail rail. Every row here comes from the server catalog —
+    /// there is no local index behind this surface any more.
+    fn refresh_library_ui(&mut self, cx: &mut Cx) {
+        // The only facet the UI offers is the one the server actually
+        // filters on: the content-contract kind vocabulary. Nothing here is
+        // derived from a local index, and no option is offered that the
+        // catalog cannot answer.
+        let kinds = KindChoice::rows();
+        let labels: Vec<String> = kinds.iter().map(KindChoice::row_text).collect();
+        let selected_row = kinds
+            .iter()
+            .position(|row| *row == self.lib_filters.kind)
+            .unwrap_or(0);
+        let drop = self.ui.combo_box(cx, ids!(lib_kind_drop));
+        drop.set_labels(cx, labels);
+        drop.set_selected_item(cx, selected_row);
+        self.lib_kind_options = kinds;
 
-    fn refresh_library_ui(&mut self, cx: &mut Cx, clear_thumbnails: bool) {
-        let local = self.lib_source == LibSource::Local;
-        let total = self.library.as_ref().map_or(0, |library| library.len());
-        self.ui.button(cx, ids!(lib_local_tab)).set_text(
-            cx,
-            &if local {
-                format!("● Local ({total})")
-            } else {
-                format!("Local ({total})")
-            },
-        );
+        // Tags: the catalog's own labels, counted server-side over the whole
+        // result set (not this page) in the same snapshot as the rows, and
+        // merged into ONE vocabulary — the store's two label kinds are a
+        // wire fact, not a user-facing idea. The structural names live in the
+        // Kind picker and are not repeated here. An empty catalog offers
+        // nothing rather than a made-up vocabulary.
+        let facets: Vec<makepad_asset_client::CatalogFacet> = self
+            .store
+            .search
+            .ready()
+            .map(|results| results.facets.clone())
+            .unwrap_or_default();
+        let merged = merge_facets(&facets);
+        let mut label_rows = vec!["all tags".to_string()];
+        label_rows.extend(merged.iter().map(facet_row_text));
+        let label_row = facet_row(&merged, self.lib_filters.label.as_ref());
+        let label_drop = self.ui.combo_box(cx, ids!(lib_label_drop));
+        label_drop.set_labels(cx, label_rows);
+        label_drop.set_selected_item(cx, label_row);
+        self.lib_label_options = merged;
+        self.lib_facets = facets;
+
+        // The inline clear only exists while there is something to clear.
+        let typed = !self.ui.text_input(cx, ids!(lib_search)).text().is_empty();
         self.ui
-            .button(cx, ids!(lib_server_tab))
-            .set_text(cx, if local { "Server" } else { "● Server" });
-
-        let tag_stats = match &self.library {
-            Some(library) => collect_tag_stats(library.newest_items()),
-            None => Vec::new(),
-        };
-        let tag_labels: Vec<String> = std::iter::once(if tag_stats.is_empty() {
-            "tags".to_string()
-        } else {
-            format!("tags · {}", tag_stats.len())
-        })
-        .chain(tag_stats.iter().map(|stat| {
-            let on = self
-                .lib_filters
-                .tags
-                .iter()
-                .any(|selected| selected.eq_ignore_ascii_case(&stat.name));
-            let mark = if on { "● " } else { "" };
-            let star = if stat.enhanced { "✦ " } else { "" };
-            format!("{mark}{star}{}   {}", stat.name, stat.count)
-        }))
-        .collect();
-        let drop = self.ui.drop_down2(cx, ids!(lib_tag_drop));
-        drop.set_labels(cx, tag_labels);
-        drop.set_selected_item(cx, 0);
-        self.lib_tag_options = tag_stats;
-
-        let chips = self.lib_filters.tags.clone();
-        self.ui
-            .widget(cx, ids!(lib_tag_chips))
-            .set_visible(cx, !chips.is_empty());
-        for i in 0..8 {
-            set_lib_tag_chip(&self.ui, cx, i, chips.get(i).map(String::as_str));
-        }
+            .widget(cx, ids!(lib_search_clear))
+            .set_visible(cx, typed);
 
         self.read_filters_from_ui(cx);
 
-        // Filtered local grid.
-        let entries = match &self.library {
-            Some(library) => library
-                .newest_items()
-                .filter(|item| {
-                    self.lib_filters.matches(
-                        &item.label,
-                        &item.prompt,
-                        &item.domain,
-                        &item.content_type,
-                        &item.filter_tags(),
-                    )
-                })
-                .filter_map(|item| {
-                    let path = library.payload_path(&item.file).ok()?;
-                    let ct = item.content_type.to_ascii_lowercase();
-                    let preview_path = if item.domain.eq_ignore_ascii_case("billboard")
-                        || ct.contains("billboard")
-                    {
-                        Some(path.clone())
-                    } else if ct.starts_with("image/") {
-                        Some(path.clone())
-                    } else {
-                        library.thumbnail_path(&item.file).ok().flatten()
-                    };
-                    Some(GalleryEntry {
-                        meta: item.clone(),
-                        path,
-                        preview_path,
-                        selected: self.selected_file.as_deref() == Some(item.file.as_str()),
-                    })
-                })
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let shown = entries.len();
-        if let Some(mut grid) = self
-            .ui
-            .widget(cx, ids!(lib_grid))
-            .borrow_mut::<LibraryGrid>()
-        {
-            grid.set_entries(cx, entries, clear_thumbnails);
+        // A changed filter is a changed result set: send the viewport home
+        // before the new rows are laid out.
+        let signature = library_view_signature(&self.lib_filters);
+        if self.lib_view_signature != signature {
+            self.lib_view_signature = signature;
+            if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
+            {
+                grid.scroll_to_top(cx);
+            }
         }
-        let count_text = match self.lib_source {
-            LibSource::Local => format!("{shown} shown · {total} local"),
-            LibSource::Server => match &self.store.search {
-                Remote::Ready(results) => format!(
-                    "{} shown · {} on server{}",
-                    results.hits.len(),
-                    results.total,
-                    if results.more { " · more available" } else { "" }
-                ),
-                Remote::Loading => "searching server…".to_string(),
-                Remote::Failed(error) => format!("server search failed · {error}"),
-                Remote::Idle if self.store.connected() => "server catalog not loaded".to_string(),
-                Remote::Idle => "server disconnected · 0 assets".to_string(),
-            },
+
+        let (loaded, walking) = self.store.catalog_loaded();
+        let count_text = match &self.store.search {
+            Remote::Ready(results) => {
+                let total = results.total as usize;
+                let held = total.min(MAX_CATALOG_ROWS);
+                if walking && loaded < held {
+                    format!("{loaded} of {total} loaded…")
+                } else if held < total {
+                    format!("{held} shown · {total} on server · first {held} held")
+                } else {
+                    format!("{loaded} of {total} on server")
+                }
+            }
+            Remote::Loading => "searching server…".to_string(),
+            Remote::Failed(error) => format!("server search failed · {error}"),
+            Remote::Idle if self.store.connected() => "server catalog not loaded".to_string(),
+            Remote::Idle => "server disconnected · 0 assets".to_string(),
         };
         self.ui.label(cx, ids!(lib_count)).set_text(cx, &count_text);
+        // "Retire shown" is a bulk server delete: it stays disabled until a
+        // filter actually narrows the catalog to something.
+        let shown = self.shown_catalog_assets().len();
+        let filter_active = !self.lib_filters.query.trim().is_empty()
+            || !self.lib_filters.kind.is_any()
+            || self.lib_filters.label.is_some();
+        let retire_btn = self.ui.button(cx, ids!(lib_retire_shown_btn));
+        retire_btn.set_text(cx, &format!("× Retire {shown} shown"));
+        retire_btn.set_enabled(cx, filter_active && shown > 0);
 
-        // Server pane: the actual discovery/auth/session state and typed
-        // catalog rows. Empty/loading/failure are intentionally distinct.
-        let server_note = self.store.status_label();
-        self.ui
-            .label(cx, ids!(lib_server_note))
-            .set_text(cx, &server_note);
-        if let Some(mut list) = self
-            .ui
-            .widget(cx, ids!(lib_server_list))
-            .borrow_mut::<StoreListPanel>()
-        {
-            list.set_rows(cx, catalog_rows(&self.store));
+        // The session/server state is written ONCE, in the nav bar's
+        // `remote_connection`. The Library used to repeat it inside the
+        // panel; two copies of one address is one too many.
+        // Tiles: one card per catalog asset, sized to the SERVER's match
+        // count so the scrollbar covers the whole result set while the walk
+        // fills it in.
+        let tiles = catalog_tiles(&self.store);
+        let total = self
+            .store
+            .search
+            .ready()
+            .map(|results| (results.total as usize).min(MAX_CATALOG_ROWS))
+            .unwrap_or(0);
+        let empty_note = crate::store_views::catalog_empty_note(&self.store);
+        if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>() {
+            grid.set_empty_note(cx, empty_note);
+            grid.set_tiles(
+                cx,
+                tiles,
+                total,
+                match self.lib_tiles {
+                    LibViewMode::Tiles => crate::store_views::CatalogLayout::Tiles,
+                    LibViewMode::List => crate::store_views::CatalogLayout::Rows,
+                },
+            );
         }
+        // The active view is the lit glyph; neither glyph ever changes. The
+        // button's own `focus` state carries "this is the current view" —
+        // nothing in this app keyboard-focuses these two.
+        for (id, active) in [
+            (ids!(lib_grid_btn), self.lib_tiles == LibViewMode::Tiles),
+            (ids!(lib_list_btn), self.lib_tiles == LibViewMode::List),
+        ] {
+            self.ui.widget(cx, id).as_view().toggle_state(
+                cx,
+                active,
+                Animate::No,
+                ids!(focus.on),
+                ids!(focus.off),
+            );
+        }
+
         self.ui
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
 
+        self.refresh_gc_ui(cx);
         self.refresh_library_detail(cx);
+        self.refresh_library_preview(cx);
+        self.refresh_analysis_ui(cx);
         self.ui.redraw(cx);
     }
 
-    /// Selected-item rail. Local items show exactly what the local index
-    /// records (and say so); server items show revision/provenance/publish
-    /// from the snapshot. Nothing is invented for either side.
+    /// Selected-item rail for the catalog selection: revision, provenance
+    /// and publish state straight from the server snapshot. Nothing is
+    /// invented, and nothing here reads a local file.
     fn refresh_library_detail(&mut self, cx: &mut Cx) {
         struct Detail {
             badge: String,
@@ -5732,7 +10075,15 @@ impl App {
             prov: String,
             rev: String,
             publish: String,
-            local_actions: bool,
+            /// `Some((asset, latest_revision))` shows the SERVER delete
+            /// actions; `detail_retire_asset_btn` always targets `asset`,
+            /// `detail_retire_version_btn` targets `latest_revision` when
+            /// known (hidden otherwise — nothing to retire "just this
+            /// version" of without a confirmed revision id).
+            server_delete: Option<(
+                makepad_asset_data::AssetId,
+                Option<makepad_asset_data::AssetRevisionId>,
+            )>,
         }
         let empty = |title: &str, meta: &str| Detail {
             badge: String::new(),
@@ -5743,180 +10094,140 @@ impl App {
             prov: "—".into(),
             rev: "—".into(),
             publish: "—".into(),
-            local_actions: false,
+            server_delete: None,
         };
-        let detail = match self.lib_source {
-            LibSource::Local => {
-                let selected = self.selected_file.clone().and_then(|file| {
-                    self.library.as_ref().and_then(|library| {
-                        let item = library.get(&file)?.clone();
-                        let size = library
-                            .payload_path(&file)
-                            .ok()
-                            .and_then(|path| std::fs::metadata(path).ok())
-                            .map(|meta| meta.len());
-                        Some((item, size))
-                    })
-                });
-                match selected {
-                    Some((item, size)) => Detail {
-                        badge: kind_label(&item.domain, &item.content_type).to_ascii_uppercase(),
-                        title: item.label.clone(),
-                        meta: {
-                            let tags = item.filter_tags();
-                            let tag_bit = if tags.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · tags {}", tags.join(", "))
-                            };
+        let detail = if !self.store.connected() {
+            empty(
+                "Asset Server not connected",
+                &self.store.status_label(),
+            )
+        } else {
+            match self.store.selected {
+                None => empty("Nothing selected", "Click a catalog row to inspect it."),
+                Some(selected) => {
+                    let hit = self
+                        .store
+                        .search
+                        .ready()
+                        .and_then(|results| {
+                            results.hits.iter().find(|hit| hit.asset_id == selected)
+                        });
+                    let badge = hit
+                        .and_then(|hit| hit.kind)
+                        .map(server_kind_label)
+                        .unwrap_or("asset")
+                        .to_ascii_uppercase();
+                    let title = hit
+                        .map(|hit| hit.title.clone())
+                        .unwrap_or_else(|| format!("Asset {selected}"));
+                    let meta = hit.map_or_else(
+                        || format!("asset {selected}"),
+                        |hit| {
+                            let alias = hit
+                                .alias
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "no alias".to_string());
                             format!(
-                                "{} · {} · {} · {}{tag_bit}",
-                                item.domain,
-                                item.content_type,
-                                size.map(format_bytes)
-                                    .unwrap_or_else(|| "size unknown".into()),
-                                item.file
+                                "{alias} · namespace {} · {}",
+                                hit.namespace,
+                                if hit.live { "live" } else { "not live" }
                             )
                         },
-                        head_a: "Prompt",
-                        prompt: if item.prompt.trim().is_empty() {
-                            "(no prompt recorded)".into()
-                        } else {
-                            item.prompt.clone()
-                        },
-                        prov: "Produced by this app (local pipeline run or explicit import). \
-                               The local index records domain, content type and prompt; fleet \
-                               candidate labels additionally preserve endpoint, model, seed, \
-                               remote artifact id, digest prefix and byte length."
-                            .into(),
-                        rev: "Single local copy — History keeps the latest payload only.".into(),
-                        publish: "Local only — not published to any Asset Store server.".into(),
-                        local_actions: true,
-                    },
-                    None => empty("Nothing selected", "Click a thumbnail to see its details."),
-                }
-            }
-            LibSource::Server => {
-                if !self.store.connected() {
-                    empty(
-                        "Asset Server not connected",
-                        &self.store.status_label(),
-                    )
-                } else {
-                    match self.store.selected {
-                        None => empty("Nothing selected", "Click a catalog row to inspect it."),
-                        Some(selected) => {
-                            let hit = self
-                                .store
-                                .search
-                                .ready()
-                                .and_then(|results| {
-                                    results.hits.iter().find(|hit| hit.asset_id == selected)
-                                });
-                            let badge = hit
-                                .and_then(|hit| hit.kind)
-                                .map(server_kind_label)
-                                .unwrap_or("asset")
-                                .to_ascii_uppercase();
-                            let title = hit
-                                .map(|hit| hit.title.clone())
-                                .unwrap_or_else(|| format!("Asset {selected}"));
-                            let meta = hit.map_or_else(
-                                || format!("asset {selected}"),
-                                |hit| {
-                                    let alias = hit
-                                        .alias
-                                        .as_ref()
-                                        .map(ToString::to_string)
-                                        .unwrap_or_else(|| "no alias".to_string());
-                                    format!(
-                                        "{alias} · namespace {} · {}",
-                                        hit.namespace,
-                                        if hit.live { "live" } else { "not live" }
-                                    )
-                                },
-                            );
-                            let snippet = hit
-                                .map(|hit| hit.snippet.clone())
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or_else(|| "(no search snippet returned)".to_string());
-                            let (provenance, revisions, publish) = match &self.store.detail {
-                                Remote::Idle => (
-                                    "Detail has not been requested.".to_string(),
-                                    "—".to_string(),
-                                    "—".to_string(),
-                                ),
-                                Remote::Loading => (
-                                    "Loading authoritative server detail…".to_string(),
-                                    "loading…".to_string(),
-                                    "loading…".to_string(),
-                                ),
-                                Remote::Failed(error) => (
-                                    format!("Server detail request failed: {error}"),
-                                    "unavailable".to_string(),
-                                    "unavailable".to_string(),
-                                ),
-                                Remote::Ready(detail) if detail.asset_id == selected => {
-                                    let revisions = if detail.candidates.is_empty() {
-                                        "no candidates returned".to_string()
-                                    } else {
-                                        detail
-                                            .candidates
-                                            .iter()
-                                            .map(|candidate| {
-                                                let revision = candidate.revision.to_string();
-                                                let when = candidate
-                                                    .published_ms
-                                                    .or(candidate.quarantined_ms)
-                                                    .unwrap_or(candidate.staged_ms);
-                                                format!(
-                                                    "{} · {} · {} ms",
-                                                    short_digest(&revision),
-                                                    candidate.state.as_str(),
-                                                    when
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    };
-                                    let publish = detail
-                                        .latest_published()
-                                        .map(|candidate| {
-                                            let revision = candidate.revision.to_string();
-                                            format!(
-                                                "latest published: {} · {} ms",
-                                                short_digest(&revision),
-                                                candidate.published_ms.unwrap_or_default()
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "no published revision".to_string());
-                                    (
+                    );
+                    let snippet = hit
+                        .map(|hit| hit.snippet.clone())
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or_else(|| "(no search snippet returned)".to_string());
+                    let (provenance, revisions, publish, latest_revision) = match &self.store.detail {
+                        Remote::Idle => (
+                            "Detail has not been requested.".to_string(),
+                            "—".to_string(),
+                            "—".to_string(),
+                            None,
+                        ),
+                        Remote::Loading => (
+                            "Loading authoritative server detail…".to_string(),
+                            "loading…".to_string(),
+                            "loading…".to_string(),
+                            None,
+                        ),
+                        Remote::Failed(error) => (
+                            format!("Server detail request failed: {error}"),
+                            "unavailable".to_string(),
+                            "unavailable".to_string(),
+                            None,
+                        ),
+                        Remote::Ready(detail) if detail.asset_id == selected => {
+                            // One clock reading for the whole rail, so two lines
+                            // of the same panel cannot disagree about one instant.
+                            let now = crate::store_views::now_ms();
+                            let revisions = if detail.candidates.is_empty() {
+                                "no candidates returned".to_string()
+                            } else {
+                                detail
+                                    .candidates
+                                    .iter()
+                                    .map(|candidate| {
+                                        let revision = candidate.revision.to_string();
+                                        let when = candidate
+                                            .published_ms
+                                            .or(candidate.quarantined_ms)
+                                            .unwrap_or(candidate.staged_ms);
                                         format!(
-                                            "namespace {} · asset {}\nManifest files and generator provenance are not part of the detail response.",
-                                            detail.namespace, detail.asset_id
-                                        ),
-                                        revisions,
-                                        publish,
-                                    )
-                                }
-                                Remote::Ready(_) => (
-                                    "Waiting for the selected asset detail…".to_string(),
-                                    "loading…".to_string(),
-                                    "loading…".to_string(),
-                                ),
+                                            "{} · {} · {}",
+                                            short_digest(&revision),
+                                            candidate.state.as_str(),
+                                            format_when(when, now)
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
                             };
-                            Detail {
-                                badge,
-                                title,
-                                meta,
-                                head_a: "Search match",
-                                prompt: snippet,
-                                prov: provenance,
-                                rev: revisions,
+                            let publish = detail
+                                .latest_published()
+                                .map(|candidate| {
+                                    let revision = candidate.revision.to_string();
+                                    match candidate.published_ms {
+                                        Some(ms) => format!(
+                                            "latest published: {} · {}",
+                                            short_digest(&revision),
+                                            format_when(ms, now)
+                                        ),
+                                        None => format!(
+                                            "latest published: {} · time not recorded",
+                                            short_digest(&revision)
+                                        ),
+                                    }
+                                })
+                                .unwrap_or_else(|| "no published revision".to_string());
+                            (
+                                format!(
+                                    "namespace {} · asset {}\nManifest files and generator provenance are not part of the detail response.",
+                                    detail.namespace, detail.asset_id
+                                ),
+                                revisions,
                                 publish,
-                                local_actions: false,
-                            }
+                                detail.latest_published().map(|candidate| candidate.revision),
+                            )
                         }
+                        Remote::Ready(_) => (
+                            "Waiting for the selected asset detail…".to_string(),
+                            "loading…".to_string(),
+                            "loading…".to_string(),
+                            None,
+                        ),
+                    };
+                    Detail {
+                        badge,
+                        title,
+                        meta,
+                        head_a: "Search match",
+                        prompt: snippet,
+                        prov: provenance,
+                        rev: revisions,
+                        publish,
+                        server_delete: Some((selected, latest_revision)),
                     }
                 }
             }
@@ -5947,8 +10258,875 @@ impl App {
             .label(cx, ids!(detail_publish))
             .set_text(cx, &detail.publish);
         self.ui
-            .widget(cx, ids!(detail_actions))
-            .set_visible(cx, detail.local_actions);
+            .widget(cx, ids!(detail_server_actions))
+            .set_visible(cx, detail.server_delete.is_some());
+        self.ui
+            .button(cx, ids!(detail_retire_version_btn))
+            .set_visible(cx, matches!(detail.server_delete, Some((_, Some(_)))));
+    }
+
+    /// The rail's preview well: what the selected catalog asset actually
+    /// LOOKS like, without leaving the Library.
+    ///
+    /// The well is the SHARED preview component (`makepad-asset-widgets`):
+    /// stills, cycling sprite sheets and audio are drawn by the same widgets
+    /// the VJ and DJ surfaces will use, handed typed content — a texture,
+    /// cut frames, or a track's picture plus where its playhead is. Meshes
+    /// still use this app's own viewer; that face moves into the shared set
+    /// next, behind the same door.
+    ///
+    /// Everything comes from the materialised, digest-named objects the
+    /// tiles and the Create surface use, so the picture cannot show one
+    /// revision while the lines above it describe another.
+    fn refresh_library_preview(&mut self, cx: &mut Cx) {
+        let Some(asset) = self.store.selected else {
+            self.show_preview(cx, PreviewContent::Empty("Click an asset to preview it.".into()));
+            return;
+        };
+        let file = store_file_id(&asset);
+        let item = self.catalog_work.get(&file).cloned();
+        let asset_key = asset.to_string();
+        // Selecting away from a playing rail clip stops it — the player
+        // belongs to the selection, not to the app forever.
+        let selecting_video = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("video/"))
+            .unwrap_or(false);
+        if !selecting_video
+            && self
+                .library_video_file
+                .as_deref()
+                .is_some_and(|owned| owned != file.as_str())
+        {
+            self.stop_video_playback();
+            self.clear_video_frame(cx);
+            self.library_video_file = None;
+        }
+
+        // A WORLD walks itself: the shared well runs the same autonomous
+        // walkthrough the VJ does — build the level's collision and
+        // navigation off the frame thread, then tour it, opening doors on
+        // approach. A map turned on a turntable tells you nothing about
+        // what it is like to be inside it.
+        let hit = self
+            .store
+            .search
+            .ready()
+            .and_then(|results| results.hits.iter().find(|hit| hit.asset_id == asset));
+        let kind = hit.and_then(|hit| hit.kind);
+        // Which GAME a map came from, in the only form the walker wants: a
+        // string of what this app knows about its origin. It picks a walking
+        // STYLE (eye height, step rule, gravity, bob, speed) and nothing
+        // else — every classic importer emits the same map contract, so one
+        // walker walks them all.
+        let world_source = hit.map(world_source_text).unwrap_or_default();
+        let is_world = kind == Some(makepad_asset_data::AssetKind::World);
+        if is_world {
+            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                    match std::fs::read(&path) {
+                        Ok(glb) => {
+                            self.library_preview_file = Some(file.clone());
+                            self.show_preview(
+                                cx,
+                                PreviewContent::World {
+                                    glb,
+                                    texture_png: None,
+                                    source: world_source,
+                                },
+                            );
+                            return;
+                        }
+                        Err(error) => log!("library preview: {file} unreadable: {error}"),
+                    }
+                }
+                // Already walking this one: leave the tour alone.
+                return;
+            }
+            self.show_preview(cx, PreviewContent::Empty("Loading the world…".into()));
+            return;
+        }
+
+        // A BILLBOARD is an actor, not a picture: walk/attack/pain/death and
+        // eight viewing angles per state. The well plays it with the SAME
+        // widget the Create surface uses — one viewer, two mount points —
+        // fed the two blobs the asset carries: the packed sheet (its
+        // payload) and the `.billboard` manifest (its source file) that says
+        // which cells are which state and which rotation. The thumbnail
+        // cycles underneath while the second blob is fetched.
+        if kind == Some(makepad_asset_data::AssetKind::Billboard) {
+            let sheet = item.as_ref().and_then(|item| item.payload.clone());
+            let manifest = item.as_ref().and_then(|item| item.source.clone());
+            match (sheet, manifest) {
+                (Some(sheet), Some(manifest)) => {
+                    if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                        match (std::fs::read_to_string(&manifest), std::fs::read(&sheet)) {
+                            (Ok(text), Ok(png)) => {
+                                if let Some(mut view) = self
+                                    .ui
+                                    .widget(cx, ids!(detail_billboard_view))
+                                    .borrow_mut::<BillboardView>()
+                                {
+                                    view.show_sheet(cx, &text, &png);
+                                }
+                                self.library_preview_file = Some(file.clone());
+                            }
+                            _ => log!("library preview: {file} billboard files unreadable"),
+                        }
+                    }
+                    self.set_library_preview(cx, id!(detail_preview_billboard));
+                    return;
+                }
+                (sheet, manifest) => {
+                    // Ask for the manifest once, then fall through to the
+                    // picture so the well is never blank while it arrives.
+                    if manifest.is_none() {
+                        self.request_catalog_source(&asset, &file);
+                    }
+                    if sheet.is_none() {
+                        self.show_preview(cx, PreviewContent::Empty("Loading the actor…".into()));
+                        return;
+                    }
+                }
+            }
+        }
+
+        // A mesh: hand this app's viewer the payload once it is on disk.
+        if let Some(item) = &item {
+            if item.meta.content_type.contains("gltf") {
+                if let Some(path) = &item.payload {
+                    if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                        match std::fs::read(path) {
+                            Ok(bytes) => {
+                                let rig = self.rig_cache_of(&file);
+                                if let Some(mut mesh) = self
+                                    .ui
+                                    .widget(cx, ids!(detail_mesh_view))
+                                    .borrow_mut::<MeshView>()
+                                {
+                                    let _ = rig;
+                                    mesh.set_model_bytes_ao(cx, bytes, None, None, None);
+                                }
+                                self.library_preview_file = Some(file.clone());
+                            }
+                            Err(error) => log!("library preview: {file} unreadable: {error}"),
+                        }
+                    }
+                    self.set_library_preview(cx, id!(detail_preview_mesh));
+                    return;
+                }
+                self.show_preview(cx, PreviewContent::Empty("Loading the model…".into()));
+                return;
+            }
+        }
+
+        // Video: the shared player widget. The same app-owned player that
+        // serves the big viewer serves the rail — whichever surface is
+        // showing, the pump feeds both widget faces.
+        let is_video = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("video/"))
+            .unwrap_or(false);
+        if is_video {
+            // The viewer-open path (display_artifact) is the ONE opener for
+            // store clips; it marks ownership in library_video_file. The
+            // rail only opens a player itself when it has a materialized
+            // payload and nothing owns the file yet — never a second player
+            // for the same clip.
+            let owned = self.library_video_file.as_deref() == Some(file.as_str());
+            if owned && self.video.is_some() {
+                let aspect = self
+                    .video
+                    .as_ref()
+                    .map(|player| player.width.max(1) as f64 / player.height.max(1) as f64)
+                    .unwrap_or(16.0 / 9.0);
+                self.show_preview(cx, PreviewContent::Video { aspect });
+                return;
+            }
+            if !owned {
+                if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                    self.stop_video_playback();
+                    self.clear_video_frame(cx);
+                    match VideoPlayer::new(&path.to_string_lossy()) {
+                        Ok(player) => {
+                            self.library_video_file = Some(file.clone());
+                            self.video = Some(player);
+                            self.video_path = Some(path);
+                            self.video_pump = cx.new_next_frame();
+                            let aspect = self
+                                .video
+                                .as_ref()
+                                .map(|p| p.width.max(1) as f64 / p.height.max(1) as f64)
+                                .unwrap_or(16.0 / 9.0);
+                            self.show_preview(cx, PreviewContent::Video { aspect });
+                            return;
+                        }
+                        Err(error) => log!("library preview: {file} video open failed: {error}"),
+                    }
+                }
+            }
+            // No player yet (payload still fetching): the well takes its
+            // FINAL video shape immediately — thumbnail aspect, thumbnail as
+            // the stand-in frame — so the panel below never reflows when the
+            // real player arrives a beat later (the "text renders first,
+            // then jumps down" glitch).
+            let thumb = self.preview_texture(cx, &asset_key);
+            let aspect = thumb
+                .as_ref()
+                .and_then(|texture| texture.get_format(cx).vec_width_height())
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .map(|(w, h)| w as f64 / h as f64)
+                // Catalog video thumbs are square crops; a square stand-in
+                // would reflow again when the real 16:9-ish frame arrives.
+                .filter(|aspect| (*aspect - 1.0).abs() > 0.05)
+                .unwrap_or(16.0 / 9.0);
+            self.show_preview(cx, PreviewContent::Video { aspect });
+            if let Some(preview) = self
+                .ui
+                .widget(cx, ids!(detail_content))
+                .borrow::<ContentPreview>()
+            {
+                preview.set_video_frame(cx, thumb);
+                preview.set_video_transport(cx, 0.0, false, "loading…");
+            }
+            return;
+        }
+
+        // Audio: the DJ player. The catalog thumbnail goes up instantly and
+        // the well then draws the REAL file — its own waveform to scrub, its
+        // own spectrogram behind the toggle — while the transport under it
+        // plays the payload the store handed over.
+        let is_audio = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("audio/"))
+            .unwrap_or(false);
+        if is_audio {
+            // The bytes go out exactly ONCE per track. This well is
+            // refreshed constantly — every store tick, every thumbnail that
+            // lands, every playhead update — and re-reading a six-minute
+            // file on each of those would restart both workers forever.
+            //
+            // The guard is recorded when the BYTES WERE READ: not on a
+            // successful mixer load (the mixer used to take WAV only, so an
+            // MP3 looked like a fresh track every refresh), and not before
+            // the read either (this well is first drawn while the payload is
+            // still being fetched, and marking the track done then means the
+            // refresh that finally HAS the bytes decides it has nothing to
+            // send). The well is told the track's NAME every time regardless,
+            // which is what lets it tell "still this one" from "a new one".
+            let mut clip = None;
+            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                if self.library_audio_file.as_deref() != Some(file.as_str()) {
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            self.library_audio_file = Some(file.clone());
+                            // The transport: decoded off the frame thread and
+                            // installed when it lands.
+                            let clip_gen = crate::audio::load_clip_async(bytes.clone());
+                            // And, exactly once per track, what the store
+                            // already holds BESIDE the mixed audio: the four
+                            // separated layers and the transcript. The clip
+                            // generation travels with it, so whichever of the
+                            // two workers lands second knows they belong to
+                            // the same track.
+                            self.request_side_channels(cx, asset, clip_gen);
+                            // The picture: the same bytes, drawn by the well.
+                            let content_type = &item.as_ref().unwrap().meta.content_type;
+                            clip = clip_format(&path, content_type, &bytes)
+                                .map(|format| (bytes, format));
+                            if clip.is_none() {
+                                log!("library preview: {file} is not a container this app can draw ({content_type})");
+                            }
+                        }
+                        Err(error) => log!("library preview: {file} unreadable: {error}"),
+                    }
+                }
+            }
+            let picture = self.preview_texture(cx, &asset_key);
+            let playing = crate::audio::is_playing();
+            self.show_preview(
+                cx,
+                PreviewContent::Audio {
+                    track: file.clone(),
+                    picture,
+                    clip,
+                    fraction: crate::audio::playhead_fraction(),
+                    playing,
+                    position: crate::audio::format_time(crate::audio::playhead_secs()),
+                },
+            );
+            return;
+        }
+
+        // A billboard's picture is its animation sheet: the well cycles the
+        // same cells the card does.
+        if let Some((frames, fps)) = self.catalog_preview_frames.get(&asset_key) {
+            if frames.len() > 1 {
+                self.show_preview(
+                    cx,
+                    PreviewContent::Animation { frames: frames.clone(), fps: *fps },
+                );
+                return;
+            }
+        }
+
+        // Everything else: the asset's own picture, letterboxed. It is
+        // already decoded for the tile.
+        match self.preview_texture(cx, &asset_key) {
+            Some(texture) => self.show_preview(cx, PreviewContent::Still(texture)),
+            None => self.show_preview(cx, PreviewContent::Empty("Fetching the preview…".into())),
+        }
+    }
+
+    /// Ask the store for an asset's SOURCE-role file — the second blob a
+    /// stateful billboard needs before it can be played. Once per asset:
+    /// the well is refreshed constantly and a fetch per refresh would be a
+    /// fetch per frame.
+    fn request_catalog_source(&mut self, asset: &makepad_asset_data::AssetId, file: &str) {
+        if self.catalog_work.get(file).is_none_or(|item| item.source.is_some()) {
+            return;
+        }
+        if !self.catalog_source_pending.insert(file.to_string()) {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            self.catalog_source_pending.remove(file);
+            return;
+        };
+        if let Some(io) = &self.artifact_io {
+            io.request(IoRequest {
+                file: file.to_string(),
+                path: PathBuf::new(),
+                purpose: IoPurpose::CatalogSource,
+                store: Some(crate::artifact_io::StoreSource {
+                    asset: *asset,
+                    prefer: vec![makepad_asset_data::FileRole::Source],
+                    session,
+                }),
+            });
+        }
+    }
+
+    /// The decoded picture the grid already holds for this asset.
+    fn preview_texture(&self, cx: &mut Cx, asset: &str) -> Option<Texture> {
+        self.ui
+            .widget(cx, ids!(lib_grid))
+            .borrow::<CatalogGrid>()
+            .and_then(|grid| grid.thumb_of(asset))
+    }
+
+    /// Hand content to the shared well and show it.
+    fn show_preview(&mut self, cx: &mut Cx, content: PreviewContent) {
+        if let Some(mut preview) = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow_mut::<ContentPreview>()
+        {
+            preview.show(cx, content);
+        }
+        self.set_library_preview(cx, id!(detail_preview_shared));
+    }
+
+    /// The playhead, ticked from this app's mixer while a track plays. The
+    /// widget owns no audio — it is told where the playhead is and reports
+    /// where the user wants it.
+    fn refresh_library_audio(&mut self, cx: &mut Cx) {
+        let position = crate::audio::format_time(crate::audio::playhead_secs());
+        let (fraction, playing) =
+            (crate::audio::playhead_fraction(), crate::audio::is_playing());
+        if let Some(preview) = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+        {
+            preview.set_transport(cx, fraction, playing, &position);
+        }
+        // The transcript reads the SAME device-clocked playhead: the words
+        // cannot drift from what is coming out of the speakers.
+        if self.lyrics_visible {
+            let secs = crate::audio::playhead_secs();
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(detail_lyrics))
+                .borrow_mut::<LyricReader>()
+            {
+                reader.set_position(cx, secs);
+            }
+        }
+    }
+
+    fn set_library_preview(&mut self, cx: &mut Cx, page: LiveId) {
+        self.ui
+            .page_flip(cx, ids!(detail_preview_pages))
+            .set_active_page(cx, page.into());
+    }
+
+    // -- "Split audio layers": the bake queue and its consumers -----------
+
+    /// The bake + fetch lanes, started on first use. Two threads parked on
+    /// a channel is the whole cost of having them.
+    fn analysis(&mut self) -> &mut analysis::AnalysisQueue {
+        self.analysis
+            .get_or_insert_with(analysis::AnalysisQueue::start)
+    }
+
+    /// The selected catalog hit when it is an AUDIO asset: id and title.
+    /// Everything on the analysis surface hangs off this — a mesh has no
+    /// stems and must not be offered any.
+    fn selected_audio(&self) -> Option<(makepad_asset_data::AssetId, String)> {
+        let selected = self.store.selected?;
+        let hit = self
+            .store
+            .search
+            .ready()?
+            .hits
+            .iter()
+            .find(|hit| hit.asset_id == selected)?;
+        (hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+            .then(|| (selected, hit.title.clone()))
+    }
+
+    /// How many AUDIO assets the active filter shows. Counted, not
+    /// collected: the rail refreshes on every store tick and the result set
+    /// is thousands of rows.
+    fn shown_audio_count(&self) -> usize {
+        self.store
+            .search
+            .ready()
+            .map(|results| {
+                results
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Every AUDIO asset the Library's active filter currently shows — the
+    /// exact set the bulk analyse acts on, from the same snapshot the count
+    /// beside the button is taken from.
+    fn shown_audio_assets(&self) -> Vec<(makepad_asset_data::AssetId, String)> {
+        self.store
+            .search
+            .ready()
+            .map(|results| {
+                results
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+                    .map(|hit| (hit.asset_id, hit.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Ask the fetch lane what a newly selected track carries, and for the
+    /// bytes of whatever it does. Called once per track (from the preview's
+    /// own "this is a new track" gate), because the rail is refreshed on
+    /// every store tick and a fetch per refresh would be a fetch per frame.
+    fn request_side_channels(
+        &mut self,
+        cx: &mut Cx,
+        asset: makepad_asset_data::AssetId,
+        clip: u64,
+    ) {
+        // Whatever the previous track carried is not this one's.
+        self.side_channels = analysis::SideChannels::default();
+        self.side_channels_asset = None;
+        audio::clear_stems();
+        self.set_lyrics(cx, Vec::new());
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        let generation = self.analysis().request_fetch(asset, session, true);
+        self.side_channels_generation = generation;
+        self.audio_clip_generation = clip;
+    }
+
+    /// Hand the reader a transcript (or none, which hides the panel).
+    fn set_lyrics(&mut self, cx: &mut Cx, rows: Vec<LyricRow>) {
+        let empty = rows.is_empty();
+        if let Some(mut reader) = self
+            .ui
+            .widget(cx, ids!(detail_lyrics))
+            .borrow_mut::<LyricReader>()
+        {
+            reader.set_lines(cx, rows);
+            reader.set_position(cx, crate::audio::playhead_secs());
+        }
+        self.lyrics_visible = !empty;
+        self.ui
+            .widget(cx, ids!(detail_lyrics_panel))
+            .set_visible(cx, !empty);
+        self.arm_lyrics_pump(cx);
+    }
+
+    /// The transcript follows the playhead per frame while it is visible and
+    /// the track is audibly playing; it parks otherwise (the 10 Hz transport
+    /// timer keeps it honest when parked).
+    fn arm_lyrics_pump(&mut self, cx: &mut Cx) {
+        if self.lyrics_visible && self.surface == Surface::Library && audio::is_playing() {
+            self.lyrics_pump = cx.new_next_frame();
+        }
+    }
+
+    /// Queue tracks for analysis. Refuses (loudly) without a server session:
+    /// the bake reads from and publishes to the store, it has no local half.
+    fn enqueue_analysis(
+        &mut self,
+        cx: &mut Cx,
+        targets: Vec<(analysis::BakeTarget, String)>,
+        lyrics: bool,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            log!("analysis: no Asset Server session — nothing to analyse against");
+            return;
+        };
+        let asked = targets.len();
+        let mut queued = 0usize;
+        {
+            let queue = self.analysis();
+            for (target, title) in targets {
+                if queue.enqueue(target, title, lyrics, session.clone()) {
+                    queued += 1;
+                }
+            }
+        }
+        log!(
+            "analysis: queued {queued} of {asked} track(s){}",
+            if lyrics { " · with lyrics" } else { "" }
+        );
+        self.refresh_analysis_ui(cx);
+    }
+
+    /// Drain both lanes. The fetch lane feeds the preview (layers + lyrics);
+    /// the bake lane feeds the queue line and the log.
+    fn drain_analysis(&mut self, cx: &mut Cx) {
+        let (fetched, mut changed, finished) = {
+            let Some(queue) = self.analysis.as_mut() else {
+                return;
+            };
+            let fetched = queue.drain_fetch();
+            let (changed, finished) = queue.drain_bake();
+            (fetched, changed, finished)
+        };
+        if !fetched.is_empty() {
+            changed = true;
+        }
+        for message in fetched {
+            match message {
+                analysis::FetchMsg::Roles {
+                    asset,
+                    generation,
+                    roles,
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    self.side_channels = roles;
+                    self.side_channels_asset = Some(asset);
+                }
+                analysis::FetchMsg::Stems {
+                    asset,
+                    generation,
+                    lanes,
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    // A fresh set arrives fully audible (the sum IS the
+                    // track); the toggles follow the mixer in
+                    // `refresh_analysis_ui`, which runs right after this.
+                    if audio::set_stems(*lanes, self.audio_clip_generation) {
+                        log!("layers: 4 separated stems now play instead of {asset}");
+                    }
+                }
+                analysis::FetchMsg::Lyrics {
+                    generation, rows, ..
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    self.set_lyrics(cx, rows);
+                }
+                analysis::FetchMsg::Failed {
+                    generation,
+                    message,
+                    asset,
+                } => {
+                    if generation == self.side_channels_generation {
+                        log!("side-channels for {asset}: {message}");
+                    }
+                }
+            }
+        }
+        for (title, result) in finished {
+            match result {
+                Ok(done) => {
+                    log!("analysis: {title} · {}", done.summary());
+                    // The track on the rail just gained stems: pick them up
+                    // rather than leaving a preview that predates the bake.
+                    if self.store.selected == Some(done.asset) && !done.already {
+                        let clip = audio::clip_generation();
+                        self.request_side_channels(cx, done.asset, clip);
+                    }
+                }
+                Err(error) => error!("analysis: {title} FAILED — {error}"),
+            }
+        }
+        if changed {
+            self.refresh_analysis_ui(cx);
+            // The Loading panel draws the bake as its own queue row.
+            if self.surface == Surface::Import {
+                self.refresh_import_queue_list(cx);
+            }
+            self.ui.redraw(cx);
+        }
+    }
+
+    /// Everything the analysis owns on screen: the rail's button and its
+    /// state, the queue line (rail + Load card), and the bulk button.
+    fn refresh_analysis_ui(&mut self, cx: &mut Cx) {
+        let (busy, line) = self
+            .analysis
+            .as_ref()
+            .map(|queue| (queue.busy(), queue.status_line()))
+            .unwrap_or((false, String::new()));
+        let selected = self.selected_audio();
+        let connected = self.store.connected();
+
+        self.ui
+            .widget(cx, ids!(detail_analysis_actions))
+            .set_visible(cx, connected && selected.is_some());
+        let want_lyrics = self.ui.check_box(cx, ids!(detail_analyse_lyrics)).active(cx);
+        // The roles are only known once the fetch lane has answered FOR THIS
+        // asset; until then the button offers the analysis rather than
+        // claiming the track has none.
+        let known = selected
+            .as_ref()
+            .is_some_and(|(asset, _)| self.side_channels_asset == Some(*asset));
+        let need = analysis::BakeNeed::decide(self.side_channels, want_lyrics);
+        let (text, enabled) = if !known {
+            ("Analyse stems".to_string(), true)
+        } else if need.nothing() {
+            (
+                if self.side_channels.lyrics {
+                    "stems + lyrics analysed".to_string()
+                } else {
+                    "stems analysed".to_string()
+                },
+                false,
+            )
+        } else if !need.stems && need.lyrics {
+            ("Analyse lyrics".to_string(), true)
+        } else if want_lyrics {
+            ("Analyse stems + lyrics".to_string(), true)
+        } else {
+            ("Analyse stems".to_string(), true)
+        };
+        let queued = selected.as_ref().is_some_and(|(asset, _)| {
+            self.analysis
+                .as_ref()
+                .is_some_and(|queue| queue.queued_keys.contains(&asset.to_string()))
+        });
+        let button = self.ui.button(cx, ids!(detail_analyse_btn));
+        button.set_text(cx, if queued { "queued" } else { &text });
+        button.set_enabled(cx, enabled && !queued);
+        self.ui
+            .label(cx, ids!(detail_analysis_status))
+            .set_text(cx, &line);
+        self.ui
+            .button(cx, ids!(detail_analyse_stop))
+            .set_visible(cx, busy);
+        self.ui
+            .label(cx, ids!(music_analysis_label))
+            .set_text(cx, &line);
+
+        // The separated layers and the transcript belong to the SELECTED
+        // track: the transport keeps playing when the rail moves to a mesh,
+        // but neither panel may stay under something that is not a track.
+        let is_audio = selected.is_some();
+        let stems = audio::stems_ready();
+        self.ui
+            .widget(cx, ids!(detail_layers_row))
+            .set_visible(cx, is_audio && stems);
+        // The MIXER is the source of truth for which layers are audible:
+        // the toggles follow it (and heal themselves after a fresh set
+        // arrives unmuted), and only when they actually disagree — an
+        // unconditional re-apply is a redraw on every store tick.
+        if stems {
+            for (lane, id) in [
+                (0usize, ids!(layer_drums_toggle)),
+                (1, ids!(layer_bass_toggle)),
+                (2, ids!(layer_vocals_toggle)),
+                (3, ids!(layer_other_toggle)),
+            ] {
+                let audible = !audio::lane_muted(lane);
+                let toggle = self.ui.check_box(cx, id);
+                if toggle.active(cx) != audible {
+                    toggle.set_active(cx, audible, Animate::No);
+                }
+            }
+        }
+        self.ui
+            .widget(cx, ids!(detail_lyrics_panel))
+            .set_visible(cx, is_audio && self.lyrics_visible);
+
+        // Bulk: the count is the shown AUDIO hits, so the button and what it
+        // would do can never disagree.
+        let shown = self.shown_audio_count();
+        let bulk = self.ui.button(cx, ids!(lib_analyse_shown_btn));
+        bulk.set_text(cx, &format!("Analyse {shown} shown"));
+        bulk.set_enabled(cx, shown > 0 && connected);
+    }
+
+    fn open_analyse_shown_modal(&mut self, cx: &mut Cx) {
+        let shown = self.shown_audio_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        self.ui.label(cx, ids!(lib_analyse_shown_body)).set_text(
+            cx,
+            &format!(
+                "Split {} audio asset{} matching {filter_desc} into drums, bass, vocals and other, and publish the stems back onto each track? Tracks that already carry stems are skipped. This is minutes of GPU per track and runs one track at a time.",
+                shown.len(),
+                if shown.len() == 1 { "" } else { "s" }
+            ),
+        );
+        self.ui.modal(cx, ids!(lib_analyse_shown_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_analyse_shown_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(lib_analyse_shown_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn analyse_shown_assets(&mut self, cx: &mut Cx) {
+        let lyrics = self
+            .ui
+            .check_box(cx, ids!(lib_analyse_shown_lyrics))
+            .active(cx);
+        let targets: Vec<(analysis::BakeTarget, String)> = self
+            .shown_audio_assets()
+            .into_iter()
+            .map(|(asset, title)| (analysis::BakeTarget::Asset(asset), title))
+            .collect();
+        self.enqueue_analysis(cx, targets, lyrics);
+    }
+
+    fn open_store_delete_modal(&mut self, cx: &mut Cx, action: PendingStoreDelete) {
+        let body = match action {
+            PendingStoreDelete::Asset(id) => format!(
+                "Delete asset {id} from the store? Every revision is retired, aliases and search rows are gone, and its bytes are handed to blob garbage collection. This cannot be undone."
+            ),
+            PendingStoreDelete::Revision(id, revision) => format!(
+                "Delete revision {} of asset {id}? The asset stays live if other revisions remain.",
+                short_digest(&revision.to_string())
+            ),
+        };
+        self.pending_store_delete = Some(action);
+        self.ui.label(cx, ids!(store_delete_body)).set_text(cx, &body);
+        self.ui.modal(cx, ids!(store_delete_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_store_delete_modal(&mut self, cx: &mut Cx) {
+        self.pending_store_delete = None;
+        self.ui.modal(cx, ids!(store_delete_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn confirm_store_delete(&mut self, cx: &mut Cx) {
+        let Some(action) = self.pending_store_delete.take() else {
+            return;
+        };
+        match action {
+            PendingStoreDelete::Asset(id) => self.store.retire_asset(id),
+            PendingStoreDelete::Revision(id, revision) => self.store.retire_revision(id, revision),
+        }
+        self.ui.modal(cx, ids!(store_delete_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// "Keep newest 3 per asset" checkbox on the Server tab's GC toolbar —
+    /// `Some(3)` when checked, `None` (GC only reclaims already-unreferenced
+    /// blobs) otherwise.
+    fn gc_retain_setting(&mut self, cx: &mut Cx) -> Option<u32> {
+        self.ui
+            .check_box(cx, ids!(gc_retain_check))
+            .active(cx)
+            .then_some(3)
+    }
+
+    fn open_gc_confirm_modal(&mut self, cx: &mut Cx, status: &GcStatusDto) {
+        let body = format!(
+            "Dry run found {} unreferenced blob{} — {} will be freed. Collect now?",
+            status.unreferenced_blobs,
+            if status.unreferenced_blobs == 1 { "" } else { "s" },
+            format_bytes(status.unreferenced_bytes),
+        );
+        self.ui.label(cx, ids!(gc_confirm_body)).set_text(cx, &body);
+        self.ui.modal(cx, ids!(gc_confirm_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_gc_confirm_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(gc_confirm_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// GC toolbar status line + button states — call whenever `self.store.gc`
+    /// might have changed and whenever the Server tab is visible.
+    fn refresh_gc_ui(&mut self, cx: &mut Cx) {
+        let busy = self.store.gc_busy();
+        self.ui.button(cx, ids!(gc_collect_btn)).set_enabled(cx, !busy);
+        self.ui.button(cx, ids!(gc_cancel_btn)).set_visible(cx, busy);
+        let text = match &self.store.gc {
+            Remote::Idle => String::new(),
+            Remote::Loading => "starting…".to_string(),
+            Remote::Failed(error) => format!("GC failed: {error}"),
+            Remote::Ready(status) => {
+                let verb = if status.dry_run { "dry run" } else { "collect" };
+                if status.done {
+                    format!(
+                        "{verb} done · {} blob{} / {} · {} freed",
+                        status.deleted_blobs.max(status.unreferenced_blobs),
+                        if status.deleted_blobs.max(status.unreferenced_blobs) == 1 { "" } else { "s" },
+                        format_bytes(status.deleted_bytes.max(status.unreferenced_bytes)),
+                        if status.dry_run { "would be" } else { "was" }
+                    )
+                } else {
+                    format!(
+                        "{verb} running · scanned {} · examined {} blobs",
+                        status.scanned_revisions, status.examined_blobs
+                    )
+                }
+            }
+        };
+        self.ui.label(cx, ids!(gc_status)).set_text(cx, &text);
+    }
+
+    /// A dry run this session started just finished — show what it found
+    /// and let the user confirm turning it into a real collect. Checked
+    /// every tick after `self.store.poll()`; `gc_dry_run_prompted` makes
+    /// this fire exactly once per run (a NEW dry run always carries a
+    /// fresh `run_id`).
+    fn maybe_open_gc_confirm(&mut self, cx: &mut Cx) {
+        let Remote::Ready(status) = &self.store.gc else {
+            return;
+        };
+        if !(status.dry_run && status.done) || self.gc_dry_run_prompted == status.run_id {
+            return;
+        }
+        self.gc_dry_run_prompted = status.run_id;
+        let status = *status;
+        self.open_gc_confirm_modal(cx, &status);
     }
 
     /// Runs+Workers surface rows: local pipeline + queue + LAN fleet (all
@@ -6008,10 +11186,10 @@ impl App {
     fn refresh_import_ui(&mut self, cx: &mut Cx) {
         let _modules = crate::import_classic::PACK_MODULES_WITH_CLASSIC;
         let labels = crate::import::kenney_pack_labels();
-        let drop = self.ui.drop_down2(cx, ids!(kenney_pack_drop));
+        let drop = self.ui.combo_box(cx, ids!(kenney_pack_drop));
         drop.set_labels(cx, labels);
         drop.set_selected_item(cx, self.import_page.kenney_pack_index);
-        self.refresh_import_preview_strip(cx);
+        self.refresh_import_grid(cx);
         self.refresh_import_queue_list(cx);
         let show_preview = !self.import_page.preview_thumbs.is_empty()
             && (self.import_busy()
@@ -6019,7 +11197,7 @@ impl App {
                 || !self.import_landings.is_empty()
                 || self.import_page.icons_busy());
         self.ui
-            .view(cx, ids!(import_preview))
+            .widget(cx, ids!(import_grid))
             .set_visible(cx, show_preview);
         self.ui
             .button(cx, ids!(queue_clear_btn))
@@ -6167,6 +11345,49 @@ impl App {
             },
         );
 
+        let music_job = self.music_import_page.job();
+        self.ui.button(cx, ids!(music_import_btn)).set_text(
+            cx,
+            match &music_job {
+                Some(job) if self.import_queue.is_active(job) && self.music_import_page.compiling() => {
+                    "Loading…"
+                }
+                Some(job) if self.import_queue.has_job(job) => "Waiting",
+                Some(_) => "Load",
+                None => "Pick first",
+            },
+        );
+        self.ui.button(cx, ids!(music_pick_btn)).set_text(
+            cx,
+            if self.music_import_page.picking {
+                "Choosing…"
+            } else if self.music_import_page.dir.is_empty() {
+                "Choose folder…"
+            } else {
+                "Change folder…"
+            },
+        );
+        self.ui
+            .label(cx, ids!(music_dir_label))
+            .set_text(cx, &self.music_import_page.dir_label());
+        // "+ lyrics" only means anything on top of a separation (the
+        // transcript is baked FROM the vocals stem), so it is only offered
+        // once the layers switch is on.
+        let split = self.ui.check_box(cx, ids!(split_layers_toggle)).active(cx);
+        self.ui
+            .widget(cx, ids!(lyrics_toggle))
+            .set_visible(cx, split);
+        // The queue row disappears the moment a job stops, so the card keeps
+        // the verdict: a refusal, a cancel, or the counts of the last run.
+        self.ui.label(cx, ids!(music_status_label)).set_text(
+            cx,
+            &if self.music_import_page.compiling() {
+                self.music_import_page.status_line(self.store.connected())
+            } else {
+                self.music_import_page.summary.clone()
+            },
+        );
+
         self.ui
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
@@ -6174,7 +11395,9 @@ impl App {
     }
 
     fn import_busy(&self) -> bool {
-        self.import_page.compiling() || self.classic_import_page.compiling()
+        self.import_page.compiling()
+            || self.classic_import_page.compiling()
+            || self.music_import_page.compiling()
     }
 
     fn refresh_import_queue_list(&mut self, cx: &mut Cx) {
@@ -6186,10 +11409,10 @@ impl App {
                     active.job.title(),
                     self.import_page.kenney_status_line(self.store.connected()),
                     self.import_page.progress_fraction(),
-                    matches!(
-                        self.import_page.kenney_phase,
-                        crate::import::ImportPhase::Failed { .. }
-                    ),
+                    // Every refusal shape, not just the terminal one: a
+                    // pack that died mid-"Import all", or one whose
+                    // compile/publish was refused, draws as failed too.
+                    self.import_page.kenney_phase.failure_reason().is_some(),
                 ),
                 ImportJob::Freedoom { .. } => (
                     active.job.title(),
@@ -6279,6 +11502,15 @@ impl App {
                         crate::import::ImportPhase::Failed { .. }
                     ),
                 ),
+                ImportJob::Music { .. } => (
+                    active.job.title(),
+                    self.music_import_page.status_line(self.store.connected()),
+                    self.music_import_page.progress_fraction(),
+                    matches!(
+                        self.music_import_page.phase,
+                        crate::import::ImportPhase::Failed { .. }
+                    ),
+                ),
             };
             if landing_left > 0 && !self.import_busy() {
                 meta = format!("adding to library · {landing_left} left");
@@ -6298,6 +11530,21 @@ impl App {
                 cancel: RowAction::RemoveQueuedImport(item.id),
             });
         }
+        // The analysis bake is its own lane beside the imports: it outlives
+        // the run that queued it (a 200-track import publishes long before
+        // the first track is separated), so it gets its own row with its own
+        // bar rather than sharing the import's.
+        if let Some(queue) = &self.analysis {
+            if queue.busy() {
+                rows.push(StoreRow::Stage {
+                    title: "Split audio layers".into(),
+                    meta: queue.status_line(),
+                    progress: queue.progress_fraction(),
+                    failed: false,
+                    cancel: None,
+                });
+            }
+        }
         if rows.is_empty() {
             rows.push(StoreRow::Note(
                 "Nothing importing. Add a pack below.".into(),
@@ -6316,32 +11563,48 @@ impl App {
         script_apply_eval!(cx, list, { height: #(height) });
     }
 
-    fn refresh_import_preview_strip(&mut self, cx: &mut Cx) {
+    /// The LOAD grid: every import that has a picture yet, drawn with the
+    /// SAME card the Library uses. One component, so a card improvement is
+    /// never made twice.
+    fn refresh_import_grid(&mut self, cx: &mut Cx) {
         if !self.import_page.preview_dirty {
             return;
         }
         self.import_page.preview_dirty = false;
-        let slots = [
-            ids!(import_t0),
-            ids!(import_t1),
-            ids!(import_t2),
-            ids!(import_t3),
-            ids!(import_t4),
-            ids!(import_t5),
-            ids!(import_t6),
-            ids!(import_t7),
-        ];
-        for (i, slot) in slots.iter().enumerate() {
-            match self.import_page.preview_thumbs.get(i) {
-                Some((_, png)) => {
-                    if let Err(error) = self.ui.image(cx, *slot).load_png_from_data(cx, png) {
-                        log!("import preview decode failed: {error:?}");
-                        self.ui.image(cx, *slot).set_texture(cx, None);
+        let tiles: Vec<CatalogTile> = self
+            .import_page
+            .preview_thumbs
+            .iter()
+            .map(|(file, _)| CatalogTile {
+                asset: file.clone(),
+                title: import_item_name(file),
+                meta: import_item_source(file),
+                alias: file.clone(),
+                when: String::new(),
+                selected: false,
+            })
+            .collect();
+        let pictures: Vec<(String, Vec<u8>)> = self.import_page.preview_thumbs.clone();
+        let widget = self.ui.widget(cx, ids!(import_grid));
+        let Some(mut grid) = widget.borrow_mut::<CatalogGrid>() else {
+            return;
+        };
+        let total = tiles.len();
+        grid.set_tiles(cx, tiles, total, crate::store_views::CatalogLayout::Tiles);
+        for (file, png) in pictures {
+            if grid.has_thumb(&file) {
+                continue;
+            }
+            match import_thumb_frames(cx, &png) {
+                Some((frames, fps)) if frames.len() > 1 => {
+                    grid.install_anim(cx, file, frames, fps)
+                }
+                Some((mut frames, _)) => {
+                    if let Some(texture) = frames.pop() {
+                        grid.install_thumb(cx, file, texture);
                     }
                 }
-                None => {
-                    self.ui.image(cx, *slot).set_texture(cx, None);
-                }
+                None => {}
             }
         }
     }
@@ -6428,6 +11691,9 @@ impl App {
                 .darkmod
                 .start_import(cx, path.clone(), server),
             ImportJob::KayKit => self.import_page.start_kaykit_import(server),
+            ImportJob::Music { path } => {
+                self.music_import_page.start_import(path.clone(), server)
+            }
         };
         if let Err(error) = result {
             log!("import: {} refused: {error}", item.job.title());
@@ -6477,6 +11743,9 @@ impl App {
             Some(ImportJob::DarkMod { .. }) => {
                 self.classic_import_page.darkmod.request_stop(cx);
             }
+            Some(ImportJob::Music { .. }) => {
+                self.music_import_page.request_stop();
+            }
             None => {}
         }
         if self.surface == Surface::Import {
@@ -6484,15 +11753,68 @@ impl App {
         }
     }
 
+    /// Where imports publish. The connected client session first; when
+    /// that is not up yet (imports often start seconds after launch) the
+    /// server this process HOSTS, read from its own root files — so a pack
+    /// never silently compiles local-only while we are the server.
+    /// Half of the icon-render handshake (`ImportPhase::IconsPending` /
+    /// `IconResumeGate`, the other half lives in `run_kenney_import`/
+    /// `run_kaykit_import`): a parked import thread already staged+baked and
+    /// is waiting right here for real icons before it will compile+publish
+    /// — nothing gets published with a placeholder thumbnail. Once every
+    /// icon this session queued has rendered (or the import was cancelled),
+    /// let it continue.
+    fn maybe_resume_icons_pending(&mut self, cx: &mut Cx) {
+        let drained = self.import_landings.is_empty();
+        // Classic packs park in the same handshake (their own per-source
+        // gate), so they resume on the same condition.
+        let resumed_classic = self
+            .classic_import_page
+            .resume_icons_pending(drained, self.import_page.icons_busy());
+        for source in &resumed_classic {
+            log!("import {source}: icons ready — resuming compile+publish");
+        }
+        let ready = self.import_page.icons_pending_ready(drained);
+        let cancelled = self.import_page.stop_requested();
+        if !ready && !cancelled {
+            if !resumed_classic.is_empty() && self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+            return;
+        }
+        // The gate is about to open. If a staged mesh never registered for
+        // the wait, the wait was a lie — say so BEFORE the publish-time
+        // placeholder guard turns it into a bare refusal further down.
+        let unregistered = self.import_page.unregistered_mesh_icons();
+        if !unregistered.is_empty() {
+            error!(
+                "import: {} staged mesh(es) never registered for the icon wait ({}{}) — publish will refuse the placeholders",
+                unregistered.len(),
+                unregistered
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unregistered.len() > 5 { ", …" } else { "" }
+            );
+        }
+        if self.import_page.resume_icons_pending() || !resumed_classic.is_empty() {
+            log!("import: icons ready — resuming compile+publish");
+            if self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+        }
+    }
+
     fn import_server_session(&self) -> Option<crate::import::ServerSession> {
-        let endpoints = self.store.endpoints?;
-        let token = self.store.token.clone()?;
-        let server_id = self.store.server.as_ref()?.server_id;
-        Some(crate::import::ServerSession {
-            endpoints,
-            token,
-            server_id,
-        })
+        let from_session = (|| {
+            let endpoints = self.store.endpoints?;
+            let token = self.store.token.clone()?;
+            let server_id = self.store.server.as_ref()?.server_id;
+            Some(crate::import::ServerSession { endpoints, token, server_id })
+        })();
+        from_session.or_else(crate::import::hosted_server_session)
     }
 
     fn collect_import_landings(&mut self) {
@@ -6508,8 +11830,22 @@ impl App {
         }
     }
 
-    /// Persist a bounded slice of imported payloads so convert/AO can keep
-    /// painting the queue strip instead of freezing the UI on 800 files.
+    /// Feed a bounded slice of staged pack items to the GPU icon renderer so
+    /// convert/AO can keep painting the queue strip instead of freezing the
+    /// UI on 800 files. Pack content publishes to the ASSET STORE ONLY
+    /// (`publish_compiled_pack`, run once from `run_kenney_import`/
+    /// `run_kaykit_import` — but NOT YET when `LibraryLanding`s first reach
+    /// this function: the import thread is PARKED in `ImportPhase::IconsPending`,
+    /// waiting for every icon this function queues to finish, before it
+    /// will compile+publish at all — see `maybe_resume_icons_pending`); the
+    /// local AI-workspace library is never touched here. Each staged GLB
+    /// either reuses its already-persisted icon
+    /// (`crate::import::read_reusable_pack_icon`, keyed by a content
+    /// fingerprint — the staging-free analog of
+    /// `library::keep_existing_glb_thumbnail`) or gets queued for a fresh
+    /// GPU render whose result lands in `crate::import::pack_icons_dir` (see
+    /// `drain_rendered_thumbnails`), which survives the `work/`+`out/`
+    /// staging cleanup (`clear_pack_staging`) once the one publish succeeds.
     fn land_imported_pack(&mut self, cx: &mut Cx) {
         self.collect_import_landings();
         const BATCH: usize = 32;
@@ -6518,137 +11854,119 @@ impl App {
         }
         let n = BATCH.min(self.import_landings.len());
         let landings: Vec<_> = self.import_landings.drain(..n).collect();
-        let mut queued = 0usize;
+        let mut staged = 0usize;
         let mut reused = 0usize;
-        let mut thumbs: Vec<(String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = Vec::new();
+        type ThumbJob = (String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<([f32; 3], f32, f32)>);
+        let mut thumbs: Vec<ThumbJob> = Vec::new();
         let mut preview_images: Vec<(String, Vec<u8>)> = Vec::new();
         let mut icon_tracks: Vec<(String, Option<Vec<u8>>)> = Vec::new();
-        if let Some(library) = &mut self.library {
-            for landing in &landings {
-                let Ok(mut bytes) = std::fs::read(&landing.path) else {
-                    log!("import: cannot read {}", landing.path.display());
-                    continue;
-                };
-                if landing.content_type.contains("gltf") {
-                    if let Some(dir) = landing.path.parent() {
-                        match crate::import::embed_glb_file_images(&bytes, dir) {
-                            Ok(embedded) => bytes = embedded,
-                            Err(error) => log!(
-                                "import: embed textures {}: {error}",
-                                landing.label
-                            ),
-                        }
+        for landing in &landings {
+            let Ok(mut bytes) = std::fs::read(&landing.path) else {
+                log!("import: cannot read {}", landing.path.display());
+                continue;
+            };
+            if landing.content_type.contains("gltf") {
+                if let Some(dir) = landing.path.parent() {
+                    match crate::import::embed_glb_file_images(&bytes, dir) {
+                        Ok(embedded) => bytes = embedded,
+                        Err(error) => log!(
+                            "import: embed textures {}: {error}",
+                            landing.label
+                        ),
                     }
                 }
-                let source_id = if landing.source_id.is_empty() {
-                    "import".to_string()
+            }
+            let source_id = if landing.source_id.is_empty() {
+                "import".to_string()
+            } else {
+                landing.source_id.clone()
+            };
+            let pack = if landing.pack.is_empty() {
+                match source_id.as_str() {
+                    "kenney" => landing
+                        .label
+                        .split('/')
+                        .nth(1)
+                        .unwrap_or("kenney")
+                        .to_string(),
+                    other => other.to_string(),
+                }
+            } else {
+                landing.pack.clone()
+            };
+            staged += 1;
+            let premade = landing
+                .thumbnail
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .filter(|b| b.starts_with(b"\x89PNG") && !crate::import::is_blank_preview_png(b));
+            let stem = landing
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("item")
+                .to_string();
+            if landing.content_type.contains("gltf") && premade.is_none() {
+                let fingerprint = crate::import::content_fingerprint(&bytes);
+                let icon_key = crate::import::pack_icon_key(&source_id, &pack, &stem, &fingerprint);
+                let icons_dir = crate::import::pack_icons_dir(&source_id, &pack);
+                if let Some(existing) =
+                    crate::import::read_reusable_pack_icon(&icons_dir, &stem, &fingerprint)
+                {
+                    reused += 1;
+                    icon_tracks.push((icon_key, Some(existing)));
                 } else {
-                    landing.source_id.clone()
-                };
-                let pack = if landing.pack.is_empty() {
-                    match source_id.as_str() {
-                        "kenney" => landing
-                            .label
-                            .split('/')
-                            .nth(1)
-                            .unwrap_or("kenney")
-                            .to_string(),
-                        other => other.to_string(),
-                    }
-                } else {
-                    landing.pack.clone()
-                };
-                let group_id = format!("import:{source_id}:{pack}");
-                let group_label = match source_id.as_str() {
-                    "freedoom" => "Freedoom · BSD-3-Clause".to_string(),
-                    "doom" => "Doom shareware · id-Software-shareware".to_string(),
-                    "librequake" => "LibreQuake · Modified BSD".to_string(),
-                    "quake" => "Quake shareware · id-Software-shareware".to_string(),
-                    "duke3d" => "Duke3D shareware · 3D-Realms-shareware".to_string(),
-                    "quake2" => "Quake II shareware · id-Software-shareware".to_string(),
-                    "quake3" => "Quake III demo · id-Software-demo".to_string(),
-                    "darkmod" => "The Dark Mod · CC-BY-NC-SA-3.0".to_string(),
-                    "kaykit" => "KayKit · CC0-1.0".to_string(),
-                    _ => format!("Kenney {pack} · CC-BY-4.0"),
-                };
-                let premade = landing
-                    .thumbnail
-                    .as_ref()
-                    .and_then(|p| std::fs::read(p).ok())
-                    .filter(|b| {
-                        b.starts_with(b"\x89PNG") && !crate::import::is_blank_preview_png(b)
-                    });
-                match library.import_unique_with_thumbnail(
-                    landing.domain,
-                    landing.content_type,
-                    &landing.prompt,
-                    &landing.label,
-                    &bytes,
-                    premade.as_deref(),
-                    Some((group_id.as_str(), group_label.as_str())),
-                ) {
-                    Ok((file, created)) => {
-                        if created {
-                            queued += 1;
-                        } else {
-                            reused += 1;
-                        }
-                        // AO sidecars live beside the staged GLB after bake
-                        // (or seed-from-source). Fail-closed: absent means none.
-                        if landing.content_type.contains("gltf") {
-                            if let Err(error) = library.install_ao_sidecars(&file, &landing.path) {
-                                log!(
-                                    "import: AO sidecar copy for {} failed: {error}",
-                                    landing.label
-                                );
-                            }
-                        }
-                        if landing.content_type.contains("billboard") {
-                            if let Err(error) =
-                                library.install_billboard_frames(&file, &landing.path)
-                            {
-                                log!(
-                                    "import: billboard frames for {} failed: {error}",
-                                    landing.label
-                                );
-                            }
-                        }
-                        if landing.content_type.starts_with("image/") {
-                            let preview = premade.clone().unwrap_or(bytes.clone());
-                            preview_images.push((file.clone(), preview));
-                        }
-                        // Reimport rebuilds GPU icons unless a convert-time
-                        // anim sheet already is the thumbnail.
-                        if landing.content_type.contains("gltf") && premade.is_none() {
-                            if let Err(error) = library.discard_model_thumbnail(&file) {
-                                log!("import: could not drop old icon for {file}: {error}");
-                            }
-                            let (aomesh, ao_png) = library.ao_sidecar_bytes(&file);
-                            thumbs.push((file.clone(), bytes, aomesh, ao_png));
-                            icon_tracks.push((file, None));
-                        } else if premade.is_some() {
-                            icon_tracks.push((file, premade));
-                        }
-                    }
-                    Err(error) => log!("import: library persist {}: {error}", landing.label),
+                    // AO sidecars live beside the staged GLB after bake (or
+                    // seed-from-source); `.spawn` too for World items.
+                    // Fail-closed: absent means none.
+                    let aomesh = std::fs::read(landing.path.with_extension("aomesh")).ok();
+                    let ao_png = std::fs::read(landing.path.with_extension("ao.png")).ok();
+                    let spawn = crate::library::parse_world_spawn(&landing.path.with_extension("spawn"));
+                    thumbs.push((icon_key, bytes, aomesh, ao_png, spawn));
+                }
+            } else {
+                // Non-model (e.g. plain image) or already-thumbnailed
+                // (billboard sheet, premade beauty render) content needs no
+                // GPU render — the store publish already carries its real
+                // thumbnail straight from the staged file.
+                let key = crate::import::pack_icon_key(&source_id, &pack, &stem, "premade");
+                if landing.content_type.starts_with("image/") {
+                    let preview = premade.clone().unwrap_or_else(|| bytes.clone());
+                    preview_images.push((key.clone(), preview));
+                }
+                if premade.is_some() {
+                    icon_tracks.push((key, premade));
                 }
             }
         }
-        for (file, png) in preview_images {
-            self.import_page.push_preview_thumb(file, png);
+        for (key, png) in preview_images {
+            self.import_page.push_preview_thumb(key, png);
         }
-        for (file, existing) in icon_tracks {
-            self.import_page.track_import_icon(file, existing);
+        for (key, existing) in icon_tracks {
+            self.import_page.track_import_icon(key, existing);
         }
-        for (file, bytes, aomesh, ao_png) in thumbs {
-            self.queue_glb_thumbnail_ao(cx, &file, &bytes, aomesh, ao_png);
+        let mut queued = 0usize;
+        for (key, bytes, aomesh, ao_png, spawn) in thumbs {
+            // REGISTER THE WAIT, then queue. `ImportPhase::IconsPending`
+            // parks the import thread until `import_icon_files` is fully
+            // processed (`ImportPage::icons_busy`), so an icon that renders
+            // but was never registered leaves the gate reading "nothing
+            // queued — resume now": compile+publish then runs against the
+            // 512² placeholders `assign_staged_thumbnails` just wrote and
+            // the pack dies on its own last guard, with every icon landing
+            // uselessly minutes later. Only ever register what really went
+            // on the renderer, or the opposite failure (a wait nothing can
+            // ever satisfy) parks the import forever.
+            if self.queue_glb_thumbnail_ao(cx, &key, &bytes, aomesh, ao_png, spawn) {
+                self.import_page.track_import_icon(key, None);
+                queued += 1;
+            }
         }
         log!(
-            "import: library landed {queued} new / {reused} cached · icons {}/{}",
+            "import: staged {staged} pack item(s) ({reused} icon reused, {queued} icon queued) · icons {}/{}",
             self.import_page.icons_done,
             self.import_page.icons_total()
         );
-        self.refresh_gallery(cx, false);
         if self.import_landings.is_empty()
             && matches!(
                 self.import_page.kenney_phase,
@@ -6657,10 +11975,9 @@ impl App {
                     | crate::import::ImportPhase::AllDone { .. }
             )
         {
+            // Pack content lives in the STORE — re-run the catalog search
+            // so a just-published pack shows up on the Library surface.
             self.store.submit_search();
-        }
-        if self.surface == Surface::Library {
-            self.refresh_library_ui(cx, false);
         }
         if self.surface == Surface::Import {
             self.refresh_import_ui(cx);
@@ -6669,6 +11986,30 @@ impl App {
 
     /// `flip_y`: generated worlds (FlashWorld ply) are y-up/-z-forward and load
     /// as-is; scan-class plys (the biker sample) are y-down and need the flip.
+    /// Frame the splat scene: object splats (TripoSplat, a single subject
+    /// normalised to the unit sphere) are orbited from OUTSIDE; world splats
+    /// (FlashWorld, scans) keep the inside-the-scene framing.
+    fn frame_splat_camera(&mut self, cx: &mut Cx, object: bool) {
+        if let Some(mut scene) = self
+            .ui
+            .widget(cx, ids!(splat_scene))
+            .borrow_mut::<makepad_xr::scene::XrSceneView>()
+        {
+            let camera = scene.camera_mut();
+            if object {
+                camera.distance = 6.0;
+                camera.distance_min = 0.5;
+                camera.orbit_yaw = 0.4;
+                camera.orbit_pitch = -0.2;
+            } else {
+                camera.distance = 1.5;
+                camera.distance_min = 0.03;
+                camera.orbit_yaw = 0.0;
+                camera.orbit_pitch = 0.0;
+            }
+        }
+    }
+
     fn set_splat_file(&mut self, cx: &mut Cx, abs_path: &str, flip_y: bool) {
         let abs_path = abs_path.to_string();
         let mut splat = self.ui.widget(cx, ids!(splat));
@@ -6726,7 +12067,9 @@ impl App {
     /// state, or an error state.
     fn clear_video_frame(&mut self, cx: &mut Cx) {
         self.video_texture = None;
-        self.ui.image(cx, ids!(video_img)).set_texture(cx, None);
+        if let Some(mut video) = self.viewer_video(cx).borrow_mut::<VideoView>() {
+            video.set_frame(cx, None);
+        }
         self.ui.label(cx, ids!(video_info)).set_text(cx, "");
     }
 
@@ -6768,11 +12111,11 @@ impl App {
     /// The shown/loading item no longer exists (single or group delete):
     /// empty the viewer instead of pointing it at a ghost.
     fn reset_viewer_if_gone(&mut self, cx: &mut Cx) {
-        let gone = self.viewer.file().is_some_and(|file| {
-            self.library
-                .as_ref()
-                .is_none_or(|library| library.get(file).is_none())
-        });
+        let gone = self
+            .viewer
+            .file()
+            .map(|file| file.to_string())
+            .is_some_and(|file| self.meta_of(&file).is_none());
         if gone {
             self.viewer = ViewerContent::Empty;
             self.set_viewer_text(cx, "Deleted.");
@@ -6888,6 +12231,32 @@ impl App {
         }
     }
 
+    fn set_mesh_shadows(&mut self, cx: &mut Cx, on: bool) {
+        if let Some(mut mesh) = self
+            .ui
+            .widget(cx, ids!(mesh_view))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_shadows_enabled(cx, on);
+        }
+        self.ui
+            .check_box(cx, ids!(shadows_toggle))
+            .set_active(cx, on, Animate::No);
+    }
+
+    fn set_mesh_dark(&mut self, cx: &mut Cx, on: bool) {
+        if let Some(mut mesh) = self
+            .ui
+            .widget(cx, ids!(mesh_view))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_dark_enabled(cx, on);
+        }
+        self.ui
+            .check_box(cx, ids!(dark_toggle))
+            .set_active(cx, on, Animate::No);
+    }
+
     // -- samples (viewer smoke tests without live mesh/world backends) ---------
 
     fn load_sample_mesh(&mut self, cx: &mut Cx) {
@@ -6896,9 +12265,9 @@ impl App {
         let (glb, png) = match std::env::var("AI_CONTENT_SAMPLE_MESH") {
             Ok(path) => (std::fs::read(&path), None),
             Err(_) => (
-                std::fs::read(repo_path("examples/rig/resources/character_retex.glb")),
+                std::fs::read(repo_path("apps/asset-ui/resources/test/character_retex.glb")),
                 std::fs::read(repo_path(
-                    "examples/rig/resources/character_retex_basecolor.png",
+                    "apps/asset-ui/resources/test/character_retex_basecolor.png",
                 ))
                 .ok(),
             ),
@@ -6927,6 +12296,7 @@ impl App {
         let path = repo_path("local/biker.ply");
         if std::path::Path::new(&path).is_file() {
             self.set_splat_file(cx, &path, true);
+            self.frame_splat_camera(cx, false);
             self.selected_file = None;
             self.viewer = ViewerContent::Empty;
             self.set_caption(cx, "splat", "sample — biker scan");
@@ -6981,7 +12351,7 @@ impl App {
         });
         self.selected_file = managed.as_ref().map(|(file, _)| file.clone());
         self.set_caption(cx, "mesh", name);
-        if self.display_artifact(cx, "motion", "model/gltf-binary", &bytes, 0, None) {
+        if self.display_artifact(cx, "motion", "model/gltf-binary", &bytes, 0, None, false) {
             self.viewer = match &self.selected_file {
                 Some(file) => ViewerContent::Showing(file.clone()),
                 None => ViewerContent::Empty,
@@ -7005,6 +12375,96 @@ impl App {
 
     // -- per-frame video pump ----------------------------------------------------
 
+
+    /// Jump the current clip to `fraction`, coalescing while the decoder is
+    /// mid-seek — the pump flushes the newest stashed target when the
+    /// previous one lands, which is what makes dragging the knob live.
+    fn scrub_video_to(&mut self, cx: &mut Cx, fraction: f64) {
+        if self.video.is_none() {
+            self.restart_viewer_video(cx);
+        }
+        let Some(player) = &mut self.video else { return };
+        let duration = player.duration_secs();
+        if duration <= 0.0 {
+            return;
+        }
+        let fraction = fraction.clamp(0.0, 1.0);
+        if player.seek_pending() {
+            self.pending_scrub = Some(fraction);
+        } else {
+            player.seek(fraction * duration);
+            self.pending_scrub = None;
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Push the player's clock + state into the shared video widget(s).
+    fn sync_video_transport(&mut self, cx: &mut Cx) {
+        let (fraction, playing, position) = match &self.video {
+            Some(player) => {
+                let duration = player.duration_secs();
+                let position = player.position_secs();
+                let fraction = if duration > 0.0 {
+                    (position / duration).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (
+                    fraction,
+                    !player.is_paused(),
+                    format!(
+                        "{}:{:04.1} / {}:{:04.1}",
+                        position as u32 / 60,
+                        position % 60.0,
+                        duration as u32 / 60,
+                        duration % 60.0
+                    ),
+                )
+            }
+            None => (1.0, false, "ended".to_string()),
+        };
+        let scrubbing = self
+            .viewer_video(cx)
+            .borrow::<VideoView>()
+            .map(|video| video.is_scrubbing())
+            .unwrap_or(false);
+        if !scrubbing {
+            if let Some(mut video) = self.viewer_video(cx).borrow_mut::<VideoView>() {
+                video.set_transport(cx, fraction, playing, &position);
+            }
+            if let Some(preview) = self
+                .ui
+                .widget(cx, ids!(detail_content))
+                .borrow::<ContentPreview>()
+            {
+                preview.set_video_transport(cx, fraction, playing, &position);
+            }
+        }
+    }
+
+    fn viewer_video(&self, cx: &mut Cx) -> WidgetRef {
+        self.ui.widget(cx, ids!(viewer_video))
+    }
+
+    /// Re-opens the viewer's current video from the start. False when no
+    /// video was open in the viewer.
+    fn restart_viewer_video(&mut self, cx: &mut Cx) -> bool {
+        let Some(path) = self.video_path.clone() else { return false };
+        self.stop_video_playback();
+        match VideoPlayer::new(&path.to_string_lossy()) {
+            Ok(player) => {
+                self.video = Some(player);
+                self.sync_video_transport(cx);
+                self.video_pump = cx.new_next_frame();
+                true
+            }
+            Err(error) => {
+                log!("video restart failed: {error}");
+                false
+            }
+        }
+    }
+
     fn pump_video(&mut self, cx: &mut Cx) {
         let Some(player) = &mut self.video else { return };
         if let Some(frame) = player.take_due_frame() {
@@ -7021,22 +12481,64 @@ impl App {
                             updated: TextureUpdated::Full,
                         },
                     ));
-                    self.ui
-                        .image(cx, ids!(video_img))
-                        .set_texture(cx, self.video_texture.clone());
+                    if let Some(mut video) =
+                        self.viewer_video(cx).borrow_mut::<VideoView>()
+                    {
+                        video.set_frame(cx, self.video_texture.clone());
+                    }
+                    if let Some(preview) = self
+                        .ui
+                        .widget(cx, ids!(detail_content))
+                        .borrow::<ContentPreview>()
+                    {
+                        preview.set_video_frame(cx, self.video_texture.clone());
+                    }
                 }
             }
-            self.ui.image(cx, ids!(video_img)).redraw(cx);
+            self.sync_video_transport(cx);
         }
-        if let Some(player) = &self.video {
+        // A scrub that arrived while the decoder was mid-seek: flush the
+        // newest one the moment the previous lands.
+        if let Some(fraction) = self.pending_scrub {
+            let flush = self
+                .video
+                .as_ref()
+                .is_some_and(|player| !player.seek_pending());
+            if flush {
+                self.pending_scrub = None;
+                if let Some(player) = &mut self.video {
+                    let duration = player.duration_secs();
+                    if duration > 0.0 {
+                        player.seek(fraction * duration);
+                    }
+                }
+            }
+        }
+        if let Some(player) = &mut self.video {
             if player.at_end() {
-                // Real EOS: decode thread exited (end of stream or error)
-                // and every due frame is shown. The pump chain ends here
-                // instead of re-arming at frame rate forever; the soundtrack
-                // tail drains from the audio callback on its own.
+                // EOS with the decode thread PARKED, not gone. Loop = a
+                // ~10 ms in-place seek on the same player — the bar snaps
+                // home, the play state survives, nothing reopens.
+                let looping = self
+                    .viewer_video(cx)
+                    .borrow::<VideoView>()
+                    .map(|video| video.looping())
+                    .unwrap_or(true);
+                if looping {
+                    if let Some(player) = &mut self.video {
+                        player.seek(0.0);
+                    }
+                    self.video_pump = cx.new_next_frame();
+                    return;
+                }
                 self.ui
                     .label(cx, ids!(video_info))
-                    .set_text(cx, "ended — click the history card to replay");
+                    .set_text(cx, "ended — Play restarts it");
+                self.sync_video_transport(cx);
+                return;
+            }
+            if player.is_paused() {
+                // Paused: keep the chain parked; the Play click re-arms it.
                 return;
             }
         }
@@ -7050,89 +12552,127 @@ const MODEL_THUMBNAIL_MAX_PENDING: usize = 2;
 /// Finished runs kept visible on the Runs surface (running ones always are).
 const MAX_FINISHED_RUNS_SHOWN: usize = 3;
 
+/// What the catalog just handed us, from the bytes themselves: the store is
+/// the source of truth for CONTENT, so the viewer asks the content.
+/// What a manifest file role means to the Create surface: the domain and
+/// content type its tools switch on. The role is authoritative — it is what
+/// the publisher measured — where a file extension is a guess.
+///
+/// A role says what a file is FOR, and for most roles that settles the
+/// container too. `Audio` is the exception: WAV, Ogg and MP3 are all legal
+/// under it (`FileRole::allows`), the store's paths are digest-named so
+/// there is no extension to consult, and a decoder handed the wrong
+/// container fails SILENTLY — it just produces nothing to draw. So where the
+/// manifest declares the media, that is what the content type says.
+fn role_media(
+    role: makepad_asset_data::FileRole,
+    media: Option<makepad_asset_data::MediaType>,
+) -> (&'static str, &'static str) {
+    use makepad_asset_data::FileRole;
+    match role {
+        FileRole::RenderGlb | FileRole::Lod1Glb | FileRole::Lod2Glb | FileRole::AoMesh => {
+            ("mesh", "model/gltf-binary")
+        }
+        FileRole::Splat => ("splat", "application/x-ply"),
+        FileRole::Audio => ("sfx", audio_content_type(media)),
+        FileRole::Video => ("video", "video/mp4"),
+        FileRole::Source => ("billboard", "application/x-stateful-billboard"),
+        _ => ("image", "image/png"),
+    }
+}
+
+/// The container of an `Audio` file. Unknown media keeps the historical
+/// answer: WAV is what every audio role carried before MP3 was admitted,
+/// and a wrong guess here is a well that shows no waveform.
+fn audio_content_type(media: Option<makepad_asset_data::MediaType>) -> &'static str {
+    use makepad_asset_data::MediaType;
+    match media {
+        Some(MediaType::Mp3) => "audio/mpeg",
+        Some(MediaType::Ogg) => "audio/ogg",
+        _ => "audio/wav",
+    }
+}
+
+fn store_media_of(bytes: &[u8]) -> (&'static str, &'static str) {
+    if bytes.starts_with(b"glTF") {
+        ("map", "model/gltf-binary")
+    } else if bytes.starts_with(b"ply\n") || bytes.starts_with(b"ply\r") {
+        ("splat", "application/ply")
+    } else if bytes.starts_with(b"\x89PNG") {
+        ("image", "image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        ("image", "image/jpeg")
+    } else if bytes.starts_with(b"RIFF") {
+        ("sfx", "audio/wav")
+    } else if bytes.len() > 8 && &bytes[4..8] == b"ftyp" {
+        ("video", "video/mp4")
+    } else {
+        ("asset", "application/octet-stream")
+    }
+}
+
 fn kind_label(domain: &str, content_type: &str) -> &'static str {
     crate::asset_store_state::library_type(domain, content_type)
 }
 
+/// Which completions take over the Create viewer. Paint's channel maps and
+/// provenance JSON are kept in History; auto-showing them is why a finished
+/// Hunyuan job landed on a text dump after two atlas images flashed past.
+fn auto_show_artifact(domain: &str, content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.starts_with("application/json") || ct.starts_with("text/") {
+        return false;
+    }
+    if domain == "paint" && ct.starts_with("image/") {
+        return false;
+    }
+    true
+}
+
+/// Is this run artifact the PRODUCT — the thing the user asked for — rather
+/// than an intermediate stage artifact? True only for the primary output of
+/// the chain's LAST stage: every earlier stage is scaffolding (source image,
+/// cutout matte, untextured mesh), and a stage's non-primary outputs (the
+/// PBR maps beside a painted GLB, the run's JSON sidecar) are never it.
+///
+/// Written into the library at route time, where the stage index is known —
+/// the importer's `classify_products` only has to infer this for legacy rows.
+fn run_artifact_product(
+    stage: usize,
+    stage_count: usize,
+    domain: &str,
+    content_type: &str,
+) -> Option<bool> {
+    if stage + 1 != stage_count {
+        return Some(false);
+    }
+    Some(stage_primary_output(domain, content_type))
+}
+
+/// The one artifact a stage exists to produce, per domain.
+fn stage_primary_output(domain: &str, content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let d = domain.to_ascii_lowercase();
+    if ct == "application/json" || ct.starts_with("text/") {
+        // Only prompt expansion produces text as its product; everywhere
+        // else text/json is a provenance sidecar.
+        return d == "text" && ct.starts_with("text/");
+    }
+    match d.as_str() {
+        // Geometry stages: the GLB, never the channel maps beside it.
+        "mesh" | "paint" | "rig" | "motion" | "character" => {
+            ct.contains("gltf") || ct.contains("glb")
+        }
+        "world" | "splat" => ct.contains("ply") || ct.contains("gltf") || ct.contains("glb"),
+        "video" => ct.starts_with("video/"),
+        "speech" | "audio" | "sfx" | "music" => ct.starts_with("audio/"),
+        // image / matte / depth / edit / upscale / control / segment
+        _ => ct.starts_with("image/"),
+    }
+}
+
 /// Named chip slots under the Library tag dropdown. Keep in sync with
 /// `ft0`…`ft7` in the Library filter row.
-fn set_lib_tag_chip(ui: &WidgetRef, cx: &mut Cx, index: usize, text: Option<&str>) {
-    let on = text.is_some();
-    match index {
-        0 => {
-            ui.widget(cx, ids!(ft0)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft0.chip_name)).set_text(cx, text);
-            }
-        }
-        1 => {
-            ui.widget(cx, ids!(ft1)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft1.chip_name)).set_text(cx, text);
-            }
-        }
-        2 => {
-            ui.widget(cx, ids!(ft2)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft2.chip_name)).set_text(cx, text);
-            }
-        }
-        3 => {
-            ui.widget(cx, ids!(ft3)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft3.chip_name)).set_text(cx, text);
-            }
-        }
-        4 => {
-            ui.widget(cx, ids!(ft4)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft4.chip_name)).set_text(cx, text);
-            }
-        }
-        5 => {
-            ui.widget(cx, ids!(ft5)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft5.chip_name)).set_text(cx, text);
-            }
-        }
-        6 => {
-            ui.widget(cx, ids!(ft6)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft6.chip_name)).set_text(cx, text);
-            }
-        }
-        7 => {
-            ui.widget(cx, ids!(ft7)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft7.chip_name)).set_text(cx, text);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lib_tag_chip_removed(ui: &WidgetRef, cx: &mut Cx, actions: &Actions) -> Option<usize> {
-    if ui.button(cx, ids!(ft0.chip_x)).clicked(actions) {
-        Some(0)
-    } else if ui.button(cx, ids!(ft1.chip_x)).clicked(actions) {
-        Some(1)
-    } else if ui.button(cx, ids!(ft2.chip_x)).clicked(actions) {
-        Some(2)
-    } else if ui.button(cx, ids!(ft3.chip_x)).clicked(actions) {
-        Some(3)
-    } else if ui.button(cx, ids!(ft4.chip_x)).clicked(actions) {
-        Some(4)
-    } else if ui.button(cx, ids!(ft5.chip_x)).clicked(actions) {
-        Some(5)
-    } else if ui.button(cx, ids!(ft6.chip_x)).clicked(actions) {
-        Some(6)
-    } else if ui.button(cx, ids!(ft7.chip_x)).clicked(actions) {
-        Some(7)
-    } else {
-        None
-    }
-}
-
 /// The word a seeded transform label uses for the pinned input's class.
 fn seed_kind_word(content_type: &str) -> &'static str {
     let ct = content_type.to_ascii_lowercase();
@@ -7198,7 +12738,6 @@ impl MatchEvent for App {
         // Surface nav.
         for (tab, surface) in [
             (ids!(nav_create), Surface::Create),
-            (ids!(nav_chat), Surface::Chat),
             (ids!(nav_library), Surface::Library),
             (ids!(nav_import), Surface::Import),
             (ids!(nav_runs), Surface::Runs),
@@ -7213,11 +12752,11 @@ impl MatchEvent for App {
         }
         if self
             .ui
-            .drop_down2(cx, ids!(kenney_pack_drop))
+            .combo_box(cx, ids!(kenney_pack_drop))
             .changed(actions)
             .is_some()
         {
-            let index = self.ui.drop_down2(cx, ids!(kenney_pack_drop)).selected_item();
+            let index = self.ui.combo_box(cx, ids!(kenney_pack_drop)).selected_item();
             self.import_page.set_pack_index(index);
             if self.surface == Surface::Import {
                 self.refresh_import_ui(cx);
@@ -7321,6 +12860,73 @@ impl MatchEvent for App {
             log!("import: queue KayKit");
             self.enqueue_import(cx, ImportJob::KayKit);
         }
+        if self.ui.button(cx, ids!(music_pick_btn)).clicked(actions) {
+            // The native directory dialog answers later, as a
+            // `FileDialogAction` in a following actions pass.
+            self.music_import_page.picking = true;
+            let mut dialog = FileDialog::new().set_title("Choose a music folder to import".into());
+            if !self.music_import_page.dir.trim().is_empty() {
+                dialog = dialog.set_location(PathBuf::from(self.music_import_page.dir.trim()));
+            }
+            cx.open_select_folder_dialog(dialog);
+            self.refresh_import_ui(cx);
+        }
+        if self.ui.button(cx, ids!(music_import_btn)).clicked(actions) {
+            match self.music_import_page.job() {
+                Some(job) => {
+                    // The analysis switches are read HERE, when the run is
+                    // queued — a toggle flipped during a 200-track import
+                    // must not change what that run promised.
+                    let split = self.ui.check_box(cx, ids!(split_layers_toggle)).active(cx);
+                    let lyrics = split && self.ui.check_box(cx, ids!(lyrics_toggle)).active(cx);
+                    self.music_import_page.split_layers = split;
+                    self.music_import_page.bake_lyrics = lyrics;
+                    log!(
+                        "import: queue {}{}",
+                        job.title(),
+                        if split {
+                            if lyrics {
+                                " · split audio layers + lyrics"
+                            } else {
+                                " · split audio layers"
+                            }
+                        } else {
+                            ""
+                        }
+                    );
+                    self.enqueue_import(cx, job);
+                }
+                None => {
+                    log!("import: choose a music folder first");
+                    // No folder yet: opening the picker IS the next step, so
+                    // the click still moves the user forward.
+                    self.music_import_page.picking = true;
+                    cx.open_select_folder_dialog(
+                        FileDialog::new().set_title("Choose a music folder to import".into()),
+                    );
+                    self.refresh_import_ui(cx);
+                }
+            }
+        }
+        for action in actions {
+            let Some(picked) = action.downcast_ref::<FileDialogAction>() else {
+                continue;
+            };
+            match picked {
+                FileDialogAction::FolderSelected(path) => {
+                    log!("import music: folder {}", path.display());
+                    self.music_import_page
+                        .set_dir(path.to_string_lossy().into_owned());
+                }
+                FileDialogAction::FolderCancelled => {
+                    self.music_import_page.picking = false;
+                }
+                FileDialogAction::None => {}
+            }
+            if self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+        }
         let queue_widget = self.ui.widget(cx, ids!(import_queue_list));
         let queue_portal = queue_widget.portal_list(cx, ids!(list));
         let mut queue_action = None;
@@ -7359,155 +12965,299 @@ impl MatchEvent for App {
             self.chat.cancel();
             self.refresh_chat_ui(cx);
         }
+        if self.ui.button(cx, ids!(chat_clear_btn)).clicked(actions) {
+            // Wipe the transcript AND retire the session: the next message
+            // starts a conversation the model has no memory of.
+            self.chat.clear();
+            self.refresh_chat_ui(cx);
+        }
         if self.ui.text_input(cx, ids!(chat_input)).returned(actions).is_some() {
             self.send_chat(cx);
         }
-        if self.ui.button(cx, ids!(lib_local_tab)).clicked(actions) {
-            self.set_lib_source(cx, LibSource::Local);
-        }
-        if self.ui.button(cx, ids!(lib_server_tab)).clicked(actions) {
-            self.set_lib_source(cx, LibSource::Server);
-        }
-        // Library filters re-run on every keystroke / dropdown pick; the
-        // thumbnail cache survives (only the visible set changes).
+        // Tool chips in the chat expand/collapse on click.
+        self.ui
+            .widget(cx, ids!(chat_list))
+            .borrow_mut::<makepad_asset_chat_ui::AssetChatList>()
+            .map(|mut list| list.handle_actions(cx, actions));
+        // Library filters re-run on every keystroke / dropdown pick and go
+        // straight onto the server query.
         let mut filters_changed = self
             .ui
             .text_input(cx, ids!(lib_search))
             .changed(actions)
             .is_some();
-        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_tag_drop)).changed(actions) {
-            if let Some(stat) = index
-                .checked_sub(1)
-                .and_then(|i| self.lib_tag_options.get(i).cloned())
-            {
-                if let Some(pos) = self
-                    .lib_filters
-                    .tags
-                    .iter()
-                    .position(|have| have.eq_ignore_ascii_case(&stat.name))
-                {
-                    self.lib_filters.tags.remove(pos);
-                } else if self.lib_filters.tags.len() < 8 {
-                    self.lib_filters.tags.push(stat.name);
-                }
-            }
-            self.ui
-                .drop_down2(cx, ids!(lib_tag_drop))
-                .set_selected_item(cx, 0);
-            filters_changed = true;
-        }
-        if let Some(index) = lib_tag_chip_removed(&self.ui, cx, actions) {
-            if index < self.lib_filters.tags.len() {
-                self.lib_filters.tags.remove(index);
+        if let Some(index) = self.ui.combo_box(cx, ids!(lib_kind_drop)).changed(actions) {
+            // Row 0 is "all kinds"; every other row is one picker choice.
+            let picked = self
+                .lib_kind_options
+                .get(index)
+                .cloned()
+                .unwrap_or(KindChoice::Any);
+            if picked != self.lib_filters.kind {
+                self.lib_filters.kind = picked;
                 filters_changed = true;
             }
         }
+        if let Some(index) = self.ui.combo_box(cx, ids!(lib_label_drop)).changed(actions) {
+            // Row 0 is "all tags"; every other row is one counted name.
+            let picked = facet_at(&self.lib_label_options, index);
+            if picked != self.lib_filters.label {
+                self.lib_filters.label = picked;
+                filters_changed = true;
+            }
+        }
+        // The × inside the search box clears the TEXT and nothing else — the
+        // dropdowns are their own filters with their own way back to "all".
+        if self.ui.button(cx, ids!(lib_search_clear)).clicked(actions) {
+            self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
+            filters_changed = true;
+        }
         if filters_changed {
-            self.refresh_library_ui(cx, false);
+            self.refresh_library_ui(cx);
         }
         if self.ui.button(cx, ids!(lib_clear_btn)).clicked(actions) {
             self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
-            self.lib_filters.tags.clear();
+            self.lib_filters.kind = KindChoice::Any;
+            self.lib_filters.label = None;
             self.ui
-                .drop_down2(cx, ids!(lib_tag_drop))
+                .combo_box(cx, ids!(lib_kind_drop))
                 .set_selected_item(cx, 0);
-            self.refresh_library_ui(cx, false);
+            self.ui
+                .combo_box(cx, ids!(lib_label_drop))
+                .set_selected_item(cx, 0);
+            self.refresh_library_ui(cx);
         }
-        if self.ui.button(cx, ids!(lib_enhance_btn)).clicked(actions) {
-            self.run_enhance_metadata(cx);
+        if self.ui.button(cx, ids!(lib_grid_btn)).clicked(actions)
+            && self.lib_tiles != LibViewMode::Tiles
+        {
+            self.lib_tiles = LibViewMode::Tiles;
+            self.refresh_library_ui(cx);
         }
-        // Grid card clicks select + load into the viewer. Media file dragging
-        // is confined to the explicit handle so card-surface vertical scroll
-        // and ordinary selection keep their existing behavior.
+        if self.ui.button(cx, ids!(lib_list_btn)).clicked(actions)
+            && self.lib_tiles != LibViewMode::List
+        {
+            self.lib_tiles = LibViewMode::List;
+            self.refresh_library_ui(cx);
+        }
+        // Tile clicks: same act as a row click — select, open from the
+        // store, adopt into the Create surface.
         let grid_widget = self.ui.widget(cx, ids!(lib_grid));
-        let grid_list = grid_widget.portal_list(cx, ids!(list));
         let grid_cols = grid_widget
-            .borrow::<LibraryGrid>()
-            .map_or(1, |grid| grid.last_cols.max(1));
-        let mut grid_pick = None;
-        let mut grid_open = None;
-        let mut grid_drag = None;
+            .borrow::<CatalogGrid>()
+            .map_or(1, |grid| grid.columns());
+        let grid_list = grid_widget.portal_list(cx, ids!(list));
+        let mut picked_tile = None;
+        let mut picked_twice = false;
+        // Tiles put up to eight cards on a row; a metadata row is one card
+        // wide. Both map back to the same row-major index.
         let slots = [
             ids!(c1), ids!(c2), ids!(c3), ids!(c4),
             ids!(c5), ids!(c6), ids!(c7), ids!(c8),
-        ];
-        let drag_handles = [
-            ids!(c1.file_drag), ids!(c2.file_drag), ids!(c3.file_drag),
-            ids!(c4.file_drag), ids!(c5.file_drag), ids!(c6.file_drag),
-            ids!(c7.file_drag), ids!(c8.file_drag),
+            ids!(lr_card),
         ];
         'grid_rows: for (row_id, item) in grid_list.items_with_actions(actions) {
             for (slot, path) in slots.iter().enumerate() {
-                let index = row_id * grid_cols + slot;
-                let handle = item.file_drag_handle(cx, drag_handles[slot]);
-                let drag_down = handle.finger_down(actions).is_some();
-                let drag_move = handle.finger_move(actions);
-                let drag_up = handle.finger_up(actions).is_some();
-                if drag_down || drag_move.is_some() || drag_up {
-                    // The handle owns the whole gesture, including a short
-                    // click. Otherwise its FingerDown can bubble to the card
-                    // and accidentally select/open before a drag begins.
-                    if let Some(event) = drag_move.filter(|event| {
-                        should_start_file_drag(event.move_distance(), self.file_drag_active)
-                    }) {
-                        if let Some(payload) = grid_widget
-                            .borrow::<LibraryGrid>()
-                            .and_then(|grid| grid.file_drag_payload_path_at(index))
-                        {
-                            grid_drag = Some((event.window_id, payload));
-                        }
-                    }
-                    break 'grid_rows;
-                }
                 if let Some(fe) = item.view(cx, *path).finger_down(actions) {
-                    if fe.tap_count >= 2 {
-                        grid_open = Some(index);
-                    } else {
-                        grid_pick = Some(index);
-                    }
+                    let index = row_id * grid_cols + slot.min(grid_cols - 1);
+                    picked_tile = grid_widget
+                        .borrow::<CatalogGrid>()
+                        .and_then(|grid| grid.tile_at(index))
+                        .map(|tile| tile.asset);
+                    picked_twice = fe.tap_count >= 2;
                     break 'grid_rows;
                 }
             }
         }
-        if let Some((window_id, payload)) = grid_drag {
-            self.start_file_payload_drag(cx, window_id, payload);
-        } else if let Some(index) = grid_open.or(grid_pick) {
-            let file = grid_widget
-                .borrow::<LibraryGrid>()
-                .and_then(|grid| grid.file_at(index));
-            if let Some(file) = file {
-                if grid_open.is_some() {
-                    self.open_gallery(cx, &file);
-                    self.show_surface(cx, Surface::Create);
-                } else {
-                    self.select_gallery(cx, &file);
+        if let Some(asset) = picked_tile {
+            match asset.parse::<makepad_asset_data::AssetId>() {
+                Ok(asset_id) => {
+                    self.store.select(asset_id);
+                    self.open_store_asset(cx, asset_id);
+                    self.adopt_catalog_asset(cx, asset_id, true);
+                    self.refresh_library_ui(cx);
+                    // Single click inspects it right here in the rail; a
+                    // double click is "show me properly" and goes to Create.
+                    if picked_twice {
+                        self.show_surface(cx, Surface::Create);
+                    }
                 }
+                Err(error) => log!("asset store: invalid tile id {asset}: {error}"),
             }
         }
-        // Detail rail actions (local selection only).
-        if self.ui.button(cx, ids!(detail_open_btn)).clicked(actions) {
-            if let Some(file) = self.selected_file.clone() {
-                self.open_gallery(cx, &file);
+        // The shared preview well reports what the user did to the
+        // transport; this app owns the mixer and carries it out. Dragging
+        // the playhead line IS the seek gesture.
+        let preview_action = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+            .map(|preview| preview.audio_action(cx, actions))
+            .unwrap_or(AudioAction::None);
+        match preview_action {
+            AudioAction::TogglePlay => {
+                if crate::audio::is_playing() {
+                    crate::audio::pause();
+                } else {
+                    crate::audio::play();
+                }
+                self.refresh_library_audio(cx);
+                // Playing again re-arms the transcript's per-frame follow.
+                self.arm_lyrics_pump(cx);
             }
-            self.show_surface(cx, Surface::Create);
+            AudioAction::Seek(fraction) => {
+                crate::audio::seek_fraction(fraction);
+                self.refresh_library_audio(cx);
+            }
+            AudioAction::None => {}
         }
-        if self.ui.button(cx, ids!(detail_reuse_btn)).clicked(actions) {
-            let prompt = self.selected_file.clone().and_then(|file| {
-                self.library
-                    .as_ref()
-                    .and_then(|library| library.get(&file))
-                    .map(|item| item.prompt.clone())
-            });
-            if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
-                self.ui
-                    .text_input(cx, ids!(prompt_input))
-                    .set_text(cx, &prompt);
+        // The rail's video transport: same player the big viewer drives.
+        let rail_video_action = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+            .map(|preview| preview.video_action(cx, actions))
+            .unwrap_or(VideoAction::None);
+        match rail_video_action {
+            VideoAction::TogglePlay => {
+                if let Some(player) = &mut self.video {
+                    if player.at_end() {
+                        player.seek(0.0);
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else if player.is_paused() {
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else {
+                        player.pause();
+                    }
+                } else {
+                    self.restart_viewer_video(cx);
+                }
+                self.sync_video_transport(cx);
+            }
+            VideoAction::Restart => {
+                if let Some(player) = &mut self.video {
+                    player.seek(0.0);
+                    player.resume();
+                    self.video_pump = cx.new_next_frame();
+                } else {
+                    self.restart_viewer_video(cx);
+                }
+                self.sync_video_transport(cx);
+            }
+            VideoAction::Seek(fraction) => {
+                self.scrub_video_to(cx, fraction);
+            }
+            VideoAction::ToggleLoop | VideoAction::TrimChanged(..) | VideoAction::None => {}
+        }
+        // The separated layers: four mute toggles over one shared playhead.
+        for (lane, id) in [
+            (0usize, ids!(layer_drums_toggle)),
+            (1, ids!(layer_bass_toggle)),
+            (2, ids!(layer_vocals_toggle)),
+            (3, ids!(layer_other_toggle)),
+        ] {
+            if let Some(audible) = self.ui.check_box(cx, id).changed(actions) {
+                crate::audio::set_lane_muted(lane, !audible);
             }
         }
-        if self.ui.button(cx, ids!(detail_delete_btn)).clicked(actions) {
-            if let Some(file) = self.selected_file.clone() {
-                self.delete_gallery(cx, &file);
+        // A click on a lyric line is a seek request; this app owns the mixer
+        // and carries it out.
+        let lyric_events = self
+            .ui
+            .widget(cx, ids!(detail_lyrics))
+            .borrow_mut::<LyricReader>()
+            .map(|mut reader| reader.take_events())
+            .unwrap_or_default();
+        for event in lyric_events {
+            let LyricEvent::Seek { secs } = event;
+            let duration = crate::audio::duration_secs();
+            if duration > 0.0 {
+                crate::audio::seek_fraction(secs / duration);
+                self.refresh_library_audio(cx);
             }
+        }
+        // "Split audio layers" for the selected track.
+        if self.ui.button(cx, ids!(detail_analyse_btn)).clicked(actions) {
+            let lyrics = self.ui.check_box(cx, ids!(detail_analyse_lyrics)).active(cx);
+            if let Some((asset, title)) = self.selected_audio() {
+                self.enqueue_analysis(cx, vec![(analysis::BakeTarget::Asset(asset), title)], lyrics);
+            }
+        }
+        if self
+            .ui
+            .check_box(cx, ids!(detail_analyse_lyrics))
+            .changed(actions)
+            .is_some()
+        {
+            self.refresh_analysis_ui(cx);
+        }
+        if self.ui.button(cx, ids!(detail_analyse_stop)).clicked(actions) {
+            if let Some(queue) = self.analysis.as_mut() {
+                queue.stop();
+            }
+            self.refresh_analysis_ui(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_btn)).clicked(actions) {
+            self.open_analyse_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_cancel)).clicked(actions) {
+            self.close_analyse_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_confirm)).clicked(actions) {
+            self.close_analyse_shown_modal(cx);
+            self.analyse_shown_assets(cx);
+        }
+        if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
+            self.open_retire_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_retire_shown_cancel)).clicked(actions) {
+            self.close_retire_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_retire_shown_confirm)).clicked(actions) {
+            self.close_retire_shown_modal(cx);
+            self.retire_shown_assets(cx);
+        }
+        if self.ui.button(cx, ids!(detail_retire_asset_btn)).clicked(actions) {
+            if let Some(id) = self.store.selected {
+                self.open_store_delete_modal(cx, PendingStoreDelete::Asset(id));
+            }
+        }
+        if self.ui.button(cx, ids!(detail_retire_version_btn)).clicked(actions) {
+            let target = self.store.selected.zip(
+                self.store
+                    .detail
+                    .ready()
+                    .and_then(|detail| detail.latest_published())
+                    .map(|candidate| candidate.revision),
+            );
+            if let Some((id, revision)) = target {
+                self.open_store_delete_modal(cx, PendingStoreDelete::Revision(id, revision));
+            }
+        }
+        if self.ui.button(cx, ids!(store_delete_cancel)).clicked(actions) {
+            self.close_store_delete_modal(cx);
+        }
+        if self.ui.button(cx, ids!(store_delete_confirm)).clicked(actions) {
+            self.confirm_store_delete(cx);
+        }
+        if self.ui.button(cx, ids!(gc_collect_btn)).clicked(actions) {
+            let retain = self.gc_retain_setting(cx);
+            self.store.gc_dry_run(retain);
+            self.refresh_gc_ui(cx);
+        }
+        if self.ui.button(cx, ids!(gc_cancel_btn)).clicked(actions) {
+            self.store.gc_cancel();
+            self.refresh_gc_ui(cx);
+        }
+        if self.ui.button(cx, ids!(gc_confirm_cancel)).clicked(actions) {
+            self.close_gc_confirm_modal(cx);
+        }
+        if self.ui.button(cx, ids!(gc_confirm_collect)).clicked(actions) {
+            let retain = self.gc_retain_setting(cx);
+            self.close_gc_confirm_modal(cx);
+            self.store.gc_collect(retain);
+            self.refresh_gc_ui(cx);
         }
         // Runs list: cancel the active stage / drop a queued run.
         let runs_widget = self.ui.widget(cx, ids!(runs_list));
@@ -7539,7 +13289,7 @@ impl MatchEvent for App {
         let server_portal = server_widget.portal_list(cx, ids!(list));
         let mut picked_asset = None;
         for (row_id, item) in server_portal.items_with_actions(actions) {
-            if item.view(cx, ids!(asset_card)).finger_down(actions).is_some() {
+            if let Some(fe) = item.view(cx, ids!(asset_card)).finger_down(actions) {
                 if let Some(StoreRow::Asset {
                     action: RowAction::SelectAsset(asset_id),
                     ..
@@ -7547,21 +13297,40 @@ impl MatchEvent for App {
                     .borrow::<StoreListPanel>()
                     .and_then(|panel| panel.row_at(row_id))
                 {
-                    picked_asset = Some(asset_id);
+                    picked_asset = Some((asset_id, fe.tap_count >= 2));
                     break;
                 }
             }
         }
-        if let Some(asset_id) = picked_asset {
+        if let Some((asset_id, to_viewer)) = picked_asset {
             match asset_id.parse::<makepad_asset_data::AssetId>() {
                 Ok(asset_id) => {
                     self.store.select(asset_id);
-                    self.refresh_library_ui(cx, false);
+                    // The catalog IS the content: open the head revision's
+                    // drawable file straight from the server, never a local
+                    // copy that can be older than what was published.
+                    self.open_store_asset(cx, asset_id);
+                    // …and the asset joins the Create surface's working set,
+                    // materialised into the verified cache, so the tools
+                    // that take a file can work on catalog content.
+                    self.adopt_catalog_asset(cx, asset_id, true);
+                    self.refresh_library_ui(cx);
+                    // Single click inspects (detail rail); a double click
+                    // is "show it to me" — the viewer lives on Create.
+                    if to_viewer {
+                        self.show_surface(cx, Surface::Create);
+                    }
                 }
                 Err(error) => log!("asset store: invalid catalog id {asset_id}: {error}"),
             }
         }
 
+        if self.ui.button(cx, ids!(license_accept)).clicked(actions) {
+            self.accept_license_prompt(cx);
+        }
+        if self.ui.button(cx, ids!(license_decline)).clicked(actions) {
+            self.decline_license_prompt(cx);
+        }
         if self.ui.button(cx, ids!(generate_btn)).clicked(actions) {
             self.start_generate(cx);
         }
@@ -7598,6 +13367,67 @@ impl MatchEvent for App {
             self.input_tray.clear();
             self.sync_input_tray(cx);
         }
+        // Webcam tile.
+        if let Some(on) = self.ui.check_box(cx, ids!(webcam_toggle)).changed(actions) {
+            if on {
+                self.webcam_start(cx);
+            } else {
+                self.webcam_stop(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(webcam_snap)).clicked(actions) {
+            self.webcam_snap(cx, false);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(webcam_auto)).changed(actions) {
+            self.webcam.auto_run_group = None;
+            self.webcam.auto_next_at = 0.0;
+            self.set_webcam_status(
+                cx,
+                if on { "auto-run armed: snaps + generates whenever idle" } else { "live" },
+            );
+        }
+        {
+            let viewer_video = self.viewer_video(cx);
+            let action = viewer_video
+                .borrow::<VideoView>()
+                .map(|_| ())
+                .and_then(|_| actions.find_widget_action(viewer_video.widget_uid()))
+                .map(|action| action.cast::<VideoAction>())
+                .unwrap_or(VideoAction::None);
+            match action {
+                VideoAction::TogglePlay => {
+                    if let Some(player) = &mut self.video {
+                        if player.at_end() {
+                            player.seek(0.0);
+                            player.resume();
+                            self.video_pump = cx.new_next_frame();
+                        } else if player.is_paused() {
+                            player.resume();
+                            self.video_pump = cx.new_next_frame();
+                        } else {
+                            player.pause();
+                        }
+                    } else {
+                        self.restart_viewer_video(cx);
+                    }
+                    self.sync_video_transport(cx);
+                }
+                VideoAction::Restart => {
+                    if let Some(player) = &mut self.video {
+                        player.seek(0.0);
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else {
+                        self.restart_viewer_video(cx);
+                    }
+                    self.sync_video_transport(cx);
+                }
+                VideoAction::Seek(fraction) => {
+                    self.scrub_video_to(cx, fraction);
+                }
+                VideoAction::ToggleLoop | VideoAction::TrimChanged(..) | VideoAction::None => {}
+            }
+        }
         if self.ui.button(cx, ids!(retry_btn)).clicked(actions) {
             // Retry re-dispatches the SAME spec — including its group id, so
             // retried artifacts join the original run's History group.
@@ -7606,67 +13436,109 @@ impl MatchEvent for App {
                 self.try_dispatch_pending(cx);
             }
         }
-        // One-click chains: select the preset and go.
-        for (button, preset_name) in [
-            (ids!(qp_img), "image"),
-            (ids!(qp_expimg), "expand → image"),
-            (ids!(qp_sfx), "audio sfx (sa3)"),
-            (ids!(qp_speech), "speech (kokoro)"),
-            (ids!(qp_indextts), "speech clone"),
-            (ids!(qp_sfx_woosh), "audio sfx (woosh)"),
-            (ids!(qp_expsfx_woosh), "expand → sfx (woosh)"),
-            (ids!(qp_vid), "video (small)"),
-            (ids!(qp_expvid), "expand → video"),
-            (ids!(qp_mesh), "image → mesh"),
-            (ids!(qp_mesh_pbr), "image → mesh → hunyuan PBR"),
-            (ids!(qp_mesh_pbr_test), "image → mesh → PBR (testpattern)"),
-            (ids!(qp_i2v), "image → video"),
-            (ids!(qp_expi2v), "expand → image → video"),
-            (ids!(qp_fleet_i2v), "fleet images → choose → video"),
-            (ids!(qp_world), "image → world"),
-            (ids!(qp_expworld), "expand → image → world"),
-            (ids!(qp_sfx_moss), "audio sfx (moss)"),
-            (ids!(qp_expsfx_sa3), "expand → sfx (sa3)"),
-            (ids!(qp_expsfx_moss), "expand → sfx (moss)"),
-            (ids!(qp_music), "music (minimax-music3)"),
-            (ids!(qp_music_ace), "music (ace-step-1.5-xl)"),
-            (ids!(qp_expmusic), "expand → music (minimax-music3)"),
-            (ids!(qp_expmusic_ace), "expand → music (ace-step-1.5-xl)"),
-            (ids!(qp_cutout), "image → cutout (alpha)"),
-            (ids!(qp_depth), "image → depthmap"),
-            // The full character chain: prompt → image → mesh → rig →
-            // motion → playable animated GLB in the mesh viewer.
-            (ids!(qp_character), "character (playable)"),
-            (ids!(qp_character_pbr), "character (playable + hunyuan PBR)"),
-            (ids!(qp_character_pbr_test), "character (playable + PBR test)"),
-        ] {
-            if self.ui.button(cx, button).clicked(actions) {
-                if let Some(index) = PRESETS.iter().position(|p| p.name.starts_with(preset_name))
-                {
-                    self.ui
-                        .drop_down2(cx, ids!(preset_drop))
-                        .set_selected_item(cx, index);
-                    // The voice control must reflect the preset's speech
-                    // backend BEFORE the run spec reads it.
-                    self.refresh_voice_ui(cx);
-                    self.start_generate(cx);
-                }
-            }
-        }
-        // Preset/model picks change which speech backend a run would hit —
-        // keep the voice control honest about pack support.
         if self
             .ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .changed(actions)
             .is_some()
-            || self
-                .ui
-                .drop_down2(cx, ids!(model_drop))
-                .changed(actions)
-                .is_some()
+        {
+            self.refresh_model_ui(cx, true);
+            self.refresh_voice_ui(cx);
+            self.sync_preset_name_box(cx);
+            self.sync_mask_mode(cx);
+        }
+        if self.ui.combo_box(cx, ids!(lora_drop)).changed(actions).is_some() {
+            let on = self.selected_lora(cx).is_some();
+            self.ui.widget(cx, ids!(lora_strength_row)).set_visible(cx, on);
+            self.ui.redraw(cx);
+        }
+        // Inpaint mask tools.
+        if let Some(index) = self.ui.combo_box(cx, ids!(mask_brush_drop)).changed(actions) {
+            let radius = MASK_BRUSH_SIZES.get(index).copied().unwrap_or(24.0);
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.set_brush_radius(radius);
+            }
+        }
+        if self.ui.button(cx, ids!(mask_clear_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.clear_mask(cx);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if self.ui.button(cx, ids!(mask_invert_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.invert_mask(cx);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if self.ui.button(cx, ids!(mask_outpaint_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.outpaint(cx, 0.25);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if actions.iter().any(|action| {
+            matches!(
+                action.as_widget_action().map(|a| a.cast::<MaskPaintAction>()),
+                Some(MaskPaintAction::MaskChanged)
+            )
+        }) {
+            self.refresh_mask_status(cx);
+        }
+        if self.ui.button(cx, ids!(save_preset_btn)).clicked(actions) {
+            self.save_current_preset(cx);
+        }
+        let fast_slots = [
+            (ids!(fp0_go), ids!(fp0_del), 0usize),
+            (ids!(fp1_go), ids!(fp1_del), 1),
+            (ids!(fp2_go), ids!(fp2_del), 2),
+            (ids!(fp3_go), ids!(fp3_del), 3),
+            (ids!(fp4_go), ids!(fp4_del), 4),
+            (ids!(fp5_go), ids!(fp5_del), 5),
+            (ids!(fp6_go), ids!(fp6_del), 6),
+            (ids!(fp7_go), ids!(fp7_del), 7),
+        ];
+        for (go, del, index) in fast_slots {
+            if self.ui.button(cx, go).clicked(actions) {
+                self.apply_saved_preset(cx, index);
+            }
+            if self.ui.button(cx, del).clicked(actions) && index < self.saved_presets.len() {
+                self.saved_presets.remove(index);
+                self.persist_saved_presets();
+                self.refresh_saved_presets_ui(cx);
+            }
+        }
+        let stage_drops = [
+            ids!(md_text),
+            ids!(md_image),
+            ids!(md_audio),
+            ids!(md_speech),
+            ids!(md_music),
+            ids!(md_video),
+            ids!(md_mesh),
+            ids!(md_matte),
+            ids!(md_depth),
+            ids!(md_segment),
+            ids!(md_paint),
+            ids!(md_world),
+            ids!(md_rig),
+            ids!(md_motion),
+            ids!(size_drop),
+            ids!(steps_drop),
+            ids!(texture_size_drop),
+            ids!(mesh_faces_drop),
+            ids!(vid_size_drop),
+            ids!(vid_len_drop),
+            ids!(music_len_drop),
+            ids!(enh_upscale_drop),
+            ids!(enh_tween_drop),
+        ];
+        if stage_drops
+            .iter()
+            .any(|id| self.ui.combo_box(cx, *id).changed(actions).is_some())
         {
             self.refresh_voice_ui(cx);
+            self.sync_preset_name_box(cx);
         }
         if self
             .ui
@@ -7749,8 +13621,42 @@ impl MatchEvent for App {
                 self.sync_audio_ui(cx);
             }
         }
-        if self.ui.button(cx, ids!(sample_mesh_btn)).clicked(actions) {
-            self.load_sample_mesh(cx);
+        if let Some(on) = self.ui.check_box(cx, ids!(shadows_toggle)).changed(actions) {
+            self.set_mesh_shadows(cx, on);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(dark_toggle)).changed(actions) {
+            self.set_mesh_dark(cx, on);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(studio_toggle)).changed(actions) {
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_studio_enabled(cx, on);
+            }
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(speculars_toggle)).changed(actions) {
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_pbr_speculars(cx, on);
+            }
+        }
+        if let Some(index) = self.ui.combo_box(cx, ids!(pbr_view_drop)).changed(actions) {
+            let mode = crate::mesh_view::pbr_preview::PbrViewMode::ALL
+                .get(index)
+                .copied()
+                .unwrap_or_default();
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_pbr_view_mode(cx, mode);
+            }
         }
         if self.ui.button(cx, ids!(sample_splat_btn)).clicked(actions) {
             self.load_sample_splat(cx);
@@ -7766,7 +13672,12 @@ impl MatchEvent for App {
                 payload: PathBuf,
             },
             SuppressOpen,
+            /// Single click: view only.
+            View(usize),
+            /// Double click: view AND pin as the next transform's input.
             Open(usize),
+            /// ⇧ double click: view AND add as an extra edit reference.
+            AddReference(usize),
         }
         let mut gallery_action = None;
         for (index, item) in gallery_list.items_with_actions(actions) {
@@ -7796,10 +13707,21 @@ impl MatchEvent for App {
                     .or(Some(GalleryAct::SuppressOpen));
                 break;
             }
-            if item.button(cx, ids!(card.title)).clicked(actions)
-                || item.view(cx, ids!(card)).finger_down(actions).is_some()
-            {
-                gallery_action = Some(GalleryAct::Open(index));
+            // Single click views; a double click also pins the artifact as
+            // the next transform's input (pinning on every click meant
+            // clearing the input tray before each ordinary generate).
+            if let Some(fe) = item.view(cx, ids!(card)).finger_down(actions) {
+                gallery_action = Some(if fe.tap_count >= 2 && fe.modifiers.shift {
+                    GalleryAct::AddReference(index)
+                } else if fe.tap_count >= 2 {
+                    GalleryAct::Open(index)
+                } else {
+                    GalleryAct::View(index)
+                });
+                break;
+            }
+            if item.button(cx, ids!(card.title)).clicked(actions) {
+                gallery_action = Some(GalleryAct::View(index));
                 break;
             }
         }
@@ -7819,6 +13741,14 @@ impl MatchEvent for App {
                 self.start_file_payload_drag(cx, window_id, payload);
             }
             Some(GalleryAct::SuppressOpen) => {}
+            Some(GalleryAct::View(index)) => {
+                let file = gallery_widget
+                    .borrow::<LibraryGallery>()
+                    .and_then(|gallery| gallery.file_at(index));
+                if let Some(file) = file {
+                    self.reopen_gallery(cx, &file);
+                }
+            }
             Some(GalleryAct::Open(index)) => {
                 let file = gallery_widget
                     .borrow::<LibraryGallery>()
@@ -7827,7 +13757,150 @@ impl MatchEvent for App {
                     self.open_gallery(cx, &file);
                 }
             }
+            Some(GalleryAct::AddReference(index)) => {
+                let file = gallery_widget
+                    .borrow::<LibraryGallery>()
+                    .and_then(|gallery| gallery.file_at(index));
+                if let Some(file) = file {
+                    self.add_input_reference(cx, &file);
+                }
+            }
             None => {}
+        }
+        // Run tray chips: single click views the member, double click also
+        // pins it as the next transform's input.
+        let mut chip_hit = None;
+        {
+            let tray_widget = self.ui.widget(cx, ids!(run_tray_list));
+            let tray_list = tray_widget.portal_list(cx, ids!(list));
+            for (index, item) in tray_list.items_with_actions(actions) {
+                if let Some(fe) = item.as_view().finger_down(actions) {
+                    chip_hit = tray_widget
+                        .borrow::<RunTray>()
+                        .and_then(|tray| tray.file_at(index))
+                        .map(|f| (f, fe.tap_count >= 2, fe.modifiers.shift));
+                    break;
+                }
+            }
+        }
+        if let Some((file, pin, shift)) = chip_hit {
+            if pin && shift {
+                self.add_input_reference(cx, &file);
+            } else if pin {
+                self.open_gallery(cx, &file);
+            } else {
+                self.reopen_gallery(cx, &file);
+            }
+        }
+        // Extra-reference thumbs: a click drops that reference.
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            if self.ui.view(cx, row).finger_down(actions).is_some() {
+                if self.input_tray.remove_extra(slot) {
+                    self.sync_input_tray(cx);
+                }
+                break;
+            }
+        }
+        // Fleet box cards → per-box model popup; toggles in the popup flip
+        // the per-box routing opt-out (persisted) and refresh routing views.
+        let mut card_hit = None;
+        for (slot, card) in Self::fleet_card_ids().iter().enumerate() {
+            if self.ui.view(cx, card).finger_down(actions).is_some() {
+                card_hit = self.fleet_card_boxes.get(slot).cloned();
+                break;
+            }
+        }
+        if let Some(url) = card_hit {
+            // Same card again = toggle the config column closed; another
+            // card just switches the column to that box.
+            if self.fleet_modal_box.as_deref() == Some(url.as_str()) {
+                self.close_fleet_modal(cx);
+            } else {
+                self.open_fleet_modal(cx, url);
+            }
+        }
+        if self.ui.button(cx, ids!(fleet_box_close)).clicked(actions) {
+            self.close_fleet_modal(cx);
+        }
+        if let Some(url) = self.fleet_modal_box.clone() {
+            // Cancel any listed job (ours or another client's): the service
+            // drops a queued job immediately and unwinds a running one.
+            for (slot, row) in Self::fleet_job_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(jcancel));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    if let Some(job_id) = self.fleet_modal_jobs.get(slot).cloned() {
+                        let cancel_url = format!("{url}/job/{job_id}/cancel");
+                        let mut request = crate::http::request(cancel_url, HttpMethod::POST);
+                        request.set_header("Content-Type".to_string(), "application/json".to_string());
+                        request.set_body(b"{}".to_vec());
+                        cx.http_request(LiveId::unique(), request);
+                        log!("fleet: cancel requested for {job_id} on {url}");
+                    }
+                }
+            }
+            let mut changed = false;
+            if self.ui.button(cx, ids!(fleet_box_defaults)).clicked(actions) {
+                self.apply_default_preferences(&url);
+                changed = true;
+            }
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(enable));
+                if let Some(on) = self.ui.check_box(cx, &id).changed(actions) {
+                    if let Some(model) = self.fleet_modal_models.get(slot).cloned() {
+                        let key = (url.clone(), model);
+                        if on {
+                            self.fleet_disabled.remove(&key);
+                        } else {
+                            self.fleet_disabled.insert(key);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(terms));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    if let Some(model) = self.fleet_modal_models.get(slot).cloned() {
+                        self.license_resume = None;
+                        self.open_license_modal(cx, self.license_prompt_for(&model));
+                    }
+                }
+            }
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(prefer));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    let model = self.fleet_modal_models.get(slot).cloned();
+                    let domain = model.as_ref().and_then(|m| {
+                        self.fleet.as_ref().and_then(|fleet| {
+                            fleet
+                                .snapshots
+                                .iter()
+                                .find(|s| s.base_url == url)
+                                .and_then(|s| s.models.iter().find(|x| &x.id == m))
+                                .map(|x| x.domain.clone())
+                        })
+                    });
+                    if let (Some(model), Some(domain)) = (model, domain) {
+                        let key = (url.clone(), domain);
+                        // Click the current preference again to clear it.
+                        if self.fleet_prefer.get(&key) == Some(&model) {
+                            self.fleet_prefer.remove(&key);
+                        } else {
+                            self.fleet_prefer.insert(key, model);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.save_fleet_prefs();
+                self.refresh_model_ui(cx, false);
+                self.refresh_fleet_cards(cx);
+            }
         }
         // Run-queue rows: cancel / move up.
         for (k, (cancel, up)) in [
@@ -7858,10 +13931,17 @@ impl AppMain for App {
         // Draw shaders must register before the widgets that declare them.
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
+        // Shared preview widgets (ContentPreview / AudioView): the pool this
+        // app draws catalog content with, and the same one the VJ and DJ
+        // surfaces adopt.
+        makepad_asset_widgets::script_mod(vm);
         crate::mesh_view::script_mod(vm);
+        crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);
         crate::thumbnail_renderer::script_mod(vm);
-        crate::chat::script_mod(vm);
+        // The shared chat pane (also the sandbox's): transcript list,
+        // tool chips, think dots.
+        makepad_asset_chat_ui::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -7869,11 +13949,121 @@ impl AppMain for App {
         if matches!(event, Event::DragEnd) {
             self.file_drag_active = false;
         }
+        // External file drop (Finder screenshot, exported render, GLB…)
+        // onto the authoring column: import into the library and pin as the
+        // input (⇧ = add as an extra edit reference).
+        if matches!(event, Event::Drag(_) | Event::Drop(_)) && !self.file_drag_active {
+            let area = self.ui.view(cx, ids!(left_panel)).area();
+            match event.drag_hits(cx, area) {
+                DragHit::Drag(drag) => {
+                    let accepts = drag.items.iter().any(|item| match item {
+                        DragItem::FilePath { path, internal_id: None } => {
+                            dropped_file_kind(Path::new(path)).is_some()
+                        }
+                        _ => false,
+                    });
+                    *drag.response.lock().unwrap() = if accepts {
+                        DragResponse::Copy
+                    } else {
+                        DragResponse::None
+                    };
+                }
+                DragHit::Drop(drop) => {
+                    let paths: Vec<PathBuf> = drop
+                        .items
+                        .iter()
+                        .filter_map(|item| match item {
+                            DragItem::FilePath { path, internal_id: None } => {
+                                Some(PathBuf::from(path))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let as_reference = drop.modifiers.shift;
+                    for path in paths {
+                        self.import_dropped_file(cx, &path, as_reference);
+                    }
+                }
+                DragHit::NoHit | DragHit::DragEnd => {}
+            }
+        }
+        match event {
+            Event::VideoInputs(ev) => {
+                self.webcam.descs = ev.descs.clone();
+                if self.ui.check_box(cx, ids!(webcam_toggle)).active(cx) && !self.webcam.capturing {
+                    self.webcam_start(cx);
+                }
+            }
+            Event::PermissionResult(result) => {
+                use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+                if result.permission == Permission::Camera {
+                    match result.status {
+                        PermissionStatus::Granted => {
+                            if self.ui.check_box(cx, ids!(webcam_toggle)).active(cx) {
+                                self.webcam_start(cx);
+                            }
+                        }
+                        status => {
+                            self.set_webcam_status(cx, &format!("camera permission: {status:?}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Event::KeyDown(ke) = event {
+            // Escape stops the reply in flight (the broker's cancel route),
+            // wherever the focus is — a runaway answer must not need a
+            // mouse trip to the Stop button.
+            if ke.key_code == KeyCode::Escape && !ke.is_repeat && ChatData::is_streaming() {
+                self.chat.cancel();
+                self.refresh_chat_ui(cx);
+            }
+            if ke.key_code == KeyCode::F8 && !ke.is_repeat {
+                let on = self
+                    .ui
+                    .widget(cx, ids!(mesh_view))
+                    .borrow::<MeshView>()
+                    .map(|mesh| mesh.shadows_enabled())
+                    .unwrap_or(true);
+                self.set_mesh_shadows(cx, !on);
+            }
+        }
         self.match_event(cx, event);
         if self.asset_store_timer.is_event(event).is_some() {
             let store_changed = self.store.poll();
+            // A revision landed for what the viewer is showing: re-resolve
+            // it. The bytes are named by digest, so "refresh" is simply
+            // asking the catalog again — no cache to invalidate by hand.
+            for asset in self.store.take_changed_assets() {
+                if self.viewer_shows_store_asset(&asset) {
+                    log!("asset store: {asset} changed — reopening from the catalog");
+                    self.open_store_asset(cx, asset);
+                }
+                // A card in the Create surface's working set points at the
+                // object of the revision it was materialised from. A new
+                // revision means new digests, so the card re-materialises
+                // rather than keeping a path to yesterday's bytes.
+                let file = store_file_id(&asset);
+                if self.catalog_work.get(&file).is_some() {
+                    self.catalog_work.pending.remove(&file);
+                    // Re-materialise WITHOUT stealing the selection: a
+                    // background revision is not a user pick.
+                    self.adopt_catalog_asset(cx, asset, false);
+                }
+            }
+            self.maybe_open_gc_confirm(cx);
             let kenney_poll = self.import_page.poll();
             let classic_poll = self.classic_import_page.poll();
+            let music_poll = self.music_import_page.poll();
+            // Collect BEFORE checking resume-readiness: a freshly-polled
+            // `IconsPending` message's landings must be visible in
+            // `import_landings` (not yet drained) so the readiness check
+            // below correctly reads "not ready" this tick, not "nothing
+            // queued, resume now" — `land_imported_pack` further down
+            // re-collects (a no-op once already collected) as it drains.
+            self.collect_import_landings();
+            self.maybe_resume_icons_pending(cx);
             if self.surface == Surface::Import && self.import_page.icons_busy() {
                 let current = self
                     .ui
@@ -7884,8 +14074,50 @@ impl AppMain for App {
                 self.refresh_import_ui(cx);
             }
             self.drain_import_previews();
-            if kenney_poll || classic_poll || !self.import_landings.is_empty() {
+            if music_poll {
+                // A finished music run with "split audio layers" on hands
+                // its tracks straight to the bake queue. Aliases, resolved
+                // on the bake lane — the UI thread never blocks on lookups.
+                let batch = self.music_import_page.take_pending_analysis();
+                if !batch.is_empty() {
+                    let lyrics = self.music_import_page.bake_lyrics;
+                    let targets = batch
+                        .into_iter()
+                        .map(|alias| {
+                            let title = alias
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&alias)
+                                .to_string();
+                            (analysis::BakeTarget::Alias(alias), title)
+                        })
+                        .collect();
+                    self.enqueue_analysis(cx, targets, lyrics);
+                }
+            }
+            if kenney_poll || classic_poll || music_poll || !self.import_landings.is_empty() {
+                if music_poll {
+                    log!(
+                        "import music: {}",
+                        self.music_import_page.status_line(self.store.connected())
+                    );
+                }
                 if kenney_poll {
+                    // A failure must never leave the log at [I]. One [E]
+                    // line per failed pack, naming the pack and the reason
+                    // — and for a multi-pack run, one per pack that died,
+                    // at the end, so the whole list is readable at once.
+                    if let crate::import::ImportPhase::AllDone { failed, .. } =
+                        &self.import_page.kenney_phase
+                    {
+                        for (pack, message) in failed {
+                            error!("import: {pack} FAILED — {message}");
+                        }
+                    } else if let Some(reason) =
+                        self.import_page.kenney_phase.failure_reason()
+                    {
+                        error!("import: FAILED — {reason}");
+                    }
                     log!(
                         "import: {}",
                         self.import_page.kenney_status_line(self.store.connected())
@@ -7923,7 +14155,7 @@ impl AppMain for App {
             } else if self.import_page.preview_dirty && self.surface == Surface::Import {
                 self.refresh_import_ui(cx);
             }
-            self.maybe_connect_chat();
+            self.maybe_connect_chat(cx);
             self.drain_chat_jobs(cx);
             if self.chat.take_dirty() {
                 self.refresh_chat_ui(cx);
@@ -7937,8 +14169,7 @@ impl AppMain for App {
                     .set_text(cx, &self.store.status_label());
                 match self.surface {
                     Surface::Create => self.ui.redraw(cx),
-                    Surface::Chat => self.refresh_chat_ui(cx),
-                    Surface::Library => self.refresh_library_ui(cx, false),
+                    Surface::Library => self.refresh_library_ui(cx),
                     Surface::Import => self.refresh_import_ui(cx),
                     Surface::Runs => self.refresh_runs_panel(cx),
                     Surface::Admin => self.refresh_admin_panel(cx),
@@ -7948,15 +14179,34 @@ impl AppMain for App {
         self.scrub_audio(cx, event);
         if self.audio_timer.is_event(event).is_some() && audio::is_ready() {
             self.sync_audio_ui(cx);
+            // The Library rail has its own transport over the same mixer.
+            if self.surface == Surface::Library && self.library_audio_file.is_some() {
+                self.refresh_library_audio(cx);
+                // Playback that started from the transport re-arms the
+                // transcript's own per-frame follow.
+                self.arm_lyrics_pump(cx);
+            }
+        }
+        if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
+            self.pump_webcam(cx);
         }
         self.drain_rendered_thumbnails(cx);
         // The IO worker wakes the loop with SignalToUI; drain on Signal (and
         // it is cheap enough that a spurious shared signal costs nothing).
         if let Event::Signal = event {
             self.drain_artifact_io(cx);
+            // The analysis lanes wake the loop the same way.
+            self.drain_analysis(cx);
+        }
+        if self.lyrics_pump.is_event(event).is_some() {
+            // Per-frame word fill while the transcript is up and the track
+            // is audible; parks itself otherwise.
+            self.refresh_library_audio(cx);
+            self.arm_lyrics_pump(cx);
         }
         if self.thumbnail_timer.is_event(event).is_some() {
             self.pump_thumbnail_backfill(cx);
+            self.pump_splat_thumbnails(cx);
         }
 
         if self.fleet_timer.is_event(event).is_some() {
@@ -7968,7 +14218,7 @@ impl AppMain for App {
                 }
                 fleet.poll(cx);
             }
-            self.maybe_connect_chat();
+            self.maybe_connect_chat(cx);
         }
         if self.job_timer.is_event(event).is_some() {
             // Admission is re-evaluated for every stage, not just the first:
@@ -7976,11 +14226,7 @@ impl AppMain for App {
             // enough free VRAM. Snapshot once, calculate each run's occupied
             // slot exclusions before its mutable borrow, then let Pipeline
             // resume the held stage when a compatible GPU becomes admitted.
-            let snapshots = self
-                .fleet
-                .as_ref()
-                .map(|fleet| fleet.snapshots.clone())
-                .unwrap_or_default();
+            let snapshots = self.routing_snapshots();
             let mut tick_events = Vec::new();
             for index in 0..self.runs.len() {
                 let avoid = self.avoid_for_run(index);
@@ -8010,29 +14256,119 @@ impl AppMain for App {
                 Some("import") => Surface::Import,
                 Some("runs") => Surface::Runs,
                 Some("admin") => Surface::Admin,
-                Some("chat") => Surface::Chat,
+                // The chat is no longer a page: it sits under the form.
+                Some("chat") => Surface::Create,
                 _ => Surface::Create,
             };
-            if self.auto.surface.as_deref() == Some("library-server") {
-                self.set_lib_source(cx, LibSource::Server);
-            }
             self.show_surface(cx, surface);
-            if let Some(name) = self.auto.import.take() {
-                match name.to_ascii_lowercase().as_str() {
-                    "duke3d" | "duke" => {
-                        log!("auto: queue Duke3D shareware");
-                        self.enqueue_import(
-                            cx,
-                            ImportJob::Duke3d {
-                                path: String::new(),
-                            },
-                        );
+            // ASSET_UI_PICK_MUSIC=1 opens the native music-folder dialog;
+            // ASSET_UI_PICK_MUSIC=<dir> takes that folder and queues the
+            // import outright. Both exist because posted CGEvents do not
+            // reach this app without Accessibility, so the Music card is
+            // otherwise untestable end to end.
+            if let Some(value) = crate::asset_store_state::env_alias(&["ASSET_UI_PICK_MUSIC"]) {
+                if value == "1" {
+                    log!("auto: opening the music folder picker");
+                    self.music_import_page.picking = true;
+                    cx.open_select_folder_dialog(
+                        FileDialog::new().set_title("Choose a music folder to import".into()),
+                    );
+                } else {
+                    log!("auto: music folder {value}");
+                    self.music_import_page.set_dir(value);
+                    if let Some(job) = self.music_import_page.job() {
+                        self.enqueue_import(cx, job);
                     }
-                    other => log!("auto: unknown ASSET_UI_IMPORT={other}"),
+                }
+            }
+            // ASSET_UI_IMPORT=a,b,c queues several imports in order; each
+            // pack is the same job the LOAD surface enqueues.
+            // `kenney:<kit>` is ONE kit — the whole compile+icons+publish
+            // leg of a real import against a single pack, which is what
+            // reproducing a pack failure needs (and what "kenney" alone,
+            // 46 kits and an hour of GPU renders, is useless for).
+            if let Some(names) = self.auto.import.take() {
+                for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    let empty = String::new;
+                    let lower = name.to_ascii_lowercase();
+                    if let Some(kit) = lower.strip_prefix("kenney:") {
+                        let packs = crate::import::on_disk_kenney_packs();
+                        match packs.iter().position(|(pack, _)| pack == kit) {
+                            Some(pack_index) => {
+                                log!("auto: queue import kenney kit {kit} (#{pack_index})");
+                                self.enqueue_import(
+                                    cx,
+                                    ImportJob::Kenney {
+                                        pack: kit.to_string(),
+                                        pack_index,
+                                        path: empty(),
+                                    },
+                                );
+                            }
+                            None => error!(
+                                "auto: no Kenney kit {kit} on disk — have {}",
+                                packs
+                                    .iter()
+                                    .map(|(pack, _)| pack.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        }
+                        continue;
+                    }
+                    let job = match lower.as_str() {
+                        "duke3d" | "duke" => Some(ImportJob::Duke3d { path: empty() }),
+                        "quake3" | "quakeiii" | "q3" => Some(ImportJob::Quake3 { path: empty() }),
+                        "quake2" | "q2" => Some(ImportJob::Quake2 { path: empty() }),
+                        "quake" | "q1" => Some(ImportJob::Quake { path: empty() }),
+                        "doom" => Some(ImportJob::Doom { path: empty() }),
+                        "freedoom" => Some(ImportJob::Freedoom { path: empty() }),
+                        "librequake" => Some(ImportJob::LibreQuake { path: empty() }),
+                        "kenney" | "kenney-all" => Some(ImportJob::KenneyAll),
+                        _ => None,
+                    };
+                    match job {
+                        Some(job) => {
+                            log!("auto: queue import {name}");
+                            self.enqueue_import(cx, job);
+                        }
+                        None => log!("auto: unknown ASSET_UI_IMPORT={name}"),
+                    }
                 }
             }
         }
         if self.sample_timer.is_event(event).is_some() {
+            // ASSET_UI_DARK=1: night stage for headless viewer captures.
+            if crate::asset_store_state::env_alias(&["ASSET_UI_DARK", "AI_CONTENT_DARK"]).is_some() {
+                self.set_mesh_dark(cx, true);
+            }
+            // ASSET_UI_OPEN_VIEW_DROP=1: open the View popup (popup placement captures).
+            if crate::asset_store_state::env_alias(&["ASSET_UI_OPEN_VIEW_DROP", "AI_CONTENT_OPEN_VIEW_DROP"]).is_some() {
+                if let Some(mut drop) = self.ui.combo_box(cx, ids!(pbr_view_drop)).borrow_mut() {
+                    drop.set_active(cx);
+                }
+            }
+            // ASSET_UI_PBR_VIEW=<index|label>: inspection view for captures.
+            if let Some(view) =
+                crate::asset_store_state::env_alias(&["ASSET_UI_PBR_VIEW", "AI_CONTENT_PBR_VIEW"])
+            {
+                use crate::mesh_view::pbr_preview::PbrViewMode;
+                let index = PbrViewMode::ALL
+                    .iter()
+                    .position(|mode| mode.label().eq_ignore_ascii_case(&view))
+                    .or_else(|| view.parse::<usize>().ok())
+                    .unwrap_or(0);
+                self.ui
+                    .combo_box(cx, ids!(pbr_view_drop))
+                    .set_selected_item(cx, index);
+                if let Some(mut mesh) = self
+                    .ui
+                    .widget(cx, ids!(mesh_view))
+                    .borrow_mut::<MeshView>()
+                {
+                    mesh.set_pbr_view_mode(cx, PbrViewMode::ALL[index.min(PbrViewMode::ALL.len() - 1)]);
+                }
+            }
             let sample = self.auto.sample.clone();
             match sample.as_deref() {
                 Some("mesh") => self.load_sample_mesh(cx),
@@ -8046,6 +14382,25 @@ impl AppMain for App {
                     if let Some(file) = newest {
                         self.reopen_gallery(cx, &file);
                     }
+                }
+                // A .ply/.sog path opens straight in the splat viewer (headless
+                // captures of generated splats); anything else imports as a
+                // playtest artifact (GLB etc.).
+                Some(path)
+                    if std::path::Path::new(path).is_file()
+                        && (path.ends_with(".ply") || path.ends_with(".sog")) =>
+                {
+                    let path = path.to_string();
+                    // Headless samples: a TripoSplat-style object file is small
+                    // (≲ 50 MB) — frame it as an object (y-down, flip); big
+                    // scans/worlds keep the inside framing.
+                    let object = std::fs::metadata(&path).map(|m| m.len() < 50_000_000).unwrap_or(false);
+                    self.set_splat_file(cx, &path, object);
+                    self.frame_splat_camera(cx, object);
+                    self.selected_file = None;
+                    self.viewer = ViewerContent::Empty;
+                    self.set_caption(cx, "splat", &format!("sample — {path}"));
+                    self.show_page(cx, id!(splat_page));
                 }
                 Some(path) if std::path::Path::new(path).is_file() => {
                     match std::fs::read(path) {
@@ -8061,6 +14416,46 @@ impl AppMain for App {
             }
         }
         if self.capture_timer.is_event(event).is_some() && !self.auto.captured {
+            // ASSET_UI_HISTORY_FIRST=<n>: scroll the History strip to item n
+            // right before the shot (scrollbar captures).
+            if let Some(first) = crate::asset_store_state::env_alias(&["ASSET_UI_HISTORY_FIRST", "AI_CONTENT_HISTORY_FIRST"])
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                self.ui
+                    .widget(cx, ids!(library_gallery))
+                    .portal_list(cx, ids!(list))
+                    .set_first_id_and_scroll(first, 0.0);
+                self.ui.redraw(cx);
+            }
+            // ASSET_UI_MASK_SMOKE=<png>: inpaint preset + that picture pinned
+            // + a demo stroke and an outpaint border in the mask painter
+            // (headless shader/layout check of the mask lane).
+            if let Some(png) = crate::asset_store_state::env_alias(&["ASSET_UI_MASK_SMOKE"]) {
+                if let Some(index) = PRESETS.iter().position(|p| p.domains.contains(&"inpaint")) {
+                    self.ui
+                        .combo_box(cx, ids!(preset_drop))
+                        .set_selected_item(cx, crate::pipeline::preset_row_for_index(index));
+                    self.refresh_model_ui(cx, true);
+                }
+                self.import_dropped_file(cx, Path::new(&png), false);
+                if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                    let (w, h) = paint.canvas_size();
+                    paint.set_brush_radius((w.min(h) as f32 * 0.06).max(4.0));
+                    let mask_w = w;
+                    let mask_h = h;
+                    // A diagonal demo stroke through the middle.
+                    let steps = 24;
+                    for i in 0..=steps {
+                        let t = i as f32 / steps as f32;
+                        let x = mask_w as f32 * (0.3 + 0.4 * t);
+                        let y = mask_h as f32 * (0.35 + 0.3 * t);
+                        let r = paint.brush_radius();
+                        paint.paint_at(x, y, r, true);
+                    }
+                    paint.outpaint(cx, 0.2);
+                }
+                self.refresh_mask_status(cx);
+            }
             if let Some(path) = self.auto.capture.clone() {
                 self.auto.captured = true;
                 log!("capture: {}", path.display());
@@ -8115,11 +14510,7 @@ impl AppMain for App {
                     continue;
                 };
                 let avoid = self.avoid_for_run(position);
-                let snapshots = self
-                    .fleet
-                    .as_ref()
-                    .map(|fleet| fleet.snapshots.clone())
-                    .unwrap_or_default();
+                let snapshots = self.routing_snapshots();
                 let run_id = self.runs[position].id;
                 let events = self.runs[position].pipeline.handle_response(
                     cx,
@@ -8134,6 +14525,7 @@ impl AppMain for App {
             if fleet_changed {
                 self.push_fleet_view();
                 self.refresh_fleet_ui(cx);
+                self.refresh_lora_ui(cx);
                 if self.surface == Surface::Runs {
                     self.refresh_runs_panel(cx);
                 }
@@ -8149,8 +14541,998 @@ impl AppMain for App {
         }
 
         self.ui.handle_event(cx, event, &mut Scope::empty());
-        // Draw passes above recorded any gallery-preview cache misses;
-        // route them through the IO worker (bounded, deduplicated).
+        // Draw passes above recorded any preview cache misses; route them
+        // through the IO worker (bounded, deduplicated). The Library tiles
+        // record theirs the same way, and their pictures come from the
+        // store by digest.
+        self.pump_catalog_thumbs(cx);
         self.pump_gallery_previews(cx);
+    }
+}
+
+/// Does `model_id` (registered under `model_domain`) serve stage `domain`?
+/// Mirrors the service's routing law: besides the exact-domain models, every
+/// `flux2-dev*` tier (registered as an image generator) also runs the
+/// instruction-edit path when an input image is supplied.
+fn model_serves_domain(model_id: &str, model_domain: &str, domain: &str) -> bool {
+    model_domain == domain || (domain == "edit" && model_id.starts_with("flux2-dev"))
+}
+
+/// What an OS-dropped file imports as: (domain, content type, re-encode to
+/// PNG?). PNG screenshots go in byte-identical; other raster formats are
+/// decoded and re-encoded because every image-consuming model input is PNG.
+fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => ("image", "image/png", false),
+        "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" => ("image", "image/png", true),
+        "glb" => ("mesh", "model/gltf-binary", false),
+        "wav" => ("audio", "audio/wav", false),
+        "mp4" | "mov" => ("video", "video/mp4", false),
+        _ => return None,
+    })
+}
+
+/// Which body the Library shows. Tiles are the default — a catalog is
+/// pictures first — and the list is there for the rows the grid cannot
+/// spell out (aliases, revisions, lifecycle).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LibViewMode {
+    #[default]
+    Tiles,
+    List,
+}
+
+/// Catalog assets the Create surface is working with.
+///
+/// The surface asks two things of whatever it is holding: WHAT is this
+/// (label, domain, content type) and WHERE are its bytes. A local library
+/// row answers with an index entry and a file under `local/ai_content_...`;
+/// a catalog asset answers with a synthesized row and the client's verified
+/// cache object. Both answers arrive through the same two accessors, so the
+/// tools — AO bake, rig, transforms, the viewer, drag-out — do not care
+/// which they are looking at.
+///
+/// The cache path is NOT an app-owned copy: it is digest-named and re-hashed
+/// before the client hands it out, so it cannot drift from the revision it
+/// came from the way `lib-13501.glb` drifted from the map that replaced it.
+#[derive(Default)]
+struct CatalogWork {
+    /// Keyed by the `store:<asset_id>` identity the viewer gate already uses.
+    items: std::collections::HashMap<String, CatalogItem>,
+    /// Identities with a materialisation in flight, so a second click does
+    /// not queue a second fetch of the same object.
+    pending: std::collections::HashSet<String>,
+    /// Newest first — the order the rail shows them in.
+    order: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CatalogItem {
+    meta: crate::library::LibraryMeta,
+    /// Verified cache path of the payload, once materialised.
+    payload: Option<PathBuf>,
+    /// Verified cache path of the asset's thumbnail, once materialised.
+    thumbnail: Option<PathBuf>,
+    /// Verified cache path of the asset's SOURCE-role file, once asked for.
+    /// A stateful billboard's `.billboard` manifest lives here beside its
+    /// sheet in `payload` — one asset, two blobs, both needed to PLAY it.
+    source: Option<PathBuf>,
+    /// Revision the payload belongs to — what makes staleness impossible.
+    revision: Option<String>,
+}
+
+/// The identity of a catalog asset on the Create surface. One spelling,
+/// used by the viewer gate, the rail, the input tray and the resolver.
+fn store_file_id(asset: &makepad_asset_data::AssetId) -> String {
+    format!("store:{asset}")
+}
+
+/// The asset id inside a `store:` identity, if that is what this is.
+fn store_asset_of(file: &str) -> Option<makepad_asset_data::AssetId> {
+    file.strip_prefix("store:")?.parse().ok()
+}
+
+impl CatalogWork {
+    /// Announce an asset the user picked. Returns true when it is new here
+    /// and its files still have to be materialised.
+    fn track(&mut self, file: &str, meta: crate::library::LibraryMeta) -> bool {
+        if let Some(existing) = self.items.get_mut(file) {
+            existing.meta = meta;
+            return false;
+        }
+        self.items.insert(
+            file.to_string(),
+            CatalogItem { meta, payload: None, thumbnail: None, source: None, revision: None },
+        );
+        self.order.retain(|have| have != file);
+        self.order.insert(0, file.to_string());
+        true
+    }
+
+    fn set_payload(&mut self, file: &str, path: PathBuf, revision: Option<String>) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.payload = Some(path);
+            item.revision = revision;
+        }
+    }
+
+    fn set_thumbnail(&mut self, file: &str, path: PathBuf) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.thumbnail = Some(path);
+        }
+    }
+
+    fn set_source(&mut self, file: &str, path: PathBuf) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.source = Some(path);
+        }
+    }
+
+    fn get(&self, file: &str) -> Option<&CatalogItem> {
+        self.items.get(file)
+    }
+
+    /// Rail rows, newest pick first.
+    fn rows(&self) -> impl Iterator<Item = &CatalogItem> {
+        self.order.iter().filter_map(|file| self.items.get(file))
+    }
+}
+
+/// Does the Create surface's History strip show this row? It is the
+/// GENERATOR's own output rail: what this app made, plus what the user
+/// handed it directly (drops, webcam snaps). Imported packs are catalog
+/// content — they land in the store and are browsed on the Library surface,
+/// and the thousands of historical `import:` rows an older pipeline left in
+/// the local index are not what anyone is looking for here.
+///
+/// It asks exactly the question the publisher asks (`is_generated_row`), so
+/// the rail and the catalog agree about what "generated" means.
+fn rail_shows(item: &crate::library::LibraryMeta) -> bool {
+    makepad_asset_importer::import::is_generated_row(
+        item.import_tags(),
+        item.group_id.as_deref(),
+    )
+}
+
+/// What makes the Library's result set a DIFFERENT one. When this changes,
+/// both bodies scroll back to the top: a filter that narrows the results
+/// under a scrolled viewport otherwise leaves the user looking past the end
+/// of them, which reads as "found nothing".
+fn library_view_signature(filters: &LibraryFilters) -> String {
+    format!(
+        "{}|{:?}|{:?}",
+        filters.query.trim().to_ascii_lowercase(),
+        filters.kind,
+        filters.label,
+    )
+}
+
+/// Everything this app knows about where a map came from, run together for
+/// the walker's style pick: the namespace the importer published under, its
+/// canonical alias path, and its title.
+///
+/// The namespace is the strong signal (`doom`, `quake`, `duke`); the alias
+/// carries the pack and episode (`duke/duke3d/worlds/e1l1`), and the title
+/// is the last resort for an asset published without either. It is a STYLE
+/// hint and only a style hint — the map itself is read from the declared
+/// contract every classic importer emits, never from which game this says.
+fn world_source_text(hit: &makepad_asset_client::CatalogHit) -> String {
+    let alias = hit
+        .alias
+        .as_ref()
+        .map(|alias| alias.to_string())
+        .unwrap_or_default();
+    format!("{} {} {}", hit.namespace, alias, hit.title)
+}
+
+/// ONE tag, as the UI sees it.
+///
+/// The store keeps two label kinds on the wire — `category` and `tag` — and
+/// its publishers write BOTH for the same name: this catalog answers
+/// `category music 245` AND `tag music 245`, `category doom 70` AND
+/// `tag doom 70`, describing the same rows twice. Shown as two dropdown
+/// entries that reads as a glitch, and there is no user-facing idea that
+/// tells the two apart. So the UI has one vocabulary: a NAME, its count, and
+/// which wire kinds happen to carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TagFacet {
+    name: String,
+    /// How many assets carry it. The MAX of the two kinds' counts, never the
+    /// sum: a track labelled `music` in both vocabularies is one track.
+    count: u64,
+    /// True when the free `tag` vocabulary carries this name — which is the
+    /// filter the query prefers, because it is the one every publisher
+    /// writes for a free label.
+    as_tag: bool,
+}
+
+/// Merge the server's two label vocabularies into the one the UI shows.
+///
+/// Structural names are dropped: `music` and `sfx` moved into the Kind
+/// picker ([`KindChoice`]), and leaving them here too would recreate exactly
+/// the duplicate this merge exists to remove.
+fn merge_facets(facets: &[makepad_asset_client::CatalogFacet]) -> Vec<TagFacet> {
+    let mut merged: Vec<TagFacet> = Vec::with_capacity(facets.len());
+    for facet in facets {
+        if crate::asset_store_state::AUDIO_SHELVES.contains(&facet.label.as_str()) {
+            continue;
+        }
+        let as_tag = facet.kind == makepad_asset_client::FacetKind::Tag;
+        match merged.iter_mut().find(|have| have.name == facet.label) {
+            Some(have) => {
+                have.count = have.count.max(facet.count);
+                have.as_tag |= as_tag;
+            }
+            None => merged.push(TagFacet {
+                name: facet.label.clone(),
+                count: facet.count,
+                as_tag,
+            }),
+        }
+    }
+    merged
+}
+
+/// The Library's tag dropdown: row 0 is "all tags", row `n + 1` is merged
+/// facet `n`. Reading and writing that offset lives here so the render and
+/// the click can never disagree about it.
+fn facet_at(facets: &[TagFacet], row: usize) -> Option<String> {
+    row.checked_sub(1)
+        .and_then(|index| facets.get(index))
+        .map(|facet| facet.name.clone())
+}
+
+/// Which row shows a picked tag, or 0 when the pick is not in this result
+/// set (a filter can narrow it away) — the dropdown then reads "all tags"
+/// rather than pointing at some other label.
+fn facet_row(facets: &[TagFacet], picked: Option<&String>) -> usize {
+    let Some(name) = picked else {
+        return 0;
+    };
+    facets
+        .iter()
+        .position(|facet| &facet.name == name)
+        .map_or(0, |index| index + 1)
+}
+
+/// One dropdown row: the name and the server's count. No prefix — with one
+/// vocabulary there is nothing for a prefix to distinguish. `#` stays as the
+/// search box's own notation.
+fn facet_row_text(facet: &TagFacet) -> String {
+    format!("{}   {}", facet.name, facet.count)
+}
+
+/// What one Library search box means: the `#tag` filters it names, and the
+/// free text left over.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SearchBox {
+    /// Every `#word` typed, `#` stripped and case-folded, in typed order and
+    /// without repeats. All of them are REQUIRED — `#music #ambient` is an
+    /// AND, never an OR.
+    tags: Vec<String>,
+    /// Everything that was not a `#word`, whitespace-normalised.
+    text: String,
+}
+
+/// Split a Library search box into `#tag` filters and free text.
+///
+/// A bare `#` names no tag, so it stays text rather than silently doing
+/// nothing. Tags are case-folded because the catalog's tag vocabulary is
+/// lower-case; free text is left as typed and the server folds it.
+fn parse_search_box(input: &str) -> SearchBox {
+    let mut tags: Vec<String> = Vec::new();
+    let mut words: Vec<&str> = Vec::new();
+    for word in input.split_whitespace() {
+        match word.strip_prefix('#') {
+            Some(tag) if !tag.is_empty() => {
+                let tag = tag.to_lowercase();
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            _ => words.push(word),
+        }
+    }
+    SearchBox { tags, text: words.join(" ") }
+}
+
+/// The catalog query a search box and a picked facet add up to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CatalogFilterTerms {
+    /// Structured category filter — only the dropdown can set this. `#` is
+    /// tag notation, so a typed `#doom` never lands here even when a
+    /// category `doom` exists.
+    category: Option<String>,
+    /// Structured tag filter: the one exact tag the catalog query holds.
+    tag: Option<String>,
+    /// Lexical query text the server AND-s term by term.
+    text: String,
+}
+
+/// Fold the search box, the picked tag and the Kind picker's structural
+/// refinement into one catalog query.
+///
+/// The wire has two label filters — `category` and `tag` — and they AND, so
+/// a name is asked for in the vocabulary that actually carries it: the
+/// counted facets say which, and the free `tag` vocabulary wins when both
+/// do (this catalog writes both for the same rows, so either answers the
+/// same set). `structural` — music/sfx from the Kind picker — always takes
+/// the `category` slot, because that is the one every audio publisher
+/// writes.
+///
+/// The catalog query holds exactly ONE structured tag, so the first typed
+/// tag with no other home takes it and the rest ride the lexical index —
+/// the server indexes every tag word as a public term and requires ALL
+/// query terms, so a second `#tag` still narrows. Nothing typed is dropped:
+/// a discarded tag would silently WIDEN the result set.
+fn catalog_filter_terms(
+    input: &str,
+    picked: Option<&String>,
+    structural: Option<&str>,
+    vocabulary: &[makepad_asset_client::CatalogFacet],
+) -> CatalogFilterTerms {
+    let parsed = parse_search_box(input);
+    // Which vocabulary carries a name: the free tag list unless only the
+    // category list has it. Unknown names (a facet narrowed out of this
+    // result set, a half-typed `#wor`) go to the tag filter, which is what
+    // the box has always meant by `#`.
+    let carried_as_tag = |name: &String| {
+        let seen = |kind| {
+            vocabulary
+                .iter()
+                .any(|facet| facet.kind == kind && &facet.label == name)
+        };
+        !seen(makepad_asset_client::FacetKind::Category)
+            || seen(makepad_asset_client::FacetKind::Tag)
+    };
+    let mut category = structural.map(str::to_string);
+    let mut picked_tag = None;
+    // The picked row and any typed `#word` are the same kind of thing now:
+    // a name to be placed in whichever vocabulary holds it.
+    let mut typed = parsed.tags.iter();
+    let named = picked.cloned().or_else(|| typed.next().cloned());
+    if let Some(name) = named {
+        if carried_as_tag(&name) {
+            picked_tag = Some(name);
+        } else if category.is_none() {
+            category = Some(name);
+        } else {
+            // The Kind picker already holds the one category slot. The name
+            // still narrows through the lexical index rather than being
+            // dropped, which would widen the result set behind the user.
+            picked_tag = Some(name);
+        }
+    }
+    let tag = picked_tag;
+    let mut text = parsed.text;
+    for extra in typed {
+        // The one already carried by the structured filter adds nothing.
+        if Some(extra) == tag.as_ref() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(extra);
+    }
+    // The server builds its lexical index from ASCII-alphanumeric runs and
+    // REFUSES a non-empty query that yields no term at all — a bare `#` came
+    // back as "server refused: 400 invalid input". `#` is the notation this
+    // box teaches, so the half-typed prefix on the way to `#music` must not
+    // flash an error: text with nothing searchable in it is not a search.
+    if !text.chars().any(|c| c.is_ascii_alphanumeric()) {
+        text.clear();
+    }
+    CatalogFilterTerms { category, tag, text }
+}
+
+#[cfg(test)]
+mod search_box_tests {
+    use super::*;
+    use makepad_asset_client::{CatalogFacet, FacetKind};
+
+    /// The real vocabulary this catalog answers with: every publisher writes
+    /// the same name into BOTH label kinds, so `music` and `doom` are a
+    /// category AND a tag over the same rows, while an artist is a tag only.
+    fn vocabulary() -> Vec<CatalogFacet> {
+        let facet = |kind, label: &str, count| CatalogFacet {
+            kind,
+            label: label.to_string(),
+            count,
+        };
+        vec![
+            facet(FacetKind::Category, "music", 245),
+            facet(FacetKind::Tag, "music", 245),
+            facet(FacetKind::Category, "doom", 70),
+            facet(FacetKind::Tag, "doom", 70),
+            facet(FacetKind::Category, "sfx", 12),
+            facet(FacetKind::Tag, "bicep", 2),
+            // A name only the category vocabulary carries.
+            facet(FacetKind::Category, "derived", 9),
+        ]
+    }
+
+    fn terms(input: &str) -> CatalogFilterTerms {
+        catalog_filter_terms(input, None, None, &vocabulary())
+    }
+
+    #[test]
+    fn an_empty_box_filters_nothing() {
+        assert_eq!(parse_search_box(""), SearchBox::default());
+        assert_eq!(parse_search_box("   "), SearchBox::default());
+        assert_eq!(terms(""), CatalogFilterTerms::default());
+    }
+
+    #[test]
+    fn a_bare_word_stays_free_text() {
+        let parsed = parse_search_box("german");
+        assert!(parsed.tags.is_empty(), "no `#`, no tag filter");
+        assert_eq!(parsed.text, "german");
+        assert_eq!(terms("german").tag, None);
+        assert_eq!(terms("german").text, "german");
+    }
+
+    #[test]
+    fn one_hash_word_becomes_the_tag_filter() {
+        let parsed = parse_search_box("#music");
+        assert_eq!(parsed.tags, vec!["music".to_string()]);
+        assert_eq!(parsed.text, "", "the tag left no text behind");
+        let query = terms("#music");
+        assert_eq!(query.tag.as_deref(), Some("music"));
+        assert_eq!(query.text, "");
+        assert_eq!(query.category, None);
+    }
+
+    #[test]
+    fn a_tag_and_free_text_are_both_kept() {
+        let parsed = parse_search_box("#music german");
+        assert_eq!(parsed.tags, vec!["music".to_string()]);
+        assert_eq!(parsed.text, "german");
+        // Order is irrelevant: the `#` marks the tag, not the position.
+        assert_eq!(parse_search_box("german #music"), parsed);
+        let query = terms("#music german");
+        assert_eq!(query.tag.as_deref(), Some("music"), "tag:music");
+        assert_eq!(query.text, "german", "and the free text survives");
+    }
+
+    #[test]
+    fn every_hash_word_is_required() {
+        let parsed = parse_search_box("#music #ambient");
+        assert_eq!(parsed.tags, vec!["music".to_string(), "ambient".to_string()]);
+        // The catalog query holds one structured tag; the rest go to the
+        // lexical index, which the server AND-s. Neither is dropped.
+        let query = terms("#music #ambient");
+        assert_eq!(query.tag.as_deref(), Some("music"));
+        assert_eq!(query.text, "ambient");
+        let with_text = terms("#music #ambient german");
+        assert_eq!(with_text.tag.as_deref(), Some("music"));
+        assert_eq!(with_text.text, "german ambient");
+    }
+
+    #[test]
+    fn a_repeated_tag_is_named_once() {
+        assert_eq!(parse_search_box("#music #music").tags, vec!["music".to_string()]);
+        assert_eq!(terms("#music #music").text, "", "no duplicate rides the text");
+    }
+
+    #[test]
+    fn a_lone_hash_is_text_not_a_tag() {
+        let parsed = parse_search_box("#");
+        assert!(parsed.tags.is_empty(), "`#` names no tag");
+        assert_eq!(parsed.text, "#", "so it stays exactly what was typed");
+        assert_eq!(terms("# music").tag, None);
+        assert_eq!(terms("# music").text, "# music");
+    }
+
+    /// Live regression: typing `#` on the way to `#music` used to reach the
+    /// server as the text query "#", which it refuses (400 invalid input)
+    /// because the query names no lexical term. Half-typed notation is not
+    /// an error.
+    #[test]
+    fn text_with_nothing_searchable_in_it_is_not_sent_as_a_query() {
+        assert_eq!(terms("#").text, "", "a bare `#` filters nothing");
+        assert_eq!(terms("#").tag, None);
+        assert_eq!(terms("  #  ").text, "");
+        assert_eq!(terms("!!!").text, "", "no term, no query");
+        // A term ANYWHERE keeps the whole text: the server tokenizes it.
+        assert_eq!(terms("# music").text, "# music");
+        assert_eq!(terms("rocket!").text, "rocket!");
+    }
+
+    #[test]
+    fn tag_filters_are_case_insensitive() {
+        assert_eq!(parse_search_box("#Music").tags, vec!["music".to_string()]);
+        assert_eq!(parse_search_box("#MUSIC").tags, vec!["music".to_string()]);
+        assert_eq!(
+            parse_search_box("#Music #music").tags,
+            vec!["music".to_string()],
+            "one tag, typed twice in two cases"
+        );
+        assert_eq!(terms("#AMBIENT").tag.as_deref(), Some("ambient"));
+    }
+
+    /// `#word` reaches a name in EITHER wire vocabulary. There is one tag
+    /// system as far as anyone using this app is concerned; which of the
+    /// store's two label kinds happens to carry a name is not something a
+    /// person should have to know, or could find out.
+    #[test]
+    fn a_hash_reaches_a_name_in_either_vocabulary() {
+        // Carried by both: the free tag filter answers, and it is exact.
+        let query = terms("#doom");
+        assert_eq!(query.tag.as_deref(), Some("doom"));
+        assert_eq!(query.category, None);
+        // Carried ONLY as a category: the category filter answers. Before
+        // one system, this typed as `#derived` and found nothing.
+        let query = terms("#derived");
+        assert_eq!(query.category.as_deref(), Some("derived"));
+        assert_eq!(query.tag, None);
+        // A name this result set does not offer at all still means what `#`
+        // has always meant, rather than silently filtering nothing.
+        let query = terms("#halfTyped");
+        assert_eq!(query.tag.as_deref(), Some("halftyped"));
+    }
+
+    /// The Kind picker's music/sfx refinement owns the category slot; a
+    /// picked tag and typed tags compose around it.
+    #[test]
+    fn the_kind_refinement_and_a_picked_tag_compose() {
+        let vocab = vocabulary();
+        let music = catalog_filter_terms("", None, Some("music"), &vocab);
+        assert_eq!(music.category.as_deref(), Some("music"));
+        assert_eq!(music.tag, None);
+
+        let picked = "bicep".to_string();
+        let both = catalog_filter_terms("#ambient german", Some(&picked), Some("music"), &vocab);
+        assert_eq!(both.category.as_deref(), Some("music"), "the kind picker");
+        assert_eq!(both.tag.as_deref(), Some("bicep"), "the picked tag");
+        assert_eq!(both.text, "german ambient", "the typed tag still narrows");
+    }
+
+    /// A picked tag owns the structured slot; typed tags still narrow.
+    #[test]
+    fn a_picked_tag_keeps_the_structured_slot_and_typed_tags_still_narrow() {
+        let picked = "music".to_string();
+        let query = catalog_filter_terms("#ambient german", Some(&picked), None, &vocabulary());
+        assert_eq!(query.tag.as_deref(), Some("music"), "the pick owns the slot");
+        assert_eq!(query.text, "german ambient", "the typed tag still applies");
+        assert_eq!(query.category, None);
+    }
+
+    /// One vocabulary: the same name in both wire kinds is ONE row, counted
+    /// once (they describe the same rows — adding them counts every track
+    /// twice), and the structural names are not in this list at all because
+    /// they moved to the Kind picker.
+    #[test]
+    fn the_tag_list_is_one_vocabulary_without_the_structural_names() {
+        let merged = merge_facets(&vocabulary());
+        let names: Vec<&str> = merged.iter().map(|facet| facet.name.as_str()).collect();
+        assert_eq!(names, vec!["doom", "bicep", "derived"]);
+        assert!(!names.contains(&"music"), "music is a Kind now");
+        assert!(!names.contains(&"sfx"), "and so is sfx");
+        let doom = &merged[0];
+        assert_eq!(doom.count, 70, "one count, not 70 + 70");
+        assert!(doom.as_tag, "the free vocabulary carries it, so the tag filter answers");
+        assert!(!merged[2].as_tag, "`derived` is a category-only name");
+        // And the row says the name, with no vocabulary prefix to decode.
+        assert_eq!(facet_row_text(doom), "doom   70");
+        assert_eq!(facet_at(&merged, 1).as_deref(), Some("doom"));
+        assert_eq!(facet_at(&merged, 0), None, "row 0 is `all tags`");
+        assert_eq!(facet_row(&merged, Some(&"bicep".to_string())), 2);
+        assert_eq!(facet_row(&merged, Some(&"gone".to_string())), 0);
+    }
+
+    /// The Kind picker offers the contract's kinds, with audio split into
+    /// the two shelves that are worth going to separately — and audio itself
+    /// still there, so an unlabelled track is not lost.
+    #[test]
+    fn the_kind_picker_splits_audio_into_music_and_sfx() {
+        let rows = KindChoice::rows();
+        let text: Vec<String> = rows.iter().map(KindChoice::row_text).collect();
+        assert_eq!(text[0], "all kinds");
+        let audio = text.iter().position(|row| row == "audio").expect("audio row");
+        assert_eq!(text[audio + 1], "audio · music");
+        assert_eq!(text[audio + 2], "audio · sfx");
+        assert_eq!(
+            rows[audio + 1].query(),
+            (Some(makepad_asset_data::AssetKind::Audio), Some("music"))
+        );
+        assert_eq!(
+            rows[audio + 2].query(),
+            (Some(makepad_asset_data::AssetKind::Audio), Some("sfx"))
+        );
+        assert_eq!(rows[0].query(), (None, None));
+        assert!(rows[0].is_any());
+    }
+}
+
+#[cfg(test)]
+mod library_view_tests {
+    use super::*;
+    use makepad_asset_client::FacetKind;
+
+    /// A changed filter is a changed RESULT SET, and both Library bodies go
+    /// back to the top when it changes — a narrowed filter must not leave
+    /// the user staring past the end of the new results, which reads as
+    /// "found nothing". The signature is what decides that, so every field
+    /// a user can change has to be in it.
+    #[test]
+    fn every_filter_a_user_can_change_moves_the_view_signature() {
+        let base = LibraryFilters::default();
+        let sig = library_view_signature(&base);
+        assert_eq!(sig, library_view_signature(&base), "same filter, same view");
+
+        let mut typed = base.clone();
+        typed.query = "rocket".into();
+        assert_ne!(library_view_signature(&typed), sig, "search text");
+
+        let mut cased = typed.clone();
+        cased.query = "ROCKET".into();
+        assert_eq!(
+            library_view_signature(&cased),
+            library_view_signature(&typed),
+            "case and padding are not a different result set"
+        );
+        let mut padded = typed.clone();
+        padded.query = "  rocket ".into();
+        assert_eq!(library_view_signature(&padded), library_view_signature(&typed));
+
+        let mut kinded = base.clone();
+        kinded.kind = KindChoice::Kind(makepad_asset_data::AssetKind::Prop);
+        assert_ne!(library_view_signature(&kinded), sig, "kind facet");
+
+        // The audio refinements are their own result sets, and not each
+        // other's: music and sfx are both `audio` underneath.
+        let mut music = base.clone();
+        music.kind = KindChoice::AudioShelf("music");
+        let mut sfx = base.clone();
+        sfx.kind = KindChoice::AudioShelf("sfx");
+        assert_ne!(library_view_signature(&music), sig);
+        assert_ne!(library_view_signature(&music), library_view_signature(&sfx));
+
+        let mut labelled = base.clone();
+        labelled.label = Some("doom".into());
+        assert_ne!(library_view_signature(&labelled), sig, "tag facet");
+    }
+}
+
+#[cfg(test)]
+mod catalog_work_tests {
+    use super::*;
+    use makepad_asset_data::{AssetId, FileRole};
+
+    fn meta(file: &str) -> crate::library::LibraryMeta {
+        crate::library::LibraryMeta {
+            file: file.into(),
+            label: "Rocket".into(),
+            domain: "asset".into(),
+            content_type: "application/octet-stream".into(),
+            prompt: String::new(),
+            group_id: None,
+            group_label: Some("catalog".into()),
+            tags: Some(vec!["catalog".into()]),
+            enhanced_tags: None,
+            product: Some(true),
+        }
+    }
+
+    /// The Create surface identifies a catalog asset by one spelling, the
+    /// same one the viewer gate uses. Anything else is a library file name.
+    #[test]
+    fn a_catalog_identity_round_trips_and_never_shadows_a_library_file() {
+        let asset = AssetId::from_bytes([3; 16]);
+        let file = store_file_id(&asset);
+        assert!(file.starts_with("store:"));
+        assert_eq!(store_asset_of(&file), Some(asset));
+        assert_eq!(store_asset_of("lib-42.glb"), None);
+        assert_eq!(store_asset_of("store:not-an-id"), None);
+    }
+
+    /// Tracking is idempotent (a second click does not duplicate a card),
+    /// newest pick first, and materialisation fills in the two paths the
+    /// surface needs without ever inventing one.
+    #[test]
+    fn the_working_set_holds_one_card_per_asset_newest_first() {
+        let mut work = CatalogWork::default();
+        let a = store_file_id(&AssetId::from_bytes([1; 16]));
+        let b = store_file_id(&AssetId::from_bytes([2; 16]));
+
+        assert!(work.track(&a, meta(&a)), "first sight of an asset is new");
+        assert!(!work.track(&a, meta(&a)), "a second click is the same card");
+        assert!(work.track(&b, meta(&b)));
+        let order: Vec<String> = work.rows().map(|item| item.meta.file.clone()).collect();
+        assert_eq!(order, vec![b.clone(), a.clone()], "newest pick leads");
+
+        // Nothing has a path until the client materialised one.
+        assert!(work.get(&a).unwrap().payload.is_none());
+        assert!(work.get(&a).unwrap().thumbnail.is_none());
+        work.set_payload(&a, PathBuf::from("/cache/objects/ab/cd"), Some("rev-1".into()));
+        work.set_thumbnail(&a, PathBuf::from("/cache/objects/ef/01"));
+        let item = work.get(&a).unwrap();
+        assert_eq!(item.payload.as_deref(), Some(Path::new("/cache/objects/ab/cd")));
+        assert_eq!(item.thumbnail.as_deref(), Some(Path::new("/cache/objects/ef/01")));
+        assert_eq!(item.revision.as_deref(), Some("rev-1"), "which revision the bytes are");
+
+        // Re-tracking keeps what was materialised: the card must not lose
+        // its object because the user clicked it again.
+        assert!(!work.track(&a, meta(&a)));
+        assert!(work.get(&a).unwrap().payload.is_some());
+    }
+
+    /// The kind of a catalog asset comes from the manifest's file ROLE —
+    /// what the publisher measured — not from a digest-named path that has
+    /// no extension to guess from.
+    #[test]
+    fn a_file_role_decides_what_the_tools_see() {
+        let no_media = None;
+        assert_eq!(role_media(FileRole::RenderGlb, no_media), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Lod1Glb, no_media), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Splat, no_media), ("splat", "application/x-ply"));
+        assert_eq!(role_media(FileRole::Audio, no_media), ("sfx", "audio/wav"));
+        assert_eq!(role_media(FileRole::Video, no_media), ("video", "video/mp4"));
+        assert_eq!(
+            role_media(FileRole::Source, no_media),
+            ("billboard", "application/x-stateful-billboard")
+        );
+        assert_eq!(role_media(FileRole::Albedo, no_media), ("image", "image/png"));
+    }
+
+    /// …but the role does NOT decide the CONTAINER. `FileRole::Audio` admits
+    /// WAV, Ogg and MP3 alike, and announcing all three as `audio/wav` is
+    /// how a music library of 241 MP3s ended up handed to a RIFF parser: it
+    /// returns nothing, the well draws no waveform, and there is no error
+    /// anywhere to notice.
+    #[test]
+    fn the_manifest_media_decides_the_container() {
+        use makepad_asset_data::MediaType;
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Mp3)), ("sfx", "audio/mpeg"));
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Ogg)), ("sfx", "audio/ogg"));
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Wav)), ("sfx", "audio/wav"));
+        // Every one of them is still audio to the surfaces that switch on
+        // the domain half of the answer.
+        for media in [MediaType::Mp3, MediaType::Ogg, MediaType::Wav] {
+            let (domain, content_type) = role_media(FileRole::Audio, Some(media));
+            assert_eq!(domain, "sfx");
+            assert!(content_type.starts_with("audio/"));
+        }
+    }
+
+    /// And what the well is handed to DECODE follows the content type, the
+    /// name, then the bytes — because a store payload is a digest-named
+    /// cache object with no extension at all.
+    #[test]
+    fn a_clip_container_is_read_not_assumed() {
+        use std::path::Path;
+        let mp3 = {
+            // ID3v2 tag then a Layer III frame sync, which is what a tagged
+            // MP3 from a music library actually starts with.
+            let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+            bytes.extend_from_slice(&[0u8; 10]);
+            bytes.extend_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+            bytes.extend_from_slice(&[0u8; 400]);
+            bytes
+        };
+        let wav = b"RIFF....WAVEfmt ".to_vec();
+        let object = Path::new("/cache/objects/9f2c1ab3");
+
+        // The catalog's own answer, when it is the truth.
+        assert_eq!(clip_format(object, "audio/mpeg", &mp3), Some(ClipFormat::Mp3));
+        assert_eq!(clip_format(object, "audio/wav", &wav), Some(ClipFormat::Wav));
+        // A stale "audio/wav" over MP3 bytes: the bytes win, because a WAV
+        // parser handed an MP3 fails silently and shows nothing.
+        assert_eq!(clip_format(object, "audio/wav", &mp3), Some(ClipFormat::Mp3));
+        // No content type at all, no extension: still readable.
+        assert_eq!(clip_format(object, "", &mp3), Some(ClipFormat::Mp3));
+        assert_eq!(clip_format(object, "", &wav), Some(ClipFormat::Wav));
+        // The file name as the second opinion.
+        assert_eq!(clip_format(Path::new("/t/x.mp3"), "", &mp3), Some(ClipFormat::Mp3));
+        // And nothing is invented for bytes that are not a track.
+        assert_eq!(clip_format(object, "audio/wav", b"not audio at all"), None);
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+    use crate::library::LibraryMeta;
+
+    fn row(group: Option<&str>, tags: &[&str]) -> LibraryMeta {
+        LibraryMeta {
+            file: "lib-1.glb".into(),
+            label: "thing".into(),
+            domain: "mesh".into(),
+            content_type: "model/gltf-binary".into(),
+            prompt: String::new(),
+            group_id: group.map(Into::into),
+            group_label: None,
+            tags: (!tags.is_empty())
+                .then(|| tags.iter().map(|t| (*t).to_string()).collect()),
+            enhanced_tags: None,
+            product: Some(true),
+        }
+    }
+
+    /// The History strip is the generator's own output: pipeline runs, and
+    /// what the user handed the app directly. Pack and classic imports are
+    /// catalog content and must not come back into this rail — a library
+    /// that has accumulated thousands of `import:` rows would otherwise bury
+    /// the thing that was just generated.
+    #[test]
+    fn the_history_rail_shows_generated_work_and_not_imported_packs() {
+        assert!(rail_shows(&row(Some("run-12"), &[])), "a pipeline run");
+        assert!(rail_shows(&row(Some("drop-3"), &[])), "a dropped file");
+        assert!(rail_shows(&row(Some("webcam-1"), &[])), "a webcam snap");
+        assert!(rail_shows(&row(None, &["generated"])), "the explicit tag");
+        assert!(
+            rail_shows(&row(Some("import:kenney"), &["generated"])),
+            "the tag wins: whatever wrote it, it says it was generated"
+        );
+
+        assert!(!rail_shows(&row(Some("import:kenney"), &["kenney"])), "a pack row");
+        assert!(!rail_shows(&row(Some("import:doom"), &["maps"])), "a classic map");
+        assert!(!rail_shows(&row(None, &[])), "an unlabelled orphan");
+    }
+}
+
+#[cfg(test)]
+mod world_style_tests {
+    use super::*;
+    use makepad_asset_client::CatalogHit;
+    use makepad_asset_data::{AssetAlias, AssetId};
+    use makepad_render::level::BobStyle;
+    use std::str::FromStr;
+
+    fn hit(namespace: &str, alias: &str, title: &str) -> CatalogHit {
+        CatalogHit {
+            asset_id: AssetId::from_bytes([7; 16]),
+            namespace: namespace.to_string(),
+            kind: Some(makepad_asset_data::AssetKind::World),
+            title: title.to_string(),
+            snippet: String::new(),
+            score: 0,
+            live: true,
+            alias: AssetAlias::from_str(alias).ok(),
+            updated_ms: 0,
+        }
+    }
+
+    /// ONE walker walks every classic game; the only per-game input is the
+    /// STYLE it walks in. This is where that style comes from, so a Quake
+    /// map must not be toured with Doom's eye height and step rule just
+    /// because Doom is the fallback.
+    #[test]
+    fn a_maps_own_facts_pick_the_walking_style() {
+        let doom = hit("doom", "doom/doom/worlds/doom1/e1m1", "e1m1");
+        assert_eq!(BobStyle::from_source(&world_source_text(&doom)), BobStyle::Doom);
+
+        let quake = hit("quake", "quake/lq/worlds/e1m1", "the slipgate complex");
+        assert_eq!(BobStyle::from_source(&world_source_text(&quake)), BobStyle::Quake);
+        // Quake II and III walk as Quake: same locomotion family.
+        let q2 = hit("quake2", "quake2/q2/worlds/base1", "outer base");
+        assert_eq!(BobStyle::from_source(&world_source_text(&q2)), BobStyle::Quake);
+        let q3 = hit("quake3", "quake3/q3/worlds/q3dm1", "arena gate");
+        assert_eq!(BobStyle::from_source(&world_source_text(&q3)), BobStyle::Quake);
+
+        let duke = hit("duke", "duke/duke3d/worlds/e1l1", "hollywood holocaust");
+        assert_eq!(BobStyle::from_source(&world_source_text(&duke)), BobStyle::Duke);
+
+        // The alias alone is enough when the namespace is generic — an
+        // importer that publishes under `import` still says which game in
+        // the path it wrote.
+        let aliased = hit("import", "import/build/worlds/duke3d/e2l1", "spaceport");
+        assert_eq!(BobStyle::from_source(&world_source_text(&aliased)), BobStyle::Duke);
+
+        // And a generated world names no game at all, which is the existing
+        // default rather than a special case.
+        let splat = hit("gen", "gen/worlds/coastal", "coastal");
+        assert_eq!(BobStyle::from_source(&world_source_text(&splat)), BobStyle::Doom);
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+    use makepad_asset_client::{CatalogFacet, FacetKind};
+
+    fn facet(kind: FacetKind, label: &str, count: u64) -> CatalogFacet {
+        CatalogFacet { kind, label: label.to_string(), count }
+    }
+
+    /// The dropdown's first row is "all tags", so every merged name sits
+    /// one row down. Reading a row and showing a pick have to agree about
+    /// that, or picking "doom" silently filters by "kenney".
+    #[test]
+    fn the_tag_dropdown_row_maps_back_to_the_name_it_shows() {
+        let rows = merge_facets(&[
+            facet(FacetKind::Category, "doom", 102),
+            facet(FacetKind::Tag, "prop", 40),
+            facet(FacetKind::Category, "kenney", 7),
+        ]);
+        assert_eq!(facet_at(&rows, 0), None, "row 0 clears the filter");
+        for (row, want) in [(1, "doom"), (2, "prop"), (3, "kenney")] {
+            let picked = facet_at(&rows, row).expect("a tag row");
+            assert_eq!(picked, want);
+            assert_eq!(facet_row(&rows, Some(&picked)), row, "round trip");
+        }
+        assert_eq!(facet_at(&rows, 4), None, "past the end selects nothing");
+
+        // The SAME name in both wire vocabularies is ONE row. It described
+        // the same assets twice and read as a glitch in the dropdown.
+        let both = merge_facets(&[
+            facet(FacetKind::Category, "doom", 70),
+            facet(FacetKind::Tag, "doom", 70),
+        ]);
+        assert_eq!(both.len(), 1, "one name, one row");
+        assert_eq!(both[0].count, 70, "one count, not 140");
+        assert_eq!(facet_at(&both, 2), None, "and no second row to pick");
+
+        // A pick the current result set no longer contains reads as "all
+        // tags" rather than pointing at whatever sits in its old row.
+        assert_eq!(facet_row(&rows, Some(&"gone".to_string())), 0);
+        assert_eq!(facet_row(&rows, None), 0);
+    }
+
+    /// The row text is the name and its count. Nothing else: with one
+    /// vocabulary there is no second thing for a prefix to distinguish, and
+    /// the `#` that used to mark tags now belongs to the search box alone.
+    #[test]
+    fn a_tag_row_shows_its_name_and_its_count() {
+        let rows = merge_facets(&[
+            facet(FacetKind::Category, "doom", 102),
+            facet(FacetKind::Tag, "prop", 40),
+        ]);
+        assert_eq!(facet_row_text(&rows[0]), "doom   102");
+        assert_eq!(facet_row_text(&rows[1]), "prop   40");
+    }
+}
+
+#[cfg(test)]
+mod product_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_last_stage_primary_output_is_the_product() {
+        // `image → mesh → PBR` (3 stages): source, untextured mesh, then
+        // the painted GLB + its channel maps + the provenance sidecar.
+        assert_eq!(run_artifact_product(0, 3, "image", "image/png"), Some(false));
+        assert_eq!(run_artifact_product(1, 3, "mesh", "model/gltf-binary"), Some(false));
+        assert_eq!(run_artifact_product(2, 3, "paint", "model/gltf-binary"), Some(true));
+        assert_eq!(run_artifact_product(2, 3, "paint", "image/png"), Some(false));
+        assert_eq!(run_artifact_product(2, 3, "paint", "application/json"), Some(false));
+
+        // Single-stage chains: the stage's own payload kind is the product.
+        assert_eq!(run_artifact_product(0, 1, "image", "image/png"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "matte", "image/png"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "video", "video/mp4"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "music", "audio/wav"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "text", "text/plain"), Some(true));
+
+        // A preview image a mesh/motion backend returns beside its GLB is
+        // never the product, even at the last stage.
+        assert_eq!(run_artifact_product(5, 6, "motion", "model/gltf-binary"), Some(true));
+        assert_eq!(run_artifact_product(5, 6, "motion", "image/png"), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_file_kinds() {
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/Screenshot 2026.png")),
+            Some(("image", "image/png", false))
+        );
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/photo.JPG")),
+            Some(("image", "image/png", true))
+        );
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/elf.glb")),
+            Some(("mesh", "model/gltf-binary", false))
+        );
+        assert_eq!(dropped_file_kind(Path::new("/x/notes.txt")), None);
+        assert_eq!(dropped_file_kind(Path::new("/x/noext")), None);
     }
 }

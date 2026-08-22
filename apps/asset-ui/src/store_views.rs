@@ -16,8 +16,9 @@ use crate::pipeline::{
     format_clock, format_music_duration, stage_display_name, CandidateSet, Pipeline, StageState,
 };
 use makepad_asset_ai::fleet::BoxSnapshot;
+use makepad_asset_widgets::{AssetThumb, ThumbMedia};
 use makepad_widgets::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,10 @@ impl GalleryEntry {
     /// audio card's `.thumb` is a waveform PNG and a video's preview is not
     /// the playable attachment.
     pub fn file_drag_payload_path(&self) -> Option<PathBuf> {
-        Some(self.path.clone())
+        // A catalog card whose object has not been materialised yet has no
+        // path at all; offering an empty one would hand the OS a drag of
+        // nothing.
+        (!self.path.as_os_str().is_empty()).then(|| self.path.clone())
     }
 }
 
@@ -75,9 +79,10 @@ pub fn should_start_file_drag(move_distance: f64, already_dragging: bool) -> boo
 
 pub struct CachedGalleryTexture {
     pub source: Option<PathBuf>,
-    pub texture: Texture,
-    pub frames: Vec<Texture>,
-    pub fps: f32,
+    /// What the card draws — the ONE thumbnail type
+    /// (`makepad_asset_widgets::ThumbMedia`): a still, or declared cells at
+    /// a declared rate. Badges are stills of a flat color.
+    pub media: ThumbMedia,
 }
 
 /// Which artifact kinds may inherit the nearest upstream pipeline image as
@@ -92,11 +97,15 @@ pub fn upstream_preview_allowed(content_type: &str) -> bool {
 /// The background work one card without a cached texture needs. Draw code
 /// never performs this work itself — it records the miss, shows the typed
 /// badge, and the app routes the read+decode through the IO worker.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// (`PartialEq` only: a declared view carries an `f32` rate.)
+#[derive(Clone, Debug, PartialEq)]
 pub enum PreviewWork {
     /// Read + decode an encoded image: the persisted sidecar, or an image
     /// payload that is its own preview.
     Encoded(PathBuf),
+    /// A catalog thumbnail object plus the manifest's DECLARED views — the
+    /// decode obeys the declaration (`makepad_asset_widgets::thumb`).
+    Declared(PathBuf, Vec<makepad_asset_data::ThumbnailView>),
     /// Legacy sidecarless WAV: read + parse + min/max scan the payload.
     WavPayload(PathBuf),
     /// `.billboard` manifest: decode the preview state's native-size frames.
@@ -114,14 +123,20 @@ pub fn preview_work(entry: &GalleryEntry) -> Option<PreviewWork> {
         .unwrap_or("");
     // Only real manifests go through the frame decoder. Duke tile PNGs are
     // domain=billboard but the payload is the icon itself.
+    // A catalog card can exist before its object has been materialised;
+    // every branch that reads the PAYLOAD needs one to read.
+    let has_payload = !entry.path.as_os_str().is_empty();
     let manifest = ext.eq_ignore_ascii_case("billboard")
         || ct.contains("stateful-billboard")
         || ct == "text/x-stateful-billboard";
-    if manifest {
+    if manifest && has_payload {
         return Some(PreviewWork::StatefulBillboard(entry.path.clone()));
     }
     if let Some(path) = &entry.preview_path {
         return Some(PreviewWork::Encoded(path.clone()));
+    }
+    if !has_payload {
+        return None;
     }
     if entry.meta.domain.eq_ignore_ascii_case("billboard")
         && (ext.eq_ignore_ascii_case("png") || ct.starts_with("image/"))
@@ -157,18 +172,14 @@ impl PreviewCache {
         self.map.clear();
     }
 
-    /// The texture to draw NOW. On a cache miss with pending work the badge
+    /// The media to draw NOW. On a cache miss with pending work the badge
     /// shows and the miss is recorded (deduplicated) for the app's async
-    /// pump; badge-only kinds cache their badge permanently.
-    pub fn texture_for(&mut self, cx: &mut Cx, entry: &GalleryEntry, time: f64) -> Texture {
+    /// pump; badge-only kinds cache their badge permanently. The card's
+    /// `AssetThumb` picks the frame — this cache never touches a clock.
+    pub fn media_for(&mut self, cx: &mut Cx, entry: &GalleryEntry) -> ThumbMedia {
         if let Some(cached) = self.map.get(&entry.meta.file) {
             if cached.source == entry.preview_path {
-                if cached.frames.len() > 1 {
-                    let fps = cached.fps.max(1.0) as f64;
-                    let i = ((time * fps).floor() as usize) % cached.frames.len();
-                    return cached.frames[i].clone();
-                }
-                return cached.texture.clone();
+                return cached.media.clone();
             }
         }
         match preview_work(entry) {
@@ -177,22 +188,26 @@ impl PreviewCache {
                 // treats that as last-requested-first.
                 self.pending.retain(|(file, _)| file != &entry.meta.file);
                 self.pending.push((entry.meta.file.clone(), work));
-                self.badge(cx, &entry.meta.domain)
+                ThumbMedia::still(self.badge(cx, &entry.meta.domain))
             }
             None => {
-                let texture = self.badge(cx, &entry.meta.domain);
+                let media = ThumbMedia::still(self.badge(cx, &entry.meta.domain));
                 self.map.insert(
                     entry.meta.file.clone(),
                     CachedGalleryTexture {
                         source: None,
-                        texture: texture.clone(),
-                        frames: Vec::new(),
-                        fps: 0.0,
+                        media: media.clone(),
                     },
                 );
-                texture
+                media
             }
         }
+    }
+
+    /// The decoded still for `file` if this cache holds one (animated
+    /// previews return their first frame; badges count as decoded).
+    pub fn cached(&self, file: &str) -> Option<Texture> {
+        self.map.get(file).map(|cached| cached.media.first().clone())
     }
 
     /// Store a completed (or failure-pinned) texture under its validation
@@ -202,9 +217,7 @@ impl PreviewCache {
             file,
             CachedGalleryTexture {
                 source,
-                texture,
-                frames: Vec::new(),
-                fps: 0.0,
+                media: ThumbMedia::still(texture),
             },
         );
     }
@@ -216,22 +229,20 @@ impl PreviewCache {
         frames: Vec<Texture>,
         fps: f32,
     ) {
-        let Some(texture) = frames.first().cloned() else {
+        if frames.is_empty() {
             return;
-        };
+        }
         self.map.insert(
             file,
             CachedGalleryTexture {
                 source,
-                texture,
-                frames,
-                fps,
+                media: ThumbMedia::anim(frames, fps),
             },
         );
     }
 
     pub fn has_anims(&self) -> bool {
-        self.map.values().any(|c| c.frames.len() > 1)
+        self.map.values().any(|c| c.media.is_animated())
     }
 
     pub fn take_pending(&mut self) -> Vec<(String, PreviewWork)> {
@@ -298,37 +309,83 @@ pub struct InputAsset {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct InputTray {
     current: Option<InputAsset>,
+    /// Extra references for multi-reference editors (⇧ double-click adds
+    /// one); ordered, deduped, capped at [`Self::MAX_EXTRAS`].
+    extras: Vec<InputAsset>,
 }
 
 impl InputTray {
+    pub const MAX_EXTRAS: usize = 3;
+
     pub fn current(&self) -> Option<&InputAsset> {
         self.current.as_ref()
     }
 
-    /// Explicit user pick; returns whether the tray changed.
+    pub fn extras(&self) -> &[InputAsset] {
+        &self.extras
+    }
+
+    /// Explicit user pick; returns whether the tray changed. A new primary
+    /// that was pinned as an extra reference leaves the extras list.
     pub fn select(&mut self, asset: InputAsset) -> bool {
+        let removed = self.extras.iter().position(|a| a.file == asset.file);
+        if let Some(index) = removed {
+            self.extras.remove(index);
+        }
         if self.current.as_ref() == Some(&asset) {
-            return false;
+            return removed.is_some();
         }
         self.current = Some(asset);
         true
     }
 
+    /// Add an extra reference. Without a primary input the asset becomes
+    /// the primary instead (a reference list needs something to refer to).
+    /// Returns whether the tray changed; a duplicate or a full list is a
+    /// no-op.
+    pub fn add_extra(&mut self, asset: InputAsset) -> bool {
+        if self.current.is_none() {
+            return self.select(asset);
+        }
+        if self.current.as_ref().is_some_and(|c| c.file == asset.file)
+            || self.extras.iter().any(|a| a.file == asset.file)
+            || self.extras.len() >= Self::MAX_EXTRAS
+        {
+            return false;
+        }
+        self.extras.push(asset);
+        true
+    }
+
+    pub fn remove_extra(&mut self, index: usize) -> bool {
+        if index < self.extras.len() {
+            self.extras.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn clear(&mut self) -> bool {
-        self.current.take().is_some()
+        let had_extras = !self.extras.is_empty();
+        self.extras.clear();
+        self.current.take().is_some() || had_extras
     }
 
     /// Deletion sweep: drop the pinned asset when its managed record no
     /// longer exists (single delete, group delete, cap eviction — every
     /// mutation path revalidates). Returns whether the tray changed.
-    pub fn retain_existing(&mut self, exists: impl FnOnce(&str) -> bool) -> bool {
-        match &self.current {
-            Some(asset) if !exists(&asset.file) => {
+    pub fn retain_existing(&mut self, exists: impl Fn(&str) -> bool) -> bool {
+        let before = self.extras.len();
+        self.extras.retain(|asset| exists(&asset.file));
+        let mut changed = self.extras.len() != before;
+        if let Some(asset) = &self.current {
+            if !exists(&asset.file) {
                 self.current = None;
-                true
+                changed = true;
             }
-            _ => false,
         }
+        changed
     }
 }
 
@@ -611,7 +668,9 @@ pub fn history_tiles(entries: Vec<GalleryEntry>) -> Vec<HistoryTile> {
             .iter()
             .filter(|member| member.meta.group_id.as_deref() == Some(id))
             .collect();
-        let mut representative = entry.clone();
+        // Newest-first, but prefer the textured mesh over paint maps / JSON
+        // so clicking the run tile opens something you can judge in 3D.
+        let mut representative = group_tile_representative(&members).clone();
         representative.selected = members.iter().any(|member| member.selected);
         tiles.push(HistoryTile {
             entry: representative,
@@ -620,6 +679,36 @@ pub fn history_tiles(entries: Vec<GalleryEntry>) -> Vec<HistoryTile> {
         });
     }
     tiles
+}
+
+fn group_tile_representative<'a>(members: &[&'a GalleryEntry]) -> &'a GalleryEntry {
+    let ct = |entry: &&GalleryEntry| entry.meta.content_type.to_ascii_lowercase();
+    // Final product first: the mesh of a mesh run, the clip of a video run,
+    // the take of an audio run — an image is the source of those, and only
+    // represents runs that produced nothing further.
+    members
+        .iter()
+        .copied()
+        .find(|entry| ct(entry).contains("gltf"))
+        .or_else(|| {
+            members.iter().copied().find(|entry| {
+                let ct = ct(entry);
+                ct.starts_with("video/") || ct.starts_with("audio/")
+            })
+        })
+        .or_else(|| {
+            members
+                .iter()
+                .copied()
+                .find(|entry| ct(entry).starts_with("image/"))
+        })
+        .or_else(|| {
+            members.iter().copied().find(|entry| {
+                let ct = ct(entry);
+                !ct.starts_with("application/json") && !ct.starts_with("text/")
+            })
+        })
+        .unwrap_or(members[0])
 }
 
 /// Virtualized, horizontally scrolling History strip: one compact tile per
@@ -636,6 +725,12 @@ pub struct LibraryGallery {
     rows: Vec<HistoryTile>,
     #[rust]
     cache: PreviewCache,
+    /// Files whose preview landed since their tile last rendered. Tiles are
+    /// `CachedView`s: binding a new texture on the card's Image does nothing
+    /// visible until the cached content is forced to re-render, so a landed
+    /// preview used to stay a badge until scrolling moved the tile.
+    #[rust]
+    stale_tiles: HashSet<String>,
 }
 
 impl LibraryGallery {
@@ -668,6 +763,7 @@ impl LibraryGallery {
         source: Option<PathBuf>,
         texture: Texture,
     ) {
+        self.stale_tiles.insert(file.clone());
         self.cache.install(file, source, texture);
         self.view.redraw(cx);
     }
@@ -680,9 +776,16 @@ impl LibraryGallery {
         frames: Vec<Texture>,
         fps: f32,
     ) {
+        self.stale_tiles.insert(file.clone());
         self.cache.install_anim(file, source, frames, fps);
         self.view.redraw(cx);
         cx.new_next_frame();
+    }
+
+    /// A member's decoded preview if the strip already has it (lets other
+    /// widgets — the run tray — reuse the decode instead of re-reading).
+    pub fn cached_texture(&self, file: &str) -> Option<Texture> {
+        self.cache.cached(file)
     }
 
     /// Stable file id of tile `index`'s representative artifact — what a
@@ -758,10 +861,19 @@ impl Widget for LibraryGallery {
 
                 // Cache hit or typed badge — NEVER a synchronous file
                 // read/decode inside a draw.
-                let now = cx.time();
-                let texture = self.cache.texture_for(cx, &tile.entry, now);
-                item.image(cx, ids!(card.thumb))
-                    .set_texture(cx, Some(texture));
+                let media = self.cache.media_for(cx, &tile.entry);
+                if let Some(mut thumb) = item
+                    .widget(cx, ids!(card.thumb))
+                    .borrow_mut::<AssetThumb>()
+                {
+                    thumb.set_media(cx, Some(media));
+                }
+                // A preview that landed since this tile last rendered: the
+                // tile is a CachedView, so force its offscreen re-render or
+                // the new texture never shows (until a scroll moves it).
+                if self.stale_tiles.remove(&tile.entry.meta.file) || self.cache.has_anims() {
+                    item.as_view().redraw_texture_cache();
+                }
                 item.draw_all_unscoped(cx);
             }
         }
@@ -780,63 +892,70 @@ impl Widget for LibraryGallery {
 }
 
 // ---------------------------------------------------------------------------
-// Library grid (wrapping thumbnail gallery on the Library surface)
+// Run tray (one horizontal, virtualized row of the selected run's artifacts)
 // ---------------------------------------------------------------------------
 
-/// Grid card layout constants; `grid_columns` derives the per-row card count
-/// from the width the grid actually received.
-pub const GRID_CARD_W: f64 = 150.0;
-pub const GRID_GAP: f64 = 8.0;
-/// Card slots available in the Row template (c1..c8); extra width on very
-/// wide windows becomes margin instead of a ninth column.
-pub const GRID_MAX_COLS: usize = 8;
-
-pub fn grid_columns(width: f64) -> usize {
-    (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
+/// One member of the selected run as the tray shows it.
+#[derive(Clone)]
+pub struct RunTrayMember {
+    pub entry: GalleryEntry,
+    /// Stage-ish label under the thumb ("matte", "mesh", "paint", "image").
+    pub kind: String,
 }
 
-/// Vertically scrolling thumbnail grid over the filtered local History. Rows
-/// are virtualized; each PortalList row holds up to [`GRID_MAX_COLS`] card
-/// slots and the visible column count follows the widget's real width.
+/// The selected run spread out: ONE row, horizontally scrolling and
+/// virtualized (imports bring hundreds of members), each chip a click-to-view
+/// / double-click-to-pin artifact. Same async preview rules as the History
+/// strip: decoded textures keyed by stable file id, never a synchronous read.
 #[derive(Script, ScriptHook, Widget)]
-pub struct LibraryGrid {
+pub struct RunTray {
     #[deref]
     view: View,
     #[rust]
-    entries: Vec<GalleryEntry>,
+    members: Vec<RunTrayMember>,
+    #[rust]
+    selected: Option<String>,
     #[rust]
     cache: PreviewCache,
-    /// Columns used on the last draw — the click handler needs the same
-    /// row-major mapping that layout used.
-    #[rust(4usize)]
-    pub last_cols: usize,
+    #[rust]
+    stale_chips: HashSet<String>,
 }
 
-impl LibraryGrid {
-    /// `clear_thumbnails` drops decoded textures so a replaced sidecar at the
-    /// same path re-decodes; filter-only refreshes keep the cache warm.
-    pub fn set_entries(&mut self, cx: &mut Cx, entries: Vec<GalleryEntry>, clear_thumbnails: bool) {
-        self.entries = entries;
-        if clear_thumbnails {
+impl RunTray {
+    pub fn set_members(
+        &mut self,
+        cx: &mut Cx,
+        members: Vec<RunTrayMember>,
+        selected: Option<String>,
+        clear_previews: bool,
+    ) {
+        self.members = members;
+        self.selected = selected;
+        if clear_previews {
             self.cache.clear();
         }
         self.view.redraw(cx);
     }
 
-    pub fn file_at(&self, index: usize) -> Option<String> {
-        self.entries.get(index).map(|entry| entry.meta.file.clone())
+    pub fn member_count(&self) -> usize {
+        self.members.len()
     }
 
-    /// Actual managed audio payload for a filtered grid card. This is never
-    /// the waveform preview sidecar.
-    pub fn file_drag_payload_path_at(&self, index: usize) -> Option<PathBuf> {
-        self.entries
-            .get(index)
-            .and_then(GalleryEntry::file_drag_payload_path)
+    pub fn file_at(&self, index: usize) -> Option<String> {
+        self.members.get(index).map(|m| m.entry.meta.file.clone())
     }
 
     pub fn take_preview_work(&mut self) -> Vec<(String, PreviewWork)> {
         self.cache.take_pending()
+    }
+
+    /// Reuse a decode another widget already has (the History strip usually
+    /// holds every member of the selected run).
+    pub fn seed_texture(&mut self, file: &str, texture: Texture) {
+        if self.cache.cached(file).is_none() {
+            self.cache.install(file.to_string(), None, texture);
+            self.stale_chips.insert(file.to_string());
+        }
     }
 
     pub fn install_preview(
@@ -846,6 +965,7 @@ impl LibraryGrid {
         source: Option<PathBuf>,
         texture: Texture,
     ) {
+        self.stale_chips.insert(file.clone());
         self.cache.install(file, source, texture);
         self.view.redraw(cx);
     }
@@ -858,104 +978,35 @@ impl LibraryGrid {
         frames: Vec<Texture>,
         fps: f32,
     ) {
+        self.stale_chips.insert(file.clone());
         self.cache.install_anim(file, source, frames, fps);
         self.view.redraw(cx);
         cx.new_next_frame();
     }
 }
 
-const GRID_SLOTS: usize = GRID_MAX_COLS;
-
-impl Widget for LibraryGrid {
+impl Widget for RunTray {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // The widget's area rect is one frame behind, which is fine: a resize
-        // re-chunks the rows on the next frame.
-        let width = self.view.area().rect(cx).size.x;
-        if width > GRID_CARD_W {
-            self.last_cols = grid_columns(width - 14.0); // scrollbar gutter
-        }
-        let cols = self.last_cols.max(1);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             let list_ref = step.as_portal_list();
             let Some(mut list) = list_ref.borrow_mut() else {
                 continue;
             };
-            if self.entries.is_empty() {
-                // Draw the empty card once; skipping later yielded ids ends
-                // the viewport-fill walk (see LibraryGallery).
-                list.set_item_range(cx, 0, 1);
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    if item_id == 0 {
-                        list.item(cx, item_id, id!(Empty)).draw_all_unscoped(cx);
-                    }
-                }
-                continue;
-            }
-            let rows = self.entries.len().div_ceil(cols);
-            list.set_item_range(cx, 0, rows);
-            while let Some(row_id) = list.next_visible_item(cx) {
-                // PortalList may ask past the declared item range while it
-                // tries to fill a viewport that is taller than the available
-                // content. Never instantiate those synthetic ids: an empty
-                // Row has zero-height hidden cells, so drawing it makes the
-                // list request another id forever (unbounded widget growth).
-                if row_id >= rows {
+            list.set_item_range(cx, 0, self.members.len());
+            while let Some(item_id) = list.next_visible_item(cx) {
+                let Some(member) = self.members.get(item_id).cloned() else {
                     continue;
+                };
+                let item = list.item(cx, item_id, id!(Chip));
+                item.label(cx, ids!(kind)).set_text(cx, &member.kind);
+                let selected = self.selected.as_deref() == Some(member.entry.meta.file.as_str());
+                item.as_view()
+                    .toggle_state(cx, selected, Animate::No, ids!(select.on), ids!(select.off));
+                let media = self.cache.media_for(cx, &member.entry);
+                if let Some(mut thumb) = item.widget(cx, ids!(thumb)).borrow_mut::<AssetThumb>() {
+                    thumb.set_media(cx, Some(media));
                 }
-                let (item, _existed) = list.item_with_existed(cx, row_id, id!(Row));
-                let slots = [
-                    ids!(c1), ids!(c2), ids!(c3), ids!(c4),
-                    ids!(c5), ids!(c6), ids!(c7), ids!(c8),
-                ];
-                let thumbs = [
-                    ids!(c1.grid_thumb), ids!(c2.grid_thumb), ids!(c3.grid_thumb),
-                    ids!(c4.grid_thumb), ids!(c5.grid_thumb), ids!(c6.grid_thumb),
-                    ids!(c7.grid_thumb), ids!(c8.grid_thumb),
-                ];
-                let sprites = [
-                    ids!(c1.grid_sprite), ids!(c2.grid_sprite), ids!(c3.grid_sprite),
-                    ids!(c4.grid_sprite), ids!(c5.grid_sprite), ids!(c6.grid_sprite),
-                    ids!(c7.grid_sprite), ids!(c8.grid_sprite),
-                ];
-                let titles = [
-                    ids!(c1.grid_title), ids!(c2.grid_title), ids!(c3.grid_title),
-                    ids!(c4.grid_title), ids!(c5.grid_title), ids!(c6.grid_title),
-                    ids!(c7.grid_title), ids!(c8.grid_title),
-                ];
-                let drag_handles = [
-                    ids!(c1.file_drag), ids!(c2.file_drag), ids!(c3.file_drag),
-                    ids!(c4.file_drag), ids!(c5.file_drag), ids!(c6.file_drag),
-                    ids!(c7.file_drag), ids!(c8.file_drag),
-                ];
-                for slot in 0..GRID_SLOTS {
-                    let index = row_id * cols + slot;
-                    let visible = slot < cols && index < self.entries.len();
-                    item.view(cx, slots[slot]).set_visible(cx, visible);
-                    if !visible {
-                        continue;
-                    }
-                    let entry = self.entries[index].clone();
-                    item.label(cx, titles[slot]).set_text(cx, &entry.meta.label);
-                    item.view(cx, drag_handles[slot]).set_visible(cx, true);
-                    item.view(cx, slots[slot]).toggle_state(
-                        cx,
-                        entry.selected,
-                        Animate::No,
-                        ids!(select.on),
-                        ids!(select.off),
-                    );
-                    // Cache hit or typed badge — never a synchronous decode.
-                    let now = cx.time();
-                    let texture = self.cache.texture_for(cx, &entry, now);
-                    let sprite = entry.is_sprite_preview();
-                    item.image(cx, thumbs[slot]).set_visible(cx, !sprite);
-                    item.image(cx, sprites[slot]).set_visible(cx, sprite);
-                    if sprite {
-                        item.image(cx, sprites[slot]).set_texture(cx, Some(texture));
-                    } else {
-                        item.image(cx, thumbs[slot]).set_texture(cx, Some(texture));
-                    }
-                }
+                self.stale_chips.remove(&member.entry.meta.file);
                 item.draw_all_unscoped(cx);
             }
         }
@@ -968,6 +1019,504 @@ impl Widget for LibraryGrid {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
         if matches!(event, Event::NextFrame(_)) && self.cache.has_anims() {
+            self.view.redraw(cx);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Catalog grid (the Library's tile view)
+// ---------------------------------------------------------------------------
+
+/// The card size the grid AIMS for. Columns are chosen so the real card
+/// width lands near it, and then the cards STRETCH to fill the row exactly —
+/// a fixed-size card leaves a gutter down the right that grows with every
+/// pixel of window the layout refuses to use.
+pub const GRID_CARD_W: f64 = 148.0;
+/// THE gap of the lattice — between columns AND between rows, one number,
+/// so the grid reads as an even grid instead of tight stacks in loose
+/// columns. Applied to each Row at draw time (spacing for the columns,
+/// bottom padding for the row below), because PortalList stacks its items
+/// with no spacing of its own and a DSL literal here already drifted from
+/// this constant once.
+pub const GRID_GAP: f64 = 10.0;
+/// Inner padding of a card, and the gap between its picture and its title.
+/// Kept tight: a library holds a LOT of tiles, so the picture gets the
+/// room and the chrome stays minimal. The SAME inset on all four sides —
+/// the picture sits in its own visible well, so aspect letterboxing lands
+/// inside the well instead of reading as accidental card padding, and the
+/// well's left edge is the title's left edge. MUST match the CatalogCell
+/// DSL literals (padding/spacing) — the card-height math here assumes them.
+pub const GRID_CARD_PAD: f64 = 6.0;
+pub const GRID_CARD_SPACING: f64 = 4.0;
+/// Height of the title zone: exactly two lines at the card's text size,
+/// reserved whether a title needs them or not. Cards in a row are then the
+/// same height, and no card's second line straddles its own bottom edge.
+/// The title Label is `max_lines: 2` + `text_overflow: Ellipsis`, so the
+/// layouter guarantees at most two rows ending in "…" — this constant only
+/// has to be tall enough for those two rows. From the real metrics (theme
+/// font_regular = IBM Plex, ascender 1.025-0.1 fudge, descender -0.275,
+/// line_spacing 1.2, and font_size in POINTS so 8pt = 10.67px): first line
+/// 12.8px + baseline advance 15.4px = 28.2px. 30 is that plus breathing
+/// room; 26 was one line and a half, which is exactly what a clipped second
+/// line looks like. Applied to the Label per draw, so the DSL cannot drift
+/// from the card-height math.
+pub const GRID_TITLE_H: f64 = 30.0;
+/// Picture aspect inside a card (the shape a rendered icon and a spectrogram
+/// tile both read well at). Nearer square than the old 0.62: rendered icons
+/// are square-ish, so a wide box put its slack into dead side gutters.
+pub const GRID_THUMB_ASPECT: f64 = 0.68;
+/// Card slots available in the Row template (c1..c8); extra width on very
+/// wide windows becomes margin instead of a ninth column.
+pub const GRID_MAX_COLS: usize = 8;
+
+/// The real card size for a panel `width` wide at `cols` per row: the row is
+/// divided exactly, so `cols` cards plus `cols - 1` gaps span the panel.
+pub fn grid_card_size(width: f64, cols: usize) -> (f64, f64) {
+    let cols = cols.max(1);
+    let gaps = GRID_GAP * (cols - 1) as f64;
+    let card_w = ((width - gaps) / cols as f64).max(64.0);
+    let thumb_h = ((card_w - 2.0 * GRID_CARD_PAD) * GRID_THUMB_ASPECT).max(24.0).round();
+    let card_h = GRID_CARD_PAD * 2.0 + thumb_h + GRID_CARD_SPACING + GRID_TITLE_H;
+    (card_w.round(), card_h.round())
+}
+
+// A cycling card's fallback cadence lives with the ONE interpreter:
+// `makepad_asset_widgets::THUMB_FALLBACK_FPS`.
+
+pub fn grid_columns(width: f64) -> usize {
+    (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
+}
+
+/// One catalog asset as the grid draws it. Everything here came from the
+/// server: there is no local row behind a tile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogTile {
+    /// Asset id, canonical string form — the identity textures and clicks
+    /// are keyed by.
+    pub asset: String,
+    pub title: String,
+    /// Kind and lifecycle: the short line a tile has room for.
+    pub meta: String,
+    /// Where it lives — alias and namespace. Rows have room for it.
+    pub alias: String,
+    /// When the catalog last touched this asset, already readable.
+    pub when: String,
+    pub selected: bool,
+}
+
+/// Which body the grid draws. Same tiles, same textures, same clicks — a
+/// wall of pictures, or one row per asset with its metadata beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CatalogLayout {
+    #[default]
+    Tiles,
+    Rows,
+}
+
+/// Wrapping thumbnail grid over a catalog result set.
+///
+/// The range is the SERVER's total, not the number of rows that happen to
+/// have arrived: the scrollbar covers the whole result set from the first
+/// paint, and rows still in flight draw as placeholders that fill in as the
+/// walk lands them. A grid that only ever showed its first page is exactly
+/// what "not even a complete list" meant.
+///
+/// Thumbnails are digest-named store objects, decoded once and held as
+/// textures keyed by asset id; a tile without one records a miss and shows
+/// the neutral card until the app installs it.
+#[derive(Script, ScriptHook, Widget)]
+pub struct CatalogGrid {
+    #[deref]
+    view: View,
+    #[rust]
+    tiles: Vec<CatalogTile>,
+    /// Rows the result set has server-side, capped by what the app will
+    /// hold. Never below `tiles.len()`.
+    #[rust]
+    total: usize,
+    #[rust]
+    layout: CatalogLayout,
+    /// What the empty state SAYS. Disconnected, searching, failed and
+    /// "nothing matches" are four different facts, and the card tells the
+    /// truth about which one it is.
+    #[rust]
+    empty_note: String,
+    /// One [`ThumbMedia`] per asset — decoded once, textures uploaded once,
+    /// interpreted by the shared `makepad_asset_widgets::thumb` path. A
+    /// still card binds its texture; a declared animation cycles at its
+    /// declared rate. The cache lives HERE (not in the cards) because
+    /// PortalList recycles items: a card is re-bound to a different asset
+    /// every scroll.
+    #[rust]
+    media: HashMap<String, ThumbMedia>,
+    /// Set while the last draw actually had a cycling card ON SCREEN — an
+    /// off-screen sprite must not keep the app awake.
+    #[rust]
+    animating: bool,
+    /// Assets whose thumbnail the last draw wanted and did not have.
+    #[rust]
+    wanted: Vec<String>,
+    /// Columns used on the last draw — the click handler needs the same
+    /// row-major mapping that layout used.
+    #[rust(4usize)]
+    pub last_cols: usize,
+    /// Set when the RESULT SET changed rather than its contents: the next
+    /// draw pins the viewport back to the top, so a narrowed filter never
+    /// leaves the user staring past the end of the new results.
+    #[rust]
+    reset_scroll: bool,
+}
+
+impl CatalogGrid {
+    /// `total` is the server's match count for the current filter; the grid
+    /// reserves space for it while the pages walk in.
+    pub fn set_tiles(
+        &mut self,
+        cx: &mut Cx,
+        tiles: Vec<CatalogTile>,
+        total: usize,
+        layout: CatalogLayout,
+    ) {
+        let total = total.max(tiles.len());
+        if self.tiles != tiles || self.total != total || self.layout != layout {
+            self.tiles = tiles;
+            self.total = total;
+            self.layout = layout;
+            self.view.redraw(cx);
+        }
+    }
+
+    pub fn set_empty_note(&mut self, cx: &mut Cx, note: String) {
+        if self.empty_note != note {
+            self.empty_note = note;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// Cards per row for the layout in force: a row body is one asset wide.
+    pub fn columns(&self) -> usize {
+        match self.layout {
+            CatalogLayout::Tiles => self.last_cols.max(1),
+            CatalogLayout::Rows => 1,
+        }
+    }
+
+    /// Drop every decoded thumbnail (a wipe, or a reconnect to another
+    /// server): the digests behind them no longer describe this catalog.
+    pub fn clear_thumbnails(&mut self, cx: &mut Cx) {
+        self.media.clear();
+        self.wanted.clear();
+        self.view.redraw(cx);
+    }
+
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        self.reset_scroll = true;
+        self.view.redraw(cx);
+    }
+
+    /// Assets the last draw wanted a picture for, newest request last.
+    pub fn take_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.wanted)
+    }
+
+    pub fn install_thumb(&mut self, cx: &mut Cx, asset: String, texture: Texture) {
+        self.media.insert(asset, ThumbMedia::still(texture));
+        self.view.redraw(cx);
+    }
+
+    /// A declared animation's cells, in declared order at the declared
+    /// rate. One frame is a still that happens to be packed.
+    pub fn install_anim(&mut self, cx: &mut Cx, asset: String, frames: Vec<Texture>, fps: f32) {
+        if frames.is_empty() {
+            return;
+        }
+        self.media.insert(asset, ThumbMedia::anim(frames, fps));
+        self.view.redraw(cx);
+        cx.new_next_frame();
+    }
+
+    pub fn has_thumb(&self, asset: &str) -> bool {
+        self.media.contains_key(asset)
+    }
+
+    /// The decoded picture for an asset, if the grid has it — the detail
+    /// rail shows the same one at a size you can look at, rather than
+    /// decoding a second copy of the same object. An animation's still is
+    /// its first frame.
+    pub fn thumb_of(&self, asset: &str) -> Option<Texture> {
+        self.media.get(asset).map(|media| media.first().clone())
+    }
+
+    pub fn tile_at(&self, index: usize) -> Option<CatalogTile> {
+        self.tiles.get(index).cloned()
+    }
+
+    pub fn rows(&self, cols: usize) -> usize {
+        grid_rows(self.total, cols)
+    }
+}
+
+/// Rows a result set of `total` tiles needs at `cols` per row. Always at
+/// least one, so an empty catalog still has a row to draw its empty card in.
+pub fn grid_rows(total: usize, cols: usize) -> usize {
+    total.div_ceil(cols.max(1)).max(1)
+}
+
+/// Record a tile's missing thumbnail exactly once per pass: a card drawn on
+/// every frame must not queue the same fetch on every frame.
+pub fn record_want(wanted: &mut Vec<String>, asset: &str) {
+    if !wanted.iter().any(|have| have == asset) {
+        wanted.push(asset.to_string());
+    }
+}
+
+impl CatalogGrid {
+    /// One asset per row: its picture on the left, everything the catalog
+    /// knows about it to the right. Same tiles and same textures as the
+    /// tile wall — only the shape differs.
+    fn draw_rows(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
+        let mut animating = false;
+        if self.reset_scroll {
+            self.reset_scroll = false;
+            list.set_first_id_and_scroll(0, 0.0);
+        } else if list.first_id() >= self.total {
+            list.set_first_id_and_scroll(self.total.saturating_sub(1), 0.0);
+        }
+        list.set_item_range(cx, 0, self.total);
+        while let Some(index) = list.next_visible_item(cx) {
+            if index >= self.total {
+                continue;
+            }
+            let item = list.item(cx, index, id!(ListRow));
+            match self.tiles.get(index) {
+                Some(tile) => {
+                    item.label(cx, ids!(lr_card.lr_title)).set_text(cx, &tile.title);
+                    item.label(cx, ids!(lr_card.lr_meta)).set_text(cx, &tile.meta);
+                    item.label(cx, ids!(lr_card.lr_alias)).set_text(cx, &tile.alias);
+                    item.label(cx, ids!(lr_card.lr_when)).set_text(cx, &tile.when);
+                    item.view(cx, ids!(lr_card)).toggle_state(
+                        cx,
+                        tile.selected,
+                        Animate::No,
+                        ids!(select.on),
+                        ids!(select.off),
+                    );
+                    let media = self.media.get(&tile.asset).cloned();
+                    match &media {
+                        Some(media) => animating |= media.is_animated(),
+                        None => record_want(&mut self.wanted, &tile.asset),
+                    }
+                    if let Some(mut thumb) = item
+                        .widget(cx, ids!(lr_card.lr_thumb))
+                        .borrow_mut::<AssetThumb>()
+                    {
+                        thumb.set_media(cx, media);
+                    }
+                }
+                None => {
+                    item.label(cx, ids!(lr_card.lr_title)).set_text(cx, "…");
+                    item.label(cx, ids!(lr_card.lr_meta)).set_text(cx, "");
+                    item.label(cx, ids!(lr_card.lr_alias)).set_text(cx, "");
+                    item.label(cx, ids!(lr_card.lr_when)).set_text(cx, "");
+                    if let Some(mut thumb) = item
+                        .widget(cx, ids!(lr_card.lr_thumb))
+                        .borrow_mut::<AssetThumb>()
+                    {
+                        thumb.set_media(cx, None);
+                    }
+                }
+            }
+            item.draw_all_unscoped(cx);
+        }
+        self.animating = animating;
+    }
+}
+
+impl Widget for CatalogGrid {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // The width the grid is being GIVEN this frame, from the turtle it
+        // is about to walk — not from its own area rect, which is a frame
+        // behind and, once the cards below are sized from it, would feed
+        // their width back into itself and collapse.
+        let width = {
+            let turtle = cx.turtle().rect().size.x;
+            if turtle > 1.0 { turtle } else { self.view.area().rect(cx).size.x }
+        };
+        // Room the cards actually get, once the scrollbar has its gutter.
+        let inner = (width - 14.0).max(0.0);
+        let sized = width > GRID_CARD_W;
+        if sized {
+            self.last_cols = grid_columns(inner);
+        }
+        let cols = self.columns();
+        // The cards then STRETCH to divide that room exactly, so a row spans
+        // the panel at every window width instead of leaving a gutter that
+        // grows with the window. Before the layout has given the grid a
+        // credible width, the template's own size stands — a card sized from
+        // a width of nothing is a card nobody can read.
+        let (card_w, card_h) = grid_card_size(inner, cols);
+        let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
+        // `animating` records whether a CYCLING card was actually on screen
+        // this pass; the cards themselves pick frames against one shared
+        // clock inside AssetThumb.
+        let mut animating = false;
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let list_ref = step.as_portal_list();
+            let Some(mut list) = list_ref.borrow_mut() else {
+                continue;
+            };
+            if self.total == 0 {
+                // Draw the empty card once; skipping later yielded ids ends
+                // the viewport-fill walk.
+                list.set_item_range(cx, 0, 1);
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if item_id == 0 {
+                        let item = list.item(cx, item_id, id!(Empty));
+                        item.label(cx, ids!(empty_note))
+                            .set_text(cx, &self.empty_note);
+                        item.draw_all_unscoped(cx);
+                    }
+                }
+                continue;
+            }
+            if self.layout == CatalogLayout::Rows {
+                self.draw_rows(cx, &mut list);
+                continue;
+            }
+            let rows = self.rows(cols);
+            if self.reset_scroll {
+                self.reset_scroll = false;
+                list.set_first_id_and_scroll(0, 0.0);
+            } else if list.first_id() >= rows {
+                list.set_first_id_and_scroll(rows - 1, 0.0);
+            }
+            list.set_item_range(cx, 0, rows);
+            let slots = [
+                ids!(c1), ids!(c2), ids!(c3), ids!(c4),
+                ids!(c5), ids!(c6), ids!(c7), ids!(c8),
+            ];
+            let titles = [
+                ids!(c1.grid_title), ids!(c2.grid_title), ids!(c3.grid_title),
+                ids!(c4.grid_title), ids!(c5.grid_title), ids!(c6.grid_title),
+                ids!(c7.grid_title), ids!(c8.grid_title),
+            ];
+            let thumbs = [
+                ids!(c1.grid_thumb), ids!(c2.grid_thumb), ids!(c3.grid_thumb),
+                ids!(c4.grid_thumb), ids!(c5.grid_thumb), ids!(c6.grid_thumb),
+                ids!(c7.grid_thumb), ids!(c8.grid_thumb),
+            ];
+            let thumb_boxes = [
+                ids!(c1.grid_thumb_box), ids!(c2.grid_thumb_box), ids!(c3.grid_thumb_box),
+                ids!(c4.grid_thumb_box), ids!(c5.grid_thumb_box), ids!(c6.grid_thumb_box),
+                ids!(c7.grid_thumb_box), ids!(c8.grid_thumb_box),
+            ];
+            while let Some(row_id) = list.next_visible_item(cx) {
+                if row_id >= rows {
+                    continue;
+                }
+                let item = list.item(cx, row_id, id!(Row));
+                // The lattice: the gap between columns is the gap between
+                // rows, from the same constant the card-width math used.
+                // PortalList stacks items with no spacing of its own, so the
+                // row gap is the row's own bottom padding.
+                if sized {
+                    let mut row_view = item.clone();
+                    // `Inset` by its full module path: the eval scope of
+                    // script_apply_eval! has `mod` but not the widget
+                    // prelude's aliases.
+                    script_apply_eval!(cx, row_view, {
+                        spacing: #(GRID_GAP)
+                        padding: mod.turtle.Inset{bottom: #(GRID_GAP)}
+                    });
+                }
+                for slot in 0..GRID_MAX_COLS {
+                    let index = row_id * cols + slot;
+                    let visible = slot < cols && index < self.total;
+                    item.view(cx, slots[slot]).set_visible(cx, visible);
+                    if !visible {
+                        continue;
+                    }
+                    // Stretch this card to its share of the row, and give
+                    // its picture the height that keeps the aspect.
+                    if sized {
+                        let mut cell = item.view(cx, slots[slot]);
+                        script_apply_eval!(cx, cell, {
+                            width: #(card_w)
+                            height: #(card_h)
+                        });
+                        let mut picture = item.view(cx, thumb_boxes[slot]);
+                        script_apply_eval!(cx, picture, {
+                            height: #(thumb_h)
+                        });
+                        // The title zone is the same GRID_TITLE_H the card
+                        // height reserved — applied here so the two cannot
+                        // drift into a caption straddling the card's edge.
+                        let mut title = item.label(cx, titles[slot]);
+                        script_apply_eval!(cx, title, {
+                            height: #(GRID_TITLE_H)
+                        });
+                    }
+                    match self.tiles.get(index) {
+                        Some(tile) => {
+                            item.label(cx, titles[slot]).set_text(cx, &tile.title);
+                            item.view(cx, slots[slot]).toggle_state(
+                                cx,
+                                tile.selected,
+                                Animate::No,
+                                ids!(select.on),
+                                ids!(select.off),
+                            );
+                            // The card draws whatever its media DECLARES —
+                            // still, or cycling at its declared rate. The
+                            // pixels were uploaded once, at decode.
+                            let media = self.media.get(&tile.asset).cloned();
+                            match &media {
+                                Some(media) => animating |= media.is_animated(),
+                                None => record_want(&mut self.wanted, &tile.asset),
+                            }
+                            if let Some(mut thumb) =
+                                item.widget(cx, thumbs[slot]).borrow_mut::<AssetThumb>()
+                            {
+                                thumb.set_media(cx, media);
+                            }
+                        }
+                        // Reserved space for a row the walk has not reached
+                        // yet: an honest empty card, never a stand-in for
+                        // some other asset.
+                        None => {
+                            item.label(cx, titles[slot]).set_text(cx, "…");
+                            if let Some(mut thumb) =
+                                item.widget(cx, thumbs[slot]).borrow_mut::<AssetThumb>()
+                            {
+                                thumb.set_media(cx, None);
+                            }
+                            item.view(cx, slots[slot]).toggle_state(
+                                cx,
+                                false,
+                                Animate::No,
+                                ids!(select.on),
+                                ids!(select.off),
+                            );
+                        }
+                    }
+                }
+                item.draw_all_unscoped(cx);
+            }
+        }
+        if self.layout == CatalogLayout::Tiles {
+            self.animating = animating;
+        }
+        // Only a visible cycling card asks for another frame.
+        if self.animating {
+            cx.new_next_frame();
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        if matches!(event, Event::NextFrame(_)) && self.animating {
             self.view.redraw(cx);
         }
     }
@@ -1027,7 +1576,7 @@ pub enum StoreRow {
     },
     /// Generic titled record (server operation, game, room, namespace).
     Record { title: String, meta: String },
-    /// Server catalog asset row (Library → Server, connected).
+    /// Server catalog asset row (the Library surface, connected).
     Asset {
         title: String,
         meta: String,
@@ -1047,6 +1596,10 @@ pub struct StoreListPanel {
     view: View,
     #[rust]
     pub rows: Vec<StoreRow>,
+    /// Set when the RESULT SET changed rather than its contents; the next
+    /// draw pins the viewport back to the first row (see `LibraryGrid`).
+    #[rust]
+    reset_scroll: bool,
 }
 
 impl StoreListPanel {
@@ -1055,6 +1608,12 @@ impl StoreListPanel {
             self.rows = rows;
             self.view.redraw(cx);
         }
+    }
+
+    /// Show the first row again on the next draw.
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        self.reset_scroll = true;
+        self.view.redraw(cx);
     }
 
     pub fn row_at(&self, index: usize) -> Option<StoreRow> {
@@ -1069,7 +1628,14 @@ impl Widget for StoreListPanel {
             let Some(mut list) = list_ref.borrow_mut() else {
                 continue;
             };
-            list.set_item_range(cx, 0, self.rows.len().max(1));
+            let count = self.rows.len().max(1);
+            if self.reset_scroll {
+                self.reset_scroll = false;
+                list.set_first_id_and_scroll(0, 0.0);
+            } else if list.first_id() >= count {
+                list.set_first_id_and_scroll(count - 1, 0.0);
+            }
+            list.set_item_range(cx, 0, count);
             while let Some(item_id) = list.next_visible_item(cx) {
                 let Some(row) = self.rows.get(item_id).cloned() else {
                     continue;
@@ -1467,6 +2033,9 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
             "Catalog event feed is starting…".into()
         }));
     }
+    // One clock reading for the whole block: fifty rows of one feed must
+    // not disagree about how long ago "now" was.
+    let now = now_ms();
     for event in store.events.iter().take(50) {
         let subject = event
             .alias
@@ -1476,70 +2045,142 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
             .unwrap_or_else(|| event.namespace.clone());
         rows.push(StoreRow::Record {
             title: format!("#{} · {}", event.seq, event.kind.as_str()),
-            meta: format!("{} · {} · {} ms", event.namespace, subject, event.ts_ms),
+            meta: format!(
+                "{} · {} · {}",
+                event.namespace,
+                subject,
+                format_when(event.ts_ms, now)
+            ),
         });
     }
     rows
 }
 
-/// Library → Server catalog rows over the real typed search response.
-pub fn catalog_rows(store: &AssetStore) -> Vec<StoreRow> {
+/// Library TILES over the real typed search response: one card per hit,
+/// in the order the server ranked them. Kind and lifecycle ride the meta
+/// line — a picture plus a name is what a person scans a catalog with.
+pub fn catalog_tiles(store: &AssetStore) -> Vec<CatalogTile> {
+    let Some(results) = store.search.ready() else {
+        return Vec::new();
+    };
+    // One clock reading for the whole page of rows.
+    let now = now_ms();
+    results
+        .hits
+        .iter()
+        .map(|hit| {
+            let kind = hit.kind.map(server_kind_label).unwrap_or("asset");
+            let live = if hit.live { "live" } else { "not live" };
+            let alias = hit
+                .alias
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{} · no alias", hit.namespace));
+            CatalogTile {
+                asset: hit.asset_id.to_string(),
+                title: hit.title.clone(),
+                meta: format!("{kind} · {live}"),
+                alias,
+                // A server too old to send the stamp says nothing rather
+                // than claiming 1970.
+                when: if hit.updated_ms == 0 {
+                    String::new()
+                } else {
+                    format_when(hit.updated_ms, now)
+                },
+                selected: store.selected == Some(hit.asset_id),
+            }
+        })
+        .collect()
+}
+
+/// What the Library says when it has no tiles to show. Disconnected,
+/// searching, failed and "nothing matches" are four different facts, and
+/// none of them is an invitation to a local library that no longer exists.
+pub fn catalog_empty_note(store: &AssetStore) -> String {
     if !store.connected() {
-        return vec![
-            StoreRow::Disconnected {
-                title: "No server catalog".into(),
-                detail: store.status_label(),
-            },
-            StoreRow::Note(
-                "Local History stays fully usable on the Local tab; nothing local is promoted into this view.".into(),
-            ),
-        ];
+        return format!(
+            "No catalog: {}. Imports and generated artifacts appear here once they are published.",
+            store.status_label()
+        );
     }
     match &store.search {
-        Remote::Idle => vec![StoreRow::Note("Catalog browse has not started yet.".into())],
-        Remote::Loading => vec![StoreRow::Note("Searching the server catalog…".into())],
-        Remote::Failed(error) => vec![StoreRow::Disconnected {
-            title: "Catalog request failed".into(),
-            detail: error.clone(),
-        }],
-        Remote::Ready(results) if results.hits.is_empty() => vec![StoreRow::Note(
-            "No catalog assets match the current filters.".into(),
-        )],
-        Remote::Ready(results) => {
-            let mut rows = results
-                .hits
-                .iter()
-                .map(|hit| {
-                    let kind = hit
-                        .kind
-                        .map(server_kind_label)
-                        .unwrap_or("kind unknown");
-                    let alias = hit
-                        .alias
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "no alias".into());
-                    let lifecycle = if hit.live { "published" } else { "not live" };
-                    StoreRow::Asset {
-                        title: format!("{} · {kind}", hit.title),
-                        meta: format!(
-                            "{alias} · {} · {lifecycle} · {}",
-                            hit.namespace, hit.snippet
-                        ),
-                        selected: store.selected == Some(hit.asset_id),
-                        action: RowAction::SelectAsset(hit.asset_id.to_string()),
-                    }
-                })
-                .collect::<Vec<_>>();
-            if results.more {
-                rows.push(StoreRow::Note(format!(
-                    "Showing {} of {} matches · more available on the server.",
-                    results.hits.len(), results.total
-                )));
-            }
-            rows
+        Remote::Idle => "Catalog browse has not started yet.".into(),
+        Remote::Loading => "Searching the catalog…".into(),
+        Remote::Failed(error) => format!("Catalog request failed: {error}"),
+        Remote::Ready(results) if results.hits.is_empty() => {
+            "Nothing in the catalog matches the current filters.".into()
         }
+        Remote::Ready(_) => String::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Times a person can read
+// ---------------------------------------------------------------------------
+
+/// Epoch milliseconds as a date and time.
+///
+/// The server stamps everything in epoch ms, and `1787176179804 ms` on a
+/// detail rail tells a reader nothing. Rendered UTC and LABELLED as such
+/// unless the host has told the platform what the local offset is
+/// (`set_script_local_utc_offset_secs`, unset by default) — a timestamp
+/// that silently claims to be local while it is not is worse than one that
+/// says which zone it is in.
+pub fn format_epoch_ms(ms: u64) -> String {
+    let offset = makepad_platform::script::timer::script_local_utc_offset_secs();
+    let secs = (ms / 1000) as i64 + offset;
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    let zone = if offset == 0 { "Z" } else { "" };
+    format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}{zone}")
+}
+
+/// How long ago, in the coarsest unit that still says something: "just
+/// now", "9 min ago", "2 h ago", "3 d ago". A stamp in the future (clock
+/// skew between this app and a server) says so rather than printing a
+/// negative age.
+pub fn format_age(ms: u64, now_ms: u64) -> String {
+    if ms > now_ms {
+        return "in the future".to_string();
+    }
+    let secs = (now_ms - ms) / 1000;
+    match secs {
+        0..=44 => "just now".to_string(),
+        45..=5_399 => format!("{} min ago", (secs + 30) / 60),
+        5_400..=86_399 => format!("{} h ago", (secs + 1_800) / 3_600),
+        _ => format!("{} d ago", (secs + 43_200) / 86_400),
+    }
+}
+
+/// Both, as UI text: when it happened and how long ago that was.
+pub fn format_when(ms: u64, now_ms: u64) -> String {
+    format!("{} · {}", format_epoch_ms(ms), format_age(ms, now_ms))
+}
+
+/// Wall clock now, in epoch milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// Days since the epoch to (year, month, day) — Howard Hinnant's
+/// `civil_from_days`, the same one the platform's script clock uses.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 pub fn short_digest(digest: &str) -> &str {
@@ -1563,7 +2204,7 @@ mod tests {
             "a weathered fishing trawler",
             &["text", "image"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -1630,39 +2271,179 @@ mod tests {
         )));
     }
 
+    /// The Library says which of the four empty states it is in. None of
+    /// them points at a local library, and a connected catalog with rows
+    /// says nothing at all — the tiles are the answer.
     #[test]
-    fn catalog_rows_are_disconnected_without_session_and_real_with_search_page() {
+    fn the_empty_state_names_the_fact_it_is_reporting() {
         let mut store = AssetStore::default();
-        assert!(matches!(
-            catalog_rows(&store)[0],
-            StoreRow::Disconnected { .. }
-        ));
+        let disconnected = catalog_empty_note(&store);
+        assert!(disconnected.starts_with("No catalog:"), "{disconnected}");
 
-        let asset_id = AssetId::from_bytes([7; 16]);
         store.server = Some(ServerInfo {
             label: "asset.example:443".into(),
             server_id: [9; 16],
         });
+        store.search = Remote::Idle;
+        assert!(catalog_empty_note(&store).contains("has not started"));
+        store.search = Remote::Loading;
+        assert!(catalog_empty_note(&store).contains("Searching"));
+        store.search = Remote::Failed("boom".into());
+        assert!(catalog_empty_note(&store).contains("boom"));
         store.search = Remote::Ready(SearchResults {
-            hits: vec![CatalogHit {
-                asset_id,
-                namespace: "game".into(),
-                kind: Some(AssetKind::Vehicle),
-                title: "Fishing Trawler".into(),
-                snippet: "weathered coast vehicle".into(),
-                score: 42,
-                live: true,
-                alias: Some("game/trawler".parse().unwrap()),
-            }],
+            hits: Vec::new(),
+            total: 0,
+            more: false,
+            facets: Vec::new(),
+        });
+        assert!(catalog_empty_note(&store).contains("Nothing in the catalog"));
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![hit_named(1, "Crate", true)],
             total: 1,
             more: false,
+            facets: Vec::new(),
         });
-        let rows = catalog_rows(&store);
-        assert!(matches!(
-            &rows[0],
-            StoreRow::Asset { title, action: RowAction::SelectAsset(id), .. }
-                if title.contains("Fishing Trawler") && id == &asset_id.to_string()
-        ));
+        assert!(catalog_empty_note(&store).is_empty(), "rows speak for themselves");
+
+        for note in [
+            catalog_empty_note(&AssetStore::default()),
+            disconnected,
+        ] {
+            let lower = note.to_ascii_lowercase();
+            assert!(
+                !lower.contains("local tab") && !lower.contains("local history"),
+                "an empty catalog still must not advertise a local library: {note}"
+            );
+        }
+    }
+
+    fn hit_named(n: u8, title: &str, live: bool) -> CatalogHit {
+        CatalogHit {
+            asset_id: AssetId::from_bytes([n; 16]),
+            namespace: "gen".into(),
+            kind: Some(AssetKind::Prop),
+            title: title.into(),
+            snippet: "a thing".into(),
+            score: 10,
+            live,
+            alias: None,
+            updated_ms: 1_787_000_000_000,
+        }
+    }
+
+    /// A tile is one catalog hit: its identity is the asset id (which is
+    /// what the thumbnail and the click are keyed by), and nothing on it
+    /// comes from a local row.
+    #[test]
+    fn tiles_are_catalog_hits_keyed_by_asset_id() {
+        let mut store = AssetStore::default();
+        assert!(catalog_tiles(&store).is_empty(), "no session, no tiles");
+        store.server = Some(ServerInfo {
+            label: "asset.example:443".into(),
+            server_id: [9; 16],
+        });
+        let selected = AssetId::from_bytes([2; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![hit_named(1, "Crate", true), hit_named(2, "Barrel", false)],
+            total: 2,
+            more: false,
+            facets: Vec::new(),
+        });
+        store.selected = Some(selected);
+        let tiles = catalog_tiles(&store);
+        assert_eq!(tiles.len(), 2);
+        assert_eq!(tiles[0].asset, AssetId::from_bytes([1; 16]).to_string());
+        assert_eq!(tiles[0].title, "Crate");
+        assert_eq!(tiles[0].meta, "prop · live", "kind and lifecycle");
+        assert!(!tiles[0].selected);
+        assert_eq!(tiles[1].meta, "prop · not live", "lifecycle is honest");
+        assert!(tiles[1].selected, "the selected hit is the selected tile");
+        // A row has room for where it lives and when it last changed.
+        assert!(tiles[0].alias.contains("gen"), "{}", tiles[0].alias);
+        assert!(
+            tiles[0].when.starts_with("2026-"),
+            "a readable date, not epoch ms: {}",
+            tiles[0].when
+        );
+        // A server too old to stamp the row says nothing rather than 1970.
+        let mut old_server = store.search.ready().unwrap().clone();
+        old_server.hits[0].updated_ms = 0;
+        store.search = Remote::Ready(old_server);
+        assert!(catalog_tiles(&store)[0].when.is_empty());
+    }
+
+    /// The grid reserves space for the SERVER's match count, not for the
+    /// rows that happen to have arrived: the scrollbar covers the whole
+    /// result set from the first paint, which is what "not even a complete
+    /// list" was about.
+    #[test]
+    fn the_grid_row_range_covers_the_whole_result_set() {
+        assert_eq!(grid_rows(0, 4), 1, "an empty catalog still draws one row");
+        assert_eq!(grid_rows(1000, 4), 250);
+        assert_eq!(grid_rows(1000, 8), 125);
+        assert_eq!(grid_rows(1000, 3), 334, "a partial last row still counts");
+        assert_eq!(grid_rows(1000, 0), 1000, "a zero column count cannot divide by zero");
+        // Columns follow the width the grid was given, bounded by the card
+        // slots the row template has.
+        assert_eq!(grid_columns(0.0), 1);
+        assert_eq!(grid_columns(GRID_CARD_W), 1);
+        assert_eq!(grid_columns(2.0 * GRID_CARD_W + GRID_GAP), 2);
+        assert_eq!(grid_columns(10_000.0), GRID_MAX_COLS);
+    }
+
+    /// Cards divide the row EXACTLY: whatever the window width, `cols`
+    /// cards plus their gaps span the panel, so there is never a gutter down
+    /// the right that grows as the window does. And a card's height follows
+    /// its width, so its picture keeps its shape and its two-line title zone
+    /// is always there.
+    #[test]
+    fn cards_stretch_to_fill_the_row_at_every_width() {
+        for width in [320.0f64, 641.0, 900.0, 1280.0, 1739.0, 2560.0] {
+            let cols = grid_columns(width);
+            let (card_w, card_h) = grid_card_size(width, cols);
+            let spanned = card_w * cols as f64 + GRID_GAP * (cols - 1) as f64;
+            assert!(
+                (spanned - width).abs() <= cols as f64,
+                "{cols} cards of {card_w} span {spanned} of {width}"
+            );
+            // The card is a picture plus a fixed two-line caption.
+            let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
+            assert!(thumb_h > 0.0, "the picture has room at {width}");
+            let expect = ((card_w - 2.0 * GRID_CARD_PAD) * GRID_THUMB_ASPECT).round();
+            assert!(
+                (thumb_h - expect).abs() <= 1.0,
+                "the picture keeps its aspect at {width}: {thumb_h} vs {expect}"
+            );
+            // Cards stay near the size the grid aims for rather than
+            // stretching to twice it before adding a column.
+            assert!(
+                card_w >= GRID_CARD_W * 0.75 || cols == 1,
+                "{card_w} is not a card at {width}"
+            );
+            assert!(card_w <= GRID_CARD_W * 2.0 || cols == GRID_MAX_COLS);
+        }
+        // A panel narrower than one card still gets one card, not zero.
+        assert_eq!(grid_columns(0.0), 1);
+        assert!(grid_card_size(0.0, 1).0 >= 64.0);
+    }
+
+    /// Thumbnails are bound by asset id — the identity of the digest-named
+    /// store object behind the tile — so a picture can never land on the
+    /// wrong card, and a tile without one asks for it exactly once.
+    #[test]
+    fn thumbnails_bind_by_asset_and_are_asked_for_once() {
+        let a = AssetId::from_bytes([1; 16]).to_string();
+        let b = AssetId::from_bytes([2; 16]).to_string();
+        let mut wanted = Vec::new();
+        // Every frame redraws the same cards; the fetch is queued once.
+        for _ in 0..5 {
+            record_want(&mut wanted, &a);
+            record_want(&mut wanted, &b);
+        }
+        assert_eq!(wanted, vec![a.clone(), b.clone()]);
+        let asked = std::mem::take(&mut wanted);
+        assert_eq!(asked, vec![a, b]);
+        assert!(wanted.is_empty(), "a miss is handed over once");
     }
 
     fn entry(file: &str, group_id: Option<&str>, group_label: Option<&str>) -> GalleryEntry {
@@ -1677,6 +2458,7 @@ mod tests {
                 group_label: group_label.map(Into::into),
                 tags: None,
                 enhanced_tags: None,
+                product: None,
             },
             path: PathBuf::from(file),
             preview_path: None,
@@ -1718,6 +2500,26 @@ mod tests {
                 "lib-6.txt:None:1",
             ]
         );
+    }
+
+    #[test]
+    fn paint_run_tile_opens_the_textured_glb_not_the_manifest() {
+        let mut manifest = entry("lib-5.json", Some("run-pbr"), Some("pbr"));
+        manifest.meta.content_type = "application/json".into();
+        manifest.meta.domain = "paint".into();
+        let mut albedo = entry("lib-4.png", Some("run-pbr"), Some("pbr"));
+        albedo.meta.domain = "paint".into();
+        let mut painted = entry("lib-3.glb", Some("run-pbr"), Some("pbr"));
+        painted.meta.content_type = "model/gltf-binary".into();
+        painted.meta.domain = "paint".into();
+        let mut mesh = entry("lib-2.glb", Some("run-pbr"), Some("pbr"));
+        mesh.meta.content_type = "model/gltf-binary".into();
+        mesh.meta.domain = "mesh".into();
+        let tiles = history_tiles(vec![manifest, albedo, painted, mesh]);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].count, 4);
+        assert_eq!(tiles[0].entry.meta.file, "lib-3.glb");
+        assert_eq!(tiles[0].entry.meta.domain, "paint");
     }
 
     #[test]
@@ -1874,6 +2676,43 @@ mod tests {
     }
 
     #[test]
+    fn input_tray_extra_references_dedupe_cap_and_sweep() {
+        let mut tray = InputTray::default();
+        let mk = |name: &str| {
+            let mut e = entry(name, Some("run-a"), Some("image"));
+            e.meta.content_type = "image/png".into();
+            e.path = PathBuf::from(format!("/library/{name}"));
+            input_asset(&e)
+        };
+        // No primary yet: the first "add reference" becomes the primary.
+        assert!(tray.add_extra(mk("a.png")));
+        assert_eq!(tray.current().map(|a| a.file.as_str()), Some("a.png"));
+        assert!(tray.extras().is_empty());
+        // Extras dedupe against the primary and each other, and cap.
+        assert!(!tray.add_extra(mk("a.png")));
+        assert!(tray.add_extra(mk("b.png")));
+        assert!(!tray.add_extra(mk("b.png")));
+        assert!(tray.add_extra(mk("c.png")));
+        assert!(tray.add_extra(mk("d.png")));
+        assert!(!tray.add_extra(mk("e.png")), "capped at MAX_EXTRAS");
+        assert_eq!(tray.extras().len(), InputTray::MAX_EXTRAS);
+        // Promoting an extra to primary removes it from the extras.
+        assert!(tray.select(mk("c.png")));
+        assert_eq!(tray.current().map(|a| a.file.as_str()), Some("c.png"));
+        assert_eq!(
+            tray.extras().iter().map(|a| a.file.as_str()).collect::<Vec<_>>(),
+            vec!["b.png", "d.png"]
+        );
+        // Deletion sweep drops only the vanished reference.
+        assert!(tray.retain_existing(|file| file != "b.png"));
+        assert_eq!(tray.extras().len(), 1);
+        assert!(tray.remove_extra(0));
+        assert!(!tray.remove_extra(0));
+        assert!(tray.clear());
+        assert!(tray.current().is_none() && tray.extras().is_empty());
+    }
+
+    #[test]
     fn input_tray_pins_the_exact_payload_path_and_type_from_a_history_tile() {
         // Clicking the compact History tile selects the run's REPRESENTATIVE
         // (final) artifact; pinning it as input must carry the exact managed
@@ -2019,13 +2858,48 @@ mod tests {
         assert!(!cards[1].selected);
     }
 
+    /// `1787176179804 ms` on a detail rail tells a reader nothing. Times are
+    /// rendered as a date and a time, labelled with the zone they are in.
     #[test]
-    fn grid_columns_track_width_within_slot_bounds() {
-        assert_eq!(grid_columns(0.0), 1);
-        assert_eq!(grid_columns(GRID_CARD_W), 1);
-        assert_eq!(grid_columns(2.0 * GRID_CARD_W + GRID_GAP), 2);
-        assert_eq!(grid_columns(4.0 * (GRID_CARD_W + GRID_GAP)), 4);
-        assert_eq!(grid_columns(10_000.0), GRID_MAX_COLS);
+    fn epoch_milliseconds_become_a_date_and_a_time() {
+        // The stamp from the reported screenshot.
+        assert_eq!(format_epoch_ms(1_787_176_179_804), "2026-08-19 21:49:39Z");
+        assert_eq!(format_epoch_ms(0), "1970-01-01 00:00:00Z");
+        // Leap day, and the last second of a year.
+        assert_eq!(format_epoch_ms(1_709_164_800_000), "2024-02-29 00:00:00Z");
+        assert_eq!(format_epoch_ms(1_735_689_599_000), "2024-12-31 23:59:59Z");
+        // Sub-second precision is dropped, never rounded up into the next
+        // second.
+        assert_eq!(format_epoch_ms(1_787_176_179_999), "2026-08-19 21:49:39Z");
+    }
+
+    /// The age is the part people actually read, in the coarsest unit that
+    /// still says something.
+    #[test]
+    fn ages_read_as_a_person_would_say_them() {
+        let now = 1_787_176_179_804u64;
+        let ago = |secs: u64| format_age(now - secs * 1000, now);
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(44), "just now");
+        assert_eq!(ago(45), "1 min ago");
+        assert_eq!(ago(540), "9 min ago");
+        assert_eq!(ago(5_399), "90 min ago");
+        assert_eq!(ago(5_400), "2 h ago");
+        assert_eq!(ago(7_200), "2 h ago");
+        assert_eq!(ago(86_399), "24 h ago");
+        assert_eq!(ago(172_800), "2 d ago");
+        // A server clock ahead of this app says so instead of printing a
+        // negative age.
+        assert_eq!(format_age(now + 60_000, now), "in the future");
+    }
+
+    #[test]
+    fn a_stamp_carries_both_halves() {
+        let now = 1_787_176_179_804u64;
+        assert_eq!(
+            format_when(now - 7_200_000, now),
+            "2026-08-19 19:49:39Z · 2 h ago"
+        );
     }
 
     #[test]

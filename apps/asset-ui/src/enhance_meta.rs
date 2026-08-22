@@ -164,6 +164,7 @@ mod tests {
             group_label: None,
             tags: None,
             enhanced_tags: None,
+            product: None,
         }
     }
 
