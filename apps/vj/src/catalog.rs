@@ -22,10 +22,26 @@ use std::collections::{HashMap, VecDeque};
 
 pub type CatGen = u64;
 
-/// Most tile-resolve pipelines (detail + manifest) in flight at once.
-pub const MAX_RESOLVING: usize = 4;
+/// Tile-resolve pipelines (detail + manifest) in flight at once while the
+/// operator is BROWSING — nobody is on stage, so the grid may take the
+/// whole machine and fill in one breath. A page is [`PAGE_SIZE`] tiles and
+/// every one of them needs its own detail + manifest round trip before its
+/// thumbnail blob is even named; resolving four at a time turned a
+/// warm-cache page into a two-second drip (measured: 48 tiles, 2.0-2.3s,
+/// ~23 tiles a second, with the fetch and decode lanes idle the whole
+/// time). A page's worth in flight is what makes a warm page land at once.
+pub const MAX_RESOLVING: usize = 48;
+/// Tile-resolve pipelines in flight while a set is RUNNING — the program
+/// window is up or a deck is playing. The grid still fills; it just stops
+/// competing with the picture on screen for the link and the CPU.
+pub const MAX_RESOLVING_PERFORMING: usize = 6;
 /// Search page size (server pages deterministically under this).
 pub const PAGE_SIZE: u32 = 48;
+/// Resolved tiles one surface remembers across listings. Each is a handful
+/// of ids and two short strings, so a whole browsed library costs well under
+/// a megabyte; the bound is here so a session that never stops browsing
+/// cannot grow without one.
+pub const MAX_CARRY: usize = 8192;
 /// Catalog tag the asset-ui puts on non-product run artifacts.
 pub const INTERMEDIATE_TAG: &str = "intermediate";
 
@@ -251,13 +267,32 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     pages_pending: usize,
     /// Tiles were already replaced for this generation's first pages.
     cleared_gen: CatGen,
-    /// Resolved state of the tiles a refresh replaced, by asset. A refresh
-    /// re-lists the catalog; it must not throw away manifests/thumbnails we
-    /// already hold for assets that are still listed — otherwise a stream
-    /// of publish events (an import running) keeps the grid forever blank.
+    /// Resolved state of tiles this surface has ALREADY resolved, by asset.
+    ///
+    /// A tile's picture is keyed by its revision, and its revision is only
+    /// known once a detail + manifest round trip has landed. So a listing
+    /// that forgets what it resolved shows blank tiles until the store
+    /// answers again — even when every one of those pictures is sitting in
+    /// texture memory. That is what "switching tabs doesn't cache the
+    /// thumbnails" looks like from the operator's chair.
+    ///
+    /// It therefore ACCUMULATES rather than being swapped: a refresh, a
+    /// filter change and a tab flip all re-list, and flipping VIDEO →
+    /// EFFECT → VIDEO must find VIDEO's revisions still remembered, not
+    /// just the one tab back. Entries are dropped when the asset is
+    /// republished ([`Self::event_republished`]) or retired, and the oldest
+    /// are trimmed at [`MAX_CARRY`].
     carry: HashMap<AssetId, Tile>,
+    /// Insertion order for `carry`, so the trim drops the least recently
+    /// remembered rather than an arbitrary one.
+    carry_order: VecDeque<AssetId>,
     resolve_queue: VecDeque<AssetId>,
     resolving: usize,
+    /// How many resolves this surface may run at once — [`MAX_RESOLVING`]
+    /// while browsing, [`MAX_RESOLVING_PERFORMING`] during a set. The app
+    /// sets it from the same politeness check the effect-thumbnail bank
+    /// uses, so one rule governs both.
+    resolve_width: usize,
     pub error: Option<String>,
     /// Raised by catalog events; the app refreshes on its debounce tick.
     pub refresh_wanted: bool,
@@ -367,8 +402,10 @@ impl<C: Clone> BrowseModel<C> {
             pages_pending: 0,
             cleared_gen: 0,
             carry: HashMap::new(),
+            carry_order: VecDeque::new(),
             resolve_queue: VecDeque::new(),
             resolving: 0,
+            resolve_width: MAX_RESOLVING,
             error: None,
             refresh_wanted: false,
             order: Vec::new(),
@@ -381,6 +418,32 @@ impl<C: Clone> BrowseModel<C> {
 
     pub fn tiles(&self) -> &[Tile] {
         &self.tiles
+    }
+
+    /// How many tile resolves this surface may run at once. Returns the
+    /// commands the widening frees, so raising the width does not have to
+    /// wait for the next page to land.
+    pub fn set_resolve_width(&mut self, width: usize) -> Vec<CatCmd<C>> {
+        let width = width.max(1);
+        if width == self.resolve_width {
+            return Vec::new();
+        }
+        self.resolve_width = width;
+        self.pump_resolves()
+    }
+
+    pub fn resolve_width(&self) -> usize {
+        self.resolve_width
+    }
+
+    /// Tile resolves in flight right now (detail or manifest).
+    pub fn resolving(&self) -> usize {
+        self.resolving
+    }
+
+    /// Tiles waiting for a resolve slot.
+    pub fn resolve_backlog(&self) -> usize {
+        self.resolve_queue.len()
     }
 
     pub fn tile(&self, asset: &AssetId) -> Option<&Tile> {
@@ -548,7 +611,10 @@ impl<C: Clone> BrowseModel<C> {
             // replaces the old tiles; the other kind lane then merges in.
             // Resolved tiles are carried, not dropped.
             self.cleared_gen = gen;
-            self.carry = self.tiles.drain(..).map(|t| (t.asset, t)).collect();
+            let outgoing: Vec<Tile> = self.tiles.drain(..).collect();
+            for tile in outgoing {
+                self.remember(tile);
+            }
             self.index.clear();
             if self.resort {
                 // A real query change: the whole strip is re-derived from
@@ -569,7 +635,9 @@ impl<C: Clone> BrowseModel<C> {
             resorted = true;
             self.index.insert(hit.asset, self.tiles.len());
             let kind = hit.kind.or_else(|| self.kinds.get(slot).copied());
-            match self.carry.remove(&hit.asset) {
+            // Cloned, not taken: the operator flips back and forth, and a
+            // memory that empties itself on first use is no memory.
+            match self.carry.get(&hit.asset).cloned() {
                 Some(mut known) if known.state == TileState::Ready => {
                     known.title = hit.title;
                     known.alias = hit.alias;
@@ -696,10 +764,56 @@ impl<C: Clone> BrowseModel<C> {
         Vec::new()
     }
 
+    /// Remember a resolved tile so a later listing can paint it without a
+    /// round trip. Unresolved tiles are not worth remembering.
+    fn remember(&mut self, tile: Tile) {
+        if tile.state != TileState::Ready {
+            self.carry.remove(&tile.asset);
+            return;
+        }
+        let asset = tile.asset;
+        if self.carry.insert(asset, tile).is_none() {
+            self.carry_order.push_back(asset);
+        }
+        while self.carry_order.len() > MAX_CARRY {
+            if let Some(oldest) = self.carry_order.pop_front() {
+                self.carry.remove(&oldest);
+            }
+        }
+    }
+
+    fn forget(&mut self, asset: AssetId) {
+        if self.carry.remove(&asset).is_some() {
+            self.carry_order.retain(|a| *a != asset);
+        }
+    }
+
+    /// This asset was published again: whatever we remember about it is a
+    /// revision out of date.
+    ///
+    /// The carried copy goes, so the next listing resolves it fresh instead
+    /// of painting last night's picture. A tile of it that is on screen
+    /// right now is re-resolved in place — it KEEPS its current picture
+    /// until the new manifest lands, because a republish should refresh a
+    /// grid, not blank it.
+    pub fn event_republished(&mut self, asset: AssetId) -> Vec<CatCmd<C>> {
+        self.forget(asset);
+        let Some(&i) = self.index.get(&asset) else { return Vec::new() };
+        if self.tiles[i].state != TileState::Ready {
+            return Vec::new(); // already on its way
+        }
+        if self.resolve_queue.contains(&asset) {
+            return Vec::new();
+        }
+        self.resolve_queue.push_back(asset);
+        self.pump_resolves()
+    }
+
     /// Start queued tile resolves up to the bound.
     fn pump_resolves(&mut self) -> Vec<CatCmd<C>> {
         let mut cmds = Vec::new();
-        while self.resolving < MAX_RESOLVING {
+        let width = self.resolve_width.max(1);
+        while self.resolving < width {
             let Some(asset) = self.resolve_queue.pop_front() else { break };
             let Some(&i) = self.index.get(&asset) else { continue };
             self.tiles[i].state = TileState::Resolving;
@@ -723,6 +837,36 @@ impl<C: Clone> BrowseModel<C> {
         }
         self.resolve_queue.retain(|a| *a != asset);
         self.resolve_queue.push_front(asset);
+        self.pump_resolves()
+    }
+
+    /// Move the tiles the operator can SEE to the front of the resolve
+    /// queue, in the order given, and start what fits.
+    ///
+    /// The queue is otherwise filled in listing order, so a bank of three
+    /// thousand clips resolves from the top whatever page is on screen —
+    /// the operator scrolls to row forty and waits for rows one to thirty-
+    /// nine to finish first. The store's resolve throughput is finite; what
+    /// it spends it on is not.
+    pub fn resolve_visible_first(&mut self, assets: &[AssetId]) -> Vec<CatCmd<C>> {
+        let mut jumped: Vec<AssetId> = Vec::new();
+        for asset in assets {
+            let Some(&i) = self.index.get(asset) else { continue };
+            if self.tiles[i].state != TileState::Listed {
+                continue; // already resolving, resolved or failed
+            }
+            jumped.push(*asset);
+        }
+        if jumped.is_empty() {
+            return Vec::new();
+        }
+        // Nothing already at the head of the queue is displaced further than
+        // the visible window itself: retain, then push the window in front
+        // in the order the eye reads it.
+        self.resolve_queue.retain(|a| !jumped.contains(a));
+        for asset in jumped.into_iter().rev() {
+            self.resolve_queue.push_front(asset);
+        }
         self.pump_resolves()
     }
 
@@ -820,7 +964,10 @@ impl<C: Clone> BrowseModel<C> {
     /// dead tile AND closing its hole without hand-surgery on invariants
     /// (a surgical compaction here once left duplicate tiles scattered on
     /// an 8-stride; rebuild beats scalpel).
-    pub fn event_remove(&mut self, _asset: AssetId) {
+    pub fn event_remove(&mut self, asset: AssetId) {
+        // A retired asset must not be remembered, or the next listing would
+        // paint a tile the store no longer has.
+        self.forget(asset);
         self.resort = true;
         self.refresh_wanted = true;
     }
@@ -1052,9 +1199,12 @@ mod tests {
         let mut m = BrowseModel::<u8>::new(AssetKind::Audio, "music");
         let g = search_gen(&m.refresh());
         let hits: Vec<HitRow> = (1..=7).map(hit).collect();
+        // Narrowed on purpose: this test is about the BOUND and the identity
+        // guard, not the width the app browses at.
+        m.set_resolve_width(4);
         let cmds = m.page_arrived(g, 0, true, hits, 7, None);
-        // Only MAX_RESOLVING details go out.
-        assert_eq!(cmds.len(), MAX_RESOLVING);
+        // Only `resolve_width` details go out.
+        assert_eq!(cmds.len(), 4);
         // Completing one admits the next.
         let a1 = hit(1).asset;
         let cmds = m.detail_arrived(g, a1, Some(rev(1)));
@@ -1210,6 +1360,156 @@ mod tests {
         m.refresh_wanted = false;
         m.event_touch(Some(AssetKind::Audio));
         assert!(!m.refresh_wanted);
+    }
+
+
+    /// A resolved tile is remembered across EVERY listing, not just the one
+    /// the operator came from. Flipping to another tab and back must paint
+    /// from what is already known — a revision the grid has to ask for again
+    /// is a blank tile, however warm the texture cache is.
+    #[test]
+    fn resolved_tiles_survive_a_round_trip_through_another_tab() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        let a = hit(1).asset;
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        m.detail_arrived(g, a, Some(rev(1)));
+        m.manifest_arrived(
+            g,
+            a,
+            rev(1),
+            Some(media(1)),
+            None,
+            Some(TileThumb { blob: BlobId::from_bytes([5; 32]), len: 20, anim: None }),
+        );
+        assert_eq!(m.tile(&a).unwrap().state, TileState::Ready);
+
+        // Tab away: a different query, none of the old assets in it.
+        let g2 = search_gen(&m.set_text("transition".into()));
+        m.page_arrived(g2, 0, true, vec![hit(2)], 1, None);
+        assert!(m.tile(&a).is_none());
+
+        // Tab back. The tile comes back RESOLVED — no detail, no manifest,
+        // and its revision is there for the texture cache to key on.
+        let g3 = search_gen(&m.set_text(String::new()));
+        let cmds = m.page_arrived(g3, 0, true, vec![hit(1)], 1, None);
+        let back = m.tile(&a).expect("the tile is listed again");
+        assert_eq!(back.state, TileState::Ready);
+        assert_eq!(back.revision, Some(rev(1)));
+        assert!(back.thumb.is_some());
+        assert!(
+            !cmds.iter().any(|c| matches!(c, CatCmd::FetchDetail { asset, .. } if *asset == a)),
+            "a remembered tile must not be resolved again"
+        );
+
+        // And once more, to prove the memory is not consumed by first use.
+        let g4 = search_gen(&m.set_text("transition".into()));
+        m.page_arrived(g4, 0, true, vec![hit(2)], 1, None);
+        let g5 = search_gen(&m.set_text(String::new()));
+        m.page_arrived(g5, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.tile(&a).unwrap().revision, Some(rev(1)));
+    }
+
+    /// A republish makes the memory wrong, so the memory goes — and the tile
+    /// on screen re-resolves WITHOUT losing the picture it is showing.
+    #[test]
+    fn a_republish_forgets_the_remembered_revision() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        let a = hit(1).asset;
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        m.detail_arrived(g, a, Some(rev(1)));
+        m.manifest_arrived(g, a, rev(1), Some(media(1)), None, None);
+
+        let cmds = m.event_republished(a);
+        assert!(
+            cmds.iter().any(|c| matches!(c, CatCmd::FetchDetail { asset, .. } if *asset == a)),
+            "the live tile asks the store what it is now"
+        );
+        // The picture it is already showing stays until the new one lands.
+        assert_eq!(m.tile(&a).unwrap().revision, Some(rev(1)));
+
+        // The new revision replaces it, and THAT is what gets remembered.
+        m.detail_arrived(g, a, Some(rev(2)));
+        m.manifest_arrived(g, a, rev(2), Some(media(2)), None, None);
+        assert_eq!(m.tile(&a).unwrap().revision, Some(rev(2)));
+        let g2 = search_gen(&m.set_text("transition".into()));
+        m.page_arrived(g2, 0, true, vec![hit(9)], 1, None);
+        let g3 = search_gen(&m.set_text(String::new()));
+        m.page_arrived(g3, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.tile(&a).unwrap().revision, Some(rev(2)));
+    }
+
+    /// The resolve pipeline is as wide as the app says. Four at a time made
+    /// a warm page a two-second drip; a page's worth in flight makes it land
+    /// at once, and the politeness width narrows it again for a live set.
+    #[test]
+    fn resolve_width_bounds_and_reopens_the_pipeline() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        let hits: Vec<HitRow> = (1..=20u8).map(hit).collect();
+        let cmds = m.page_arrived(g, 0, true, hits, 20, None);
+        let details = cmds.iter().filter(|c| matches!(c, CatCmd::FetchDetail { .. })).count();
+        assert_eq!(details, MAX_RESOLVING.min(20), "a page resolves as wide as it may");
+        assert_eq!(m.resolving(), details);
+
+        // Narrowing for a set does not cancel what is running; it just stops
+        // starting more. Widening again starts what is waiting, now.
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.set_resolve_width(2);
+        let hits: Vec<HitRow> = (1..=20u8).map(hit).collect();
+        let cmds = m.page_arrived(g, 0, true, hits, 20, None);
+        assert_eq!(cmds.iter().filter(|c| matches!(c, CatCmd::FetchDetail { .. })).count(), 2);
+        assert_eq!(m.resolve_backlog(), 18);
+        let opened = m.set_resolve_width(MAX_RESOLVING);
+        assert_eq!(
+            opened.iter().filter(|c| matches!(c, CatCmd::FetchDetail { .. })).count(),
+            18,
+            "widening starts the backlog without waiting for a page"
+        );
+        assert_eq!(m.resolve_backlog(), 0);
+    }
+
+    /// What is on screen resolves first: the store's throughput is finite,
+    /// and a bank of thousands must not make the visible page wait behind
+    /// every row above it.
+    #[test]
+    fn visible_tiles_jump_the_resolve_queue() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.set_resolve_width(2);
+        let hits: Vec<HitRow> = (1..=10u8).map(hit).collect();
+        let started = m.page_arrived(g, 0, true, hits, 10, None);
+        let first_two: Vec<AssetId> = started
+            .iter()
+            .filter_map(|c| match c {
+                CatCmd::FetchDetail { asset, .. } => Some(*asset),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(first_two.len(), 2);
+
+        // Rows 8 and 9 are what the operator scrolled to.
+        let visible = [AssetId::from_bytes([8; 16]), AssetId::from_bytes([9; 16])];
+        // No slot free yet, so nothing starts — but the ORDER changed.
+        assert!(m.resolve_visible_first(&visible).is_empty());
+        // A landed detail hands its own slot straight to its manifest; the
+        // slot frees only when that tile is finished.
+        let cmds = m.detail_arrived(g, first_two[0], Some(rev(1)));
+        assert!(!cmds.iter().any(|c| matches!(c, CatCmd::FetchDetail { .. })));
+        let cmds = m.manifest_arrived(g, first_two[0], rev(1), None, None, None);
+        let next = cmds
+            .iter()
+            .find_map(|c| match c {
+                CatCmd::FetchDetail { asset, .. } => Some(*asset),
+                _ => None,
+            })
+            .expect("the freed slot starts something");
+        assert_eq!(next, visible[0], "the visible row goes first, in reading order");
+
+        // Tiles already resolving or resolved are left alone.
+        assert!(m.resolve_visible_first(&[first_two[0]]).is_empty());
     }
 }
 
