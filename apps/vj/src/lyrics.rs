@@ -84,7 +84,6 @@ pub fn display_offset_secs() -> f64 {
 /// The karaoke fill contract lives in the shared widget family now (the
 /// asset UI preview and the VJ surfaces paint the same fill); the VJ keeps
 /// its `LyricLine`-shaped entry point.
-pub use makepad_asset_widgets::lyric_reader::WORD_HOP_SECS;
 
 /// How far across a line's characters the green has reached at `secs`.
 pub fn sung_fraction(line: &LyricLine, secs: f64) -> f32 {
@@ -1671,6 +1670,7 @@ impl Transcriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_asset_widgets::lyric_reader::WORD_HOP_SECS;
 
     fn line(start: f64, end: f64, text: &str) -> LyricLine {
         LyricLine::new(start, end, text)

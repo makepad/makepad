@@ -22,7 +22,7 @@
 //! SAME asset id, so a playlist that pinned the identity keeps it.
 
 use crate::import::alias_slug;
-use crate::thumbs::{encode_jpeg_bgra, parse_wav, waveform_bgra_512, THUMB_DIM};
+use crate::thumbs::{encode_jpeg_bgra, parse_wav, THUMB_DIM};
 use makepad_asset_client::util::{sanitize_text, to_hex};
 use makepad_asset_client::{
     AssetClient, ClientError, PublishFile, PublishRequest, PublishRights, PublishThumbnail,
@@ -828,7 +828,6 @@ pub fn track_picture(
         Container::Wav => Some(makepad_asset_data::MediaType::Wav),
         Container::Mp3 => Some(makepad_asset_data::MediaType::Mp3),
         Container::Ogg => Some(makepad_asset_data::MediaType::Ogg),
-        _ => None,
     };
     if let Some(media) = media {
         if let Ok(pcm) = crate::thumbs::decode_audio(bytes, media) {

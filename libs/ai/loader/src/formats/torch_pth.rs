@@ -165,8 +165,14 @@ impl ZipIndex {
 #[derive(Clone, Debug)]
 enum Value {
     None,
+    // The VM must decode these to stay in sync with the pickle stream (a
+    // torch checkpoint's metadata dicts carry stray bools/floats we don't
+    // currently read), but the loader's tensor/storage walk never pulls
+    // the payload back out.
+    #[allow(dead_code)]
     Bool(bool),
     Int(i64),
+    #[allow(dead_code)]
     Float(f64),
     Str(String),
     Tuple(Vec<Value>),
@@ -183,6 +189,9 @@ enum Value {
 struct StorageRef {
     dtype: String,
     key: String,
+    // Parsed off the pickle stream for a faithful `StorageRef`, but the
+    // loader derives element counts from tensor shape/stride instead.
+    #[allow(dead_code)]
     numel: usize,
 }
 

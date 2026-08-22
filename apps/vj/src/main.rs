@@ -82,7 +82,7 @@ use crate::apc40::{
     PAD_COUNT,
 };
 use crate::beat_sync::{
-    fit_loop_to_grid, BeatClock, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
+    BeatClock, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
     BeatTarget, ClockSource, TapTempo,
 };
 use crate::catalog::{BrowseModel, CatCmd, CatGen, TileMedia, TileThumb};
@@ -117,7 +117,6 @@ use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
     TrackStems,
     Mixer, TrackPcm, VideoTransitionError, VideoTransitionId, VideoTransitionPhase,
-    MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE,
 };
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
@@ -2086,6 +2085,11 @@ script_mod! {
                 window.title: "VJ Output"
                 window.inner_size: vec2(1280, 720)
                 window.position: vec2(720, 220)
+                // No caption bar: a pure projector surface with nothing to
+                // click but the picture. WindowDragQuery (main.rs) answers
+                // Caption over the whole client area while it isn't
+                // maximized, and a double-click there toggles maximize.
+                show_caption_bar: false
                 body +: {
                     SolidView{
                         width: Fill
@@ -4414,6 +4418,10 @@ pub struct App {
     /// Cue-well drag in progress: (slot, last pointer position).
     #[rust]
     well_drag: Option<(SlotId, DVec2)>,
+    /// Last `WindowDragQuery` seen for the output window: (when, where) —
+    /// the double-click detector for its maximize/restore toggle.
+    #[rust]
+    output_drag_last: Option<(Instant, DVec2)>,
     /// THE published beat clock — the disciplined oscillator every consumer
     /// reads, its monotonic time base, and the confidence it inherited from
     /// whatever source it last followed (kept through a coast).
@@ -13424,6 +13432,29 @@ impl MatchEvent for App {
         // The borderless window carries its own min/max/close on Windows.
         #[cfg(target_os = "windows")]
         self.ui.view(cx, ids!(win_buttons)).set_visible(cx, true);
+        // No native traffic lights to clear on Windows, so the status bar's
+        // 74px mac inset (measured to clear them) is wrong there — it reads
+        // as the logo floating off-grid. Instead the logo's M lines up with
+        // the left edge of the cue monitor below it: the outer column's 8px
+        // padding plus the console pane's own 4px inset (the GEN-closed
+        // margin the pane's own comment names), same left rhythm the video
+        // picture already uses.
+        #[cfg(target_os = "windows")]
+        {
+            let mut status_bar = self.ui.view(cx, ids!(status_bar));
+            script_apply_eval!(cx, status_bar, {
+                padding: Inset{left: 4.0 right: 8.0 top: 1.0 bottom: 0.0}
+            });
+        }
+        // Projector output: maximized reads as a clean fullscreen picture,
+        // not a decorated window pinned to the work area. Windows-only —
+        // the border/thickframe strip this drops is a Windows-maximize
+        // artifact; other backends already give a chromeless maximize for
+        // a caption-less window for free.
+        #[cfg(target_os = "windows")]
+        self.ui
+            .window(cx, ids!(output_window))
+            .set_chromeless_when_maximized(cx, true);
         // Effect slots restore from their local splash files — before (and
         // independent of) the store connection; the MIDI map rides the same
         // boot.
@@ -14586,6 +14617,7 @@ impl AppMain for App {
         // user never hunts for where the window grabs.
         if let Event::WindowDragQuery(dq) = event {
             let main_id = self.ui.window(cx, ids!(main_window)).window_id();
+            let output_id = self.ui.window(cx, ids!(output_window)).window_id();
             if Some(dq.window_id) == main_id {
                 // The LOGO is the one Caption spot; EVERY other point of
                 // the top strip answers Client EXPLICITLY — macOS treats
@@ -14606,9 +14638,58 @@ impl AppMain for App {
                     } else {
                         34.0
                     };
-                    if dq.abs.y <= strip_bottom {
+                    // The stretch between the SFX tab and the beat-wave/BPM
+                    // cluster carries only the status label (no clicks to
+                    // lose), so — like the gripper — it is genuinely empty
+                    // bar and answers Caption too. Everything else in the
+                    // strip still answers Client explicitly.
+                    let sfx = self.ui.widget(cx, ids!(mode_sfx)).area();
+                    let beats = self.ui.view(cx, ids!(beat_cluster)).area();
+                    let in_gap = dq.abs.y <= strip_bottom
+                        && sfx.is_valid(cx)
+                        && beats.is_valid(cx)
+                        && {
+                            let sfx_rect = sfx.rect(cx);
+                            let beats_rect = beats.rect(cx);
+                            let gap_left = sfx_rect.pos.x + sfx_rect.size.x;
+                            let gap_right = beats_rect.pos.x;
+                            gap_right > gap_left
+                                && dq.abs.x >= gap_left
+                                && dq.abs.x <= gap_right
+                        };
+                    if in_gap {
+                        dq.response.set(WindowDragQueryResponse::Caption);
+                    } else if dq.abs.y <= strip_bottom {
                         dq.response.set(WindowDragQueryResponse::Client);
                     }
+                }
+            } else if Some(dq.window_id) == output_id {
+                // The output window is a pure projector surface — no
+                // controls of its own, so the whole client area is fair
+                // game for a drag. A Caption answer hands the entire
+                // gesture to the OS, so this query (fired on every
+                // mouse-down, whether or not it turns into a drag) is the
+                // only place left to notice a double-click; that is why
+                // the toggle lives here rather than behind a FingerDown
+                // handler downstream that a Caption answer would starve.
+                let now = Instant::now();
+                let is_double_click = self.output_drag_last.is_some_and(|(t, p)| {
+                    now.duration_since(t).as_secs_f64() < 0.4 && (p - dq.abs).length() < 12.0
+                });
+                self.output_drag_last = Some((now, dq.abs));
+                let output = self.ui.window(cx, ids!(output_window));
+                if is_double_click {
+                    self.output_drag_last = None;
+                    if output.is_fullscreen(cx) {
+                        output.restore(cx);
+                    } else {
+                        output.maximize(cx);
+                    }
+                    dq.response.set(WindowDragQueryResponse::Client);
+                } else if !output.is_fullscreen(cx) {
+                    // Chromeless once maximized: nothing left to drag by
+                    // until a double-click restores it.
+                    dq.response.set(WindowDragQueryResponse::Caption);
                 }
             }
         }

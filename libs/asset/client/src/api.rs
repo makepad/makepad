@@ -2093,7 +2093,7 @@ impl Api {
         blob: &BlobId,
         range_start: Option<u64>,
         body_deadline_ms: u64,
-    ) -> ClientResult<Response> {
+    ) -> ClientResult<Response<'_>> {
         let path = wire::path_blob(blob);
         let mut req = Request::get(&path);
         req.bearer = self.bearer();

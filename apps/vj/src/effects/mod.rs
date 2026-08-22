@@ -342,7 +342,6 @@ pub mod shaders;
 pub mod sim;
 pub mod view;
 
-pub use doc::EffectDoc;
 pub use view::VjFxView;
 use makepad_widgets::*;
 

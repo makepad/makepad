@@ -1287,9 +1287,9 @@ fx_mesh_draw_struct!(DrawVjFxTerrain);
 fx_mesh_draw_struct!(DrawVjFxRibbon);
 fx_mesh_draw_struct!(DrawVjFxTunnel);
 fx_mesh_draw_struct!(DrawVjFxParticles);
-/// The shared content backdrop (above): standard signal block, and it
-/// reads only `fog.z` (pre-gated content strength) x `fog.w` (the family
-/// dim) plus `col_bg`.
+// The shared content backdrop (above): standard signal block, and it
+// reads only `fog.z` (pre-gated content strength) x `fog.w` (the family
+// dim) plus `col_bg`.
 fx_mesh_draw_struct!(DrawVjFxBackdrop);
 
 /// The scriptable-emitter shader: shared frame state + per-EMITTER instance

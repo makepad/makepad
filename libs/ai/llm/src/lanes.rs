@@ -1245,8 +1245,8 @@ impl LaneExecutor {
             LaneStep::Idle => {}
             LaneStep::Prefill {
                 lane,
-                kv_base,
-                state_row,
+                kv_base: _,
+                state_row: _,
                 start,
                 tokens,
                 resumed,

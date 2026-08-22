@@ -1,7 +1,12 @@
 //! Dynamic cuDNN loader. Same library PyTorch uses; no new kernels.
+//!
+//! Type and field names below mirror cuDNN's own C header (`cudnn.h`)
+//! verbatim so this file reads as a direct crib sheet against NVIDIA's
+//! docs; renaming them to Rust style would defeat that.
+#![allow(non_camel_case_types, non_snake_case)]
 
 use crate::{cudaStream_t, CUDA_SUCCESS};
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -267,6 +272,11 @@ struct CudnnApi {
     conv_bias_act: Option<FnConvBiasAct>,
     create_act: Option<FnCreateAct>,
     set_act: Option<FnSetAct>,
+    // Loaded for API completeness; activation descriptors are cached
+    // thread-locally for the process lifetime (see `identity_act`/
+    // `swish_act`) and never explicitly destroyed, so this symbol is
+    // resolved but not yet called.
+    #[allow(dead_code)]
     destroy_act: Option<FnDestroyAct>,
     act_forward: Option<FnActForward>,
     transform_tensor: FnTransformTensor,
@@ -300,6 +310,10 @@ fn check(api: &CudnnApi, status: cudnnStatus_t, what: &str) -> Result<(), String
     }
 }
 
+// Holds the dlopen handle alive for the process lifetime (cached in the
+// `CUDNN` OnceLock below); the handle itself is never read back, only kept
+// so the library isn't a candidate for unloading out from under `CudnnApi`.
+#[allow(dead_code)]
 struct Lib(*mut c_void);
 unsafe impl Send for Lib {}
 unsafe impl Sync for Lib {}

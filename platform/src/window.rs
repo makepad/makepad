@@ -561,6 +561,18 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
 
+    /// Windows only: a maximized window normally keeps a border/titlebar
+    /// strip so its client area matches the monitor work area. Setting this
+    /// drops that strip while maximized instead, so the window reads as a
+    /// clean fullscreen picture (a projector output, say) rather than a
+    /// decorated window pinned to the screen. Other backends ignore it.
+    pub fn set_chromeless_when_maximized(&mut self, cx: &mut Cx, chromeless: bool) {
+        cx.push_unique_platform_op(CxOsOp::SetChromelessWhenMaximized(
+            self.window_id(),
+            chromeless,
+        ));
+    }
+
     pub fn set_window_visuals(&mut self, cx: &mut Cx, visuals: WindowVisuals) {
         let visuals = visuals.normalized();
         let window_id = self.window_id();

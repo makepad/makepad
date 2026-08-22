@@ -1531,7 +1531,7 @@ fn seek_bounce_playback(
         .map(|f| f.pts_100ns)
         .unwrap_or(0)
         .max(shared.position_100ns.load(Ordering::Acquire));
-    let mut serve = |shared: &SlotShared, bgra: Vec<u32>, clip_100ns: i64, synth_pts: &mut i64| {
+    let serve = |shared: &SlotShared, bgra: Vec<u32>, clip_100ns: i64, synth_pts: &mut i64| {
         *synth_pts += delta;
         shared
             .frames
