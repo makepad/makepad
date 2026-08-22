@@ -21,7 +21,9 @@
     beat_rate: 1.0
     fog: 0.03
     glow: 1.0
-    p3: "0.15 + 0.5 * pulse"   // IOR bend breathes on the beat
+    p3: "0.15 + 0.5 * pulse"   // IOR bend breathes on the beat (and the
+                               // transition slot drives p3 with its engage
+                               // triangle — the lens bends open mid-fade)
 
     input0: "test"
 

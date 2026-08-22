@@ -18,6 +18,8 @@
     glow: "0.8 + env(phase) * 1.3"
     fog: "0.08 + env(phase) * 0.05"
     p0: "tri(bar)"
+    // Declared dials: hosts label their knobs from these.
+    dials: [ {name: "SWEEP", bind: "p0", default: 0.5} ]
 
     color_bg: #x000208
     color_a: #x00ffcc

@@ -21,6 +21,7 @@
     fog: 0.05
     glow: 1.45
     p0: "0.06 * sin(bar * tau)"   // the fold slowly breathes over the bar
+    dials: [ {name: "FOLD", bind: "p0", default: 0.5} ]
 
     color_bg: #x05040f
     color_a: #x8f4dff

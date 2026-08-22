@@ -57,6 +57,9 @@ mod lyrics;
 pub use makepad_audio_lyrics::align as lyrics_align;
 mod media;
 mod mesh_view;
+// MIDI LEARN: alt-click (or LEARN+click) any wrapped dial/slider, wiggle a
+// CC, and that CC drives it from then on — persistent (midi-map.txt).
+mod midi_learn;
 mod mix;
 mod mixer;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.
@@ -105,6 +108,7 @@ use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis
 use crate::fx_slot::{
     FxSlotKind, FxSlotTileAction, FxSlotTileState, FxSlots, PremixJob, VjFxSlotHost, VjFxSlotTile,
 };
+use crate::midi_learn::{LearnEvent, LearnWrapAction, MidiLearn, VjLearnWrap};
 use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
@@ -116,6 +120,7 @@ use crate::mixer::{
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
+use makepad_widgets::desktop_button::DesktopButtonWidgetExt;
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
 use crate::mix::MixState;
@@ -267,6 +272,10 @@ script_mod! {
             ring_color: uniform(#x2f3842)
             val_color: uniform(#x3ee0b0)
             pointer_color: uniform(#xf2f6fa)
+            // Slot dials the loaded effect does not declare dim to inert
+            // (fixed dial count keeps MIDI maps stable; the dimming keeps
+            // the strip honest about which ones do anything).
+            inert: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let c = self.rect_size * 0.5
@@ -289,7 +298,7 @@ script_mod! {
                 sdf.move_to(p0.x, p0.y)
                 sdf.line_to(p1.x, p1.y)
                 sdf.stroke(self.pointer_color, 2.0)
-                return sdf.result
+                return sdf.result * (1.0 - self.inert * 0.72)
             }
         }
     }
@@ -630,15 +639,21 @@ script_mod! {
                                 width: 74
                                 text: "RESYNC"
                             }
+                            // Global MIDI-learn: press, then click a dial
+                            // to map; wiggle a CC to bind it. Top bar —
+                            // where a DAW keeps it.
+                            midi_learn_btn := ChromeButton{width: 56 text: "LEARN"}
                             PanelLabel{text: "MASTER"}
                             // The stock Slider is drawn for a tall well with a
                             // label gutter and is INVISIBLE at 28px of chrome —
                             // this is the same fader the FX/light strips use.
-                            master_slider := ApcHSlider{
-                                width: 116
-                                min: 0.0
-                                max: 1.2
-                                default: 0.9
+                            master_learn := Learn{
+                                master_slider := ApcHSlider{
+                                    width: 116
+                                    min: 0.0
+                                    max: 1.2
+                                    default: 0.9
+                                }
                             }
                             master_value := PanelLabel{width: 38 text: "90%"}
                             // Karaoke subtitles on the program output: the
@@ -657,6 +672,38 @@ script_mod! {
                             }
                             open_output := ChromeButton{text: "OUTPUT"}
                             output_window_status := PanelLabel{width: 96 text: "output open"}
+                            // Windows-only chrome: the borderless window's
+                            // min/max/close cluster floats at the bar's right
+                            // edge (made visible at startup on that OS).
+                            win_buttons := View{
+                                visible: false
+                                width: Fit height: Fit
+                                flow: Right
+                                win_min := DesktopButton{
+                                    draw_bg.button_type: DesktopButtonType.WindowsMin
+                                    width: 40 height: 26
+                                    draw_bg +: {
+                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
+                                        bg_color_hover: #x2b3440, bg_color_down: #x161b22
+                                    }
+                                }
+                                win_max := DesktopButton{
+                                    draw_bg.button_type: DesktopButtonType.WindowsMax
+                                    width: 40 height: 26
+                                    draw_bg +: {
+                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
+                                        bg_color_hover: #x2b3440, bg_color_down: #x161b22
+                                    }
+                                }
+                                win_close := DesktopButton{
+                                    draw_bg.button_type: DesktopButtonType.WindowsClose
+                                    width: 40 height: 26
+                                    draw_bg +: {
+                                        color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
+                                        bg_color_hover: #xe81123, bg_color_down: #xf1707a
+                                    }
+                                }
+                            }
                         }
                         gen_split := Splitter{
                             width: Fill
@@ -976,50 +1023,127 @@ script_mod! {
                                                 align: Align{x: 0.5, y: 0.0}
                                                 KnobCol{
                                                     Tick{text: "FADE"}
-                                                    video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
+                                                    video_fade_learn := Learn{
+                                                        video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
+                                                    }
                                                 }
                                                 video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
                                             }
+                                            // One HORIZONTAL strip per slot: tile,
+                                            // ON/× stacked, SPD, then the THREE fixed
+                                            // dials — each label BESIDE its dial so
+                                            // the doc-declared names have room.
+                                            // Vertical space is the premium here.
                                             View{
-                                                width: Fit height: Fit flow: Down spacing: 3
-                                                align: Align{x: 0.5, y: 0.0}
-                                                fx_slot_a_tile := VjFxSlotTile{}
+                                                width: Fit height: Fit flow: Right spacing: 4
+                                                align: Align{x: 0.0, y: 0.5}
+                                                fx_slot_a_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
-                                                    width: Fit height: Fit flow: Right spacing: 3
-                                                    align: Align{x: 0.5, y: 0.5}
+                                                    width: Fit height: Fit flow: Down spacing: 3
                                                     fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
-                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_a_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_a_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_a_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    fx_slot_a_clear := ChromeButton{width: 24 text: "×"}
+                                                    fx_slot_a_clear := ChromeButton{width: 30 text: "×"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    Tick{width: 26 text: "SPD"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_a_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_a_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_a_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                 }
                                             }
+                                            // One HORIZONTAL strip per slot: tile,
+                                            // ON/× stacked, SPD, then the THREE fixed
+                                            // dials — each label BESIDE its dial so
+                                            // the doc-declared names have room.
+                                            // Vertical space is the premium here.
                                             View{
-                                                width: Fit height: Fit flow: Down spacing: 3
-                                                align: Align{x: 0.5, y: 0.0}
-                                                fx_slot_t_tile := VjFxSlotTile{}
+                                                width: Fit height: Fit flow: Right spacing: 4
+                                                align: Align{x: 0.0, y: 0.5}
+                                                fx_slot_t_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
-                                                    width: Fit height: Fit flow: Right spacing: 3
-                                                    align: Align{x: 0.5, y: 0.5}
+                                                    width: Fit height: Fit flow: Down spacing: 3
                                                     fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
-                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_t_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_t_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_t_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    fx_slot_t_clear := ChromeButton{width: 24 text: "×"}
+                                                    fx_slot_t_clear := ChromeButton{width: 30 text: "×"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    Tick{width: 26 text: "SPD"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_t_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_t_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_t_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                 }
                                             }
+                                            // One HORIZONTAL strip per slot: tile,
+                                            // ON/× stacked, SPD, then the THREE fixed
+                                            // dials — each label BESIDE its dial so
+                                            // the doc-declared names have room.
+                                            // Vertical space is the premium here.
                                             View{
-                                                width: Fit height: Fit flow: Down spacing: 3
-                                                align: Align{x: 0.5, y: 0.0}
-                                                fx_slot_b_tile := VjFxSlotTile{}
+                                                width: Fit height: Fit flow: Right spacing: 4
+                                                align: Align{x: 0.0, y: 0.5}
+                                                fx_slot_b_tile := VjFxSlotTile{width: 130 height: 76}
                                                 View{
-                                                    width: Fit height: Fit flow: Right spacing: 3
-                                                    align: Align{x: 0.5, y: 0.5}
+                                                    width: Fit height: Fit flow: Down spacing: 3
                                                     fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
-                                                    KnobCol{width: 34 Tick{text: "SPD"} fx_slot_b_spd := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P1"} fx_slot_b_p1 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    KnobCol{width: 34 Tick{text: "P2"} fx_slot_b_p2 := ApcKnob{width: 32 height: 32 default: 0.5}}
-                                                    fx_slot_b_clear := ChromeButton{width: 24 text: "×"}
+                                                    fx_slot_b_clear := ChromeButton{width: 30 text: "×"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    Tick{width: 26 text: "SPD"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_b_d0_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_b_d1_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                }
+                                                View{
+                                                    width: Fit height: Fit flow: Right spacing: 2
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 30 height: 30 default: 0.5} }
+                                                    fx_slot_b_d2_lab := Tick{width: 40 flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                 }
                                             }
                                             View{width: Fill height: 1}
@@ -1044,7 +1168,9 @@ script_mod! {
                                             // centre, not the group's.
                                             View{width: 92 height: 1}
                                             Tick{width: 14 text: "A"}
-                                            apc_xfader := ApcXfader{width: 360}
+                                            xfader_learn := Learn{
+                                                apc_xfader := ApcXfader{width: 360}
+                                            }
                                             Tick{width: 14 text: "B"}
                                             autofade := ChromeButton{width: 84 text: "AUTOFADE"}
                                             View{width: Fill height: 1}
@@ -1961,14 +2087,6 @@ struct StripShape {
     flow_on: bool,
 }
 
-/// Clip-grid kind chips and the catalog kinds each one selects.
-/// The remaining sub-shelf chips inside the clips explorer. The four hot
-/// presets in the bar decide the BUCKET; these narrow it.
-const KIND_CHIPS: [(&[LiveId], &[AssetKind]); 2] = [
-    (ids!(kind_splat), &[AssetKind::World]),
-    (ids!(kind_sprite), &[AssetKind::Billboard]),
-];
-
 /// Hands-free crossfade at the deck's set fade time.
 ///
 /// The operator arms a clip on the far side and presses AUTOFADE instead of
@@ -2057,15 +2175,56 @@ const MODE_BUTTONS: [(&[LiveId], ApcSurface); 3] = [
     (ids!(mode_sfx), ApcSurface::Sfx),
 ];
 
-/// The explorer's hot presets, in row order. `None` is ALL.
-const PRESET_CHIPS: [(&[LiveId], Option<catalog::Preset>); 7] = [
-    (ids!(preset_all), None),
-    (ids!(preset_video), Some(catalog::Preset::Video)),
-    (ids!(preset_effect), Some(catalog::Preset::Effect)),
-    (ids!(preset_transition), Some(catalog::Preset::Transition)),
-    (ids!(preset_3d), Some(catalog::Preset::ThreeD)),
-    (ids!(preset_image), Some(catalog::Preset::Image)),
-    (ids!(preset_audio), Some(catalog::Preset::Audio)),
+/// The explorer's lane: exactly one chip at a time (radio; the selected
+/// chip clicked again returns to ALL). Audio has no chip here — that is
+/// the DJ surface's lane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum GridLane {
+    #[default]
+    All,
+    Kind(AssetKind),
+    /// vjeffects narrowed to the `transition` tag.
+    Transition,
+}
+
+/// Every visual asset kind the store holds, one chip each, in row order.
+const LANE_CHIPS: [(&[LiveId], GridLane, &str); 15] = [
+    (ids!(preset_all), GridLane::All, "ALL"),
+    (ids!(preset_video), GridLane::Kind(AssetKind::Video), "VIDEO"),
+    (ids!(preset_effect), GridLane::Kind(AssetKind::VjEffect), "EFFECT"),
+    (ids!(preset_transition), GridLane::Transition, "TRANSITION"),
+    (ids!(chip_image), GridLane::Kind(AssetKind::Texture), "IMAGE"),
+    (ids!(chip_mesh), GridLane::Kind(AssetKind::Mesh), "MESH"),
+    (ids!(chip_char), GridLane::Kind(AssetKind::Character), "CHAR"),
+    (ids!(chip_prop), GridLane::Kind(AssetKind::Prop), "PROP"),
+    (ids!(chip_weapon), GridLane::Kind(AssetKind::Weapon), "WEAPON"),
+    (ids!(chip_vehicle), GridLane::Kind(AssetKind::Vehicle), "VEHICLE"),
+    (ids!(chip_world), GridLane::Kind(AssetKind::World), "WORLD"),
+    (ids!(chip_sprite), GridLane::Kind(AssetKind::Billboard), "SPRITE"),
+    (ids!(chip_skybox), GridLane::Kind(AssetKind::Skybox), "SKYBOX"),
+    (ids!(chip_material), GridLane::Kind(AssetKind::Material), "MATERIAL"),
+    (ids!(chip_prefab), GridLane::Kind(AssetKind::Prefab), "PREFAB"),
+];
+
+/// Every MIDI-learnable control: wrapper widget path + stable persisted id.
+/// Making another control learnable = wrap it in `Learn{...}` in the DSL
+/// and add one row here (plus its value arm in `apply_learned`).
+const LEARNABLES: [(&[LiveId], &str); 15] = [
+    (ids!(video_fade_learn), "video_fade"),
+    (ids!(xfader_learn), "xfader"),
+    (ids!(master_learn), "master"),
+    (ids!(fx_slot_a_spd_learn), "fx_a_spd"),
+    (ids!(fx_slot_a_d0_learn), "fx_a_d0"),
+    (ids!(fx_slot_a_d1_learn), "fx_a_d1"),
+    (ids!(fx_slot_a_d2_learn), "fx_a_d2"),
+    (ids!(fx_slot_t_spd_learn), "fx_t_spd"),
+    (ids!(fx_slot_t_d0_learn), "fx_t_d0"),
+    (ids!(fx_slot_t_d1_learn), "fx_t_d1"),
+    (ids!(fx_slot_t_d2_learn), "fx_t_d2"),
+    (ids!(fx_slot_b_spd_learn), "fx_b_spd"),
+    (ids!(fx_slot_b_d0_learn), "fx_b_d0"),
+    (ids!(fx_slot_b_d1_learn), "fx_b_d1"),
+    (ids!(fx_slot_b_d2_learn), "fx_b_d2"),
 ];
 
 /// The four-state colour set of a LATCHING toggle (ROTATE, PLAY, LOOP,
@@ -3811,12 +3970,6 @@ pub struct App {
     /// Cue-well drag in progress: (slot, last pointer position).
     #[rust]
     well_drag: Option<(SlotId, DVec2)>,
-    /// Kind chips currently selected (empty = every visual kind).
-    #[rust]
-    kind_filter: Vec<AssetKind>,
-    /// The hot preset the explorer is on; `None` is ALL.
-    #[rust]
-    preset: Option<catalog::Preset>,
     /// THE published beat clock — the disciplined oscillator every consumer
     /// reads, its monotonic time base, and the confidence it inherited from
     /// whatever source it last followed (kept through a coast).
@@ -3854,6 +4007,12 @@ pub struct App {
     /// Last event-driven refresh per surface (see EVENT_REFRESH_COOLDOWN_S).
     #[rust]
     last_event_refresh: [Option<Instant>; 4],
+    /// The lane chip the explorer is on (one at a time; ALL default).
+    #[rust]
+    grid_lane: GridLane,
+    /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
+    #[rust]
+    midi_learn: MidiLearn,
     /// A tile clicked before its manifest resolved; fires on arrival.
     /// The flag is the click's SHIFT state (explicit effect-as-content).
     #[rust]
@@ -4358,6 +4517,95 @@ impl App {
         Some((view.color_texture(), 16.0 / 9.0))
     }
 
+    // ---- MIDI LEARN (midi_learn.rs) -----------------------------------------
+
+    fn midi_map_path() -> PathBuf {
+        service::session_config_from_env().cache_parent.join("midi-map.txt")
+    }
+
+    fn save_midi_map(&self) {
+        let path = Self::midi_map_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.midi_learn.encode());
+    }
+
+    fn load_midi_map(&mut self) {
+        if let Ok(body) = std::fs::read_to_string(Self::midi_map_path()) {
+            self.midi_learn = MidiLearn::decode(&body);
+        }
+    }
+
+    /// Mirror the learn state onto every wrapper: pick-mode hint outlines,
+    /// the armed pulse, the mapped ticks, and the LEARN button's latch.
+    fn sync_midi_learn_ui(&mut self, cx: &mut Cx) {
+        for (path, control) in LEARNABLES {
+            let mode = if self.midi_learn.is_armed(control) {
+                2
+            } else if self.midi_learn.picking {
+                1
+            } else {
+                0
+            };
+            let mapped = self.midi_learn.is_bound(control);
+            let widget = self.ui.widget(cx, path);
+            if let Some(mut wrap) = widget.borrow_mut::<VjLearnWrap>() {
+                wrap.set_learn_state(cx, mode, mapped);
+            };
+        }
+        self.paint_lit(cx, ids!(midi_learn_btn), self.midi_learn.active());
+    }
+
+    /// A learned CC's value lands on its control — the same state changes
+    /// the pointer path makes, plus the widget mirror.
+    fn apply_learned(&mut self, cx: &mut Cx, control: &str, v: f32) {
+        match control {
+            "video_fade" => {
+                let secs = 0.05 + v * (5.0 - 0.05);
+                self.fade_secs = secs;
+                self.ui.slider(cx, ids!(video_fade)).set_value(cx, secs as f64);
+            }
+            "xfader" => {
+                // The hand always wins — a mapped fader IS the hand.
+                self.auto_fade.cancel();
+                self.sync_autofade_ui(cx);
+                self.set_visual_mix(cx, v);
+            }
+            "master" => {
+                let value = v * 1.2;
+                self.mixer.set_master(value);
+                self.set_master_readout(cx, value);
+                self.ui.slider(cx, ids!(master_slider)).set_value(cx, value as f64);
+            }
+            _ => {
+                let Some(rest) = control.strip_prefix("fx_") else { return };
+                let (kind, knob) = match rest.split_once('_') {
+                    Some(("a", knob)) => (FxSlotKind::EffectA, knob),
+                    Some(("t", knob)) => (FxSlotKind::Transition, knob),
+                    Some(("b", knob)) => (FxSlotKind::EffectB, knob),
+                    _ => return,
+                };
+                let index = match knob {
+                    "spd" => 0,
+                    "d0" => 1,
+                    "d1" => 2,
+                    "d2" => 3,
+                    _ => return,
+                };
+                match index {
+                    0 => self.fx_slots.slot_mut(kind).speed = v,
+                    i => self.fx_slots.slot_mut(kind).p[i - 1] = Some(v),
+                }
+                self.save_fx_slots();
+                self.ui
+                    .slider(cx, Self::fx_slot_knob_path(kind, index))
+                    .set_value(cx, v as f64);
+            }
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
     // ---- EFFECT SLOTS (fx_slot.rs) ------------------------------------------
     //
     // The vjeffect category's runtime: three offscreen hosts in the status
@@ -4447,18 +4695,35 @@ impl App {
         }
     }
 
-    /// Knob 0 = SPD, 1 = P1 (doc p0), 2 = P2 (doc p1).
+    fn fx_slot_dial_lab_path(kind: FxSlotKind, dial: usize) -> &'static [LiveId] {
+        match (kind, dial) {
+            (FxSlotKind::EffectA, 0) => ids!(fx_slot_a_d0_lab),
+            (FxSlotKind::EffectA, 1) => ids!(fx_slot_a_d1_lab),
+            (FxSlotKind::EffectA, _) => ids!(fx_slot_a_d2_lab),
+            (FxSlotKind::Transition, 0) => ids!(fx_slot_t_d0_lab),
+            (FxSlotKind::Transition, 1) => ids!(fx_slot_t_d1_lab),
+            (FxSlotKind::Transition, _) => ids!(fx_slot_t_d2_lab),
+            (FxSlotKind::EffectB, 0) => ids!(fx_slot_b_d0_lab),
+            (FxSlotKind::EffectB, 1) => ids!(fx_slot_b_d1_lab),
+            (FxSlotKind::EffectB, _) => ids!(fx_slot_b_d2_lab),
+        }
+    }
+
+    /// Knob 0 = SPD, 1..=3 = the THREE fixed dials (user params p0..p2).
     fn fx_slot_knob_path(kind: FxSlotKind, knob: usize) -> &'static [LiveId] {
         match (kind, knob) {
             (FxSlotKind::EffectA, 0) => ids!(fx_slot_a_spd),
-            (FxSlotKind::EffectA, 1) => ids!(fx_slot_a_p1),
-            (FxSlotKind::EffectA, _) => ids!(fx_slot_a_p2),
+            (FxSlotKind::EffectA, 1) => ids!(fx_slot_a_d0),
+            (FxSlotKind::EffectA, 2) => ids!(fx_slot_a_d1),
+            (FxSlotKind::EffectA, _) => ids!(fx_slot_a_d2),
             (FxSlotKind::Transition, 0) => ids!(fx_slot_t_spd),
-            (FxSlotKind::Transition, 1) => ids!(fx_slot_t_p1),
-            (FxSlotKind::Transition, _) => ids!(fx_slot_t_p2),
+            (FxSlotKind::Transition, 1) => ids!(fx_slot_t_d0),
+            (FxSlotKind::Transition, 2) => ids!(fx_slot_t_d1),
+            (FxSlotKind::Transition, _) => ids!(fx_slot_t_d2),
             (FxSlotKind::EffectB, 0) => ids!(fx_slot_b_spd),
-            (FxSlotKind::EffectB, 1) => ids!(fx_slot_b_p1),
-            (FxSlotKind::EffectB, _) => ids!(fx_slot_b_p2),
+            (FxSlotKind::EffectB, 1) => ids!(fx_slot_b_d0),
+            (FxSlotKind::EffectB, 2) => ids!(fx_slot_b_d1),
+            (FxSlotKind::EffectB, _) => ids!(fx_slot_b_d2),
         }
     }
 
@@ -4517,9 +4782,30 @@ impl App {
             Some(Ok(name)) => {
                 let title = if title.is_empty() { name } else { title.to_string() };
                 self.fx_slots.loaded(kind, title);
+                // The knob strip re-describes itself from the new doc's
+                // dial declarations.
+                self.sync_fx_slot_knobs(cx, kind);
                 if persist {
                     self.save_fx_slot_source(kind, source);
                     self.save_fx_slots();
+                    // AUTOFADE: the effect landed on the most-faded-out
+                    // side — sweep the program over to it, exactly the
+                    // fade a content cue gets. (Restores never sweep; the
+                    // toggle off means the operator rides the fader.)
+                    let target_is_b = kind == FxSlotKind::EffectB;
+                    let heading_to_b = self.program_mix < 0.5;
+                    if kind != FxSlotKind::Transition
+                        && self.fx_slots.click_autofade
+                        && heading_to_b == target_is_b
+                    {
+                        let secs = self
+                            .ui
+                            .slider(cx, ids!(video_fade))
+                            .value()
+                            .unwrap_or(1.0) as f32;
+                        self.auto_fade.press(self.program_mix, secs);
+                        self.sync_autofade_ui(cx);
+                    }
                 }
             }
             Some(Err(error)) => {
@@ -4590,17 +4876,51 @@ impl App {
         }
     }
 
-    /// Push the model's knob positions onto the widgets — only on load,
-    /// restore and clear, never while a hand is on them.
+    /// Mirror the LOADED DOC's dial declarations onto the FIXED knob strip:
+    /// three dials, one per user param p0..p2, always present so MIDI maps
+    /// stay stable across effect swaps. A declared dial gets its real
+    /// legend and doc default; an undeclared one dims to inert with a blank
+    /// legend. Runs on load, restore and clear — never while a hand is on a
+    /// knob.
     fn sync_fx_slot_knobs(&mut self, cx: &mut Cx, kind: FxSlotKind) {
         let slot = self.fx_slots.slot(kind).clone();
+        let dials = self
+            .ui
+            .widget(cx, Self::fx_slot_host_path(kind))
+            .borrow::<VjFxSlotHost>()
+            .map(|host| host.dials())
+            .unwrap_or_default();
+        let loaded = slot.title.is_some();
         self.ui
             .slider(cx, Self::fx_slot_knob_path(kind, 0))
             .set_value(cx, slot.speed as f64);
-        for p in 0..2 {
+        for i in 0..3 {
+            // The dial for p_i, whatever position the doc declared it in.
+            let dial = dials.iter().find(|d| d.index == i).filter(|_| loaded);
+            let label = match dial {
+                Some(dial) => {
+                    let mut label = dial.label.clone();
+                    label.truncate(6);
+                    label
+                }
+                None => "—".to_string(),
+            };
             self.ui
-                .slider(cx, Self::fx_slot_knob_path(kind, p + 1))
-                .set_value(cx, slot.p[p].unwrap_or(0.5) as f64);
+                .label(cx, Self::fx_slot_dial_lab_path(kind, i))
+                .set_text(cx, &label);
+            let knob = self.ui.slider(cx, Self::fx_slot_knob_path(kind, i + 1));
+            knob.set_value(
+                cx,
+                slot.p[i]
+                    .unwrap_or_else(|| dial.map(|d| d.default).unwrap_or(0.0)) as f64,
+            );
+            let inert = if dial.is_some() { 0.0f64 } else { 1.0 };
+            let mut knob = knob;
+            script_apply_eval!(cx, knob, {
+                draw_bg +: {
+                    inert: #(inert)
+                }
+            });
         }
     }
 
@@ -4641,7 +4961,12 @@ impl App {
                 host.set_beat(pos, bpm);
             }
             host.set_speed(FxSlots::speed_scale(slot.speed));
-            host.set_user([slot.p[0], slot.p[1], None, None]);
+            // The three fixed dials drive p0..p2 directly; an untouched
+            // knob leaves the doc's binding alone. (A touched knob on an
+            // undeclared param writes a value nothing reads — honest and
+            // dimmed in the UI.)
+            let over = [slot.p[0], slot.p[1], slot.p[2], None];
+            host.set_user(over);
             host.set_channel_input(chan.as_ref().map(|(tex, _)| tex.clone()));
             // First frame after a load has no output yet: pass the deck
             // through rather than a black frame.
@@ -4679,9 +5004,11 @@ impl App {
                     host.set_beat(pos, bpm);
                 }
                 host.set_speed(FxSlots::speed_scale(slot.speed));
-                // p3 carries the fade triangle: transition-aware documents
-                // can bind their own intensity to `p3`.
-                host.set_user([slot.p[0], slot.p[1], None, Some(tri)]);
+                // p3 carries the fade triangle (transition-aware documents
+                // bind intensity to it — which is why the fixed dials stop
+                // at p2); the dials drive p0..p2 as everywhere else.
+                let over = [slot.p[0], slot.p[1], slot.p[2], Some(tri)];
+                host.set_user(over);
                 host.set_premix(PremixJob {
                     a: out.0.clone(),
                     b: out.1.clone(),
@@ -4791,39 +5118,12 @@ impl App {
             self.sync_fx_slot_knobs(cx, kind);
         }
         self.sync_fx_slots_ui(cx);
+        self.sync_autofade_ui(cx);
         self.video_pump = cx.new_next_frame();
     }
 
     /// Toggle one kind chip; the grid re-queries the server for the new lane
     /// set (no chip selected = every visual kind).
-    fn toggle_kind_chip(&mut self, cx: &mut Cx, kinds: &[AssetKind]) {
-        let all_on = kinds.iter().all(|k| self.kind_filter.contains(k));
-        if all_on {
-            self.kind_filter.retain(|k| !kinds.contains(k));
-        } else {
-            for k in kinds {
-                if !self.kind_filter.contains(k) {
-                    self.kind_filter.push(*k);
-                }
-            }
-        }
-        let lanes = if self.kind_filter.is_empty() {
-            catalog::BrowseModel::<makepad_asset_client::PageCursor>::visual_kinds()
-        } else {
-            self.kind_filter.clone()
-        };
-        let cmds = self.video_model.set_kinds(lanes);
-        self.run_cat_cmds(Surface::Video, cmds);
-        self.sync_kind_chips_ui(cx);
-    }
-
-    fn sync_kind_chips_ui(&mut self, cx: &mut Cx) {
-        for (chip, kinds) in KIND_CHIPS {
-            let on = !self.kind_filter.is_empty() && kinds.iter().all(|k| self.kind_filter.contains(k));
-            self.paint_chip(cx, chip, on, None);
-        }
-        self.sync_preset_chips_ui(cx);
-    }
 
     /// A chip's ON state is FILLED plus a check — never colour alone, which
     /// is unreadable on a stage in the dark and invisible to a colour-blind
@@ -4858,51 +5158,52 @@ impl App {
 
     /// AUTOFADE wears its state: lit while it is walking the fader.
     fn sync_autofade_ui(&mut self, cx: &mut Cx) {
-        let on = self.auto_fade.active();
+        // The latch state, not the transient sweep: the button answers
+        // "will a click fade in?".
+        let on = self.fx_slots.click_autofade;
         self.paint_chip(cx, ids!(autofade), on, Some("AUTOFADE"));
     }
 
-    fn sync_preset_chips_ui(&mut self, cx: &mut Cx) {
-        for (chip, preset) in PRESET_CHIPS {
-            let on = self.preset == preset;
-            let label = match preset {
-                None => "ALL",
-                Some(p) => p.label(),
-            };
-            self.paint_chip(cx, chip, on, Some(label));
+    /// Paint the ONE radio group of lane chips (and the mode buttons).
+    fn sync_lane_chips_ui(&mut self, cx: &mut Cx) {
+        for (chip, lane, label) in LANE_CHIPS {
+            self.paint_chip(cx, chip, self.grid_lane == lane, Some(label));
         }
-        // What the explorer is showing, in the Library's own words.
-        let shelf = match self.preset {
-            None => String::new(),
-            Some(catalog::Preset::ThreeD) => "meshes · maps · scenes".to_string(),
-            Some(catalog::Preset::Audio) => "music · sfx".to_string(),
-            Some(_) => String::new(),
-        };
-        self.ui.label(cx, ids!(shelf_label)).set_text(cx, &shelf);
-        // The three MODES.
         for (button, surface) in MODE_BUTTONS {
             self.paint_chip(cx, button, self.apc.surface == surface, None);
         }
     }
 
-    /// Hot preset: SET the explorer's content, never toggle a lane. Every
-    /// bucket lives on the ONE explorer — which is why there is no MESH
-    /// surface (a map is 3D content, not its own app) and no MUSIC browse
-    /// tab (audio is a preset; clicking an audio tile loads a deck).
-    fn select_preset(&mut self, cx: &mut Cx, preset: Option<catalog::Preset>) {
-        self.preset = preset;
-        let lanes = match preset {
-            Some(p) => p.kinds(),
-            None => catalog::BrowseModel::<makepad_asset_client::PageCursor>::visual_kinds(),
+    /// Point the explorer at one lane. SET semantics — used by the slot arm
+    /// gesture; chip clicks go through [`Self::lane_chip_clicked`], which
+    /// adds the click-again-for-ALL radio behavior.
+    fn set_lane(&mut self, cx: &mut Cx, lane: GridLane) {
+        self.grid_lane = lane;
+        let (kinds, tag) = match lane {
+            GridLane::All => (
+                catalog::BrowseModel::<makepad_asset_client::PageCursor>::visual_kinds(),
+                String::new(),
+            ),
+            GridLane::Kind(kind) => (vec![kind], String::new()),
+            GridLane::Transition => (
+                vec![AssetKind::VjEffect],
+                crate::effects::seed::TRANSITION_TAG.to_string(),
+            ),
         };
-        let tag = preset
-            .and_then(|p| p.tag())
-            .unwrap_or_default()
-            .to_string();
-        self.kind_filter.clear();
-        let cmds = self.video_model.set_lanes(lanes, tag);
+        let cmds = self.video_model.set_lanes(kinds, tag);
         self.run_cat_cmds(Surface::Video, cmds);
-        self.sync_kind_chips_ui(cx);
+        self.sync_lane_chips_ui(cx);
+    }
+
+    /// Radio semantics: a chip click selects that lane alone; clicking the
+    /// selected chip again returns to ALL.
+    fn lane_chip_clicked(&mut self, cx: &mut Cx, lane: GridLane) {
+        let lane = if self.grid_lane == lane && lane != GridLane::All {
+            GridLane::All
+        } else {
+            lane
+        };
+        self.set_lane(cx, lane);
     }
 
     /// Switch top-level mode. The APC surface and the page are the same
@@ -5920,7 +6221,7 @@ impl App {
     /// the hot presets are the navigation now — so this only has to keep
     /// the chips and the GENERATE pill honest.
     fn paint_tabs(&mut self, cx: &mut Cx, _active: LiveId) {
-        self.sync_preset_chips_ui(cx);
+        self.sync_lane_chips_ui(cx);
         self.paint_gen_tab(cx);
     }
 
@@ -6680,6 +6981,22 @@ impl App {
         let mut pad_touched = false;
         for _ in 0..256 {
             let Some((port, data)) = self.midi_input.receive() else { break };
+            // LEARN layer first, on EVERY port: an armed control binds to
+            // the next CC that moves; a learned CC then drives its control
+            // INSTEAD of whatever the hardwired surface meant by it.
+            match self.midi_learn.midi(data.data) {
+                Some(LearnEvent::Bound { control, channel, cc: number }) => {
+                    log!("midi learn: {control} ← ch{channel} cc{number}");
+                    self.save_midi_map();
+                    self.sync_midi_learn_ui(cx);
+                    continue;
+                }
+                Some(LearnEvent::Value { control, value }) => {
+                    self.apply_learned(cx, &control, value);
+                    continue;
+                }
+                None => {}
+            }
             if !self.apc_input_ports.contains(&port) {
                 continue;
             }
@@ -7933,11 +8250,13 @@ impl App {
                 // The splash text is here: hand the render job to the hidden
                 // offscreen effect host. Small file, read in place.
                 self.fx_source_inflight.remove(&revision);
-                let title = self
+                let (title, transition) = self
                     .video_model
                     .tile(&asset)
-                    .map(|t| t.title.clone())
-                    .unwrap_or_else(|| revision.to_string());
+                    .map(|t| {
+                        (t.title.clone(), Self::alias_is_transition(t.alias.as_deref()))
+                    })
+                    .unwrap_or_else(|| (revision.to_string(), false));
                 match std::fs::read_to_string(&path) {
                     Ok(source) => {
                         let widget = self.ui.widget(cx, ids!(fx_thumbs));
@@ -7946,7 +8265,13 @@ impl App {
                         {
                             thumbs.enqueue(
                                 cx,
-                                fx_thumbs::FxThumbJob { asset, revision, title, source },
+                                fx_thumbs::FxThumbJob {
+                                    asset,
+                                    revision,
+                                    title,
+                                    source,
+                                    transition,
+                                },
                             );
                         };
                     }
@@ -8630,7 +8955,10 @@ impl App {
                                 .cache_parent
                                 .join("cache-vjfx-thumbs-30");
                             let _ = std::fs::remove_file(fx_thumbs::cache_path(
-                                &cache, &revision,
+                                &cache, &revision, false,
+                            ));
+                            let _ = std::fs::remove_file(fx_thumbs::cache_path(
+                                &cache, &revision, true,
                             ));
                             log!("fx thumb: sheet decode FAILED {revision}: {e}");
                         }
@@ -8840,7 +9168,8 @@ impl App {
             if failed {
                 continue;
             }
-            let cache = fx_thumbs::cache_path(&cache_dir, &revision);
+            let transition = Self::alias_is_transition(tile.alias.as_deref());
+            let cache = fx_thumbs::cache_path(&cache_dir, &revision, transition);
             if cache.exists() {
                 // A relaunch must not re-render: decode the digest-keyed
                 // sheet straight off disk, bounded per tick.
@@ -11230,7 +11559,17 @@ impl App {
         let is_effect = tile.kind == Some(AssetKind::VjEffect);
         let transition_ok = Self::tile_is_transition_fx(&self.video_model, tile);
         if is_effect && !as_content {
-            let kind = self.fx_slots.armed.unwrap_or_else(|| self.standby_fx_slot());
+            // Transitions auto-route to their one home; a plain effect
+            // lands on the MOST-FADED-OUT side's slot (and, with AUTOFADE
+            // on, sweeps in once loaded). An armed slot is the precision
+            // path and wins over both.
+            let kind = if let Some(kind) = self.fx_slots.armed {
+                kind
+            } else if transition_ok {
+                FxSlotKind::Transition
+            } else {
+                self.standby_fx_slot()
+            };
             match FxSlots::accepts(kind, true, transition_ok) {
                 Ok(()) => self.fx_effect_tile_clicked(cx, kind, asset),
                 Err(msg) => self.refuse_fx_slot(cx, kind, msg),
@@ -11280,8 +11619,13 @@ impl App {
         if model.tag == crate::effects::seed::TRANSITION_TAG {
             return true;
         }
-        tile.alias
-            .as_deref()
+        Self::alias_is_transition(tile.alias.as_deref())
+    }
+
+    /// A bundled transition preset, by alias — the client-side certainty
+    /// that needs no server round trip (thumbnails key on it too).
+    fn alias_is_transition(alias: Option<&str>) -> bool {
+        alias
             .and_then(|alias| alias.strip_prefix("vjfx/"))
             .is_some_and(crate::effects::seed::is_transition_preset)
     }
@@ -11733,9 +12077,15 @@ impl MatchEvent for App {
             self.paint_tabs(cx, id!(video_page));
         }
         self.paint_gen_tab(cx);
+        // The borderless window carries its own min/max/close on Windows.
+        #[cfg(target_os = "windows")]
+        self.ui.view(cx, ids!(win_buttons)).set_visible(cx, true);
         // Effect slots restore from their local splash files — before (and
-        // independent of) the store connection.
+        // independent of) the store connection; the MIDI map rides the same
+        // boot.
         self.load_fx_slots_panel(cx);
+        self.load_midi_map();
+        self.sync_midi_learn_ui(cx);
         self.sync_slot_controls_ui(cx);
         self.sync_pads();
         self.grids_dirty = true;
@@ -12313,8 +12663,10 @@ impl MatchEvent for App {
             self.set_visual_mix(cx, v as f32);
         }
         if self.ui.button(cx, ids!(autofade)).clicked(actions) {
-            let secs = self.ui.slider(cx, ids!(video_fade)).value().unwrap_or(1.0) as f32;
-            self.auto_fade.press(self.program_mix, secs);
+            // LATCHING toggle: clicks (effects now, content always did)
+            // sweep the program to the side they land on while this is on.
+            self.fx_slots.click_autofade = !self.fx_slots.click_autofade;
+            self.save_fx_slots();
             self.sync_autofade_ui(cx);
             self.video_pump = cx.new_next_frame();
         }
@@ -12349,23 +12701,29 @@ impl MatchEvent for App {
             }
         }
         // Hot presets in the bar: they SET what the explorer shows.
-        for (chip, preset) in PRESET_CHIPS {
+        for (chip, lane, _) in LANE_CHIPS {
             if self.ui.button(cx, chip).clicked(actions) {
-                self.select_preset(cx, preset);
+                self.lane_chip_clicked(cx, lane);
             }
         }
-        if self.ui.button(cx, ids!(preset_sfx)).clicked(actions) {
-            self.preset = Some(catalog::Preset::Audio);
-            self.apc.surface = ApcSurface::Sfx;
-            self.show_apc_surface(cx);
-            self.sync_kind_chips_ui(cx);
+        // ---- MIDI learn ----
+        if self.ui.button(cx, ids!(midi_learn_btn)).clicked(actions) {
+            self.midi_learn.toggle_pick();
+            self.sync_midi_learn_ui(cx);
         }
-        // Sub-shelf chips: narrow the chosen preset.
-        for (chip, kinds) in KIND_CHIPS {
-            if self.ui.button(cx, chip).clicked(actions) {
-                self.toggle_kind_chip(cx, kinds);
+        for (path, control) in LEARNABLES {
+            let wrap = self.ui.widget(cx, path);
+            if let Some(item) = actions.find_widget_action(wrap.widget_uid()) {
+                if let LearnWrapAction::Clicked { alt } = item.cast() {
+                    if self.midi_learn.control_clicked(control, alt) {
+                        // The clear gesture may have dropped a binding.
+                        self.save_midi_map();
+                        self.sync_midi_learn_ui(cx);
+                    }
+                }
             }
         }
+
         // ---- effect slots (fx_slot.rs) ----
         for kind in FxSlotKind::ALL {
             let tile = self.ui.widget(cx, Self::fx_slot_tile_path(kind));
@@ -12376,11 +12734,11 @@ impl MatchEvent for App {
                     // the explorer at the matching lane: the TRANSITION
                     // slot prefers the transition-tagged effects.
                     if self.fx_slots.toggle_arm(kind) {
-                        let preset = match kind {
-                            FxSlotKind::Transition => catalog::Preset::Transition,
-                            _ => catalog::Preset::Effect,
+                        let lane = match kind {
+                            FxSlotKind::Transition => GridLane::Transition,
+                            _ => GridLane::Kind(AssetKind::VjEffect),
                         };
-                        self.select_preset(cx, Some(preset));
+                        self.set_lane(cx, lane);
                     }
                     self.sync_fx_slots_ui(cx);
                 }
@@ -12406,7 +12764,7 @@ impl MatchEvent for App {
                 self.save_fx_slots();
                 self.video_pump = cx.new_next_frame();
             }
-            for p in 0..2 {
+            for p in 0..3 {
                 if let Some(v) = self
                     .ui
                     .slider(cx, Self::fx_slot_knob_path(kind, p + 1))
@@ -12613,6 +12971,32 @@ impl MatchEvent for App {
             }
         }
 
+        // ---- Windows chrome cluster ----
+        if self.ui.desktop_button(cx, ids!(win_min)).clicked(actions) {
+            if let Some(window_id) = self.ui.window(cx, ids!(main_window)).window_id() {
+                cx.push_unique_platform_op(
+                    makepad_widgets::makepad_platform::CxOsOp::MinimizeWindow(window_id),
+                );
+            }
+        }
+        if self.ui.desktop_button(cx, ids!(win_max)).clicked(actions) {
+            if let Some(window_id) = self.ui.window(cx, ids!(main_window)).window_id() {
+                let op = if cx.windows[window_id].window_geom.is_fullscreen {
+                    makepad_widgets::makepad_platform::CxOsOp::RestoreWindow(window_id)
+                } else {
+                    makepad_widgets::makepad_platform::CxOsOp::MaximizeWindow(window_id)
+                };
+                cx.push_unique_platform_op(op);
+            }
+        }
+        if self.ui.desktop_button(cx, ids!(win_close)).clicked(actions) {
+            if let Some(window_id) = self.ui.window(cx, ids!(main_window)).window_id() {
+                cx.push_unique_platform_op(
+                    makepad_widgets::makepad_platform::CxOsOp::CloseWindow(window_id),
+                );
+            }
+        }
+
         // ---- output window ----
         if self.ui.button(cx, ids!(open_output)).clicked(actions) {
             // A toggle, not a one-way door: the second press puts the
@@ -12639,12 +13023,17 @@ impl AppMain for App {
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);
         crate::fx_slot::script_mod(vm);
+        crate::midi_learn::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.handle_output_window_event(cx, event);
         if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::Escape && self.midi_learn.active() {
+                self.midi_learn.escape();
+                self.sync_midi_learn_ui(cx);
+            }
             if ke.key_code == KeyCode::F3 {
                 let graph = self.ui.view(cx, ids!(perf_box));
                 let on = !graph.visible();
@@ -12673,6 +13062,7 @@ impl AppMain for App {
                         self.ui.widget(cx, ids!(karaoke_enable)).area(),
                         self.ui.widget(cx, ids!(karaoke_word_hops)).area(),
                         self.ui.widget(cx, ids!(open_output)).area(),
+                        self.ui.widget(cx, ids!(win_buttons)).area(),
                         self.ui.widget(cx, ids!(beat_block)).area(),
                     ];
                     let over_control = controls
@@ -12733,16 +13123,6 @@ impl AppMain for App {
         if let Event::Startup = event {
             if !self.started {
                 self.started = true;
-                // Windows has no system chrome overlay on a borderless
-                // window: without the caption bar there is no minimize/
-                // maximize/close at all. Show the bar there; macOS keeps
-                // the borderless look (its traffic lights are the OS's).
-                if matches!(cx.os_type(), OsType::Windows) {
-                    let mut window = self.ui.widget(cx, ids!(main_window));
-                    script_apply_eval!(cx, window, {
-                        show_caption_bar: true
-                    });
-                }
             }
         }
         if self.poll_timer.is_event(event).is_some() {
