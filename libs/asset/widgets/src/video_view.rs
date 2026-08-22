@@ -72,7 +72,9 @@ script_mod! {
             color: #xff5a4d99
         }
         draw_knob +: {
-            color: #xff5a4d
+            // WHITE = where things are (the app's slider-handle language);
+            // accent = what's on. The playhead follows the handles.
+            color: #xffffff
         }
         draw_handle +: {
             color: #xf0b34d

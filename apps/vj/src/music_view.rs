@@ -303,7 +303,7 @@ script_mod! {
                 height: 22
                 padding: 0
                 draw_bg +: {
-                    color: #x141920
+                    color: #x1c2129
                     color_alt: #x11161c
                     color_live: #x1d2a2a
                     live: instance(0.0)
@@ -327,14 +327,14 @@ script_mod! {
                 row_badge := Label{
                     width: 26
                     text: ""
-                    draw_text.color: #x3ee0b0
+                    draw_text.color: #xff5c39
                     draw_text.text_style: theme.font_bold{font_size: 8}
                 }
                 row_title := TrackText{width: Fill}
                 row_artist := TrackText{width: 150 draw_text.color: #x9fabb7}
                 row_bpm := TrackText{
                     width: 54
-                    draw_text.color: #x3ee0b0
+                    draw_text.color: #xff5c39
                     draw_text.text_style: theme.font_bold{font_size: 9}
                 }
                 row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
@@ -345,9 +345,9 @@ script_mod! {
                     height: 18
                     text: "+"
                     draw_bg +: {
-                        color: #x1f262f
+                        color: #x272e38
                         color_hover: #x2b3440
-                        color_down: #x161b22
+                        color_down: #x1e232b
                         border_color: #xffffff26
                         border_radius: 4.0
                         border_size: 1.0
@@ -389,10 +389,10 @@ script_mod! {
 
     let MusicButton = Button{
         draw_bg +: {
-            color: #x1f262f
-            color_focus: #x1f262f
+            color: #x272e38
+            color_focus: #x272e38
             color_hover: #x2b3440
-            color_down: #x161b22
+            color_down: #x1e232b
             border_color: #xffffff2e
             border_radius: 6.0
             border_size: 1.0
@@ -410,10 +410,10 @@ script_mod! {
         height: 24
         icon_walk: Walk{width: 12 height: Fit}
         draw_bg +: {
-            color: #x1f262f
-            color_focus: #x1f262f
+            color: #x272e38
+            color_focus: #x272e38
             color_hover: #x2b3440
-            color_down: #x161b22
+            color_down: #x1e232b
             border_color: #xffffff26
             border_radius: 5.0
             border_size: 1.0
@@ -450,7 +450,7 @@ script_mod! {
             body_color_hover: uniform(#x2a323d)
             rim_color: uniform(#xffffff40)
             ring_color: uniform(#x2f3842)
-            val_color: uniform(#x3ee0b0)
+            val_color: uniform(#xff5c39)
             pointer_color: uniform(#xf2f6fa)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -506,9 +506,9 @@ script_mod! {
         flow: Down
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x151a21)
+            body_color: uniform(#x1d222a)
             track_color: uniform(#x2b343f)
-            fill_color: uniform(#x3ee0b0)
+            fill_color: uniform(#xff5c39)
             cap_color: uniform(#xe8eef4)
             cap_shadow: uniform(#x8d98a7)
             pixel: fn() {
@@ -543,9 +543,9 @@ script_mod! {
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
-            body_color: uniform(#x151a21)
+            body_color: uniform(#x1d222a)
             track_color: uniform(#x2b343f)
-            fill_color: uniform(#x3ee0b0)
+            fill_color: uniform(#xff5c39)
             cap_color: uniform(#xe8eef4)
             cap_shadow: uniform(#x8d98a7)
             pixel: fn() {
@@ -578,8 +578,8 @@ script_mod! {
         height: Fill
         draw_bg +: {
             level: uniform(0.0)
-            color: uniform(#x151a21)
-            color_lit: uniform(#x3ee0b0)
+            color: uniform(#x1d222a)
+            color_lit: uniform(#xff5c39)
             color_hot: uniform(#xff5a4e)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -638,7 +638,7 @@ script_mod! {
                 align: Align{x: 0.0, y: 0.5}
                 Label{
                     text: "A"
-                    draw_text.color: #x3ee0b0
+                    draw_text.color: #xff5c39
                     draw_text.text_style: theme.font_bold{font_size: 13}
                 }
                 deck_a_art := Image{width: 44 height: 44}
@@ -656,7 +656,7 @@ script_mod! {
                     align: Align{x: 1.0, y: 0.5}
                     deck_a_bpm := Label{
                         text: "---.-"
-                        draw_text.color: #x3ee0b0
+                        draw_text.color: #xff5c39
                         draw_text.text_style: theme.font_bold{font_size: 17}
                     }
                     deck_a_pitch_text := MusicLabel{text: "+0.0%"}
@@ -1127,7 +1127,7 @@ script_mod! {
                     align: Align{x: 0.0, y: 0.5}
                     Label{
                         text: "QUEUE"
-                        draw_text.color: #x3ee0b0
+                        draw_text.color: #xff5c39
                         draw_text.text_style: theme.font_bold{font_size: 10}
                     }
                     queue_count := MusicLabel{width: Fill text: ""}

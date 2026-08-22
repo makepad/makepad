@@ -863,12 +863,11 @@ impl EffectDoc {
             }
         };
         let grow_beats = r.f32(live_id!(grow_beats), 8.0).clamp(0.5, 64.0);
-        let params = [
-            r.anim(live_id!(p0), 0.0),
-            r.anim(live_id!(p1), 0.0),
-            r.anim(live_id!(p2), 0.0),
-            r.anim(live_id!(p3), 0.0),
-        ];
+        // Parsed BELOW (dial declarations), used here: a doc that declares
+        // a dial default but never sets `p_i:` must BEHAVE at that default
+        // — the knob face and the shader value must be the same number.
+        // (The wipe's SOFT dial said 0.15 while the shader ran 0.0.)
+        let params;
 
         // -- palette --------------------------------------------------------
         let palette = [
@@ -1044,6 +1043,16 @@ impl EffectDoc {
         if dials.is_empty() {
             dials = engine_default_dials(&engine_name);
         }
+        let mut p_defaults = [0.0f32; 4];
+        for dial in &dials {
+            p_defaults[dial.index] = dial.default;
+        }
+        params = [
+            r.anim(live_id!(p0), p_defaults[0]),
+            r.anim(live_id!(p1), p_defaults[1]),
+            r.anim(live_id!(p2), p_defaults[2]),
+            r.anim(live_id!(p3), p_defaults[3]),
+        ];
 
         // -- engage profile -------------------------------------------------
         // engage: "triangle" (default) | "ramp" — how the host rides this
