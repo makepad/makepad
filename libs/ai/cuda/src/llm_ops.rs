@@ -88,11 +88,13 @@ pub type CudaError = i32;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffi {
+    #![allow(dead_code)]
     use super::{CudaError, Stream};
     use std::ffi::c_void;
 
-    #[allow(dead_code)]
-    unsafe extern "C" {
+    // `cuda_ffi!` (see `link_gate.rs`): the real `mkllm_*` declarations when
+    // the kernels were built, link-clean stubs when they were not.
+    cuda_ffi! {
         pub fn mkllm_device_info(
             device: i32,
             name: *mut u8,

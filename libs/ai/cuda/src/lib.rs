@@ -2,6 +2,11 @@
 //! dense `gpu_*` launch surface, quant compute, and llm `mkllm_*` ops.
 //! Plan of record: /aiarch.md §1 + §4.
 
+// Declared first, and with `#[macro_use]`, so `cuda_ffi!` is in scope for
+// every module below: `macro_rules!` visibility is textual.
+#[macro_use]
+mod link_gate;
+
 pub mod accel;
 pub mod cudnn;
 pub mod cudnn_v8_bench;
