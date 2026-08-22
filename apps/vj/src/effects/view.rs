@@ -31,6 +31,7 @@ use super::engines_charts::DrawVjFxCharts;
 use super::engines_city::DrawVjFxCity;
 use super::engines_copper::DrawVjFxCopper;
 use super::engines_domino::DrawVjFxDomino;
+use super::engines_duo::DrawVjFxDuo;
 use super::engines_firefly::DrawVjFxFirefly;
 use super::engines_flock::DrawVjFxFlock;
 use super::engines_forge::DrawVjFxForge;
@@ -108,6 +109,8 @@ pub struct VjFxView {
     draw_flock: DrawVjFxFlock,
     #[live]
     draw_raymarch: DrawVjFxRaymarch,
+    #[live]
+    draw_duo: DrawVjFxDuo,
     #[live]
     draw_jet: DrawVjFxJet,
     #[live]
@@ -223,6 +226,10 @@ pub struct VjFxView {
 
     #[rust]
     input0: Option<Texture>,
+    /// Texture input 1: deck B, for the two-deck transition engine. Never
+    /// substituted by the fallback — an unbound deck samples black.
+    #[rust]
+    input1: Option<Texture>,
     /// The built-in ANIMATED stand-in for input 0: every texture-input
     /// effect renders something meaningful with no channel bound (gallery,
     /// thumbnails, empty channels). Beat-aware so even the dummy pulses.
@@ -358,6 +365,7 @@ impl VjFxView {
                         ShaderKind::Tiles => live_id!(DrawVjFxTiles),
                         ShaderKind::Flock => live_id!(DrawVjFxFlock),
                         ShaderKind::Raymarch => live_id!(DrawVjFxRaymarch),
+                        ShaderKind::Duo => live_id!(DrawVjFxDuo),
                         ShaderKind::Jet => live_id!(DrawVjFxJet),
                         ShaderKind::City => live_id!(DrawVjFxCity),
                         ShaderKind::Pipes => live_id!(DrawVjFxPipes),
@@ -419,6 +427,9 @@ impl VjFxView {
                 }
                 ShaderKind::Raymarch => {
                     self.draw_raymarch.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::Duo => {
+                    self.draw_duo.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
                 ShaderKind::Jet => {
                     self.draw_jet.script_apply(vm, &Apply::Eval, &mut scope, value)
@@ -540,9 +551,27 @@ impl VjFxView {
     /// Texture input 0 (the "extra slot" — a still, or the channel's main
     /// content in effect-pass mode).
     pub fn set_input_texture(&mut self, index: usize, texture: Option<Texture>) {
-        if index == 0 {
-            self.input0 = texture;
+        match index {
+            0 => self.input0 = texture,
+            1 => self.input1 = texture,
+            _ => {}
         }
+    }
+
+    /// True when the loaded document is the two-deck transition engine —
+    /// the host should feed deck A into input 0 and deck B into input 1,
+    /// and drive `p3` with the crossfader position (not the triangle).
+    pub fn wants_deck_inputs(&self) -> bool {
+        matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Duo(_)))
+    }
+
+    /// True when the doc declared `engage: "ramp"` — an overlay/key
+    /// transition that stays fully applied at the fader's B end instead of
+    /// handing back the plain deck (see [`super::doc::EngageProfile`]).
+    pub fn engage_ramp(&self) -> bool {
+        self.doc
+            .as_ref()
+            .is_some_and(|d| d.engage == super::doc::EngageProfile::Ramp)
     }
 
     /// Host overrides for the document's `p0..p3` user params; `None` per
@@ -557,14 +586,10 @@ impl VjFxView {
         self.speed_scale = scale.clamp(0.05, 20.0);
     }
 
-    /// One user param for this frame: the host override, else the binding.
+    /// One user param for this frame: already resolved into the signal
+    /// vector by `signals()` (host override, else the doc's binding).
     fn user_value(&self, index: usize, sig: &Signals) -> f32 {
-        self.user_override[index].unwrap_or_else(|| {
-            self.doc
-                .as_ref()
-                .map(|d| d.params[index].value(sig))
-                .unwrap_or(0.0)
-        })
+        sig.0[Signals::P0 + index]
     }
 
     pub fn set_live(&mut self, cx: &mut Cx, live: bool) {
@@ -701,6 +726,16 @@ impl VjFxView {
         s[Signals::BASS] = self.audio[1];
         s[Signals::MID] = self.audio[2];
         s[Signals::HIGH] = self.audio[3];
+        // p0..p3 as signals, so any binding can route a dial ("0.4+p1*1.2").
+        // Host override (a touched knob) wins; else the doc's own p binding,
+        // evaluated against the BASE signals — a p-param's own binding sees
+        // the other p's as 0, never itself (no cycles by construction).
+        let base = Signals(s);
+        for i in 0..4 {
+            s[Signals::P0 + i] = self.user_override[i].unwrap_or_else(|| {
+                doc.map(|d| d.params[i].value(&base)).unwrap_or(0.0)
+            });
+        }
         Signals(s)
     }
 
@@ -831,7 +866,7 @@ impl VjFxView {
             vm.bx.captured_errors = Some(Vec::new());
             // Input snapshot: what the tick can see.
             let input = vm.bx.heap.new_object();
-            let fields: [(LiveId, f64); 8] = [
+            let fields: [(LiveId, f64); 12] = [
                 (live_id!(time), sig.0[Signals::TIME] as f64),
                 (live_id!(dt), sig.0[Signals::DT] as f64),
                 (live_id!(beat), sig.0[Signals::BEAT] as f64),
@@ -840,6 +875,12 @@ impl VjFxView {
                 (live_id!(pulse), sig.0[Signals::PULSE] as f64),
                 (live_id!(energy), sig.0[Signals::ENERGY] as f64),
                 (live_id!(emitters), emitter_count as f64),
+                // The resolved user params (dials): fx.p0..fx.p3, so the
+                // tick can dial spawn rate/size like shaders read self.user.
+                (live_id!(p0), sig.0[Signals::P0] as f64),
+                (live_id!(p1), sig.0[Signals::P1] as f64),
+                (live_id!(p2), sig.0[Signals::P2] as f64),
+                (live_id!(p3), sig.0[Signals::P3] as f64),
             ];
             for (key, v) in fields {
                 vm.bx.heap.set_value_def(input, key.into(), ScriptValue::from_f64(v));
@@ -1005,10 +1046,10 @@ impl VjFxView {
             (
                 doc.engine.uniforms(),
                 vec4(
-                    self.user_override[0].unwrap_or_else(|| doc.params[0].value(sig)),
-                    self.user_override[1].unwrap_or_else(|| doc.params[1].value(sig)),
-                    self.user_override[2].unwrap_or_else(|| doc.params[2].value(sig)),
-                    self.user_override[3].unwrap_or_else(|| doc.params[3].value(sig)),
+                    sig.0[Signals::P0],
+                    sig.0[Signals::P1],
+                    sig.0[Signals::P2],
+                    sig.0[Signals::P3],
                 ),
                 vec4(
                     doc.sway.value(sig),
@@ -1127,6 +1168,21 @@ impl VjFxView {
                 // viewport aspect (the pass camera is ignored).
                 self.draw_raymarch.rm = vec4(aspect, 0.0, 0.0, 0.0);
                 draw_engine!(&mut self.draw_raymarch)
+            }
+            ShaderKind::Duo => {
+                // Deck A in 0, deck B in 1; a missing deck samples empty
+                // (never the animated fallback — a transition must show
+                // the real decks or nothing).
+                match &self.input0 {
+                    Some(tex) => self.draw_duo.draw_vars.set_texture(0, tex),
+                    None => self.draw_duo.draw_vars.empty_texture(0),
+                }
+                match &self.input1 {
+                    Some(tex) => self.draw_duo.draw_vars.set_texture(1, tex),
+                    None => self.draw_duo.draw_vars.empty_texture(1),
+                }
+                self.draw_duo.rm = vec4(aspect, 0.0, 0.0, 0.0);
+                draw_engine!(&mut self.draw_duo)
             }
             ShaderKind::Jet => draw_engine!(&mut self.draw_jet),
             ShaderKind::City => draw_engine!(&mut self.draw_city),

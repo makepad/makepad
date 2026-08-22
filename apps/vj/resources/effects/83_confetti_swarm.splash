@@ -23,9 +23,18 @@
     bank: 1.6
     bar_beats: 4
 
-    beat_pulse: 1.1
+    beat_pulse: "1.1 * (0.2 + 1.6*p1)"
     cam_orbit: 0.14
     fog: 0.05
+    glow: "0.25 + 1.5*p2"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TRAIL", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x06040c
     color_a: #x22ffcc
@@ -33,7 +42,7 @@
     color_c: #xffffff
 
     stages: [
-        {kind: "feedback", amount: "0.5 + 0.25 * pulse", zoom: 1.015,
+        {kind: "feedback", amount: "min(0.5 + 0.25 * pulse + (p0-0.5)*0.6, 0.97)", zoom: 1.015,
          rotate: 0.006, dim: 0.95},
         {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
     ]

@@ -25,6 +25,15 @@
     beat_pulse: 0.4
     p1: "0.35 * pulse"     // the nib presses harder on the beat
 
+    // PERFORMANCE DIALS — all three are the engine's own p-levers:
+    // DETUNE splays the pendulum ratios, WIDTH overrides the nib-press
+    // binding above when touched, DEPTH pulls the figure into z.
+    dials: [
+        {name: "DETUNE", bind: "p0", default: 0.0},
+        {name: "WIDTH", bind: "p1", default: 0.5},
+        {name: "DEPTH", bind: "p2", default: 0.0}
+    ]
+
     color_bg: #x05060d
     color_a: #xd8d0c0
     color_b: #x8090b8

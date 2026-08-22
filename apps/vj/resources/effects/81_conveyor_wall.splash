@@ -19,6 +19,17 @@
 
     beat_pulse: 0.8
     p2: "0.10 + 0.30 * pulse"
+    p0: 0.5  p1: 0.5
+    glow: "0.25 + 1.5*p0"
+
+    // PERFORMANCE DIALS — GROUT is the engine's own p2 lever (touching it
+    // holds the lattice pump); GLOW and SPLIT route p0/p1 through the glow
+    // key and the chroma stage. Mid-knob = the stock look, exact.
+    dials: [
+        {name: "GLOW", bind: "p0", default: 0.5},
+        {name: "SPLIT", bind: "p1", default: 0.5},
+        {name: "GROUT", bind: "p2", default: 0.5}
+    ]
 
     input0: "test"
 
@@ -28,7 +39,7 @@
     color_c: #xffd9a8
 
     stages: [
-        {kind: "chroma", p1: "0.10 + 0.14 * pulse", p2: 0.0},
+        {kind: "chroma", p1: "(0.10 + 0.14 * pulse) * (0.2 + 1.6*p1)", p2: 0.0},
         {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 3}
     ]
 }

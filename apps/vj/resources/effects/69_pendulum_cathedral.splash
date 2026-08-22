@@ -24,6 +24,14 @@
     p1: "0.5 * env(bar)"   // organ swell per bar
     p2: 1.4                // the cathedral depth
 
+    // PERFORMANCE DIALS — the engine's own p-levers; DEPTH rests at the
+    // knob's ceiling (the doc holds 1.4 until the knob is touched).
+    dials: [
+        {name: "DETUNE", bind: "p0", default: 0.0},
+        {name: "WIDTH", bind: "p1", default: 0.5},
+        {name: "DEPTH", bind: "p2", default: 1.0}
+    ]
+
     color_bg: #x060410
     color_a: #x8060ff
     color_b: #x30a0c0

@@ -18,8 +18,15 @@
     sway: 0.12
     twist: 0.0
     speed: 1.2
-    beat_pulse: 0.9
-    glow: "0.7 + env(phase) * 1.6"
+    beat_pulse: "0.9 * (0.2 + 1.6*p2)"
+    glow: "(0.7 + env(phase) * 1.6) * (0.2 + 1.6*p0)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "STROBE", bind: "p0", default: 0.5},
+        {name: "SPLIT", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x050208
     color_a: #x00ff88
@@ -31,6 +38,6 @@
 
     stages: [
         {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3},
-        {kind: "chroma", p1: "pulse * 0.5", p2: 0.13}
+        {kind: "chroma", p1: "(pulse * 0.5) * (0.2 + 1.6*p1)", p2: 0.13}
     ]
 }

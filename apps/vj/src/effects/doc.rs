@@ -76,7 +76,11 @@ impl<'a, 'v> Reader<'a, 'v> {
         if v.is_nil() {
             return Animatable::Const(default);
         }
-        if v.as_string().is_some() {
+        // is_string_like, NOT as_string: short literals ("p0", "bar",
+        // "pulse") are INLINE strings — a different type tag that
+        // as_string() misses, which silently turned bare-signal bindings
+        // into numeric garbage.
+        if v.is_string_like() {
             let src = self
                 .vm
                 .bx
@@ -271,6 +275,7 @@ pub fn engine_default_dials(engine: &str) -> Vec<DialDecl> {
         "stockcharts" => vec![d("GAIN", 0, 0.5), d("GLOW", 1, 0.5), d("PANIC", 2, 0.0)],
         "mountainjet" => vec![d("GLOW", 0, 0.5), d("FLICK", 1, 0.5), d("PLUME", 2, 0.5)],
         "fluid" => vec![d("WARP", 0, 0.5), d("TEXMX", 1, 0.5)],
+        "transition" => vec![d("SOFT", 0, 0.15)],
         _ => Vec::new(),
     }
 }
@@ -279,6 +284,9 @@ pub struct EffectDoc {
     pub name: String,
     pub engine: Engine,
     pub warnings: Vec<String>,
+    /// How the HOST engages this doc as the program transition along the
+    /// crossfader — see [`EngageProfile`].
+    pub engage: EngageProfile,
 
     pub speed: f32,
     pub beat_pulse: Animatable,
@@ -323,6 +331,25 @@ pub struct EffectDoc {
     pub wind_field: Option<String>,
 }
 
+/// TRANSITION ENGAGE PROFILE — declared per doc as `engage: "triangle" |
+/// "ramp"`.
+///
+/// * `Triangle` (default): engagement is the fader triangle — zero at both
+///   ends, full at mid. Right for TIMED moves (wipe/dissolve/iris/push):
+///   their t=0/t=1 endpoints ARE the plain decks, so the rest state at
+///   either end is exact and free.
+/// * `Ramp`: engagement rises with the fader and STAYS full at B's end —
+///   `min(2·mix, 1)`. Right for OVERLAY/KEY docs (luma key, chroma key,
+///   additive, PiP…): riding the fader to the end must leave the KEYED
+///   COMPOSITE up, never flick the base layer off — full fader means "key
+///   fully applied", and only the A end is the plain deck.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EngageProfile {
+    #[default]
+    Triangle,
+    Ramp,
+}
+
 fn warp_kind(kind: &str) -> Option<WarpMode> {
     Some(match kind {
         "kaleido" => WarpMode::Kaleido,
@@ -340,12 +367,22 @@ fn warp_kind(kind: &str) -> Option<WarpMode> {
 }
 
 impl EffectDoc {
-    /// Evaluate `source` and read the doc. `key` must be stable per document
-    /// slot (it names the script body; re-evaluating the same key with new
-    /// source replaces it).
+    /// Evaluate `source` and read the doc. `key` names the document slot;
+    /// the module file it evaluates under is CONTENT-ADDRESSED (key + a
+    /// hash of the source). This is load-bearing, not cosmetic: the draw
+    /// system caches compiled shaders by the hook functions' instruction
+    /// pointers (`DrawVars::compute_shader_functions_hash`), and a module
+    /// re-evaluated under the SAME file name lands its closures on the
+    /// SAME ips — so loading doc B into a slot that held doc A (or
+    /// rendering thumbnails through one shared key) would silently REUSE
+    /// A's compiled `trans`/`fx_color` shader ("every transition is a
+    /// wipe"). A distinct file per distinct content gives distinct ips;
+    /// reloading identical content maps to the same module, so nothing
+    /// accretes in the steady state.
     pub fn parse(vm: &mut ScriptVm, key: &str, source: &str) -> Result<EffectDoc, String> {
+        let content = LiveId(LiveId::SEED).bytes_append(source.as_bytes());
         let script_mod = ScriptMod {
-            file: format!("vjfx://{key}"),
+            file: format!("vjfx://{key}/{:016x}", content.0),
             code: format!("{DOC_PRELUDE}{source}"),
             ..Default::default()
         };
@@ -647,6 +684,12 @@ impl EffectDoc {
                 // Mirror of the shared bar_beats key — the predator's clock.
                 cfg.bar_beats = r.f32(live_id!(bar_beats), cfg.bar_beats).clamp(1.0, 32.0);
                 Engine::Flock(FlockEngine::new(cfg))
+            }
+            // The two-deck transition compositor: the host feeds BOTH deck
+            // textures and sweeps p3 with the crossfader (engines_duo).
+            "transition" => {
+                use super::engines_duo::{DuoConfig, DuoEngine};
+                Engine::Duo(DuoEngine::new(DuoConfig::default()))
             }
             "raymarch" => {
                 use super::engines_raymarch::{RaymarchCam, RaymarchConfig, RaymarchEngine};
@@ -992,11 +1035,25 @@ impl EffectDoc {
             dials = engine_default_dials(&engine_name);
         }
 
+        // -- engage profile -------------------------------------------------
+        // engage: "triangle" (default) | "ramp" — how the host rides this
+        // doc along the crossfader when it sits in the TRANSITION slot.
+        let engage = match r.string(live_id!(engage)).as_deref() {
+            None | Some("triangle") => EngageProfile::Triangle,
+            Some("ramp") => EngageProfile::Ramp,
+            Some(other) => {
+                r.warnings
+                    .push(format!("engage '{other}' unknown (triangle/ramp)"));
+                EngageProfile::Triangle
+            }
+        };
+
         let warnings = std::mem::take(&mut r.warnings);
         Ok(EffectDoc {
             name,
             engine,
             warnings,
+            engage,
             speed,
             beat_pulse,
             beat_rate,

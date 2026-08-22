@@ -13,8 +13,15 @@
     swirl: 1.4
     stretch: 3.0
 
-    beat_pulse: 0.8
+    beat_pulse: "0.8 * (0.2 + 1.6*p2)"
     beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TRAIL", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x030310
     color_a: #x2ff0ff
@@ -28,7 +35,7 @@
     fog: 0.03
 
     stages: [
-        {kind: "feedback", amount: 0.78, zoom: 1.035, rotate: 0.006, dim: 0.96},
+        {kind: "feedback", amount: "min(0.78 + (p0-0.5)*0.44, 0.97)", zoom: 1.035, rotate: "0.006 + (p1-0.5)*0.05", dim: 0.96},
         {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 3}
     ]
 }

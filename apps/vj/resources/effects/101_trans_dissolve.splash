@@ -1,0 +1,29 @@
+// DISSOLVE — the plain crossfade as a TRANSITION DOC. Pattern taught: the
+// two-deck `transition` engine. The host binds deck A/B into input 0/1 and
+// sweeps p3 with the crossfader; the default `trans` hook of
+// draw.DrawVjFxDuo IS a dissolve. The hook below reproduces it EXACTLY at
+// the dial defaults and adds the mixer-desk levers: CURVE bends the fade
+// law (fast-in vs fast-out), DIP ducks through black mid-fade, FLASH
+// lifts to white mid-fade.
+{
+    name: "Dissolve"
+    engine: "transition"
+    p0: 0.5
+    dials: [
+        {name: "CURVE", bind: "p0", default: 0.5},
+        {name: "DIP", bind: "p1", default: 0.0},
+        {name: "FLASH", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            // CURVE: exponent 0.25..4, exactly 1 (a plain mix) at 0.5.
+            let tt = pow(clamp(t, 0.0, 1.0), pow(4.0, self.user.x * 2.0 - 1.0))
+            let c = self.deck_a(uv).mix(self.deck_b(uv), tt)
+            // Mid-fade envelope: 0 at the ends, 1 in the middle.
+            let mid = 4.0 * tt * (1.0 - tt)
+            let dim = 1.0 - mid * self.user.y * 0.9
+            let flash = mid * self.user.z * 0.8
+            return vec4(c.xyz * dim + vec3(1.0, 1.0, 1.0) * flash, 1.0)
+        }
+    }
+}

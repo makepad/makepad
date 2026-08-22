@@ -12,8 +12,15 @@
     scroll: 2.0
     ridged: 0.65
 
-    beat_pulse: 0.25
+    beat_pulse: "0.25 * (0.2 + 1.6*p0)"
     beat_rate: 0.5
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "HAZE", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x1c0c18
     color_a: #xff9a70
@@ -22,8 +29,8 @@
 
     cam_fov: 64.0
     cam_height: 4.6
-    fog: 0.055
-    glow: 1.05
+    fog: "0.055 * (0.2 + 1.6*p2)"
+    glow: "1.05 * (0.25 + 1.5*p1)"
 
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 3}

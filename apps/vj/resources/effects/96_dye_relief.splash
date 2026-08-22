@@ -24,15 +24,22 @@
             force: 2.2
             dissipation: 0.10
             swirl: 0.4
-            splat: "1.5 + pulse * 0.7"
+            splat: "(1.5 + pulse * 0.7) * (0.2 + 1.6*p0)"
             dye_fade: 0.14
             radius: 0.09
         }
     ]
     input0: "field:dye"
 
-    beat_pulse: 0.35
+    beat_pulse: "0.35 * (0.2 + 1.6*p1)"
     beat_rate: 0.5
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPLAT", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x080611
     color_a: #x3a2a8f
@@ -43,7 +50,7 @@
     cam_height: 6.5
     cam_dist: 12.5
     fog: 0.035
-    glow: 1.2
+    glow: "1.2 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.5, strength: 1.2, levels: 3}

@@ -22,6 +22,15 @@
     beat_rate: 1.0
     p0: "0.35 + 1.8 * bass"   // afterburner kick — bass once audio arrives
 
+    // PERFORMANCE DIALS — the engine's own p-levers: BURNER holds the
+    // afterburner binding above when touched, WEAVE speeds the flight
+    // weave, GLOW gains the terrain light.
+    dials: [
+        {name: "BURNER", bind: "p0", default: 0.5},
+        {name: "WEAVE", bind: "p1", default: 0.0},
+        {name: "GLOW", bind: "p2", default: 0.0}
+    ]
+
     color_bg: #x241028
     color_a: #x8a4a5c
     color_b: #xffb070

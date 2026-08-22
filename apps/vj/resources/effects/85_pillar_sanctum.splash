@@ -18,10 +18,18 @@
     cam_fov: 66.0
     shadow: 1
 
-    beat_pulse: 0.45
+    beat_pulse: "0.45 * (0.2 + 1.6*p0)"
     beat_rate: 1.0
-    fog: 0.055
-    glow: 1.05
+    fog: "0.055 * (0.2 + 1.6*p2)"
+    glow: "1.05 * (0.25 + 1.5*p1)"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "HAZE", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x140a06
     color_a: #xffc890

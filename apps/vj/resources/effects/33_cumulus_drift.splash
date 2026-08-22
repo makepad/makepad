@@ -15,8 +15,15 @@
     rate: 0.02
     swirl: 0.8
 
-    beat_pulse: 0.12
+    beat_pulse: "0.12 * (0.2 + 1.6*p0)"
     beat_rate: 0.25
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FOCUS", bind: "p1", default: 0.5},
+        {name: "BLUR", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x1a0e24
     color_a: #xffb48a
@@ -29,7 +36,7 @@
     fog: 0.02
 
     stages: [
-        {kind: "tiltshift", focus: 0.5, width: 0.3, levels: 3},
+        {kind: "tiltshift", focus: "p1", width: "0.3 * (0.2 + 1.6*p2)", levels: 3},
         {kind: "bloom", threshold: 0.75, strength: 0.9, levels: 3}
     ]
 }

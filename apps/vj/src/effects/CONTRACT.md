@@ -150,7 +150,16 @@ STRING: a tiny expression compiled once at load, evaluated per frame.
 Signals: `time dt beat phase bar bpm pulse energy bass mid high`
 (`beat` = continuous beat position; `phase` = 0..1 at `beat_rate`; `bar` =
 0..1 over `bar_beats`; `pulse` = eased envelope `(1-phase)^3`; audio ones
-are 0 until the host feeds `set_signals`). Constants `pi`, `tau`.
+are 0 until the host feeds `set_signals`), and `p0 p1 p2 p3` — the
+RESOLVED user params for this frame (a touched host dial wins, else the
+doc's own `p0:` binding), so ANY binding can route a dial:
+`sway: "0.8 * (0.25 + 1.5*p0)"`. A p-param's OWN binding sees the other
+p's as 0 — no cycles by construction. This is THE dial-routing idiom:
+pick the expression so the dial's declared `default` reproduces the
+stock value exactly (mid-knob multipliers like `(0.2 + 1.6*pN)` = 1.0
+at pN 0.5), and set the doc's `pN:` constant to that default. The
+emitters `frame:` tick sees the same values as `fx.p0..fx.p3`.
+Constants `pi`, `tau`.
 Functions: `sin cos abs floor fract sqrt tri saw env` (1-arg),
 `min max pow step` (2), `clamp mix` (3). Grammar: `+ - * /`, unary `-`,
 parentheses. Examples: `"0.3 + 0.5*env(phase)"`, `"sin(bar*tau)*0.02"`,

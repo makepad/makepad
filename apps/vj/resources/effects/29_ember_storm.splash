@@ -12,7 +12,14 @@
     rate: 0.5
     gravity: 1.8
 
-    beat_pulse: 0.6
+    beat_pulse: "0.6 * (0.2 + 1.6*p0)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x0a0402
     color_a: #xff9030
@@ -25,7 +32,7 @@
     fog: 0.03
 
     stages: [
-        {kind: "feedback", amount: 0.7, zoom: 1.004, rotate: 0.0, dim: 0.90},
-        {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
+        {kind: "feedback", amount: "min(0.7 + (p1-0.5)*0.56, 0.97)", zoom: 1.004, rotate: 0.0, dim: 0.90},
+        {kind: "bloom", threshold: 0.35, strength: "1.5 * (0.25 + 1.5*p2)", levels: 3}
     ]
 }

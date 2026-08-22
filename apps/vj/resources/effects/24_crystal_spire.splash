@@ -19,8 +19,15 @@
     grow: "pingpong"
     grow_beats: 16
     sway: 0.0
-    twist: 0.1
-    beat_pulse: 0.45
+    twist: "0.1 + (p0-0.5)*0.8"
+    beat_pulse: "0.45 * (0.2 + 1.6*p1)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TWIST", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x040810
     color_a: #x66e8ff
@@ -29,7 +36,7 @@
 
     cam_orbit: 0.14
     fog: 0.025
-    glow: 1.3
+    glow: "1.3 * (0.25 + 1.5*p2)"
 
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.5, levels: 3}

@@ -23,6 +23,16 @@
     // Extra launch bite right on the downbeat (bar-gated pulse).
     p0: "0.22 * env(bar) * pulse"
     p2: "0.30 * pulse"
+    p1: 0.5
+
+    // PERFORMANCE DIALS — KICK/GROUT are the engine's own p0/p2 levers
+    // (touching KICK holds the launch bite; full KICK = hung in the air);
+    // TRAIL routes p1 through the feedback amount.
+    dials: [
+        {name: "KICK", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GROUT", bind: "p2", default: 0.5}
+    ]
 
     input0: "test"
 
@@ -32,7 +42,7 @@
     color_c: #xcfd8ff
 
     stages: [
-        {kind: "feedback", amount: "0.35 + 0.3 * env(bar)", zoom: 1.006,
+        {kind: "feedback", amount: "min(0.35 + 0.3 * env(bar) + (p1-0.5)*0.6, 0.97)", zoom: 1.006,
          rotate: 0.0, dim: 0.94},
         {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3}
     ]

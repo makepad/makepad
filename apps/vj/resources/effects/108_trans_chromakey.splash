@@ -1,0 +1,49 @@
+// CHROMA KEY — green-screen over the program: deck B replaces deck A
+// wherever B is NEAR THE KEY COLOR… inverted logic from the luma key:
+// the KEYED color becomes transparent, the rest of B rides over A. HUE
+// picks the key color (0 = green, sweep for blue), TOL the tolerance,
+// SOFT the matte edge. Ridden like every MX50 mode: the fader holds it.
+{
+    name: "Chroma Key"
+    engine: "transition"
+    // Overlay semantics: ridden to the fader's end the key STAYS fully
+    // applied (the composite is the destination) — never a snap to
+    // plain B. Zero only at the A end.
+    engage: "ramp"
+    dials: [
+        {name: "HUE", bind: "p0", default: 0.33},
+        {name: "TOL", bind: "p1", default: 0.35},
+        {name: "SOFT", bind: "p2", default: 0.2}
+    ]
+    shader: draw.DrawVjFxDuo {
+        hue_of: fn(c: vec3) -> float {
+            let hi = max(c.x, max(c.y, c.z))
+            let lo = min(c.x, min(c.y, c.z))
+            let d = hi - lo
+            if d < 0.0001 {
+                return 0.0
+            }
+            let mut h = 0.0
+            if hi == c.x {
+                h = modf((c.y - c.z) / d + 6.0, 6.0)
+            } else if hi == c.y {
+                h = (c.z - c.x) / d + 2.0
+            } else {
+                h = (c.x - c.y) / d + 4.0
+            }
+            return h / 6.0
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let h = self.hue_of(b.xyz)
+            let d0 = abs(h - self.user.x)
+            let dist = min(d0, 1.0 - d0)
+            let tol = 0.02 + self.user.y * 0.2
+            let soft = 0.005 + self.user.z * 0.1
+            // Inside the tolerance = the matte (transparent); outside = B.
+            let matte = smoothstep(tol - soft, tol + soft, dist)
+            return a.mix(b, matte * t)
+        }
+    }
+}

@@ -24,6 +24,10 @@ pub enum VideoAction {
     Seek(f64),
     /// The loop toggle flipped; [`VideoView::looping`] has the new state.
     ToggleLoop,
+    /// An IN/OUT trim handle was RELEASED at these fractions (start, end).
+    /// Emitted once per drag, on the release — hosts re-fit beat-synced
+    /// loops here, not per drag frame.
+    TrimChanged(f64, f64),
     #[default]
     None,
 }
@@ -51,6 +55,13 @@ script_mod! {
                 fit: ImageFit.Smallest
             }
         }
+        // Reserved strip for `bar_below` hosts (a small monitor whose
+        // picture must stay unobstructed); collapsed otherwise.
+        bar_slot := View{
+            width: Fill
+            height: 12
+            visible: false
+        }
         // Seek bar: track + progress + knob, code-drawn over the lane's
         // bottom edge (a themed slider knob is invisible on a dark well;
         // these three rectangles never are).
@@ -62,6 +73,12 @@ script_mod! {
         }
         draw_knob +: {
             color: #xff5a4d
+        }
+        draw_handle +: {
+            color: #xf0b34d
+        }
+        draw_tail +: {
+            color: #xffffff10
         }
         controls := View{
             width: Fill height: Fit
@@ -165,7 +182,38 @@ pub struct VideoView {
     playing: bool,
     #[rust(true)]
     looping: bool,
+    /// Draw the seek bar in its own strip BELOW the picture instead of
+    /// floating over the picture's bottom edge — for small source
+    /// monitors where the frame must stay unobstructed.
+    #[live]
+    bar_below: bool,
+    /// Hide the built-in transport row (a host drawing its own tighter
+    /// control line sets this off).
+    #[live(true)]
+    show_controls: bool,
+    /// Show IN/OUT trim handles on the bar: two draggable notches that
+    /// constrain the playing range. The tails outside [in, out] draw
+    /// dimmed; releasing a handle emits [`VideoAction::TrimChanged`]. A
+    /// plain viewer keeps this off — near-edge presses seek there.
+    #[live]
+    trim_handles: bool,
+    #[live]
+    draw_handle: DrawColor,
+    #[live]
+    draw_tail: DrawColor,
+    /// The trim range, fractions of the clip. (0, 1) = untrimmed.
+    #[rust((0.0f64, 1.0f64))]
+    trim: (f64, f64),
+    /// Which handle the finger holds: 0 = IN, 1 = OUT.
+    #[rust]
+    trim_drag: Option<usize>,
 }
+
+/// Two handles closer than this cannot be: the loop must keep a visible,
+/// playable width.
+const TRIM_MIN_GAP: f64 = 0.02;
+/// Horizontal grab radius around a trim notch, layout points.
+const TRIM_GRAB: f64 = 6.0;
 
 impl VideoView {
     /// The decoded frame to show. The host pumps this once per presented
@@ -193,6 +241,25 @@ impl VideoView {
 
     pub fn is_scrubbing(&self) -> bool {
         self.scrubbing
+    }
+
+    /// The IN/OUT trim range as fractions.
+    pub fn trim(&self) -> (f64, f64) {
+        self.trim
+    }
+
+    /// True while a trim notch is held — hosts must not force `set_trim`
+    /// against the finger.
+    pub fn is_trim_dragging(&self) -> bool {
+        self.trim_drag.is_some()
+    }
+
+    /// Set the trim range (host reset on cue, restore on reload).
+    pub fn set_trim(&mut self, cx: &mut Cx, start: f64, end: f64) {
+        let start = start.clamp(0.0, 1.0);
+        let end = end.clamp(0.0, 1.0).max(start + TRIM_MIN_GAP).min(1.0);
+        self.trim = (start.min(end - TRIM_MIN_GAP).max(0.0), end);
+        self.view.redraw(cx);
     }
 
     pub fn looping(&self) -> bool {
@@ -233,39 +300,140 @@ impl VideoView {
     }
 
     fn seek_to(&mut self, cx: &mut Cx, uid: WidgetUid, x: f64) {
-        let band = self.band(cx);
+        let band = if self.bar_below {
+            self.view.view(cx, ids!(bar_slot)).area().rect(cx)
+        } else {
+            self.band(cx)
+        };
         let Some(fraction) = Self::fraction_at(x, band) else {
             return;
         };
-        self.fraction = fraction;
+        // Playback lives inside the trim range; so does the playhead.
+        self.fraction = fraction.clamp(self.trim.0, self.trim.1);
         cx.widget_action(uid, VideoAction::Seek(self.fraction));
+        self.view.redraw(cx);
+    }
+
+    /// The rect the seek bar occupies (strip in `bar_below`, picture band
+    /// otherwise) — scrub x-mapping and the trim notches both measure
+    /// against it.
+    fn bar_band(&self, cx: &mut Cx) -> Rect {
+        if self.bar_below {
+            self.view.view(cx, ids!(bar_slot)).area().rect(cx)
+        } else {
+            self.band(cx)
+        }
+    }
+
+    /// Which trim notch (0 = IN, 1 = OUT) a press at `abs` grabs, if any.
+    /// The notches win over the scrub surface — nearest one on overlap.
+    fn trim_hit(&self, cx: &mut Cx, abs: DVec2) -> Option<usize> {
+        if !self.trim_handles {
+            return None;
+        }
+        let band = self.bar_band(cx);
+        if band.size.x <= 1.0 {
+            return None;
+        }
+        // Vertically: anywhere in the strip (bar_below) or within the
+        // floating bar's lift zone.
+        if !self.bar_below {
+            let y = band.pos.y + band.size.y - TRACK_LIFT - TRACK_H * 0.5;
+            if (abs.y - y).abs() > TRACK_LIFT + TRACK_H {
+                return None;
+            }
+        } else if abs.y < band.pos.y || abs.y > band.pos.y + band.size.y {
+            return None;
+        }
+        let x_in = band.pos.x + band.size.x * self.trim.0;
+        let x_out = band.pos.x + band.size.x * self.trim.1;
+        let (d_in, d_out) = ((abs.x - x_in).abs(), (abs.x - x_out).abs());
+        if d_in <= TRIM_GRAB || d_out <= TRIM_GRAB {
+            Some(if d_in <= d_out { 0 } else { 1 })
+        } else {
+            None
+        }
+    }
+
+    fn drag_trim(&mut self, cx: &mut Cx, x: f64) {
+        let Some(which) = self.trim_drag else { return };
+        let band = self.bar_band(cx);
+        let Some(f) = Self::fraction_at(x, band) else { return };
+        if which == 0 {
+            self.trim.0 = f.min(self.trim.1 - TRIM_MIN_GAP).max(0.0);
+        } else {
+            self.trim.1 = f.max(self.trim.0 + TRIM_MIN_GAP).min(1.0);
+        }
+        self.fraction = self.fraction.clamp(self.trim.0, self.trim.1);
         self.view.redraw(cx);
     }
 }
 
 impl Widget for VideoView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let slot = self.view.view(cx, ids!(bar_slot));
+        if slot.visible() != self.bar_below {
+            slot.set_visible(cx, self.bar_below);
+        }
+        let controls = self.view.view(cx, ids!(controls));
+        if controls.visible() != self.show_controls {
+            controls.set_visible(cx, self.show_controls);
+        }
         while self.view.draw_walk(cx, scope, walk).is_step() {}
-        // Track + progress + knob over the picture's bottom edge, drawn
-        // last so they ride every resize without a layout pass.
-        let band = self.band(cx);
+        // Track + progress + knob — over the picture's bottom edge, or in
+        // the reserved strip below it (`bar_below`) — drawn last so they
+        // ride every resize without a layout pass.
+        // In bar_below mode the bar spans the PLAYER's full width (the
+        // reserved strip), the normal-video-player shape; floating mode
+        // hugs the letterboxed picture band.
+        let band = if self.bar_below {
+            let strip = self.view.view(cx, ids!(bar_slot)).area().rect(cx);
+            Rect { pos: strip.pos, size: dvec2(strip.size.x, strip.size.y) }
+        } else {
+            self.band(cx)
+        };
         if band.size.x > KNOB_W {
-            let y = band.pos.y + band.size.y - TRACK_LIFT - TRACK_H;
+            let y = if self.bar_below {
+                band.pos.y + (band.size.y - TRACK_H) * 0.5
+            } else {
+                band.pos.y + band.size.y - TRACK_LIFT - TRACK_H
+            };
+            let (t_in, t_out) = if self.trim_handles { self.trim } else { (0.0, 1.0) };
+            let (x0, w) = (band.pos.x, band.size.x);
+            // Trimmed-off tails draw DIM; the active range keeps the
+            // normal track. Untrimmed, the tails are zero-width.
+            if t_in > 0.0 {
+                self.draw_tail.draw_abs(
+                    cx,
+                    Rect { pos: dvec2(x0, y), size: dvec2(w * t_in, TRACK_H) },
+                );
+            }
+            if t_out < 1.0 {
+                self.draw_tail.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(x0 + w * t_out, y),
+                        size: dvec2(w * (1.0 - t_out), TRACK_H),
+                    },
+                );
+            }
             self.draw_track.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(band.pos.x, y),
-                    size: dvec2(band.size.x, TRACK_H),
+                    pos: dvec2(x0 + w * t_in, y),
+                    size: dvec2(w * (t_out - t_in), TRACK_H),
                 },
             );
+            // Progress runs from IN to the playhead.
+            let f = self.fraction.clamp(t_in, t_out);
             self.draw_progress.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(band.pos.x, y),
-                    size: dvec2(band.size.x * self.fraction, TRACK_H),
+                    pos: dvec2(x0 + w * t_in, y),
+                    size: dvec2(w * (f - t_in), TRACK_H),
                 },
             );
-            let knob_x = band.pos.x + (band.size.x - KNOB_W) * self.fraction;
+            let knob_x = x0 + (w - KNOB_W) * f;
             self.draw_knob.draw_abs(
                 cx,
                 Rect {
@@ -273,6 +441,22 @@ impl Widget for VideoView {
                     size: dvec2(KNOB_W, KNOB_H),
                 },
             );
+            // The IN/OUT notches: slim bars a touch taller than the knob,
+            // sitting exactly on the range edges — grab and drag inward.
+            if self.trim_handles {
+                for t in [t_in, t_out] {
+                    self.draw_handle.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(
+                                x0 + w * t - 2.0,
+                                y - (KNOB_H + 2.0 - TRACK_H) / 2.0,
+                            ),
+                            size: dvec2(4.0, KNOB_H + 2.0),
+                        },
+                    );
+                }
+            }
         }
         DrawStep::done()
     }
@@ -284,21 +468,48 @@ impl Widget for VideoView {
         // the finger capture (it carries the cursor), same as the audio
         // face; WHERE in the clip is measured against the picture band.
         let lane = self.view.view(cx, ids!(lane)).area();
-        match event.hits(cx, lane) {
-            Hit::FingerDown(fe) => {
-                self.scrubbing = true;
-                self.seek_to(cx, uid, fe.abs.x);
-            }
-            Hit::FingerMove(fe) if self.scrubbing => {
-                self.seek_to(cx, uid, fe.abs.x);
-            }
-            Hit::FingerUp(fe) => {
-                if self.scrubbing {
+        // One press decides ONCE what it is: a trim notch (they hit-test
+        // first — the playhead drag stays distinct) or a scrub. The strip
+        // and the lane are both surfaces for either.
+        let surfaces = if self.bar_below {
+            [Some(self.view.view(cx, ids!(bar_slot)).area()), Some(lane)]
+        } else {
+            [Some(lane), None]
+        };
+        for area in surfaces.into_iter().flatten() {
+            match event.hits(cx, area) {
+                Hit::FingerDown(fe) => {
+                    if let Some(which) = self.trim_hit(cx, fe.abs) {
+                        self.trim_drag = Some(which);
+                        self.drag_trim(cx, fe.abs.x);
+                    } else {
+                        self.scrubbing = true;
+                        self.seek_to(cx, uid, fe.abs.x);
+                    }
+                }
+                Hit::FingerMove(fe) if self.trim_drag.is_some() => {
+                    self.drag_trim(cx, fe.abs.x);
+                }
+                Hit::FingerMove(fe) if self.scrubbing => {
                     self.seek_to(cx, uid, fe.abs.x);
                 }
-                self.scrubbing = false;
+                Hit::FingerUp(fe) => {
+                    if self.trim_drag.is_some() {
+                        self.drag_trim(cx, fe.abs.x);
+                        self.trim_drag = None;
+                        // ONE report per drag, on release — the host
+                        // re-fits beat-synced loops here.
+                        cx.widget_action(
+                            uid,
+                            VideoAction::TrimChanged(self.trim.0, self.trim.1),
+                        );
+                    } else if self.scrubbing {
+                        self.seek_to(cx, uid, fe.abs.x);
+                    }
+                    self.scrubbing = false;
+                }
+                _ => {}
             }
-            _ => {}
         }
         let play_area = self.view.view(cx, ids!(play)).area();
         if let Hit::FingerDown(_) = event.hits(cx, play_area) {
@@ -336,6 +547,20 @@ impl VideoViewRef {
 
     pub fn looping(&self) -> bool {
         self.borrow().map(|inner| inner.looping()).unwrap_or(true)
+    }
+
+    pub fn trim(&self) -> (f64, f64) {
+        self.borrow().map(|inner| inner.trim()).unwrap_or((0.0, 1.0))
+    }
+
+    pub fn is_trim_dragging(&self) -> bool {
+        self.borrow().map(|inner| inner.is_trim_dragging()).unwrap_or(false)
+    }
+
+    pub fn set_trim(&self, cx: &mut Cx, start: f64, end: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_trim(cx, start, end);
+        }
     }
 
     pub fn action(&self, actions: &Actions) -> VideoAction {

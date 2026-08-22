@@ -10,8 +10,15 @@
     noise_scale: 0.13
     scroll: 1.2
 
-    beat_pulse: 0.2
+    beat_pulse: "0.2 * (0.2 + 1.6*p0)"
     beat_rate: 0.25
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.42  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "FOCUS", bind: "p1", default: 0.42},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
 
     color_bg: #x030a16
     color_a: #x1a55aa
@@ -21,10 +28,10 @@
     cam_fov: 58.0
     cam_height: 2.2
     fog: 0.045
-    glow: 1.1
+    glow: "1.1 * (0.25 + 1.5*p2)"
 
     stages: [
-        {kind: "tiltshift", focus: 0.42, width: 0.3, levels: 3},
+        {kind: "tiltshift", focus: "p1", width: 0.3, levels: 3},
         {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
     ]
 }

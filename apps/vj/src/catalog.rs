@@ -232,6 +232,11 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     pub category: String,
     /// Positive tag narrowing (the TRANSITION preset); empty = none.
     pub tag: String,
+    /// Per-lane EXCLUDE tag override (the EFFECT lane drops transition-
+    /// tagged docs). Empty = the default intermediate-artifact exclusion.
+    /// (The query wire carries ONE exclude tag, so a lane that needs its
+    /// own gives up the intermediate one — vjeffects never carry it.)
+    pub exclude: String,
     gen: CatGen,
     tiles: Vec<Tile>,
     index: HashMap<AssetId, usize>,
@@ -316,18 +321,24 @@ impl<C: Clone> BrowseModel<C> {
     /// plain kind change drops any preset tag narrowing — the chips are a
     /// different gesture than the tag presets.
     pub fn set_kinds(&mut self, kinds: Vec<AssetKind>) -> Vec<CatCmd<C>> {
-        self.set_lanes(kinds, String::new())
+        self.set_lanes(kinds, String::new(), String::new())
     }
 
     /// Change the kind lanes AND the positive tag filter together (the
     /// EFFECT / TRANSITION presets) and re-query from page one.
-    pub fn set_lanes(&mut self, kinds: Vec<AssetKind>, tag: String) -> Vec<CatCmd<C>> {
+    pub fn set_lanes(
+        &mut self,
+        kinds: Vec<AssetKind>,
+        tag: String,
+        exclude: String,
+    ) -> Vec<CatCmd<C>> {
         let kinds = if kinds.is_empty() { Self::visual_kinds() } else { kinds };
-        if self.kinds == kinds && self.tag == tag {
+        if self.kinds == kinds && self.tag == tag && self.exclude == exclude {
             return Vec::new();
         }
         self.kinds = kinds;
         self.tag = tag;
+        self.exclude = exclude;
         self.next_cursors = vec![None; self.kinds.len()];
         self.refresh()
     }
@@ -342,6 +353,7 @@ impl<C: Clone> BrowseModel<C> {
             text: String::new(),
             category: category.to_string(),
             tag: String::new(),
+            exclude: String::new(),
             gen: 0,
             tiles: Vec::new(),
             index: HashMap::new(),
@@ -387,6 +399,10 @@ impl<C: Clone> BrowseModel<C> {
         }
         if !self.tag.is_empty() {
             q.tag = Some(self.tag.clone());
+        }
+        if !self.exclude.is_empty() {
+            q.exclude_tag = Some(self.exclude.clone());
+            return q;
         }
         // Program surfaces show a run's PRODUCT only. The asset-ui tags the
         // source image, the untextured mesh, mattes and PBR maps of a

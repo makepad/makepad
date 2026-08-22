@@ -7,14 +7,23 @@
     particles: 900
     size: 0.12
 
+    // PERFORMANCE DIALS — the tick reads the dial params as fx.p0..fx.p3;
+    // mid-knob reproduces the stock shower exactly.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BLAZE", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x040208
     cam_dist: 16.0
     cam_height: 3.0
     cam_orbit: 0.02
 
     stages: [
-        {kind: "feedback", amount: 0.65, zoom: 1.0, rotate: 0.0, dim: 0.88},
-        {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3}
+        {kind: "feedback", amount: "min(0.65 + (p1-0.5)*0.6, 0.97)", zoom: 1.0, rotate: 0.0, dim: 0.88},
+        {kind: "bloom", threshold: 0.35, strength: "1.6 * (0.25 + 1.5*p2)", levels: 3}
     ]
 
     frame: fn(fx) {
@@ -28,7 +37,8 @@
                 vel: vec3(-6.0, -5.5, 0.0)
                 life: 1.6
                 speed: 0.9
-                size: 0.16
+                // BLAZE dial: meteor size rides fx.p0.
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
                 fraction: 0.45
                 gravity: 0.0
                 color: #xffffff
@@ -43,8 +53,8 @@
                 kind: "ring"
                 pos: vec3(lane2 - 3.0, -1.0, 0.0)
                 life: 1.4
-                speed: 5.0
-                size: 0.16
+                speed: 5.0 * (0.5 + fx.p0)
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
                 fraction: 0.8
                 color: #xffffff
                 color2: #x99aaff

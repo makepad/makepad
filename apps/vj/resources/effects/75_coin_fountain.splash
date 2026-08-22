@@ -26,6 +26,14 @@
     p1: "0.2 + 0.8*bass"
     p2: "0.4 + 2.5*high"
 
+    // PERFORMANCE DIALS — the engine's own p-levers; touching one holds
+    // its audio binding above at a fixed gain.
+    dials: [
+        {name: "HEAT", bind: "p0", default: 0.5},
+        {name: "RING", bind: "p1", default: 0.5},
+        {name: "EMBER", bind: "p2", default: 0.5}
+    ]
+
     color_bg: #x0a0806
     color_a: #xc9a12c      // old gold
     color_b: #xffd86a      // bright gold
