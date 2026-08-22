@@ -82,6 +82,7 @@ pub fn thumbnail() -> ThumbnailMeta {
         width: 512,
         height: 512,
         byte_len: 300,
+        views: Vec::new(),
     }
 }
 
@@ -355,6 +356,7 @@ pub fn import_manifest() -> ImportManifest {
                         width: 512,
                         height: 512,
                         byte_len: 300,
+                        views: Vec::new(),
                     },
                 }),
                 metrics: Metrics {
@@ -519,6 +521,7 @@ pub fn thumb_variant(base: AssetRevisionRef, inp: u8, out: u8) -> DerivedVariant
             width: 512,
             height: 512,
             byte_len: 450,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: 450,

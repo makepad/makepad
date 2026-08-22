@@ -76,6 +76,27 @@ impl From<AssetDataError> for ClientError {
     }
 }
 
+impl ClientError {
+    /// Is this "the document that is already there cannot be read under
+    /// today's content contract"?
+    ///
+    /// Two shapes, because a stored document can be refused at either end:
+    /// this client refuses it locally with [`AssetDataError::UnsupportedSchema`],
+    /// and the SERVER refuses to serve it at all with a 422, because it
+    /// validates what it holds against the same contract.
+    ///
+    /// Only ever ask this about reading an EXISTING document. A 422 while
+    /// writing means the document being written is bad, which is a reason to
+    /// stop, not a reason to write it again.
+    pub fn is_unreadable_stored_document(&self) -> bool {
+        matches!(
+            self,
+            ClientError::Content(AssetDataError::UnsupportedSchema { .. })
+                | ClientError::Server { status: 422, .. }
+        )
+    }
+}
+
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use ClientError::*;

@@ -173,6 +173,8 @@ pub fn kind_str(k: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -195,10 +197,17 @@ pub fn role_str(r: FileRole) -> &'static str {
         FileRole::Video => "video",
         FileRole::Source => "source",
         FileRole::Depth => "depth",
+        FileRole::Splat => "splat",
+        FileRole::AoTexture => "ao_texture",
+        FileRole::StemDrums => "stem_drums",
+        FileRole::StemBass => "stem_bass",
+        FileRole::StemVocals => "stem_vocals",
+        FileRole::StemOther => "stem_other",
+        FileRole::Lyrics => "lyrics",
     }
 }
 
-pub const ALL_ROLES: [FileRole; 17] = [
+pub const ALL_ROLES: [FileRole; 24] = [
     FileRole::RenderGlb,
     FileRole::Lod1Glb,
     FileRole::Lod2Glb,
@@ -216,6 +225,13 @@ pub const ALL_ROLES: [FileRole; 17] = [
     FileRole::Video,
     FileRole::Source,
     FileRole::Depth,
+    FileRole::Splat,
+    FileRole::AoTexture,
+    FileRole::StemDrums,
+    FileRole::StemBass,
+    FileRole::StemVocals,
+    FileRole::StemOther,
+    FileRole::Lyrics,
 ];
 
 pub fn parse_role(name: &str) -> Option<FileRole> {
@@ -252,14 +268,29 @@ pub fn media_str(m: makepad_asset_data::MediaType) -> &'static str {
         M::Mp4 => "mp4",
         M::Bin => "bin",
         M::Text => "text",
+        M::Ply => "ply",
+        M::Mp3 => "mp3",
+        M::Json => "json",
     }
 }
 
 pub fn parse_media(name: &str) -> Option<makepad_asset_data::MediaType> {
     use makepad_asset_data::MediaType as M;
-    [M::Png, M::Jpeg, M::Glb, M::Wav, M::Ogg, M::Mp4, M::Bin, M::Text]
-        .into_iter()
-        .find(|m| media_str(*m) == name)
+    [
+        M::Png,
+        M::Jpeg,
+        M::Glb,
+        M::Wav,
+        M::Ogg,
+        M::Mp4,
+        M::Bin,
+        M::Text,
+        M::Ply,
+        M::Mp3,
+        M::Json,
+    ]
+    .into_iter()
+    .find(|m| media_str(*m) == name)
 }
 
 /// HTTP Content-Type for a media type. `Text` is validated UTF-8 at
@@ -276,6 +307,9 @@ pub fn media_content_type(m: makepad_asset_data::MediaType) -> &'static str {
         M::Mp4 => "video/mp4",
         M::Bin => "application/octet-stream",
         M::Text => "text/plain; charset=utf-8",
+        M::Ply => "application/x-ply",
+        M::Mp3 => "audio/mpeg",
+        M::Json => "application/json",
     }
 }
 
@@ -408,11 +442,13 @@ pub fn rights_value(r: &makepad_asset_data::Rights) -> Value {
             Redistribution::Allowed => "allowed",
             Redistribution::AttributionRequired => "attribution_required",
             Redistribution::Forbidden => "forbidden",
+            Redistribution::LanLocal => "lan_local",
         })),
         ("derivatives", s(match r.derivatives {
             DerivativePolicy::Allowed => "allowed",
             DerivativePolicy::AttributionRequired => "attribution_required",
             DerivativePolicy::Forbidden => "forbidden",
+            DerivativePolicy::LocalPreview => "local_preview",
         })),
     ])
 }

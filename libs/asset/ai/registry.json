@@ -1,31 +1,18 @@
 {
  "models": [
   {
-   "id": "testpattern",
-   "domain": "image",
-   "backend": "testpattern",
-   "available": true,
-   "gated": false,
-   "vram_gb": 0.0,
-   "note": "procedural test pattern renderer; no GPU, no downloads; used for end-to-end service testing",
-   "files": []
-  },
-  {
-   "id": "pbr-testpattern",
-   "domain": "paint",
-   "backend": "paint-test",
-   "available": true,
-   "gated": false,
-   "vram_gb": 0.0,
-   "note": "Deterministic PBR paint tier: named inputs mesh (GLB) + reference_image (PNG) -> PBR-textured GLB + albedo/normal/ORM maps + provenance manifest via the native geometry pipeline with a mock diffusion executor. No GPU, no downloads; exercises the full paint artifact contract end-to-end.",
-   "files": []
-  },
-  {
    "id": "hunyuan3d-paint-2.1",
    "domain": "paint",
    "backend": "paint",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Tencent Hunyuan 3D 2.1 Community License Agreement",
+    "url": "https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/LICENSE",
+    "summary": "Community license for Hunyuan3D-Paint-2.1 weights. Territory named in the license excludes the European Union, United Kingdom and South Korea, including outputs. This app records acknowledgement only; it does not interpret or enforce those terms.",
+    "restriction": "community",
+    "sha256": "5bd08f93b2d280bb26ff3eed5d3996fe47a9698b5f7785163928668d7fd578c6"
+   },
    "vram_gb": 20.0,
    "note": "Experimental OSS. License: Tencent Hunyuan 3D 2.1 Community License Agreement, sha256 5bd08f93b2d280bb26ff3eed5d3996fe47a9698b5f7785163928668d7fd578c6, https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/LICENSE (territory excludes EU/UK/South Korea incl. outputs \u2014 informational only, not enforced). Contract: named inputs mesh (GLB) + reference_image (PNG) -> PBR-textured GLB; albedo + metallic/roughness model-generated, normal/AO geometry-derived. Official baseline 6 views @512; staged-residency 24GB budget 20000 MiB (all-resident oracle peak 21125..22681 MiB). Native CUDA UNet2p5D executor port pending; fails closed until provisioned.",
    "files": [
@@ -64,6 +51,12 @@
    "backend": "flux",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+    "summary": "FLUX.1-schnell weights are Apache-2.0. Permissive use, including commercial, subject to the Apache-2.0 conditions (attribution, NOTICE retention). This stack does not host the weights.",
+    "restriction": "none"
+   },
    "vram_gb": 21.0,
    "note": "FLUX.1-schnell CANONICAL combined single-file FP8 checkpoint (Apache-2.0): model.diffusion_model.* FP8 E4M3FN (776 tensors, 11891178560 B) + text_encoders.clip_l F16 + text_encoders.t5xxl FP8 + vae F32 in ONE safetensors under checkpoints/ - the whole stack loads from this file and stays device-resident across prompt changes on a 24GB card. Immutable revision pin = Comfy-Org commit 44ea96fbcead75dfa908449883350ada44601791; size+sha256 pin the exact LFS object (header audited 2026-08-15: 1438 tensors, all four component prefixes + 2 outer logit_scale scalars, no scale tensors - raw signed E4M3FN, implicit scale 1.0). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). The former split-model BF16 bundle (unet 23.8GB + separate vae/clip/t5) is RETIRED from this registry; previously provisioned boxes keep those cache blobs until the FP8 canary passes and a separate cleanup step removes them. vram_gb 21.0 is the pre-canary estimate (~15.85GiB resident weights + capped activation pool); replace with the measured peak after the 4090 canary.",
    "files": [
@@ -83,6 +76,12 @@
    "backend": "flux",
    "available": true,
    "gated": true,
+   "license": {
+    "name": "FLUX.1 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+    "summary": "FLUX.1-dev weights are under Black Forest Labs' non-commercial license. Personal and research use only. Do not use this model to sell generated images or otherwise commercially exploit outputs unless you have a separate BFL grant.",
+    "restriction": "non-commercial"
+   },
    "vram_gb": 21.0,
    "note": "FLUX.1-dev CANONICAL combined single-file FP8 checkpoint (FLUX.1 [dev] Non-Commercial License - gated:true records the license restriction; the Comfy-Org mirror itself is ungated): the guidance-distilled base model, default 20 steps / guidance 3.5 (vs schnell's 4-step distillation). Same combined layout as flux1-schnell-fp8 - model.diffusion_model.* FP8 E4M3FN (780 tensors incl. the four guidance_in tensors, 11901408320 B) + clip_l F16 + t5xxl FP8 + vae F32 in ONE safetensors under checkpoints/. Immutable revision pin = Comfy-Org commit 7ec07cd0cd2cb88298a80c905ad38250e1389880; size+sha256 pin the exact LFS object (header audited 2026-08-15: 1442 tensors). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). The former split-model BF16 bundle is RETIRED from this registry; existing cache blobs stay until the FP8 canary passes and a separate cleanup step removes them. vram_gb 21.0 is the pre-canary estimate; replace with the measured peak after the 4090 canary.",
    "files": [
@@ -97,11 +96,178 @@
    ]
   },
   {
+   "id": "flux1-depth-dev",
+   "domain": "control",
+   "backend": "control",
+   "available": true,
+   "gated": true,
+   "license": {
+    "name": "FLUX.1 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-Depth-dev",
+    "summary": "FLUX.1-Depth-dev uses the same FLUX.1 [dev] Non-Commercial License as flux1-dev. Personal and research use only. The Hugging Face repo itself is gated.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 35.0,
+   "min_vram_gb": 38.0,
+   "note": "FLUX.1-Depth-dev (FLUX.1 [dev] Non-Commercial License, gated - black-forest-labs/FLUX.1-Depth-dev is itself gated on HF, not just the license flag): the official BFL split-model bundle, no public FP8 single-file repackage exists yet (checked 2026-08-19: only unofficial/unverified third-party fp8 repacks like boricuapab/flux1-depth-dev-fp8 turn up, none from black-forest-labs or Comfy-Org) so this pins the canonical BF16 diffusion checkpoint - heavier than the FP8 flux1-dev tier (~34GB total resident vs ~17GB). img_in accepts 128 channels (packed noisy latents 64 + packed VAE-encoded depth-map latents 64, concatenated every step - diffusers FluxControlPipeline); guidance_embed present, recommended guidance ~10, 30-50 steps. clip_l/t5xxl are the standard public ComfyUI companion encoders (comfyanonymous/flux_text_encoders, ungated, shared verbatim across the whole FLUX.1 family so flux1-canny-dev below reuses the same cache_as/bytes) - the BFL repo's own text_encoder/text_encoder_2 are diffusers-sharded and NOT used here. ae.safetensors matches flux1-canny-dev's byte-for-byte (same sha256) but is cached per-model rather than shared, keeping each model's file list self-contained. Requires a CUDA box (no CPU/Metal fallback - control_backend::control_provisioned fails closed).",
+   "files": [
+    {
+     "role": "unet",
+     "repo": "black-forest-labs/FLUX.1-Depth-dev",
+     "path": "flux1-depth-dev.safetensors",
+     "cache_as": "unet/flux1-depth-dev.safetensors",
+     "revision": "fb5e9b1bae41b8c8adcea4ea2a87b74dd298f07a",
+     "size": 23803351200,
+     "sha256": "41360d1662f44ca45bc1b665fe6387e91802f53911001630d970a4f8be8dac21"
+    },
+    {
+     "role": "vae",
+     "repo": "black-forest-labs/FLUX.1-Depth-dev",
+     "path": "ae.safetensors",
+     "cache_as": "vae/flux1-depth-ae.safetensors",
+     "revision": "fb5e9b1bae41b8c8adcea4ea2a87b74dd298f07a",
+     "size": 335304388,
+     "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+    },
+    {
+     "role": "clip-l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp16.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp16.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 9787841024,
+     "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    }
+   ]
+  },
+  {
+   "id": "flux1-canny-dev",
+   "domain": "control",
+   "backend": "control",
+   "available": true,
+   "gated": true,
+   "license": {
+    "name": "FLUX.1 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-Canny-dev",
+    "summary": "FLUX.1-Canny-dev uses the same FLUX.1 [dev] Non-Commercial License as flux1-dev. Personal and research use only. The Hugging Face repo itself is gated.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 35.0,
+   "min_vram_gb": 38.0,
+   "note": "FLUX.1-Canny-dev (FLUX.1 [dev] Non-Commercial License, gated - black-forest-labs/FLUX.1-Canny-dev is itself gated on HF). Same shape as flux1-depth-dev above (see its note for the FP8-repackage search + text-encoder sourcing rationale): official BFL BF16 split-model bundle, img_in 128 channels (packed noisy + packed VAE-encoded Canny-edge-map latents), guidance_embed present, recommended guidance ~30 (higher than depth's ~10 - Canny conditioning is weaker/more literal per the BFL model card), 30-50 steps. control_backend runs its own CPU Canny detector (control_image::canny_edges_u8, defaults low=50/high=200) on the input image before VAE-encoding it, so a plain photo works as input_b64 (not just a pre-made edge map). clip_l/t5xxl/ae share the exact bytes flux1-depth-dev pins (ae has its own per-model cache_as; clip_l/t5xxl share cache_as+bytes - see the shared-cache-identity note there).",
+   "files": [
+    {
+     "role": "unet",
+     "repo": "black-forest-labs/FLUX.1-Canny-dev",
+     "path": "flux1-canny-dev.safetensors",
+     "cache_as": "unet/flux1-canny-dev.safetensors",
+     "revision": "27c3d8bdc17509b47cf4fd9ba25ab1c7508a69a2",
+     "size": 23803351736,
+     "sha256": "996876670169591cb412b937fbd46ea14cbed6933aef17c48a2dcd9685c98cdb"
+    },
+    {
+     "role": "vae",
+     "repo": "black-forest-labs/FLUX.1-Canny-dev",
+     "path": "ae.safetensors",
+     "cache_as": "vae/flux1-canny-ae.safetensors",
+     "revision": "27c3d8bdc17509b47cf4fd9ba25ab1c7508a69a2",
+     "size": 335304388,
+     "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+    },
+    {
+     "role": "clip-l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp16.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp16.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 9787841024,
+     "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    }
+   ]
+  },
+  {
+   "id": "flux1-fill-dev",
+   "domain": "inpaint",
+   "backend": "flux-fill",
+   "available": true,
+   "gated": true,
+   "license": {
+    "name": "FLUX.1 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-Fill-dev",
+    "summary": "FLUX.1-Fill-dev uses the same FLUX.1 [dev] Non-Commercial License as flux1-dev. Personal and research use only.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 21.0,
+   "note": "FLUX.1-Fill-dev mask inpaint/outpaint (FLUX.1 [dev] Non-Commercial License, same as flux1-dev - gated:true records the license restriction; every file below is hosted ungated). Architecturally flux1-dev's DiT with a wider img_in (384 channels/token instead of 64: packed noisy latent 64 + packed masked-image latent 64 + packed mask 256; guidance-distilled, guidance_in present) - out_channels stays 64. No Comfy-Org combined-checkpoint repack exists for Fill (unlike flux1-dev/schnell), and the official black-forest-labs/FLUX.1-Fill-dev repo requires an authenticated+license-accepted HF pull even for its LFS metadata (could not be read from this environment) - so this is a 4-file SPLIT bundle instead, every file individually pinned + audited: (1) diffusion_model - cudabenchmarktest/flux1-fill-dev-fp8 flux1-fill-dev-fp8.safetensors, FP8 E4M3FN, 780 tensors (header audited: img_in.weight [3072,384], final_layer.linear.weight [64,3072], guidance_in.in_layer.weight present, modelspec.description 'An in- and outpainting model.', modelspec.implementation references black-forest-labs/flux - same tensor count as flux1-dev-fp8's DiT component, +1131008 B for the wider img_in). (2) vae - Kijai/flux-fp8 flux-vae-bf16.safetensors, the standard shared FLUX VAE (ae.safetensors) cast to BF16 by a well-known ComfyUI contributor (335304388 B official F32 file / 2 = this BF16 file's size, confirming it is the same weights just narrower; our loader upconverts BF16->F32 on load). (3)+(4) clip_l.safetensors + t5xxl_fp8_e4m3fn.safetensors - comfyanonymous/flux_text_encoders, the canonical ComfyUI split text-encoder source already used by every other Flux ComfyUI workflow (same repo the RETIRED flux1-dev/schnell split-model bundles used). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). Request contract: named inputs 'image' (PNG) + 'mask' (PNG, white/1=repaint; outpaint = client pre-pads the canvas and masks the new area) + prompt; default steps 50, guidance 30 (BFL's recommended Fill settings, both far higher than dev's 20/3.5). vram_gb 21.0 is an estimate carried over from flux1-dev-fp8 (same DiT class, unmeasured - no GPU available while wiring this up).",
+   "files": [
+    {
+     "role": "diffusion_model",
+     "repo": "cudabenchmarktest/flux1-fill-dev-fp8",
+     "path": "flux1-fill-dev-fp8.safetensors",
+     "cache_as": "unet/flux1-fill-dev-fp8.safetensors",
+     "revision": "bc5ef4da6d294c45aa01aeb497cf199f28123665",
+     "size": 11902539328,
+     "sha256": "0320d505ca42bca99c5bd600b1839ced2b2e980ea985917965d411d98a710729"
+    },
+    {
+     "role": "vae",
+     "repo": "Kijai/flux-fp8",
+     "path": "flux-vae-bf16.safetensors",
+     "cache_as": "vae/flux-ae-bf16.safetensors",
+     "revision": "2ef6f85f9f4b94634f995ba0bfa84fd3ab865c1d",
+     "size": 167664710,
+     "sha256": "0c0c8ac49850d6bd174107d4001685f4f6c876768a1c84dde751f2aed69f46ce"
+    },
+    {
+     "role": "clip_l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp8_e4m3fn.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 4893934904,
+     "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    }
+   ]
+  },
+  {
    "id": "flux2-klein-4b",
-   "domain": "image",
+   "domain": "edit",
    "backend": "flux2",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B",
+    "summary": "FLUX.2-klein-4B weights are Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 16.0,
    "min_vram_gb": 13.0,
    "note": "FLUX.2-klein-4B (Apache-2.0) local image edit: instruction + reference PNG through the in-repo CUDA port (Qwen3-4B TE taps [9,18,27], 32ch AutoencoderKLFlux2 encode+decode, 4-step distilled DiT, guidance_embed=false). Official transformer is BF16 (flux-2-klein-4b.safetensors 7.75GB); FP8 siblings dequant to f16 at load. CUDA-only \u2014 availability fails closed without a GPU device. Default 4 steps / 512px. Request: prompt + input_b64 PNG.",
@@ -154,11 +320,125 @@
    ]
   },
   {
+   "id": "flux2-dev",
+   "domain": "image",
+   "backend": "flux2",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "FLUX.2 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+    "summary": "FLUX.2-dev weights are under Black Forest Labs' non-commercial license. Personal and research use only unless you have a separate BFL grant.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 29.0,
+   "min_vram_gb": 30.0,
+   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT: 48 singles + globals resident 1-byte, 8 doubles streamed through the pinned-host ring; Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. vram_gb is the ADMISSION estimate for the 32GB class it is built for: the measured process peak on the RTX 5090 is ~30.1GB (nvidia-smi 30.65GB incl. context, 2026-08-19, validator at 1024px) with an elastic activation pool, and the service adds its 2GB reserve on top, so 29.0 is what lets a cold 32GB card (32607 MB) admit it (29x1024+2048 = 31744 MB) while min_vram_gb 30 still refuses 24GB cards. Request: prompt (+ optional width/height/steps/guidance/seed).",
+   "files": [
+    {
+     "role": "transformer",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/diffusion_models/flux2_dev_fp8mixed.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2_dev_fp8mixed.safetensors",
+     "size": 35455599592,
+     "sha256": "863a82e4ff950a42a6b0e80bea824828f129eb1a8fbbdbd9e8cb29859127b486"
+    },
+    {
+     "role": "text-encoder",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/mistral_3_small_flux2_fp8.safetensors",
+     "size": 18034640095,
+     "sha256": "e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e"
+    },
+    {
+     "role": "vae",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/vae/flux2-vae.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+     "path": "tokenizer.json",
+     "revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+     "cache_as": "flux2-dev/tokenizer/tokenizer.json",
+     "size": 17078037,
+     "sha256": "b76085f9923309d873994d444989f7eb6ec074b06f25b58f1e8d7b7741070949"
+    }
+   ]
+  },
+  {
+   "id": "flux2-dev-q4-24g",
+   "domain": "image",
+   "backend": "flux2",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "FLUX.2 [dev] Non-Commercial License",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev",
+    "summary": "This is a GGUF Q4 quantization of FLUX.2-dev. The underlying weights remain under the FLUX.2 [dev] Non-Commercial License. Personal and research use only unless you have a separate BFL grant.",
+    "restriction": "non-commercial"
+   },
+   "vram_gb": 19.0,
+   "min_vram_gb": 22.0,
+   "note": "FLUX.2-dev 24 GB-class tier: the same 32B guidance-distilled dev DiT as flux2-dev, quantized to GGUF Q4_K_M by city96 (ComfyUI-GGUF's reference conversion: Q4_K bulk linears, Q5_K on the double-block qkv and some proj/mlp tensors, BF16 img_in/txt_in/time_in/guidance_in/final_layer/modulation, F32 norms), served by the in-repo CUDA port with K-quant weights resident as raw block streams and dequantized into bf16 scratch per GEMM (ComfyUI-GGUF's own dequant-on-the-fly numerics class \u2014 NOT the fp8mixed scaled-mm class of flux2-dev; expect its own look at the same seed). Text encoder, VAE and tokenizer are byte-identical to flux2-dev and share its cache blobs (same cache_as; the dev loader falls back to the sibling flux2-dev/ dir). Measured on the RTX 5090 (2026-08-19, 1024px/20 steps): resident floor ~16.5 GB, warm denoise 30.3 s, decode 0.27 s; vram_gb 19 is the admission estimate for a 24 GB card (19x1024+2048 reserve = 21.5 GB) pending a measured peak on a 4090; min_vram_gb 22 refuses 16 GB cards. FLUX [dev] Non-Commercial License applies to the quant too. Request: prompt (+ optional width/height/steps/guidance/seed, input_b64 reference for the instruction edit).",
+   "files": [
+    {
+     "role": "transformer",
+     "repo": "city96/FLUX.2-dev-gguf",
+     "path": "flux2-dev-Q4_K_M.gguf",
+     "revision": "ade5d688ddab0d9cf4a5b01bf4321e01c115020d",
+     "cache_as": "flux2-dev-q4-24g/flux2-dev-Q4_K_M.gguf",
+     "size": 20082414560,
+     "sha256": "fca680c7b221a713b5cf7db6cf6b33474875320ee61f4c585bc33fe391dab9a6"
+    },
+    {
+     "role": "text-encoder",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/mistral_3_small_flux2_fp8.safetensors",
+     "size": 18034640095,
+     "sha256": "e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e"
+    },
+    {
+     "role": "vae",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/vae/flux2-vae.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+     "path": "tokenizer.json",
+     "revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+     "cache_as": "flux2-dev/tokenizer/tokenizer.json",
+     "size": 17078037,
+     "sha256": "b76085f9923309d873994d444989f7eb6ec074b06f25b58f1e8d7b7741070949"
+    }
+   ]
+  },
+  {
    "id": "trellis-2",
    "domain": "mesh",
    "backend": "trellis",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://huggingface.co/microsoft/TRELLIS.2-4B",
+    "summary": "TRELLIS.2-4B (Microsoft) is published under MIT. Permissive use, including commercial, subject to the MIT notice conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 14.0,
    "note": "TRELLIS.2-4B image->GLB on the native Rust/CUDA diffusion stack: native BiRefNet soft matte, DINOv3 conditioning, SS flow, cascade shape flows, sparse FDG decode, dual-grid mesh and texture SLAT flow/decode. The complete bundle is role-addressed and pinned to immutable revisions and SHA-256 identities. Request: input_b64 PNG -> glTF Y-up GLB. Default output uses native FaithC cleanup/remesh/QEM decimation plus an embedded PBR atlas. Params: seed, remesh_resolution, texture, decimation_target and texture_size. No Python/ComfyUI fallback.",
    "files": [
@@ -251,6 +531,12 @@
    "backend": "llm",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.8-27B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 19.0,
    "note": "Preferred AI Content prompt expander when its weights are already ready on a live node. Qwen3.8-27B is a dense Qwen3.5-architecture conditional-generation model (general.architecture=qwen35 in GGUF), so the text-only path matches the in-repo Makepad-Llama model contract. The upstream model also has a vision tower; this text registry entry deliberately carries only the language GGUF, while a future vision-capable serving entry may pair it with mmproj-BF16.gguf. Apache-2.0. The audited Unsloth Q4_K_M is 17.1 GB decimal (~15.9 GiB), leaving materially more headroom than UD-Q4_K_XL on a 24 GB GPU. AI Content never lets an absent/downloading copy displace the ready qwen3.5-9b fallback.",
    "files": [
@@ -266,29 +552,17 @@
    ]
   },
   {
-   "id": "qwen3.6-27b",
-   "domain": "text",
-   "backend": "llm",
-   "available": true,
-   "gated": false,
-   "vram_gb": 18.0,
-   "note": "Canonical embedded LLM prompt expander: dense Qwen3.6-27B instruct, Q4_K_M GGUF (general.architecture=qwen35 - runs on the in-repo makepad-llama runtime as-is). Apache-2.0. ~16.8GB weights + KV at 8k ctx; fits a 24GB card. The local Mac character workflow intentionally uses a cache-registry override named qwen3.5-9b because that smaller GGUF is the resident model there; the override does not rename or replace this canonical entry.",
-   "files": [
-    {
-     "repo": "unsloth/Qwen3.6-27B-GGUF",
-     "path": "Qwen3.6-27B-Q4_K_M.gguf",
-     "cache_as": "llm/Qwen3.6-27B-Q4_K_M.gguf",
-     "size": 16817244384,
-     "sha256": null
-    }
-   ]
-  },
-  {
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/hexgrad/Kokoro-82M",
+    "summary": "Kokoro-82M weights and voices are Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 0.5,
    "note": "Kokoro-82M TTS via the in-repo pure-Rust port (libs/tts). Upstream .pth/.pt weights download from hexgrad/Kokoro-82M and are converted in-process to the .mktts/.mkvoice format the loader reads (libs/tts convert.rs, byte-identical to the offline Python converter); boxes carrying pre-converted files at the tts/ cache paths never re-download. All 28 English voices (af_*/am_* American, bf_*/bm_* British; default bm_daniel). Output: mono 16-bit 24kHz WAV.",
    "files": [
@@ -561,6 +835,12 @@
    "backend": "indextts",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "bilibili Model Use License",
+    "url": "https://huggingface.co/IndexTeam/IndexTTS-2.5",
+    "summary": "IndexTTS-2.5 weights are under the bilibili Model Use License (restricted; research posture). Review the model card before any production or commercial use.",
+    "restriction": "restricted"
+   },
    "vram_gb": 6.0,
    "note": "IndexTTS-2.5 character-voice TTS via the in-repo pure-Rust port (libs/diffusion indextts_*): zero-shot voice cloning from a reference wav (input_b64 audio/wav or a named clip in indextts/voices/) + explicit 8-dim emotion vector ([happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]) for programmatic NPC states. GPT-2 0.8B AR -> semantic codec -> flow-matching mel -> BigVGAN. CPU f32 today (CUDA perf phase pending). Output: mono 16-bit 22.05kHz WAV. License: bilibili Model Use License (restricted; research posture).",
    "files": [
@@ -652,8 +932,14 @@
    "backend": "h3",
    "available": true,
    "gated": false,
-   "vram_gb": 90.0,
-   "note": "MiniMax H3 t2va (video+audio) on the in-repo makepad-ggml CUDA port: 33B DiT + Qwen3-VL-32B TE + video/audio VAEs, f32 activation spine (validated config - H3 activations overflow f16), weights stream disk->device. Full bf16 set needs a 96GB-class card (RTX 6000 Blackwell verified; beats the diffusers reference at 640x352 and 864x480). Consumer tiers run the Q4_K_M GGUF stack instead (future backend variant): 24GB caps at 864x480x124 full-Q4 / 960x544x124 pruned-Q4, 32GB runs all canvases up to 1344x768x124; 64GB host RAM required for Q4 offload. Output: HEVC (or H264) mp4, 24 fps, stereo AAC 48kHz from the 32kHz audio VAE.",
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI",
+    "summary": "MiniMax H3 community license. Local generation is the intended use of this OSS stack. Review MiniMax's acceptable-use and any commercial-authorization terms on the model card before shipping a product on these weights.",
+    "restriction": "community"
+   },
+   "vram_gb": 74.0,
+   "note": "MiniMax H3 t2va (video+audio) on the in-repo makepad-ggml CUDA port: 33B DiT + Qwen3-VL-32B TE + video/audio VAEs, f32 activation spine (validated config - H3 activations overflow f16), weights stream disk->device. vram_gb is the MEASURED cold-card peak (74.3 GB at 640x384x22f on RTX PRO 6000, 2026-08-18: TE streams to ~46 GB and releases BEFORE DiT+VAE climb to peak - stages never overlap; the old 90 assumed they did). Full-ladder large clips belong on minimax-h3-bf16-96g which keeps the hard 90 floor. Full bf16 set needs a 96GB-class card (RTX 6000 Blackwell verified; beats the diffusers reference at 640x352 and 864x480). Consumer tiers run the Q4_K_M GGUF stack instead (future backend variant): 24GB caps at 864x480x124 full-Q4 / 960x544x124 pruned-Q4, 32GB runs all canvases up to 1344x768x124; 64GB host RAM required for Q4 offload. Output: HEVC (or H264) mp4, 24 fps, stereo AAC 48kHz from the 32kHz audio VAE. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-H3",
@@ -1081,6 +1367,15 @@
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
      "sha256": null
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -1090,6 +1385,12 @@
    "backend": "sa3",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Stability Community License",
+    "url": "https://huggingface.co/stabilityai/stable-audio-3-small-sfx",
+    "summary": "Stable Audio 3 Small SFX is under Stability AI's community license. Review the model card for commercial and acceptable-use terms before production use.",
+    "restriction": "community"
+   },
    "vram_gb": 3.0,
    "note": "Stable Audio 3 Small SFX (Stability Community license) on the in-repo libs/diffusion port: T5Gemma-B text encoder + 459M 20-block DiT (8-step ping-pong rectified flow, CFG-free distilled) + SAME-S transformer autoencoder; 44.1 kHz stereo wav, up to 120 s. Validated fp-exact against the Stability-AI/stable-audio-3 reference (oracle dumps in local/sa3_ref). Canonical weights live in the gated (auto-accept) stabilityai/stable-audio-3-small-sfx repo; these entries use the ungated exact mirror. Seeds are deterministic per build but not torch-compatible.",
    "files": [
@@ -1136,6 +1437,12 @@
    "backend": "moss",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/OpenMOSS",
+    "summary": "MOSS-SoundEffect v2.0 (OpenMOSS) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 7.0,
    "note": "MOSS-SoundEffect v2.0 (OpenMOSS, Apache 2.0) on the in-repo libs/diffusion port: Qwen3-1.7B text encoder (duration conditioned through the prompt text) + 1.3B Wan-audio DiT (100-step CFG-4 flow matching over a fixed 30 s latent) + continuous-DAC decoder; mono 48 kHz duplicated to stereo wav, up to 30 s. The second audio model beside sa3-sfx, picked for output variety: full-band 48 kHz, denser 'produced' event character vs SA3's dry one-shots. Validated against reference oracle dumps (local/moss_ref). Seeds deterministic per build, not torch-compatible.",
    "files": [
@@ -1189,6 +1496,12 @@
    "backend": "woosh",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "CC BY-NC 4.0 (weights) / MIT (code)",
+    "url": "https://creativecommons.org/licenses/by-nc/4.0/",
+    "summary": "Sony Woosh DFlow: inference code is MIT, but the weights are CC-BY-NC-4.0. Non-commercial use of the weights and their outputs. Attribution required.",
+    "restriction": "non-commercial"
+   },
    "vram_gb": 4.0,
    "note": "Sony Woosh DFlow (code MIT, weights CC-BY-NC-4.0) on the in-repo libs/diffusion port: RoBERTa-large text conditioner + 337M dual/single-stream MMDiT (4-step Euler+renoise distilled student, CFG embedded in a single forward) + VOCOS ConvNeXt/iSTFT autoencoder; FIXED 5.0 s mono 48 kHz duplicated to stereo wav (no duration conditioning; seconds/steps ignored). Third audio voice beside sa3-sfx/moss-sfx, picked for speed (~0.06 s warm on the torch reference 5090) and take variety; band-limited ~12 kHz by model character. Weights ship as the official GitHub release zips (absolute URLs) and are extracted into the cache on first load. Validated per-stage against reference oracle dumps (local/woosh_ref). Seeds deterministic per build, not torch-compatible.",
    "files": [
@@ -1231,9 +1544,78 @@
    "backend": "flashworld",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "CC BY-NC-SA",
+    "url": "https://huggingface.co/imlixinyang/FlashWorld",
+    "summary": "FlashWorld checkpoint is CC-BY-NC-SA. Non-commercial, attribution required, share-alike. This backend runs a local Python worker against those weights; it does not host them.",
+    "restriction": "non-commercial"
+   },
    "vram_gb": 55.0,
    "note": "FlashWorld (ICLR26) image/text -> 3DGS world, ply artifact (~4M splats, sh deg 2, ~600MB). Reference-tier python subprocess: needs box-provisioned venv+repo+ckpt (MAKEPAD_FLASHWORLD_PYTHON/_DIR/_CKPT; defaults = the .169 layout) + Wan2.2-TI2V-5B base at C:/ai/models/wan22. Weights CC-BY-NC-SA (imlixinyang/FlashWorld model.ckpt 20.9GB). Warm gen ~6s, cold ~70s (worker killed after each job unless MAKEPAD_FLASHWORLD_KEEP_WARM=1 - no cross-backend VRAM eviction yet).",
    "files": []
+  },
+  {
+   "id": "triposplat",
+   "domain": "splat",
+   "backend": "triposplat",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License (TripoSplat) + DINOv3 License (bundled image encoder)",
+    "url": "https://huggingface.co/VAST-AI/TripoSplat",
+    "summary": "TripoSplat code and weights are MIT (VAST-AI; permissive, commercial use allowed, notice retention). The bundled DINOv3 ViT-H image-encoder weights originate from Meta's DINOv3 release under the DINOv3 License: commercial use permitted, but redistribution of those weights or derivatives must carry the DINOv3 License and display 'Built with DINOv3'. This app records acknowledgement only; it does not host or redistribute any weights.",
+    "restriction": "community"
+   },
+   "vram_gb": 20.0,
+   "min_vram_gb": 16.0,
+   "note": "TripoSplat (VAST-AI-Research, MIT code + weights) single image -> 3D gaussian splat on the native Rust/CUDA stack: native BiRefNet cutout, DINOv3 ViT-H/16+ conditioning, a FLUX.2 VAE latent condition, a 24-block rectified-flow denoiser over 8192 splat-latent tokens, and an 8-level octree + 16-block gaussian decoder. The whole bundle is role-addressed and pinned to an immutable revision, byte size and SHA-256. CUDA-only - availability fails closed without a GPU device. Request: input_b64 PNG -> one application/x-ply artifact (standard 3DGS binary little endian, pre-activation columns: opacity logit, log scales, wxyz quaternion). Params: seed, steps (default 20), guidance (default 3.0; <=1 disables CFG and halves the per-step cost), gaussians (32768..262144, default 262144, rounded to a multiple of 32 - the denoiser runs once regardless, only the decode scales). TripoSplat ships its OWN BiRefNet repack: same architecture and byte length as the birefnet-hr entry but different weights, so it is pinned separately rather than aliasing that cache blob. No Python/ComfyUI fallback.",
+   "files": [
+    {
+     "role": "dit",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "diffusion_models/triposplat_fp16.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/diffusion_models/triposplat_fp16.safetensors",
+     "size": 741106994,
+     "sha256": "c870b97ac1d6bc9177608a5ec625e19ef9f3c5019aa68f64b0fb7803abcd6d20"
+    },
+    {
+     "role": "splat-decoder",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "vae/triposplat_vae_decoder_fp16.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/vae/triposplat_vae_decoder_fp16.safetensors",
+     "size": 576148442,
+     "sha256": "ed0d0c3d43b599e326845d0ec70f3cf77be9a55e2d97627ac3b34d2830763cc8"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "clip_vision/dino_v3_vit_h.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/clip_vision/dino_v3_vit_h.safetensors",
+     "size": 1681247696,
+     "sha256": "a29ef35101a16966972a0d50732a6f3a608ff7cfffb2afa9bbe9007cb842cc53"
+    },
+    {
+     "role": "vae",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "vae/flux2-vae.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/vae/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "native-matte",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "background_removal/birefnet.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/background_removal/birefnet.safetensors",
+     "size": 444473596,
+     "sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"
+    }
+   ]
   },
   {
    "id": "birefnet-hr",
@@ -1241,6 +1623,12 @@
    "backend": "matte-native",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://huggingface.co/ZhengPeng7/BiRefNet_HR-matting",
+    "summary": "BiRefNet HR matting weights are MIT. Permissive use, including commercial, subject to the MIT notice conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 2.0,
    "note": "BiRefNet HR matting (ZhengPeng7/BiRefNet_HR-matting, MIT) image -> RGBA cutout with continuous soft alpha. Native Rust/CUDA inference at the checkpoint's 1024 envelope; no Python, Torch, subprocess, thresholding, or silent fallback. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Request: input_b64 PNG -> image/png RGBA at input resolution.",
    "files": [
@@ -1261,6 +1649,12 @@
    "backend": "depth-native",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/depth-anything/DA3METRIC-LARGE",
+    "summary": "Depth-Anything-3 DA3METRIC-LARGE is Apache-2.0 (not the later CC-BY-NC x.1 refresh). Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 3.0,
    "note": "Depth-Anything-3 DA3METRIC-LARGE (depth-anything/DA3METRIC-LARGE, Apache-2.0 - NOT the CC-BY-NC x.1 refresh) image -> metric depthmap. Native Rust/CUDA inference; no Python, Torch, subprocess, or silent fallback. Metric scale uses the processed network width (focal_px * net / 300, 60deg HFOV default). The old box script used the pre-resize width and is retained only as an explicit python-backends oracle. Sky pixels clip to far. Output: TWO artifacts - image/png 16-bit grayscale, depth in MILLIMETERS (u16, far clip 65.535m, 0 = invalid) + application/json sidecar {metric:true, unit:mm, min, max, focal_px} (min/max = pre-clip non-sky range in mm).",
    "files": [
@@ -1281,6 +1675,12 @@
    "backend": "segment-native",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "SAM License",
+    "url": "https://huggingface.co/Comfy-Org/sam3.1",
+    "summary": "SAM 3.1 Multiplex is under the SAM License / Meta acceptable-use terms as published with the checkpoint. Review the model card before production use. This stack never downloads facebook/sam3* TOS checkpoints.",
+    "restriction": "community"
+   },
    "vram_gb": 4.0,
    "note": "SAM 3.1 Multiplex (Comfy-Org/sam3.1, SAM License) image + text prompt -> grayscale mask PNG + RGBA cutout. Native Rust/CUDA inference; no Python, Torch, subprocess, or silent fallback. Facebook TOS checkpoints (facebook/sam3*) are never downloaded. Prompt uses multiplex syntax (\"cat:1\", \"eye:2, window panels:4\"). The checkpoint is pinned to an immutable revision, byte size, and SHA-256.",
    "files": [
@@ -1296,11 +1696,78 @@
    ]
   },
   {
+   "id": "realesrgan-x4plus",
+   "domain": "upscale",
+   "backend": "upscale-native",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "BSD 3-Clause License",
+    "url": "https://github.com/xinntao/Real-ESRGAN",
+    "summary": "Real-ESRGAN x4plus (xinntao, Comfy-Org repack) is BSD-3-Clause. Permissive use, including commercial, subject to the BSD notice conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 3.0,
+   "note": "RealESRGAN x4plus (Comfy-Org/Real-ESRGAN_repackaged repack of xinntao/Real-ESRGAN, BSD-3) general image 4x upscaler (RRDBNet: conv_first, 23 RRDB blocks, conv_body trunk, two nearest-2x upsample stages, conv_hr, conv_last). Native Rust/CUDA inference beating the official fp16 forward inside its quality envelope (max_abs/mae/cosine/pixel-diff gates); no Python, Torch, subprocess, or silent fallback. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Request: input_b64 PNG -> image/png at 4x input resolution (RGBA in keeps its alpha, nearest-scaled onto the 4x canvas; the network itself only upscales the color planes).",
+   "files": [
+    {
+     "role": "native-upscale",
+     "repo": "Comfy-Org/Real-ESRGAN_repackaged",
+     "path": "RealESRGAN_x4plus.safetensors",
+     "revision": "ea19b4cd14f85a5b914eee8aa7ff77bc371039a0",
+     "cache_as": "upscale/realesrgan-x4plus/RealESRGAN_x4plus.safetensors",
+     "size": 66857836,
+     "sha256": "37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb"
+    }
+   ]
+  },
+  {
+   "id": "video-enhance",
+   "domain": "enhance",
+   "backend": "video-enhance",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "BSD 3-Clause License + MIT",
+    "url": "https://github.com/xinntao/Real-ESRGAN",
+    "summary": "RealESRGAN x4plus (xinntao, BSD-3-Clause) + Practical-RIFE v4.26 flownet (hzwer, MIT). Both permissive, including commercial, subject to their notice conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 6.0,
+   "note": "Video post-processor: one decode, one encode, up to three fused transforms. upscale: 2|4 = RealESRGAN x4plus per frame (x2 = exact 2:1 box downsample of the x4 pass). interpolate: 2|4 = RIFE v4.26 frame-rate multiplication at the OUTPUT resolution (same clip duration, denser cadence). flow_map: true = per-final-frame-pair RIFE motion field (flow + occlusion mask at t=0.5, quarter source resolution, int8 quarter-pixel) appended to the mp4 as a trailing 'mkfl' box for arbitrary-timestep playback warping - decoders skip unknown top-level boxes so the artifact stays one plain playable video. Request: input_b64 video/mp4 -> video/mp4. The input's audio track is dropped (video-only stage). Weights are shared cache entries with realesrgan-x4plus and the H3 tiers' interpolate role.",
+   "files": [
+    {
+     "role": "native-upscale",
+     "repo": "Comfy-Org/Real-ESRGAN_repackaged",
+     "path": "RealESRGAN_x4plus.safetensors",
+     "revision": "ea19b4cd14f85a5b914eee8aa7ff77bc371039a0",
+     "cache_as": "upscale/realesrgan-x4plus/RealESRGAN_x4plus.safetensors",
+     "size": 66857836,
+     "sha256": "37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
+    }
+   ]
+  },
+  {
    "id": "skintokens",
    "domain": "rig",
    "backend": "rig-native",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "VAST-AI / SkinTokens model card",
+    "url": "https://huggingface.co/VAST-AI/SkinTokens",
+    "summary": "SkinTokens weights are used as published by VAST-AI. Review the Hugging Face model card and any accompanying license before commercial or redistributed use. This stack does not host the weights.",
+    "restriction": "community"
+   },
    "vram_gb": 9.0,
    "note": "Canonical pure-Rust/CUDA SkinTokens auto-rigger: GLB mesh -> skinned GLB through deterministic native sampling, VAE/Michelangelo conditioning, constrained Qwen3 generation, FSQ skin decoding, 8-neighbor transfer and lossless armature augmentation. Uses the corrected strict grammar (exactly four real skin symbols per joint); the released upstream off-by-one behavior is retained only by the explicit oracle. No Python, Torch, Blender or silent fallback. The immutable official Lightning artifact is downloaded and converted atomically by the common cancellable lifecycle.",
    "files": [
@@ -1328,6 +1795,12 @@
    "backend": "rig-oracle",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "VAST-AI / SkinTokens model card",
+    "url": "https://huggingface.co/VAST-AI/SkinTokens",
+    "summary": "Oracle comparison backend for SkinTokens. Same upstream weight license as skintokens. Review the Hugging Face model card before use.",
+    "restriction": "community"
+   },
    "vram_gb": 8.0,
    "note": "Explicit SkinTokens reference oracle: upstream Python/Torch model plus Blender/bpy transfer and export. Box-provisioned through MAKEPAD_RIG_CMD and retained only for same-box numerical and performance comparisons. The canonical skintokens model never falls back to this backend.",
    "files": []
@@ -1338,6 +1811,12 @@
    "backend": "motion-native",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Tencent Hunyuan / HY-Motion community license",
+    "url": "https://huggingface.co/tencent/HY-Motion-1.0",
+    "summary": "HY-Motion 1.0 is published under Tencent's Hunyuan / HY-Motion community terms. Review the model card for territory, acceptable-use and commercial conditions. This app records acknowledgement only.",
+    "restriction": "community"
+   },
    "vram_gb": 24.0,
    "note": "Canonical pure-Rust/CUDA HY-Motion 1.0 FULL 1B runtime plus native hierarchy/direction retarget and lossless GLB animation augmentation. Qwen3-8B + CLIP-L + 1.04B full DiT stay resident on one persistent worker; no Python, Torch or Blender and no silent oracle fallback. Produces deterministic seeded in-place idle/walk/run/jump clips for playable-character locomotion. All runtime artifacts are immutable commit- and SHA-pinned and prepared by the common service downloader/lifecycle.",
    "files": [
@@ -1475,6 +1954,12 @@
    "backend": "motion-oracle",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Tencent Hunyuan / HY-Motion community license",
+    "url": "https://huggingface.co/tencent/HY-Motion-1.0",
+    "summary": "Oracle comparison backend for HY-Motion. Same upstream weight license as hy-motion.",
+    "restriction": "community"
+   },
    "vram_gb": 24.0,
    "note": "Explicit HY-Motion reference oracle: Python/Torch generation plus Blender/bpy retarget. Box-provisioned through MAKEPAD_MOTION_CMD, retained solely for same-box quality/performance comparisons. The canonical hy-motion model never falls back to this backend.",
    "files": []
@@ -1485,6 +1970,12 @@
    "backend": "music3",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MiniMax-Music3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI/MiniMax-Music-3",
+    "summary": "MIT-style community license with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue. Fine for local generation; review the LICENSE file before a commercial product.",
+    "restriction": "community"
+   },
    "vram_gb": 29.0,
    "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served reference-tier through the official diffusers ModularPipeline (music3_worker.py subprocess; diffusers pinned to PR #14456 commit dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d per the model card). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth, dav.pth) are deliberately excluded. vram_gb is full bf16 residency; MAKEPAD_MUSIC3_OFFLOAD=1 fits ~22 GB via auto CPU offload. License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
    "files": [
@@ -1683,205 +2174,91 @@
    ]
   },
   {
-   "id": "minimax-music3-python",
+   "id": "minimax-music3-q4",
    "domain": "music",
-   "backend": "music3-python",
+   "backend": "music3",
    "available": true,
    "gated": false,
-   "vram_gb": 29.0,
-   "note": "Official MiniMax-Music3 ModularPipeline REFERENCE (Python/Torch worker). Same weights and request contract as minimax-music3 (lyrics + prompt + seconds + seed) but never the native CUDA port. Use this to A/B a 60s song against native. Requires C:\\ai\\music3venv (MAKEPAD_MUSIC3_PYTHON). Does not enable FlashWorld or other python-backends.",
+   "license": {
+    "name": "MiniMax-Music3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI/MiniMax-Music-3",
+    "summary": "Same MiniMax-Music3 Community License as the bf16 tree. Quantization does not change the weight license.",
+    "restriction": "community"
+   },
+   "vram_gb": 12.0,
+   "note": "MiniMax Music 3 NATIVE QUANTIZED 24GB tier: official audio.cpp GGUF export (audio-cpp/MiniMax-Music3-GGUF, architecture 'audiocpp', native HF tensor names), default mix Q4_0 8B LM + Q4_0 2.4B DiT + BF16 RVQ depth decoder + F32 condition encoder + F32 Flow-VAE vocoder (~9.0 GB pull vs 28.5 GB bf16). Same generate contract as minimax-music3 (lyrics + prompt + seconds + seed -> stereo 44.1 kHz wav) on the in-repo CUDA stack: Q4_0 block streams stay resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine; pack import is fail-closed (architecture + tensor census + python shape canaries). Native engine only \u2014 the Python ModularPipeline cannot serve a GGUF pack. License: MiniMax-Music3 COMMUNITY LICENSE (same terms as the bf16 tree; LICENSE file pinned below).",
    "files": [
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
+     "role": "license",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
      "path": "LICENSE",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/LICENSE",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/LICENSE",
      "size": 7373,
      "sha256": "b21d12df2adae59dad3fcf80c1d81492654c662342f497d9a9770198c9317e58"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/config.json",
-     "size": 107,
-     "sha256": "1ffcff67d916d5519d1ef9a36853232ee6bcb7e14a936623c4e85559f5dce106"
+     "role": "lm-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "language_model_q4_0.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/language_model_q4_0.gguf",
+     "size": 6006866496,
+     "sha256": "6f621dd636320403c03e9f755b3e2047f5754d055e0fcc6c0c444ae52ffbfa90"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "modular_model_index.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/modular_model_index.json",
-     "size": 2391,
-     "sha256": "1dc86609cf8855e70cc3f5d085213988094fb59e448aedcda06740d34e386002"
+     "role": "dit-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "transformer_q4_0.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/transformer_q4_0.gguf",
+     "size": 1396392768,
+     "sha256": "18d3b2461a2988f59e197ccf05dc3931663099290b42443baa2a30e4fd15e506"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "condition_encoder/config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/condition_encoder/config.json",
-     "size": 292,
-     "sha256": "1cdea3f36506719128ae4a29cdfff74b1134e607eb4a504ce6d810568fac8263"
+     "role": "rvq-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "rvq_depth_decoder_bf16.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/rvq_depth_decoder_bf16.gguf",
+     "size": 1292061152,
+     "sha256": "7f7adfb54a9e156682555dc7ddc575c20a6f038c8d036e364881a3ea80400fd0"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "condition_encoder/diffusion_pytorch_model.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/condition_encoder/diffusion_pytorch_model.safetensors",
-     "size": 100671852,
-     "sha256": "83179c5eaa9a68a370affe0c1b96c2179f659ea4175666b31071490a202c2a4d"
+     "role": "cond-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "condition_encoder.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/condition_encoder.gguf",
+     "size": 100677184,
+     "sha256": "7f9414097b1f6ad154dae08ed69ce88fd0db6d7fd422f4d1a847216ca28ba1bf"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/config.json",
-     "size": 1596,
-     "sha256": "34ded58fcd5e8181557f1417e76af9f3e95109a5ce113a4771fd16f8625b53c0"
+     "role": "vocoder-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "vocoder.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/vocoder.gguf",
+     "size": 216704192,
+     "sha256": "0a768b596516678fc850da1aff36556b8bc6bafcb7b42bc7ba7cb46cb9927a42"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/generation_config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/generation_config.json",
-     "size": 158,
-     "sha256": "c0f7c1612e174a7bdec9548464a7bf031a0292587033228e6767fb9e5dc367cd"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/model.safetensors.index.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/model.safetensors.index.json",
-     "size": 32914,
-     "sha256": "a8bf9de1e8c0d680f39730a127d74445b4abf505623bd91d5ed4f97c0869cc2a"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/model-00001-of-00004.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/model-00001-of-00004.safetensors",
-     "size": 4910103856,
-     "sha256": "1e95924a158b45b67cfad04fa0f0a352e5a263e69338734d7c1d558be776cc98"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/model-00002-of-00004.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/model-00002-of-00004.safetensors",
-     "size": 4915960352,
-     "sha256": "fde2d335eef7eafa268d35e53d4b040ee51d2f3fa727f9855b4c97d88a2892da"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/model-00003-of-00004.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/model-00003-of-00004.safetensors",
-     "size": 4983068496,
-     "sha256": "6549a831637ab678a573047e7fa8fdf966998c4f45330e6eb7573d67f7b9b4c6"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "language_model/model-00004-of-00004.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/language_model/model-00004-of-00004.safetensors",
-     "size": 2359864688,
-     "sha256": "a1c9865f357b64d3ae9f428fb98a844831e5a0aee9ed17b19bd7f7be32b964a9"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "rvq_depth_decoder/config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/config.json",
-     "size": 274,
-     "sha256": "b38c7f72d4b2fa8667442071f9e4a63ca5a7b5d0859e5e64ee7f79c4bc64520c"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "rvq_depth_decoder/diffusion_pytorch_model.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/diffusion_pytorch_model.safetensors",
-     "size": 1292055248,
-     "sha256": "80e86ab006bb5c8d4f223205045035a1c77b2bb9c3be9a86d7e740bbafe5ddf0"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "scheduler/scheduler_config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/scheduler/scheduler_config.json",
-     "size": 483,
-     "sha256": "b544466124aab333da4874417da0168610067e9c9ff95fcb63d749e4bf891d99"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "tokenizer/chat_template.jinja",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/tokenizer/chat_template.jinja",
-     "size": 4168,
-     "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "tokenizer/tokenizer_config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer_config.json",
-     "size": 377,
-     "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
+     "role": "tokenizer-json",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
      "path": "tokenizer/tokenizer.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer.json",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/tokenizer/tokenizer.json",
      "size": 11423801,
      "sha256": "b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610"
     },
     {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "transformer/config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/transformer/config.json",
-     "size": 294,
-     "sha256": "f60856be934127a8b8223510aff2e38a9efd8bbdbc230c3d3339b96e2cb12f00"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model.safetensors.index.json",
-     "size": 42679,
-     "sha256": "5a57fc3b98e91ec7f4e9da199b3dc8ce1c67e42824c42bed91c15443c049b991"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
-     "size": 4959921384,
-     "sha256": "1943baebe93b5d5a57e9e1f603d9cef51a73a55e7a42f52913932dc06dcf10f0"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-     "size": 4767750800,
-     "sha256": "b2f9e29d241e107e5a281f8b369d6db48eee983917df966c56d7b8dd0bd482c2"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "vocoder/config.json",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/vocoder/config.json",
-     "size": 251,
-     "sha256": "4161afd07ba7d5b949e29c8a7a005592259fba73e9110b6ece9dfd38d3489eac"
-    },
-    {
-     "repo": "MiniMaxAI/MiniMax-Music3",
-     "path": "vocoder/diffusion_pytorch_model.safetensors",
-     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
-     "cache_as": "music/MiniMax-Music3/vocoder/diffusion_pytorch_model.safetensors",
-     "size": 216695272,
-     "sha256": "daf0bf0560ea978ce7b5ec3e82f420a44429efef18bdfbe3c714d55ceffbe934"
+     "role": "tokenizer-config",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "tokenizer/tokenizer_config.json",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/tokenizer/tokenizer_config.json",
+     "size": 377,
+     "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada"
     }
    ]
   },
@@ -1891,6 +2268,12 @@
    "backend": "ace",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/ACE-Step/Ace-Step-1.5-XL",
+    "summary": "ACE-Step 1.5 XL is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
    "vram_gb": 12.0,
    "min_vram_gb": 10.0,
    "min_compute_cap": 8.9,
@@ -2048,10 +2431,16 @@
    "backend": "h3",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI",
+    "summary": "Same MiniMax H3 Community License as the bf16 tree. Quantization does not change the weight license.",
+    "restriction": "community"
+   },
    "vram_gb": 20.0,
    "min_vram_gb": 22.0,
    "min_compute_cap": 8.9,
-   "note": "MiniMax H3 fl2va (t2v + first-frame i2v, video+stereo audio) NATIVE QUANTIZED 24GB tier: unsloth pruned Q4_K GGUF DiT (AdaLN rank-8 curve table, 11.4GB) + Q4_K_M Qwen3-VL TE (18.2GB), fp16 video VAE + fp32 audio VAE repacks. Runs on the in-repo CUDA stack (GGUF blocks resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine) with STAGED component residency: TE -> DiT -> video VAE load/unload sequentially so 24GB-class cards (RTX 4090, sm89+) really fit. Measured ceiling 960x544x124f (pruned ladder 2026-08-12); larger canvases are refused. Same MiniMax H3 Community License as the bf16 tree.",
+   "note": "MiniMax H3 fl2va (t2v + first-frame i2v, video+stereo audio) NATIVE QUANTIZED 24GB tier: unsloth pruned Q4_K GGUF DiT (AdaLN rank-8 curve table, 11.4GB) + Q4_K_M Qwen3-VL TE (18.2GB), fp16 video VAE + fp32 audio VAE repacks. Runs on the in-repo CUDA stack (GGUF blocks resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine) with STAGED component residency: TE -> DiT -> video VAE load/unload sequentially so 24GB-class cards (RTX 4090, sm89+) really fit. Measured ceiling 960x544x124f (pruned ladder 2026-08-12); larger canvases are refused. Same MiniMax H3 Community License as the bf16 tree. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "role": "dit-gguf",
@@ -2106,6 +2495,15 @@
      "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
      "size": 7032403,
      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -2115,10 +2513,16 @@
    "backend": "h3",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI",
+    "summary": "Same MiniMax H3 Community License as the bf16 tree. Quantization does not change the weight license.",
+    "restriction": "community"
+   },
    "vram_gb": 28.0,
    "min_vram_gb": 30.0,
    "min_compute_cap": 12.0,
-   "note": "MiniMax H3 fl2va NATIVE QUANTIZED Blackwell 32GB tier: Abiray pruned NVFP4 DiT (12.5GB, AdaLN curve) + NVFP4-AWQ Qwen3-VL TE (15.7GB), ComfyUI/TensorRT-ModelOpt layout (E2M1 nibbles + E4M3 block scales + f32 tensor scale, AWQ pre-scales folded per input column). Requires compute capability 12.0 (RTX 5090 / RTX PRO 6000, sm120a) \u2014 fails closed elsewhere. Staged component residency; v1 compute path is dequant-to-bf16 scratch + f32-accumulate gemms (numerics-safe; Blackwell FP4 MMA is a later perf lever). Measured full-ladder ceiling 1344x768x124f on 32GB. Shares VAE/tokenizer files with the q4-24g tier.",
+   "note": "MiniMax H3 fl2va NATIVE QUANTIZED Blackwell 32GB tier: Abiray pruned NVFP4 DiT (12.5GB, AdaLN curve) + NVFP4-AWQ Qwen3-VL TE (15.7GB), ComfyUI/TensorRT-ModelOpt layout (E2M1 nibbles + E4M3 block scales + f32 tensor scale, AWQ pre-scales folded per input column). Requires compute capability 12.0 (RTX 5090 / RTX PRO 6000, sm120a) \u2014 fails closed elsewhere. Staged component residency; v1 compute path is dequant-to-bf16 scratch + f32-accumulate gemms (numerics-safe; Blackwell FP4 MMA is a later perf lever). Measured full-ladder ceiling 1344x768x124f on 32GB. Shares VAE/tokenizer files with the q4-24g tier. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "role": "dit-nvfp4",
@@ -2173,6 +2577,15 @@
      "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
      "size": 7032403,
      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -2182,10 +2595,16 @@
    "backend": "h3",
    "available": true,
    "gated": false,
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/MiniMaxAI",
+    "summary": "Same MiniMax H3 Community License as minimax-h3. Canonical bf16 tier.",
+    "restriction": "community"
+   },
    "vram_gb": 90.0,
    "min_vram_gb": 90.0,
    "min_compute_cap": 8.9,
-   "note": "MiniMax H3 fl2va CANONICAL BF16 tier (96GB class, RTX PRO 6000 verified) \u2014 the same file set and cache paths as the legacy 'minimax-h3' id (which stays as an alias), plus the hard fail-closed VRAM gate. Full quality reference: f32 activation spine, DiT+VAE stay warm across jobs, TE re-streams per prompt. The file identities are intentionally NOT pinned: seeded/junctioned boxes carry no verification receipts, and pinning would force a 134GB re-download.",
+   "note": "MiniMax H3 fl2va CANONICAL BF16 tier (96GB class, RTX PRO 6000 verified) \u2014 the same file set and cache paths as the legacy 'minimax-h3' id (which stays as an alias), plus the hard fail-closed VRAM gate. Full quality reference: f32 activation spine, DiT+VAE stay warm across jobs, TE re-streams per prompt. The file identities are intentionally NOT pinned: seeded/junctioned boxes carry no verification receipts, and pinning would force a 134GB re-download. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-H3",
@@ -2613,6 +3032,15 @@
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
      "sha256": null
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   }

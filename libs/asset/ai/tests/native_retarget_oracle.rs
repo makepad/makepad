@@ -3,7 +3,7 @@
 use makepad_asset_ai::motion_retarget::{
     retarget_hy_motion_glb_with_report, HyMotionClipRef, RetargetOptions,
 };
-use makepad_diffusion::hy_motion_decode::HyMotionDecoded;
+use makepad_ai_motion::hy_motion_decode::HyMotionDecoded;
 use makepad_gltf::parse_glb_bytes;
 use makepad_micro_serde::JsonValue;
 use makepad_zip_file::zip_read_central_directory;

@@ -12,6 +12,7 @@ use makepad_asset_store::{AssetServer, ServerConfig};
 use makepad_asset_client::{
     ApiEndpoints, AssetClient, CatalogQuery, CatalogSubscriberConfig, CatalogSubscriptionEvent,
     ClientConfig, ClientError, JobStateDto, PublishFile, PublishRequest, PublishThumbnail,
+    RoomClaimDto,
 };
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetRevisionRef, ContentLock, FileRole, GameAlias,
@@ -95,6 +96,7 @@ fn real_client_full_stack_roundtrip() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.alias = Some(AssetAlias::from_str("gen/e2e-neon").unwrap());
@@ -171,6 +173,7 @@ fn real_client_full_stack_roundtrip() {
             width: 512,
             height: 512,
             byte_len: game_thumb.len() as u64,
+            views: Vec::new(),
         },
         catalog_snapshot: None,
         search_algorithm_version: 1,
@@ -325,6 +328,7 @@ fn publish_retry_recovers_a_published_revision_missing_its_alias() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.asset_id = Some(asset_id);
@@ -372,4 +376,87 @@ fn non_root_principal_still_needs_grants() {
         Err(ClientError::Unauthenticated) => {}
         other => panic!("unknown token must be uniformly refused, got {other:?}"),
     }
+}
+
+/// The rendezvous, end to end through the real client: two players press
+/// Play on the same game and the second is sent to the first, not handed a
+/// second claim. Then the unreachable-room escape, which is what keeps a
+/// stale record from becoming a dead end for everyone who follows.
+#[test]
+fn real_clients_meet_in_one_room_and_never_dead_end_on_a_stale_one() {
+    let (server, token) = start_server("rooms");
+    let rik = connect(&server, &token, "rooms_rik_cache");
+    let sam = connect(&server, &token, "rooms_sam_cache");
+
+    // Nobody is playing. Both apps see the same nothing.
+    assert!(rik.rooms(Some("arcade")).expect("list").is_empty());
+    assert!(sam.rooms(None).expect("list").is_empty());
+
+    // Rik presses Play. No room, so he hosts and takes the claim.
+    let claimed = rik
+        .claim_room("arcade", "10.0.0.7:5000:5001#ab", "rik", 30_000, None)
+        .expect("claim");
+    let RoomClaimDto::Claimed { room, token: host_token } = claimed else {
+        panic!("the first press must take the claim");
+    };
+
+    // Sam presses Play on the same game. He is told where Rik is — and is
+    // NOT given a claim of his own, which is the whole point.
+    let second = sam
+        .claim_room("arcade", "10.0.0.9:6000:6001#cd", "sam", 30_000, None)
+        .expect("claim");
+    let RoomClaimDto::Occupied { room: found } = second else {
+        panic!("the second press must be sent to the first");
+    };
+    assert_eq!(found, room);
+    assert_eq!(found.invite, "10.0.0.7:5000:5001#ab");
+    assert_eq!(found.host, "rik");
+    assert_eq!(rik.rooms(Some("arcade")).expect("list"), vec![found.clone()]);
+
+    // Rik stays alive, then leaves; his claim frees at once.
+    let beat = rik.room_heartbeat(&room.room, &host_token, 30_000).expect("heartbeat");
+    assert!(beat.expires_ms >= room.expires_ms);
+    rik.retire_room(&room.room, &host_token).expect("retire");
+    assert!(sam.rooms(Some("arcade")).expect("list").is_empty());
+    // Leaving twice is not an error — a host that leaves and then exits
+    // runs both paths.
+    rik.retire_room(&room.room, &host_token).expect("retire again");
+
+    // A room whose host has vanished without retiring: Sam reads it, fails
+    // to dial it, and says which room he failed on. He becomes the host
+    // instead of hitting the same wall forever.
+    let stale = rik
+        .claim_room("arcade", "10.0.0.7:5000:5001#ab", "rik", 30_000, None)
+        .expect("claim");
+    let RoomClaimDto::Claimed { room: dead, token: dead_token } = stale else {
+        panic!("claim");
+    };
+    let taken = sam
+        .claim_room("arcade", "10.0.0.9:6000:6001#cd", "sam", 30_000, Some(&dead.room))
+        .expect("replacing claim");
+    let RoomClaimDto::Claimed { room: live, .. } = taken else {
+        panic!("an unreachable room must yield its claim");
+    };
+    assert_eq!(live.host, "sam");
+    assert_eq!(rik.rooms(Some("arcade")).expect("list"), vec![live]);
+    // The displaced host learns the claim moved the next time it says it is
+    // alive — a plain NotFound, which means "claim again", not "you broke".
+    match rik.room_heartbeat(&dead.room, &dead_token, 30_000) {
+        Err(ClientError::NotFound { .. }) => {}
+        other => panic!("a replaced room must heartbeat as gone, got {other:?}"),
+    }
+
+    // Local refusals happen before anything reaches the wire.
+    assert!(matches!(
+        rik.claim_room("", "i", "h", 30_000, None),
+        Err(ClientError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        rik.claim_room("g", "i", "h", 1, None),
+        Err(ClientError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        rik.rooms(Some(&"x".repeat(200))),
+        Err(ClientError::InvalidInput { .. })
+    ));
 }

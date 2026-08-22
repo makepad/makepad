@@ -169,10 +169,10 @@ mod sa3_gen {
     use super::AudioJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::sa3_pipeline::{Sa3Pipeline, Sa3SeededNoise};
-    use makepad_diffusion::sa3_tokenizer::Sa3Tokenizer;
-    use makepad_diffusion::sa3_transformer::Sa3PadMode;
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_sfx::sa3_pipeline::{Sa3Pipeline, Sa3SeededNoise};
+    use makepad_ai_sfx::sa3_tokenizer::Sa3Tokenizer;
+    use makepad_ai_sfx::sa3_transformer::Sa3PadMode;
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     /// DiffusionError -> AssetAiError, preserving cancellation.
@@ -236,7 +236,7 @@ mod sa3_gen {
                 .as_ref()
                 .is_some_and(|(pipeline, _)| pipeline.device_active());
             if has_device {
-                makepad_diffusion::backend::release_gpu_runtime_namespaces(&[
+                makepad_ai_common::backend::release_gpu_runtime_namespaces(&[
                     "sa3te::",
                     "sa3dit::",
                     "sa3ae::",

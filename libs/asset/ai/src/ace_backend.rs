@@ -162,8 +162,8 @@ mod ace_gen {
     use super::MusicJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::ace_pipeline::{AceGenerate, AcePaths, AcePipeline};
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_music::ace_pipeline::{AceGenerate, AcePaths, AcePipeline};
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     fn gen_err(context: &str, err: DiffusionError) -> AssetAiError {
@@ -206,7 +206,7 @@ mod ace_gen {
 
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
             if self.loaded.is_some() {
-                makepad_diffusion::backend::release_gpu_runtime_namespaces(&["acete::"])
+                makepad_ai_common::backend::release_gpu_runtime_namespaces(&["acete::"])
                     .map_err(|error| AssetAiError::Backend(format!("ace unload: {error}")))?;
             }
             self.loaded = None;
@@ -248,8 +248,8 @@ mod ace_gen {
                 seconds: job.seconds,
                 seed: job.seed,
                 steps: job.steps as usize,
-                shift: makepad_diffusion::ace::ACE_DEFAULT_SHIFT,
-                guidance: makepad_diffusion::ace::ACE_BASE_CFG,
+                shift: makepad_ai_music::ace::ACE_DEFAULT_SHIFT,
+                guidance: makepad_ai_music::ace::ACE_BASE_CFG,
                 vocal_language: "en".into(),
             };
             let mut gen_hook = |label: &str, fraction: f64| -> Result<(), DiffusionError> {

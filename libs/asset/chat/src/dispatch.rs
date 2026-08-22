@@ -611,6 +611,23 @@ impl ToolExecutor for AssetServerTools {
             ContentToolCall::LlmConsult { .. } => ToolOutcome::Unavailable {
                 reason: "llm.consult is executed by the chat broker".to_string(),
             },
+            // Game-client tools: the broker's dispatcher never advertises
+            // them (see `ToolExecutor::tool_definitions`); a model that
+            // calls one anyway gets the honest answer, not an execution.
+            ContentToolCall::AssetsQuery { .. }
+            | ContentToolCall::AssetsSchema
+            | ContentToolCall::WorldPlace { .. }
+            | ContentToolCall::WorldRemove { .. }
+            | ContentToolCall::WorldMove { .. }
+            | ContentToolCall::WorldList
+            | ContentToolCall::WorldGetSource
+            | ContentToolCall::WorldSetSource { .. }
+            | ContentToolCall::WorldSetPlayerModel { .. }
+            | ContentToolCall::WorldSpawn { .. }
+            | ContentToolCall::WorldTune { .. }
+            | ContentToolCall::WorldAddAddon { .. } => ToolOutcome::Unavailable {
+                reason: "catalog SQL and world tools run in a game chat session".to_string(),
+            },
         }
     }
 }
@@ -706,6 +723,8 @@ pub(crate) fn kind_label(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -728,6 +747,8 @@ fn role_parse(s: &str) -> Option<FileRole> {
         "audio" => R::Audio,
         "video" => R::Video,
         "source" => R::Source,
+        "splat" => R::Splat,
+        "ao_texture" => R::AoTexture,
         _ => return None,
     })
 }
@@ -753,6 +774,8 @@ fn media_parse(s: &str) -> Option<MediaType> {
         "mp4" => M::Mp4,
         "bin" => M::Bin,
         "text" => M::Text,
+        "ply" => M::Ply,
+        "mp3" => M::Mp3,
         _ => return None,
     })
 }

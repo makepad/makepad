@@ -1,0 +1,36 @@
+# The app side of a broker-owned chat session: ONE component, two apps.
+#
+# The game sandbox and the asset UI both put a Qwen chat on screen. Both
+# want the same machinery — a session on the Asset Server's chat broker, a
+# worker thread on a channel pumping its event stream, a rate meter reading
+# the serving box's own token counts, cancel and clear — and each wants its
+# own personality: its namespace, its declared client profile (which selects
+# the taught context server-side), and its own client-executed tools.
+#
+# So the MECHANICS live here and the personality is an input. Before this,
+# the sandbox had the mechanics and the asset UI had a second, weaker copy
+# that called a fleet box directly.
+#
+# Dependency policy: the widget library, the chat protocol crate (tool
+# parsing, thinking/tool-marker stripping) and the hardened asset client.
+# This crate sits ABOVE both libs/asset/chat and libs/asset/widgets — the
+# store never depends on it, so a chat pane can never drag makepad-widgets
+# into the server.
+
+[package]
+name = "makepad-asset-chat-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Shared chat pane for Makepad apps: broker session transport, transcript + rate meter, and the transcript widget"
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets" }
+makepad-asset-chat = { path = "../chat" }
+makepad-asset-client = { path = "../client" }
+
+[dev-dependencies]
+# The e2e proof runs against a REAL Asset Server with a scripted serving
+# lane: session create, the worker channel, the event stream and the
+# client-tool park are all the real code paths — only the GPU is a fixture.
+makepad-asset-store = { path = "../store" }

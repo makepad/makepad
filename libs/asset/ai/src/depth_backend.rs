@@ -42,15 +42,17 @@ use crate::subproc_img::png_header;
 use crate::subproc_img::{cmd_provisioned, run_cancellable, SubprocError};
 use makepad_micro_serde::*;
 #[cfg(feature = "depth-native")]
-use makepad_diffusion::da3::{
+use makepad_ai_vision::da3::{
     encode_metric_mm, preprocess_rgb8, Da3MetricLarge, DA3_DEFAULT_HFOV_DEG,
 };
 #[cfg(feature = "depth-native")]
-use makepad_diffusion::DiffusionError;
+use makepad_ai_common::DiffusionError;
 use std::path::PathBuf;
+#[cfg(feature = "python-backends")]
 use std::time::Duration;
 
 pub const DEPTH_CMD_ENV: &str = "MAKEPAD_DEPTH_CMD";
+#[cfg(feature = "python-backends")]
 const DEPTH_CMD_DEFAULT: &str = r"C:\ai\venv\Scripts\python.exe C:\ai\depth_da3.py {in} {out}";
 
 /// Per-job budget: warm inference is seconds; cold covers the model load

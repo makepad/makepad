@@ -169,8 +169,8 @@ mod moss_gen {
     use super::MossJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::moss_pipeline::{MossDeviceState, MossPipeline};
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_sfx::moss_pipeline::{MossDeviceState, MossPipeline};
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     fn gen_err(context: &str, err: DiffusionError) -> AssetAiError {
@@ -247,7 +247,7 @@ mod moss_gen {
                 .as_ref()
                 .is_some_and(|(_, device)| device.is_some());
             if has_device {
-                makepad_diffusion::backend::release_gpu_runtime_namespaces(&[
+                makepad_ai_common::backend::release_gpu_runtime_namespaces(&[
                     "mosste::",
                     "mossdit::",
                     "mossdac::",
@@ -285,7 +285,7 @@ mod moss_gen {
                 };
                 let pipe = MossPipeline::load(&te, &dit, &vae, &tok, Some(&mut load_hook))
                     .map_err(|e| gen_err("moss load", e))?;
-                let device = if makepad_diffusion::moss::moss_device_enabled() {
+                let device = if makepad_ai_sfx::moss::moss_device_enabled() {
                     // Host f32 -> f16 conversion pass over all weights.
                     progress("prepare moss device", super::load_fraction(1.0));
                     Some(pipe.prepare_device().map_err(|e| gen_err("moss device", e))?)
@@ -313,7 +313,7 @@ mod moss_gen {
                     &job.prompt,
                     job.seconds,
                     steps,
-                    makepad_diffusion::moss::MOSS_DEFAULT_CFG,
+                    makepad_ai_sfx::moss::MOSS_DEFAULT_CFG,
                     job.seed,
                     Some(&mut gen_hook),
                     Some(&cancel_flag),

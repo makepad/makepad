@@ -3,13 +3,15 @@
 //! plus the single worker thread that executes jobs (one GPU = one job).
 
 use crate::backend::{
-    create_backend, model_availability, BackendCtx, ContentBackend, GenerateParams,
+    backend_live_supported, create_backend, list_loras, lora_dir, model_availability,
+    validate_loras_for_backend, BackendCtx, ContentBackend, GenerateParams, LiveParams,
 };
 use crate::download::{DownloadProgress, Downloader};
 use crate::error::AssetAiError;
 use crate::gpu::GpuCache;
-use crate::jobs::{QueuePolicy, SharedJobs};
+use crate::jobs::{JobParams, QueuePolicy, SharedJobs};
 use crate::protocol::*;
+use crate::realtime::RealtimeSession;
 use crate::registry::{ModelSpec, Registry};
 use crate::residency::{self, ResidencyConfig};
 use makepad_micro_serde::{DeJson, SerJson};
@@ -33,6 +35,8 @@ pub struct ServiceConfig {
     /// Peer-assisted model-cache distribution knobs (all optional; env/file
     /// fallbacks — see [`crate::peer_serve::PeerOptions`]).
     pub peer: crate::peer_serve::PeerOptions,
+    /// Partition advertised on `/health` and LAN beacons.
+    pub fleet: String,
 }
 
 pub struct ServiceHandle {
@@ -40,6 +44,9 @@ pub struct ServiceHandle {
     pub http_thread: JoinHandle<()>,
     pub route_thread: JoinHandle<()>,
     pub worker_thread: JoinHandle<()>,
+    /// One per chat lane. They take from the chat admission class only, so a
+    /// chat turn never waits on the heavy worker and vice versa.
+    pub chat_threads: Vec<JoinHandle<()>>,
     /// Machine-wide Windows singleton plus the per-cache-dir lock. Hold this
     /// for the life of the daemon (main.rs never drops its handle). Dropping
     /// the handle releases both locks (tests rely on that for restarts).
@@ -185,14 +192,42 @@ pub struct ServiceShared {
     pub residency: ResidencyConfig,
     /// Last time each model's backend ran a job (LRU input for eviction).
     pub last_used: Mutex<HashMap<String, Instant>>,
+    /// Partition advertised on `/health` and LAN beacons.
+    pub fleet: String,
     /// Peer-assisted model distribution state: transfer secret, serve
     /// bounds, in-flight serve leases, operator-injected sources.
     pub peer: crate::peer_serve::PeerRuntime,
+    /// Live/realtime sessions currently running, keyed by job id. Reachable
+    /// from both the worker thread (`server::execute_live_job`, which
+    /// inserts/removes) and `route_loop` (which feeds it websocket traffic).
+    /// At most one entry in practice — one GPU = one job — but keyed by job
+    /// id rather than a single `Option` so a session mid-teardown never
+    /// collides with a new one for a different job id.
+    pub realtime_sessions: Mutex<HashMap<String, Arc<RealtimeSession>>>,
+    /// `web_socket_id -> job_id`, populated on `ConnectWebSocket` so a later
+    /// `BinaryMessage`/`TextMessage`/`DisconnectWebSocket` (which only carry
+    /// the socket id) can find the right session.
+    pub ws_sessions: Mutex<HashMap<u64, String>>,
+    /// The resident backends, shared by every worker thread.
+    ///
+    /// One map behind one lock because **residency is a whole-device
+    /// decision**: admitting a model may evict another, and two threads each
+    /// keeping their own map would each believe they owned the GPU and would
+    /// evict out from under one another. The lock is held for preparation,
+    /// admission and load — never for generation, which runs through
+    /// [`crate::backend::ConcurrentBackend`] with the lock released.
+    pub backends: Mutex<HashMap<String, Box<dyn ContentBackend>>>,
 }
 
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
     fs::create_dir_all(&config.cache_dir)
         .map_err(|e| AssetAiError::Io(format!("cache dir {}: {e}", config.cache_dir.display())))?;
+    // The LoRA drop-box: operators copy adapter safetensors in here and
+    // `GET /loras` lists them. Created up front so the directory exists to
+    // copy into on a fresh box.
+    let loras_dir = lora_dir(&config.cache_dir);
+    fs::create_dir_all(&loras_dir)
+        .map_err(|e| AssetAiError::Io(format!("loras dir {}: {e}", loras_dir.display())))?;
     // Hard deployment invariant: exactly one service process per Windows
     // machine, independent of cache dir, plus an advisory cache-dir lock on
     // every platform. Acquire both before binding or mutating cache state.
@@ -268,11 +303,15 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         started_ms: crate::jobs::now_ms(),
         residency: ResidencyConfig::from_env(),
         last_used: Mutex::new(HashMap::new()),
+        fleet: crate::discovery::normalize_fleet(&config.fleet),
         peer,
+        realtime_sessions: Mutex::new(HashMap::new()),
+        ws_sessions: Mutex::new(HashMap::new()),
+        backends: Mutex::new(HashMap::new()),
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
-    // fleet-file edit.
-    crate::discovery::start_beacon(node_id, port);
+    // fleet-file edit. Frontends keep only beacons whose fleet matches.
+    crate::discovery::start_beacon(node_id, port, shared.fleet.clone());
 
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     // Character chains relay self-contained GLBs between mesh, rig, and
@@ -293,11 +332,36 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let worker_shared = shared.clone();
     let worker_thread = std::thread::spawn(move || worker_loop(worker_shared));
 
+    // One chat worker per lane. The store admits exactly this many chat turns,
+    // so the two numbers are the same number by construction rather than by
+    // two places agreeing: a worker with no lane to decode in would sit in the
+    // session's queue where the job protocol cannot see it, and a lane with no
+    // worker to feed it is capacity nobody can reach.
+    //
+    // None at one lane: nothing is ever admitted into the chat class there
+    // (see `route_post`), so a worker would be a thread that only ever times
+    // out. A box that has not opted into lanes stays exactly as it was.
+    let chat_lanes = crate::llm_backend::configured_lane_count();
+    let chat_lanes = if chat_lanes > 1 { chat_lanes } else { 0 };
+    shared
+        .jobs
+        .with(|store| store.set_chat_slots(chat_lanes.max(1)));
+    let chat_threads: Vec<JoinHandle<()>> = (0..chat_lanes)
+        .map(|index| {
+            let chat_shared = shared.clone();
+            std::thread::Builder::new()
+                .name(format!("asset-ai-chat-{index}"))
+                .spawn(move || chat_worker_loop(chat_shared))
+                .expect("spawn chat worker")
+        })
+        .collect();
+
     Ok(ServiceHandle {
         addr,
         http_thread,
         route_thread,
         worker_thread,
+        chat_threads,
         singleton,
     })
 }
@@ -363,26 +427,73 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 let out = route_post(&shared, &headers.path, &body);
                 let _ = response.send(out);
             }
-            // No websocket endpoints on this service: sending the empty
-            // sentinel makes the connection close down cleanly.
+            // The only websocket endpoint is a live session's own path,
+            // `/realtime/<job_id>` (see `route_post`'s `POST /realtime` and
+            // `protocol.rs`'s wire doc block). Anything else — including a
+            // request for a session that already finished — closes cleanly
+            // via the empty-payload sentinel.
             HttpServerRequest::ConnectWebSocket {
-                response_sender, ..
+                web_socket_id,
+                headers,
+                response_sender,
             } => {
-                let _ = response_sender.send(Vec::new());
+                let session = headers
+                    .path
+                    .strip_prefix("/realtime/")
+                    .and_then(|job_id| shared.realtime_sessions.lock().unwrap().get(job_id).cloned());
+                match session {
+                    Some(session) => {
+                        session.add_socket(web_socket_id, response_sender);
+                        shared
+                            .ws_sessions
+                            .lock()
+                            .unwrap()
+                            .insert(web_socket_id, session.job_id.clone());
+                    }
+                    None => {
+                        let _ = response_sender.send(Vec::new());
+                    }
+                }
             }
             HttpServerRequest::BinaryMessage {
-                response_sender, ..
+                web_socket_id,
+                response_sender,
+                data,
             } => {
-                let _ = response_sender.send(Vec::new());
+                if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
+                    if let Err(e) = session.handle_binary(&data) {
+                        let _ = response_sender
+                            .send(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+                    }
+                }
             }
             HttpServerRequest::TextMessage {
-                response_sender, ..
+                web_socket_id,
+                response_sender,
+                string,
             } => {
-                let _ = response_sender.send(Vec::new());
+                if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
+                    if let Err(e) = session.handle_text(&string) {
+                        let _ = response_sender
+                            .send(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+                    }
+                }
             }
-            HttpServerRequest::DisconnectWebSocket { .. } => {}
+            HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
+                    if let Some(session) = shared.realtime_sessions.lock().unwrap().get(&job_id).cloned() {
+                        session.remove_socket(web_socket_id);
+                    }
+                }
+            }
         }
     }
+}
+
+/// Looks up the live session a connected websocket belongs to.
+fn realtime_session_for_socket(shared: &Arc<ServiceShared>, web_socket_id: u64) -> Option<Arc<RealtimeSession>> {
+    let job_id = shared.ws_sessions.lock().unwrap().get(&web_socket_id).cloned()?;
+    shared.realtime_sessions.lock().unwrap().get(&job_id).cloned()
 }
 
 fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
@@ -393,8 +504,15 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
     if path == "/models" {
         return ok_json(models_json(shared).serialize_json());
     }
+    if path == "/loras" {
+        return ok_json(loras_json(&shared.cache_dir).serialize_json());
+    }
     if path == "/v1/model_inventory" {
         return ok_json(model_inventory_json(shared).serialize_json());
+    }
+    if path == "/jobs" {
+        let jobs = shared.jobs.with(|store| store.active_status_json());
+        return ok_json(crate::protocol::JobsJson { jobs }.serialize_json());
     }
     if let Some(job_id) = path.strip_prefix("/job/") {
         return match shared.jobs.with(|store| store.status_json(job_id)) {
@@ -442,7 +560,20 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         .and_then(|rest| rest.strip_suffix("/cancel"))
     {
         use crate::jobs::CancelOutcome;
-        return match shared.jobs.with(|store| store.cancel(job_id)) {
+        let outcome = shared.jobs.with(|store| store.cancel(job_id));
+        if outcome == CancelOutcome::Cancelled {
+            // A queued (not yet running) job was dropped outright — if it
+            // was a live session, its `RealtimeSession` was created back at
+            // `POST /realtime` time and no worker thread ever ran
+            // `execute_live_job` to tear it down. Do that here instead: any
+            // socket a client opened while the session sat queued still
+            // gets its `stopped` notice and a clean close.
+            if let Some(session) = shared.realtime_sessions.lock().unwrap().remove(job_id) {
+                session.push_bytes(crate::realtime_wire::encode_stopped_message("cancelled").into_bytes());
+                session.close_all_sockets();
+            }
+        }
+        return match outcome {
             CancelOutcome::Cancelled | CancelOutcome::Cancelling => {
                 match shared.jobs.with(|store| store.status_json(job_id)) {
                     Some(status) => ok_json(status.serialize_json()),
@@ -454,6 +585,9 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             }
             CancelOutcome::Unknown => error_json(404, format!("no such job: {job_id}")),
         };
+    }
+    if path == "/realtime" {
+        return route_realtime_post(shared, body);
     }
     if path != "/generate" {
         return error_json(404, format!("no such endpoint: POST {path}"));
@@ -484,7 +618,37 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Ok(params) => params,
         Err(e) => return error_json(400, e.to_string()),
     };
-    match shared.jobs.submit(params, policy) {
+    // Only the flux backend can apply LoRAs — refuse rather than render an
+    // un-adapted image that looks like a broken adapter.
+    if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
+        return error_json(400, e.to_string());
+    }
+    // Admission class. Chat rides the lane worker, which serves several turns
+    // from one resident model, so those turns admit alongside each other and
+    // alongside heavy work. Everything else keeps one-at-a-time.
+    //
+    // `pull_only` is HEAVY even for the llm backend: it downloads and verifies
+    // gigabytes and never reaches a lane, so admitting it as chat would let a
+    // pull occupy a lane slot a conversation is waiting for.
+    //
+    // And only on a box configured for lanes. At one lane there is nothing to
+    // batch, so the only thing the split would buy is running a chat turn
+    // CONCURRENTLY with a heavy generation on a GPU sized for one of them —
+    // a VRAM decision an operator should opt into, not one a default should
+    // make. `MAKEPAD_ASSET_AI_LLM_LANES` unset therefore keeps exactly today's
+    // behaviour, everywhere.
+    let class = if spec.backend == "llm"
+        && !params.pull_only
+        && crate::llm_backend::configured_lane_count() > 1
+    {
+        crate::jobs::JobClass::Chat
+    } else {
+        crate::jobs::JobClass::Heavy
+    };
+    match shared
+        .jobs
+        .submit_as(JobParams::Generate(params), policy, class)
+    {
         Ok(job_id) => ok_json(
             GenerateResponseJson {
                 job_id: Some(job_id),
@@ -493,8 +657,90 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             .serialize_json(),
         ),
         Err(refused @ (AssetAiError::Busy | AssetAiError::QueueFull(_))) => {
-            let body = GenerateResponseJson {
+            generate_refused(&refused)
+        }
+        Err(e) => error_json(500, e.to_string()),
+    }
+}
+
+/// The one answer a client gets when this box will not take more work.
+///
+/// 409, `job_id: null`, and the reason in `error`: a status a caller can
+/// retry on and a body it can show a person. Never a hang and never a
+/// silently dropped request — a chat client with several agents talking at
+/// once has to be able to tell "come back in a moment" from "broken", and it
+/// can only do that if saturation has ONE shape.
+///
+/// A function rather than four inline lines so a test can hold that shape.
+fn generate_refused(refused: &AssetAiError) -> HttpServerResponse {
+    json_response(
+        409,
+        GenerateResponseJson {
+            job_id: None,
+            error: Some(refused.to_string()),
+        }
+        .serialize_json(),
+    )
+}
+
+/// `POST /realtime` — admits a live session exactly like `POST /generate`
+/// admits an ordinary job (same FIFO / `queue_policy=reject` gate); see the
+/// "Realtime session wire protocol" doc block in `protocol.rs`.
+fn route_realtime_post(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return error_json(400, "request body is not utf-8".to_string()),
+    };
+    let request = match RealtimeRequestJson::deserialize_json_lenient(text) {
+        Ok(request) => request,
+        Err(e) => return error_json(400, format!("bad realtime request: {e:?}")),
+    };
+    let spec = match shared.registry.find(&request.model) {
+        Some(spec) => spec,
+        None => return error_json(404, format!("unknown model: {}", request.model)),
+    };
+    let gpu = shared.gpu.get();
+    if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
+        return error_json(503, format!("model {} is unavailable: {reason}", spec.id));
+    }
+    if !backend_live_supported(spec) {
+        return error_json(400, format!("model {} has no live/realtime mode", spec.id));
+    }
+    let policy = match QueuePolicy::parse(request.queue_policy.as_deref()) {
+        Ok(policy) => policy,
+        Err(e) => return error_json(400, e.to_string()),
+    };
+    let live_params = match LiveParams::from_request(&request) {
+        Ok(params) => params,
+        Err(e) => return error_json(400, e.to_string()),
+    };
+    // The session object is created here, synchronously with the response,
+    // NOT when the worker thread eventually starts running the job — a
+    // client is entitled to open the websocket and start sending control
+    // updates the instant it has `ws_path`, which can race well ahead of
+    // `execute_live_job` (the job may still be queued behind another job).
+    // `execute_live_job` looks this same session up by job id instead of
+    // constructing a new one. If the job is cancelled while still queued
+    // (never reaches the worker), `route_post`'s cancel handler tears this
+    // down directly since `execute_live_job` never runs to do it.
+    let session_seed = live_params.clone();
+    match shared.jobs.submit(JobParams::Live(live_params), policy) {
+        Ok(job_id) => {
+            let session = Arc::new(RealtimeSession::new(job_id.clone(), &session_seed));
+            shared.realtime_sessions.lock().unwrap().insert(job_id.clone(), session);
+            ok_json(
+                RealtimeResponseJson {
+                    ws_path: Some(format!("/realtime/{job_id}")),
+                    job_id: Some(job_id),
+                    error: None,
+                }
+                .serialize_json(),
+            )
+        }
+        Err(refused @ (AssetAiError::Busy | AssetAiError::QueueFull(_))) => {
+            let body = RealtimeResponseJson {
                 job_id: None,
+                ws_path: None,
                 error: Some(refused.to_string()),
             };
             json_response(409, body.serialize_json())
@@ -547,6 +793,34 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         capabilities: Some(capabilities),
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
+        fleet: Some(shared.fleet.clone()),
+        // Absent whenever no LLM is resident: a box with nothing loaded has no
+        // lanes to describe, and "0 of 4 free" would read as busy rather than
+        // as not serving this at all.
+        lanes: crate::lane_advert::snapshot().map(|facts| crate::protocol::LanesJson {
+            slots_free: facts.slots_free(),
+            model: facts.model,
+            slots_total: facts.slots_total,
+            slots_claimed: facts.slots_claimed,
+            lanes_active: facts.lanes_active,
+            context_per_slot: facts.context_per_slot,
+            // Queue facts come from the JobStore, which is what actually
+            // refuses work — advertising anything else would describe a queue
+            // nobody is standing in.
+            queue_depth: jobs_pending,
+            queue_max: queue_limit,
+        }),
+    }
+}
+
+/// GET /loras — the adapters this box has, for the `loras` field of
+/// POST /generate. Names are file stems; sorted.
+fn loras_json(cache_dir: &Path) -> LorasJson {
+    LorasJson {
+        loras: list_loras(&lora_dir(cache_dir))
+            .into_iter()
+            .map(|(name, bytes)| LoraInfoJson { name, bytes })
+            .collect(),
     }
 }
 
@@ -599,6 +873,11 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
                 error,
                 revision: model_revision(spec),
                 unavailable_reason,
+                license_name: spec.license.as_ref().map(|l| l.name.clone()),
+                license_url: spec.license.as_ref().map(|l| l.url.clone()),
+                license_summary: spec.license.as_ref().map(|l| l.summary.clone()),
+                license_restriction: spec.license.as_ref().map(|l| l.restriction.as_str().to_string()),
+                license_sha256: spec.license.as_ref().and_then(|l| l.sha256.clone()),
             }
         })
         .collect();
@@ -661,14 +940,55 @@ fn model_revision(spec: &ModelSpec) -> Option<String> {
 // Worker: executes one job at a time, keeps backends alive across jobs
 // ---------------------------------------------------------------------------
 
-fn worker_loop(shared: Arc<ServiceShared>) {
-    let mut backends: HashMap<String, Box<dyn ContentBackend>> = HashMap::new();
+/// The chat admission class: one turn per lane, all of them in flight at once.
+///
+/// It runs the SAME `execute_job` as the heavy worker. The whole difference is
+/// which class it takes from — and that `execute_job` releases the backend
+/// registry before generating whenever the backend hands out a concurrent
+/// handle, which the resident LLM does and nothing else does.
+///
+/// It never sweeps for idle eviction. Retiring a resident is the heavy
+/// worker's business, and a chat worker doing it between turns could evict the
+/// model its own next turn needs.
+fn chat_worker_loop(shared: Arc<ServiceShared>) {
     loop {
-        let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
-            idle_evict_sweep(&shared, &mut backends);
+        let Some(job_id) = shared
+            .jobs
+            .wait_take_next_of(crate::jobs::JobClass::Chat, Duration::from_millis(500))
+        else {
             continue;
         };
-        let result = execute_job(&shared, &mut backends, &job_id);
+        let is_live = shared.jobs.with(|store| store.is_live(&job_id));
+        let result = if is_live {
+            // A live session owns the device frame by frame; it is not a chat
+            // turn and must not have been admitted here.
+            Err(AssetAiError::Backend(
+                "a live session cannot run in the chat admission class".to_string(),
+            ))
+        } else {
+            execute_job(&shared, &job_id)
+        };
+        match result {
+            Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
+            Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
+            Err(e) => shared.jobs.with(|store| store.fail(&job_id, e.to_string())),
+        }
+        apply_finished_retention(&shared);
+    }
+}
+
+fn worker_loop(shared: Arc<ServiceShared>) {
+    loop {
+        let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
+            idle_evict_sweep(&shared);
+            continue;
+        };
+        let is_live = shared.jobs.with(|store| store.is_live(&job_id));
+        let result = if is_live {
+            execute_live_job(&shared, &job_id)
+        } else {
+            execute_job(&shared, &job_id)
+        };
         match result {
             Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
             Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
@@ -701,14 +1021,11 @@ fn apply_finished_retention(shared: &Arc<ServiceShared>) {
 /// residents that have not served anything for the configured window are
 /// retired so a quiet box returns its VRAM. Pins are exempt — that is what
 /// a pin means.
-fn idle_evict_sweep(
-    shared: &Arc<ServiceShared>,
-    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
-) {
+fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
     let Some(window) = shared.residency.idle_evict else {
         return;
     };
-    let idle: Vec<String> = {
+    let idle: Vec<String> = with_backends(shared, |backends| {
         let last_used = shared.last_used.lock().unwrap();
         backends
             .iter()
@@ -722,25 +1039,48 @@ fn idle_evict_sweep(
             })
             .map(|(model_id, _)| model_id.clone())
             .collect()
-    };
+    });
     for model_id in idle {
         eprintln!("residency: idle-evicting {model_id}");
-        match evict_resident(shared, backends, &model_id, &mut |_| {}) {
+        // Re-taken per model rather than held across the sweep: an unload can
+        // be slow, and a chat turn waiting to LOAD behind an eviction of a
+        // model it does not care about is the queue this whole change removes.
+        let result = with_backends(shared, |backends| {
+            evict_resident(shared, backends, &model_id, &mut |_| {})
+        });
+        match result {
             Ok(()) => {}
             Err(e) => eprintln!("residency: idle-evict {model_id} failed: {e}"),
         }
     }
 }
 
+/// Take the shared backend registry for the duration of `f`.
+///
+/// Everything that touches residency runs in here: constructing a backend,
+/// preparing artifacts, admitting a load, evicting, unloading. Generation does
+/// NOT — see `ConcurrentBackend`.
+fn with_backends<R>(
+    shared: &ServiceShared,
+    f: impl FnOnce(&mut HashMap<String, Box<dyn ContentBackend>>) -> R,
+) -> R {
+    let mut guard = shared.backends.lock().unwrap();
+    f(&mut guard)
+}
+
 fn execute_job(
     shared: &Arc<ServiceShared>,
-    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     job_id: &str,
 ) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
-    let params = shared
-        .jobs
-        .with(|store| store.take_params(job_id))
-        .ok_or_else(|| AssetAiError::Backend(format!("job {job_id} has no params")))?;
+    let params = match shared.jobs.with(|store| store.take_params(job_id)) {
+        Some(JobParams::Generate(params)) => params,
+        Some(JobParams::Live(_)) => {
+            return Err(AssetAiError::Backend(format!(
+                "job {job_id} is a live session, not an ordinary generate job"
+            )))
+        }
+        None => return Err(AssetAiError::Backend(format!("job {job_id} has no params"))),
+    };
     let spec = shared
         .registry
         .find(&params.model)
@@ -762,9 +1102,12 @@ fn execute_job(
     // Backend construction is required only to select a backend-specific
     // artifact converter and MUST remain cheap. Resident model state belongs
     // exclusively to ensure_loaded below; pull_only never reaches it.
-    if !backends.contains_key(&spec.id) {
-        backends.insert(spec.id.clone(), create_backend(&spec)?);
-    }
+    with_backends(shared, |backends| -> Result<(), AssetAiError> {
+        if !backends.contains_key(&spec.id) {
+            backends.insert(spec.id.clone(), create_backend(&spec)?);
+        }
+        Ok(())
+    })?;
     // Load (may download). Per-file byte progress is aggregated across the
     // registry file list into the model tracker, and mirrored into the job
     // as a "download" stage fraction.
@@ -835,12 +1178,12 @@ fn execute_job(
         cancel: &cancel,
         progress: &mut load_progress,
     };
-    let prepare = {
+    let prepare = with_backends(shared, |backends| {
         let backend = backends.get_mut(&spec.id).unwrap();
         backend
             .prepare_artifacts(&mut ctx)
             .map(|()| backend.is_resident())
-    };
+    });
     match prepare {
         Ok(resident) => set_model_state(
             shared,
@@ -884,7 +1227,9 @@ fn execute_job(
     // Disk artifacts remain Ready, so switching back is a warm-from-disk
     // load, not a pull. See crate::residency for the policy contract.
     cancel.check()?;
-    admit_for_load(shared, backends, &spec, job_id, &cancel)?;
+    with_backends(shared, |backends| {
+        admit_for_load(shared, backends, &spec, job_id, &cancel)
+    })?;
     cancel.check()?;
     shared
         .last_used
@@ -897,9 +1242,14 @@ fn execute_job(
     // fallback: the second failure is the job's explicit error.
     let mut oom_retried = false;
     let generated: Vec<crate::backend::ArtifactData> = loop {
-        let load_error = {
+        // Load under the lock; GENERATE outside it. `concurrent()` is taken
+        // here, while the registry is still held, and used after it is
+        // released — that is the whole seam. A backend that returns None keeps
+        // exactly today's behaviour: generation re-takes the lock and holds it
+        // for the duration, so the device stays one-job-at-a-time for it.
+        let (load_error, concurrent) = with_backends(shared, |backends| {
             let backend = backends.get_mut(&spec.id).unwrap();
-            match backend.ensure_loaded(&mut ctx) {
+            let error = match backend.ensure_loaded(&mut ctx) {
                 Ok(()) => {
                     let resident = backend.is_resident();
                     set_model_state(
@@ -917,15 +1267,19 @@ fn execute_job(
                     let _ = backend.unload();
                     Some(e)
                 }
-            }
-        };
+            };
+            let concurrent = if error.is_none() { backend.concurrent() } else { None };
+            (error, concurrent)
+        });
         if let Some(error) = load_error {
             if !oom_retried
                 && residency::error_is_oom(&error)
                 && residency::fresh_free_mb().is_some()
             {
                 oom_retried = true;
-                oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                with_backends(shared, |backends| {
+                    oom_evict_all_others(shared, backends, &spec.id, job_id, &error)
+                })?;
                 continue;
             }
             set_model_state(
@@ -945,7 +1299,6 @@ fn execute_job(
         cancel.check()?;
 
         let gen_result = {
-            let backend = backends.get_mut(&spec.id).unwrap();
             let gen_shared = shared.clone();
             let gen_job = job_id.to_string();
             let mut progress_sink = move |stage: &str, progress: f64| {
@@ -953,55 +1306,101 @@ fn execute_job(
                     .jobs
                     .with(|store| store.set_progress(&gen_job, stage, progress));
             };
-            backend.generate(&params, &mut progress_sink, &cancel)
+            // Streaming text lands as partial_text while the job runs, so
+            // chat pollers see the reply grow instead of one burst at done.
+            let text_shared = shared.clone();
+            let text_job = job_id.to_string();
+            let mut text_sink = move |text: &str| {
+                let text = text.to_string();
+                text_shared
+                    .jobs
+                    .with(|store| store.set_partial_text(&text_job, text));
+            };
+            // Chat serving facts land on the job as they become known, so a
+            // poller sees warmth and the think phase while the turn is still
+            // running rather than after it.
+            let serving_shared = shared.clone();
+            let serving_job = job_id.to_string();
+            let mut serving_sink = move |update: crate::backend::ServingUpdate| {
+                serving_shared.jobs.with(|store| {
+                    store.update_serving(&serving_job, |serving| match update {
+                        crate::backend::ServingUpdate::Prefill { tokens, resumed } => {
+                            serving.prefix_ingested = Some(tokens as u64);
+                            serving.prefix_resumed = Some(resumed);
+                        }
+                        crate::backend::ServingUpdate::Think { think, visible } => {
+                            serving.think_tokens = Some(think as u64);
+                            serving.visible_tokens = visible.map(|v| v as u64);
+                        }
+                    })
+                });
+            };
+            match &concurrent {
+                Some(handle) => handle.generate_streamed(
+                    &params,
+                    &mut progress_sink,
+                    &mut text_sink,
+                    &mut serving_sink,
+                    &cancel,
+                ),
+                None => with_backends(shared, |backends| {
+                    let backend = backends.get_mut(&spec.id).unwrap();
+                    backend.generate_streamed_serving(
+                        &params,
+                        &mut progress_sink,
+                        &mut text_sink,
+                        &mut serving_sink,
+                        &cancel,
+                    )
+                }),
+            }
         };
         match gen_result {
             Ok(artifacts) => {
-                let backend = backends.get_mut(&spec.id).unwrap();
-                if let Err(error) = cancel.check() {
-                    if !backend.resident_is_healthy_after_error(&error) {
-                        let _ = backend.unload();
+                let cancelled = cancel.check();
+                let resident = with_backends(shared, |backends| {
+                    let backend = backends.get_mut(&spec.id).unwrap();
+                    if let Err(error) = &cancelled {
+                        if !backend.resident_is_healthy_after_error(error) {
+                            let _ = backend.unload();
+                        }
                     }
-                    set_model_state(
-                        shared,
-                        &spec.id,
-                        if backend.is_resident() {
-                            ModelTrack::Loaded
-                        } else {
-                            ModelTrack::Ready
-                        },
-                    );
-                    return Err(error);
-                }
+                    backend.is_resident()
+                });
                 set_model_state(
                     shared,
                     &spec.id,
-                    if backend.is_resident() {
+                    if resident {
                         ModelTrack::Loaded
                     } else {
                         ModelTrack::Ready
                     },
                 );
+                cancelled?;
                 break artifacts;
             }
             Err(error) => {
-                {
+                with_backends(shared, |backends| {
                     let backend = backends.get_mut(&spec.id).unwrap();
                     if !backend.resident_is_healthy_after_error(&error) {
                         let _ = backend.unload();
                     }
-                }
+                });
                 if !oom_retried
                     && !matches!(error, AssetAiError::Cancelled)
                     && residency::error_is_oom(&error)
                     && residency::fresh_free_mb().is_some()
                 {
                     oom_retried = true;
-                    oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                    with_backends(shared, |backends| {
+                        oom_evict_all_others(shared, backends, &spec.id, job_id, &error)
+                    })?;
                     continue;
                 }
-                let backend = backends.get_mut(&spec.id).unwrap();
-                let state = if backend.is_resident() {
+                let resident = with_backends(shared, |backends| {
+                    backends.get_mut(&spec.id).unwrap().is_resident()
+                });
+                let state = if resident {
                     ModelTrack::Loaded
                 } else if matches!(error, AssetAiError::Cancelled) {
                     ModelTrack::Ready
@@ -1064,6 +1463,235 @@ fn execute_job(
     Ok(refs)
 }
 
+/// Runs a live session job: same download/admit/load prefix as
+/// [`execute_job`] (model files may need a first pull, VRAM admission and
+/// LRU eviction apply identically — a live session competes for the box's
+/// single GPU slot exactly like an ordinary job), then hands the loaded
+/// backend to `crate::realtime::run_live` instead of `generate` and loops
+/// there until the session stops. Never persists artifacts (a live session
+/// has none).
+///
+/// The `RealtimeSession` itself is looked up here, NOT constructed —
+/// `route_realtime_post` already created and registered it synchronously
+/// with the `POST /realtime` response, so a client racing ahead of this
+/// worker (opening the websocket, sending control updates, while the job
+/// still sits queued) is never refused. Every exit path below (admission
+/// failure, load failure, a cancel raised before/while running, or a clean
+/// stop) funnels through one teardown: broadcast `stopped`/`error`, close
+/// every connected socket, remove the session from `shared.realtime_
+/// sessions` (freeing the box's live slot for the next `POST /realtime`),
+/// then fix up model residency state exactly like `execute_job` does.
+fn execute_live_job(
+    shared: &Arc<ServiceShared>,
+    job_id: &str,
+) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
+    let mut guard = shared.backends.lock().unwrap();
+    let backends = &mut *guard;
+    let params = match shared.jobs.with(|store| store.take_params(job_id)) {
+        Some(JobParams::Live(params)) => params,
+        Some(JobParams::Generate(_)) => {
+            return Err(AssetAiError::Backend(format!(
+                "job {job_id} is an ordinary generate job, not a live session"
+            )))
+        }
+        None => return Err(AssetAiError::Backend(format!("job {job_id} has no params"))),
+    };
+    let spec = shared
+        .registry
+        .find(&params.model)
+        .ok_or_else(|| AssetAiError::UnknownModel(params.model.clone()))?
+        .clone();
+
+    // Missing here means the queued job was already cancelled — route_post's
+    // cancel handler already ran this exact teardown directly since this
+    // function never got a chance to. Nothing left to run or clean up.
+    let Some(session) = shared.realtime_sessions.lock().unwrap().get(job_id).cloned() else {
+        return Err(AssetAiError::Cancelled);
+    };
+
+    let cancel = shared
+        .jobs
+        .with(|store| store.cancel_token(job_id))
+        .unwrap_or_default();
+
+    let result: Result<(), AssetAiError> = (|| {
+        model_availability(&spec, &shared.gpu.get(), shared.residency.reserve_mb)
+            .map_err(|reason| AssetAiError::Unavailable(format!("model {}: {reason}", spec.id)))?;
+        cancel.check()?;
+
+        if !backends.contains_key(&spec.id) {
+            backends.insert(spec.id.clone(), create_backend(&spec)?);
+        }
+        if !backends.get(&spec.id).unwrap().live_supported() {
+            return Err(AssetAiError::Unavailable(format!(
+                "model {} has no live/realtime mode",
+                spec.id
+            )));
+        }
+
+        // Download/verify/convert + load progress — identical plumbing to
+        // execute_job's (see there for the per-field byte aggregation
+        // comment).
+        let mut per_file: HashMap<String, (u64, Option<u64>)> = HashMap::new();
+        let progress_spec = spec.clone();
+        let progress_shared = shared.clone();
+        let progress_job = job_id.to_string();
+        let mut download_progress = move |p: DownloadProgress| {
+            per_file.insert(p.file.clone(), (p.done, p.total));
+            let done: u64 = per_file.values().map(|(done, _)| *done).sum();
+            let mut total = Some(0u64);
+            for file in &progress_spec.files {
+                let known = per_file
+                    .get(&file.path)
+                    .and_then(|(_, total)| *total)
+                    .or(file.size);
+                match (known, &mut total) {
+                    (Some(bytes), Some(sum)) => *sum += bytes,
+                    _ => {
+                        total = None;
+                        break;
+                    }
+                }
+            }
+            set_model_state(
+                &progress_shared,
+                &progress_spec.id,
+                ModelTrack::Downloading {
+                    done,
+                    total,
+                    file: p.file.clone(),
+                },
+            );
+            if let Some(total) = total {
+                if total > 0 {
+                    progress_shared.jobs.with(|store| {
+                        store.set_progress(&progress_job, "download", done as f64 / total as f64)
+                    });
+                }
+            }
+        };
+        let load_shared = shared.clone();
+        let load_job = job_id.to_string();
+        let mut load_progress = move |stage: &str, fraction: f64| {
+            load_shared
+                .jobs
+                .with(|store| store.set_progress(&load_job, stage, fraction));
+        };
+        // A live session does not ride the request-level peer_sources/
+        // tickets a one-shot GenerateParams carries — only operator-injected
+        // env sources apply here.
+        let job_downloader = shared.downloader.clone().with_peer_plan(crate::peer::PeerPlan::for_job(
+            &[],
+            &[],
+            &shared.peer.env_sources,
+            &shared.node_key,
+            shared.peer.secret.clone(),
+        ));
+        let mut ctx = BackendCtx {
+            spec: &spec,
+            cache_dir: &shared.cache_dir,
+            downloader: &job_downloader,
+            download_progress: &mut download_progress,
+            cancel: &cancel,
+            progress: &mut load_progress,
+        };
+        {
+            let backend = backends.get_mut(&spec.id).unwrap();
+            backend.prepare_artifacts(&mut ctx)?;
+        }
+        cancel.check()?;
+
+        admit_for_load(shared, backends, &spec, job_id, &cancel)?;
+        cancel.check()?;
+        shared.last_used.lock().unwrap().insert(spec.id.clone(), Instant::now());
+
+        let mut oom_retried = false;
+        loop {
+            let load_error = {
+                let backend = backends.get_mut(&spec.id).unwrap();
+                match backend.ensure_loaded(&mut ctx) {
+                    Ok(()) => {
+                        let resident = backend.is_resident();
+                        set_model_state(
+                            shared,
+                            &spec.id,
+                            if resident { ModelTrack::Loaded } else { ModelTrack::Ready },
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        let _ = backend.unload();
+                        Some(e)
+                    }
+                }
+            };
+            let Some(error) = load_error else { break };
+            if !oom_retried && residency::error_is_oom(&error) && residency::fresh_free_mb().is_some() {
+                oom_retried = true;
+                oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                continue;
+            }
+            set_model_state(
+                shared,
+                &spec.id,
+                if matches!(error, AssetAiError::Cancelled) {
+                    ModelTrack::Ready
+                } else {
+                    ModelTrack::Error(error.to_string())
+                },
+            );
+            return Err(error);
+        }
+        cancel.check()?;
+        shared.last_used.lock().unwrap().insert(spec.id.clone(), Instant::now());
+
+        shared
+            .jobs
+            .with(|store| store.set_live_progress(job_id, "live", 0, 0, 0.0));
+        let progress_shared = shared.clone();
+        let progress_job = job_id.to_string();
+        let mut progress_sink = move |stage: &str, frames_in: u64, frames_out: u64, fps: f64| {
+            progress_shared
+                .jobs
+                .with(|store| store.set_live_progress(&progress_job, stage, frames_in, frames_out, fps));
+        };
+        let backend = backends.get_mut(&spec.id).unwrap();
+        crate::realtime::run_live(&session, backend.as_mut(), &cancel, &mut progress_sink)
+    })();
+
+    // Tell every connected client why the session ended, then close their
+    // sockets from the server side and forget the session (before touching
+    // residency, so a slow eviction below can never delay that
+    // notification).
+    match &result {
+        Ok(()) => session.push_bytes(crate::realtime_wire::encode_stopped_message("stopped").into_bytes()),
+        Err(AssetAiError::Cancelled) => {
+            session.push_bytes(crate::realtime_wire::encode_stopped_message("cancelled").into_bytes())
+        }
+        Err(e) => {
+            session.push_bytes(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+            session.push_bytes(crate::realtime_wire::encode_stopped_message("error").into_bytes());
+        }
+    }
+    session.close_all_sockets();
+    shared.realtime_sessions.lock().unwrap().remove(job_id);
+
+    if let Some(backend) = backends.get_mut(&spec.id) {
+        if let Err(error) = &result {
+            if !backend.resident_is_healthy_after_error(error) {
+                let _ = backend.unload();
+            }
+        }
+        set_model_state(
+            shared,
+            &spec.id,
+            if backend.is_resident() { ModelTrack::Loaded } else { ModelTrack::Ready },
+        );
+    }
+
+    result.map(|()| Vec::new())
+}
+
 fn set_model_state(shared: &Arc<ServiceShared>, model_id: &str, state: ModelTrack) {
     shared
         .models
@@ -1079,10 +1707,21 @@ fn resident_others_lru(
     backends: &HashMap<String, Box<dyn ContentBackend>>,
     keep: &str,
 ) -> Vec<String> {
+    // A model with a job running on it is never a candidate. With one
+    // admission class this was true for free: the only running job was the one
+    // asking to load. With two classes a heavy job can admit itself while a
+    // chat turn is mid-reply, and evicting under it tears down the session the
+    // turn is talking to — the turn then fails with "llm worker dropped the
+    // reply", which names neither the eviction nor the job that caused it.
+    let busy = shared.jobs.with(|store| store.running_models());
     let last_used = shared.last_used.lock().unwrap();
     let mut out: Vec<(String, Option<Instant>)> = backends
         .iter()
-        .filter(|(model_id, backend)| model_id.as_str() != keep && backend.is_resident())
+        .filter(|(model_id, backend)| {
+            model_id.as_str() != keep
+                && backend.is_resident()
+                && !busy.iter().any(|running| running == *model_id)
+        })
         .map(|(model_id, _)| (model_id.clone(), last_used.get(model_id).copied()))
         .collect();
     out.sort_by(|a, b| match (a.1, b.1) {
@@ -1170,13 +1809,13 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
         feature = "indextts"
     ))]
     {
-        match makepad_diffusion::backend::gpu_weight_cache_evict_prefix("") {
+        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
             Ok(count) => progress(&format!(
                 "vram-release: evicted {count} cached weight buffers + idle pool"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }
-        makepad_diffusion::backend::gpu_pool_clear();
+        makepad_ai_common::backend::gpu_pool_clear();
     }
 }
 
@@ -1336,6 +1975,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cache = std::env::temp_dir();
@@ -1386,10 +2026,14 @@ mod lifecycle_tests {
             started_ms: 0,
             residency,
             last_used: Mutex::new(HashMap::new()),
+            fleet: crate::discovery::DEFAULT_FLEET.to_string(),
             peer: crate::peer_serve::PeerRuntime::resolve(
                 &peer_options,
                 &std::env::temp_dir(),
             ),
+            realtime_sessions: Mutex::new(HashMap::new()),
+            ws_sessions: Mutex::new(HashMap::new()),
+            backends: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1399,6 +2043,56 @@ mod lifecycle_tests {
             loads: 0,
             generates: 0,
         })
+    }
+
+    /// The invariant that makes two admission classes on one GPU safe.
+    ///
+    /// With one class it held for free — the only running job was the one
+    /// asking to load. With two, a heavy job can admit itself while a chat
+    /// turn is mid-reply, and evicting under it tears down the session that
+    /// turn is talking to. The turn then fails with "llm worker dropped the
+    /// reply", which names neither the eviction nor the job that caused it.
+    #[test]
+    fn eviction_never_takes_a_model_with_a_job_running_on_it() {
+        let shared = fixture_shared(&[]);
+        let backends = HashMap::from([
+            ("busy".to_string(), fixture(true)),
+            ("idle".to_string(), fixture(true)),
+        ]);
+
+        // Nothing running: both are candidates, so the filter is not just
+        // rejecting everything.
+        let candidates = resident_others_lru(&shared, &backends, "keep");
+        assert!(candidates.contains(&"busy".to_string()));
+        assert!(candidates.contains(&"idle".to_string()));
+
+        // A turn running on "busy" takes it off the table, and only it.
+        let running = shared
+            .jobs
+            .with(|store| {
+                store.submit_as(
+                    crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params("busy")),
+                    crate::jobs::QueuePolicy::Queue,
+                    crate::jobs::JobClass::Chat,
+                )
+            })
+            .expect("submit");
+        shared
+            .jobs
+            .with(|store| store.take_next_of(crate::jobs::JobClass::Chat));
+        let candidates = resident_others_lru(&shared, &backends, "keep");
+        assert!(
+            !candidates.contains(&"busy".to_string()),
+            "a model serving a turn must never be an eviction candidate"
+        );
+        assert!(
+            candidates.contains(&"idle".to_string()),
+            "and an idle resident must still be one"
+        );
+
+        // And it comes back the moment the turn ends.
+        shared.jobs.with(|store| store.finish(&running, Vec::new()));
+        assert!(resident_others_lru(&shared, &backends, "keep").contains(&"busy".to_string()));
     }
 
     #[test]
@@ -1420,6 +2114,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cancel = crate::backend::CancelToken::new();
@@ -1432,6 +2127,126 @@ mod lifecycle_tests {
         let models = shared.models.lock().unwrap();
         assert!(matches!(models.get("old-a"), Some(ModelTrack::Ready)));
         assert!(matches!(models.get("old-b"), Some(ModelTrack::Ready)));
+    }
+
+    /// What several agents talking at once are entitled to when the box fills
+    /// up: an answer. Never a hang, never a silently dropped request.
+    ///
+    /// The real workload is a game chat, an asset-ui chat, an eval rig and a
+    /// handful of probes, all pointed at the same box. When the queue is full
+    /// the ONLY acceptable outcome is a status the caller can retry on with a
+    /// reason it can show, and the shape has to be the same every time or a
+    /// client cannot tell saturation from a fault.
+    #[test]
+    fn a_full_queue_refuses_with_a_retryable_409_and_says_why() {
+        let shared = fixture_shared(&[]);
+        let limit = shared.jobs.with(|store| {
+            store.set_queue_limit(4);
+            store.queue_limit()
+        });
+        for _ in 0..limit {
+            shared
+                .jobs
+                .with(|store| {
+                    store.submit_as(
+                        crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params(
+                            "qwen",
+                        )),
+                        crate::jobs::QueuePolicy::Queue,
+                        crate::jobs::JobClass::Chat,
+                    )
+                })
+                .expect("the queue takes work up to its limit");
+        }
+        let refused = shared
+            .jobs
+            .with(|store| {
+                store.submit_as(
+                    crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params("qwen")),
+                    crate::jobs::QueuePolicy::Queue,
+                    crate::jobs::JobClass::Chat,
+                )
+            })
+            .expect_err("past the limit the box must refuse, not accept and forget");
+        assert!(matches!(refused, AssetAiError::QueueFull(n) if n == limit));
+        let response = generate_refused(&refused);
+        assert!(
+            response.header.starts_with("HTTP/1.1 409"),
+            "saturation is a 409 a client retries on, got {:?}",
+            response.header.lines().next()
+        );
+        let body = String::from_utf8(response.body).expect("json body");
+        // No job id: there is nothing to poll, and a client that invents one
+        // would poll forever.
+        assert!(!body.contains("\"job_id\":\""), "no job id on a refusal: {body}");
+        assert!(body.contains("queue full"), "the reason is in the body: {body}");
+        assert!(body.contains(&limit.to_string()), "and it names the limit: {body}");
+
+        // `queue_policy=reject` is the other way to be told no, and it lands
+        // in the same shape rather than a second one.
+        let busy = generate_refused(&AssetAiError::Busy);
+        assert!(busy.header.starts_with("HTTP/1.1 409"));
+        assert!(String::from_utf8(busy.body).unwrap().contains("busy"));
+    }
+
+    /// The ordinary case, which must NOT be a refusal: more chat turns than
+    /// lanes. They wait, they keep their job ids, and they say where they are
+    /// in the line — that is the difference between a busy box and a lost
+    /// request, and a client polling a job id can see it.
+    #[test]
+    fn chat_turns_past_the_lanes_wait_in_the_queue_instead_of_vanishing() {
+        let shared = fixture_shared(&[]);
+        shared.jobs.with(|store| store.set_chat_slots(2));
+        let ids: Vec<String> = (0..4)
+            .map(|_| {
+                shared
+                    .jobs
+                    .with(|store| {
+                        store.submit_as(
+                            crate::jobs::JobParams::Generate(
+                                crate::jobs::tests::generate_params("qwen"),
+                            ),
+                            crate::jobs::QueuePolicy::Queue,
+                            crate::jobs::JobClass::Chat,
+                        )
+                    })
+                    .expect("four turns on a two-lane box are all admitted")
+            })
+            .collect();
+        // Two lanes, two runners, and the other two still queued rather than
+        // dropped on the floor.
+        for _ in 0..2 {
+            assert!(shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat))
+                .is_some());
+        }
+        assert!(
+            shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat))
+                .is_none(),
+            "a third turn must not start on a two-lane box"
+        );
+        let waiting = shared.jobs.with(|store| {
+            store
+                .status_json(&ids[3])
+                .expect("a queued turn is still a job with an id")
+        });
+        assert_eq!(waiting.state, crate::protocol::JOB_STATE_QUEUED);
+        assert!(
+            waiting.stage.unwrap_or_default().contains("ahead"),
+            "a queued turn says how many are in front of it"
+        );
+        // And the line moves when a lane frees.
+        shared.jobs.with(|store| store.finish(&ids[0], Vec::new()));
+        assert_eq!(
+            shared
+                .jobs
+                .with(|store| store.take_next_of(crate::jobs::JobClass::Chat)),
+            Some(ids[2].clone()),
+            "the next turn in the line takes the freed lane"
+        );
     }
 
     #[test]
@@ -1452,6 +2267,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cancel = crate::backend::CancelToken::new();

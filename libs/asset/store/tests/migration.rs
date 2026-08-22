@@ -86,7 +86,7 @@ fn ann(title: &str) -> AssetAnnotation {
 }
 
 fn q(text: &str) -> SearchQuery<'_> {
-    SearchQuery { text, filters: SearchFilters::default(), page_size: 10 }
+    SearchQuery { text, filters: SearchFilters::default(), page_size: 10, facets: 0 }
 }
 
 const ANYONE: SearchViewer<'static> = SearchViewer { principal: None, scope: ViewerScope::All };
@@ -353,6 +353,92 @@ fn v4_root_gains_operation_tables() {
     // A second open of the migrated root is a clean no-op.
     AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
     assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
+}
+
+#[test]
+fn v7_root_gains_scale_indices_and_a_sharded_cas() {
+    // A faithful v7 root: today's tables minus the three indices v8 adds,
+    // plus a CAS object at the pre-v8 one-level path.
+    let (root, db) = fixture_root(
+        "scale_v7",
+        &format!(
+            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{search}{import}{variant}{operations}\
+             DROP INDEX IF EXISTS asset_aliases_by_asset;\
+             DROP INDEX IF EXISTS game_aliases_by_game;\
+             DROP INDEX IF EXISTS search_annotations_by_canon;\
+             INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
+             PRAGMA user_version=7;",
+            search = makepad_asset_store::search::SEARCH_SCHEMA,
+            import = makepad_asset_store::imports::IMPORT_SCHEMA,
+            variant = makepad_asset_store::variants::VARIANT_SCHEMA,
+            operations = makepad_asset_store::operations::OPERATIONS_SCHEMA,
+        ),
+    );
+    let payload = b"blob written by a v7 server".to_vec();
+    let blob_id = makepad_asset_data::BlobId::hash_of(&payload);
+    let hex: String = blob_id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let legacy_dir = root.join("cas/objects").join(&hex[..2]);
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join(&hex), &payload).unwrap();
+
+    let core = AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
+    assert_eq!(
+        core.catalog().asset_namespace(&asset_id_n(1)).unwrap().as_deref(),
+        Some("rik2"),
+        "migration kept the catalog data"
+    );
+    // The object moved into its two-level hash path and still verifies.
+    assert!(root
+        .join("cas/objects")
+        .join(&hex[..2])
+        .join(&hex[2..4])
+        .join(&hex)
+        .is_file());
+    assert!(!legacy_dir.join(&hex).is_file(), "one-level copy is gone");
+    assert_eq!(core.cas().read_verified(&blob_id).unwrap(), payload);
+    drop(core);
+
+    assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
+    let indices = raw::exec(
+        &db,
+        "SELECT name FROM sqlite_master WHERE type='index' AND name IN \
+         ('asset_aliases_by_asset','game_aliases_by_game','search_annotations_by_canon') \
+         ORDER BY name",
+    );
+    assert_eq!(indices.len(), 3, "v8 indices present: {indices:?}");
+    // A second open of the migrated root is a clean no-op.
+    AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
+    assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
+}
+
+/// The plans the v8 indices exist to produce. A schema that grows a new
+/// ordering column or filter without an index would show up here as a
+/// re-appearing SCAN or TEMP B-TREE.
+#[test]
+fn hot_paths_use_the_scale_indices() {
+    let root = test_root("scale_plans");
+    AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
+    let db = root.join("catalog.sqlite3");
+    let plan = |sql: &str| raw::exec_last(&db, &format!("EXPLAIN QUERY PLAN {sql}")).join(" | ");
+
+    // Browse page: index-ordered, no sort, no scan.
+    let browse = plan(
+        "SELECT a.asset_id FROM search_annotations a WHERE 1=1 \
+         AND (a.visibility = 'public' OR (a.owner IS NOT NULL AND a.owner = NULL)) \
+         ORDER BY a.canon_alias ASC, a.asset_id ASC LIMIT 61",
+    );
+    assert!(browse.contains("search_annotations_by_canon"), "{browse}");
+    assert!(!browse.contains("TEMP B-TREE"), "browse page still sorts: {browse}");
+
+    // Alias-head reads by asset: seek, not scan.
+    for sql in [
+        "SELECT alias FROM asset_aliases WHERE asset_id = X'01' ORDER BY alias",
+        "SELECT MIN(alias) FROM asset_aliases WHERE asset_id = X'01'",
+        "DELETE FROM asset_aliases WHERE asset_id = X'01' AND head_revision = X'02'",
+    ] {
+        let p = plan(sql);
+        assert!(p.contains("asset_aliases_by_asset"), "{sql} => {p}");
+    }
 }
 
 #[test]

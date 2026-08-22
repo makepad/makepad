@@ -12,10 +12,20 @@
 //! lru/<64-hex>                     last-use stamps (ascii milliseconds)
 //! ```
 //!
+//! Durability policy: this is a CACHE of content-addressed bytes, not a
+//! store of record. Every read re-hashes (`resolve`), a mismatch evicts and
+//! reports absent, and anything missing is simply re-fetched — so a crash
+//! can only ever cost a re-download. Paying `F_FULLFSYNC` per committed
+//! object would buy nothing the digest does not already guarantee, and on a
+//! Mac it costs ~10 ms per object: a grid of thirty thumbnails would spend
+//! a third of a second waiting on disk barriers for bytes it can re-fetch in
+//! microseconds. Commits therefore flush to the OS and rename atomically,
+//! without a device barrier.
+//!
 //! Invariants:
 //! - Bytes are hashed while they stream into `partial/`/`tmp/`; nothing lands
 //!   under `objects/` without its digest having been computed from the exact
-//!   bytes on disk. Commit is fsync(file) → atomic rename → fsync(dir).
+//!   bytes on disk. Commit is flush → atomic rename.
 //! - Reads re-hash and refuse: a corrupt object is deleted and reported
 //!   absent, never served. The resolver's "verified path" promise rests here.
 //! - Partial downloads are keyed by their EXPECTED digest and survive both
@@ -50,6 +60,121 @@ pub struct CacheBudgets {
     pub max_partial_bytes: u64,
     /// A partial older than this (since last write) is deleted at open.
     pub stale_partial_ms: u64,
+    /// Verified blob bytes the client may hold in PROCESS MEMORY across
+    /// fetches. Unbounded residency was a leak with a polite name: an app
+    /// that browses a catalog holds every blob it ever opened until it
+    /// exits. See [`RamCache`].
+    pub max_ram_bytes: u64,
+}
+
+/// Verified blob bytes held in process memory, keyed by content digest,
+/// evicted least-recently-used under a byte budget.
+///
+/// A digest names its bytes, so an entry can never be the wrong content for
+/// its key — this cache cannot go stale, only cold. What it CAN do is grow:
+/// hence the budget, the LRU, and [`RamCache::forget`] for a caller that
+/// knows an object will not be wanted again.
+#[derive(Debug)]
+pub struct RamCache {
+    entries: HashMap<[u8; 32], RamEntry>,
+    used: u64,
+    budget: u64,
+    clock: u64,
+}
+
+#[derive(Debug)]
+struct RamEntry {
+    bytes: Vec<u8>,
+    last_used: u64,
+}
+
+impl RamCache {
+    pub fn new(budget: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            used: 0,
+            budget: budget.max(1),
+            clock: 0,
+        }
+    }
+
+    /// Bytes for `digest`, marked most-recently-used.
+    pub fn get(&mut self, digest: &[u8; 32]) -> Option<&Vec<u8>> {
+        self.clock += 1;
+        let clock = self.clock;
+        let entry = self.entries.get_mut(digest)?;
+        entry.last_used = clock;
+        Some(&entry.bytes)
+    }
+
+    /// Hold `bytes`. An object larger than the whole budget is NOT held:
+    /// admitting it would evict everything else to cache a single item that
+    /// the next fetch evicts again.
+    pub fn insert(&mut self, digest: [u8; 32], bytes: Vec<u8>) {
+        let len = bytes.len() as u64;
+        if len > self.budget {
+            self.forget(&digest);
+            return;
+        }
+        self.clock += 1;
+        self.forget(&digest);
+        self.used = self.used.saturating_add(len);
+        self.entries.insert(
+            digest,
+            RamEntry {
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        self.evict_to_budget();
+    }
+
+    /// Drop one object. Returns whether it was resident.
+    pub fn forget(&mut self, digest: &[u8; 32]) -> bool {
+        match self.entries.remove(digest) {
+            Some(old) => {
+                self.used = self.used.saturating_sub(old.bytes.len() as u64);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.used = 0;
+    }
+
+    pub fn used_bytes(&self) -> u64 {
+        self.used
+    }
+
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.used > self.budget {
+            let Some((victim, size)) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, e)| (*k, e.bytes.len() as u64))
+            else {
+                break;
+            };
+            self.entries.remove(&victim);
+            self.used = self.used.saturating_sub(size);
+        }
+    }
 }
 
 impl CacheBudgets {
@@ -59,6 +184,7 @@ impl CacheBudgets {
             max_object_bytes: 256 * 1024 * 1024,
             max_partial_bytes: 512 * 1024 * 1024,
             stale_partial_ms: 7 * 24 * 60 * 60 * 1000,
+            max_ram_bytes: 512 * 1024 * 1024,
         }
     }
 
@@ -66,6 +192,7 @@ impl CacheBudgets {
         if self.max_total_bytes == 0
             || self.max_object_bytes == 0
             || self.max_partial_bytes == 0
+            || self.max_ram_bytes == 0
             || self.stale_partial_ms == 0
         {
             return Err(ClientError::InvalidInput { what: "cache budgets zero" });
@@ -89,6 +216,23 @@ pub struct CacheStats {
     pub corruption_evictions: u64,
 }
 
+/// Push a directory's entries out at cache OPEN time only: the root layout
+/// has to exist for anything else to make sense. Per-object commits do not
+/// call this — see the durability policy above.
+///
+/// Windows has no directory fsync to call: a directory handle is read-only
+/// even with `FILE_FLAG_BACKUP_SEMANTICS`, a plain `File::open` of one is
+/// refused with `PermissionDenied`, and `FlushFileBuffers` on a read handle
+/// answers `ERROR_ACCESS_DENIED`. Left as-is this refused every cache open
+/// on Windows. NTFS journals its own metadata, so a returned rename is
+/// already durable; the no-op is the correct Windows behaviour, not a
+/// swallowed error. (Same reasoning as `makepad_asset_store::cas::fsync_dir`.)
+#[cfg(windows)]
+fn fsync_dir(_dir: &Path) -> ClientResult<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> ClientResult<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cache fsync dir"))
 }
@@ -254,6 +398,13 @@ impl ContentCache {
         self.index.contains_key(digest)
     }
 
+    /// The path a committed digest occupies. Public because callers that
+    /// commit bytes themselves (the batch path) need the same answer
+    /// `resolve` would give without re-hashing what was just written.
+    pub fn object_path_of(&self, digest: &[u8; 32]) -> PathBuf {
+        self.object_path(digest)
+    }
+
     fn object_path(&self, digest: &[u8; 32]) -> PathBuf {
         let hex = to_hex(digest);
         self.objects.join(&hex[..2]).join(&hex)
@@ -411,7 +562,9 @@ impl ContentCache {
                 .open(&tmp_path)
                 .map_err(io_err("cache open tmp"))?;
             f.write_all(bytes).map_err(io_err("cache write tmp"))?;
-            f.sync_all().map_err(io_err("cache fsync tmp"))?;
+            // Flush to the OS, no device barrier: a lost cache object is a
+            // re-fetch, and `resolve` re-hashes anything that survives.
+            f.flush().map_err(io_err("cache flush tmp"))?;
         }
         match self.commit_file(&tmp_path, &digest, bytes.len() as u64, now_ms) {
             Ok(()) => Ok(digest),
@@ -432,13 +585,11 @@ impl ContentCache {
     ) -> ClientResult<()> {
         let final_path = self.object_path(digest);
         let dir = final_path.parent().expect("object path has parent");
-        let fanout_created = !dir.is_dir();
         fs::create_dir_all(dir).map_err(io_err("cache create fanout"))?;
-        if fanout_created {
-            fsync_dir(&self.objects)?;
-        }
+        // Atomic rename, no directory barrier: the rename is what makes the
+        // object visible-or-not, and a crash that loses the entry costs a
+        // re-fetch of bytes we can always ask for again.
         fs::rename(from, &final_path).map_err(io_err("cache commit rename"))?;
-        fsync_dir(dir)?;
         self.index.insert(*digest, size);
         self.total_bytes = self.total_bytes.saturating_add(size);
         self.touch(digest, now_ms)?;
@@ -564,7 +715,12 @@ impl ContentCache {
             return Ok(self.object_path(&digest));
         }
         self.admit(written)?;
-        file.sync_all().map_err(io_err("cache fsync partial"))?;
+        // Same policy as `put_bytes`: flush, do not barrier. A resumed
+        // partial is re-hashed from disk before it is extended, and a
+        // digest mismatch at commit deletes it, so torn tails are already
+        // handled by construction.
+        let mut file = file;
+        file.flush().map_err(io_err("cache flush partial"))?;
         drop(file);
         self.commit_file(&path, &digest, written, now_ms)?;
         Ok(self.object_path(&digest))
@@ -710,4 +866,103 @@ fn partial_digest_of(path: &Path) -> Option<[u8; 32]> {
     let name = path.file_name()?.to_str()?;
     let hex = name.strip_suffix(".part")?;
     from_hex_exact::<32>(hex)
+}
+
+#[cfg(test)]
+mod ram_tests {
+    use super::RamCache;
+    use std::sync::{Arc, Mutex};
+
+    fn digest(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn holds_bytes_and_counts_them() {
+        let mut ram = RamCache::new(1024);
+        ram.insert(digest(1), vec![7u8; 256]);
+        assert_eq!(ram.used_bytes(), 256);
+        assert_eq!(ram.get(&digest(1)).map(Vec::len), Some(256));
+    }
+
+    #[test]
+    fn the_least_recently_used_object_is_evicted_first() {
+        let mut ram = RamCache::new(600);
+        ram.insert(digest(1), vec![0u8; 256]);
+        ram.insert(digest(2), vec![0u8; 256]);
+        // Touch 1 so 2 is the coldest.
+        assert!(ram.get(&digest(1)).is_some());
+        ram.insert(digest(3), vec![0u8; 256]);
+        assert!(ram.get(&digest(1)).is_some(), "recently used survives");
+        assert!(ram.get(&digest(3)).is_some(), "the newcomer survives");
+        assert!(ram.get(&digest(2)).is_none(), "the cold one was evicted");
+        assert!(ram.used_bytes() <= ram.budget_bytes());
+    }
+
+    #[test]
+    fn an_object_larger_than_the_budget_is_never_admitted() {
+        let mut ram = RamCache::new(128);
+        ram.insert(digest(1), vec![0u8; 64]);
+        ram.insert(digest(2), vec![0u8; 4096]);
+        assert!(ram.get(&digest(2)).is_none(), "one giant object must not move in");
+        assert!(
+            ram.get(&digest(1)).is_some(),
+            "and must not evict what was already resident"
+        );
+    }
+
+    #[test]
+    fn forget_frees_its_bytes_and_reports_residency() {
+        let mut ram = RamCache::new(1024);
+        ram.insert(digest(1), vec![0u8; 512]);
+        assert!(ram.forget(&digest(1)));
+        assert_eq!(ram.used_bytes(), 0);
+        assert!(!ram.forget(&digest(1)), "forgetting twice is honest about it");
+        assert!(ram.get(&digest(1)).is_none());
+    }
+
+    #[test]
+    fn re_inserting_the_same_digest_does_not_double_count() {
+        let mut ram = RamCache::new(1024);
+        ram.insert(digest(1), vec![0u8; 300]);
+        ram.insert(digest(1), vec![0u8; 300]);
+        assert_eq!(ram.used_bytes(), 300);
+        assert_eq!(ram.len(), 1);
+    }
+
+    /// Lanes share one cache behind a mutex (that is how `AssetClient`
+    /// clones hold it): the budget must hold no matter how the interleaving
+    /// falls, and the used-bytes accounting must survive it.
+    #[test]
+    fn the_budget_holds_under_concurrent_lanes() {
+        const BUDGET: u64 = 8 * 1024;
+        let ram = Arc::new(Mutex::new(RamCache::new(BUDGET)));
+        let mut lanes = Vec::new();
+        for lane in 0..8u8 {
+            let ram = Arc::clone(&ram);
+            lanes.push(std::thread::spawn(move || {
+                for i in 0..64u8 {
+                    let d = digest(lane.wrapping_mul(64).wrapping_add(i));
+                    ram.lock().unwrap().insert(d, vec![lane; 1024]);
+                    // Reading a hot object mid-flight must not corrupt the
+                    // accounting either.
+                    let _ = ram.lock().unwrap().get(&d).map(Vec::len);
+                }
+            }));
+        }
+        for lane in lanes {
+            lane.join().unwrap();
+        }
+        let mut ram = ram.lock().unwrap();
+        assert!(
+            ram.used_bytes() <= BUDGET,
+            "budget blown: {} > {BUDGET}",
+            ram.used_bytes()
+        );
+        // Accounting is exactly the sum of what is still resident.
+        let resident: u64 = (0..=255u8)
+            .filter_map(|b| ram.get(&digest(b)).map(|v| v.len() as u64))
+            .sum();
+        assert_eq!(resident, ram.used_bytes());
+    }
 }

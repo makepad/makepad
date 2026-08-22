@@ -37,10 +37,11 @@
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
 use crate::error::AssetAiError;
 use crate::registry::ModelSpec;
-use makepad_diffusion::comfy::{FluxGenerationConfig, FluxPrompts};
-use makepad_diffusion::flux::{ComfyModelRoots, FluxPromptToImagePlan, FluxResolvedBundle};
-use makepad_diffusion::flux_pipeline::encode_png_rgb;
-use makepad_diffusion::DiffusionError;
+use makepad_ai_flux::comfy::{FluxGenerationConfig, FluxPrompts};
+use makepad_ai_flux::flux::{ComfyModelRoots, FluxPromptToImagePlan, FluxResolvedBundle};
+use makepad_ai_flux::flux_lora::{FluxLoraRef, FluxLoraStack};
+use makepad_ai_flux::flux_pipeline::encode_png_rgb;
+use makepad_ai_common::DiffusionError;
 use std::path::PathBuf;
 
 pub struct FluxBackend {
@@ -78,7 +79,7 @@ struct ReadyFiles {
 /// explicitly (fail closed at the job, never a silent degrade).
 pub fn flux_fp8_provisioned() -> bool {
     static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PROBE.get_or_init(makepad_diffusion::backend::gpu_device_available)
+    *PROBE.get_or_init(makepad_ai_common::backend::gpu_device_available)
 }
 
 impl FluxBackend {
@@ -192,7 +193,23 @@ impl ContentBackend for FluxBackend {
             roots.checkpoints_dir.join(&ready.checkpoint_name),
         )
         .map_err(diffusion_err)?;
-        let plan = FluxPromptToImagePlan::from_files(
+        // LoRA adapters live in the operator drop-box next to the model
+        // cache; a missing name fails the job loudly with the available
+        // list rather than rendering an un-adapted image.
+        let loras = FluxLoraStack::new(
+            crate::backend::resolve_loras(
+                &crate::backend::lora_dir(&ready.cache_dir),
+                &params.loras,
+            )?
+            .into_iter()
+            .map(|(name, path, strength)| FluxLoraRef {
+                name,
+                path,
+                strength,
+            })
+            .collect(),
+        );
+        let plan = FluxPromptToImagePlan::from_files_with_loras(
             bundle,
             FluxPrompts {
                 clip_l: params.prompt.clone(),
@@ -207,10 +224,11 @@ impl ContentBackend for FluxBackend {
                 steps,
                 cfg: 1.0,
                 denoise: 1.0,
-                guidance: params.guidance,
+                guidance: params.guidance.unwrap_or(3.5),
                 sampler_name: "euler".to_string(),
                 scheduler: "simple".to_string(),
             },
+            loras,
         )
         .map_err(diffusion_err)?;
 
@@ -230,7 +248,7 @@ impl ContentBackend for FluxBackend {
             height,
             seed: params.seed,
             steps: steps as usize,
-            guidance: params.guidance,
+            guidance: params.guidance.unwrap_or(3.5),
         };
         let (generation, worker) = self.worker.as_ref().expect("flux worker just acquired");
         let run = match worker.generate(job, cancel.clone(), progress) {
@@ -268,11 +286,11 @@ impl ContentBackend for FluxBackend {
 mod flux_worker {
     use crate::backend::{CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::flux::FluxPromptToImagePlan;
-    use makepad_diffusion::flux_pipeline::{
+    use makepad_ai_flux::flux::FluxPromptToImagePlan;
+    use makepad_ai_flux::flux_pipeline::{
         FluxPipeline, FluxPipelineGenerateRun, FluxRunHooks,
     };
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_common::DiffusionError;
     use std::sync::mpsc;
 
     /// One generation, fully resolved by the backend (paths in the plan,
@@ -452,7 +470,14 @@ mod flux_worker {
                 // the evict and re-uses the device weights outright.
                 // Dropping the pipeline then frees its host weight arenas
                 // (~16GB raw payload) before the new load allocates.
-                if old.diffusion_model_path() != job.plan.bundle.diffusion_model_path {
+                //
+                // A LoRA change counts as a model switch: merged weights get
+                // their own cache namespace, so without the evict the
+                // outgoing (pristine or previously-adapted) unet would stay
+                // resident next to the incoming one.
+                if old.diffusion_model_path() != job.plan.bundle.diffusion_model_path
+                    || old.lora_fingerprint() != job.plan.loras.fingerprint()
+                {
                     old.evict_device_caches();
                 }
                 drop(old);

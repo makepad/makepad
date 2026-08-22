@@ -15,11 +15,11 @@ use crate::backend::{
 use crate::error::AssetAiError;
 use crate::subproc_img::png_header;
 #[cfg(feature = "matte-native")]
-use makepad_diffusion::birefnet::{
+use makepad_ai_vision::birefnet::{
     unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights,
 };
 #[cfg(feature = "matte-native")]
-use makepad_diffusion::DiffusionError;
+use makepad_ai_common::DiffusionError;
 #[cfg(feature = "matte-native")]
 use std::path::PathBuf;
 

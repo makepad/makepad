@@ -37,7 +37,7 @@ fn reg(core: &AssetServerCore, n: u8, ns: &str) -> AssetId {
 }
 
 fn q<'a>(text: &'a str) -> SearchQuery<'a> {
-    SearchQuery { text, filters: SearchFilters::default(), page_size: 10 }
+    SearchQuery { text, filters: SearchFilters::default(), page_size: 10, facets: 0 }
 }
 
 #[test]
@@ -258,6 +258,97 @@ fn filters_are_exact_and_composable() {
     assert!(matches!(
         search.search(&query, &ANYONE, None).unwrap_err(),
         ServerError::InvalidInput { what: "search filter empty" }
+    ));
+}
+
+#[test]
+fn exclude_tag_is_applied_server_side_and_composes() {
+    let (_root, core) = open_core("exclude_tag");
+    let search = core.search();
+    let a = reg(&core, 1, "rik2");
+    let b = reg(&core, 2, "rik2");
+    let c = reg(&core, 3, "rik2");
+    let tagged = |title: &str, tags: &[&str]| {
+        let mut x = ann(title);
+        x.tags = tags.iter().map(|t| (*t).to_string()).collect();
+        x
+    };
+    search.set_annotation(&a, &tagged("alpha robot", &["x"]), NOW).unwrap();
+    search.set_annotation(&b, &tagged("beta robot", &["x", "intermediate"]), NOW).unwrap();
+    search.set_annotation(&c, &tagged("gamma robot", &["intermediate"]), NOW).unwrap();
+
+    let hits = |filters: SearchFilters| {
+        let mut query = q("robot");
+        query.filters = filters;
+        let page = search.search(&query, &ANYONE, None).unwrap();
+        (page.hits.iter().map(|h| h.asset_id).collect::<Vec<_>>(), page.total)
+    };
+    assert_eq!(hits(SearchFilters::default()), (vec![a, b, c], 3));
+    // Exclusion alone: total is cut by the same clause as the page.
+    assert_eq!(
+        hits(SearchFilters { exclude_tag: Some("intermediate"), ..Default::default() }),
+        (vec![a], 1)
+    );
+    // b carries both labels, so the exclusion overrides the positive match.
+    assert_eq!(hits(SearchFilters { tag: Some("x"), ..Default::default() }), (vec![a, b], 2));
+    assert_eq!(
+        hits(SearchFilters {
+            tag: Some("x"),
+            exclude_tag: Some("intermediate"),
+            ..Default::default()
+        }),
+        (vec![a], 1)
+    );
+    // An unused label excludes nothing.
+    assert_eq!(
+        hits(SearchFilters { exclude_tag: Some("nosuch"), ..Default::default() }),
+        (vec![a, b, c], 3)
+    );
+    // Same label validation as `tag`.
+    let mut bad = q("robot");
+    bad.filters = SearchFilters { exclude_tag: Some("Bad Tag"), ..Default::default() };
+    assert!(matches!(
+        search.search(&bad, &ANYONE, None).unwrap_err(),
+        ServerError::InvalidInput { what: "annotation label charset" }
+    ));
+    bad.filters = SearchFilters { exclude_tag: Some(""), ..Default::default() };
+    assert!(matches!(
+        search.search(&bad, &ANYONE, None).unwrap_err(),
+        ServerError::InvalidInput { what: "annotation label length" }
+    ));
+
+    // Keyset paging with excluded rows interleaved between kept ones:
+    // ids 1,4,6 survive, 2,3,5 drop, one hit per page.
+    let d = reg(&core, 4, "rik2");
+    let e = reg(&core, 5, "rik2");
+    let g = reg(&core, 6, "rik2");
+    search.set_annotation(&d, &tagged("delta robot", &["x"]), NOW).unwrap();
+    search.set_annotation(&e, &tagged("epsilon robot", &["intermediate"]), NOW).unwrap();
+    search.set_annotation(&g, &tagged("zeta robot", &["x"]), NOW).unwrap();
+    let mut paged = q("robot");
+    paged.page_size = 1;
+    paged.filters = SearchFilters { exclude_tag: Some("intermediate"), ..Default::default() };
+    let mut seen = Vec::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    for _ in 0..10 {
+        let page = search.search(&paged, &ANYONE, cursor.as_deref()).unwrap();
+        assert_eq!(page.total, 3, "the COUNT form excludes the same rows");
+        seen.extend(page.hits.iter().map(|h| h.asset_id));
+        match page.cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, vec![a, d, g]);
+
+    // The exclusion is part of the cursor fingerprint: a cursor minted under
+    // it is stale against the same text without it.
+    let first = search.search(&paged, &ANYONE, None).unwrap().cursor.expect("more pages");
+    let mut without = q("robot");
+    without.page_size = 1;
+    assert!(matches!(
+        search.search(&without, &ANYONE, Some(&first)).unwrap_err(),
+        ServerError::InvalidInput { what: "stale search cursor" }
     ));
 }
 
@@ -661,4 +752,108 @@ fn snippets_are_normalized_bounded_and_term_centered() {
     // A hit matched via title has a snippet from the description head.
     let page = search.search(&q("console"), &ANYONE, None).unwrap();
     assert!(page.hits[0].snippet.starts_with("start red text"), "{}", page.hits[0].snippet);
+}
+
+/// Facets describe the WHOLE result set, not the page, and they obey every
+/// filter that shaped it — including the negative one. They ride the page so
+/// the counts and the rows come out of one snapshot.
+#[test]
+fn facets_count_the_whole_result_set_under_the_same_filters() {
+    let (_root, core) = open_core("facets");
+    let search = core.search();
+    let labelled = |title: &str, categories: &[&str], tags: &[&str]| {
+        let mut x = ann(title);
+        x.categories = categories.iter().map(|c| (*c).to_string()).collect();
+        x.tags = tags.iter().map(|t| (*t).to_string()).collect();
+        x
+    };
+    // Four robots: three doom props, one kenney prop, one of them also
+    // intermediate (the label the pads exclude).
+    let ids: Vec<AssetId> = (1..=4).map(|n| reg(&core, n, "rik2")).collect();
+    search
+        .set_annotation(&ids[0], &labelled("alpha robot", &["doom"], &["prop"]), NOW)
+        .unwrap();
+    search
+        .set_annotation(&ids[1], &labelled("beta robot", &["doom"], &["prop"]), NOW)
+        .unwrap();
+    search
+        .set_annotation(
+            &ids[2],
+            &labelled("gamma robot", &["doom"], &["prop", "intermediate"]),
+            NOW,
+        )
+        .unwrap();
+    search
+        .set_annotation(&ids[3], &labelled("delta robot", &["kenney"], &["prop"]), NOW)
+        .unwrap();
+
+    let facets = |filters: SearchFilters, page_size: u32| {
+        let mut query = q("robot");
+        query.filters = filters;
+        query.page_size = page_size;
+        query.facets = 16;
+        let page = search.search(&query, &ANYONE, None).unwrap();
+        let counts: Vec<(String, String, u64)> = page
+            .facets
+            .iter()
+            .map(|f| (f.kind.as_str().to_string(), f.label.clone(), f.count))
+            .collect();
+        (page.hits.len(), page.total, counts)
+    };
+
+    // One hit per page, but the facets still count all four assets.
+    let (shown, total, counts) = facets(SearchFilters::default(), 1);
+    assert_eq!((shown, total), (1, 4));
+    assert_eq!(
+        counts,
+        vec![
+            ("tag".to_string(), "prop".to_string(), 4),
+            ("category".to_string(), "doom".to_string(), 3),
+            ("category".to_string(), "kenney".to_string(), 1),
+            ("tag".to_string(), "intermediate".to_string(), 1),
+        ],
+        "most used first, then kind and label"
+    );
+
+    // A filter narrows the facets with the rows: excluding `intermediate`
+    // drops it from the counts entirely and takes doom down with it.
+    let (_, total, counts) = facets(
+        SearchFilters { exclude_tag: Some("intermediate"), ..Default::default() },
+        10,
+    );
+    assert_eq!(total, 3);
+    assert_eq!(
+        counts,
+        vec![
+            ("tag".to_string(), "prop".to_string(), 3),
+            ("category".to_string(), "doom".to_string(), 2),
+            ("category".to_string(), "kenney".to_string(), 1),
+        ]
+    );
+
+    // Picking a facet is just another filter; the remaining labels are the
+    // ones that still co-occur with it.
+    let (_, total, counts) =
+        facets(SearchFilters { category: Some("kenney"), ..Default::default() }, 10);
+    assert_eq!(total, 1);
+    assert_eq!(
+        counts,
+        vec![
+            ("category".to_string(), "kenney".to_string(), 1),
+            ("tag".to_string(), "prop".to_string(), 1),
+        ]
+    );
+
+    // Not asking costs nothing and returns nothing.
+    let mut plain = q("robot");
+    plain.page_size = 10;
+    assert!(search.search(&plain, &ANYONE, None).unwrap().facets.is_empty());
+
+    // Over the budget refuses rather than silently truncating.
+    let mut greedy = q("robot");
+    greedy.facets = 100_000;
+    assert!(matches!(
+        search.search(&greedy, &ANYONE, None).unwrap_err(),
+        ServerError::OverBudget { what: "search facets", .. }
+    ));
 }

@@ -109,6 +109,11 @@ pub const ROLE_VIDEO_VAE: &str = "video-vae";
 pub const ROLE_AUDIO_VAE: &str = "audio-vae";
 pub const ROLE_AUDIO_VAE_CONFIG: &str = "audio-vae-config";
 pub const ROLE_TOKENIZER_JSON: &str = "tokenizer-json";
+/// Auxiliary role carried by every H3 tier: the Practical-RIFE v4.26
+/// flownet used by the optional interpolation post-stage. It is a file of
+/// the video models, never a model of its own — the domain must keep
+/// exactly one selectable generator per tier.
+pub const ROLE_INTERPOLATE: &str = "interpolate";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum H3TierKind {
@@ -234,6 +239,11 @@ pub struct VideoJob {
     /// The video VISIBLY starts from this image — the pipeline VAE-encodes it
     /// into never-denoised leading rows and feeds it to the vision tower.
     pub input_rgb: Option<(Vec<u8>, u32, u32)>,
+    /// true (default) = decode the jointly-denoised audio latents and mux an
+    /// AAC track. false = skip the audio VAE decode and mux a silent mp4.
+    /// The DiT still denoises the audio rows either way — there is no
+    /// upstream mode that drops them from the packed t2va sequence.
+    pub audio: bool,
 }
 
 /// Raw decoded output of a video generator.
@@ -290,6 +300,11 @@ pub struct H3Backend {
     /// Tier canvas ceiling captured in `ensure_loaded` (None until then, and
     /// for the bf16 tier).
     tier_limit_pixel_frames: Option<u64>,
+    /// RIFE flownet path resolved from the tier's [`ROLE_INTERPOLATE`] file
+    /// in `ensure_loaded`; None when the manifest carries no such role (an
+    /// `interpolate` request then fails loudly instead of silently
+    /// returning 24 fps).
+    interpolate_weights: Option<PathBuf>,
 }
 
 impl H3Backend {
@@ -301,6 +316,7 @@ impl H3Backend {
             mux: Mux::Stub(mux),
             cache_dir: None,
             tier_limit_pixel_frames: None,
+            interpolate_weights: None,
         }
     }
 
@@ -313,6 +329,7 @@ impl H3Backend {
             mux: Mux::Platform,
             cache_dir: None,
             tier_limit_pixel_frames: None,
+            interpolate_weights: None,
         }
     }
 }
@@ -461,6 +478,10 @@ impl ContentBackend for H3Backend {
         )?;
         let plan = tier_plan_for_spec(ctx.spec)?;
         self.tier_limit_pixel_frames = plan.max_pixel_frames;
+        self.interpolate_weights = ctx
+            .spec
+            .file_by_role(ROLE_INTERPOLATE)
+            .map(|file| file.dest_path(ctx.cache_dir));
         match &mut self.gen {
             Gen::Stub(_) => Ok(()),
             #[cfg(feature = "video")]
@@ -548,6 +569,7 @@ impl ContentBackend for H3Backend {
             steps: params.steps.unwrap_or(DEFAULT_STEPS).clamp(2, 100),
             seed: params.seed,
             input_rgb,
+            audio: params.audio.unwrap_or(true),
         };
         check_canvas_within_tier(
             &self.model_id,
@@ -557,9 +579,19 @@ impl ContentBackend for H3Backend {
             job.frames,
         )?;
 
+        let interpolate = match params.interpolate {
+            None | Some(1) => 1,
+            Some(factor @ (2 | 4)) => factor,
+            Some(other) => {
+                return Err(AssetAiError::Params(format!(
+                    "minimax-h3: interpolate must be 1 (off), 2 or 4, got {other}"
+                )))
+            }
+        };
+
         cancel.check()?;
         progress("starting", 0.0);
-        let clip = match &mut self.gen {
+        let mut clip = match &mut self.gen {
             Gen::Stub(gen) => gen(&job, progress, cancel)?,
             #[cfg(feature = "video")]
             Gen::H3(gen) => gen.generate(&job, progress, cancel)?,
@@ -578,6 +610,23 @@ impl ContentBackend for H3Backend {
                 clip.height
             )));
         }
+
+        // Optional RIFE post-stage: same wall-clock duration, `interpolate`
+        // times as many frames, so the mux fps scales with it. The audio
+        // track is untouched — it was never resampled against the frame
+        // cadence.
+        let fps = if interpolate > 1 {
+            interpolate_clip(
+                &mut clip,
+                interpolate,
+                self.interpolate_weights.as_deref(),
+                progress,
+                cancel,
+            )?;
+            H3_FPS * interpolate
+        } else {
+            H3_FPS
+        };
 
         // Audio: split planar stereo, resample to the AAC-encoder rate,
         // interleave + quantize.
@@ -603,7 +652,7 @@ impl ContentBackend for H3Backend {
         let input = MuxInput {
             width: clip.width as u32,
             height: clip.height as u32,
-            fps: H3_FPS,
+            fps,
             h264,
             frames_rgb8: clip.frames_rgb8,
             audio_i16,
@@ -630,6 +679,151 @@ impl ContentBackend for H3Backend {
 }
 
 // ---------------------------------------------------------------------------
+// RIFE frame-interpolation post-stage (feature `interpolate`)
+// ---------------------------------------------------------------------------
+
+/// Progress band the interpolation stage owns, between the generator's last
+/// phase and `audio-resample`.
+// Read by `expand_frames` below, whose only production caller lives behind
+// `#[cfg(feature = "interpolate")]`; kept ungated itself (see that fn's
+// doc) so the cadence law stays unit-tested without the feature.
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
+const INTERPOLATE_BASE: f64 = 0.91;
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
+const INTERPOLATE_SPAN: f64 = 0.02;
+
+/// Expands `clip` in place from `n` frames at [`H3_FPS`] to `n * factor`
+/// frames at `H3_FPS * factor`: identical duration, denser cadence.
+///
+/// Every consecutive pair contributes its leading frame plus one
+/// intermediate per entry of `timesteps`. The final source frame is then
+/// held for `factor` slots, which is what makes the count come out at
+/// exactly `n * factor` — a naive expansion lands one frame short of the
+/// original duration and would drift the video against the untouched audio
+/// track.
+///
+/// `middle` is the interpolator; it is a parameter so this cadence law is
+/// unit-tested without weights, a GPU, or the `interpolate` feature.
+/// Cancellation is checked per frame pair.
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
+fn expand_frames(
+    clip: &mut VideoClip,
+    factor: u32,
+    timesteps: &[f32],
+    mut middle: impl FnMut(&[u8], &[u8], f32) -> Result<Vec<u8>, AssetAiError>,
+    progress: ProgressSink,
+    cancel: &CancelToken,
+) -> Result<(), AssetAiError> {
+    if factor < 2 || timesteps.len() + 1 != factor as usize {
+        return Err(AssetAiError::Backend(format!(
+            "interpolate: {} timesteps do not expand a clip by {factor}x",
+            timesteps.len()
+        )));
+    }
+    let frame_bytes = clip.width * clip.height * 3;
+    let pairs = clip.num_frames.saturating_sub(1);
+    let mut frames = Vec::with_capacity(clip.num_frames * factor as usize * frame_bytes);
+    for index in 0..pairs {
+        cancel.check()?;
+        let first = &clip.frames_rgb8[index * frame_bytes..(index + 1) * frame_bytes];
+        let second = &clip.frames_rgb8[(index + 1) * frame_bytes..(index + 2) * frame_bytes];
+        frames.extend_from_slice(first);
+        for &timestep in timesteps {
+            let generated = middle(first, second, timestep)?;
+            if generated.len() != frame_bytes {
+                return Err(AssetAiError::Backend(format!(
+                    "interpolate returned {} bytes, expected {frame_bytes}",
+                    generated.len()
+                )));
+            }
+            frames.extend_from_slice(&generated);
+        }
+        progress(
+            &format!("interpolate {}/{}", index + 1, pairs),
+            INTERPOLATE_BASE + INTERPOLATE_SPAN * (index + 1) as f64 / pairs as f64,
+        );
+    }
+    let last = &clip.frames_rgb8[(clip.num_frames - 1) * frame_bytes..];
+    for _ in 0..factor {
+        frames.extend_from_slice(last);
+    }
+    clip.frames_rgb8 = frames;
+    clip.num_frames *= factor as usize;
+    debug_assert_eq!(clip.frames_rgb8.len(), clip.num_frames * frame_bytes);
+    Ok(())
+}
+
+/// Loads the pinned RIFE flownet and runs [`expand_frames`] with it. A bad
+/// manifest, a missing flownet, or a box without CUDA all fail loudly rather
+/// than silently returning the 24 fps clip.
+#[cfg(feature = "interpolate")]
+fn interpolate_clip(
+    clip: &mut VideoClip,
+    factor: u32,
+    weights_path: Option<&std::path::Path>,
+    progress: ProgressSink,
+    cancel: &CancelToken,
+) -> Result<(), AssetAiError> {
+    use makepad_ai_common::DiffusionError;
+    use makepad_ai_rife::{interpolation_timesteps, Rife, RifeFramePair, RifeWeights};
+
+    fn rife_err(err: DiffusionError) -> AssetAiError {
+        match err {
+            DiffusionError::Cancelled => AssetAiError::Cancelled,
+            other => AssetAiError::Backend(format!("interpolate: {other}")),
+        }
+    }
+
+    let path = weights_path.ok_or_else(|| {
+        AssetAiError::Backend(format!(
+            "interpolate={factor} requested but this model manifest carries no \
+             {ROLE_INTERPOLATE:?} file role"
+        ))
+    })?;
+    if !path.is_file() {
+        return Err(AssetAiError::Backend(format!(
+            "interpolate={factor}: RIFE flownet missing at {} — pull the model first",
+            path.display()
+        )));
+    }
+    cancel.check()?;
+    progress("interpolate load", INTERPOLATE_BASE);
+    let weights = RifeWeights::load(path).map_err(rife_err)?;
+    let is_cancelled = || cancel.is_cancelled();
+    let rife = Rife::prepare_controlled(&weights, Default::default(), Some(&is_cancelled), None)
+        .map_err(rife_err)?;
+    let timesteps = interpolation_timesteps(factor);
+    let (width, height) = (clip.width, clip.height);
+    expand_frames(
+        clip,
+        factor,
+        &timesteps,
+        |first, second, timestep| {
+            let pair = RifeFramePair::new(first, second, width, height).map_err(rife_err)?;
+            rife.interpolate_rgb8_controlled(pair, timestep, Some(&is_cancelled))
+                .map_err(rife_err)
+        },
+        progress,
+        cancel,
+    )
+}
+
+/// Without the feature the request is refused rather than silently ignored.
+#[cfg(not(feature = "interpolate"))]
+fn interpolate_clip(
+    _clip: &mut VideoClip,
+    factor: u32,
+    _weights_path: Option<&std::path::Path>,
+    _progress: ProgressSink,
+    _cancel: &CancelToken,
+) -> Result<(), AssetAiError> {
+    Err(AssetAiError::Unavailable(format!(
+        "interpolate={factor}: this build has no frame-interpolation support \
+         (feature \"interpolate\" is off)"
+    )))
+}
+
+// ---------------------------------------------------------------------------
 // Real generation through libs/diffusion (feature video)
 // ---------------------------------------------------------------------------
 
@@ -638,12 +832,12 @@ mod h3_gen {
     use super::{stage_from_phase, VideoClip, VideoJob};
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::h3_pipeline::{
+    use makepad_ai_h3::h3_pipeline::{
         h3_generate_with_control, H3CondCache, H3ComponentFile, H3GenerateParams, H3KeyframeInput,
         H3ModelSet, H3RunControl, H3WeightFormat,
     };
-    use makepad_diffusion::h3_tokenizer::H3Tokenizer;
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     pub struct H3Gen {
@@ -800,7 +994,7 @@ mod h3_gen {
 
         fn release_runtime(&mut self) -> Result<usize, AssetAiError> {
             self.runtime.release_with(|prefixes| {
-                makepad_diffusion::backend::release_gpu_runtime_namespaces(prefixes)
+                makepad_ai_common::backend::release_gpu_runtime_namespaces(prefixes)
                     .map_err(|error| AssetAiError::Backend(format!("h3 unload: {error}")))
             })
         }
@@ -864,7 +1058,7 @@ mod h3_gen {
                 audio_noise_rows: None,
                 condition_rows_override: None,
                 act16: false,
-                decode_audio: true,
+                decode_audio: job.audio,
                 model_set: self.model_set.clone(),
                 staged_residency: self.staged_residency,
             };
@@ -979,6 +1173,7 @@ mod h3_mux {
                 channels: 2,
                 aac_bitrate_bps: 128_000,
             }),
+            ..Default::default()
         };
         let mux_err = |context: &str, e: makepad_video::VideoFileError| {
             AssetAiError::Backend(format!("mp4 mux {context}: {e}"))
@@ -1101,6 +1296,251 @@ mod tests {
         assert_eq!(artifacts[0].content_type, "video/mp4");
         assert_eq!(artifacts[0].ext, "mp4");
         assert_eq!(artifacts[0].bytes, b"MP4STUB");
+    }
+
+    // -- interpolation post-stage -----------------------------------------
+
+    /// The cadence law: `n` frames become exactly `n * factor`, the source
+    /// frames stay in place at every `factor`-th slot, the intermediates
+    /// arrive in timestep order, and the tail is held so the clip keeps its
+    /// original duration against the untouched audio track.
+    #[test]
+    fn expand_frames_keeps_the_duration_and_the_source_frames() {
+        let (w, h) = (2usize, 1usize);
+        let frame_bytes = w * h * 3;
+        let source: Vec<u8> = (0..3u8)
+            .flat_map(|f| std::iter::repeat(f * 10).take(frame_bytes))
+            .collect();
+        let mut clip = VideoClip {
+            width: w,
+            height: h,
+            num_frames: 3,
+            frames_rgb8: source.clone(),
+            audio_planar: None,
+            audio_rate: 32_000,
+        };
+        let mut sink = |_: &str, _: f64| {};
+        expand_frames(
+            &mut clip,
+            2,
+            &[0.5],
+            |first, second, timestep| {
+                assert_eq!(timestep, 0.5);
+                Ok(first
+                    .iter()
+                    .zip(second)
+                    .map(|(a, b)| ((u16::from(*a) + u16::from(*b)) / 2) as u8)
+                    .collect())
+            },
+            &mut sink,
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(clip.num_frames, 6);
+        assert_eq!(clip.frames_rgb8.len(), 6 * frame_bytes);
+        let frame = |index: usize| clip.frames_rgb8[index * frame_bytes];
+        // 0, mid(0,10), 10, mid(10,20), 20, 20 (held tail).
+        assert_eq!(
+            (0..6).map(frame).collect::<Vec<_>>(),
+            vec![0, 5, 10, 15, 20, 20]
+        );
+    }
+
+    #[test]
+    fn expand_frames_emits_every_timestep_for_4x() {
+        let frame_bytes = 3;
+        let mut clip = VideoClip {
+            width: 1,
+            height: 1,
+            num_frames: 2,
+            frames_rgb8: vec![0, 0, 0, 40, 40, 40],
+            audio_planar: None,
+            audio_rate: 32_000,
+        };
+        let mut seen = Vec::new();
+        let mut sink = |_: &str, _: f64| {};
+        expand_frames(
+            &mut clip,
+            4,
+            &[0.25, 0.5, 0.75],
+            |_, second, timestep| {
+                seen.push(timestep);
+                Ok(vec![(f32::from(second[0]) * timestep) as u8; frame_bytes])
+            },
+            &mut sink,
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(seen, vec![0.25, 0.5, 0.75]);
+        assert_eq!(clip.num_frames, 8);
+        assert_eq!(
+            (0..8).map(|i| clip.frames_rgb8[i * frame_bytes]).collect::<Vec<_>>(),
+            vec![0, 10, 20, 30, 40, 40, 40, 40]
+        );
+    }
+
+    #[test]
+    fn expand_frames_refuses_a_timestep_list_that_does_not_match_the_factor() {
+        let mut clip = VideoClip {
+            width: 1,
+            height: 1,
+            num_frames: 2,
+            frames_rgb8: vec![0; 6],
+            audio_planar: None,
+            audio_rate: 32_000,
+        };
+        let mut sink = |_: &str, _: f64| {};
+        let result = expand_frames(
+            &mut clip,
+            4,
+            &[0.5],
+            |_, _, _| Ok(vec![0; 3]),
+            &mut sink,
+            &CancelToken::new(),
+        );
+        assert!(matches!(result, Err(AssetAiError::Backend(_))));
+    }
+
+    /// A factor the interpolator cannot honor is refused at parameter
+    /// parsing, before any generation happens.
+    #[test]
+    fn interpolate_factor_is_validated() {
+        for (value, ok) in [(None, true), (Some(1), true), (Some(2), true), (Some(4), true)] {
+            let request = GenerateRequestJson {
+                model: "minimax-h3".to_string(),
+                prompt: Some("p".to_string()),
+                interpolate: value,
+                ..GenerateRequestJson::default()
+            };
+            assert_eq!(GenerateParams::from_request(&request).is_ok(), ok);
+        }
+        for bad in [0u32, 3, 5, 8] {
+            let request = GenerateRequestJson {
+                model: "minimax-h3".to_string(),
+                prompt: Some("p".to_string()),
+                interpolate: Some(bad),
+                ..GenerateRequestJson::default()
+            };
+            match GenerateParams::from_request(&request) {
+                Err(AssetAiError::Params(message)) => {
+                    assert!(message.contains("interpolate"), "{message}")
+                }
+                other => panic!("interpolate={bad} should be a Params error, got {other:?}"),
+            }
+        }
+        // `1` and absent both mean "off" — the backend must see None.
+        let off = GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            interpolate: Some(1),
+            ..GenerateRequestJson::default()
+        };
+        assert_eq!(GenerateParams::from_request(&off).unwrap().interpolate, None);
+    }
+
+    /// Off by default: the mux still gets H3's native 24 fps.
+    #[test]
+    fn no_interpolation_keeps_the_native_frame_rate() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| Ok(stub_clip(job))),
+            Box::new(|input: &MuxInput| {
+                assert_eq!(input.fps, H3_FPS);
+                assert_eq!(input.frames_rgb8.len(), 3 * 32 * 16 * 3);
+                Ok(vec![1])
+            }),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
+    }
+
+    /// An interpolated job on a backend whose manifest carries no
+    /// [`ROLE_INTERPOLATE`] file fails loudly instead of quietly muxing
+    /// 24 fps — the whole point of the request would be lost otherwise.
+    #[test]
+    fn interpolation_without_the_flownet_role_fails_loudly() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| Ok(stub_clip(job))),
+            Box::new(|_: &MuxInput| panic!("the mux must never be reached")),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            interpolate: Some(2),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        match backend.generate(&params, &mut sink, &CancelToken::new()) {
+            Err(AssetAiError::Backend(message)) => {
+                assert!(message.contains("interpolate"), "{message}")
+            }
+            Err(AssetAiError::Unavailable(message)) => {
+                // Build without the `interpolate` feature.
+                assert!(message.contains("interpolate"), "{message}")
+            }
+            Err(other) => panic!("expected a loud interpolation failure, got {other:?}"),
+            Ok(_) => panic!("expected a loud interpolation failure, got artifacts"),
+        }
+    }
+
+    /// `audio` defaults to true (the job wants the jointly-denoised audio
+    /// decoded); an explicit `audio: false` request reaches the generator as
+    /// `job.audio == false` so the real H3 pipeline can skip the audio VAE
+    /// decode + AAC mux (see `H3GenerateParams::decode_audio` in h3_pipeline).
+    #[test]
+    fn audio_request_field_reaches_the_job() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(job.audio, "audio omitted from the request must default to true");
+                Ok(stub_clip(job))
+            }),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
+
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(!job.audio, "audio: Some(false) must reach the job as false");
+                // The real pipeline (decode_audio: false) never populates
+                // audio_planar; the stub mirrors that.
+                let mut clip = stub_clip(job);
+                clip.audio_planar = None;
+                Ok(clip)
+            }),
+            Box::new(|input: &MuxInput| {
+                assert!(input.audio_i16.is_none(), "video-only request must mux no audio track");
+                Ok(vec![1])
+            }),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            audio: Some(false),
+            ..GenerateRequestJson::default()
+        });
+        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
     }
 
     #[test]
@@ -1275,6 +1715,7 @@ mod tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files,
         }
     }

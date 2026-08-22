@@ -12,9 +12,15 @@
 
 use crate::download::{DownloadProgress, Downloader};
 use crate::error::AssetAiError;
-use crate::protocol::GenerateRequestJson;
+use crate::protocol::{GenerateRequestJson, RealtimeRequestJson};
 use crate::registry::{FileSpec, ModelSpec};
 use std::path::{Path, PathBuf};
+
+/// Splat-domain gaussian budget bounds, mirrored from
+/// `makepad_ai_splat::{GAUSSIANS_MIN, GAUSSIANS_MAX}` so the wire contract is
+/// enforced in builds without the `splat-native` feature too.
+pub const SPLAT_GAUSSIANS_MIN: u32 = 32_768;
+pub const SPLAT_GAUSSIANS_MAX: u32 = 262_144;
 
 /// Normalized generation parameters. Ranges are clamped here; `None` means
 /// "not requested" so each backend can apply its own domain default (image
@@ -28,7 +34,8 @@ pub struct GenerateParams {
     pub height: Option<u32>,
     pub seed: u64,
     pub steps: Option<u32>,
-    pub guidance: f32,
+    /// None = model default (flux1 3.5, flux2-dev 4.0, ...).
+    pub guidance: Option<f32>,
     /// Test hook (testpattern backend only): artificial generation time.
     pub delay_ms: u64,
     /// Download/verify files then stop before generating (pull job).
@@ -41,12 +48,32 @@ pub struct GenerateParams {
     pub input_content_type: String,
     /// Decoded named inputs (multi-input models); empty when none were sent.
     pub inputs: Vec<NamedInput>,
+    /// Image-to-image denoise strength 0..=1 (see the wire doc); `None` =
+    /// model default. Clamped at parse time.
+    pub strength: Option<f32>,
 
     // Video domain (h3 backend).
     /// Frame count at the model's native fps.
     pub frames: Option<u32>,
     /// "" = backend default (h265); "h264" for the compatibility codec.
     pub codec: String,
+    /// `None`/`Some(true)` = decode + mux the jointly-denoised audio track
+    /// (H3 default). `Some(false)` = skip the audio VAE decode and the AAC
+    /// mux, producing a silent mp4 — the joint DiT still denoises the audio
+    /// rows (no upstream mode drops them from the packed sequence).
+    pub audio: Option<bool>,
+    /// Frame-rate multiplier for the RIFE interpolation post-stage: `None`
+    /// or `Some(1)` = off, `Some(2)` = 24 -> 48 fps, `Some(4)` = 24 -> 96
+    /// fps. Same clip duration, same audio; only the frame cadence changes.
+    pub interpolate: Option<u32>,
+
+    // Enhance domain (video-enhance backend).
+    /// Resolution multiplier: `None`/`Some(1)` = off, `Some(2)` or
+    /// `Some(4)` = RealESRGAN x4plus (x2 = box-downsampled x4 pass).
+    pub upscale: Option<u32>,
+    /// Append the per-pair RIFE motion field to the output mp4 as a
+    /// trailing `mkfl` box (arbitrary-timestep playback warping).
+    pub flow_map: bool,
 
     // Text domain (llm backend).
     /// Domain the expanded prompt targets: "image" | "video" | "mesh".
@@ -86,6 +113,31 @@ pub struct GenerateParams {
     pub decimation_target: Option<u32>,
     /// Baked texture atlas size; `None` = backend default.
     pub texture_size: Option<u32>,
+
+    // Splat domain (triposplat backend).
+    /// Target gaussian count; `None` = backend default (262144). Clamped and
+    /// rounded to the decoder stride by the model crate.
+    pub gaussians: Option<u32>,
+
+    // Motion domain (hy-motion backend).
+    /// `"prompt"` = one clip from `prompt`; anything else/None = the fixed
+    /// playable set (see `GenerateRequestJson::motion_mode`).
+    pub motion_mode: Option<String>,
+
+    // Control domain (control backend: FLUX.1-Depth-dev / FLUX.1-Canny-dev).
+    /// Canny low threshold (flux1-canny-dev only). `None` = backend default
+    /// (`control_image::CANNY_DEFAULT_LOW`, 50).
+    pub canny_low: Option<f32>,
+    /// Canny high threshold. `None` = backend default
+    /// (`control_image::CANNY_DEFAULT_HIGH`, 200).
+    pub canny_high: Option<f32>,
+
+    // Image domain (flux backend).
+    /// LoRA adapters as (name, strength). Resolved against
+    /// `<cache-dir>/loras/` by the backend; empty for every request that
+    /// asked for none. Backends other than `flux` refuse a non-empty list
+    /// (see [`validate_loras_for_backend`]).
+    pub loras: Vec<(String, f32)>,
 
     // Peer-assisted model distribution (see crate::peer / crate::peer_fetch).
     /// Coordinator-selected source-box base URLs, tried before Hugging Face.
@@ -202,10 +254,13 @@ impl GenerateParams {
                 .is_some_and(|messages| !messages.is_empty());
         let prompt = if is_chat {
             match request.chat_messages.as_deref() {
-                Some(messages) if !messages.is_empty() => crate::protocol::assemble_chat_prompt(
-                    request.chat_system.as_deref().unwrap_or(""),
-                    messages,
-                ),
+                Some(messages) if !messages.is_empty() => {
+                    crate::protocol::assemble_chat_prompt_with_think(
+                        request.chat_system.as_deref().unwrap_or(""),
+                        messages,
+                        crate::protocol::think_prefill_for_model(&request.model),
+                    )
+                }
                 _ => request.prompt.clone().unwrap_or_default(),
             }
         } else {
@@ -228,7 +283,7 @@ impl GenerateParams {
             height: request.height.map(|v| v.clamp(16, 8192)),
             seed,
             steps: request.steps.map(|v| v.clamp(1, 200)),
-            guidance: request.guidance.unwrap_or(3.5) as f32,
+            guidance: request.guidance.map(|v| v as f32),
             delay_ms: request.delay_ms.unwrap_or(0).min(60_000),
             pull_only: request.pull_only.unwrap_or(false),
 
@@ -238,9 +293,33 @@ impl GenerateParams {
                 .clone()
                 .unwrap_or_else(|| "image/png".to_string()),
             inputs,
+            strength: request
+                .strength
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 1.0)),
 
             frames: request.frames.map(|v| v.clamp(1, 1024)),
             codec: request.codec.clone().unwrap_or_default(),
+            audio: request.audio,
+            interpolate: match request.interpolate {
+                None | Some(1) => None,
+                Some(factor @ (2 | 4)) => Some(factor),
+                Some(other) => {
+                    return Err(AssetAiError::Params(format!(
+                        "interpolate: expected 1 (off), 2 or 4, got {other}"
+                    )))
+                }
+            },
+            upscale: match request.upscale {
+                None | Some(1) => None,
+                Some(factor @ (2 | 4)) => Some(factor),
+                Some(other) => {
+                    return Err(AssetAiError::Params(format!(
+                        "upscale: expected 1 (off), 2 or 4, got {other}"
+                    )))
+                }
+            },
+            flow_map: request.flow_map.unwrap_or(false),
 
             target_domain,
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),
@@ -303,6 +382,24 @@ impl GenerateParams {
                 .decimation_target
                 .map(|v| v.clamp(1_000, 2_000_000)),
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
+            gaussians: request
+                .gaussians
+                .map(|v| v.clamp(SPLAT_GAUSSIANS_MIN, SPLAT_GAUSSIANS_MAX)),
+
+            motion_mode: request.motion_mode.clone(),
+
+            // Wire-level sanity range only (matches the Sobel-magnitude
+            // scale documented on `control_image::canny_edges_u8`); the
+            // backend re-clamps low <= high itself.
+            canny_low: request
+                .canny_low
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 2000.0) as f32),
+            canny_high: request
+                .canny_high
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 2000.0) as f32),
+            loras: parse_loras(request.loras.as_deref())?,
 
             peer_sources: {
                 let sources = request.peer_sources.clone().unwrap_or_default();
@@ -338,6 +435,487 @@ impl GenerateParams {
             },
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live/realtime session (see crate::realtime, crate::realtime_wire, and the
+// `POST /realtime` + `GET /realtime/<id>` (websocket) endpoints in server.rs)
+// ---------------------------------------------------------------------------
+
+/// Per-frame seed policy for a live session (see [`LiveConfig::seed_mode`]).
+/// `Increment`/`Random` are resolved once per frame by the session loop
+/// (`crate::realtime::run_live`) — a backend's `live_step` always sees the
+/// already-resolved `LiveConfig::seed` for that frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SeedMode {
+    #[default]
+    Fixed,
+    Increment,
+    Random,
+}
+
+impl SeedMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "fixed" => Ok(SeedMode::Fixed),
+            "increment" => Ok(SeedMode::Increment),
+            "random" => Ok(SeedMode::Random),
+            other => Err(AssetAiError::Params(format!(
+                "unknown seed_mode {other:?} (expected \"fixed\", \"increment\" or \"random\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeedMode::Fixed => "fixed",
+            SeedMode::Increment => "increment",
+            SeedMode::Random => "random",
+        }
+    }
+}
+
+/// How a live session sources its per-frame init image (see
+/// `crate::realtime::run_live`). `Feed`: wait for the client's latest pushed
+/// input frame. `Feedback`: the session's own previous output, warped by
+/// `camera` (`crate::realtime::warp_feedback`), becomes the next init.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LoopMode {
+    #[default]
+    Feed,
+    Feedback,
+}
+
+impl LoopMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "feed" => Ok(LoopMode::Feed),
+            "feedback" => Ok(LoopMode::Feedback),
+            other => Err(AssetAiError::Params(format!(
+                "unknown loop_mode {other:?} (expected \"feed\" or \"feedback\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LoopMode::Feed => "feed",
+            LoopMode::Feedback => "feedback",
+        }
+    }
+}
+
+/// Wire format for input AND output frames on a realtime session (see
+/// `realtime_wire::FrameKind`, which mirrors this 1:1 on the binary frame
+/// header — `Raw` = kind 0, `Png` = kind 1, `H264` = kind 2, Annex-B). One
+/// enum serves both directions: `LiveParams::input_encoding` is the
+/// session's advisory "what a client should send" default (the wire is
+/// self-describing per frame via the header's `kind` byte, so nothing
+/// actually enforces it — see `realtime::RealtimeSession::handle_binary`,
+/// which decodes whatever kind actually arrives); `output_encoding` is
+/// enforced (it picks what the session itself encodes and pushes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OutputEncoding {
+    /// Raw RGB8, no compression — cheapest on a LAN, always available.
+    #[default]
+    Raw,
+    Png,
+    /// H.264 Annex-B via the platform hardware codec (`makepad-video`'s
+    /// `VideoStreamEncoder`/`VideoStreamDecoder`) — the default for both
+    /// directions when this build has the `video` feature (see
+    /// `LiveParams::from_request`); refused at admission time otherwise.
+    H264,
+}
+
+impl OutputEncoding {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "raw" => Ok(OutputEncoding::Raw),
+            "png" => Ok(OutputEncoding::Png),
+            "h264" => Ok(OutputEncoding::H264),
+            other => Err(AssetAiError::Params(format!(
+                "unknown output_encoding {other:?} (expected \"raw\", \"png\" or \"h264\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputEncoding::Raw => "raw",
+            OutputEncoding::Png => "png",
+            OutputEncoding::H264 => "h264",
+        }
+    }
+
+    /// True when this build can actually encode/decode this wire format —
+    /// `H264` requires the `video` cargo feature (`makepad-video`'s
+    /// hardware codec seam); `Raw`/`Png` are always available.
+    pub fn is_supported_in_this_build(&self) -> bool {
+        match self {
+            OutputEncoding::Raw | OutputEncoding::Png => true,
+            OutputEncoding::H264 => cfg!(feature = "video"),
+        }
+    }
+
+    /// The default output/input encoding when a request doesn't specify
+    /// one: H.264 when this build has the codec (bandwidth-cheap over a
+    /// real network), raw otherwise (no codec to fall back to).
+    pub fn default_for_this_build() -> Self {
+        if cfg!(feature = "video") {
+            OutputEncoding::H264
+        } else {
+            OutputEncoding::Raw
+        }
+    }
+}
+
+/// Feedback-loop camera vector: per-iteration dolly/pan/roll consumed by
+/// `crate::realtime::warp_feedback` (the ONE place camera motion is applied —
+/// backends never warp `LiveFrameIn::init` themselves, they only read
+/// `LiveConfig::camera` if their pipeline can use it directly, e.g. as a
+/// conditioning signal).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct CameraMotion {
+    /// Zoom-toward-center per iteration; effective scale is `1 + dolly*0.05`.
+    pub dolly: f32,
+    /// Horizontal pan per iteration, as a fraction of image width.
+    pub pan_x: f32,
+    /// Vertical pan per iteration, as a fraction of image height.
+    pub pan_y: f32,
+    /// Rotation per iteration, in radians.
+    pub roll: f32,
+}
+
+/// Tightly packed RGB8 image (no alpha, no stride padding): `data.len() ==
+/// width * height * 3`. The live-session pixel currency end to end — decoded
+/// wire input frames, backend init/output frames, reference images.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+impl RgbImage {
+    /// A solid black placeholder — used to pad `LiveConfig::references` up to
+    /// a requested slot before the client has sent that slot's image.
+    pub fn blank(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0u8; width as usize * height as usize * 3],
+        }
+    }
+}
+
+/// Live-session tunables, live-updatable via the `{"type":"control", ...}`
+/// websocket message (see `realtime_wire::ControlUpdateJson` +
+/// `realtime::apply_control_to_config`, which merges only the fields a
+/// control message actually sets). Passed to `ContentBackend::live_step`
+/// inside [`LiveFrameIn`] once per frame; `seed` is already the resolved
+/// per-frame value (see [`SeedMode`]).
+#[derive(Clone, Debug)]
+pub struct LiveConfig {
+    pub width: u32,
+    pub height: u32,
+    pub prompt: String,
+    pub negative_prompt: String,
+    /// 0.0 = pass the init image straight through, 1.0 = ignore it (pure
+    /// model output). Backend-specific in between.
+    pub strength: f32,
+    pub steps: u32,
+    pub guidance: Option<f32>,
+    pub seed: u64,
+    pub seed_mode: SeedMode,
+    /// Decoded reference images (`{"type":"reference", "slot":N, ...}`).
+    pub references: Vec<RgbImage>,
+    pub camera: CameraMotion,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            width: 512,
+            height: 512,
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            strength: 0.6,
+            steps: 4,
+            guidance: None,
+            seed: 0,
+            seed_mode: SeedMode::default(),
+            references: Vec::new(),
+            camera: CameraMotion::default(),
+        }
+    }
+}
+
+/// Everything `POST /realtime` needs to start a live session: the target
+/// model plus the initial [`LiveConfig`] and the session-level (not
+/// per-frame-tunable via control messages the same way, though control CAN
+/// still touch `loop_mode`/`output_encoding`/`max_fps`/`idle_timeout_s` —
+/// see `realtime::RealtimeSession::apply_control`) knobs.
+#[derive(Clone)]
+pub struct LiveParams {
+    pub model: String,
+    pub config: LiveConfig,
+    pub loop_mode: LoopMode,
+    /// Advisory: what a well-behaved client should send. See
+    /// [`OutputEncoding`]'s doc — the wire is self-describing per frame, so
+    /// nothing rejects a different kind actually being sent.
+    pub input_encoding: OutputEncoding,
+    /// Enforced: what the session itself encodes and pushes.
+    pub output_encoding: OutputEncoding,
+    /// 0 = as fast as possible.
+    pub max_fps: f64,
+    /// Session ends (job -> done) after this many seconds with zero
+    /// connected websockets. 0 = never.
+    pub idle_timeout_s: u64,
+}
+
+/// Clamps a live-session frame dimension to `16..=4096` AND rounds it down
+/// to even — H.264/NV12 4:2:0 requires even width/height, and applying that
+/// universally (not only when H.264 is actually selected) means a control
+/// message can freely flip `output_encoding` to `"h264"` mid-session
+/// without ever hitting an odd-dimension encoder rejection.
+fn clamp_even_dimension(value: u32) -> u32 {
+    let clamped = value.clamp(16, 4096);
+    clamped - (clamped % 2)
+}
+
+impl LiveParams {
+    /// Builds initial live-session params from the `POST /realtime` body.
+    /// Ranges are clamped the same way [`GenerateParams::from_request`]
+    /// clamps `/generate` — see that function for the convention.
+    pub fn from_request(request: &RealtimeRequestJson) -> Result<Self, AssetAiError> {
+        if request.model.trim().is_empty() {
+            return Err(AssetAiError::Params("realtime: model is required".to_string()));
+        }
+        let seed = request.seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        });
+        let width = clamp_even_dimension(request.width.unwrap_or(512));
+        let height = clamp_even_dimension(request.height.unwrap_or(512));
+        let strength = request
+            .strength
+            .filter(|v| v.is_finite())
+            .map(|v| (v as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.6);
+        let steps = request.steps.unwrap_or(4).clamp(1, 200);
+        let guidance = request
+            .guidance
+            .filter(|v| v.is_finite())
+            .map(|v| v as f32);
+        let seed_mode = SeedMode::parse(request.seed_mode.as_deref().unwrap_or(""))?;
+        let loop_mode = LoopMode::parse(request.loop_mode.as_deref().unwrap_or(""))?;
+        let input_encoding = match request.input_encoding.as_deref() {
+            None | Some("") => OutputEncoding::default_for_this_build(),
+            Some(text) => OutputEncoding::parse(text)?,
+        };
+        let output_encoding = match request.output_encoding.as_deref() {
+            None | Some("") => OutputEncoding::default_for_this_build(),
+            Some(text) => OutputEncoding::parse(text)?,
+        };
+        if !output_encoding.is_supported_in_this_build() {
+            return Err(AssetAiError::Params(format!(
+                "output_encoding {:?} needs a build with the 'video' cargo feature",
+                output_encoding.as_str()
+            )));
+        }
+        if !input_encoding.is_supported_in_this_build() {
+            return Err(AssetAiError::Params(format!(
+                "input_encoding {:?} needs a build with the 'video' cargo feature",
+                input_encoding.as_str()
+            )));
+        }
+        let max_fps = request
+            .max_fps
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+            .min(240.0);
+        let idle_timeout_s = request.idle_timeout_s.unwrap_or(30).min(3600);
+        Ok(Self {
+            model: request.model.clone(),
+            config: LiveConfig {
+                width,
+                height,
+                prompt: request.prompt.clone().unwrap_or_default(),
+                negative_prompt: request.negative_prompt.clone().unwrap_or_default(),
+                strength,
+                steps,
+                guidance,
+                seed,
+                seed_mode,
+                references: Vec::new(),
+                camera: CameraMotion::default(),
+            },
+            loop_mode,
+            input_encoding,
+            output_encoding,
+            max_fps,
+            idle_timeout_s,
+        })
+    }
+}
+
+/// One `ContentBackend::live_step` call's inputs: the (optional) init image
+/// for this frame — `None` only in `loop_mode = "feed"` before any input
+/// frame has ever arrived — the monotonic frame counter, and the current
+/// (already control-merged, seed-resolved) config.
+pub struct LiveFrameIn<'a> {
+    pub init: Option<&'a RgbImage>,
+    pub frame_index: u64,
+    pub config: &'a LiveConfig,
+}
+
+/// One `ContentBackend::live_step` call's output: the produced frame plus
+/// the backend's own wall-clock cost (surfaced in the `stats` message's
+/// `stage_ms.model`).
+pub struct LiveFrameOut {
+    pub image: RgbImage,
+    pub model_ms: f64,
+}
+
+/// Maximum adapters one job may stack. Each one is merged into the resident
+/// weights at load, so this bounds both the merge cost and how many
+/// distinct patched checkpoints a box can be asked to build.
+pub const MAX_LORAS: usize = 8;
+
+/// Wire `loras` -> `(name, strength)`. Names are file names, so they are
+/// screened for path traversal HERE rather than deep in the backend.
+fn parse_loras(
+    requested: Option<&[crate::protocol::LoraRefJson]>,
+) -> Result<Vec<(String, f32)>, AssetAiError> {
+    let Some(requested) = requested else {
+        return Ok(Vec::new());
+    };
+    if requested.len() > MAX_LORAS {
+        return Err(AssetAiError::Params(format!(
+            "loras: at most {MAX_LORAS} adapters, got {}",
+            requested.len()
+        )));
+    }
+    let mut out: Vec<(String, f32)> = Vec::with_capacity(requested.len());
+    for entry in requested {
+        let name = entry.name.trim();
+        if name.is_empty() || name.len() > 128 {
+            return Err(AssetAiError::Params(
+                "loras: name must be 1..=128 chars".to_string(),
+            ));
+        }
+        // The name indexes one flat directory; anything that could escape it
+        // is refused rather than normalized.
+        if name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || name.starts_with('.')
+        {
+            return Err(AssetAiError::Params(format!(
+                "loras: {name:?} must be a plain file name in the loras dir"
+            )));
+        }
+        if out.iter().any(|(prev, _)| prev == name) {
+            return Err(AssetAiError::Params(format!(
+                "loras: duplicate adapter {name:?}"
+            )));
+        }
+        let strength = entry.strength.unwrap_or(1.0);
+        if !strength.is_finite() {
+            return Err(AssetAiError::Params(format!(
+                "loras: {name:?} strength must be finite"
+            )));
+        }
+        out.push((name.to_string(), strength.clamp(-4.0, 4.0) as f32));
+    }
+    Ok(out)
+}
+
+/// The operator's LoRA drop-box under the service cache dir. Created at
+/// startup so there is always somewhere to copy adapters into.
+pub fn lora_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("loras")
+}
+
+/// `(file stem, byte length)` of every `*.safetensors` in `dir`, sorted by
+/// name. A missing directory lists as empty (no adapter dropped in yet),
+/// never an error.
+pub fn list_loras(dir: &Path) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("safetensors") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        out.push((stem.to_string(), bytes));
+    }
+    out.sort();
+    out
+}
+
+/// Resolves requested adapter names against `<dir>/<name>.safetensors`
+/// (a `.safetensors` suffix in the name is accepted too). A miss fails the
+/// job with the sorted list of what IS there, so a typo is fixable in one
+/// round trip instead of by guessing.
+pub fn resolve_loras(
+    dir: &Path,
+    requested: &[(String, f32)],
+) -> Result<Vec<(String, PathBuf, f32)>, AssetAiError> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(requested.len());
+    for (name, strength) in requested {
+        let file = if name.ends_with(".safetensors") {
+            name.clone()
+        } else {
+            format!("{name}.safetensors")
+        };
+        let path = dir.join(&file);
+        if !path.is_file() {
+            let available = list_loras(dir)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            return Err(AssetAiError::Params(format!(
+                "lora {name:?} is not in {} — available: [{}]",
+                dir.display(),
+                available.join(", ")
+            )));
+        }
+        out.push((name.clone(), path, *strength));
+    }
+    Ok(out)
+}
+
+/// Fails a request that asked for LoRAs on a backend that cannot apply
+/// them. Silently ignoring the field would render an un-adapted image and
+/// look like a broken adapter.
+pub fn validate_loras_for_backend(
+    backend: &str,
+    loras: &[(String, f32)],
+) -> Result<(), AssetAiError> {
+    if loras.is_empty() || backend == "flux" {
+        return Ok(());
+    }
+    Err(AssetAiError::Params(format!(
+        "loras: the {backend:?} backend does not support LoRA adapters (only \"flux\" does); \
+         requested: [{}]",
+        loras
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// One generated output. `content_type` drives the `/artifact` response;
@@ -480,6 +1058,45 @@ impl<'a> BackendCtx<'a> {
     }
 }
 
+/// A chat serving fact, as it becomes known.
+///
+/// Separate variants rather than one struct because they arrive at different
+/// moments — warmth at prefill, the think split as the reply grows — and a
+/// whole-struct update would blank whichever half it did not know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServingUpdate {
+    /// The turn ingested `tokens` at prefill; `resumed` when that was only the
+    /// delta because the lane kept this conversation's cache.
+    Prefill { tokens: usize, resumed: bool },
+    /// Tokens generated so far inside the think block, and after it. `visible`
+    /// is `None` while the block is still open.
+    Think { think: usize, visible: Option<usize> },
+}
+
+/// Sink for [`ServingUpdate`]s. `&mut dyn FnMut` like every other sink here.
+pub type ServingSink<'a> = &'a mut dyn FnMut(ServingUpdate);
+
+/// Generation that does not need the backend registry.
+///
+/// Handed out by [`ContentBackend::concurrent`] under the registry lock and
+/// used after it is released, so several generations of the same resident
+/// model can run at once while residency itself stays serialised.
+///
+/// `&self`, deliberately: anything reachable through this handle must already
+/// be safe to drive from several turns at once. For the LLM that is true
+/// because the session lives on its own thread and every turn talks to it over
+/// a channel — the handle is a sender, not the session.
+pub trait ConcurrentBackend: Send {
+    fn generate_streamed(
+        &self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        serving: ServingSink,
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError>;
+}
+
 pub trait ContentBackend: Send {
     fn model_id(&self) -> &str;
 
@@ -528,6 +1145,101 @@ pub trait ContentBackend: Send {
         progress: ProgressSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError>;
+
+    /// As [`generate`](Self::generate), with a live text sink: backends
+    /// that produce text incrementally (the LLM chat lane) call `on_text`
+    /// with the FULL text so far — prefix-stable snapshots, never deltas —
+    /// which the server publishes as the job's `partial_text` so chat
+    /// clients stream instead of receiving one burst at completion.
+    /// Default: text does not stream; identical to `generate`.
+    fn generate_streamed(
+        &mut self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let _ = on_text;
+        self.generate(params, progress, cancel)
+    }
+
+    /// Generation that can also report chat serving facts.
+    ///
+    /// Defaults to [`Self::generate_streamed`] and drops them, which is the
+    /// honest answer for every backend that has none: warmth and think blocks
+    /// are properties of a chat turn, not of image or mesh generation.
+    fn generate_streamed_serving(
+        &mut self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        serving: ServingSink,
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let _ = serving;
+        self.generate_streamed(params, progress, on_text, cancel)
+    }
+
+    /// A handle that can run this backend's generation **without holding the
+    /// backend registry**.
+    ///
+    /// The registry is one map behind one lock because residency is a
+    /// whole-device decision: admitting a model may evict another, and two
+    /// threads each keeping their own map would each believe they owned the
+    /// GPU. But `generate_streamed` takes `&mut self` and runs for the whole
+    /// generation, so holding that lock across it would serialise everything
+    /// the map protects — which is the "one GPU, one job" rule the class split
+    /// exists to lift.
+    ///
+    /// A backend that can genuinely run several generations at once returns a
+    /// handle here. The handle is taken under the lock and used after it is
+    /// released, so residency stays serialised and generation does not.
+    ///
+    /// `None` (the default, and the honest answer for every backend that owns
+    /// a single GPU context) means "generate me through `&mut self`", i.e.
+    /// exactly today's behaviour.
+    ///
+    /// Returned **owned** rather than shared: the LLM handle is an
+    /// `mpsc::Sender`, which is `Send` but not `Sync`, so each caller needs its
+    /// own clone rather than a reference to one.
+    fn concurrent(&self) -> Option<Box<dyn ConcurrentBackend>> {
+        None
+    }
+
+    /// Live-session capability (see [`LiveConfig`] / `crate::realtime`).
+    /// Default: not supported — `POST /realtime` refuses such models with
+    /// 400 before ever constructing a session.
+    fn live_supported(&self) -> bool {
+        false
+    }
+
+    /// One live-session step: given the (optional) init image and the
+    /// current config, produce the next output frame. Called at frame rate
+    /// by `crate::realtime::run_live` on the single worker thread — it MUST
+    /// be fast (no multi-second internal denoise loop without checking
+    /// `cancel` between steps) and MUST reuse the resident weights loaded by
+    /// `ensure_loaded` (no per-frame reload).
+    fn live_step(
+        &mut self,
+        frame: LiveFrameIn<'_>,
+        cancel: &CancelToken,
+    ) -> Result<LiveFrameOut, AssetAiError> {
+        let _ = (frame, cancel);
+        Err(AssetAiError::Backend(format!(
+            "{} has no live mode",
+            self.model_id()
+        )))
+    }
+}
+
+/// True when constructing this model's backend reports live-session support.
+/// Construction is cheap (see [`create_backend`]'s doc contract), so this is
+/// safe to call on the `POST /realtime` request path before admission.
+pub fn backend_live_supported(spec: &ModelSpec) -> bool {
+    match create_backend(spec) {
+        Ok(backend) => backend.live_supported(),
+        Err(_) => false,
+    }
 }
 
 /// True when this build contains an implementation for the given registry
@@ -536,7 +1248,7 @@ pub trait ContentBackend: Send {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
-        "flux" | "flux2" => cfg!(feature = "flux"),
+        "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
@@ -550,13 +1262,17 @@ pub fn backend_compiled(name: &str) -> bool {
         "matte-native" => cfg!(feature = "matte-native"),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "upscale-native" => cfg!(feature = "upscale-native"),
+        "video-enhance" => {
+            cfg!(feature = "upscale-native")
+                && cfg!(feature = "interpolate")
+                && cfg!(feature = "video")
+        }
+        "triposplat" => cfg!(feature = "splat-native"),
         "rig-native" => cfg!(feature = "rig-native"),
         "motion-native" => cfg!(feature = "motion-native"),
         // Native Music3 lives on the same CUDA stack as SA3 (`audio`).
         "music3" => cfg!(feature = "audio") || cfg!(feature = "python-backends"),
-        // Official ModularPipeline reference — compiled even when the
-        // other python-backends (FlashWorld / oracles) are off.
-        "music3-python" => true,
         // Box-provisioned Python/Torch reference-tier backends are an
         // explicit opt-in. Native-only fleet builds must never advertise
         // them merely because their std-only wrappers compile everywhere.
@@ -581,9 +1297,16 @@ pub fn backend_provisioned(name: &str) -> bool {
         "flux" => crate::flux_backend::flux_fp8_provisioned(),
         #[cfg(feature = "flux")]
         "flux2" => crate::flux2_backend::flux2_cuda_provisioned(),
-        // The deterministic paint tier ("paint-test") runs anywhere; the real
-        // Hunyuan backend ("paint") fails closed until its native CUDA
-        // executor and pinned checkpoints are present on this machine.
+        // The control checkpoints (Depth/Canny) are plain BF16 dense
+        // FLUX.1-dev-architecture transformers, not FP8 — any CUDA device
+        // is enough (no combined-FP8-checkpoint contract to satisfy), but
+        // there is still no CPU/Metal fallback: fail closed the same way.
+        #[cfg(feature = "flux")]
+        "control" => crate::control_backend::control_provisioned(),
+        #[cfg(feature = "flux")]
+        "flux-fill" => crate::inpaint_backend::inpaint_fp8_provisioned(),
+        // CUDA Hunyuan Paint is default-on for Windows/Linux `paint-cuda`
+        // builds. Weights may still be absent until first pull.
         #[cfg(feature = "paint")]
         "paint" => crate::paint_backend::hunyuan_native_provisioned(),
         #[cfg(not(feature = "paint"))]
@@ -591,9 +1314,21 @@ pub fn backend_provisioned(name: &str) -> bool {
         #[cfg(feature = "python-backends")]
         "flashworld" => crate::world_backend::flashworld_provisioned(),
         "music3" => crate::music3_backend::music3_provisioned(),
-        "music3-python" => crate::music3_backend::music3_python_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "upscale-native" => cfg!(feature = "upscale-native"),
+        "video-enhance" => {
+            cfg!(feature = "upscale-native")
+                && cfg!(feature = "interpolate")
+                && cfg!(feature = "video")
+        }
+        // TripoSplat is CUDA-only like flux2/trellis: ~1.9B parameters of
+        // resident f32 with no CPU/Metal production path, so a box without a
+        // device must not advertise it.
+        #[cfg(feature = "splat-native")]
+        "triposplat" => crate::splat_backend::splat_cuda_provisioned(),
+        #[cfg(not(feature = "splat-native"))]
+        "triposplat" => false,
         #[cfg(feature = "python-backends")]
         "depth" => crate::depth_backend::depth_provisioned(),
         #[cfg(feature = "python-backends")]
@@ -724,6 +1459,20 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
             "model {} needs a CUDA build with the 'flux' cargo feature",
             spec.id
         ))),
+        #[cfg(feature = "flux")]
+        "control" => Ok(Box::new(crate::control_backend::ControlBackend::new(&spec.id))),
+        #[cfg(not(feature = "flux"))]
+        "control" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'flux' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "flux")]
+        "flux-fill" => Ok(Box::new(crate::inpaint_backend::InpaintBackend::new(&spec.id))),
+        #[cfg(not(feature = "flux"))]
+        "flux-fill" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'flux' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "llm")]
         "llm" => Ok(Box::new(crate::llm_backend::LlmBackend::new_llama(&spec.id))),
         #[cfg(not(feature = "llm"))]
@@ -799,12 +1548,18 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "flashworld" => Ok(Box::new(
             crate::world_backend::WorldBackend::new_flashworld(&spec.id),
         )),
+        #[cfg(feature = "splat-native")]
+        "triposplat" => Ok(Box::new(crate::splat_backend::SplatBackend::new_native(
+            &spec.id,
+        ))),
+        #[cfg(not(feature = "splat-native"))]
+        "triposplat" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'splat-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(any(feature = "audio", feature = "python-backends"))]
         "music3" => Ok(Box::new(
             crate::music3_backend::Music3Backend::new_music3(&spec.id),
-        )),
-        "music3-python" => Ok(Box::new(
-            crate::music3_backend::Music3Backend::new_music3_python(&spec.id),
         )),
         #[cfg(feature = "matte-native")]
         "matte-native" => Ok(Box::new(crate::matte_backend::MatteBackend::new_native(
@@ -831,6 +1586,24 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "segment-native"))]
         "segment-native" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'segment-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "upscale-native")]
+        "upscale-native" => Ok(Box::new(
+            crate::upscale_backend::UpscaleBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(feature = "upscale-native"))]
+        "upscale-native" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'upscale-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(all(feature = "upscale-native", feature = "interpolate", feature = "video"))]
+        "video-enhance" => Ok(Box::new(
+            crate::enhance_backend::VideoEnhanceBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(all(feature = "upscale-native", feature = "interpolate", feature = "video")))]
+        "video-enhance" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'upscale-native', 'interpolate' and 'video' cargo features",
             spec.id
         ))),
         #[cfg(feature = "python-backends")]
@@ -911,6 +1684,7 @@ mod tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         }
     }
@@ -1024,6 +1798,166 @@ mod tests {
         ] {
             assert!(backend_compiled(name), "{name}");
             assert!(create_backend(&spec(name, true, None)).is_ok(), "{name}");
+        }
+    }
+
+    // -- LoRA plumbing ----------------------------------------------------
+
+    use super::{list_loras, lora_dir, resolve_loras, validate_loras_for_backend, GenerateParams};
+    use crate::protocol::{GenerateRequestJson, LoraRefJson};
+    use makepad_micro_serde::{DeJson, SerJson};
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "makepad-asset-ai-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn request_with_loras(loras: Option<Vec<LoraRefJson>>) -> GenerateRequestJson {
+        let mut request =
+            GenerateRequestJson::deserialize_json(r#"{"model":"flux1-dev"}"#).unwrap();
+        request.loras = loras;
+        request
+    }
+
+    #[test]
+    fn lists_and_resolves_the_lora_drop_box() {
+        let cache = scratch_dir("loras");
+        let dir = lora_dir(&cache);
+        // Nothing dropped in yet: lists empty, never errors.
+        assert!(list_loras(&dir).is_empty());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zebra.safetensors"), b"xx").unwrap();
+        std::fs::write(dir.join("apple.safetensors"), b"xxxx").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
+        assert_eq!(
+            list_loras(&dir),
+            vec![("apple".to_string(), 4u64), ("zebra".to_string(), 2)]
+        );
+
+        // Both spellings resolve; strengths ride through in request order.
+        let resolved = resolve_loras(
+            &dir,
+            &[
+                ("apple".to_string(), 0.5),
+                ("zebra.safetensors".to_string(), 1.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].1, dir.join("apple.safetensors"));
+        assert_eq!(resolved[0].2, 0.5);
+        assert_eq!(resolved[1].1, dir.join("zebra.safetensors"));
+
+        // A typo names what IS available so it is fixable in one round trip.
+        let error = resolve_loras(&dir, &[("aple".to_string(), 1.0)]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("apple"), "{message}");
+        assert!(message.contains("zebra"), "{message}");
+
+        // Empty request never touches the filesystem.
+        assert!(resolve_loras(&cache.join("nope"), &[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn generate_request_round_trips_loras_and_validates_them() {
+        let json = r#"{"model":"flux1-dev","prompt":"a fox",
+            "loras":[{"name":"frosting","strength":0.8},{"name":"detail.safetensors"}]}"#;
+        let request = GenerateRequestJson::deserialize_json(json).unwrap();
+        let params = GenerateParams::from_request(&request).unwrap();
+        assert_eq!(
+            params.loras,
+            vec![
+                ("frosting".to_string(), 0.8f32),
+                ("detail.safetensors".to_string(), 1.0),
+            ]
+        );
+
+        // Round-trips through our own serializer unchanged.
+        let reparsed =
+            GenerateRequestJson::deserialize_json(&request.serialize_json()).unwrap();
+        assert_eq!(
+            GenerateParams::from_request(&reparsed).unwrap().loras,
+            params.loras
+        );
+
+        // Absent field = no adapters (and every older client stays valid).
+        let plain = GenerateRequestJson::deserialize_json(r#"{"model":"flux1-dev"}"#).unwrap();
+        assert!(GenerateParams::from_request(&plain).unwrap().loras.is_empty());
+    }
+
+    #[test]
+    fn lora_requests_are_screened_before_they_reach_a_backend() {
+        let bad_names = ["", "../secrets", "sub/dir", "a\\b", ".hidden"];
+        for name in bad_names {
+            let request = request_with_loras(Some(vec![LoraRefJson {
+                name: name.to_string(),
+                strength: None,
+            }]));
+            assert!(
+                GenerateParams::from_request(&request).is_err(),
+                "name {name:?} must be refused"
+            );
+        }
+
+        // Duplicates, over-long lists and non-finite strengths refuse.
+        let duplicate = request_with_loras(Some(vec![
+            LoraRefJson { name: "a".into(), strength: None },
+            LoraRefJson { name: "a".into(), strength: Some(0.5) },
+        ]));
+        assert!(GenerateParams::from_request(&duplicate).is_err());
+
+        let too_many = request_with_loras(Some(
+            (0..super::MAX_LORAS + 1)
+                .map(|i| LoraRefJson {
+                    name: format!("a{i}"),
+                    strength: None,
+                })
+                .collect(),
+        ));
+        assert!(GenerateParams::from_request(&too_many).is_err());
+
+        let nan = request_with_loras(Some(vec![LoraRefJson {
+            name: "a".into(),
+            strength: Some(f64::NAN),
+        }]));
+        assert!(GenerateParams::from_request(&nan).is_err());
+
+        // Strength is clamped, not rejected, inside a sane band.
+        let hot = request_with_loras(Some(vec![LoraRefJson {
+            name: "a".into(),
+            strength: Some(99.0),
+        }]));
+        assert_eq!(
+            GenerateParams::from_request(&hot).unwrap().loras,
+            vec![("a".to_string(), 4.0f32)]
+        );
+    }
+
+    #[test]
+    fn only_the_flux_backend_accepts_loras() {
+        let loras = vec![("frosting".to_string(), 1.0f32)];
+        assert!(validate_loras_for_backend("flux", &loras).is_ok());
+        // No adapters requested: every backend is fine.
+        for backend in ["flux", "flux2", "trellis", "h3", "testpattern"] {
+            assert!(validate_loras_for_backend(backend, &[]).is_ok(), "{backend}");
+        }
+        // Adapters requested on a backend that cannot apply them: refused,
+        // and the message names both the backend and the adapters.
+        for backend in ["flux2", "trellis", "h3", "testpattern", "llm"] {
+            let error = validate_loras_for_backend(backend, &loras)
+                .expect_err("{backend} must refuse loras");
+            let message = error.to_string();
+            assert!(message.contains(backend), "{message}");
+            assert!(message.contains("frosting"), "{message}");
         }
     }
 }

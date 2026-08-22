@@ -153,6 +153,7 @@ fn good_facts(core: &AssetServerCore, tag: u8) -> OperationResultFacts {
                 width: 512,
                 height: 512,
                 byte_len: thumb.len() as u64,
+                views: Vec::new(),
             }),
             metrics: Metrics {
                 total_bytes: glb.len() as u64 + thumb.len() as u64,

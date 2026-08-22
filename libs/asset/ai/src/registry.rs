@@ -44,7 +44,23 @@ pub struct RegistryModelJson {
     /// Blackwell-only NVFP4 checkpoints).
     pub min_compute_cap: Option<f64>,
     pub note: Option<String>,
+    /// Weight-license record the UI must show before this model is cleared
+    /// for download or generation. Optional on the wire so a cache-dir
+    /// override registry from an older box still parses; the embedded
+    /// registry requires it (see tests).
+    pub license: Option<ModelLicenseJson>,
     pub files: Vec<RegistryEntryFileJson>,
+}
+
+/// Registry JSON shape of a model-weight license. `restriction` is one of
+/// `none` (permissive), `non-commercial`, `community`, `restricted`.
+#[derive(Clone, Debug, SerJson, DeJson, PartialEq, Eq)]
+pub struct ModelLicenseJson {
+    pub name: String,
+    pub url: String,
+    pub summary: String,
+    pub restriction: String,
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]
@@ -131,6 +147,37 @@ pub enum Domain {
     /// maps (albedo/normal/ORM) + provenance manifest (Hunyuan3D-Paint-2.1;
     /// deterministic paint-test tier ships everywhere).
     Paint,
+    /// Reference image + instruction -> edited image (FLUX.2 klein). Its own
+    /// domain so image-domain affinity never routes a text-to-image job to
+    /// a model that fails closed without a reference.
+    Edit,
+    /// Image -> 4x upscaled image (RealESRGAN x4plus). Its own domain, like
+    /// `Edit`, so image-domain affinity never routes a text-to-image job to
+    /// a model that fails closed without an input image.
+    Upscale,
+    /// Structure-conditioned image generation: a control image (depth map or
+    /// Canny edge map) + text prompt -> a new image matching that structure
+    /// (FLUX.1-Depth-dev / FLUX.1-Canny-dev). Its own domain, like `Edit`/
+    /// `Upscale`, so image-domain affinity never routes a text-to-image job
+    /// to a model that fails closed without a control image.
+    Control,
+    /// Image + mask + prompt -> inpainted/outpainted image (FLUX.1-Fill-dev).
+    /// Its own domain, like `Edit`/`Upscale`, so image-domain affinity never
+    /// routes a text-to-image job to a model that fails closed without an
+    /// image+mask pair.
+    Inpaint,
+    /// Video -> video, decoded once and re-encoded once, with RealESRGAN
+    /// upscaling, RIFE frame-rate multiplication and/or a playback motion
+    /// sidecar fused in the middle (video-enhance). Its own domain so video
+    /// affinity never routes a text-to-video job to a model that fails
+    /// closed without an input clip — and so a box can be dedicated to
+    /// post-processing without advertising generation.
+    Enhance,
+    /// Single object image -> 3D gaussian splat PLY (TripoSplat). Distinct
+    /// from `World`, which reconstructs a walkable SCENE from an image or
+    /// prompt: this is one object, reconstructed at the requested gaussian
+    /// budget, and the two are neither substitutable nor comparable in cost.
+    Splat,
 }
 
 impl Domain {
@@ -150,6 +197,12 @@ impl Domain {
             "motion" => Some(Domain::Motion),
             "music" => Some(Domain::Music),
             "paint" => Some(Domain::Paint),
+            "edit" => Some(Domain::Edit),
+            "upscale" => Some(Domain::Upscale),
+            "control" => Some(Domain::Control),
+            "inpaint" => Some(Domain::Inpaint),
+            "enhance" => Some(Domain::Enhance),
+            "splat" => Some(Domain::Splat),
             _ => None,
         }
     }
@@ -170,6 +223,12 @@ impl Domain {
             Domain::Motion => "motion",
             Domain::Music => "music",
             Domain::Paint => "paint",
+            Domain::Edit => "edit",
+            Domain::Upscale => "upscale",
+            Domain::Control => "control",
+            Domain::Inpaint => "inpaint",
+            Domain::Enhance => "enhance",
+            Domain::Splat => "splat",
         }
     }
 }
@@ -271,7 +330,64 @@ pub struct ModelSpec {
     pub min_vram_gb: Option<f64>,
     pub min_compute_cap: Option<f64>,
     pub note: Option<String>,
+    pub license: Option<ModelLicense>,
     pub files: Vec<FileSpec>,
+}
+
+/// Validated weight-license identity. The UI keys acknowledgements on
+/// `(model id, license.identity())` so a license-text change forces a
+/// fresh ack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelLicense {
+    pub name: String,
+    pub url: String,
+    pub summary: String,
+    pub restriction: LicenseRestriction,
+    pub sha256: Option<String>,
+}
+
+impl ModelLicense {
+    /// Stable identity of the *text* the user accepted: sha256 when pinned,
+    /// otherwise the canonical URL.
+    pub fn identity(&self) -> String {
+        self.sha256
+            .clone()
+            .unwrap_or_else(|| self.url.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LicenseRestriction {
+    /// Apache / MIT / BSD and similar permissive weight licenses.
+    None,
+    NonCommercial,
+    Community,
+    Restricted,
+}
+
+impl LicenseRestriction {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "none" => Some(Self::None),
+            "non-commercial" => Some(Self::NonCommercial),
+            "community" => Some(Self::Community),
+            "restricted" => Some(Self::Restricted),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::NonCommercial => "non-commercial",
+            Self::Community => "community",
+            Self::Restricted => "restricted",
+        }
+    }
+
+    pub fn needs_emphasis(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 impl ModelSpec {
@@ -482,6 +598,10 @@ impl Registry {
                     }
                 }
             }
+            let license = match model.license {
+                None => None,
+                Some(license) => Some(validate_license(&model.id, license)?),
+            };
             models.push(ModelSpec {
                 id: model.id,
                 domain,
@@ -492,6 +612,7 @@ impl Registry {
                 min_vram_gb: model.min_vram_gb,
                 min_compute_cap: model.min_compute_cap,
                 note: model.note,
+                license,
                 files,
             });
         }
@@ -511,6 +632,48 @@ impl Registry {
     pub fn find(&self, id: &str) -> Option<&ModelSpec> {
         self.models.iter().find(|model| model.id == id)
     }
+}
+
+/// License record for `id` from the embedded registry. Used by the Asset UI
+/// when a live box is old enough that `GET /models` has no license fields.
+pub fn license_for_model(id: &str) -> Option<ModelLicense> {
+    Registry::embedded()
+        .ok()?
+        .find(id)
+        .and_then(|model| model.license.clone())
+}
+
+fn validate_license(model_id: &str, license: ModelLicenseJson) -> Result<ModelLicense, AssetAiError> {
+    if license.name.trim().is_empty() || license.url.trim().is_empty() || license.summary.trim().is_empty()
+    {
+        return Err(AssetAiError::Registry(format!(
+            "model {model_id}: license name, url and summary must be non-empty"
+        )));
+    }
+    if !license.url.starts_with("https://") && !license.url.starts_with("http://") {
+        return Err(AssetAiError::Registry(format!(
+            "model {model_id}: license url must be http(s), got {:?}",
+            license.url
+        )));
+    }
+    let restriction = LicenseRestriction::parse(&license.restriction).ok_or_else(|| {
+        AssetAiError::Registry(format!(
+            "model {model_id}: unknown license restriction {:?} (expected none|non-commercial|community|restricted)",
+            license.restriction
+        ))
+    })?;
+    if let Some(sha256) = &license.sha256 {
+        validate_sha256(sha256).map_err(|message| {
+            AssetAiError::Registry(format!("model {model_id}: license sha256: {message}"))
+        })?;
+    }
+    Ok(ModelLicense {
+        name: license.name,
+        url: license.url,
+        summary: license.summary,
+        restriction,
+        sha256: license.sha256.map(|s| s.to_ascii_lowercase()),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -668,6 +831,41 @@ mod tests {
         // Music: the MiniMax-Music3 diffusers file set must stay fully
         // pinned (immutable revision + size + sha256 on every file) so pull
         // jobs are reproducible and resumable on any box.
+        assert!(
+            registry.find("pbr-testpattern").is_none(),
+            "deterministic paint-test is crate-internal and must not advertise"
+        );
+        let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
+        assert_eq!(hunyuan.domain, Domain::Paint);
+        assert_eq!(hunyuan.backend, "paint");
+        let hunyuan_license = hunyuan.license.as_ref().expect("hunyuan license");
+        assert_eq!(
+            hunyuan_license.name,
+            "Tencent Hunyuan 3D 2.1 Community License Agreement"
+        );
+        assert_eq!(
+            hunyuan_license.restriction,
+            LicenseRestriction::Community
+        );
+        assert_eq!(
+            hunyuan_license.sha256.as_deref(),
+            Some("5bd08f93b2d280bb26ff3eed5d3996fe47a9698b5f7785163928668d7fd578c6")
+        );
+        assert_eq!(hunyuan.files.len(), 3);
+        for role in ["unet", "vae", "dino-conditioner"] {
+            let file = hunyuan.file_by_role(role).unwrap();
+            assert!(file.size.is_some() && file.sha256.is_some(), "{role}");
+            assert!(
+                file.cache_as.starts_with("paint21/"),
+                "{role} cache_as {}",
+                file.cache_as
+            );
+        }
+        assert_eq!(
+            hunyuan.file_by_role("vae").unwrap().cache_as,
+            "paint21/vae/diffusion_pytorch_model.bin"
+        );
+
         let music3 = registry.find("minimax-music3").unwrap();
         assert_eq!(music3.domain, Domain::Music);
         assert_eq!(music3.backend, "music3");
@@ -695,15 +893,46 @@ mod tests {
         let total: u64 = music3.files.iter().map(|f| f.size.unwrap()).sum();
         assert_eq!(total, 28_517_609_106);
 
-        let music3_py = registry.find("minimax-music3-python").unwrap();
-        assert_eq!(music3_py.domain, Domain::Music);
-        assert_eq!(music3_py.backend, "music3-python");
-        assert!(music3_py.available && !music3_py.gated);
-        assert_eq!(music3_py.files.len(), music3.files.len());
+        // Music Q4 tier: the official audio.cpp GGUF pack (default mix
+        // Q4_0 LM + Q4_0 DiT + BF16 RVQ + F32 cond/vocoder + sidecar
+        // tokenizer + LICENSE), every file pinned to one immutable revision.
+        let music3_q4 = registry.find("minimax-music3-q4").unwrap();
+        assert_eq!(music3_q4.domain, Domain::Music);
+        assert_eq!(music3_q4.backend, "music3");
+        assert!(music3_q4.available && !music3_q4.gated);
+        assert_eq!(music3_q4.files.len(), 8);
+        for file in &music3_q4.files {
+            assert_eq!(file.repo, "audio-cpp/MiniMax-Music3-GGUF");
+            assert_eq!(
+                file.revision.as_deref(),
+                Some("ed915d0748225e39b2b9b4eab354a20f66e30bc2"),
+                "{} must pin the audited revision",
+                file.cache_as
+            );
+            assert!(file.size.is_some() && file.sha256.is_some(), "{}", file.cache_as);
+            assert!(file.role.is_some(), "{}", file.cache_as);
+            assert!(
+                file.cache_as.starts_with("music/MiniMax-Music3-Q4/"),
+                "{}",
+                file.cache_as
+            );
+        }
+        // The default audio.cpp mix exactly — no q8/q4_k alternates in the
+        // pull set, and the LICENSE ships with the weights.
+        let q4_lm = music3_q4.file_by_role("lm-gguf").unwrap();
+        assert_eq!(q4_lm.path, "language_model_q4_0.gguf");
+        assert_eq!(q4_lm.size, Some(6_006_866_496));
         assert_eq!(
-            music3_py.files.iter().map(|f| f.cache_as.as_str()).collect::<Vec<_>>(),
-            music3.files.iter().map(|f| f.cache_as.as_str()).collect::<Vec<_>>()
+            music3_q4.file_by_role("dit-gguf").unwrap().path,
+            "transformer_q4_0.gguf"
         );
+        assert_eq!(
+            music3_q4.file_by_role("rvq-gguf").unwrap().path,
+            "rvq_depth_decoder_bf16.gguf"
+        );
+        assert!(music3_q4.file_by_role("license").is_some());
+        let q4_total: u64 = music3_q4.files.iter().map(|f| f.size.unwrap()).sum();
+        assert_eq!(q4_total, 9_024_133_343);
 
         let ace = registry.find("ace-step-1.5-xl").unwrap();
         assert_eq!(ace.domain, Domain::Music);
@@ -727,11 +956,6 @@ mod tests {
         }
         let ace_total: u64 = ace.files.iter().map(|f| f.size.unwrap()).sum();
         assert_eq!(ace_total, 11_101_497_774);
-
-        let testpattern = registry.find("testpattern").unwrap();
-        assert_eq!(testpattern.domain, Domain::Image);
-        assert!(testpattern.available);
-        assert!(testpattern.files.is_empty());
 
         // The canonical flux IDs are combined single-file FP8 checkpoints:
         // exactly ONE file each, with the immutable Comfy-Org revision, the
@@ -793,7 +1017,7 @@ mod tests {
         }
 
         let klein = registry.find("flux2-klein-4b").unwrap();
-        assert_eq!(klein.domain, Domain::Image);
+        assert_eq!(klein.domain, Domain::Edit);
         assert_eq!(klein.backend, "flux2");
         assert!(klein.available && !klein.gated);
         assert_eq!(klein.files.len(), 5);
@@ -871,16 +1095,6 @@ mod tests {
         );
         assert!(!qwen38_gguf.local);
 
-        let qwen36 = registry.find("qwen3.6-27b").unwrap();
-        assert_eq!(qwen36.domain, Domain::Text);
-        assert_eq!(qwen36.backend, "llm");
-        assert!(qwen36.available);
-        assert_eq!(qwen36.files.len(), 1);
-        assert_eq!(qwen36.files[0].repo, "unsloth/Qwen3.6-27B-GGUF");
-        assert_eq!(qwen36.files[0].cache_as, "llm/Qwen3.6-27B-Q4_K_M.gguf");
-        assert_eq!(qwen36.files[0].size, Some(16_817_244_384));
-        assert!(!qwen36.files[0].local);
-
         // Speech domain: Kokoro downloads the upstream .pth/.pt and converts
         // in-process to the .mktts/.mkvoice format the loader reads.
         let kokoro = registry.find("kokoro").unwrap();
@@ -922,8 +1136,13 @@ mod tests {
         assert_eq!(h3.domain, Domain::Video);
         assert_eq!(h3.backend, "h3");
         assert!(h3.available);
-        assert_eq!(h3.files.len(), 61);
-        assert!(h3.files.iter().all(|f| f.repo == "MiniMaxAI/MiniMax-H3"));
+        // 61 upstream MiniMax files + the shared RIFE flownet.
+        assert_eq!(h3.files.len(), 62);
+        assert!(h3
+            .files
+            .iter()
+            .filter(|f| f.role.as_deref() != Some("interpolate"))
+            .all(|f| f.repo == "MiniMaxAI/MiniMax-H3"));
         // The dir anchor the backend resolves the model root from.
         assert!(h3
             .files
@@ -962,7 +1181,7 @@ mod tests {
         assert_eq!(q4.vram_gb, Some(20.0));
         assert_eq!(q4.min_vram_gb, Some(22.0));
         assert_eq!(q4.min_compute_cap, Some(8.9));
-        assert_eq!(q4.files.len(), 6);
+        assert_eq!(q4.files.len(), 7);
         for file in &q4.files {
             assert!(
                 file.role.is_some()
@@ -972,7 +1191,13 @@ mod tests {
                 "q4 tier file {} must be fully pinned",
                 file.cache_as
             );
-            assert!(file.cache_as.starts_with("video/MiniMax-H3-tiers/"), "{}", file.cache_as);
+            // The RIFE flownet is shared by every tier, so it lives outside
+            // the tier root (one on-disk copy for the whole video domain).
+            let expected_root = match file.role.as_deref() {
+                Some("interpolate") => "video/rife/",
+                _ => "video/MiniMax-H3-tiers/",
+            };
+            assert!(file.cache_as.starts_with(expected_root), "{}", file.cache_as);
         }
         let dit = q4.file_by_role("dit-gguf").unwrap();
         assert_eq!(dit.repo, "unsloth/MiniMax-H3-GGUF");
@@ -988,7 +1213,7 @@ mod tests {
         assert_eq!(nv4.vram_gb, Some(28.0));
         assert_eq!(nv4.min_vram_gb, Some(30.0));
         assert_eq!(nv4.min_compute_cap, Some(12.0));
-        assert_eq!(nv4.files.len(), 6);
+        assert_eq!(nv4.files.len(), 7);
         let nv_dit = nv4.file_by_role("dit-nvfp4").unwrap();
         assert_eq!(nv_dit.repo, "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot");
         assert_eq!(nv_dit.size, Some(12_528_636_865));
@@ -1019,6 +1244,39 @@ mod tests {
         // The legacy id keeps its no-gate behavior (running boxes/apps).
         assert_eq!(h3.min_vram_gb, None);
         assert_eq!(h3.min_compute_cap, None);
+
+        // The RIFE v4.26 flownet is an AUXILIARY FILE of every video tier,
+        // never a model of its own: the domain must keep exactly one
+        // selectable generator per tier, so nothing may register it as an
+        // entry the UI model list can pick.
+        assert!(registry.find("rife").is_none());
+        assert!(registry.models.iter().all(|model| !model.id.contains("rife")));
+        let mut interpolate_files = Vec::new();
+        for tier in [&h3, &q4, &nv4, &bf16] {
+            let file = tier
+                .file_by_role("interpolate")
+                .unwrap_or_else(|| panic!("{} carries no interpolate role", tier.id));
+            assert_eq!(file.repo, "Comfy-Org/frame_interpolation");
+            assert_eq!(file.path, "frame_interpolation/rife_v4.26.safetensors");
+            assert_eq!(
+                file.revision.as_deref(),
+                Some("9bca6366a22473ccee25602fa82b224d78413960")
+            );
+            assert_eq!(file.cache_as, "video/rife/rife_v4.26.safetensors");
+            assert_eq!(file.size, Some(22_674_688));
+            assert_eq!(
+                file.sha256.as_deref(),
+                Some("151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94")
+            );
+            assert!(!file.local);
+            interpolate_files.push(file);
+        }
+        // One identity, so one on-disk copy no matter how many tiers a box
+        // pulls.
+        for file in &interpolate_files {
+            assert_eq!(file.cache_as, interpolate_files[0].cache_as);
+            assert_eq!(file.sha256, interpolate_files[0].sha256);
+        }
 
         // Audio domain #3: Woosh ships as GitHub release zips — absolute
         // URLs in `path` (the downloader uses them verbatim), each zip
@@ -1105,6 +1363,58 @@ mod tests {
         assert_eq!(segment_weights.repo, "Comfy-Org/sam3.1");
         assert!(!segment_weights.repo.starts_with("facebook/"));
         assert_eq!(segment.vram_gb, Some(4.0));
+
+        // Upscale domain: pinned native RealESRGAN x4plus CUDA artifact.
+        let upscale = registry.find("realesrgan-x4plus").unwrap();
+        assert_eq!(upscale.domain, Domain::Upscale);
+        assert_eq!(upscale.backend, "upscale-native");
+        assert!(upscale.available && !upscale.gated);
+        assert_eq!(upscale.files.len(), 1);
+        let upscale_weights = upscale.file_by_role("native-upscale").unwrap();
+        assert_eq!(upscale_weights.repo, "Comfy-Org/Real-ESRGAN_repackaged");
+        assert_eq!(upscale_weights.path, "RealESRGAN_x4plus.safetensors");
+        assert_eq!(
+            upscale_weights.revision.as_deref(),
+            Some("ea19b4cd14f85a5b914eee8aa7ff77bc371039a0")
+        );
+        assert_eq!(upscale_weights.size, Some(66_857_836));
+        assert_eq!(
+            upscale_weights.sha256.as_deref(),
+            Some("37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb")
+        );
+        assert!(upscale_weights.cache_as.starts_with("upscale/"));
+
+        // Inpaint domain: flux1-fill-dev, a 4-file split bundle (no
+        // Comfy-Org combined-checkpoint repack exists for Fill).
+        let fill = registry.find("flux1-fill-dev").unwrap();
+        assert_eq!(fill.domain, Domain::Inpaint);
+        assert_eq!(fill.backend, "flux-fill");
+        assert!(fill.available && fill.gated);
+        assert_eq!(fill.files.len(), 4);
+        let dit = fill.file_by_role("diffusion_model").unwrap();
+        assert_eq!(dit.repo, "cudabenchmarktest/flux1-fill-dev-fp8");
+        assert_eq!(dit.size, Some(11_902_539_328));
+        assert_eq!(
+            dit.sha256.as_deref(),
+            Some("0320d505ca42bca99c5bd600b1839ced2b2e980ea985917965d411d98a710729")
+        );
+        assert!(dit.cache_as.starts_with("unet/"));
+        let vae = fill.file_by_role("vae").unwrap();
+        assert_eq!(vae.repo, "Kijai/flux-fp8");
+        assert!(vae.cache_as.starts_with("vae/"));
+        let clip_l = fill.file_by_role("clip_l").unwrap();
+        assert_eq!(clip_l.repo, "comfyanonymous/flux_text_encoders");
+        assert!(clip_l.cache_as.starts_with("text_encoders/"));
+        let t5xxl = fill.file_by_role("t5xxl").unwrap();
+        assert_eq!(t5xxl.repo, "comfyanonymous/flux_text_encoders");
+        assert!(t5xxl.cache_as.starts_with("text_encoders/"));
+        // Every pinned file has both size and sha256 (the RegistryEntryFileJson
+        // doc contract: a revision pin must carry both).
+        for file in &fill.files {
+            assert!(file.revision.is_some());
+            assert!(file.size.is_some());
+            assert!(file.sha256.is_some());
+        }
     }
 
     #[test]
@@ -1263,5 +1573,45 @@ mod tests {
         let entry = |role: &str, output: &str, output_sha: &str| format!(r#"{{"role":"{role}","repo":"o/r","path":"w","revision":"{revision}","cache_as":"shared/source","size":7,"sha256":"{source_sha}","conversion":{{"cache_as":"{output}","size":9,"sha256":"{output_sha}","converter_id":"c","converter_version":"1"}}}}"#);
         let json = format!(r#"{{"models":[{{"id":"x","domain":"rig","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"files":[{},{}]}}]}}"#, entry("a", "out/a", &output_a), entry("b", "out/b", &output_b));
         assert!(Registry::parse(&json).is_ok());
+    }
+
+    #[test]
+    fn embedded_registry_requires_a_license_on_every_model() {
+        let registry = Registry::embedded().unwrap();
+        assert!(registry.models.len() >= 4);
+        for model in &registry.models {
+            let license = model
+                .license
+                .as_ref()
+                .unwrap_or_else(|| panic!("model {} is missing a license record", model.id));
+            assert!(
+                !license.name.trim().is_empty(),
+                "{} empty license name",
+                model.id
+            );
+            assert!(
+                license.url.starts_with("https://") || license.url.starts_with("http://"),
+                "{} license url {}",
+                model.id,
+                license.url
+            );
+            assert!(
+                !license.summary.trim().is_empty(),
+                "{} empty license summary",
+                model.id
+            );
+        }
+        let flux_dev = license_for_model("flux1-dev").expect("flux1-dev license");
+        assert_eq!(flux_dev.restriction, LicenseRestriction::NonCommercial);
+        let schnell = license_for_model("flux1-schnell").expect("flux1-schnell license");
+        assert_eq!(schnell.restriction, LicenseRestriction::None);
+        assert!(license_for_model("no-such-model").is_none());
+    }
+
+    #[test]
+    fn unknown_license_restriction_fails_closed() {
+        let json = r#"{"models":[{"id":"x","domain":"image","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"license":{"name":"X","url":"https://example.com/l","summary":"s","restriction":"copyleft"},"files":[]}]}"#;
+        let message = Registry::parse(json).unwrap_err().to_string();
+        assert!(message.contains("unknown license restriction"), "{message}");
     }
 }

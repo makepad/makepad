@@ -8,7 +8,13 @@
 //!   it was committed to the CAS first); a manifest can never point at bytes
 //!   the store does not hold.
 //! - Candidate lifecycle: staged -> published, staged/published -> quarantined,
-//!   quarantined is terminal. No other transition exists.
+//!   quarantined is terminal. No other transition exists. RETIREMENT reuses
+//!   that terminal state rather than inventing a parallel one: retiring a
+//!   revision performs exactly the quarantine transition (with its alias
+//!   teardown and search refresh) and additionally stamps `retired_ms`, which
+//!   is the deletion intent blob GC reads. Retiring an ASSET stamps
+//!   `assets.retired_ms` and retires every revision it has, in one
+//!   transaction, cost proportional to that asset — never to the catalog.
 //! - Aliases are the only mutable pointers, and may only point at PUBLISHED
 //!   revisions whose namespace matches the alias namespace. That invariant is
 //!   maintained, not just admitted: quarantining a revision drops every alias
@@ -33,12 +39,20 @@ pub const CATALOG_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS blobs(
     blob_id BLOB PRIMARY KEY,
     size INTEGER NOT NULL,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    -- When a later upload of the SAME bytes deduped against this row. The
+    -- blob is old but the intent to reference it is fresh, so blob GC's
+    -- grace horizon must see that recency (schema v9).
+    last_ref_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS assets(
     asset_id BLOB PRIMARY KEY,
     namespace TEXT NOT NULL,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    -- Asset-level terminal state (schema v9). NULL = live. A retired asset
+    -- and every one of its revisions leave every listing, alias and search
+    -- row; the identity row survives so the id can never be reused.
+    retired_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS asset_revisions(
     revision BLOB PRIMARY KEY,
@@ -46,6 +60,11 @@ CREATE TABLE IF NOT EXISTS asset_revisions(
     manifest BLOB NOT NULL,
     created_ms INTEGER NOT NULL
 );
+-- 'Every revision of this asset, newest first' is what retirement and the
+-- retention rule walk; without this index each is a full scan of every
+-- revision in the store (schema v9).
+CREATE INDEX IF NOT EXISTS asset_revisions_by_asset
+    ON asset_revisions(asset_id, created_ms, revision);
 CREATE TABLE IF NOT EXISTS candidates(
     kind TEXT NOT NULL CHECK(kind IN ('asset','game')),
     owner_id BLOB NOT NULL,
@@ -54,6 +73,11 @@ CREATE TABLE IF NOT EXISTS candidates(
     staged_ms INTEGER NOT NULL,
     published_ms INTEGER,
     quarantined_ms INTEGER,
+    -- Retirement (schema v9) is quarantine PLUS a deletion intent: the
+    -- state column stays the terminal 'quarantined' the lifecycle already
+    -- defines, and this timestamp says the bytes may be collected. NULL on
+    -- a merely quarantined (pulled, still stored) revision.
+    retired_ms INTEGER,
     PRIMARY KEY(kind, owner_id, revision)
 );
 CREATE TABLE IF NOT EXISTS asset_aliases(
@@ -62,6 +86,13 @@ CREATE TABLE IF NOT EXISTS asset_aliases(
     head_revision BLOB NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+-- Reverse direction of the alias table. Every alias-head mutation asks
+-- 'which aliases point at this asset' three times (liveness EXISTS, the
+-- canonical MIN(alias), the posting rebuild) and quarantine deletes by
+-- (asset_id, head_revision); without this index each of those is a full
+-- scan of every alias in the store.
+CREATE INDEX IF NOT EXISTS asset_aliases_by_asset
+    ON asset_aliases(asset_id, alias);
 CREATE TABLE IF NOT EXISTS games(
     game_id BLOB PRIMARY KEY,
     namespace TEXT NOT NULL,
@@ -85,6 +116,10 @@ CREATE TABLE IF NOT EXISTS game_aliases(
     head_revision BLOB NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+-- Same reverse direction for games: quarantine drops alias heads by
+-- (game_id, head_revision).
+CREATE INDEX IF NOT EXISTS game_aliases_by_game
+    ON game_aliases(game_id, alias);
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +177,11 @@ impl<'a> Catalog<'a> {
 
     /// Record a CAS-committed blob. Idempotent for the same size; a size
     /// conflict on the same digest is corruption and refuses.
+    ///
+    /// A repeat record of bytes the store already holds (a deduped upload)
+    /// refreshes `last_ref_ms`: the row is old, but someone just uploaded
+    /// these bytes intending to reference them, and blob GC's grace horizon
+    /// must not collect them out from under that publish.
     pub fn record_blob(&self, blob_id: &BlobId, size: u64, now_ms: u64) -> ServerResult<()> {
         if let Some(existing) = self.blob_size(blob_id)? {
             if existing != size {
@@ -151,6 +191,14 @@ impl<'a> Catalog<'a> {
                     found: size,
                 });
             }
+            let mut s = self.db.prepare(
+                "touch blob",
+                "UPDATE blobs SET last_ref_ms = ?2
+                 WHERE blob_id = ?1 AND (last_ref_ms IS NULL OR last_ref_ms < ?2)",
+            )?;
+            s.bind_blob(1, blob_id.as_bytes())?;
+            s.bind_u64(2, now_ms)?;
+            s.run()?;
             return Ok(());
         }
         let mut s = self.db.prepare(
@@ -220,6 +268,11 @@ impl<'a> Catalog<'a> {
             if existing != namespace {
                 return Err(ServerError::Conflict { what: "asset namespace" });
             }
+            // Re-registering a retired identity would be resurrection by the
+            // back door; the row stays, refused.
+            if self.asset_retired_ms(asset_id)?.is_some() {
+                return Err(ServerError::InvalidState { what: "asset", state: "retired" });
+            }
             return Ok(());
         }
         let mut s = self.db.prepare(
@@ -243,6 +296,13 @@ impl<'a> Catalog<'a> {
         } else {
             Ok(None)
         }
+    }
+
+    /// When this asset was retired, or `None` for a live (or unknown) asset.
+    /// One statement, so it is safe to call inside a caller's transaction
+    /// (a nested BEGIN would refuse).
+    pub fn asset_retired_ms(&self, asset_id: &AssetId) -> ServerResult<Option<u64>> {
+        asset_retired_in(self.db, asset_id.as_bytes())
     }
 
     /// Admit an asset revision from canonical manifest bytes: decode/validate
@@ -275,6 +335,12 @@ impl<'a> Catalog<'a> {
         if self.asset_namespace(&manifest.asset_id)?.is_none() {
             return Err(ServerError::NotFound { what: "asset for revision" });
         }
+        // Retirement is terminal for the identity, not just for the
+        // revisions that existed when it happened: a retired asset never
+        // gains new content (which blob GC would then have to keep).
+        if asset_retired_in(db, manifest.asset_id.as_bytes())?.is_some() {
+            return Err(ServerError::InvalidState { what: "asset", state: "retired" });
+        }
         // Every referenced blob must exist AND be exactly the size the
         // manifest declares for it; a lying byte_len is refused here.
         for f in &manifest.files {
@@ -305,6 +371,15 @@ impl<'a> Catalog<'a> {
         s.run()?;
         drop(s);
         self.stage_candidate("asset", manifest.asset_id.as_bytes(), revision.as_bytes(), now_ms)?;
+        // A blob GC run in flight decided its referenced set before this
+        // manifest existed: pin what we just made reachable, in THIS
+        // transaction, so the sweep can never delete bytes a committed
+        // manifest names.
+        let mut pinned: Vec<BlobId> = manifest.files.iter().map(|f| f.blob).collect();
+        if let Some(t) = &manifest.thumbnail {
+            pinned.push(t.blob);
+        }
+        crate::gc::pin_blobs_in_tx(db, &pinned)?;
         Ok(revision)
     }
 
@@ -476,6 +551,250 @@ impl<'a> Catalog<'a> {
             drop(s);
             self.refresh_search_live(db, asset_id.as_bytes(), asset_id.as_bytes())
         })
+    }
+
+    // ---- retirement (deletion) ---------------------------------------------
+
+    /// Retire ONE revision: the quarantine transition (alias heads pointing
+    /// at it drop, search alias state refreshes) plus the deletion intent
+    /// blob GC reads. Idempotent — retiring an already retired revision is a
+    /// no-op that reports `false`.
+    ///
+    /// Cost: O(aliases of the asset), all indexed. Nothing here scales with
+    /// the catalog.
+    pub fn retire_revision(
+        &self,
+        asset_id: &AssetId,
+        revision: &AssetRevisionId,
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        self.db
+            .tx(|db| self.retire_revision_in_tx(db, asset_id, revision, now_ms))
+    }
+
+    /// The body of [`Self::retire_revision`] inside the caller's open
+    /// transaction, so asset retirement and the retention rule can retire
+    /// many revisions atomically with their own bookkeeping.
+    pub(crate) fn retire_revision_in_tx(
+        &self,
+        db: &Db,
+        asset_id: &AssetId,
+        revision: &AssetRevisionId,
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        let state = self
+            .candidate_state_raw("asset", asset_id.as_bytes(), revision.as_bytes())?
+            .ok_or(ServerError::NotFound { what: "candidate" })?;
+        if self.revision_retired_in_tx(db, asset_id, revision)? {
+            return Ok(false);
+        }
+        if state != CandidateState::Quarantined {
+            self.transition_in_tx(
+                db,
+                "asset",
+                asset_id.as_bytes(),
+                revision.as_bytes(),
+                &[CandidateState::Staged, CandidateState::Published],
+                CandidateState::Quarantined,
+                now_ms,
+            )?;
+        }
+        let mut s = db.prepare(
+            "retire revision",
+            "UPDATE candidates SET retired_ms = ?3
+             WHERE kind='asset' AND owner_id = ?1 AND revision = ?2",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_blob(2, revision.as_bytes())?;
+        s.bind_u64(3, now_ms)?;
+        s.run()?;
+        drop(s);
+        let mut s = db.prepare(
+            "drop retired alias heads",
+            "DELETE FROM asset_aliases WHERE asset_id = ?1 AND head_revision = ?2",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_blob(2, revision.as_bytes())?;
+        s.run()?;
+        drop(s);
+        self.refresh_search_live(db, asset_id.as_bytes(), asset_id.as_bytes())?;
+        Ok(true)
+    }
+
+    /// Retire an ASSET: every revision it has becomes terminal and
+    /// collectable, every alias head pointing at it disappears, and its
+    /// whole search footprint (annotation, labels, postings, alias postings)
+    /// is deleted — a retired asset is not filtered out of search, it is
+    /// absent from it, so no query pays for its existence.
+    ///
+    /// Idempotent: re-retiring reports `already_retired`. Cost: O(revisions
+    /// + aliases + index rows OF THIS ASSET), every one of them an indexed
+    /// delete; independent of catalog size.
+    pub fn retire_asset(&self, asset_id: &AssetId, now_ms: u64) -> ServerResult<RetireReport> {
+        self.db.tx(|db| {
+            if self.asset_namespace(asset_id)?.is_none() {
+                return Err(ServerError::NotFound { what: "asset" });
+            }
+            if asset_retired_in(db, asset_id.as_bytes())?.is_some() {
+                return Ok(RetireReport { already_retired: true, ..RetireReport::default() });
+            }
+            let mut s = db.prepare(
+                "retire asset",
+                "UPDATE assets SET retired_ms = ?2 WHERE asset_id = ?1",
+            )?;
+            s.bind_blob(1, asset_id.as_bytes())?;
+            s.bind_u64(2, now_ms)?;
+            s.run()?;
+            drop(s);
+            // One statement for every revision of this asset: the same
+            // terminal transition quarantine performs, applied to the whole
+            // set (the PK's (kind, owner_id) prefix is the index).
+            let mut s = db.prepare(
+                "retire asset revisions",
+                "UPDATE candidates
+                    SET state='quarantined',
+                        quarantined_ms=COALESCE(quarantined_ms, ?2),
+                        retired_ms=?2
+                  WHERE kind='asset' AND owner_id = ?1 AND retired_ms IS NULL",
+            )?;
+            s.bind_blob(1, asset_id.as_bytes())?;
+            s.bind_u64(2, now_ms)?;
+            s.run()?;
+            drop(s);
+            let revisions_retired = db.changes();
+            let mut s = db.prepare(
+                "drop retired asset aliases",
+                "DELETE FROM asset_aliases WHERE asset_id = ?1",
+            )?;
+            s.bind_blob(1, asset_id.as_bytes())?;
+            s.run()?;
+            drop(s);
+            let aliases_dropped = db.changes();
+            let annotation_cleared =
+                crate::search::clear_annotation_in_tx(db, asset_id.as_bytes())?;
+            // The alias postings are gone with the annotation, but the live
+            // flag/canonical alias of any row that survives (none, by
+            // construction) still has to be consistent, and every open
+            // search cursor must fail closed after a catalog change.
+            self.refresh_search_live(db, asset_id.as_bytes(), asset_id.as_bytes())?;
+            Ok(RetireReport {
+                already_retired: false,
+                revisions_retired,
+                aliases_dropped,
+                annotation_cleared,
+            })
+        })
+    }
+
+    /// Every candidate revision of one asset, oldest staged first: the
+    /// lifecycle view the detail route serves. Reads the candidates table
+    /// through its `(kind, owner_id)` primary-key prefix, so the cost is
+    /// this asset's revisions and nothing else.
+    ///
+    /// This is the TRUTH about revision state. The transport keeps a mirror
+    /// for browse listings, but any state that can change without a route
+    /// (the GC retention rule retires revisions inside the core) must be
+    /// read from here or a client would see a stale lifecycle.
+    pub fn asset_candidates(
+        &self,
+        asset_id: &AssetId,
+        limit: u32,
+    ) -> ServerResult<Vec<CandidateRow>> {
+        let mut s = self.db.prepare(
+            "asset candidates",
+            "SELECT revision, state, staged_ms, published_ms, quarantined_ms, retired_ms
+             FROM candidates WHERE kind='asset' AND owner_id = ?1
+             ORDER BY staged_ms, revision LIMIT ?2",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_u64(2, limit as u64)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            let state = CandidateState::parse(&s.column_text(1))
+                .ok_or(ServerError::InvalidState { what: "candidate row", state: "unknown" })?;
+            let opt = |s: &crate::sqlite::Stmt<'_>, i: i32| {
+                if s.column_is_null(i) { None } else { Some(s.column_u64(i)) }
+            };
+            out.push(CandidateRow {
+                revision: AssetRevisionId::from_bytes(fixed32(
+                    &s.column_blob(0),
+                    "candidate row",
+                )?),
+                state,
+                staged_ms: s.column_u64(2),
+                published_ms: opt(&s, 3),
+                quarantined_ms: opt(&s, 4),
+                retired_ms: opt(&s, 5),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Whether one revision carries the deletion intent.
+    pub fn revision_retired(
+        &self,
+        asset_id: &AssetId,
+        revision: &AssetRevisionId,
+    ) -> ServerResult<bool> {
+        self.revision_retired_in_tx(self.db, asset_id, revision)
+    }
+
+    pub(crate) fn revision_retired_in_tx(
+        &self,
+        db: &Db,
+        asset_id: &AssetId,
+        revision: &AssetRevisionId,
+    ) -> ServerResult<bool> {
+        let mut s = db.prepare(
+            "revision retired",
+            "SELECT retired_ms FROM candidates
+             WHERE kind='asset' AND owner_id = ?1 AND revision = ?2",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_blob(2, revision.as_bytes())?;
+        if !s.step()? {
+            return Ok(false);
+        }
+        Ok(!s.column_is_null(0))
+    }
+
+    /// The revisions of one asset the retention rule would retire: newest
+    /// first, keep `keep`, and never touch a revision an alias head still
+    /// points at — retention trims history, it never pulls what is being
+    /// served, however old that head is.
+    ///
+    /// The `asset_revisions_by_asset` index provides the ordering, so this
+    /// reads only this asset's rows.
+    pub(crate) fn superseded_revisions_in_tx(
+        &self,
+        db: &Db,
+        asset_id: &AssetId,
+        keep: u32,
+    ) -> ServerResult<Vec<AssetRevisionId>> {
+        let mut s = db.prepare(
+            "superseded revisions",
+            "SELECT q.revision FROM (
+                 SELECT r.revision AS revision, r.asset_id AS asset_id
+                 FROM asset_revisions r
+                 JOIN candidates c
+                   ON c.kind='asset' AND c.owner_id = r.asset_id AND c.revision = r.revision
+                 WHERE r.asset_id = ?1 AND c.retired_ms IS NULL
+                 ORDER BY r.created_ms DESC, r.revision DESC
+                 LIMIT -1 OFFSET ?2
+             ) q
+             WHERE NOT EXISTS(SELECT 1 FROM asset_aliases a
+                              WHERE a.asset_id = q.asset_id AND a.head_revision = q.revision)",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_u64(2, keep as u64)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(AssetRevisionId::from_bytes(fixed32(
+                &s.column_blob(0),
+                "superseded revision row",
+            )?));
+        }
+        Ok(out)
     }
 
     // ---- asset aliases -----------------------------------------------------
@@ -741,6 +1060,19 @@ impl<'a> Catalog<'a> {
                 s.run()?;
             }
             self.stage_candidate("game", manifest.game_id.as_bytes(), revision.as_bytes(), now_ms)?;
+            // Same pin rule as asset revisions: a game revision makes its own
+            // bytes reachable, so an in-flight GC run must learn about them
+            // inside this transaction.
+            let mut pinned = vec![
+                manifest.splash_blob,
+                manifest.manifest_blob,
+                manifest.lock_blob,
+                manifest.thumbnail.blob,
+            ];
+            if let Some(snapshot) = &manifest.catalog_snapshot {
+                pinned.push(*snapshot);
+            }
+            crate::gc::pin_blobs_in_tx(db, &pinned)?;
             Ok(revision)
         })
     }
@@ -892,6 +1224,41 @@ impl<'a> Catalog<'a> {
             GameRevisionId::from_bytes(fixed32(&s.column_blob(1), "game alias row")?),
         )))
     }
+}
+
+/// One candidate revision's full lifecycle row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CandidateRow {
+    pub revision: AssetRevisionId,
+    pub state: CandidateState,
+    pub staged_ms: u64,
+    pub published_ms: Option<u64>,
+    pub quarantined_ms: Option<u64>,
+    /// Set once the revision was retired: terminal AND collectable.
+    pub retired_ms: Option<u64>,
+}
+
+/// What one asset retirement removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetireReport {
+    /// The asset was already retired; nothing changed.
+    pub already_retired: bool,
+    pub revisions_retired: u64,
+    pub aliases_dropped: u64,
+    pub annotation_cleared: bool,
+}
+
+/// Read `assets.retired_ms` inside the caller's transaction.
+pub(crate) fn asset_retired_in(db: &Db, asset_id: &[u8]) -> ServerResult<Option<u64>> {
+    let mut s = db.prepare(
+        "asset retired",
+        "SELECT retired_ms FROM assets WHERE asset_id = ?1",
+    )?;
+    s.bind_blob(1, asset_id)?;
+    if !s.step()? || s.column_is_null(0) {
+        return Ok(None);
+    }
+    Ok(Some(s.column_u64(0)))
 }
 
 /// A stored ID column that is not exactly its fixed width is catalog

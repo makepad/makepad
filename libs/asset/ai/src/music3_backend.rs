@@ -47,6 +47,14 @@ const WORKER_PY: &str = include_str!("../python/music3_worker.py");
 /// prefix for `minimax-music3`.
 const MODEL_CACHE_SUBDIR: &str = "music/MiniMax-Music3";
 
+/// Cache-relative root of the audio.cpp GGUF pack; must match the registry
+/// entry's `cache_as` prefix for `minimax-music3-q4`.
+const MODEL_CACHE_SUBDIR_Q4: &str = "music/MiniMax-Music3-Q4";
+
+/// The registry id whose weights are the audio.cpp GGUF pack. Native engine
+/// only — the Python ModularPipeline cannot serve a GGUF pack.
+const MODEL_ID_Q4: &str = "minimax-music3-q4";
+
 /// Song duration bounds per the official model card: full songs up to five
 /// minutes (generation stops earlier on the model's end-of-audio token).
 pub const MIN_SECONDS: f64 = 5.0;
@@ -88,8 +96,6 @@ pub struct Music3Backend {
     model_id: String,
     python: PathBuf,
     keep_warm: bool,
-    /// Official ModularPipeline only — never the native CUDA path.
-    force_python: bool,
     model_dir: Option<PathBuf>,
     tmp_dir: Option<PathBuf>,
     worker: Option<Worker>,
@@ -107,7 +113,7 @@ fn music3_python() -> PathBuf {
 pub fn music3_provisioned() -> bool {
     #[cfg(feature = "audio")]
     {
-        if makepad_diffusion::backend::gpu_device_available() {
+        if makepad_ai_common::backend::gpu_device_available() {
             return true;
         }
     }
@@ -121,32 +127,12 @@ pub fn music3_provisioned() -> bool {
     }
 }
 
-/// Official Python worker is provisioned when the box venv exists.
-pub fn music3_python_provisioned() -> bool {
-    music3_python().exists()
-}
-
 impl Music3Backend {
     pub fn new_music3(model_id: &str) -> Self {
         Self {
             model_id: model_id.to_string(),
             python: music3_python(),
             keep_warm: std::env::var("MAKEPAD_MUSIC3_KEEP_WARM").is_ok_and(|v| v == "1"),
-            force_python: false,
-            model_dir: None,
-            tmp_dir: None,
-            worker: None,
-            job_counter: 0,
-        }
-    }
-
-    /// Always the official ModularPipeline worker (`minimax-music3-python`).
-    pub fn new_music3_python(model_id: &str) -> Self {
-        Self {
-            model_id: model_id.to_string(),
-            python: music3_python(),
-            keep_warm: std::env::var("MAKEPAD_MUSIC3_KEEP_WARM").is_ok_and(|v| v == "1"),
-            force_python: true,
             model_dir: None,
             tmp_dir: None,
             worker: None,
@@ -280,13 +266,10 @@ impl Music3Backend {
 
 impl Music3Backend {
     fn uses_native(&self) -> bool {
-        if self.force_python {
-            return false;
-        }
         #[cfg(feature = "audio")]
         {
             std::env::var("MAKEPAD_MUSIC3_FORCE_PYTHON").ok().as_deref() != Some("1")
-                && makepad_diffusion::backend::gpu_device_available()
+                && makepad_ai_common::backend::gpu_device_available()
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -305,7 +288,7 @@ fn generate_native(
     progress: ProgressSink,
     cancel: &CancelToken,
 ) -> Result<Vec<ArtifactData>, AssetAiError> {
-    use makepad_diffusion::music3_pipeline::{
+    use makepad_ai_music::music3_pipeline::{
         music3_generate_with_progress, music3_planar_stereo, Music3Generate,
     };
     cancel.check()?;
@@ -326,7 +309,7 @@ fn generate_native(
         &|| cancel.is_cancelled(),
     )
     .map_err(|e| match e {
-        makepad_diffusion::DiffusionError::Cancelled => AssetAiError::Cancelled,
+        makepad_ai_common::DiffusionError::Cancelled => AssetAiError::Cancelled,
         other => AssetAiError::Backend(format!("music3 native: {other}")),
     })?;
     cancel.check()?;
@@ -336,7 +319,7 @@ fn generate_native(
     let bytes = crate::wav::encode_wav_pcm16_stereo(
         &left,
         &right,
-        makepad_diffusion::music3::MUSIC3_SAMPLE_RATE as u32,
+        makepad_ai_music::music3::MUSIC3_SAMPLE_RATE as u32,
     );
     progress("done", 1.0);
     Ok(vec![ArtifactData {
@@ -478,17 +461,26 @@ impl ContentBackend for Music3Backend {
 
     fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
         // Registry-managed weights: downloads/verifies the pinned
-        // MiniMaxAI/MiniMax-Music3 diffusers file set on first use (or via a
-        // pull job); a box with verified files skips straight through.
+        // MiniMaxAI/MiniMax-Music3 diffusers file set (or the audio.cpp GGUF
+        // pack for `minimax-music3-q4`) on first use (or via a pull job); a
+        // box with verified files skips straight through.
         ctx.ensure_files()?;
-        self.model_dir = Some(ctx.cache_dir.join(
+        let subdir = if self.model_id == MODEL_ID_Q4 {
+            MODEL_CACHE_SUBDIR_Q4
+        } else {
             MODEL_CACHE_SUBDIR
-                .split('/')
-                .collect::<PathBuf>(),
-        ));
+        };
+        self.model_dir = Some(ctx.cache_dir.join(subdir.split('/').collect::<PathBuf>()));
         self.tmp_dir = Some(ctx.cache_dir.join("tmp").join("music3"));
         if self.uses_native() {
             return Ok(());
+        }
+        if self.model_id == MODEL_ID_Q4 {
+            return Err(AssetAiError::Unavailable(
+                "minimax-music3-q4 is a GGUF pack: it needs the native engine \
+                 ('audio' feature + GPU device); the Python worker cannot serve it"
+                    .into(),
+            ));
         }
         if !self.python.exists() {
             return Err(AssetAiError::Unavailable(format!(
@@ -524,6 +516,13 @@ impl ContentBackend for Music3Backend {
                 progress,
                 cancel,
             );
+        }
+        if self.model_id == MODEL_ID_Q4 {
+            return Err(AssetAiError::Unavailable(
+                "minimax-music3-q4 is a GGUF pack: it needs the native engine \
+                 ('audio' feature + GPU device); the Python worker cannot serve it"
+                    .into(),
+            ));
         }
 
         let tmp = self.tmp_dir()?.to_path_buf();
