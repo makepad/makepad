@@ -44,4 +44,20 @@
         {kind: "bloom", threshold: 0.5, strength: 1.1, levels: 2},
         {kind: "tiltshift", focus: 0.5, width: 0.35, levels: 2}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = topple ease 0..1, attr = (branch, arc index, tile hash, yaw).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxDomino {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let mix_t = clamp(attr.x * 0.23 + attr.z * 0.12, 0.0, 1.0)
+            return self.col_a.mix(self.col_b, mix_t)
+        }
+    }
 }

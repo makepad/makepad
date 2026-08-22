@@ -46,4 +46,29 @@
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: uv, the dye and flow texels, and the base under the ink.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxFluidView {
+        fx_shade: fn(uv: vec2, dye: vec4, flow: vec4, base: vec3) -> vec4 {
+            let glow = self.u_view.x
+            let ink = vec3(dye.x, dye.y, dye.z) * glow
+            let shimmer = clamp(length(flow.xy) * 0.35, 0.0, 0.6)
+            let mut lit = ink + ink * shimmer
+            // Soft-knee tone map: color survives density; only genuinely
+            // dense ink approaches white.
+            lit = lit / (vec3(1.0, 1.0, 1.0) + lit * 0.45)
+            let rgb = vec3(1.0, 1.0, 1.0)
+                - (vec3(1.0, 1.0, 1.0) - base)
+                * clamp(vec3(1.0, 1.0, 1.0) - lit, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            return vec4(rgb, 1.0)
+        }
+    }
 }

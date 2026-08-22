@@ -23,9 +23,14 @@
 //! it — 0 = exactly the classic standalone look. `tex0` carries input0;
 //! `has_content: uniform(0.0)` is the raw gate for behavioral switches.
 //!
-//! Hook functions a document may override via its `shader:` object:
-//! `fx_displace`, `fx_color`, `fx_center` (particles), `fx_sprite`
-//! (particles/emitters).
+//! THE LOOK LIVES IN THE DOCUMENT. Everything a family paints is behind a
+//! named hook a `shader:` subclass replaces, and every shipped preset
+//! carries that hook inline — the defaults here are the fallback for a
+//! document that declares none, not the place a preset's look lives. Hooks
+//! in this file: `fx_color` (mesh / terrain / ribbon / tunnel / particles /
+//! emitters), `fx_displace` (mesh), `fx_center` (the particles MOTION
+//! program), `fx_sprite` (particles / emitters). Signatures and inputs:
+//! CONTRACT.md, "The shader hooks".
 //!
 //! All instance fields are `vec4`/float — never `vec3` (instance vec3
 //! misaligns in the shader ABI; see the firework shader's war story). Keep
@@ -300,6 +305,34 @@ script_mod! {
             return self.vertex_pos
         }
 
+        // THE LOOK — pixel stage, doc-replaceable (CONTRACT.md).
+        //   t       = height 0..1
+        //   attr    = (slope shade, grid line 0..1, grid uv.x, grid uv.y)
+        //   content = input0 at the SCROLLED grid uv (the drape sample)
+        //   cmix    = pre-gated content strength (self.fog.z; 0 = classic)
+        // Returns the land's colour before fog and the glow gain.
+        //
+        // CONTENT — THE DRAPE. The channel video is PAINTED ON THE LAND:
+        // one copy over the whole grid, sampled by the SAME scrolled uv as
+        // the wireframe, so the clip streams with the surface and every
+        // ridge carries its own piece of the picture. The classic surface
+        // term is a 0.30 whisper under the neon — far too dark to read a
+        // picture through — so the drape REPLACES it (lit by the same slope
+        // shade, so the land still looks like land) instead of tinting it,
+        // and only the grid keeps a tint.
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let grad = self.col_a.mix(self.col_b, t).xyz
+            let beat_glow = 1.0 + self.time_beat.w * 1.1
+            let drape = content.xyz * (0.42 + 0.85 * attr.x)
+                * (1.0 + self.time_beat.w * 0.30)
+            let surface = (grad * 0.30 * attr.x)
+                .mix(drape, clamp(cmix * 1.25, 0.0, 1.0))
+            let gline = grad.mix(content.xyz * 1.3, cmix * 0.55)
+            let neon = gline * attr.y * beat_glow * 1.6
+                + self.col_c.xyz * attr.y * t * 0.6
+            return vec4(surface + neon, 1.0)
+        }
+
         pixel: fn() {
             // Neon wireframe grid over a dark surface, colored by height.
             // Same NEGATIVE sign as `height_at`: grid, drape and land must
@@ -310,29 +343,17 @@ script_mod! {
             let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
             let line = 1.0 - smoothstep(0.0, 0.11, dg)
             let t = clamp(self.v_h * 1.4, 0.0, 1.0)
-            // CONTENT — THE DRAPE. The channel video is PAINTED ON THE
-            // LAND: one copy over the whole grid, sampled by the SAME
-            // scrolled uv as the wireframe, so the clip streams with the
-            // surface and every ridge carries its own piece of the picture.
-            // The classic surface term is a 0.30 whisper under the neon —
-            // far too dark to read a picture through — so the drape
-            // REPLACES it (lit by the same slope shade, so the land still
-            // looks like land) instead of tinting it, and only the grid
-            // keeps a tint. fog.z = pre-gated strength: 0 = classic.
             let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
-            let cm = self.fog.z
-            let grad = self.col_a.mix(self.col_b, t).xyz
-            let beat_glow = 1.0 + self.time_beat.w * 1.1
-            let drape = ttx.xyz * (0.42 + 0.85 * self.v_color.x)
-                * (1.0 + self.time_beat.w * 0.30)
-            let surface = (grad * 0.30 * self.v_color.x)
-                .mix(drape, clamp(cm * 1.25, 0.0, 1.0))
-            let gline = grad.mix(ttx.xyz * 1.3, cm * 0.55)
-            let neon = gline * line * beat_glow * 1.6 + self.col_c.xyz * line * t * 0.6
+            let look = self.fx_color(
+                t,
+                vec4(self.v_color.x, line, self.v_uv.x, self.v_uv.y),
+                ttx,
+                self.fog.z
+            )
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let d = length(self.v_world - cam.xyz / max(cam.w, 0.0001))
             let fog = exp(0.0 - d * self.fog.x)
-            let rgb = ((surface + neon) * self.fog.y).mix(self.col_bg.xyz, 1.0 - fog)
+            let rgb = (look.xyz * self.fog.y).mix(self.col_bg.xyz, 1.0 - fog)
             return vec4(rgb, 1.0)
         }
 
@@ -815,6 +836,29 @@ script_mod! {
             return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
         }
 
+        // THE LOOK — one spark, doc-replaceable (CONTRACT.md).
+        //   t       = life fraction 0..1
+        //   attr    = (particle id, seconds alive, ignition rnd, spread rnd)
+        //   content = input0 at this spark's screen position
+        //   cmix    = pre-gated content strength (0 = classic look)
+        // Returns (rgb, fade); the engine multiplies the emitter's own
+        // fraction gate onto the alpha afterwards.
+        //
+        // CONTENT COUPLING: sparks take on the channel video's colour at
+        // their screen position — fireworks burst IN the clip's palette;
+        // the white-hot birth flash and the fade envelope stay classic.
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let heat = clamp(1.0 - attr.y * 3.0, 0.0, 1.0)
+            let tint0 = self.e_col_a.mix(self.e_col_b, t)
+            let pal = tint0.xyz.mix(
+                content.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(cmix * 1.2, 0.0, 1.0)
+            )
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
+            let fade = (1.0 - t) * (1.0 - t)
+            return vec4(rgb, fade)
+        }
+
         vertex: fn() {
             let id = self.geom.geom_id
             let dir = self.geom.geom_normal
@@ -889,13 +933,8 @@ script_mod! {
                 view_pos.z,
                 view_pos.w
             )
-            // Color: emitter palette, white-hot at birth, fading out.
-            let heat = clamp(1.0 - t * 3.0, 0.0, 1.0)
-            let tint0 = self.e_col_a.mix(self.e_col_b, life_t)
-            // CONTENT COUPLING (fog.z, pre-gated): sparks take on the
-            // channel video's color at their screen position — fireworks
-            // burst IN the clip's palette; the white-hot birth flash and
-            // the fade envelope stay the classic look's.
+            // Color: the document's look hook (emitter palette, white-hot
+            // at birth, fading out), fed this spark's own content texel.
             let cc = self.draw_pass.camera_projection * view_pos
             let suv = clamp(
                 vec2(cc.x, 0.0 - cc.y) / max(cc.w, 0.0001) * 0.5 + vec2(0.5, 0.5),
@@ -903,13 +942,8 @@ script_mod! {
                 vec2(1.0, 1.0)
             )
             let vtex = self.tex0.sample_nearest(suv, 0.0)
-            let pal = tint0.xyz.mix(
-                vtex.xyz * (1.05 + 0.5 * self.time_beat.w),
-                clamp(self.fog.z * 1.2, 0.0, 1.0)
-            )
-            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
-            let fade = (1.0 - life_t) * (1.0 - life_t)
-            self.v_color = vec4(rgb, fade * gate)
+            let c = self.fx_color(life_t, vec4(id, t, r0, r1), vtex, self.fog.z)
+            self.v_color = vec4(c.xyz, c.w * gate)
             self.v_uv = self.geom.geom_uv
             self.vertex_pos = self.draw_pass.camera_projection * billboard
             return self.vertex_pos
@@ -980,6 +1014,72 @@ script_mod! {
             let vig = 1.0 - 0.35 * smoothstep(0.28, 0.78, r)
             let rgb = self.col_bg.xyz.mix(tx.xyz, lvl * vig)
             return vec4(rgb, 1.0)
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // THE FULLSCREEN FAMILY — `engine: "screen"` with a document shader.
+    //
+    // The screen engine's classic path has no scene pass at all: input0
+    // goes straight into the stage chain, and that is what its ten shipped
+    // presets are (their look IS the stage list). A document that DECLARES
+    // a `shader:` block opts into this pass instead — one clip-space quad
+    // whose whole fragment is the document's `fx_color`, with the full
+    // signal block, the palette and input0 in hand, and the stage chain
+    // still running on top of it. That is the cheapest thing there is to
+    // author from scratch: no engine, no geometry, just a pixel function.
+    //
+    // Opt-in ON PURPOSE: routing the existing presets through a blit would
+    // resample input0 before the chain sees it, and they are pixel-frozen.
+    // ---------------------------------------------------------------------
+    mod.draw.DrawVjFxScreen = set_type_default() do #(DrawVjFxScreen::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        has_content: uniform(0.0)
+        backface_culling: false
+        alpha_blend: false
+        depth_write: false
+
+        v_uv: varying(vec2f)
+
+        // THE LOOK — the entire frame, doc-replaceable (CONTRACT.md).
+        //   uv      = screen uv, (0,0) top-left
+        //   content = input0 at `uv` (the channel video, or the runtime's
+        //             animated fallback pattern when nothing is bound)
+        //   cmix    = pre-gated content strength; 0 means the texel is the
+        //             fallback, so a look that wants REAL video only can
+        //             branch on it
+        // The default is the plain frame — a document that overrides this
+        // owns every pixel.
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            return vec4(content.xyz, 1.0)
+        }
+
+        vertex: fn() {
+            // Clip-space passthrough: no camera, no depth, always the
+            // whole frame.
+            self.v_uv = self.geom.geom_uv
+            self.vertex_pos = vec4(
+                self.geom.geom_pos.x,
+                self.geom.geom_pos.y,
+                0.5,
+                1.0
+            )
+            return self.vertex_pos
+        }
+
+        pixel: fn() {
+            let tx = self.tex0.sample_as_bgra(self.v_uv)
+            return self.fx_color(self.v_uv, tx, self.fog.z)
         }
 
         fragment: fn() {
@@ -1291,6 +1391,9 @@ fx_mesh_draw_struct!(DrawVjFxParticles);
 // reads only `fog.z` (pre-gated content strength) x `fog.w` (the family
 // dim) plus `col_bg`.
 fx_mesh_draw_struct!(DrawVjFxBackdrop);
+// The fullscreen `screen` family's own pass (above): one clip-space quad,
+// the whole fragment behind `fx_color`.
+fx_mesh_draw_struct!(DrawVjFxScreen);
 
 /// The scriptable-emitter shader: shared frame state + per-EMITTER instance
 /// data (one `add_instance` per live emitter per frame — the whole upload).

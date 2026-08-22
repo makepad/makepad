@@ -4,6 +4,14 @@ One row per shipped effect document (name, engine, one-line character).
 Regenerate the table when the library changes; the seeding module
 (src/effects/seed.rs) compiles every row into the vj binary.
 
+**Every document here carries its own shader.** The family's look function
+is written out inline in the file, so a preset is a complete forkable unit
+an author can rewrite into a new look rather than only re-tune (see
+CONTRACT.md, "a document carries its own shader"). The ten `screen` presets
+are the exception: that family has no scene pass, its look IS the stage
+list — 113_scan_sermon shows what a `screen` document with its own
+fullscreen shader looks like.
+
 | file | title | engine | character |
 |---|---|---|---|
 | 01_fireworks | Fireworks | particles/burst | staggered burst shells, stateless GPU particles. |
@@ -100,3 +108,4 @@ Regenerate the table when the library changes; the seeding module
 | 98_bull_terminal | Bull Terminal | stockcharts | green-on-black phosphor tape: one candle per beat, beat- |
 | 99_amber_exchange | Amber Exchange | stockcharts | after-hours amber terminal drifting in 3D, two candles |
 | 100_flash_crash | Flash Crash | stockcharts | the red panic: bar-armed crash cascades + a pulse-driven |
+| 113_scan_sermon | Scan Sermon | screen/doc-shader | THE PURE-DOCUMENT EFFECT: no engine geometry at all, a

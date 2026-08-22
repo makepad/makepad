@@ -63,4 +63,35 @@
         }
         return out
     }
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxEmitter {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let heat = clamp(1.0 - attr.y * 3.0, 0.0, 1.0)
+            let tint0 = self.e_col_a.mix(self.e_col_b, t)
+            let pal = tint0.xyz.mix(
+                content.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(cmix * 1.2, 0.0, 1.0)
+            )
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
+            let fade = (1.0 - t) * (1.0 - t)
+            return vec4(rgb, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.4, d)
+            let halo = 1.0 - smoothstep(0.1, 0.9, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
 }

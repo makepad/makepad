@@ -85,6 +85,12 @@ pub enum ShaderKind {
     SimSwarm,
     /// The fluid engine's dye view pass (engines_simfx + sim.rs).
     FluidView,
+    /// The fullscreen `screen` family WITH a document shader: one
+    /// clip-space quad whose whole fragment is the doc's `fx_color`
+    /// (shaders.rs). A screen doc that declares no `shader:` block never
+    /// reaches it — the classic path feeds input0 straight into the stage
+    /// chain, with no scene pass at all.
+    Screen,
 }
 
 /// Per-frame camera the engine suggests; the document can override knobs.
@@ -1514,7 +1520,9 @@ impl Engine {
             Engine::Charts(_) => ShaderKind::Charts,
             Engine::Swarm(_) => ShaderKind::SimSwarm,
             Engine::Fluid(_) => ShaderKind::FluidView, // fluid skips the mesh scene pass
-            Engine::Screen => ShaderKind::Emitters, // never drawn; screen skips the scene pass
+            // Only drawn when the document declares a `shader:` block;
+            // otherwise the screen path skips the scene pass entirely.
+            Engine::Screen => ShaderKind::Screen,
         }
     }
 

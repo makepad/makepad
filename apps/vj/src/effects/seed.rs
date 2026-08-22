@@ -144,6 +144,7 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("110_trans_negative", include_str!("../../resources/effects/110_trans_negative.splash")),
     ("111_trans_pip", include_str!("../../resources/effects/111_trans_pip.splash")),
     ("112_trans_screenmix", include_str!("../../resources/effects/112_trans_screenmix.splash")),
+    ("113_scan_sermon", include_str!("../../resources/effects/113_scan_sermon.splash")),
     ]
 }
 
@@ -625,6 +626,50 @@ mod registry_tests {
             "resources/effects and seed.rs bundled_presets disagree — \
              register the missing preset (or delete the stale entry)"
         );
+    }
+
+    /// THE DOC-CARRIES-ITS-SHADER LAW (CONTRACT.md).
+    ///
+    /// A preset is a COMPLETE, FORKABLE UNIT: the pixel math it runs is in
+    /// the file, not hidden in a Rust engine, so an AI (or a person)
+    /// rewriting `42_whatever.splash` can make a genuinely new look instead
+    /// of only re-tuning parameters. This test pins that every shipped
+    /// preset carries a `shader:` block that SUBCLASSES its engine's draw
+    /// shader — the one structural mistake (a plain `{...}` object) is
+    /// rejected at parse and would leave the doc silently running the
+    /// engine default.
+    ///
+    /// The `screen` family is the documented exception: it draws no scene
+    /// pass at all (input0 goes straight into the stage chain), so it has
+    /// no pixel stage to carry. Remove it from here the day it grows one.
+    #[test]
+    fn every_bundled_preset_carries_its_own_shader() {
+        let mut without = Vec::new();
+        let mut screens = 0;
+        for (name, source) in bundled_presets() {
+            let engine = source
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("engine: \""))
+                .and_then(|l| l.split('"').next())
+                .unwrap_or("");
+            if engine == "screen" {
+                screens += 1;
+                continue;
+            }
+            let has = source
+                .lines()
+                .any(|l| l.trim_start().starts_with("shader: draw.DrawVjFx"));
+            if !has {
+                without.push(*name);
+            }
+        }
+        assert!(
+            without.is_empty(),
+            "these presets have no inline shader — every preset must carry \
+             the pixel math it runs (see CONTRACT.md, \"A doc carries its \
+             shader\"): {without:?}"
+        );
+        assert!(screens > 0, "the screen family vanished — update this test");
     }
 
     #[test]

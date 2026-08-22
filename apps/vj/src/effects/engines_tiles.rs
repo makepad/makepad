@@ -42,7 +42,7 @@
 //! (1.2 shatter flight distance, in spreads). Camera: the engine flies its
 //! own gently swaying front-on rig (doc cam keys are ignored, like tunnel).
 //! Bindings: `p0` ADDS shatter drive (strobe the explosion), `p1` scales
-//! wave amplitude, `p2` adds grout glow. Hook: `fx_tint(c, attr, flash)`.
+//! wave amplitude, `p2` adds grout glow. Hook: `fx_color(t, attr, content, cmix)`.
 
 use super::engines::{CamPose, EngineUniforms};
 use super::mesh::{FxMesh, FxRng};
@@ -264,10 +264,22 @@ script_mod! {
             return v * c + axv * s + a * (ad * (1.0 - c))
         }
 
-        // Document hook: the sampled tile color on its way out. `flash` is
-        // the mode's highlight drive (crest / flight / lane pulse).
-        fx_tint: fn(c: vec4, attr: vec4, flash: float) -> vec4 {
-            return c
+        // THE LOOK — one tile fragment, doc-replaceable (CONTRACT.md).
+        //   t       = the mode's highlight drive (wave crest / shatter
+        //             flight / conveyor lane pulse), 0..2
+        //   attr    = (per-tile shade, edge 0..1 — 1 in the middle of the
+        //             tile, 0 at the grout —, stagger rnd, tumble rnd)
+        //   content = input0 at THIS TILE'S uv window — the tile grid IS
+        //             the picture in this family, so the classic look
+        //             draws the clip whole and needs no cmix ramp
+        //   cmix    = pre-gated content strength, for looks that want it
+        // Returns the finished fragment colour (glow gain included).
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            let lit = content.xyz * (attr.x * (0.35 + 0.65 * border))
+            let glowline = self.col_c.xyz * (1.0 - border)
+                * (t + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + glowline) * self.fog.y, 1.0)
         }
 
         vertex: fn() {
@@ -392,13 +404,12 @@ script_mod! {
                 min(self.v_local.y, 1.0 - self.v_local.y)
             )
             let border = smoothstep(0.0, 0.10, e)
-            let grout = 1.0 - border
-            let attr = vec4(0.0, 0.0, self.v_shade.z, self.v_shade.w)
-            let tint = self.fx_tint(c, attr, self.v_shade.y)
-            let lit = tint.xyz * (self.v_shade.x * (0.35 + 0.65 * border))
-            let glowline = self.col_c.xyz * grout
-                * (self.v_shade.y + clamp(self.user.z, 0.0, 4.0))
-            return vec4((lit + glowline) * self.fog.y, 1.0)
+            return self.fx_color(
+                self.v_shade.y,
+                vec4(self.v_shade.x, border, self.v_shade.z, self.v_shade.w),
+                c,
+                self.fog.z
+            )
         }
 
         fragment: fn() {

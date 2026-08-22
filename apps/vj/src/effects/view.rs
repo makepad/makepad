@@ -126,6 +126,8 @@ pub struct VjFxView {
     /// for it — `content: 0` and standalone stay bit-exact classic.
     #[live]
     draw_backdrop: DrawVjFxBackdrop,
+    #[live]
+    draw_screen: DrawVjFxScreen,
     // Sim-field family (sim.rs): update quads + the stateful consumers.
     #[live]
     draw_mesh_field: DrawVjFxMeshField,
@@ -220,6 +222,13 @@ pub struct VjFxView {
     bpm: f64,
     #[rust]
     host_beat: bool,
+    /// DETERMINISTIC CAPTURE (parity harness — [`VjFxView::set_capture`]):
+    /// (fixed dt, frame budget). `None` = the free-running wall clock.
+    #[rust]
+    capture: Option<(f64, u32)>,
+    /// Frames advanced since the last document load in capture mode.
+    #[rust]
+    capture_frame: u32,
     /// Audio levels fed by the host ([energy, bass, mid, high]); zero until
     /// something feeds them (the contract exists ahead of the wiring).
     #[rust]
@@ -347,6 +356,14 @@ impl VjFxView {
         self.bounds = None;
         self.local_time = 0.0;
         self.last_time = None;
+        self.capture_frame = 0;
+        // In capture mode the BEAT restarts with the document too. It
+        // otherwise free-runs across the whole app session, which would
+        // make a grab depend on how many documents were shown before it —
+        // the one thing a deterministic capture must not do.
+        if self.capture.is_some() {
+            self.beat_pos = 0.0;
+        }
         self.tick_error = None;
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
@@ -390,6 +407,7 @@ impl VjFxView {
                         ShaderKind::MeshField => live_id!(DrawVjFxMeshField),
                         ShaderKind::SimSwarm => live_id!(DrawVjFxSimSwarmDraw),
                         ShaderKind::FluidView => live_id!(DrawVjFxFluidView),
+                        ShaderKind::Screen => live_id!(DrawVjFxScreen),
                     };
                     let modules = vm.bx.heap.modules;
                     let draw_mod = vm.bx.heap.value(modules, live_id!(draw).into(), NoTrap);
@@ -469,6 +487,9 @@ impl VjFxView {
                 ShaderKind::FluidView => {
                     self.draw_fluid_view.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
+                ShaderKind::Screen => {
+                    self.draw_screen.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
             }
         });
     }
@@ -524,8 +545,29 @@ impl VjFxView {
             | ShaderKind::Flock
             | ShaderKind::Charts
             | ShaderKind::Duo
+            | ShaderKind::Screen
             | ShaderKind::FluidView => 0.0,
         }
+    }
+
+    /// THE CLIP-SPACE QUAD, built once and shared by every fullscreen
+    /// draw (the content backdrop and the `screen` family's own pass). It
+    /// lives in clip space, so no camera and no pass size can invalidate
+    /// it; uv runs (0,0) top-left.
+    fn clip_quad_id(&mut self, cx: &mut Cx) -> GeometryId {
+        if self.backdrop_geometry.is_none() {
+            let mut quad = FxMesh::default();
+            let n0 = vec3f(0.0, 0.0, 1.0);
+            let a = quad.push_vert(vec3f(-1.0, -1.0, 0.0), 0.0, n0, 0.0, vec2f(0.0, 1.0), 0.0, 0.0);
+            let b = quad.push_vert(vec3f(1.0, -1.0, 0.0), 1.0, n0, 0.0, vec2f(1.0, 1.0), 0.0, 0.0);
+            let c = quad.push_vert(vec3f(1.0, 1.0, 0.0), 2.0, n0, 0.0, vec2f(1.0, 0.0), 0.0, 0.0);
+            let d = quad.push_vert(vec3f(-1.0, 1.0, 0.0), 3.0, n0, 0.0, vec2f(0.0, 0.0), 0.0, 0.0);
+            quad.push_quad(a, b, c, d);
+            let g = Geometry::new(cx);
+            quad.upload_clone(cx, &g);
+            self.backdrop_geometry = Some(g);
+        }
+        self.backdrop_geometry.as_ref().expect("clip quad").geometry_id()
     }
 
     /// Apply a field's `update:` subclass onto that kind's update shader;
@@ -712,6 +754,23 @@ impl VjFxView {
                     .iter()
                     .any(|s| matches!(s, StageCfg::Feedback { .. }))
         })
+    }
+
+    /// DETERMINISTIC CAPTURE MODE — the parity instrument.
+    ///
+    /// With a capture set, the widget ignores the wall clock: every frame
+    /// after a document load advances the document by exactly `dt`
+    /// seconds, and after `frames` of them the widget FREEZES (stops
+    /// advancing and stops asking for frames), so whatever the grab lands
+    /// on is a pure function of the document plus (dt, frames). That is
+    /// what makes a before/after render comparison meaningful across
+    /// machines and load: feedback stages, CPU sims and the emitters
+    /// script tick all see the same frame sequence every run.
+    ///
+    /// `None` restores the free-running wall clock (the live default).
+    pub fn set_capture(&mut self, capture: Option<(f64, u32)>) {
+        self.capture = capture;
+        self.capture_frame = 0;
     }
 
     /// Slot-mode offscreen resolution (composite off). Thumbnail hosts set
@@ -1095,6 +1154,104 @@ impl VjFxView {
             .collect()
     }
 
+    /// The `screen` family's own scene pass: one clip-space quad through
+    /// the document's `fx_color`, into the scene colour texture the stage
+    /// chain reads. Only reached when the document declared a `shader:`
+    /// block (see the call site); the classic screen path has no pass.
+    fn draw_screen_pass(&mut self, cx: &mut Cx2d, pass_rect: Rect, sig: &Signals, src: &Texture) {
+        let quad_id = self.clip_quad_id(cx.cx);
+        let (palette, fog_z) = match self.doc.as_ref() {
+            Some(doc) => (
+                doc.palette,
+                // Same law as every family: the strength is host-gated to
+                // 0 without REAL content, so a look can never accidentally
+                // key off the animated fallback pattern.
+                if self.input0.is_some() {
+                    doc.content.value(sig).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+            ),
+            None => return,
+        };
+        let doc_fog = self.doc.as_ref().map(|d| d.fog.value(sig)).unwrap_or(0.0);
+        let doc_glow = self.doc.as_ref().map(|d| d.glow.value(sig)).unwrap_or(1.0);
+        self.pass.set_size(cx.cx, pass_rect.size);
+        self.pass.set_color_texture(
+            cx.cx,
+            &self.color_texture,
+            DrawPassClearColor::ClearWith(palette[0]),
+        );
+        self.pass.set_depth_texture(
+            cx.cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+        cx.make_child_pass(&self.pass);
+        cx.begin_pass(&self.pass, None);
+        self.pass.set_size(cx.cx, pass_rect.size);
+        // THE VIEWPORT still has to be published even though this quad
+        // lives in clip space and needs no camera: without it the pass
+        // keeps a stale viewport and the frame renders into a strip.
+        fx_set_pass_camera(
+            cx.cx,
+            &self.pass,
+            &SceneState3D {
+                time: self.local_time,
+                camera_pos: vec3f(0.0, 0.0, 1.0),
+                view: Mat4f::identity(),
+                projection: Mat4f::identity(),
+                viewport_rect: pass_rect,
+            },
+        );
+        let cx3d = &mut Cx3d::new(cx.cx);
+        // A DRAW LIST inside the pass: without it the instance lands in the
+        // PARENT's current draw list and paints over the window instead of
+        // into the pass texture (it did, and the frame came out black with
+        // the effect smeared across the title bar).
+        self.draw_list.begin_always(cx3d);
+        cx3d.cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform =
+            Mat4f::identity();
+        let has_content = self.input0.is_some();
+        let d = &mut self.draw_screen;
+        d.time_beat = vec4(
+            sig.0[Signals::TIME],
+            sig.0[Signals::BEAT],
+            sig.0[Signals::PHASE],
+            sig.0[Signals::PULSE],
+        );
+        d.sig = vec4(
+            sig.0[Signals::BAR],
+            sig.0[Signals::BPM],
+            sig.0[Signals::ENERGY],
+            sig.0[Signals::DT],
+        );
+        d.user = vec4(
+            sig.0[Signals::P0],
+            sig.0[Signals::P1],
+            sig.0[Signals::P2],
+            sig.0[Signals::P3],
+        );
+        d.col_bg = palette[0];
+        d.col_a = palette[1];
+        d.col_b = palette[2];
+        d.col_c = palette[3];
+        d.fog = vec4(doc_fog, doc_glow, fog_z, 0.0);
+        d.draw_vars.set_texture(0, src);
+        d.draw_vars.set_uniform(
+            cx3d.cx,
+            live_id!(has_content),
+            &[if has_content { 1.0 } else { 0.0 }],
+        );
+        d.draw_vars.geometry_id = Some(quad_id);
+        if d.draw_vars.can_instance() {
+            let new_area = cx3d.add_instance(&d.draw_vars);
+            d.draw_vars.area = cx3d.update_area_refs(d.draw_vars.area, new_area);
+        }
+        self.draw_list.end(cx3d);
+        cx.end_pass(&self.pass);
+    }
+
     fn draw_scene(&mut self, cx: &mut Cx2d, pass_rect: Rect, sig: &Signals) {
         let Some(doc) = self.doc.as_mut() else { return };
         let time = sig.0[Signals::TIME];
@@ -1135,22 +1292,7 @@ impl VjFxView {
         let Some(geometry) = &self.geometry else { return };
         let geometry_id = geometry.geometry_id();
 
-        // The content backdrop's quad: built once, never regenerated (it
-        // lives in clip space, so no camera or size can invalidate it).
-        if self.backdrop_geometry.is_none() {
-            let mut quad = FxMesh::default();
-            let n0 = vec3f(0.0, 0.0, 1.0);
-            let a = quad.push_vert(vec3f(-1.0, -1.0, 0.0), 0.0, n0, 0.0, vec2f(0.0, 1.0), 0.0, 0.0);
-            let b = quad.push_vert(vec3f(1.0, -1.0, 0.0), 1.0, n0, 0.0, vec2f(1.0, 1.0), 0.0, 0.0);
-            let c = quad.push_vert(vec3f(1.0, 1.0, 0.0), 2.0, n0, 0.0, vec2f(1.0, 0.0), 0.0, 0.0);
-            let d = quad.push_vert(vec3f(-1.0, 1.0, 0.0), 3.0, n0, 0.0, vec2f(0.0, 0.0), 0.0, 0.0);
-            quad.push_quad(a, b, c, d);
-            let g = Geometry::new(cx.cx);
-            quad.upload_clone(cx.cx, &g);
-            self.backdrop_geometry = Some(g);
-        }
-        let backdrop_geometry_id =
-            self.backdrop_geometry.as_ref().map(|g| g.geometry_id());
+        let backdrop_geometry_id = Some(self.clip_quad_id(cx.cx));
 
         // Camera → pass uniforms.
         let cam = self.camera(time);
@@ -1341,9 +1483,10 @@ impl VjFxView {
                 }
                 draw_engine!(&mut self.draw_swarm, notex)
             }
-            // Fluid never reaches the mesh scene pass (draw_walk routes it
-            // through the field's view shader).
-            ShaderKind::FluidView => {}
+            // Fluid and screen never reach the mesh scene pass (draw_walk
+            // routes them through the fluid view shader / the screen quad
+            // pass, both of which run before this one is even begun).
+            ShaderKind::FluidView | ShaderKind::Screen => {}
             ShaderKind::Terrain => draw_engine!(&mut self.draw_terrain),
             ShaderKind::Ribbon => draw_engine!(&mut self.draw_ribbon),
             ShaderKind::Tunnel => draw_engine!(&mut self.draw_tunnel),
@@ -1463,7 +1606,16 @@ impl Widget for VjFxView {
         if self.next_frame.is_event(event).is_some() && self.live && !self.manual_clock {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
-            let dt = (time - last).clamp(0.0, 0.1);
+            let mut dt = (time - last).clamp(0.0, 0.1);
+            // Deterministic capture: fixed step for a fixed budget, then
+            // freeze (no clock, no redraw) so the grab is reproducible.
+            if let Some((fixed, frames)) = self.capture {
+                if self.capture_frame >= frames {
+                    return;
+                }
+                self.capture_frame += 1;
+                dt = fixed;
+            }
             if !self.paused {
                 if let Some(doc) = &self.doc {
                     let speed = doc.speed as f64 * self.speed_scale as f64;
@@ -1520,13 +1672,27 @@ impl Widget for VjFxView {
 
         // -- scene pass (skipped by the fullscreen `screen` engine) --------
         let chain_input = if is_screen {
-            match self.input0.clone() {
+            let src = match self.input0.clone() {
                 Some(tex) => tex,
                 None => {
                     let t = sig.0[Signals::TIME];
                     let p = sig.0[Signals::PULSE];
                     self.update_fallback_input(cx.cx, t, p)
                 }
+            };
+            // THE FULLSCREEN FAMILY. Classic path: input0 goes STRAIGHT
+            // into the stage chain, no scene pass at all — that is what the
+            // shipped `screen` presets are, and routing them through a blit
+            // would resample the input before the chain ever saw it. A
+            // document that declares its own `shader:` opts into a real
+            // pass instead: one clip-space quad whose whole fragment is the
+            // doc's `fx_color` (shaders.rs `DrawVjFxScreen`), with the
+            // stage chain still running on top.
+            if self.doc.as_ref().is_some_and(|d| d.shader_hooks.is_some()) {
+                self.draw_screen_pass(cx, pass_rect, &sig, &src);
+                self.color_texture.clone()
+            } else {
+                src
             }
         } else if is_fluid {
             // Fluid: the scene pass IS the field's view shader (dye through

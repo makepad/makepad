@@ -49,4 +49,24 @@
         {kind: "bloom", threshold: 0.55, strength: 1.0, levels: 3},
         {kind: "feedback", amount: "0.3 + 0.2*pulse", zoom: 1.004, dim: 0.95}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the bar gradient axis 0..1, attr = (id, aux, r0, r1).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCopper {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let band = pow(clamp(sin(t * 3.14159265), 0.0, 1.0), max(self.flow.z, 0.5))
+            let base = self.col_b.mix(self.col_a, band)
+            let sline = 1.0 - clamp(abs(t - 0.68) * 9.0, 0.0, 1.0)
+            let spec = pow(sline, 3.0) * (0.5 + self.time_beat.w * 0.8)
+            let vary = 0.85 + 0.30 * attr.z
+            return vec4(base.xyz * vary + self.col_c.xyz * spec, 1.0)
+        }
+    }
 }
