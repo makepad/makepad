@@ -4418,8 +4418,11 @@ pub struct App {
     /// Cue-well drag in progress: (slot, last pointer position).
     #[rust]
     well_drag: Option<(SlotId, DVec2)>,
-    /// Last `WindowDragQuery` seen for the output window: (when, where) —
-    /// the double-click detector for its maximize/restore toggle.
+    /// Last `MouseDown` seen on the output window: (when, where) — the
+    /// double-click detector for its maximize/restore toggle. Windows gets
+    /// this natively from the caption path instead (see the WindowDragQuery
+    /// handler), so this field would sit unused there.
+    #[cfg(not(target_os = "windows"))]
     #[rust]
     output_drag_last: Option<(Instant, DVec2)>,
     /// THE published beat clock — the disciplined oscillator every consumer
@@ -14665,31 +14668,46 @@ impl AppMain for App {
                 }
             } else if Some(dq.window_id) == output_id {
                 // The output window is a pure projector surface — no
-                // controls of its own, so the whole client area is fair
-                // game for a drag. A Caption answer hands the entire
-                // gesture to the OS, so this query (fired on every
-                // mouse-down, whether or not it turns into a drag) is the
-                // only place left to notice a double-click; that is why
-                // the toggle lives here rather than behind a FingerDown
-                // handler downstream that a Caption answer would starve.
+                // controls of its own, so the whole client area is always a
+                // drag/caption surface, maximized or not.
+                //
+                // On Windows this is ALL that's needed: this query is
+                // driven by WM_NCHITTEST there, which fires on every mouse
+                // MOVE, not on clicks — a click-counting toggle previously
+                // lived here and toggled maximize on ordinary mouse
+                // movement. HTCAPTION already gives native drag,
+                // double-click-to-maximize, and drag-to-restore for free
+                // once the window answers Caption, and the chrome removal
+                // reacts to the real maximize state on its own (see
+                // `extended_client_border_thickness` in win32_window.rs) —
+                // so Windows gets no app-level toggle at all; see the
+                // `MouseDown` handler below for the other platforms.
+                dq.response.set(WindowDragQueryResponse::Caption);
+            }
+        }
+        // Double-click toggles the output window's maximize state.
+        // Windows gets this natively for free from the Caption answer
+        // above (see the comment there) — wiring it again here would
+        // double-fire, so this is the non-Windows path, driven by a real
+        // click (not a query that can repeat on mouse movement).
+        #[cfg(not(target_os = "windows"))]
+        if let Event::MouseDown(me) = event {
+            let output_id = self.ui.window(cx, ids!(output_window)).window_id();
+            if Some(me.window_id) == output_id {
                 let now = Instant::now();
                 let is_double_click = self.output_drag_last.is_some_and(|(t, p)| {
-                    now.duration_since(t).as_secs_f64() < 0.4 && (p - dq.abs).length() < 12.0
+                    now.duration_since(t).as_secs_f64() < 0.4 && (p - me.abs).length() < 12.0
                 });
-                self.output_drag_last = Some((now, dq.abs));
-                let output = self.ui.window(cx, ids!(output_window));
                 if is_double_click {
                     self.output_drag_last = None;
+                    let output = self.ui.window(cx, ids!(output_window));
                     if output.is_fullscreen(cx) {
                         output.restore(cx);
                     } else {
                         output.maximize(cx);
                     }
-                    dq.response.set(WindowDragQueryResponse::Client);
-                } else if !output.is_fullscreen(cx) {
-                    // Chromeless once maximized: nothing left to drag by
-                    // until a double-click restores it.
-                    dq.response.set(WindowDragQueryResponse::Caption);
+                } else {
+                    self.output_drag_last = Some((now, me.abs));
                 }
             }
         }
