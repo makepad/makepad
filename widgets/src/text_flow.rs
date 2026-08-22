@@ -2537,14 +2537,16 @@ impl WidgetNode for TextFlowLink {
     }
 
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
-        // Check main area
+        // Clipped rects throughout, matching `Event::hits`: a link scrolled out
+        // of its container is drawn off-viewport and must not answer point
+        // queries there (see `Widget::point_hits_area`).
         let area = self.area();
-        if area.is_valid(cx) && area.rect(cx).contains(point) {
+        if area.is_valid(cx) && area.clipped_rect(cx).contains(point) {
             return true;
         }
         // Links span multiple text rects via drawn_areas
         for area in self.drawn_areas.iter() {
-            if area.is_valid(cx) && area.rect(cx).contains(point) {
+            if area.is_valid(cx) && area.clipped_rect(cx).contains(point) {
                 return true;
             }
         }

@@ -152,9 +152,16 @@ pub trait WidgetNode: ScriptApply {
     }
     /// Whether this widget's area contains the given point. Override for widgets with
     /// multiple hit areas (e.g. TextFlowLink with drawn_areas).
+    ///
+    /// Uses the *clipped* rect, the same geometry `Event::hits` tests against.
+    /// `Area::rect` is unclipped: a widget drawn outside its container's clip —
+    /// every recycled row a `PortalList` draws past the viewport edge, anything
+    /// scrolled out of a `ScrollXYView` — still reports a full-size rect at a
+    /// position where nothing of it is on screen. Matching those would hand
+    /// point queries a widget the user cannot see or click.
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
         let area = self.area();
-        area.is_valid(cx) && area.rect(cx).contains(point)
+        area.is_valid(cx) && area.clipped_rect(cx).contains(point)
     }
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}

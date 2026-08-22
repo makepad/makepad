@@ -553,7 +553,12 @@ impl ScrollBar {
         dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
     ) {
         if let Event::Scroll(e) = event {
-            if cx.is_scrolling_allowed_within(&scroll_area) && scroll_area.rect(cx).contains(e.abs)
+            // The CLIPPED rect: a scroll view partially hidden by an ancestor
+            // clip must not accept wheels over its invisible band — whatever
+            // is really drawn there owns them (the portallist_hit example's
+            // scroll-gate test pins this).
+            if cx.is_scrolling_allowed_within(&scroll_area)
+                && scroll_area.clipped_rect(cx).contains(e.abs)
             {
                 if !match self.axis {
                     ScrollAxis::Horizontal => e.handled_x.get(),

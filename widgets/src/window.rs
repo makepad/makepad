@@ -865,17 +865,21 @@ impl Window {
 
     fn sync_caption_title(&mut self, cx: &mut Cx) {
         let title = if self.window.title.is_empty() {
-            &cx.windows[self.window.handle.window_id()].create_title
+            cx.windows[self.window.handle.window_id()].create_title.clone()
         } else {
-            &self.window.title
+            self.window.title.clone()
         };
+        // Under `--remote` the title carries a `[remote]` tag, so a human who
+        // finds this window lingering can tell it belongs to an agent. Apps that
+        // draw their own caption bar must show it too, not just the OS title bar.
+        // No-op (and idempotent) when the remote server is not running.
+        let title = crate::makepad_platform::remote::tag_window_title(title);
         // Bail out early when the resolved title was already synced: pushing an
         // unchanged title through `set_text` every event would still cost a
         // widget-tree lookup per event.
         if self.last_synced_title.as_deref() == Some(title.as_str()) {
             return;
         }
-        let title = title.clone();
         if !title.is_empty() {
             let label = self.label(cx, ids!(caption_label.label));
             if label.borrow().is_none() {
@@ -1166,6 +1170,30 @@ impl WindowRef {
             inner.window.handle.is_fullscreen(cx)
         } else {
             false
+        }
+    }
+    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: zoom).
+    /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
+    /// `FullscreenWindow`/`NormalizeWindow` — not handled by every
+    /// backend), `maximize`/`restore` push the ops the Windows backend
+    /// actually implements, and `is_fullscreen()` reflects this state
+    /// there too (`window_geom.is_fullscreen` mirrors `get_is_maximized`).
+    pub fn maximize(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.maximize(cx);
+        }
+    }
+    /// See `maximize()`.
+    pub fn restore(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.restore(cx);
+        }
+    }
+    /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
+    /// other backends ignore it).
+    pub fn set_chromeless_when_maximized(&self, cx: &mut Cx, chromeless: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_chromeless_when_maximized(cx, chromeless);
         }
     }
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
