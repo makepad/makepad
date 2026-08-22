@@ -537,10 +537,10 @@ script_mod! {
                 // CONTENT: the wall carries the channel video unrolled
                 // along its arc (three copies, drifting slowly).
                 let ttx = self.tex0.sample_as_bgra(
-                    vec2(fract(self.v_uv.x * 3.0 + self.time_beat.x * 0.03), 1.0 - self.v_uv.y)
+                    vec2(fract(self.v_uv.x * 1.5 + self.time_beat.x * 0.03), 1.0 - self.v_uv.y)
                 )
                 let wall = self.col_a.mix(self.col_b, hue).xyz
-                    .mix(ttx.xyz * 1.3, self.fog.z * 0.75)
+                    .mix(ttx.xyz * 1.5, clamp(self.fog.z * 1.2, 0.0, 1.0))
                 let behind = max(self.v_base.w - self.v_uv.x, 0.0)
                 let head = exp(0.0 - behind * 22.0) * (1.5 + self.user.y)
                 let age = clamp(1.0 - behind * 1.1, 0.35, 1.0)
@@ -595,19 +595,23 @@ script_mod! {
                         + self.col_a.xyz * street * (0.05 + self.time_beat.w * 0.02)
                         + self.col_c.xyz * lane * 0.10
                 } else {
-                    // CONTENT (retro/tron): the street grid glows in the
-                    // video's palette — one copy every 4 blocks.
-                    let gtx = self.tex0.sample_as_bgra(fract(self.v_uv / (s * 4.0)))
-                    let ga = self.col_a.xyz.mix(gtx.xyz * 1.5, self.fog.z * 0.6)
+                    // CONTENT (retro/tron): the street plane PLAYS the clip
+                    // — one copy every 8 blocks, lighting the grid and
+                    // washing the asphalt between the lines, so the ground
+                    // reads as a screen the city stands on.
+                    let gtx = self.tex0.sample_as_bgra(fract(self.v_uv / (s * 8.0)))
+                    let gc = clamp(self.fog.z * 1.2, 0.0, 1.0)
+                    let ga = self.col_a.xyz.mix(gtx.xyz * 1.7, gc)
+                    let wash = gtx.xyz * (self.fog.z * 0.35)
                     if style < 1.5 {
                         let edge = 1.0 - smoothstep(half * 0.9, half + 0.05, dm)
-                        rgb = self.col_bg.xyz * 0.5
+                        rgb = self.col_bg.xyz * 0.5 + wash
                             + ga * edge * (0.7 + self.time_beat.w * 0.9)
                     } else {
                         let f = fract(self.v_uv / (s * 0.25))
                         let fm = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
                         let fine = 1.0 - smoothstep(0.01, 0.05, fm)
-                        rgb = self.col_bg.xyz * 0.4
+                        rgb = self.col_bg.xyz * 0.4 + wash
                             + ga * (fine * 0.20 + lane * (0.9 + self.time_beat.w * 0.8))
                     }
                 }
@@ -644,19 +648,32 @@ script_mod! {
                     let warm = self.hash1(tid * 5.3 + cell.x * 3.7 + cell.y * 9.1)
                     let wcol = vec3(1.0, 0.85, 0.6).mix(vec3(0.75, 0.88, 1.0), step(0.6, warm))
                     let wb = 0.55 + 0.45 * self.hash1(cell.x * 1.7 + cell.y * 2.9 + tid)
-                    // CONTENT: facades become video billboards — every
-                    // window is one chunky pixel of the channel video, with
-                    // a per-tower crop offset (a city of screens). The
-                    // window grid, density and beat flicker stay in charge.
-                    let span = vec2(9.0, 13.0)
-                    let boff = floor(vec2(self.hash1(tid * 2.31), self.hash1(tid * 4.73)) * 6.0)
-                    let fuv = (cell + vec2(0.5, 0.5) + boff) / span
+                    // CONTENT: facades become VIDEO BILLBOARDS — every
+                    // window is one chunky pixel of the channel video and
+                    // each tower runs the clip from its own bottom-left
+                    // corner, so a whole skyline of screens plays it at
+                    // once. (The first pass gave every tower a RANDOM crop
+                    // offset: correct as "a city of screens", unreadable as
+                    // a picture — the frames never lined up with each
+                    // other.) A dim wash carries the clip across the dark
+                    // glass between windows so the picture is continuous,
+                    // while grid, density and beat flicker stay in charge.
+                    let span = vec2(10.0, 14.0)
+                    let fuv = (cell + vec2(0.5, 0.5)) / span
                     let ftx = self.tex0.sample_as_bgra(vec2(fract(fuv.x), fract(0.0 - fuv.y)))
+                    // A SECOND, continuous sample for the glass between the
+                    // windows: the chunky per-window mosaic is the look, but
+                    // a 10x14 pixel grid alone is too coarse to recognise —
+                    // the smooth wash underneath carries the actual picture.
+                    let suv = wu / span
+                    let stx = self.tex0.sample_as_bgra(vec2(fract(suv.x), fract(0.0 - suv.y)))
+                    let cm = self.fog.z
                     if style < 0.5 {
                         let win = wcol * (wb * lit)
-                        let vid = ftx.xyz * (0.14 + 1.0 * lit * wb)
+                        let vid = ftx.xyz * (0.30 + 1.05 * lit * wb)
                         rgb = self.v_base.xyz * 0.045
-                            + win.mix(vid, self.fog.z)
+                            + stx.xyz * (cm * 0.55)
+                            + win.mix(vid, clamp(cm * 1.2, 0.0, 1.0))
                                 * (inwin * (1.0 + self.time_beat.w * 0.25))
                     } else {
                         // Retro/tron: neon wire grid on dark glass; lit
@@ -665,18 +682,21 @@ script_mod! {
                         let gd = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y))
                         let wire = 1.0 - smoothstep(0.02, 0.10, gd)
                         let gain = 0.5 + self.time_beat.w * 0.8 + self.user.z * 0.5
-                        let neon = self.v_base.xyz.mix(ftx.xyz * 1.5, self.fog.z * 0.6)
+                        let neon = self.v_base.xyz.mix(ftx.xyz * 1.7, clamp(cm * 1.15, 0.0, 1.0))
                             * wire * gain
+                        // The glass between the wires carries the clip too:
+                        // a wire mosaic alone is too little surface to read.
+                        let glass = stx.xyz * (cm * 0.55)
                         if style < 1.5 {
-                            rgb = self.col_bg.xyz * 0.25 + neon
+                            rgb = self.col_bg.xyz * 0.25 + neon + glass
                                 + wcol * lit * inwin * 0.12
                         } else {
                             let ed = min(f.y, 1.0 - f.y)
                             let floor_line = 1.0 - smoothstep(0.02, 0.08, ed)
                             rgb = self.col_bg.xyz * 0.30
-                                + self.col_a.xyz.mix(ftx.xyz * 1.4, self.fog.z * 0.5)
+                                + self.col_a.xyz.mix(ftx.xyz * 1.6, clamp(cm * 1.1, 0.0, 1.0))
                                     * floor_line * gain * 0.5
-                                + neon * 0.35 + wcol * lit * inwin * 0.05
+                                + neon * 0.35 + glass + wcol * lit * inwin * 0.05
                         }
                     }
                 }

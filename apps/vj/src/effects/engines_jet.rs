@@ -411,8 +411,16 @@ script_mod! {
 
         // 3-octave fbm scrolled along v — the endless stream — with a soft
         // corridor down the middle so the jet always has a valley to fly.
+        //
+        // SCROLL SIGN: the grid runs uv.y 0 at z = -size/2 (the FAR end,
+        // the camera looks down -z) to 1 at z = +size/2 (behind the
+        // camera), so a feature sampled at `uv + scroll` travels to
+        // DECREASING uv.y as scroll grows — away from the viewer. That is
+        // flying backwards, and it is what shipped. NEGATIVE scroll walks
+        // the range toward the camera: ridges rise out of the horizon,
+        // sweep past and vanish behind, which is what flying looks like.
         height_at: fn(uv: vec2) -> float {
-            let scroll = vec2(0.0, self.time_beat.x * self.flow.x * 0.06)
+            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
             let p = (uv + scroll) * (34.0 * self.shape.z)
             let h1 = self.vnoise(p)
             let h2 = self.vnoise(p * 2.11 + vec2(13.0, 5.0))
@@ -548,30 +556,38 @@ script_mod! {
                 // ---- TERRAIN ----
                 let h = self.v_misc.y
                 let lit = self.v_misc.z
-                let scroll = vec2(0.0, self.time_beat.x * self.flow.x * 0.06)
+                // Same NEGATIVE sign as `height_at`: grid, drape and land
+                // must travel together, toward the camera (see the scroll
+                // sign note there — the range used to fly backwards).
+                let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
                 let g = fract((self.v_uv + scroll) * self.shape.x)
                 let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
                 let line = 1.0 - smoothstep(0.0, 0.11, dg)
                 let beat_glow = 1.0 + self.time_beat.w * 0.9
-                // CONTENT: the channel video drapes the range — sampled by
-                // the SAME scrolled grid uv, so it streams with the land.
+                // CONTENT — THE DRAPE: the channel video is PAINTED ON THE
+                // RANGE, sampled by the SAME scrolled grid uv, so the clip
+                // streams toward the viewer with the land it lies on. It
+                // REPLACES the slope gradient rather than tinting it (a
+                // tint on a dark alpenglow ramp reads as a mood, never as
+                // a picture) and keeps the terrain's own lighting.
                 // fog.z = the pre-gated `content` strength.
                 let cm = self.fog.z
                 let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
                 if look < 0.5 {
                     // solid alpenglow: valleys col_a, peaks col_b, summits
                     // catch col_c; a whisper of grid keeps the retro DNA.
-                    // Content tints the slope gradient (lit like the land).
                     let grad = self.col_a.xyz.mix(self.col_b.xyz, clamp(h * 1.5 - 0.15, 0.0, 1.0))
-                        .mix(ttx.xyz * 1.1, cm * 0.75)
+                        .mix(ttx.xyz * 1.35, clamp(cm * 1.25, 0.0, 1.0))
                     let glow = self.col_c.xyz * pow(clamp(h, 0.0, 1.0), 3.0) * 0.85
                     rgb = (grad * lit + glow + grad * line * 0.10) * gain
                 } else {
                     if look < 1.5 {
                         // Battlezone wire: lines only over near-black fill.
-                        // Content re-colors the wireframe per cell.
-                        let wl = self.col_a.xyz.mix(ttx.xyz * 1.5, cm * 0.7)
+                        // Content lights the wireframe AND washes the fill,
+                        // so the picture is continuous between the lines.
+                        let wl = self.col_a.xyz.mix(ttx.xyz * 1.15, clamp(cm * 1.2, 0.0, 1.0))
                         let fill = self.col_a.xyz * 0.035
+                            + ttx.xyz * (cm * 0.62 * (0.35 + 0.65 * lit))
                         rgb = (fill + wl * line * beat_glow
                             + self.col_b.xyz * (line * h * 1.3)) * gain
                     } else {
@@ -579,10 +595,12 @@ script_mod! {
                         // hash is INLINED: a helper fn bound to the vertex
                         // stage (hash2 feeds height_at) cannot also be
                         // called from the pixel stage. Content ghosts the
-                        // video's luminance through the mono ramp.
+                        // video's luminance through the mono ramp — the
+                        // clip becomes the thing the scope is looking at.
                         let vl = dot(ttx.xyz, vec3(0.299, 0.587, 0.114))
                         let lum = clamp(
-                            0.14 + h * 0.9 * lit + line * 0.22 + vl * cm * 0.45,
+                            mix(0.14 + h * 0.9 * lit, vl * (0.35 + 0.75 * lit), clamp(cm, 0.0, 1.0))
+                                + line * 0.22,
                             0.0, 1.0
                         )
                         let gv = floor(self.v_uv * 331.0)

@@ -295,15 +295,18 @@ pub struct LsystemEngine {
     built: bool,
     pub segments: usize,
     pub truncated: bool,
-    /// XZ half-extent of the built plant(s) — the content-coupling canopy
-    /// footprint (shape.y): the shader maps world xz over it to sample
-    /// input0 across the foliage. Set at build; 3.0 until then.
+    /// X half-extent of the built plant(s) — the content-coupling FRONT
+    /// PROJECTION footprint (shape.y): the shader maps world x over it to
+    /// sample input0 across the plant. Set at build; 3.0 until then.
     pub extent: f32,
+    /// Height of the built plant(s) — the projection's vertical span
+    /// (shape.z). Set at build; 6.0 until then.
+    pub height: f32,
 }
 
 impl LsystemEngine {
     pub fn new(cfg: LsystemConfig) -> Self {
-        Self { cfg, built: false, segments: 0, truncated: false, extent: 3.0 }
+        Self { cfg, built: false, segments: 0, truncated: false, extent: 3.0, height: 6.0 }
     }
 
     fn build(&mut self, mesh: &mut FxMesh) {
@@ -342,23 +345,31 @@ impl LsystemEngine {
             }
         }
         self.segments = total;
-        // Canopy footprint for the content coupling: xz half-extent over
-        // everything built (all ring copies included).
+        // Projection footprint for the content coupling: x half-extent and
+        // height over everything built (all ring copies included). A plant
+        // is TALL AND THIN — projecting the video by its xz footprint (the
+        // first pass) sampled a pinhole; front-projecting over (x, height)
+        // puts a whole picture on it.
         let floats = super::mesh::VERT_FLOATS;
         let mut ext = 0.5f32;
+        let mut hgt = 0.5f32;
         for v in mesh.verts.chunks(floats) {
-            ext = ext.max(v[0].abs()).max(v[2].abs());
+            ext = ext.max(v[0].abs());
+            hgt = hgt.max(v[1]);
         }
         if ext.is_finite() {
             self.extent = ext;
         }
+        if hgt.is_finite() {
+            self.height = hgt;
+        }
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        // shape = (content mode 0 = canopy tint, canopy xz half-extent, 0, 0)
-        // — consumed by the DrawVjFxMesh content coupling only.
+        // shape = (content mode 2 = FRONT projection, x half-extent,
+        // height, 0) — consumed by the DrawVjFxMesh content coupling only.
         EngineUniforms {
-            shape: vec4(0.0, self.extent.max(0.5), 0.0, 0.0),
+            shape: vec4(2.0, self.extent.max(0.5), self.height.max(0.5), 0.0),
             flow: vec4(0.0, 0.0, 0.0, 0.0),
         }
     }
@@ -1318,8 +1329,9 @@ impl GrassEngine {
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        // shape = (content mode 0 = field tint, meadow half-extent, 0, 0):
-        // blade tips pick up input0 mapped over the meadow footprint.
+        // shape = (content mode 0 = FIELD drape, meadow half-extent, 0, 0):
+        // the clip lies on the ground the blades stand in, so looking
+        // across the meadow reads it back off the blade tips.
         let area = if self.cfg.area.is_finite() { self.cfg.area } else { 9.0 };
         EngineUniforms {
             shape: vec4(0.0, area.clamp(0.5, 100.0), 0.0, 0.0),

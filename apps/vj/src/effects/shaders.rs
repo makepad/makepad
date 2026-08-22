@@ -130,24 +130,40 @@ script_mod! {
             self.v_normal = self.geom.geom_normal
             let grow_dim = 0.20 + 0.80 * g
             let c = self.fx_color(arc, attr, self.geom.geom_normal, world.xyz)
-            // CONTENT COUPLING, canopy mode (shape.x 0): foliage picks up
-            // the live input0's colors — sampled by the plant's xz footprint
-            // at the REST position, so the colors stay glued to the canopy
-            // while the wind moves it. Tips take the video, trunks keep
-            // their own color (arc-weighted). fog.z is host-pre-gated to 0
-            // without real content: the standalone look stays classic.
+            // CONTENT COUPLING — the video PAINTED ON THE PLANT. Always
+            // sampled at the REST position, so wind moves the picture with
+            // the geometry instead of smearing it. Two projections, chosen
+            // by the engine on shape.x:
+            //
+            //   0 = FIELD (grass): world xz over the meadow half-extent
+            //       (shape.y) — the clip lies on the ground the blades
+            //       stand in, so the field reads it back as you look
+            //       across it.
+            //   2 = FRONT (l-system): world x over the plant half-extent
+            //       (shape.y) and world y over its HEIGHT (shape.z) — a
+            //       slide projector aimed at the plant. The first pass
+            //       used xz here too, which for a tall thin tree sampled
+            //       one pinhole of the frame and read as a mood, never a
+            //       picture.
+            //
+            // Trunks keep a little of their own colour (arc-weighted), the
+            // tips take the clip. fog.z is host-pre-gated to 0 without real
+            // content: the standalone look stays classic.
             let mut crgb = c.xyz
             let cmix = self.has_content * self.fog.z
-            if cmix > 0.001 && self.shape.x < 0.5 {
+            if cmix > 0.001 && abs(self.shape.x - 1.0) > 0.5 {
                 let ext = max(self.shape.y, 0.5)
-                let cuv = clamp(
-                    vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5),
-                    vec2(0.0, 0.0),
-                    vec2(1.0, 1.0)
+                let mut cuv = vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5)
+                if self.shape.x > 1.5 {
+                    let hgt = max(self.shape.z, 0.5)
+                    cuv = vec2(twisted.x / (ext * 2.0) + 0.5, 1.0 - twisted.y / hgt)
+                }
+                let texel = self.tex0.sample_nearest(
+                    clamp(cuv, vec2(0.0, 0.0), vec2(1.0, 1.0)),
+                    0.0
                 )
-                let texel = self.tex0.sample_nearest(cuv, 0.0)
-                let tipness = smoothstep(0.12, 0.72, arc)
-                crgb = mix(crgb, texel.xyz * 1.3, cmix * tipness)
+                let tipness = 0.30 + 0.70 * smoothstep(0.04, 0.45, arc)
+                crgb = mix(crgb, texel.xyz * 1.45, clamp(cmix * 1.35, 0.0, 1.0) * tipness)
             }
             self.v_color = vec4(crgb * grow_dim, c.w)
             let view_pos = self.draw_pass.camera_view * world
@@ -181,8 +197,8 @@ script_mod! {
                     vec2(1.0, 1.0)
                 )
                 let texel = self.tex0.sample_as_bgra(bent)
-                let glass = texel.xyz * ((0.35 + 0.95 * lit) * self.fog.y)
-                body = mix(body, glass, cmix * (1.0 - rim * 0.55))
+                let glass = texel.xyz * ((0.45 + 0.95 * lit) * self.fog.y)
+                body = mix(body, glass, clamp(cmix * 1.2, 0.0, 1.0) * (1.0 - rim * 0.45))
             }
             let glow = body + self.col_c.xyz * rim * 0.55
             let final_rgb = glow.mix(self.col_bg.xyz, 1.0 - fog)
@@ -233,8 +249,15 @@ script_mod! {
 
         // Height at grid uv: 3-octave fbm scrolled along v, optionally
         // replaced by input texture luminance (flow.y = tex_displace).
+        //
+        // SCROLL SIGN: the grid runs uv.y 0 at z = -size/2 (the FAR end —
+        // the camera sits at +z looking down -z) to 1 behind the camera,
+        // so a feature sampled at `uv + scroll` walks to DECREASING uv.y
+        // as scroll grows: away from the viewer. That reads as flying
+        // BACKWARDS over the land (reported on the jet's twin of this
+        // code). Negative scroll walks it toward the camera.
         height_at: fn(uv: vec2) -> float {
-            let scroll = vec2(0.0, self.time_beat.x * self.flow.x * 0.06)
+            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
             let p = (uv + scroll) * (self.shape.x * self.shape.z)
             let h1 = self.vnoise(p)
             let h2 = self.vnoise(p * 2.03 + vec2(11.0, 7.0))
@@ -279,22 +302,33 @@ script_mod! {
 
         pixel: fn() {
             // Neon wireframe grid over a dark surface, colored by height.
+            // Same NEGATIVE sign as `height_at`: grid, drape and land must
+            // travel together, toward the camera.
             let cells = 40.0
-            let scroll = vec2(0.0, self.time_beat.x * self.flow.x * 0.06)
+            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
             let g = fract((self.v_uv + scroll) * cells)
             let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
             let line = 1.0 - smoothstep(0.0, 0.11, dg)
             let t = clamp(self.v_h * 1.4, 0.0, 1.0)
-            // CONTENT: the channel video drapes the terrain — sampled by
-            // the SAME scrolled uv, so it streams with the surface — and
-            // tints the height gradient: dark faces and neon grid lines
-            // both pick up the video's palette. fog.z = pre-gated strength.
+            // CONTENT — THE DRAPE. The channel video is PAINTED ON THE
+            // LAND: one copy over the whole grid, sampled by the SAME
+            // scrolled uv as the wireframe, so the clip streams with the
+            // surface and every ridge carries its own piece of the picture.
+            // The classic surface term is a 0.30 whisper under the neon —
+            // far too dark to read a picture through — so the drape
+            // REPLACES it (lit by the same slope shade, so the land still
+            // looks like land) instead of tinting it, and only the grid
+            // keeps a tint. fog.z = pre-gated strength: 0 = classic.
             let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
+            let cm = self.fog.z
             let grad = self.col_a.mix(self.col_b, t).xyz
-                .mix(ttx.xyz * 1.15, self.fog.z * 0.7)
             let beat_glow = 1.0 + self.time_beat.w * 1.1
-            let surface = grad * 0.30 * self.v_color.x
-            let neon = grad * line * beat_glow * 1.6 + self.col_c.xyz * line * t * 0.6
+            let drape = ttx.xyz * (0.42 + 0.85 * self.v_color.x)
+                * (1.0 + self.time_beat.w * 0.30)
+            let surface = (grad * 0.30 * self.v_color.x)
+                .mix(drape, clamp(cm * 1.25, 0.0, 1.0))
+            let gline = grad.mix(ttx.xyz * 1.3, cm * 0.55)
+            let neon = gline * line * beat_glow * 1.6 + self.col_c.xyz * line * t * 0.6
             let cam = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
             let d = length(self.v_world - cam.xyz / max(cam.w, 0.0001))
             let fog = exp(0.0 - d * self.fog.x)
@@ -364,11 +398,19 @@ script_mod! {
             let energy = 0.35 + 1.15 * head + speed01 * 0.6
             self.v_color = vec4(c.xyz * energy, (1.0 - age) * 0.9)
             self.v_side = side
-            // Content-coupling uv: u = trail arc (the video flows headward
-            // along the strip), v = this ribbon's own scanline of the frame
-            // (hue picks the row; the strip's width spans a sliver of it).
-            self.v_cuv = vec2(age, clamp(attr.z * 0.88 + 0.06 + side * 0.03, 0.0, 1.0))
             self.vertex_pos = self.draw_pass.camera_projection * billboard
+            // Content-coupling uv: THE RIBBON'S OWN SCREEN POSITION. A
+            // scanline per ribbon (the first pass) gave every strip one
+            // flat colour band — a palette, never a picture. Painting each
+            // fragment with the video BEHIND it turns the swarm into a
+            // brush that reveals the clip as it sweeps, and the strips
+            // still carry their own head-bright envelope.
+            let ndc = self.vertex_pos.xy / max(self.vertex_pos.w, 0.0001)
+            self.v_cuv = clamp(
+                vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5),
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
+            )
             return self.vertex_pos
         }
 
@@ -383,13 +425,12 @@ script_mod! {
             let mut rgb = self.v_color.xyz
             let cmix = self.has_content * self.fog.z
             if cmix > 0.001 {
-                let cuv = vec2(fract(self.v_cuv.x + self.time_beat.x * 0.20), self.v_cuv.y)
-                let texel = self.tex0.sample_as_bgra(cuv)
+                let texel = self.tex0.sample_as_bgra(self.v_cuv)
                 // Clamped luminance transfer: the head stays brighter than
                 // the tail, but a bright frame can never blow the ribbon
                 // out to white — the video's own hue must survive.
                 let lum = clamp(dot(rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.2)
-                rgb = mix(rgb, texel.xyz * (0.40 + 1.1 * lum), cmix)
+                rgb = mix(rgb, texel.xyz * (0.55 + 1.1 * lum), clamp(cmix * 1.15, 0.0, 1.0))
             }
             return vec4(rgb * a, 0.0)
         }
@@ -469,10 +510,19 @@ script_mod! {
             let mut base = self.v_color.xyz * 0.06
             let cmix = self.has_content * self.fog.z
             if cmix > 0.001 {
-                let cuv = vec2(around, fract(along * 3.0 + self.time_beat.x * 0.06))
+                // THREE copies along the bore: `along` spans the WHOLE tube,
+                // so one copy stretches a frame over tens of world units
+                // and every ring shows a single smeared row — three copies
+                // is roughly square once the circumference is unrolled, and
+                // that is the difference between a texture and a picture.
+                let cuv = vec2(around, fract(along * 3.0 + self.time_beat.x * 0.05))
                 let texel = self.tex0.sample_as_bgra(cuv)
-                let wall = texel.xyz * (0.30 + 0.45 * self.time_beat.w + ring * 0.35)
-                base = mix(base, wall, cmix)
+                // Wall level stays UNDER 1: this family usually runs a
+                // bloom stage, and a bore papered at full gain bloomed the
+                // whole frame to white (measured, not guessed).
+                let wall = texel.xyz
+                    * (0.55 + 0.22 * self.time_beat.w + ring * 0.30)
+                base = mix(base, wall, clamp(cmix * 1.2, 0.0, 1.0))
             }
             let rgb = ((base + neon) * self.fog.y).mix(self.col_bg.xyz, 1.0 - fog)
             return vec4(rgb, 1.0)
@@ -681,10 +731,12 @@ script_mod! {
             }
             let attr = vec4(id, phase, hue, r1)
             let mut tint = self.fx_color(t01, attr, dir, world.xyz)
-            // CONTENT COUPLING (fog.z, pre-gated): every particle picks up
-            // the channel video's texel at its own screen position — a
-            // palette wash at half strength, a living pointillist screen at
-            // full. Motion, sprite and fade stay the classic look's.
+            // CONTENT COUPLING (fog.z, pre-gated): every particle takes the
+            // channel video's texel at its own screen position, so the
+            // swarm paints the clip in dots over the shared backdrop
+            // (view.rs `backdrop_level`) — motion, sprite and fade stay the
+            // classic look's. Near full transfer at the default: a partial
+            // mix left the palette in charge and only ever read as a tint.
             let cc = self.draw_pass.camera_projection * view_pos
             let suv = clamp(
                 vec2(cc.x, 0.0 - cc.y) / max(cc.w, 0.0001) * 0.5 + vec2(0.5, 0.5),
@@ -693,7 +745,10 @@ script_mod! {
             )
             let vtex = self.tex0.sample_nearest(suv, 0.0)
             tint = vec4(
-                tint.xyz.mix(vtex.xyz * (0.8 + 0.6 * self.time_beat.w), self.fog.z * 0.85),
+                tint.xyz.mix(
+                    vtex.xyz * (1.0 + 0.6 * self.time_beat.w),
+                    clamp(self.fog.z * 1.2, 0.0, 1.0)
+                ),
                 tint.w
             )
             if mode > 5.5 && mode < 6.5 {
@@ -848,7 +903,10 @@ script_mod! {
                 vec2(1.0, 1.0)
             )
             let vtex = self.tex0.sample_nearest(suv, 0.0)
-            let pal = tint0.xyz.mix(vtex.xyz * (0.85 + 0.5 * self.time_beat.w), self.fog.z * 0.8)
+            let pal = tint0.xyz.mix(
+                vtex.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(self.fog.z * 1.2, 0.0, 1.0)
+            )
             let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
             let fade = (1.0 - life_t) * (1.0 - life_t)
             self.v_color = vec4(rgb, fade * gate)
@@ -859,6 +917,69 @@ script_mod! {
 
         pixel: fn() {
             return self.fx_sprite(self.v_uv, self.v_color)
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // THE CONTENT BACKDROP — the shared structural coupling.
+    //
+    // A family whose classic look is BRIGHT SPARSE GEOMETRY over a near
+    // black field (particles, sparks, ribbons, plants, flies, pipes,
+    // shards, bars, dominoes, swarms) can never read as "the video is
+    // playing" from a tint alone: there is not enough surface to carry a
+    // picture. Those families get this quad drawn FIRST, at the far plane,
+    // writing no depth — the channel video dimmed behind the effect, the
+    // same structure the murmuration and the stock tape already prove.
+    //
+    // Level = fog.z (the pre-gated `content` strength) x fog.w (the
+    // per-family dim published by view.rs `backdrop_level`). The host skips
+    // the draw entirely when either is zero, so `content: 0` and the
+    // standalone fallback stay bit-exact classic BY CONSTRUCTION.
+    // ---------------------------------------------------------------------
+    mod.draw.DrawVjFxBackdrop = set_type_default() do #(DrawVjFxBackdrop::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        tex0: texture_2d(float)
+        backface_culling: false
+        alpha_blend: false
+        depth_write: false
+
+        v_uv: varying(vec2f)
+
+        vertex: fn() {
+            // Clip-space passthrough at the far plane: the camera never
+            // moves it, nothing can be drawn behind it, and it writes no
+            // depth so every engine draws straight over it.
+            self.v_uv = self.geom.geom_uv
+            self.vertex_pos = vec4(
+                self.geom.geom_pos.x,
+                self.geom.geom_pos.y,
+                0.9999,
+                1.0
+            )
+            return self.vertex_pos
+        }
+
+        pixel: fn() {
+            let tx = self.tex0.sample_as_bgra(self.v_uv)
+            // Beat lift + a soft vignette so the effect keeps the centre.
+            let lvl = clamp(
+                self.fog.z * self.fog.w * (1.0 + self.time_beat.w * 0.14),
+                0.0,
+                1.0
+            )
+            let r = length(self.v_uv - vec2(0.5, 0.5))
+            let vig = 1.0 - 0.35 * smoothstep(0.28, 0.78, r)
+            let rgb = self.col_bg.xyz.mix(tx.xyz, lvl * vig)
+            return vec4(rgb, 1.0)
         }
 
         fragment: fn() {
@@ -1166,6 +1287,10 @@ fx_mesh_draw_struct!(DrawVjFxTerrain);
 fx_mesh_draw_struct!(DrawVjFxRibbon);
 fx_mesh_draw_struct!(DrawVjFxTunnel);
 fx_mesh_draw_struct!(DrawVjFxParticles);
+/// The shared content backdrop (above): standard signal block, and it
+/// reads only `fog.z` (pre-gated content strength) x `fog.w` (the family
+/// dim) plus `col_bg`.
+fx_mesh_draw_struct!(DrawVjFxBackdrop);
 
 /// The scriptable-emitter shader: shared frame state + per-EMITTER instance
 /// data (one `add_instance` per live emitter per frame — the whole upload).
