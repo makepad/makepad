@@ -25,13 +25,73 @@ use {
     std::{ffi::CStr, os::raw::c_void, sync::Arc, sync::Mutex},
 };
 
+/// AppKit's transparent-titlebar container still owns the top ~28pt of a
+/// caption-less window: clicks fall through to the app, but DRAGS move the
+/// window — so a slider the app draws in its own top bar loses every drag
+/// to AppKit. Swapped onto the container after window creation, this
+/// subclass keeps only AppKit's own controls hittable (the traffic lights
+/// are NSButtons); everything else falls through to the makepad view, and
+/// window dragging is decided solely by the app's WindowDragQuery answer.
+pub fn define_titlebar_container_class() -> *const Class {
+    let Some(container_class) = Class::get("NSTitlebarContainerView") else {
+        return std::ptr::null();
+    };
+    extern "C" fn hit_test(this: &Object, _: Sel, point: NSPoint) -> ObjcId {
+        unsafe {
+            let hit: ObjcId = msg_send![super(this, superclass(this)), hitTest: point];
+            let mut view = hit;
+            while view != nil {
+                let is_button: bool = msg_send![view, isKindOfClass: class!(NSButton)];
+                if is_button {
+                    return hit;
+                }
+                view = msg_send![view, superview];
+            }
+            nil
+        }
+    }
+    let mut decl = ClassDecl::new("MakepadTitlebarContainerView", container_class).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(hitTest:),
+            hit_test as extern "C" fn(&Object, Sel, NSPoint) -> ObjcId,
+        );
+    }
+    decl.register()
+}
+
 pub fn define_macos_timer_delegate() -> *const Class {
+    // A panic must NOT unwind across these ObjC boundaries: the unwind hits
+    // `panic_cannot_unwind` and aborts the whole app — and because the run
+    // loop re-enters the callback while app state is already poisoned from
+    // the FIRST panic, the readable message is followed by a hard SIGABRT
+    // that looks like a platform crash. Catch at the edge, shout to stderr,
+    // and keep the run loop alive: a live VJ set survives a bad effect
+    // parameter, and the author gets the real panic text instead of a
+    // crash report.
+    fn shielded(name: &str, call: impl FnOnce() + std::panic::UnwindSafe) {
+        static PANICS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if std::panic::catch_unwind(call).is_err() {
+            let count = PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // The panic hook already printed message + backtrace; this line
+            // names the boundary that contained it.
+            eprintln!(
+                "makepad: PANIC contained at the {name} callback boundary \
+                 (#{count}); the app continues but may be in a wounded state"
+            );
+        }
+    }
+
     extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
-        MacosApp::send_timer_received(nstimer);
+        shielded("timer", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_timer_received(nstimer);
+        }));
     }
 
     extern "C" fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
-        MacosApp::send_paint_event();
+        shielded("live-resize", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_paint_event();
+        }));
     }
 
     let superclass = class!(NSObject);

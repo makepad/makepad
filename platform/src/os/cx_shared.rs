@@ -179,9 +179,27 @@ impl Cx {
 
     #[allow(dead_code)]
     pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
+        self.take_studio_screenshot_request_ids_for_window(kind_id, None)
+    }
+
+    /// Drain the pending screenshot requests this pass can answer.
+    ///
+    /// `window_id` is the window the presenting pass belongs to (None for
+    /// offscreen/stdin passes). A `--remote` `/g?w=N` grab only matches its own
+    /// window, so a multi-window app can be captured window by window instead of
+    /// whichever pass happens to present first. Studio and file-sink requests
+    /// are untargeted and match any pass, exactly as before.
+    #[allow(dead_code)]
+    pub(crate) fn take_studio_screenshot_request_ids_for_window(
+        &mut self,
+        kind_id: u32,
+        window_id: Option<usize>,
+    ) -> Vec<u64> {
         let mut request_ids = Vec::new();
         self.screenshot_requests.retain(|request| {
-            if request.kind_id == kind_id {
+            if request.kind_id == kind_id
+                && crate::remote::grab_targets_window(request.request_id, window_id)
+            {
                 request_ids.push(request.request_id);
                 false
             } else {
@@ -198,6 +216,16 @@ impl Cx {
         height: u32,
         png: Vec<u8>,
     ) {
+        if request_ids.is_empty() {
+            return;
+        }
+        // `--remote` grabs are answered on the requesting HTTP thread.
+        let request_ids = crate::remote::deliver_grabs(
+            request_ids,
+            width,
+            height,
+            &png,
+        );
         if request_ids.is_empty() {
             return;
         }
@@ -624,10 +652,13 @@ impl Cx {
 
     /// Drain the global control channel and dispatch each message as an event.
     /// Must be called from the event loop (not from inside an event handler).
+    /// Also services the `--remote` HTTP control surface, which every backend
+    /// therefore gets by calling this one function.
     pub fn poll_control_channel(&mut self) {
         use crate::makepad_math::dvec2;
         use crate::web_socket::CONTROL_CHANNEL;
         use crate::window::CxWindowPool;
+        crate::remote::poll(self);
         let msgs: Vec<StudioToApp> = {
             let lock = CONTROL_CHANNEL.lock().unwrap();
             if let Some(rx) = lock.as_ref() {

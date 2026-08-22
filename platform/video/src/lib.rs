@@ -44,7 +44,13 @@
 //! RGB entry points use the BT.709 converters in [`nv12`]. Audio may be pushed
 //! interleaved with video or in one block at the end for short clips.
 
+pub mod annex_b;
 pub mod nv12;
+pub mod stream_decoder;
+pub mod stream_encoder;
+
+pub use stream_decoder::{DecodedFrame, VideoStreamDecoder};
+pub use stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 
 use std::fmt;
 
@@ -89,6 +95,10 @@ pub struct VideoFileEncoderOptions {
     pub fps_den: u32,
     pub video_bitrate_bps: u32,
     pub audio: Option<PcmAudioTrackOptions>,
+    /// Every frame an IDR/key frame (GOP size 1). Costs bitrate but makes
+    /// the file cheaply decodable at ANY frame in ANY order — reverse and
+    /// bounce playback never forward-decode a GOP to reach a frame.
+    pub keyframe_only: bool,
 }
 
 impl Default for VideoFileEncoderOptions {
@@ -101,6 +111,7 @@ impl Default for VideoFileEncoderOptions {
             fps_den: 1,
             video_bitrate_bps: 8_000_000,
             audio: None,
+            keyframe_only: false,
         }
     }
 }
@@ -155,6 +166,12 @@ mod windows_encoder;
 #[cfg(target_os = "windows")]
 mod windows_decoder;
 #[cfg(target_os = "windows")]
+mod windows_mft;
+#[cfg(target_os = "windows")]
+mod windows_stream_encoder;
+#[cfg(target_os = "windows")]
+mod windows_stream_decoder;
+#[cfg(target_os = "windows")]
 use windows_decoder::WindowsVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "windows")]
 use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
@@ -163,6 +180,10 @@ use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
 mod apple_decoder;
 #[cfg(target_os = "macos")]
 mod apple_encoder;
+#[cfg(target_os = "macos")]
+mod apple_stream_encoder;
+#[cfg(target_os = "macos")]
+mod apple_stream_decoder;
 #[cfg(target_os = "macos")]
 use apple_decoder::MacosVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "macos")]
@@ -377,6 +398,14 @@ pub struct DecodedAudioChunk {
 pub struct VideoFileDecoder {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     os: OsVideoFileDecoder,
+    /// Where [`VideoFileDecoder::seek`]'s discard loop stopped: the frame and
+    /// chunk it kept, handed to the next `next_frame`/`next_audio` call. Held
+    /// here rather than in each backend so the "first at or after the target"
+    /// rule is written once and cannot drift between platforms.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pending_video: Option<DecodedVideoFrame>,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pending_audio: Option<DecodedAudioChunk>,
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     info: VideoFileInfo,
 }
@@ -387,7 +416,11 @@ impl VideoFileDecoder {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             let os = OsVideoFileDecoder::open(path)?;
-            return Ok(Self { os });
+            return Ok(Self {
+                os,
+                pending_video: None,
+                pending_audio: None,
+            });
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
@@ -406,7 +439,12 @@ impl VideoFileDecoder {
     /// Pull the next decoded video frame; `Ok(None)` at end of stream.
     pub fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>, VideoFileError> {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
-        return self.os.next_frame();
+        {
+            if let Some(frame) = self.pending_video.take() {
+                return Ok(Some(frame));
+            }
+            return self.os.next_frame();
+        }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
@@ -414,8 +452,74 @@ impl VideoFileDecoder {
     /// Pull the next decoded PCM audio chunk; `Ok(None)` at end of stream.
     pub fn next_audio(&mut self) -> Result<Option<DecodedAudioChunk>, VideoFileError> {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
-        return self.os.next_audio();
+        {
+            if let Some(chunk) = self.pending_audio.take() {
+                return Ok(Some(chunk));
+            }
+            return self.os.next_audio();
+        }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         return Err(VideoFileError::new(UNSUPPORTED));
+    }
+
+    /// Position the decoder at `pts_100ns`: the next [`next_frame`] returns
+    /// the first frame whose `pts_100ns` is >= the target, and the next
+    /// [`next_audio`] the first chunk whose `pts_100ns` is >= the same target.
+    /// Negative targets clamp to 0; a target past the end leaves both streams
+    /// at end-of-stream (`Ok(None)`), not an error.
+    ///
+    /// Both platforms reach that frame the same way — land the demuxer at or
+    /// before the target, then decode and discard forward — because neither OS
+    /// seam can land on a non-sync sample directly. So the DECODE half of the
+    /// cost is a property of the file: on an all-intra file
+    /// (`VideoFileEncoderOptions::keyframe_only`) there is nothing to discard
+    /// and a seek is one frame's work at any distance; on a GOP file it is the
+    /// walk from the preceding key frame, up to a whole group. On top of that
+    /// each platform pays a fixed repositioning cost, and on macOS that cost
+    /// dominates — see `MacosVideoFileDecoder::seek_to`.
+    ///
+    /// [`next_frame`]: VideoFileDecoder::next_frame
+    /// [`next_audio`]: VideoFileDecoder::next_audio
+    pub fn seek(&mut self, pts_100ns: i64) -> Result<(), VideoFileError> {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let target = pts_100ns.max(0);
+            // Anything held from a previous seek belongs to the old position.
+            self.pending_video = None;
+            self.pending_audio = None;
+            self.os.seek_to(target)?;
+            let has_audio = self.os.info().has_audio;
+            // The backend put us at or before the target; walking forward from
+            // there is what makes "at or after" exact. The frame we stop on is
+            // the one the caller asked for, so it is kept rather than dropped.
+            loop {
+                match self.next_frame()? {
+                    Some(frame) if frame.pts_100ns >= target => {
+                        self.pending_video = Some(frame);
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            if has_audio {
+                loop {
+                    match self.next_audio()? {
+                        Some(chunk) if chunk.pts_100ns >= target => {
+                            self.pending_audio = Some(chunk);
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            }
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let _ = pts_100ns;
+            return Err(VideoFileError::new(UNSUPPORTED));
+        }
     }
 }
