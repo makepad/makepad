@@ -33,8 +33,8 @@ fn multi_head_attention(
     let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref());
     let v = Tensor::linear_raw_with_prequant(x, v_w, xq.as_deref(), v_b);
 
-    if crate::metal_backend::is_requested() {
-        if let Some(out) = crate::metal_backend::try_flash_attn_f32_packed(
+    if crate::accel::is_requested() {
+        if let Some(out) = crate::accel::try_flash_attn_f32_packed(
             &q.data,
             &k.data,
             &v.data,
@@ -164,9 +164,9 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
     };
     cur = Tensor::add(&cur, &pe);
 
-    if crate::metal_backend::is_requested() {
+    if crate::accel::is_requested() {
         let t_stack = std::time::Instant::now();
-        if let Some(out) = crate::metal_backend::try_encoder_stack_f32(
+        if let Some(out) = crate::accel::try_encoder_stack_f32(
             &cur.data,
             cur.shape[0],
             cur.shape[1],
@@ -187,9 +187,9 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 
     // Transformer encoder blocks
     for layer in &model.encoder_layers {
-        if crate::metal_backend::is_requested() {
+        if crate::accel::is_requested() {
             let t_layer = std::time::Instant::now();
-            if let Some(out) = crate::metal_backend::try_encoder_layer_f32(
+            if let Some(out) = crate::accel::try_encoder_layer_f32(
                 &cur.data,
                 cur.shape[0],
                 cur.shape[1],
@@ -230,8 +230,8 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
         // Self-attention block
         let t_attn = std::time::Instant::now();
         let mut attn_done = false;
-        if crate::metal_backend::is_requested() {
-            if let Some(out) = crate::metal_backend::try_encoder_attn_block_f32(
+        if crate::accel::is_requested() {
+            if let Some(out) = crate::accel::try_encoder_attn_block_f32(
                 &cur.data,
                 cur.shape[0],
                 cur.shape[1],
@@ -287,8 +287,8 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
         // Feed-forward block
         let t_elem = std::time::Instant::now();
         let mut ffn_done = false;
-        if crate::metal_backend::is_requested() {
-            if let Some(out) = crate::metal_backend::try_encoder_ffn_block_f32(
+        if crate::accel::is_requested() {
+            if let Some(out) = crate::accel::try_encoder_ffn_block_f32(
                 &cur.data,
                 cur.shape[0],
                 cur.shape[1],
