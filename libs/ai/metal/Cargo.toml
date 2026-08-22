@@ -1,0 +1,23 @@
+[package]
+name = "makepad-ai-metal"
+version = "0.1.0"
+edition = "2021"
+description = "THE Metal store: shaders, metallib build, device/runtime, try_* shims."
+license = "MIT"
+links = "makepad_ai_metal"
+
+[features]
+default = []
+metal-precompile = []
+
+[dependencies]
+makepad-ai-loader = { path = "../loader" }
+makepad-ai-cuda = { path = "../cuda" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../../objc-sys", version = "1.0.0" }
+smallvec = { path = "../../smallvec" }
+
+[[bin]]
+name = "metal-residency-bench"
+path = "src/bin/metal_residency_bench.rs"

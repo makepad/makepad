@@ -1,0 +1,16 @@
+[package]
+name = "makepad-ai-splat"
+version = "0.1.0"
+edition = "2021"
+description = "TripoSplat (VAST-AI) single image -> 3D gaussian splat: native CPU reference + CUDA forward."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-ai-flux = { path = "../flux" }
+
+[dev-dependencies]
+# The in-repo 3DGS reader: the PLY this crate writes must load with the exact
+# parser the viewer uses, so the round trip is a test, not an assumption.
+makepad-splat = { path = "../../../splat" }
