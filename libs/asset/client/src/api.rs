@@ -218,6 +218,45 @@ pub struct BlobHead {
     pub etag_matches: bool,
 }
 
+/// What admitting a server-local file BY REFERENCE reported.
+///
+/// The digest and length are the server's own measurement of the file — the
+/// client never read it. `owned` means the store already had those exact
+/// bytes in its own CAS, so nothing was referenced and the external file is
+/// incidental.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefAdmission {
+    pub blob: BlobId,
+    pub size: u64,
+    pub deduped: bool,
+    pub owned: bool,
+}
+
+/// One reference blob as a re-scan found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefRow {
+    pub blob: BlobId,
+    /// The path on the SERVER's filesystem. Shown to the operator, never
+    /// opened by the client.
+    pub path: String,
+    pub size: u64,
+    /// `present` / `missing` / `size_changed` / `content_changed` /
+    /// `unreadable`. A string rather than an enum so a newer server can name
+    /// a state this build has not heard of without becoming unparseable.
+    pub state: String,
+    pub ok: bool,
+}
+
+/// One bounded page of a reference re-scan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlobRefsPage {
+    /// How many references the store holds in total.
+    pub total: u64,
+    pub refs: Vec<BlobRefRow>,
+    /// Resume key for the next page; `None` = the walk is finished.
+    pub next: Option<BlobId>,
+}
+
 /// The searchable annotation written alongside a published artifact.
 /// `prompt`/`provenance` are owner-only fields server-side.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1576,6 +1615,110 @@ impl Api {
             });
         }
         Ok(local)
+    }
+
+    /// Admit a file the SERVER can see, by reference: the store hashes it in
+    /// place and catalogues it without copying. The path travels; the bytes
+    /// never do, so this is only meaningful when client and store share a
+    /// filesystem (an app hosting its own store on loopback).
+    ///
+    /// Returns the digest and the length the server measured — the caller
+    /// did not read the file, so those come from the store, not from a local
+    /// guess. `ClientError::NotFound` means the server does not offer
+    /// reference admission (policy off, or an older build): fall back to
+    /// [`Self::upload_blob`].
+    pub fn admit_blob_ref(&self, ns: &str, path: &str) -> ClientResult<BlobRefAdmission> {
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "blob ref namespace" });
+        }
+        if path.is_empty() || path.len() > wire::MAX_BLOB_REF_PATH_BYTES {
+            return Err(ClientError::InvalidInput { what: "blob ref path" });
+        }
+        let body = json::obj(vec![("path", json::s(path.to_string()))])
+            .to_json()
+            .into_bytes();
+        let target = wire::path_blob_ref(ns);
+        let mut req = Request::post(&target, &body);
+        req.body_content_type = "application/json";
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.data, req, &[200, 201])?;
+        let blob = v
+            .get("blob_id")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<BlobId>().ok())
+            .ok_or(ClientError::Protocol { what: "blob ref blob_id" })?;
+        let size = v
+            .get("size")
+            .and_then(Value::as_u64)
+            .ok_or(ClientError::Protocol { what: "blob ref size" })?;
+        Ok(BlobRefAdmission {
+            blob,
+            size,
+            deduped: v.get("deduped").and_then(Value::as_bool).unwrap_or(false),
+            owned: v.get("owned").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+
+    /// RE-SCAN one bounded page of the store's reference blobs: for each,
+    /// what its file looks like on the server's disk right now.
+    ///
+    /// This is what makes "we did not copy your library" operable — a UI can
+    /// walk it a page at a time and show which originals moved, changed or
+    /// vanished, instead of discovering it when a clip refuses to play.
+    /// Verifying re-hashes each file server-side, so keep pages small.
+    pub fn blob_refs_page(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ClientResult<BlobRefsPage> {
+        let path = wire::path_blob_refs(after, limit.clamp(1, 256));
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        let total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
+        let rows = match v.get("refs") {
+            Some(Value::Arr(rows)) => rows.clone(),
+            _ => return Err(ClientError::Protocol { what: "blob refs list" }),
+        };
+        if rows.len() > wire::MAX_PAGE_ENTRIES {
+            return Err(ClientError::OverBudget {
+                what: "blob refs page",
+                limit: wire::MAX_PAGE_ENTRIES as u64,
+                found: rows.len() as u64,
+            });
+        }
+        let mut refs = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let blob = row
+                .get("blob_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<BlobId>().ok())
+                .ok_or(ClientError::Protocol { what: "blob ref id" })?;
+            let path = row
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(ClientError::Protocol { what: "blob ref path" })?
+                .to_string();
+            if path.len() > wire::MAX_BLOB_REF_PATH_BYTES {
+                return Err(ClientError::Protocol { what: "blob ref path length" });
+            }
+            refs.push(BlobRefRow {
+                blob,
+                path,
+                size: row.get("size").and_then(Value::as_u64).unwrap_or(0),
+                state: row
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                ok: row.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            });
+        }
+        let next = v
+            .get("next")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<BlobId>().ok());
+        Ok(BlobRefsPage { total, refs, next })
     }
 
     /// Register an asset id (server-minted when `id` is None). Registering
