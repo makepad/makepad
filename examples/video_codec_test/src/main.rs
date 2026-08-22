@@ -94,6 +94,7 @@ fn encode(
                 channels: 1,
                 aac_bitrate_bps: 128_000,
             }),
+            ..Default::default()
         },
     )?;
     match encoder.video_transform() {
