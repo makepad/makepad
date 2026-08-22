@@ -1,28 +1,42 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output};
+use std::time::{Duration, Instant};
 
-// The nvcc build for THE CUDA store (aiarch.md §1 + §4, lane T4). Absorbed
-// verbatim from libs/ggml/build.rs::build_cuda_backends — same env var
-// names (fleet boxes set these), same static-lib name (`ggml_cuda_affine`,
-// kept unchanged so nothing downstream needs to know it moved), same
-// graceful-skip-unless-required semantics.
+// The nvcc build for THE CUDA store (aiarch.md §1 + §4, lane T4), and the
+// single authority on whether this machine gets CUDA at all.
 //
-// On success this crate (which sets `links = "makepad_ai_cuda"` in its
-// Cargo.toml) emits BOTH its own cfg (`makepad_ai_cuda_kernels`) and the
-// links-metadata line `cargo:kernels=1`, which flows to immediate
-// dependents (libs/ggml, and libs/cuda's facade) as
-// `DEP_MAKEPAD_AI_CUDA_KERNELS`. libs/ggml/build.rs reads that env var and
-// re-emits `cargo:rustc-cfg=makepad_cuda_kernels` (same cfg name as
-// before the move), so `libs/ggml/src/backend/cuda/mod.rs` needs zero
-// edits.
+// Three answers, one decision point:
+//   * kernels compiled and archived -> `cargo:rustc-cfg=makepad_ai_cuda_kernels`
+//     + the `rustc-link-search` / `rustc-link-lib` lines for cudart, cuBLAS
+//     and cuBLASLt, taken from the toolkit we actually found;
+//   * no usable toolkit (or MAKEPAD_GGML_NO_CUDA) -> none of the above, and
+//     `src/link_gate.rs` turns every extern block into a link-clean stub, so
+//     the build SUCCEEDS with no CUDA;
+//   * MAKEPAD_GGML_REQUIRE_CUDA=1 -> the second case panics instead, which is
+//     how a fleet box refuses to silently lose its GPU.
+//
+// Because this crate sets `links = "makepad_ai_cuda"`, the answer travels to
+// its immediate dependents as `DEP_MAKEPAD_AI_CUDA_KERNELS` (=1) and
+// `DEP_MAKEPAD_AI_CUDA_ARCH`. makepad-ai-llm, makepad-ai-metal,
+// makepad-ai-common and makepad-voice gate their CUDA code on exactly that
+// and MUST NOT probe for a toolkit themselves: "nvcc exists on this machine"
+// and "kernels were built and will link" are different questions, and a
+// dependent that answers the first one locally is how a machine WITH the
+// CUDA toolkit still failed to link with `unresolved external symbol
+// cudaFree`.
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_REQUIRE_CUDA");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_NO_CUDA");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    // The Windows toolkit scan roots at %ProgramFiles%, so it is an input to
+    // the decision as much as CUDA_PATH is — without this, installing (or
+    // hiding) a toolkit leaves a stale cached answer behind.
+    println!("cargo:rerun-if-env-changed=ProgramFiles");
     println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -110,11 +124,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         return;
     };
 
-    let nvcc = if target_os == "windows" {
-        cuda_root.join("bin").join("nvcc.exe")
-    } else {
-        cuda_root.join("bin").join("nvcc")
-    };
+    let nvcc = nvcc_path(&cuda_root, target_os);
     if !nvcc.exists() {
         cuda_unavailable(
             require_cuda,
@@ -122,7 +132,25 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         );
         return;
     }
-
+    // Resolve the import/shared libs BEFORE spending minutes in nvcc: a
+    // toolkit whose libs we cannot find would compile kernels and then fail
+    // the final link with `unresolved external symbol cudaFree`, which is
+    // the failure this whole path exists to prevent.
+    let Some(lib_dir) = cuda_lib_dir(&cuda_root, target_os) else {
+        cuda_unavailable(
+            require_cuda,
+            &format!(
+                "CUDA link libraries not found under {} (looked for {})",
+                cuda_root.display(),
+                lib_dir_candidates(&cuda_root, target_os)
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        return;
+    };
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let lib_path = if target_os == "windows" {
         out_dir.join("ggml_cuda_affine.lib")
@@ -138,7 +166,15 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         .ok()
         .or_else(detect_local_arch)
         .unwrap_or_else(|| "120a".to_string());
-    println!("cargo:warning=makepad-ai-cuda: building kernels for sm_{arch}");
+    // The permanent record, in the build log. It lands only when this script
+    // exits (cargo buffers `cargo:warning` — measured, not assumed), so it
+    // cannot be the thing that reassures somebody mid-build; that is what
+    // `Console` below is for.
+    println!(
+        "cargo:warning=makepad-ai-cuda: building {} CUDA kernels for sm_{arch}, toolkit {}",
+        src_paths.len(),
+        cuda_root.display()
+    );
     let include_dir = cuda_root.join("include");
     let msvc_bin_dir = if target_os == "windows" {
         find_msvc_tool("cl.exe").and_then(|path| path.parent().map(Path::to_path_buf))
@@ -157,8 +193,25 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         None
     };
 
+    // A fresh CUDA build is minutes of silent ptxas under a cargo line that
+    // never moves. Tell the terminal what is happening, up front and as it
+    // goes: the up-front number is deliberately ~2x what this repo's
+    // 16-thread reference box measures, so the honest case is "faster than
+    // promised" rather than "it lied and then hung".
+    let total = src_paths.len();
+    let mut console = Console::open();
+    console.line(&format!(
+        "makepad-ai-cuda: compiling {total} CUDA kernels for sm_{arch} (toolkit {}).\n\
+         makepad-ai-cuda: this is one-time, and typically takes 5-10 minutes. Progress below.",
+        cuda_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cuda_root.display().to_string()),
+    ));
+    let kernels_started = Instant::now();
+
     let mut obj_paths = Vec::new();
-    for src_path in &src_paths {
+    for (index, src_path) in src_paths.iter().enumerate() {
         let stem = src_path.file_stem().unwrap().to_string_lossy();
         let obj_path = out_dir.join(format!("ggml_cuda_{stem}.{obj_ext}"));
         let arch_flag = format!("arch=compute_{arch},code=sm_{arch}");
@@ -176,7 +229,13 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         if let Some(src_dir) = src_path.parent() {
             command.arg("-I").arg(src_dir);
         }
-        let status = command
+        // Piped, not inherited: when nvcc refuses (an arch this toolkit
+        // dropped, an MSVC environment it cannot drive) its own message is
+        // the only thing that tells the user what to do, and a build
+        // script's child stderr is otherwise swallowed. Waited on with a
+        // heartbeat rather than `output()`, because one kernel
+        // (`llm/kernels.cu`) can hold the terminal still for minutes.
+        let output = command
             .args([
                 "-c",
                 "-I",
@@ -187,69 +246,216 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
                 obj_path.to_string_lossy().as_ref(),
                 src_path.to_string_lossy().as_ref(),
             ])
-            .status();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|child| {
+                wait_with_progress(
+                    child,
+                    &mut console,
+                    &stem,
+                    index,
+                    total,
+                    kernels_started,
+                )
+            });
 
-        let ok = status.as_ref().is_ok_and(|s| s.success());
+        let ok = output.as_ref().is_ok_and(|out| out.status.success());
         if !ok {
+            if let Ok(out) = &output {
+                report_tool_output("nvcc", out);
+            }
             cuda_unavailable(
                 require_cuda,
                 &format!(
-                    "failed to compile CUDA backend source {} ({status:?})",
+                    "failed to compile CUDA backend source {} for sm_{arch} \
+                     (override the arch with MAKEPAD_GGML_CUDA_ARCH)",
                     src_path.display()
                 ),
             );
             return;
         }
+        console.line(&progress_line(index + 1, total, kernels_started, &stem));
         obj_paths.push(obj_path);
     }
 
-    let archive_ok = if target_os == "windows" {
+    let archive = if target_os == "windows" {
         let mut lib = Command::new(lib_exe.unwrap());
         lib.arg("/NOLOGO")
             .arg(format!("/OUT:{}", lib_path.to_string_lossy()));
         for obj_path in &obj_paths {
             lib.arg(obj_path);
         }
-        lib.status().as_ref().is_ok_and(|s| s.success())
+        lib.output()
     } else {
         let mut ar = Command::new("ar");
         ar.arg("crus").arg(lib_path.to_string_lossy().as_ref());
         for obj_path in &obj_paths {
             ar.arg(obj_path.to_string_lossy().as_ref());
         }
-        ar.status().as_ref().is_ok_and(|s| s.success())
+        ar.output()
     };
-    if !archive_ok {
+    if !archive.as_ref().is_ok_and(|out| out.status.success()) {
+        if let Ok(out) = &archive {
+            report_tool_output("archiver", out);
+        }
         cuda_unavailable(require_cuda, "failed to archive CUDA backends");
         return;
     }
 
+    let kernels_took = fmt_duration(kernels_started.elapsed());
+    console.line(&format!(
+        "makepad-ai-cuda: CUDA kernels built in {kernels_took}. Back to cargo."
+    ));
+    println!("cargo:warning=makepad-ai-cuda: CUDA kernels built in {kernels_took}");
+
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ggml_cuda_affine");
+    // Always by IMPORT-LIB NAME (`cudart`), never by the versioned runtime
+    // name (`cudart64_12.dll` / `cudart64_13.dll`): the import lib in the
+    // detected toolkit's lib dir names its own DLL, so one rule spans every
+    // CUDA major version. `-L` from a build script propagates to the final
+    // binary link even from a transitive dependency, so nothing downstream
+    // needs LIB / LD_LIBRARY_PATH set by hand.
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=dylib=cudart");
+    println!("cargo:rustc-link-lib=dylib=cublas");
+    println!("cargo:rustc-link-lib=dylib=cublasLt");
     if target_os == "linux" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
-        let lib_dir = cuda_root.join("lib64");
-        println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        println!("cargo:rustc-link-lib=dylib=cudart");
-        println!("cargo:rustc-link-lib=dylib=cublas");
-        println!("cargo:rustc-link-lib=dylib=cublasLt");
-        if lib_dir.join("libcudnn.so").exists() {
+        if dir_has_file_starting_with(&lib_dir, "libcudnn.so") {
             println!("cargo:rustc-link-lib=dylib=cudnn");
         }
-    } else if target_os == "windows" {
-        let lib_dir = cuda_root.join("lib").join("x64");
-        println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        println!("cargo:rustc-link-lib=dylib=cudart");
-        println!("cargo:rustc-link-lib=dylib=cublas");
-        println!("cargo:rustc-link-lib=dylib=cublasLt");
-        if lib_dir.join("cudnn.lib").exists() {
-            println!("cargo:rustc-link-lib=dylib=cudnn");
-        }
+    } else if target_os == "windows" && lib_dir.join("cudnn.lib").exists() {
+        println!("cargo:rustc-link-lib=dylib=cudnn");
     }
     println!("cargo:rustc-cfg=makepad_ai_cuda_kernels");
-    // links-metadata handshake: flows to immediate dependents (libs/ggml,
-    // libs/cuda facade) as DEP_MAKEPAD_AI_CUDA_KERNELS=1.
+    // links-metadata handshake: flows to immediate dependents (ai-llm,
+    // ai-metal, ai-common, voice) as DEP_MAKEPAD_AI_CUDA_KERNELS=1 /
+    // DEP_MAKEPAD_AI_CUDA_ARCH. Those crates must not probe for a toolkit
+    // themselves: "nvcc exists" and "kernels built and will link" are
+    // different questions, and answering the first one locally is how a
+    // machine WITH the toolkit ended up with unresolved `cudaFree`.
     println!("cargo:kernels=1");
+    println!("cargo:arch={arch}");
+}
+
+/// The terminal cargo is writing to, when there is one.
+///
+/// A build script cannot reach the user while it runs: cargo captures its
+/// stdout and stderr, and holds every `cargo:warning` line until the script
+/// EXITS (measured — a warning printed six seconds before the script ended
+/// still appeared only at the end). For a script that then spends minutes
+/// inside ptxas, that means the only honest live channel is the console
+/// device itself. No console (CI, a piped build, a GUI invocation) simply
+/// means no progress lines; the `cargo:warning` summary still records what
+/// happened.
+struct Console(Option<fs::File>);
+
+impl Console {
+    fn open() -> Self {
+        let device = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
+        Console(fs::OpenOptions::new().write(true).open(device).ok())
+    }
+
+    fn line(&mut self, message: &str) {
+        if let Some(console) = self.0.as_mut() {
+            let _ = writeln!(console, "{message}");
+            let _ = console.flush();
+        }
+    }
+}
+
+/// Heartbeat interval while a single kernel is compiling. Short enough that
+/// a watching user always sees motion inside half a minute — which is the
+/// whole bar — without turning the build into a log firehose.
+const KERNEL_HEARTBEAT: Duration = Duration::from_secs(20);
+
+/// Wait for one nvcc run, keeping the terminal alive while it works.
+///
+/// `Child::wait_with_output` has to run somewhere, because the pipes must be
+/// drained or a chatty nvcc would deadlock on a full pipe buffer; it goes on
+/// a thread so this one can tick.
+fn wait_with_progress(
+    child: Child,
+    console: &mut Console,
+    stem: &str,
+    done: usize,
+    total: usize,
+    started: Instant,
+) -> std::io::Result<Output> {
+    let waiter = std::thread::spawn(move || child.wait_with_output());
+    let mut since_tick = Instant::now();
+    while !waiter.is_finished() {
+        std::thread::sleep(Duration::from_millis(200));
+        if since_tick.elapsed() >= KERNEL_HEARTBEAT {
+            console.line(&progress_line(done, total, started, stem));
+            since_tick = Instant::now();
+        }
+    }
+    waiter
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("nvcc wait thread panicked")))
+}
+
+/// One progress line, with an ETA that corrects itself from the throughput
+/// measured so far rather than from a number somebody guessed once.
+fn progress_line(done: usize, total: usize, started: Instant, current: &str) -> String {
+    let elapsed = started.elapsed();
+    if done == 0 {
+        return format!(
+            "makepad-ai-cuda: CUDA kernels 0/{total} — {} elapsed, compiling {current} \
+             (the first kernel sets the pace)",
+            fmt_duration(elapsed)
+        );
+    }
+    let per_kernel = elapsed.as_secs_f64() / done as f64;
+    let left = Duration::from_secs_f64(per_kernel * (total - done) as f64);
+    if done == total {
+        return format!(
+            "makepad-ai-cuda: CUDA kernels {done}/{total} — done in {}",
+            fmt_duration(elapsed)
+        );
+    }
+    format!(
+        "makepad-ai-cuda: CUDA kernels {done}/{total} — {} elapsed, ~{} left (now: {current})",
+        fmt_duration(elapsed),
+        fmt_duration(left)
+    )
+}
+
+fn fmt_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Surface a failed child tool's own words as cargo warnings, trimmed to
+/// something readable in a build log.
+fn report_tool_output(tool: &str, output: &std::process::Output) {
+    let text = String::from_utf8_lossy(&output.stderr);
+    let text = if text.trim().is_empty() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        text.into_owned()
+    };
+    for line in text.lines().filter(|line| !line.trim().is_empty()).take(12) {
+        println!("cargo:warning={tool}: {line}");
+    }
+}
+
+fn dir_has_file_starting_with(dir: &Path, prefix: &str) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(prefix)
+        })
+    })
 }
 
 fn rerun_if_changed_tree(path: &Path) {
@@ -267,43 +473,128 @@ fn rerun_if_changed_tree(path: &Path) {
     }
 }
 
+/// The one exit for "this machine gets no CUDA". Loud and fatal when a fleet
+/// box asked for CUDA; otherwise a warning and a stub build that still LINKS
+/// — see `src/link_gate.rs` for why that is the same decision.
 fn cuda_unavailable(required: bool, reason: &str) {
     if required {
         panic!("MAKEPAD_GGML_REQUIRE_CUDA=1, but the CUDA backend build failed: {reason}");
     }
-    println!("cargo:warning={reason}; CUDA backends disabled");
+    println!("cargo:warning=makepad-ai-cuda: {reason}");
+    println!(
+        "cargo:warning=makepad-ai-cuda: building WITHOUT CUDA — GPU inference is unavailable, \
+         everything else builds and runs normally (set MAKEPAD_GGML_REQUIRE_CUDA=1 to make this fatal)"
+    );
+}
+
+fn nvcc_path(cuda_root: &Path, target_os: &str) -> PathBuf {
+    if target_os == "windows" {
+        cuda_root.join("bin").join("nvcc.exe")
+    } else {
+        cuda_root.join("bin").join("nvcc")
+    }
+}
+
+/// Where a toolkit of this version keeps the libs we link against. Ordered
+/// most-specific first; every CUDA major version so far uses one of these,
+/// and an unknown future layout simply reads as "no usable toolkit" (a
+/// stub build) instead of a link failure.
+fn lib_dir_candidates(cuda_root: &Path, target_os: &str) -> Vec<PathBuf> {
+    if target_os == "windows" {
+        vec![cuda_root.join("lib").join("x64"), cuda_root.join("lib")]
+    } else {
+        vec![
+            cuda_root.join("lib64"),
+            cuda_root.join("targets").join("x86_64-linux").join("lib"),
+            cuda_root.join("lib"),
+        ]
+    }
+}
+
+fn cuda_lib_dir(cuda_root: &Path, target_os: &str) -> Option<PathBuf> {
+    let prefix = if target_os == "windows" {
+        "cudart.lib"
+    } else {
+        "libcudart.so"
+    };
+    lib_dir_candidates(cuda_root, target_os)
+        .into_iter()
+        .find(|dir| dir_has_file_starting_with(dir, prefix))
+}
+
+/// A directory is a usable toolkit root only if it has BOTH the compiler and
+/// the libs. A bare `CUDA_PATH` left behind by an uninstall, or a driver-only
+/// install, is not one — and falling through to the version scan finds the
+/// real toolkit next to it instead of disabling CUDA.
+fn is_toolkit_root(path: &Path, target_os: &str) -> bool {
+    nvcc_path(path, target_os).exists() && cuda_lib_dir(path, target_os).is_some()
 }
 
 fn cuda_root(target_os: &str) -> Option<PathBuf> {
-    env::var_os("CUDA_HOME")
-        .or_else(|| env::var_os("CUDA_PATH"))
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-        .or_else(|| {
-            if target_os == "windows" {
-                latest_windows_cuda_root()
-            } else {
-                let default = Path::new("/usr/local/cuda");
-                default.exists().then(|| default.to_path_buf())
+    for var in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Some(path) = env::var_os(var).map(PathBuf::from) {
+            if is_toolkit_root(&path, target_os) {
+                return Some(path);
             }
-        })
+        }
+    }
+    if target_os == "windows" {
+        newest_versioned_root(
+            &env::var_os("ProgramFiles")
+                .map(PathBuf::from)
+                .map(|program_files| {
+                    program_files
+                        .join("NVIDIA GPU Computing Toolkit")
+                        .join("CUDA")
+                })?,
+            target_os,
+        )
+    } else {
+        // `/usr/local/cuda` is the distribution's own "newest" symlink; only
+        // scan for `cuda-13.3`-style siblings when it is missing or unusable.
+        let default = Path::new("/usr/local/cuda");
+        if is_toolkit_root(default, target_os) {
+            return Some(default.to_path_buf());
+        }
+        newest_versioned_root(Path::new("/usr/local"), target_os)
+            .or_else(|| newest_versioned_root(Path::new("/opt"), target_os))
+    }
 }
 
-fn latest_windows_cuda_root() -> Option<PathBuf> {
-    let cuda_root = env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .map(|program_files| {
-            program_files
-                .join("NVIDIA GPU Computing Toolkit")
-                .join("CUDA")
-        })?;
-    let mut entries = fs::read_dir(cuda_root)
+/// Newest **usable** toolkit under `base`, by numeric version — `v13.3` beats
+/// `v12.4`, and (unlike a filename sort) `v12.4` beats `v9.0`. Directory
+/// names are `vMAJOR.MINOR` on Windows and `cuda-MAJOR.MINOR` on Linux; both
+/// are read by simply taking the digits.
+fn newest_versioned_root(base: &Path, target_os: &str) -> Option<PathBuf> {
+    let mut roots = fs::read_dir(base)
         .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().ok().is_some_and(|ty| ty.is_dir()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_toolkit_root(path, target_os))
+        .map(|path| {
+            let version = path
+                .file_name()
+                .map(|name| version_key(&name.to_string_lossy()))
+                .unwrap_or_default();
+            (version, path)
+        })
         .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    entries.pop().map(|entry| entry.path())
+    roots.sort_by(|a, b| a.0.cmp(&b.0));
+    roots.pop().map(|(_, path)| path)
+}
+
+/// `"v13.3"` / `"cuda-13.3"` -> `(13, 3)`; anything unparsable sorts lowest.
+fn version_key(name: &str) -> (u32, u32) {
+    let digits = name.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let mut parts = digits.split('.');
+    let major = parts.next().unwrap_or_default().parse().unwrap_or(0);
+    let minor = parts
+        .next()
+        .map(|part| part.trim_end_matches(|c: char| !c.is_ascii_digit()))
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0);
+    (major, minor)
 }
 
 fn find_msvc_tool(tool_name: &str) -> Option<PathBuf> {

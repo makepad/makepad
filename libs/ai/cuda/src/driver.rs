@@ -89,7 +89,10 @@ pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES:
 pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES:
     cublasLtMatmulPreferenceAttributes_t = 8;
 
-unsafe extern "C" {
+// The CUDA runtime + cuBLAS entry points. Declared through `cuda_ffi!` (see
+// `link_gate.rs`) so that a build without kernels references no `cuda*`
+// symbol at all and still links.
+cuda_ffi! {
     pub fn cudaGetDeviceCount(count: *mut c_int) -> cudaError_t;
     pub fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> cudaError_t;
     pub fn cudaSetDevice(device: c_int) -> cudaError_t;
@@ -991,5 +994,22 @@ mod tests {
     #[test]
     fn cublas_default_tensor_op_matches_cuda_header() {
         assert_eq!(CUBLAS_GEMM_DEFAULT_TENSOR_OP, 99);
+    }
+
+    /// A build with no kernels must answer the device questions itself
+    /// rather than call into a CUDA runtime that is not there. If the FFI
+    /// ever stops going through `cuda_ffi!` this test still passes — but the
+    /// build it passes in has already failed to link on Windows, which is
+    /// what makes it worth stating out loud here.
+    #[cfg(not(makepad_ai_cuda_kernels))]
+    #[test]
+    fn a_kernel_less_build_reports_no_device_and_says_why() {
+        assert!(!is_available());
+        let err = device_count().unwrap_err();
+        assert!(
+            err.message().contains("makepad-ai-cuda was built without kernels"),
+            "unhelpful stub message: {}",
+            err.message()
+        );
     }
 }
