@@ -16,7 +16,7 @@
 //! Behind the `renderer` feature.
 
 use crate::walk_world::{build_level, WalkMoment, WalkPrep, WalkWorld};
-use makepad_render::level::{BobStyle, WalkerConfig};
+use makepad_render::level::BobStyle;
 use makepad_render::player_nav::{config_for_world, NavAnchor};
 use makepad_render::{
     preview_scene_state, set_pass_camera, DrawSceneAlpha, DrawSceneCube, DrawSceneShadow,
