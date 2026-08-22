@@ -579,6 +579,17 @@ pub struct GlbTexturedPart<'a> {
     /// Optional material baseColorFactor. Lets many parts share one image
     /// and vary only by tint (e.g. BUILD shade levels).
     pub base_color_factor: Option<[f32; 4]>,
+    /// Optional linear RGB vertex colors (COLOR_0). Tiling albedo stays on
+    /// TEXCOORD_0; this carries per-vertex lightmaps / baked light.
+    pub colors: Option<&'a [[f32; 3]]>,
+    /// Optional shipped lightmap (Q3). Paired with [`lightmap_uvs`]
+    /// (`TEXCOORD_1`). The viewer applies it on load; albedo keeps tiling.
+    pub lightmap_png: Option<&'a [u8]>,
+    pub lightmap_uvs: Option<&'a [[f32; 2]]>,
+    /// Optional Q3 / Unreal detail overlay. Sampled at `TEXCOORD_0 * scale`
+    /// and multiplied `2 * dest * src` (identity at mean 0.5).
+    pub detail_png: Option<&'a [u8]>,
+    pub detail_scale: [f32; 2],
 }
 
 /// Several textured parts as one mesh (one primitive + material each).
@@ -634,6 +645,30 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             uvs.extend_from_slice(uv);
         }
         let uv_acc = b.f32_accessor(&uvs, 2, "VEC2", false, Some(34962));
+        let color_attr = match part.colors {
+            Some(cols) if cols.len() == part.positions.len() => {
+                let mut cvals = Vec::with_capacity(cols.len() * 3);
+                for c in cols {
+                    for &ch in c {
+                        cvals.push(if ch.is_finite() { ch.clamp(0.0, 1.0) } else { 1.0 });
+                    }
+                }
+                let acc = b.f32_accessor(&cvals, 3, "VEC3", false, Some(34962));
+                format!(",\"COLOR_0\":{acc}")
+            }
+            _ => String::new(),
+        };
+        let lm_attr = match (part.lightmap_png, part.lightmap_uvs) {
+            (Some(_png), Some(uvs)) if uvs.len() == part.positions.len() => {
+                let mut vals = Vec::with_capacity(uvs.len() * 2);
+                for uv in uvs {
+                    vals.extend_from_slice(uv);
+                }
+                let acc = b.f32_accessor(&vals, 2, "VEC2", false, Some(34962));
+                format!(",\"TEXCOORD_1\":{acc}")
+            }
+            _ => String::new(),
+        };
         let ti = *image_by_bytes.entry(part.base_color_png).or_insert_with(|| {
             let img_view = b.view(part.base_color_png, None);
             let ii = images.len();
@@ -641,6 +676,27 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             textures.push(format!("{{\"source\":{ii},\"sampler\":0}}"));
             ii
         });
+        let lmi = part.lightmap_png.map(|png| {
+            *image_by_bytes.entry(png).or_insert_with(|| {
+                let img_view = b.view(png, None);
+                let ii = images.len();
+                images.push(format!("{{\"bufferView\":{img_view},\"mimeType\":\"image/png\"}}"));
+                textures.push(format!("{{\"source\":{ii},\"sampler\":0}}"));
+                ii
+            })
+        });
+        let dti = match part.detail_png {
+            Some(png) if part.detail_scale[0].abs() > 1e-4 || part.detail_scale[1].abs() > 1e-4 => {
+                Some(*image_by_bytes.entry(png).or_insert_with(|| {
+                    let img_view = b.view(png, None);
+                    let ii = images.len();
+                    images.push(format!("{{\"bufferView\":{img_view},\"mimeType\":\"image/png\"}}"));
+                    textures.push(format!("{{\"source\":{ii},\"sampler\":0}}"));
+                    ii
+                }))
+            }
+            _ => None,
+        };
         let mi = materials.len();
         let factor = match part.base_color_factor {
             Some([r, g, bl, a]) if part.base_color_factor != Some([1.0, 1.0, 1.0, 1.0]) => {
@@ -648,11 +704,28 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             }
             _ => String::new(),
         };
+        let extras = {
+            let mut bits = Vec::new();
+            if let Some(i) = lmi {
+                bits.push(format!("\"lightmapTexture\":{{\"index\":{i},\"texCoord\":1}}"));
+            }
+            if let Some(i) = dti {
+                bits.push(format!(
+                    "\"detailTexture\":{{\"index\":{i},\"texCoord\":0,\"scale\":[{},{}]}}",
+                    part.detail_scale[0], part.detail_scale[1]
+                ));
+            }
+            if bits.is_empty() {
+                String::new()
+            } else {
+                format!(",\"extras\":{{{}}}", bits.join(","))
+            }
+        };
         materials.push(format!(
-            "{{\"pbrMetallicRoughness\":{{{factor}\"baseColorTexture\":{{\"index\":{ti}}},\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"doubleSided\":{double_sided}}}"
+            "{{\"pbrMetallicRoughness\":{{{factor}\"baseColorTexture\":{{\"index\":{ti}}},\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"doubleSided\":{double_sided}{extras}}}"
         ));
         prims.push(format!(
-            "{{\"attributes\":{{\"POSITION\":{pos_acc},\"NORMAL\":{nrm_acc},\"TEXCOORD_0\":{uv_acc}}},\"indices\":{idx_acc},\"material\":{mi},\"mode\":4}}"
+            "{{\"attributes\":{{\"POSITION\":{pos_acc},\"NORMAL\":{nrm_acc},\"TEXCOORD_0\":{uv_acc}{color_attr}{lm_attr}}},\"indices\":{idx_acc},\"material\":{mi},\"mode\":4}}"
         ));
     }
     if prims.is_empty() {
@@ -668,7 +741,7 @@ pub fn write_glb_mesh_textured_parts(parts: &[GlbTexturedPart], double_sided: bo
             "\"meshes\":[{{\"primitives\":[{}]}}],",
             "\"materials\":[{}],",
             "\"textures\":[{}],",
-            "\"samplers\":[{{\"magFilter\":9729,\"minFilter\":9729,\"wrapS\":10497,\"wrapT\":10497}}],",
+            "\"samplers\":[{{\"magFilter\":9729,\"minFilter\":9987,\"wrapS\":10497,\"wrapT\":10497}}],",
             "\"images\":[{}],",
             "\"accessors\":[{}],",
             "\"bufferViews\":[{}],",
@@ -1144,6 +1217,38 @@ mod tests {
     }
 
     #[test]
+    fn textured_parts_use_trilinear_repeat_sampler() {
+        use super::{write_glb_mesh_textured_parts, GlbTexturedPart};
+        let positions = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let uvs = [[0.0f32, 0.0], [2.0, 0.0], [0.0, 2.0]];
+        let indices = [0u32, 1, 2];
+        let glb = write_glb_mesh_textured_parts(
+            &[GlbTexturedPart {
+                positions: &positions,
+                uvs: &uvs,
+                indices: &indices,
+                base_color_png: b"PNGBYTES_TILE",
+                normals: None,
+                base_color_factor: None,
+                colors: None,
+                lightmap_png: None,
+                lightmap_uvs: None,
+                detail_png: None,
+                detail_scale: [0.0, 0.0],
+            }],
+            true,
+        );
+        let json = String::from_utf8_lossy(&glb);
+        assert!(
+            json.contains("\"minFilter\":9987"),
+            "tiling world parts need LINEAR_MIPMAP_LINEAR, got a slice of: {}",
+            &json[..json.len().min(800)]
+        );
+        assert!(json.contains("\"wrapS\":10497"), "tiling world parts need REPEAT");
+        assert!(json.contains("\"wrapT\":10497"), "tiling world parts need REPEAT");
+    }
+
+    #[test]
     fn roundtrip_textured() {
         use super::{write_glb_mesh_textured, GlbTexturedMesh};
         let positions = vec![[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
@@ -1173,6 +1278,43 @@ mod tests {
         assert_eq!(img0, base_png.as_slice());
         let img1 = crate::image::load_image_bytes(&loaded, 1).expect("mr image");
         assert_eq!(img1, mr_png.as_slice());
+    }
+
+    #[test]
+    fn textured_parts_write_detail_extras() {
+        use super::{write_glb_mesh_textured_parts, GlbTexturedPart};
+        let positions = vec![[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let uvs = vec![[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let indices = vec![0u32, 1, 2];
+        let glb = write_glb_mesh_textured_parts(
+            &[GlbTexturedPart {
+                positions: &positions,
+                uvs: &uvs,
+                indices: &indices,
+                base_color_png: b"PNGBYTES_BASE",
+                normals: None,
+                base_color_factor: None,
+                colors: None,
+                lightmap_png: None,
+                lightmap_uvs: None,
+                detail_png: Some(b"PNGBYTES_DETAIL"),
+                detail_scale: [2.9, 2.234],
+            }],
+            true,
+        );
+        let json = {
+            let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+            std::str::from_utf8(&glb[20..20 + json_len]).unwrap()
+        };
+        assert!(
+            json.contains("detailTexture"),
+            "material extras must name the overlay"
+        );
+        assert!(json.contains("2.9"), "scale x: {json}");
+        assert!(json.contains("2.234"), "scale y: {json}");
+        let loaded = load_gltf_from_bytes(&glb, None).expect("parse");
+        let img1 = crate::image::load_image_bytes(&loaded, 1).expect("detail image");
+        assert_eq!(img1, b"PNGBYTES_DETAIL");
     }
 
     #[test]

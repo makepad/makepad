@@ -69,6 +69,12 @@ pub struct XrSceneView {
     draw_bg: DrawXrSceneTexture,
     #[live(vec4(0.043, 0.063, 0.086, 1.0))]
     clear_color: Vec4f,
+    /// Fixed offscreen render size; zero (default) follows the widget rect.
+    /// Hosts that composite `color_texture()` elsewhere — a VJ program slot
+    /// behind a 4×4 placeholder widget — set this so the scene still renders
+    /// at program resolution and aspect.
+    #[live(vec2(0.0, 0.0))]
+    render_size: Vec2f,
     #[live]
     camera: XrCamera,
     #[new]
@@ -90,6 +96,20 @@ pub struct XrSceneView {
 }
 
 impl XrSceneView {
+    /// The desktop orbit camera (distance / target / limits): hosts re-frame
+    /// the scene per content (object splat vs world); scripted drivers
+    /// (benchmarks, tests) set yaw/pitch/distance here instead of
+    /// synthesizing mouse events.
+    pub fn camera_mut(&mut self) -> &mut XrCamera {
+        &mut self.camera
+    }
+
+    /// The scene's color render target. Valid after the first draw; read it
+    /// back with `Cx::debug_read_render_texture` for pixel checks.
+    pub fn color_texture(&self) -> &Texture {
+        &self.color_texture
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
@@ -306,8 +326,17 @@ impl Widget for XrSceneView {
         }
 
         self.ensure_initialized(cx.cx);
-        self.camera.set_desktop_viewport_rect(rect);
-        self.pass.set_size(cx, rect.size);
+        // Render at the fixed size when one is set, else at the widget rect.
+        let render_rect = if self.render_size.x >= 1.0 && self.render_size.y >= 1.0 {
+            Rect {
+                pos: rect.pos,
+                size: dvec2(self.render_size.x as f64, self.render_size.y as f64),
+            }
+        } else {
+            rect
+        };
+        self.camera.set_desktop_viewport_rect(render_rect);
+        self.pass.set_size(cx, render_rect.size);
         self.pass.set_color_texture(
             cx,
             &self.color_texture,
@@ -318,7 +347,9 @@ impl Widget for XrSceneView {
 
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, None);
-        if let Some(scene_state) = self.camera.desktop_scene_state(rect, cx.time()) {
+        // begin_pass inherits the parent pass rect: re-assert the render size.
+        self.pass.set_size(cx, render_rect.size);
+        if let Some(scene_state) = self.camera.desktop_scene_state(render_rect, cx.time()) {
             self.set_pass_camera(cx.cx, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
             self.draw_scene(cx3d, scope, scene_state);
@@ -328,7 +359,11 @@ impl Widget for XrSceneView {
         self.draw_bg.draw_vars.set_texture(0, &self.color_texture);
         self.draw_bg.draw_abs(cx, rect);
         self.area = self.draw_bg.area();
-        cx.set_pass_area(&self.pass, self.area);
+        // A fixed render_size must not be replaced by the (placeholder)
+        // widget area: set_pass_area overrides the explicit pass size.
+        if render_rect.size == rect.size {
+            cx.set_pass_area(&self.pass, self.area);
+        }
         DrawStep::done()
     }
 }

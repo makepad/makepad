@@ -9,6 +9,7 @@
 //! still draws a full world through [`Renderer::draw_scene_full`].
 
 pub mod ao;
+pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
 pub mod aobaker_port;
@@ -21,6 +22,7 @@ pub mod hud;
 pub mod light_grid;
 pub mod lightmap;
 pub mod model;
+pub mod player_nav;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
@@ -55,6 +57,12 @@ pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
 pub use sun::*;
+// `sun::solar_dir` (axis-mapped game-space wrapper) and
+// `makepad_draw::solar_dir` (the underlying shared solar model, pulled in
+// by the glob import below) share a name; this crate's own wrapper is the
+// intended public `makepad_render::solar_dir` — an explicit re-export wins
+// over both globs and resolves the ambiguity.
+pub use sun::solar_dir;
 
 use makepad_draw::*;
 

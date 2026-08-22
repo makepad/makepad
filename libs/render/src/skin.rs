@@ -14,7 +14,7 @@
 //! linear (or step) samplers. Unskinned primitives (hand props) are counted
 //! and skipped. Materials are ignored — the caller binds its own texture.
 
-use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f};
+use makepad_draw::makepad_math::{Mat3f, Mat4f, Quat, Vec3f};
 
 // ------------------------------------------------------------------- JSON
 
@@ -45,6 +45,14 @@ impl Val {
     pub(crate) fn arr(&self) -> &[Val] {
         match self {
             Val::Arr(items) => items,
+            _ => &[],
+        }
+    }
+    /// An object's fields in file order — for `extras`, whose keys are
+    /// whatever the exporter chose to write.
+    pub(crate) fn obj(&self) -> &[(String, Val)] {
+        match self {
+            Val::Obj(fields) => fields,
             _ => &[],
         }
     }
@@ -248,6 +256,44 @@ impl Default for NodeTrs {
 /// One sampled skeleton pose: local TRS per glTF node.
 pub type PoseBuffer = Vec<NodeTrs>;
 
+/// Source-neutral collider attached to one skeleton node. Coordinates are in
+/// that node's local bind frame and model units; a game scales them with the
+/// same character instance scale used for the visible skin.
+#[derive(Clone, Debug)]
+pub enum RagdollCollider {
+    Capsule { point_a: Vec3f, point_b: Vec3f, radius: f32 },
+    Sphere { center: Vec3f, radius: f32 },
+    Box { center: Vec3f, half_extents: Vec3f },
+}
+
+/// One generic articulated body parsed from `extras.kind="ragdoll_body"`.
+/// `parent` indexes [`RagdollRig::bodies`], not glTF nodes.
+#[derive(Clone, Debug)]
+pub struct RagdollBody {
+    pub connection: String,
+    pub node: usize,
+    pub parent: Option<usize>,
+    pub collider: RagdollCollider,
+    pub mass_fraction: f32,
+    pub cone_angle: f32,
+    pub twist_min: f32,
+    pub twist_max: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct RagdollRig {
+    pub bodies: Vec<RagdollBody>,
+}
+
+/// Current world-space skeleton-node frame used to seed or draw an
+/// articulation. The connection id is the only lookup handle exposed to the
+/// game; source bone names never leave the importer.
+#[derive(Clone, Debug)]
+pub struct RagdollBodyPose {
+    pub connection: String,
+    pub transform: Mat4f,
+}
+
 struct Node {
     name: String,
     parent: Option<usize>,
@@ -341,6 +387,7 @@ pub struct SkinnedModel {
     /// every vertex it moves stays within its rest radius of the joint, and a
     /// blended vertex stays inside the union of its joints' spheres.
     joint_bounds: Vec<(Vec3f, f32)>,
+    ragdoll: Option<RagdollRig>,
 }
 
 /// Pre-render deformation audit over animation samples. This observes the
@@ -595,7 +642,281 @@ impl<'a> Accessors<'a> {
     }
 }
 
+/// The size a joint was bound at, read back out of its inverse bind: the
+/// inverse of a bind matrix scales by exactly the reciprocal of the bind
+/// scale, so this recovers the authored size without a second copy of it.
+/// Averaged over the three columns, which for any sane rig agree.
+fn bind_scale(inverse_bind: &Mat4f) -> f32 {
+    let size = linear_size(inverse_bind);
+    if size > 1.0e-9 { 1.0 / size } else { 1.0 }
+}
+
+/// The size of a matrix' linear part, averaged over its three columns.
+fn linear_size(m: &Mat4f) -> f32 {
+    let column = |c: usize| {
+        let v = &m.v;
+        (v[c * 4] * v[c * 4] + v[c * 4 + 1] * v[c * 4 + 1] + v[c * 4 + 2] * v[c * 4 + 2]).sqrt()
+    };
+    (column(0) + column(1) + column(2)) / 3.0
+}
+
+/// The turn in a matrix' linear part, with any size divided out first so a
+/// scaled bone cannot leak its size into the quaternion. A degenerate column
+/// answers "no turn" rather than a NaN.
+fn quat_of_linear(m: &Mat4f) -> Quat {
+    let column = |c: usize| {
+        let v = &m.v;
+        (v[c * 4] * v[c * 4] + v[c * 4 + 1] * v[c * 4 + 1] + v[c * 4 + 2] * v[c * 4 + 2]).sqrt()
+    };
+    let (sx, sy, sz) = (column(0), column(1), column(2));
+    if !(sx > 1.0e-9 && sy > 1.0e-9 && sz > 1.0e-9) {
+        return Quat::default();
+    }
+    let r = |c: usize, row: usize, s: f32| m.v[c * 4 + row] / s;
+    let (m00, m10, m20) = (r(0, 0, sx), r(0, 1, sx), r(0, 2, sx));
+    let (m01, m11, m21) = (r(1, 0, sy), r(1, 1, sy), r(1, 2, sy));
+    let (m02, m12, m22) = (r(2, 0, sz), r(2, 1, sz), r(2, 2, sz));
+    let trace = m00 + m11 + m22;
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        Quat { x: (m21 - m12) / s, y: (m02 - m20) / s, z: (m10 - m01) / s, w: 0.25 * s }
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        Quat { x: 0.25 * s, y: (m01 + m10) / s, z: (m02 + m20) / s, w: (m21 - m12) / s }
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        Quat { x: (m01 + m10) / s, y: 0.25 * s, z: (m12 + m21) / s, w: (m02 - m20) / s }
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        Quat { x: (m02 + m20) / s, y: (m12 + m21) / s, z: 0.25 * s, w: (m10 - m01) / s }
+    };
+    let length = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+    if length > 1.0e-9 {
+        Quat { x: q.x / length, y: q.y / length, z: q.z / length, w: q.w / length }
+    } else {
+        Quat::default()
+    }
+}
+
+/// `m` with its rotation and translation kept and its linear size replaced by
+/// `scale`. A degenerate column leaves the matrix alone rather than dividing
+/// by zero.
+fn with_linear_scale(m: &Mat4f, scale: f32) -> Mat4f {
+    let mut out = *m;
+    for c in 0..3 {
+        let v = &m.v;
+        let length =
+            (v[c * 4] * v[c * 4] + v[c * 4 + 1] * v[c * 4 + 1] + v[c * 4 + 2] * v[c * 4 + 2]).sqrt();
+        if !(length > 1.0e-9) {
+            return *m;
+        }
+        let factor = scale / length;
+        out.v[c * 4] = v[c * 4] * factor;
+        out.v[c * 4 + 1] = v[c * 4 + 1] * factor;
+        out.v[c * 4 + 2] = v[c * 4 + 2] * factor;
+    }
+    out
+}
+
 // ------------------------------------------------------------------ parse
+
+fn ragdoll_vec3(value: Option<&Val>) -> Option<Vec3f> {
+    let value = value?;
+    let out = Vec3f {
+        x: value.idx(0).and_then(Val::f64)? as f32,
+        y: value.idx(1).and_then(Val::f64)? as f32,
+        z: value.idx(2).and_then(Val::f64)? as f32,
+    };
+    out.x.is_finite().then_some(())?;
+    out.y.is_finite().then_some(())?;
+    out.z.is_finite().then_some(())?;
+    Some(out)
+}
+
+fn parse_ragdoll(
+    json: &Val,
+    node_vals: &[Val],
+    nodes: &[Node],
+    joint_nodes: &[usize],
+) -> Result<Option<RagdollRig>, String> {
+    struct Raw {
+        connection: String,
+        parent_connection: Option<String>,
+        root: bool,
+        node: usize,
+        collider: RagdollCollider,
+        mass_fraction: f32,
+        cone_angle: f32,
+        twist_min: f32,
+        twist_max: f32,
+    }
+
+    let mut raw = Vec::new();
+    for (node, value) in node_vals.iter().enumerate() {
+        let Some(extras) = value.get("extras") else { continue };
+        if extras.get("kind").and_then(Val::str) != Some("ragdoll_body") {
+            continue;
+        }
+        if !joint_nodes.contains(&node) {
+            return Err(format!("ragdoll node {node} is not in the skin"));
+        }
+        let connection = extras
+            .get("connection")
+            .and_then(Val::str)
+            .filter(|value| !value.is_empty())
+            .ok_or("ragdoll body missing connection")?
+            .to_string();
+        if raw.iter().any(|body: &Raw| body.connection == connection) {
+            return Err(format!("duplicate ragdoll connection {connection}"));
+        }
+        let root = matches!(extras.get("root"), Some(Val::Bool(true)));
+        let parent_connection = extras
+            .get("parent_connection")
+            .and_then(Val::str)
+            .map(str::to_string);
+        let positive = |name: &str| -> Result<f32, String> {
+            let value = extras.get(name).and_then(Val::f64).unwrap_or(0.0) as f32;
+            if value.is_finite() && value > 0.0 {
+                Ok(value)
+            } else {
+                Err(format!("ragdoll {connection} has invalid {name}"))
+            }
+        };
+        let collider = match extras.get("shape").and_then(Val::str) {
+            Some("capsule") => RagdollCollider::Capsule {
+                point_a: ragdoll_vec3(extras.get("point_a"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid point_a"))?,
+                point_b: ragdoll_vec3(extras.get("point_b"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid point_b"))?,
+                radius: positive("radius")?,
+            },
+            Some("sphere") => RagdollCollider::Sphere {
+                center: ragdoll_vec3(extras.get("position"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid position"))?,
+                radius: positive("radius")?,
+            },
+            Some("box") => RagdollCollider::Box {
+                center: ragdoll_vec3(extras.get("position"))
+                    .ok_or_else(|| format!("ragdoll {connection} has invalid position"))?,
+                half_extents: {
+                    let half = ragdoll_vec3(extras.get("half_extents"))
+                        .ok_or_else(|| format!("ragdoll {connection} has invalid half_extents"))?;
+                    if half.x <= 0.0 || half.y <= 0.0 || half.z <= 0.0 {
+                        return Err(format!("ragdoll {connection} has non-positive half_extents"));
+                    }
+                    half
+                },
+            },
+            Some(other) => return Err(format!("ragdoll {connection} has unknown shape {other}")),
+            None => return Err(format!("ragdoll {connection} is missing shape")),
+        };
+        let mass_fraction = positive("mass_fraction")?;
+        let (cone_angle, twist_min, twist_max) = if root {
+            (0.0, 0.0, 0.0)
+        } else {
+            let cone = positive("cone_angle")?;
+            let lower = extras.get("twist_min").and_then(Val::f64).unwrap_or(f64::NAN) as f32;
+            let upper = extras.get("twist_max").and_then(Val::f64).unwrap_or(f64::NAN) as f32;
+            if !cone.is_finite()
+                || cone > std::f32::consts::PI
+                || !lower.is_finite()
+                || !upper.is_finite()
+                || lower > upper
+            {
+                return Err(format!("ragdoll {connection} has invalid joint limits"));
+            }
+            (cone, lower, upper)
+        };
+        raw.push(Raw {
+            connection,
+            parent_connection,
+            root,
+            node,
+            collider,
+            mass_fraction,
+            cone_angle,
+            twist_min,
+            twist_max,
+        });
+    }
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.iter().filter(|body| body.root).count() != 1 {
+        return Err("ragdoll rig must have exactly one root".into());
+    }
+
+    // Every skin in a multi-mesh character must use the same joint set. A
+    // body rig bound to the torso skin but not the head skin is a partial rig,
+    // not something runtime can safely guess around.
+    for skin in json.get("skins").map(Val::arr).unwrap_or(&[]) {
+        let joints: Vec<usize> = skin
+            .get("joints")
+            .map(|value| value.arr().iter().filter_map(Val::usize).collect())
+            .unwrap_or_default();
+        if joints != joint_nodes {
+            return Err("ragdoll character skins use incompatible joint sets".into());
+        }
+    }
+
+    let mut bodies = Vec::with_capacity(raw.len());
+    for body in &raw {
+        if body.root != body.parent_connection.is_none() {
+            return Err(format!(
+                "ragdoll {} root/parent declaration is inconsistent",
+                body.connection
+            ));
+        }
+        let parent = body
+            .parent_connection
+            .as_deref()
+            .map(|parent| {
+                raw.iter()
+                    .position(|candidate| candidate.connection == parent)
+                    .ok_or_else(|| format!("ragdoll {} has unresolved parent {parent}", body.connection))
+            })
+            .transpose()?;
+
+        // The declared graph must match the skeleton graph after skipping
+        // ordinary socket/group nodes. This makes it impossible for metadata
+        // to attach an arm constraint to the wrong physical body.
+        let mut ancestor = nodes[body.node].parent;
+        let mut actual_parent = None;
+        for _ in 0..nodes.len() {
+            let Some(node) = ancestor else { break };
+            if let Some(index) = raw.iter().position(|candidate| candidate.node == node) {
+                actual_parent = Some(index);
+                break;
+            }
+            ancestor = nodes[node].parent;
+        }
+        if actual_parent != parent {
+            return Err(format!("ragdoll {} parent does not match skeleton", body.connection));
+        }
+        bodies.push(RagdollBody {
+            connection: body.connection.clone(),
+            node: body.node,
+            parent,
+            collider: body.collider.clone(),
+            mass_fraction: body.mass_fraction,
+            cone_angle: body.cone_angle,
+            twist_min: body.twist_min,
+            twist_max: body.twist_max,
+        });
+    }
+    // Parent chains must terminate at the one root rather than cycle.
+    for start in 0..bodies.len() {
+        let mut at = Some(start);
+        for depth in 0..=bodies.len() {
+            let Some(index) = at else { break };
+            if depth == bodies.len() {
+                return Err("ragdoll parent graph contains a cycle".into());
+            }
+            at = bodies[index].parent;
+        }
+    }
+    Ok(Some(RagdollRig { bodies }))
+}
 
 impl SkinnedModel {
     pub fn parse_glb(bytes: &[u8]) -> Result<SkinnedModel, String> {
@@ -695,6 +1016,7 @@ impl SkinnedModel {
             }
             None => vec![Mat4f::identity(); joint_nodes.len()],
         };
+        let ragdoll = parse_ragdoll(&json, node_vals, &nodes, &joint_nodes)?;
 
         // All skinned mesh primitives, concatenated (they share skin 0).
         let mut vertices = Vec::new();
@@ -884,11 +1206,152 @@ impl SkinnedModel {
             clips,
             skipped_unskinned,
             joint_bounds,
+            ragdoll,
         })
     }
 
     pub fn joint_count(&self) -> usize {
         self.joint_nodes.len()
+    }
+
+    pub fn ragdoll_rig(&self) -> Option<&RagdollRig> {
+        self.ragdoll.as_ref()
+    }
+
+    /// Bounds of vertices predominantly controlled by `node`, expressed in
+    /// that skeleton node's local bind frame. Asset importers use this generic
+    /// measurement to fit colliders; no vendor naming lives here.
+    pub fn dominant_joint_local_bounds(&self, node: usize) -> Option<(Vec3f, Vec3f)> {
+        let joint = self.joint_nodes.iter().position(|candidate| *candidate == node)? as u16;
+        let rest = self.rest_pose();
+        let bone_in_mesh = self.node_mesh_transform(&rest, node)?;
+        let mesh_in_bone = bone_in_mesh.invert();
+        let mut min = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
+        let mut max = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
+        let mut count = 0usize;
+        for vertex in &self.vertices {
+            let mut dominant = 0usize;
+            for lane in 1..4 {
+                if vertex.weights[lane] > vertex.weights[dominant] {
+                    dominant = lane;
+                }
+            }
+            if vertex.joints[dominant] != joint || vertex.weights[dominant] <= 0.0 {
+                continue;
+            }
+            let point = mat4_mul_point(&mesh_in_bone, vertex.pos);
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            min.z = min.z.min(point.z);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+            max.z = max.z.max(point.z);
+            count += 1;
+        }
+        (count >= 3).then_some((min, max))
+    }
+
+    /// World-space node frames for seeding the physics articulation from the
+    /// exact animation pose visible in the previous frame.
+    pub fn ragdoll_body_poses(
+        &self,
+        pose: &PoseBuffer,
+        model_world: &Mat4f,
+    ) -> Vec<RagdollBodyPose> {
+        let Some(rig) = &self.ragdoll else { return Vec::new() };
+        rig.bodies
+            .iter()
+            .filter_map(|body| {
+                self.node_mesh_transform(pose, body.node).map(|node| RagdollBodyPose {
+                    connection: body.connection.clone(),
+                    transform: Mat4f::mul(model_world, &node),
+                })
+            })
+            .collect()
+    }
+
+    /// Replace ordinary animation palette entries with authoritative
+    /// world-space ragdoll body frames. The renderer still consumes the same
+    /// palette format; it never needs a second skinned draw path.
+    ///
+    /// A body frame carries only PLACEMENT — where physics put the bone, and
+    /// how it is turned. Size is not physics' to say: a solver body is rigid,
+    /// so the character's instance scale (which `model_world` carries) and the
+    /// joint's own bind scale are both absent from the frame that comes back.
+    /// Taking the frame's linear part at face value therefore drew a villager
+    /// at 1/instance_scale — a Kenney townsfolk at scale 2 halved the instant
+    /// a car hit them and grew back when they stood up. Each bone's size is
+    /// restored from its own inverse bind instead, which is the one place the
+    /// authored size actually lives, so a ragdolled character is exactly the
+    /// size the animated one was. Frames that DID keep their scale (this
+    /// type's own [`Self::ragdoll_body_poses`]) land on the same answer.
+    pub fn palette_from_ragdoll(
+        &self,
+        base_pose: &PoseBuffer,
+        model_world: &Mat4f,
+        bodies: &[RagdollBodyPose],
+        out: &mut Vec<Mat4f>,
+    ) {
+        self.palette(base_pose, out);
+        let Some(rig) = &self.ragdoll else { return };
+        let model_from_world = model_world.invert();
+        for body in &rig.bodies {
+            let Some(pose) = bodies.iter().find(|pose| pose.connection == body.connection) else {
+                continue;
+            };
+            let Some(joint) = self.joint_nodes.iter().position(|node| *node == body.node) else {
+                continue;
+            };
+            let placed = Mat4f::mul(&model_from_world, &pose.transform);
+            let bone_in_mesh = with_linear_scale(&placed, bind_scale(&self.inverse_bind[joint]));
+            out[joint] = Mat4f::mul(&bone_in_mesh, &self.inverse_bind[joint]);
+        }
+    }
+
+    /// Hand a character back from physics to animation: `into` (the animated
+    /// palette) is cross-faded from `from` (the palette frozen at the last
+    /// ragdoll frame), with `weight` the share of the physical pose left.
+    ///
+    /// The fade turns each bone along the short way round and interpolates
+    /// its size and position separately, because a bone's matrix is not a
+    /// number to average. Interpolating the sixteen lanes instead walks the
+    /// straight line between two rotations — through the inside of the
+    /// sphere — so a limb 90° from where it lands loses a third of its
+    /// length halfway through getting up, and a limb near 180° from it (a
+    /// villager face-down under a car, about to stand) collapses to nothing
+    /// at the midpoint and springs out the other side inverted. Both were
+    /// visible on every knockdown, as a squash and as a scale flip.
+    pub fn blend_palette(from: &[Mat4f], into: &mut [Mat4f], weight: f32) {
+        let weight = weight.clamp(0.0, 1.0);
+        for (bone, previous) in into.iter_mut().zip(from) {
+            let size = linear_size(bone) * (1.0 - weight) + linear_size(previous) * weight;
+            let turn = Mat3f::from_quat(nlerp(
+                quat_of_linear(bone),
+                quat_of_linear(previous),
+                weight,
+            ));
+            let at = |lane: usize| bone.v[lane] * (1.0 - weight) + previous.v[lane] * weight;
+            *bone = Mat4f {
+                v: [
+                    turn.c0.x * size,
+                    turn.c0.y * size,
+                    turn.c0.z * size,
+                    at(3),
+                    turn.c1.x * size,
+                    turn.c1.y * size,
+                    turn.c1.z * size,
+                    at(7),
+                    turn.c2.x * size,
+                    turn.c2.y * size,
+                    turn.c2.z * size,
+                    at(11),
+                    at(12),
+                    at(13),
+                    at(14),
+                    at(15),
+                ],
+            };
+        }
     }
 
     /// Resolve an animated glTF node by its authored name.
@@ -1869,6 +2332,87 @@ impl SkinnedModel {
         self.nodes.iter().map(|n| n.rest).collect()
     }
 
+    /// Ground speed the walk `clip` depicts at playback rate 1, in the
+    /// model's own units per second — the number that makes stride-matched
+    /// locomotion possible for ANY rig: playback rate = ground_speed / this,
+    /// and the feet stay planted at every travel speed (play-session-1
+    /// entry 20, "the walking ANIMATION is too fast" — for every walker).
+    ///
+    /// Method: the support foot, whatever the rig calls it. Candidates are
+    /// the clip-animated nodes whose rest origin sits in the lower body;
+    /// each carries a probe at its rest ground reach, so a hip-pivoted
+    /// block leg (kenney mini rigs have no foot bones) measures exactly
+    /// like a real foot bone. Across one sampled cycle the lowest probe is
+    /// the support; the median planar speed of the support probe between
+    /// consecutive samples with the SAME support (excludes swap frames) is
+    /// the depicted ground speed. `None` when the clip animates no
+    /// lower-body node or the measurement is degenerate — callers keep
+    /// their heuristic.
+    pub fn walk_clip_ground_speed(&self, clip_index: usize) -> Option<f32> {
+        let clip = self.clips.get(clip_index)?;
+        if clip.duration <= 1.0e-3 {
+            return None;
+        }
+        let rest = self.rest_pose();
+        let origins: Vec<Vec3f> = (0..self.nodes.len())
+            .map(|i| {
+                self.node_mesh_transform(&rest, i)
+                    .map(|m| Vec3f { x: m.v[12], y: m.v[13], z: m.v[14] })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let min_y = origins.iter().map(|o| o.y).fold(f32::MAX, f32::min);
+        let max_y = origins.iter().map(|o| o.y).fold(f32::MIN, f32::max);
+        let height = max_y - min_y;
+        if !(height > 1.0e-3) {
+            return None;
+        }
+        let animated: std::collections::HashSet<usize> =
+            clip.channels.iter().map(|c| c.node).collect();
+        // (node, rest ground reach below its origin)
+        let candidates: Vec<(usize, f32)> = origins
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * 0.45)
+            .map(|(i, o)| (i, o.y - min_y))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        const STEPS: usize = 48;
+        let dt = clip.duration / STEPS as f32;
+        let mut pose = self.rest_pose();
+        let mut prev: Option<(usize, Vec3f)> = None;
+        let mut speeds: Vec<f32> = Vec::new();
+        for s in 0..=STEPS {
+            self.sample_clip(clip_index, s as f32 * dt, &mut pose);
+            let mut support: Option<(usize, Vec3f)> = None;
+            for (node, reach) in &candidates {
+                let Some(m) = self.node_mesh_transform(&pose, *node) else {
+                    continue;
+                };
+                let p = mat4_mul_point(&m, Vec3f { x: 0.0, y: -reach, z: 0.0 });
+                if support.map_or(true, |(_, sp)| p.y < sp.y) {
+                    support = Some((*node, p));
+                }
+            }
+            let Some((node, p)) = support else { continue };
+            if let Some((prev_node, pp)) = prev {
+                if prev_node == node {
+                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
+                    speeds.push((dx * dx + dz * dz).sqrt() / dt);
+                }
+            }
+            prev = Some((node, p));
+        }
+        if speeds.len() < STEPS / 4 {
+            return None;
+        }
+        speeds.sort_by(|a, b| a.total_cmp(b));
+        let v = speeds[speeds.len() / 2];
+        (v > 1.0e-3).then_some(v)
+    }
+
     /// Reset translation on every skeleton root to its rest value while
     /// preserving all authored rotations and child motion.
     ///
@@ -2578,6 +3122,213 @@ fn nlerp(a: Quat, mut b: Quat, f: f32) -> Quat {
 mod tests {
     use super::*;
 
+    /// A two-bone rig whose bind pose IS its rest pose, drawn through a mesh
+    /// node that carries its own unit scale (Kenney rigs do). `mesh_scale`
+    /// away from 1 puts a real bind scale on every joint, so the ragdoll path
+    /// cannot pass by accidentally assuming unit-sized bones.
+    fn ragdoll_scale_model(mesh_scale: f32) -> SkinnedModel {
+        let trs = |t: Vec3f, s: f32| NodeTrs { t, r: Quat::default(), s: Vec3f { x: s, y: s, z: s } };
+        let nodes = vec![
+            Node { name: "root".into(), parent: None, rest: trs(Vec3f { x: 0.0, y: 0.2, z: 0.0 }, 1.0) },
+            Node { name: "torso".into(), parent: Some(0), rest: trs(Vec3f { x: 0.0, y: 0.4, z: 0.0 }, 1.0) },
+            Node { name: "mesh".into(), parent: None, rest: trs(Vec3f { x: 0.0, y: 0.0, z: 0.0 }, mesh_scale) },
+        ];
+        // Bind == rest: each inverse bind is the inverse of that node's
+        // mesh-space rest frame, which is what a real exporter writes.
+        let mesh_inv = trs_to_mat4(&nodes[2].rest).invert();
+        let root_global = trs_to_mat4(&nodes[0].rest);
+        let torso_global = Mat4f::mul(&root_global, &trs_to_mat4(&nodes[1].rest));
+        let inverse_bind = vec![
+            Mat4f::mul(&mesh_inv, &root_global).invert(),
+            Mat4f::mul(&mesh_inv, &torso_global).invert(),
+        ];
+        SkinnedModel {
+            nodes,
+            joint_nodes: vec![0, 1],
+            inverse_bind,
+            mesh_node: 2,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            clips: Vec::new(),
+            skipped_unskinned: 0,
+            joint_bounds: Vec::new(),
+            ragdoll: Some(RagdollRig {
+                bodies: vec![
+                    RagdollBody {
+                        connection: "pelvis".into(),
+                        node: 0,
+                        parent: None,
+                        collider: RagdollCollider::Sphere { center: Vec3f::default(), radius: 0.1 },
+                        mass_fraction: 0.5,
+                        cone_angle: 0.0,
+                        twist_min: 0.0,
+                        twist_max: 0.0,
+                    },
+                    RagdollBody {
+                        connection: "torso".into(),
+                        node: 1,
+                        parent: Some(0),
+                        collider: RagdollCollider::Sphere { center: Vec3f::default(), radius: 0.1 },
+                        mass_fraction: 0.5,
+                        cone_angle: 0.5,
+                        twist_min: -0.2,
+                        twist_max: 0.2,
+                    },
+                ],
+            }),
+        }
+    }
+
+    /// Getting up must not change the character's size on the way. The
+    /// recovery cross-fade used to interpolate palette matrices lane by lane,
+    /// and the straight line between two rotations cuts through the middle of
+    /// the sphere: a limb 90 degrees from where it lands lost a third of its
+    /// length halfway through standing up.
+    #[test]
+    fn getting_up_is_a_change_of_pose_not_of_size() {
+        // 90 degrees squashed the limb; 179 degrees — a villager face-down
+        // under a car, about to stand — collapsed it to nothing at the
+        // midpoint and sprang it out inverted.
+        let turned_by = |angle: f32| {
+            let half = angle * 0.5;
+            trs_to_mat4(&NodeTrs {
+                t: Vec3f { x: 0.4, y: 0.1, z: -0.2 },
+                r: Quat { x: 0.0, y: 0.0, z: half.sin(), w: half.cos() },
+                s: Vec3f { x: 1.0, y: 1.0, z: 1.0 },
+            })
+        };
+        let turned = turned_by(std::f32::consts::FRAC_PI_2);
+        for angle in [std::f32::consts::FRAC_PI_2, 179.0f32.to_radians()] {
+            let physical = vec![turned_by(angle), Mat4f::identity()];
+            let mut previous: Option<Vec<Mat4f>> = None;
+            for step in 0..=20 {
+                let weight = 1.0 - step as f32 / 20.0;
+                let mut animated = vec![Mat4f::identity(); 2];
+                SkinnedModel::blend_palette(&physical, &mut animated, weight);
+                for (joint, bone) in animated.iter().enumerate() {
+                    assert!(
+                        (linear_size(bone) - 1.0).abs() < 1.0e-4,
+                        "angle {angle} joint {joint} at weight {weight} is {}x its size",
+                        linear_size(bone)
+                    );
+                    // A right-handed bone must stay right-handed: a fade that
+                    // passes through zero comes out the far side mirrored.
+                    let v = &bone.v;
+                    let cross = [
+                        v[1] * v[6] - v[2] * v[5],
+                        v[2] * v[4] - v[0] * v[6],
+                        v[0] * v[5] - v[1] * v[4],
+                    ];
+                    let handedness = cross[0] * v[8] + cross[1] * v[9] + cross[2] * v[10];
+                    assert!(
+                        handedness > 0.5,
+                        "angle {angle} joint {joint} at weight {weight} turned inside out"
+                    );
+                }
+                // ...and it must get there smoothly: a lane-lerp through the
+                // middle of the sphere jumps most of the way in one frame.
+                if let Some(last) = &previous {
+                    for (joint, (bone, was)) in animated.iter().zip(last).enumerate() {
+                        let step_size: f32 = (0..12)
+                            .map(|lane| (bone.v[lane] - was.v[lane]).abs())
+                            .fold(0.0, f32::max);
+                        assert!(
+                            step_size < 0.25,
+                            "angle {angle} joint {joint} jumped {step_size} in one frame"
+                        );
+                    }
+                }
+                previous = Some(animated);
+            }
+        }
+        // The endpoints are still exactly the two poses being faded between.
+        let physical = vec![turned, Mat4f::identity()];
+        let mut animated = vec![Mat4f::identity(); 2];
+        SkinnedModel::blend_palette(&physical, &mut animated, 1.0);
+        for lane in 0..16 {
+            assert!((animated[0].v[lane] - turned.v[lane]).abs() < 1.0e-4, "lane {lane}");
+        }
+        let mut animated = vec![Mat4f::identity(); 2];
+        SkinnedModel::blend_palette(&physical, &mut animated, 0.0);
+        for lane in 0..16 {
+            assert!(
+                (animated[0].v[lane] - Mat4f::identity().v[lane]).abs() < 1.0e-4,
+                "lane {lane}"
+            );
+        }
+    }
+
+    /// A ragdoll that is exactly where the animation left it must DRAW exactly
+    /// like the animation — at every character scale.
+    ///
+    /// box3d bodies are rigid, so the frames that come back out of physics
+    /// have lost the character's instance scale. Reading them literally drew
+    /// the character at 1/scale: a Kenney villager placed at scale 2 halved
+    /// the instant a car hit them, and grew back when they stood up. This is
+    /// that bug, expressed as the identity it broke.
+    #[test]
+    fn a_ragdoll_at_the_animated_pose_draws_at_the_animated_size() {
+        for mesh_scale in [1.0f32, 0.01] {
+            let model = ragdoll_scale_model(mesh_scale);
+            let pose = PoseBuffer::new();
+            for character_scale in [1.0f32, 2.0, 0.35] {
+                // A villager as the town places one: somewhere, turned, and
+                // at its own build scale.
+                let half_yaw = 0.35f32;
+                let model_world = trs_to_mat4(&NodeTrs {
+                    t: Vec3f { x: 3.0, y: 0.0, z: -7.0 },
+                    r: Quat { x: 0.0, y: half_yaw.sin(), z: 0.0, w: half_yaw.cos() },
+                    s: Vec3f { x: character_scale, y: character_scale, z: character_scale },
+                });
+
+                let mut animated = Vec::new();
+                model.palette(&pose, &mut animated);
+
+                // What the game hands physics, and what physics hands back:
+                // world placement with every trace of size removed.
+                let rigid: Vec<RagdollBodyPose> = model
+                    .ragdoll_body_poses(&pose, &model_world)
+                    .into_iter()
+                    .map(|body| RagdollBodyPose {
+                        transform: with_linear_scale(&body.transform, 1.0),
+                        connection: body.connection,
+                    })
+                    .collect();
+                assert_eq!(rigid.len(), 2);
+
+                let mut ragdolled = Vec::new();
+                model.palette_from_ragdoll(&pose, &model_world, &rigid, &mut ragdolled);
+                for (joint, (want, got)) in animated.iter().zip(&ragdolled).enumerate() {
+                    for lane in 0..16 {
+                        assert!(
+                            (want.v[lane] - got.v[lane]).abs() < 1.0e-4,
+                            "mesh {mesh_scale} scale {character_scale} joint {joint} lane {lane}: \
+                             animated {} vs ragdolled {} (sizes {} vs {})",
+                            want.v[lane],
+                            got.v[lane],
+                            linear_size(want),
+                            linear_size(got),
+                        );
+                    }
+                }
+
+                // The same call fed frames that DID keep their scale (this
+                // type's own seed output) must land on the same answer.
+                let scaled = model.ragdoll_body_poses(&pose, &model_world);
+                let mut from_scaled = Vec::new();
+                model.palette_from_ragdoll(&pose, &model_world, &scaled, &mut from_scaled);
+                for (joint, (want, got)) in animated.iter().zip(&from_scaled).enumerate() {
+                    for lane in 0..16 {
+                        assert!(
+                            (want.v[lane] - got.v[lane]).abs() < 1.0e-4,
+                            "scaled frames: joint {joint} lane {lane}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Hand-assembled minimal skinned GLB: 2 joints (root→child), a 2-triangle
     /// quad fully weighted to the child, one 1s clip "spin" rotating the child
     /// 90° about +Z. Keeps parser/sampler tests hermetic — no downloads.
@@ -2758,6 +3509,7 @@ mod tests {
             }],
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 
@@ -2801,6 +3553,7 @@ mod tests {
             clips: Vec::new(),
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 
@@ -2846,6 +3599,7 @@ mod tests {
             }],
             skipped_unskinned: 0,
             joint_bounds: Vec::new(),
+            ragdoll: None,
         }
     }
 

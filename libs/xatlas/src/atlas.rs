@@ -184,6 +184,34 @@ pub fn parametrize_with_options(
     chart: &ChartOptions,
     pack: &PackOptions,
 ) -> Result<Parametrize, AddMeshError> {
+    parametrize_with_options_progress(positions, faces, chart, pack, &mut |_| true)
+}
+
+/// [`parametrize`] with progress: `progress(frac)` in [0, 1] — 0.05 after
+/// mesh add, 0.1..0.85 across chart-group parameterization (the long part),
+/// 0.9 after packing, 1.0 at output. Returning false aborts with
+/// [`AddMeshError::Error`].
+pub fn parametrize_with_progress(
+    positions: &[[f32; 3]],
+    faces: &[[u32; 3]],
+    progress: &mut dyn FnMut(f64) -> bool,
+) -> Result<Parametrize, AddMeshError> {
+    parametrize_with_options_progress(
+        positions,
+        faces,
+        &ChartOptions::default(),
+        &PackOptions::default(),
+        progress,
+    )
+}
+
+pub fn parametrize_with_options_progress(
+    positions: &[[f32; 3]],
+    faces: &[[u32; 3]],
+    chart: &ChartOptions,
+    pack: &PackOptions,
+    progress: &mut dyn FnMut(f64) -> bool,
+) -> Result<Parametrize, AddMeshError> {
     if positions.is_empty() || faces.is_empty() {
         return Err(AddMeshError::Error);
     }
@@ -259,19 +287,30 @@ pub fn parametrize_with_options(
 
     // AddMesh task: createColocals (ST scheduler runs immediately at join).
     mesh.create_colocals();
+    if !progress(0.05) {
+        return Err(AddMeshError::Error);
+    }
 
     let mut param_atlas = ParamAtlas::default();
     param_atlas.add_mesh(&mesh);
-    param_atlas.compute_charts(chart);
+    if !param_atlas.compute_charts_with_progress(chart, &mut |frac| {
+        progress(0.1 + 0.65 * frac.clamp(0.0, 1.0))
+    }) {
+        return Err(AddMeshError::Error);
+    }
 
     let mut pack_atlas = PackAtlas::default();
     pack_atlas.add_charts(&mut param_atlas);
-    if pack.texels_per_unit < 0.0 {
+    let mut pack_progress = |frac: f64| progress(0.75 + 0.2 * frac.clamp(0.0, 1.0));
+    let packed = if pack.texels_per_unit < 0.0 {
         let mut p = pack.clone();
         p.texels_per_unit = 0.0;
-        pack_atlas.pack_charts(&p);
+        pack_atlas.pack_charts_with_progress(&p, &mut pack_progress)
     } else {
-        pack_atlas.pack_charts(pack);
+        pack_atlas.pack_charts_with_progress(pack, &mut pack_progress)
+    };
+    if !packed || !progress(0.95) {
+        return Err(AddMeshError::Error);
     }
 
     let width = pack_atlas.get_width();
