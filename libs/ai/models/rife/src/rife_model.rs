@@ -19,6 +19,7 @@
 
 use crate::backend::{
     gpu_add, gpu_birefnet_resize_bilinear, gpu_concat_rows_many, gpu_conv2d_planar_strided,
+    gpu_download,
     gpu_pixel_shuffle_planar, gpu_realesrgan_lrelu, gpu_rife_conv_transpose2d,
     gpu_rife_fill, gpu_rife_merge_rgb8, gpu_rife_res_conv, gpu_rife_scale, gpu_rife_warp,
     gpu_slice_rows, gpu_upload, GpuTensor,
@@ -346,4 +347,112 @@ pub fn interpolate_rgb8(
         pair.height,
     )
     .map_err(|error| device_error("merge", error))
+}
+
+/// Device path of [`crate::rife_cpu::flow_field`]: the IFNet's final refined
+/// flow (4 planes, pixels) + post-sigmoid occlusion mask (1 plane), cropped
+/// to the input extent. Duplicates the pyramid loop of [`interpolate_rgb8`]
+/// on purpose — that function is pinned by the device parity gate and stays
+/// untouched.
+pub fn flow_field(
+    weights: &RifeModelWeights,
+    pair: RifeFramePair<'_>,
+    timestep: f32,
+    scale: RifeScale,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let (padded_w, padded_h) = padded_extent(pair.width, pair.height, scale);
+    let extent = Extent {
+        width: padded_w,
+        height: padded_h,
+    };
+    let plane = extent.plane();
+    let host0 = pack_padded_rgb8(pair.frame0, pair.width, pair.height, padded_w, padded_h);
+    let host1 = pack_padded_rgb8(pair.frame1, pair.width, pair.height, padded_w, padded_h);
+    let img0 =
+        gpu_upload(&host0.data, 3, plane).map_err(|error| device_error("upload frame0", error))?;
+    let img1 =
+        gpu_upload(&host1.data, 3, plane).map_err(|error| device_error("upload frame1", error))?;
+    drop(host0);
+    drop(host1);
+
+    let f0 = head_forward(&img0, extent, &weights.encode)?;
+    let f1 = head_forward(&img1, extent, &weights.encode)?;
+    let time =
+        gpu_rife_fill(1, plane, timestep).map_err(|error| device_error("timestep", error))?;
+
+    let mut warped0 = gpu_slice_rows(&img0, 0, 3).map_err(|e| device_error("view img0", e))?;
+    let mut warped1 = gpu_slice_rows(&img1, 0, 3).map_err(|e| device_error("view img1", e))?;
+    let mut flow: Option<GpuTensor> = None;
+    let mut mask = gpu_rife_fill(1, plane, 0.0).map_err(|e| device_error("mask init", e))?;
+    let mut feat = gpu_rife_fill(RIFE_LASTCONV_PLANES - 5, plane, 0.0)
+        .map_err(|e| device_error("feat init", e))?;
+    let scale_list = scale.scale_list();
+
+    for (index, block) in weights.blocks.iter().enumerate() {
+        let step = scale_list[index];
+        let updated = match &flow {
+            None => {
+                let input = gpu_concat_rows_many(&[&img0, &img1, &f0, &f1, &time])
+                    .map_err(|error| device_error("block0 concat", error))?;
+                let (flow_out, mask_out, feat_out) =
+                    if_block_forward(&input, extent, None, block, index, step)?;
+                mask = mask_out;
+                feat = feat_out;
+                flow_out
+            }
+            Some(current) => {
+                let flow01 =
+                    gpu_slice_rows(current, 0, 2).map_err(|e| device_error("slice flow01", e))?;
+                let flow23 =
+                    gpu_slice_rows(current, 2, 2).map_err(|e| device_error("slice flow23", e))?;
+                let wf0 = gpu_rife_warp(&f0, &flow01, extent.width, extent.height)
+                    .map_err(|error| device_error("warp f0", error))?;
+                let wf1 = gpu_rife_warp(&f1, &flow23, extent.width, extent.height)
+                    .map_err(|error| device_error("warp f1", error))?;
+                let input = gpu_concat_rows_many(&[
+                    &warped0, &warped1, &wf0, &wf1, &time, &mask, &feat,
+                ])
+                .map_err(|error| device_error("block concat", error))?;
+                let (delta, mask_out, feat_out) =
+                    if_block_forward(&input, extent, Some(current), block, index, step)?;
+                mask = mask_out;
+                feat = feat_out;
+                gpu_add(current, &delta).map_err(|error| device_error("flow update", error))?
+            }
+        };
+        let flow01 =
+            gpu_slice_rows(&updated, 0, 2).map_err(|e| device_error("slice flow01", e))?;
+        let flow23 =
+            gpu_slice_rows(&updated, 2, 2).map_err(|e| device_error("slice flow23", e))?;
+        warped0 = gpu_rife_warp(&img0, &flow01, extent.width, extent.height)
+            .map_err(|error| device_error("warp img0", error))?;
+        warped1 = gpu_rife_warp(&img1, &flow23, extent.width, extent.height)
+            .map_err(|error| device_error("warp img1", error))?;
+        flow = Some(updated);
+    }
+
+    let flow = flow.expect("at least one block ran");
+    let flow_padded = gpu_download(&flow).map_err(|e| device_error("download flow", e))?;
+    let mask_padded = gpu_download(&mask).map_err(|e| device_error("download mask", e))?;
+    if flow_padded.len() < 4 * plane || mask_padded.len() < plane {
+        return Err(DiffusionError::model(format!(
+            "rife flow download too short: flow {} mask {} plane {plane}",
+            flow_padded.len(),
+            mask_padded.len()
+        )));
+    }
+    let mut flow_out = vec![0.0f32; 4 * pair.width * pair.height];
+    let mut mask_out = vec![0.0f32; pair.width * pair.height];
+    let out_plane = pair.width * pair.height;
+    for y in 0..pair.height {
+        for x in 0..pair.width {
+            let src = y * padded_w + x;
+            let dst = y * pair.width + x;
+            for c in 0..4 {
+                flow_out[c * out_plane + dst] = flow_padded[c * plane + src];
+            }
+            mask_out[dst] = 1.0 / (1.0 + (-mask_padded[src]).exp());
+        }
+    }
+    Ok((flow_out, mask_out))
 }

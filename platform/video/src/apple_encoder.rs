@@ -163,10 +163,25 @@ impl MacosVideoFileEncoder {
             ];
             let fps = (options.fps_num as f64 / options.fps_den as f64).round().max(1.0);
             let fps_number: ObjcId = msg_send![class!(NSNumber), numberWithDouble: fps];
-            let compression = ns_dictionary(
-                &[AVVideoAverageBitRateKey, AVVideoExpectedSourceFrameRateKey],
-                &[bitrate_number, fps_number],
-            );
+            let compression = if options.keyframe_only {
+                // Max key-frame interval 1: all-intra, so the file decodes
+                // at any frame in any order (bounce loops play backwards
+                // without forward-decoding a GOP).
+                let one: ObjcId = msg_send![class!(NSNumber), numberWithInt: 1];
+                ns_dictionary(
+                    &[
+                        AVVideoAverageBitRateKey,
+                        AVVideoExpectedSourceFrameRateKey,
+                        AVVideoMaxKeyFrameIntervalKey,
+                    ],
+                    &[bitrate_number, fps_number, one],
+                )
+            } else {
+                ns_dictionary(
+                    &[AVVideoAverageBitRateKey, AVVideoExpectedSourceFrameRateKey],
+                    &[bitrate_number, fps_number],
+                )
+            };
             let video_settings = ns_dictionary(
                 &[
                     AVVideoCodecKey,

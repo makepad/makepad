@@ -45,6 +45,10 @@ pub struct SavedFastPreset {
     pub image_lora: Option<String>,
     pub image_lora_strength: Option<f32>,
     pub music_seconds: u32,
+    /// Options so presets saved before the enhance stage existed still load.
+    pub enhance_upscale: Option<u32>,
+    pub enhance_interpolate: Option<u32>,
+    pub enhance_flow: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
@@ -169,6 +173,9 @@ pub fn snapshot(
         image_lora: gen.image_lora.as_ref().map(|(name, _)| name.clone()),
         image_lora_strength: gen.image_lora.as_ref().map(|(_, strength)| *strength),
         music_seconds: gen.music_seconds,
+        enhance_upscale: Some(gen.enhance_upscale),
+        enhance_interpolate: Some(gen.enhance_interpolate),
+        enhance_flow: Some(gen.enhance_flow),
     }
 }
 
@@ -192,6 +199,9 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
             .filter(|name| !name.is_empty())
             .map(|name| (name, saved.image_lora_strength.unwrap_or(1.0))),
         music_seconds: saved.music_seconds,
+        enhance_upscale: saved.enhance_upscale.unwrap_or(2),
+        enhance_interpolate: saved.enhance_interpolate.unwrap_or(2),
+        enhance_flow: saved.enhance_flow.unwrap_or(true),
     }
 }
 

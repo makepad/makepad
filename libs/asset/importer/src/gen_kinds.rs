@@ -30,6 +30,8 @@ pub enum InputNeed {
     Image,
     /// Requires a source mesh GLB (paint/rig/motion).
     Mesh,
+    /// Requires a source video mp4 (enhance).
+    Video,
 }
 
 impl InputNeed {
@@ -37,6 +39,7 @@ impl InputNeed {
     pub fn content_type(self) -> &'static str {
         match self {
             InputNeed::Mesh => "model/gltf-binary",
+            InputNeed::Video => "video/mp4",
             _ => "image/png",
         }
     }
@@ -174,6 +177,18 @@ pub const GEN_KINDS: &[GenKind] = &[
         content_types: MP4,
         input: InputNeed::None,
         action: "video",
+    },
+    GenKind {
+        kind: "video.enhance",
+        domain: "enhance",
+        asset_kind: AssetKind::Video,
+        role: FileRole::Video,
+        media: MediaType::Mp4,
+        category: "generated",
+        tags: &["enhanced"],
+        content_types: MP4,
+        input: InputNeed::Video,
+        action: "enhance video",
     },
     GenKind {
         kind: "audio.generate",

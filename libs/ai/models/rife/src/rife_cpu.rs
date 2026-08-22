@@ -514,6 +514,89 @@ pub fn interpolate_rgb8(
     Ok(unpack_rgb8(&merged, pair.width, pair.height))
 }
 
+/// The dense motion field of one frame pair: the IFNet's final refined flow
+/// (4 planes: frame0→t xy, frame1→t xy, in pixels at the input resolution)
+/// plus the occlusion mask after its sigmoid (1 plane, 1.0 = take frame0).
+///
+/// This intentionally DUPLICATES [`ifnet_forward`]'s pyramid loop rather
+/// than refactoring it: that function is pinned by the device parity gate,
+/// and a playback flow map must never risk perturbing the gated
+/// interpolation path.
+pub fn flow_field(
+    weights: &RifeModelWeights,
+    pair: RifeFramePair<'_>,
+    timestep: f32,
+    scale: RifeScale,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let (padded_w, padded_h) = padded_extent(pair.width, pair.height, scale);
+    let img0 = pack_padded_rgb8(pair.frame0, pair.width, pair.height, padded_w, padded_h);
+    let img1 = pack_padded_rgb8(pair.frame1, pair.width, pair.height, padded_w, padded_h);
+    let scale_list = scale.scale_list();
+    if weights.blocks.len() != scale_list.len() {
+        return Err(DiffusionError::model(
+            "rife ifnet: scale list length must match the block count",
+        ));
+    }
+    let f0 = head_forward(&img0, &weights.encode)?;
+    let f1 = head_forward(&img1, &weights.encode)?;
+    let mut time = Planes::new(1, img0.width, img0.height);
+    time.data.fill(timestep);
+
+    let mut warped0 = img0.clone();
+    let mut warped1 = img1.clone();
+    let mut flow: Option<Planes> = None;
+    let mut mask = Planes::new(1, img0.width, img0.height);
+    let mut feat = Planes::new(RIFE_LASTCONV_PLANES - 5, img0.width, img0.height);
+
+    for (index, block) in weights.blocks.iter().enumerate() {
+        let scale = scale_list[index];
+        match &flow {
+            None => {
+                let input = concat_channels(&[&img0, &img1, &f0, &f1, &time])?;
+                let (flow_out, mask_out, feat_out) =
+                    if_block_forward(&input, None, block, scale)?;
+                flow = Some(flow_out);
+                mask = mask_out;
+                feat = feat_out;
+            }
+            Some(current) => {
+                let wf0 = warp(&f0, &current.slice_channels(0, 2))?;
+                let wf1 = warp(&f1, &current.slice_channels(2, 2))?;
+                let input =
+                    concat_channels(&[&warped0, &warped1, &wf0, &wf1, &time, &mask, &feat])?;
+                let (delta, mask_out, feat_out) =
+                    if_block_forward(&input, Some(current), block, scale)?;
+                let mut updated = current.clone();
+                for (slot, value) in updated.data.iter_mut().zip(delta.data.iter()) {
+                    *slot += *value;
+                }
+                flow = Some(updated);
+                mask = mask_out;
+                feat = feat_out;
+            }
+        }
+        let current = flow.as_ref().expect("flow set above");
+        warped0 = warp(&img0, &current.slice_channels(0, 2))?;
+        warped1 = warp(&img1, &current.slice_channels(2, 2))?;
+    }
+
+    let flow = flow.expect("at least one block ran");
+    let plane = flow.plane();
+    let mut flow_out = vec![0.0f32; 4 * pair.width * pair.height];
+    let mut mask_out = vec![0.0f32; pair.width * pair.height];
+    for y in 0..pair.height {
+        for x in 0..pair.width {
+            let src = y * flow.width + x;
+            let dst = y * pair.width + x;
+            for c in 0..4 {
+                flow_out[c * pair.width * pair.height + dst] = flow.data[c * plane + src];
+            }
+            mask_out[dst] = 1.0 / (1.0 + (-mask.data[src]).exp());
+        }
+    }
+    Ok((flow_out, mask_out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

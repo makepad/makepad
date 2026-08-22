@@ -86,6 +86,7 @@ use makepad_asset_client::GcStatusDto;
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
 use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
+    ENHANCE_FACTORS,
     consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
     EDIT_STRENGTHS, LORA_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
@@ -1725,6 +1726,31 @@ script_mod! {
                             }
                         }
 
+                        // The fire button lives right under the prompt — it
+                        // must never scroll out of view in a short window
+                        // (the chat pane's Send is NOT this button).
+                        action_row := View{
+                            width: Fill height: Fit flow: Right spacing: 6
+                            margin: Inset{top: 4}
+                            generate_btn := PrimaryButton{ text: "Generate" width: Fill }
+                            pull_btn := GhostButton{ text: "Pull model" }
+                            retry_btn := ChipButton{ text: "Retry last" visible: false }
+                        }
+                        // One run per IDLE capable box (not up, not busy with
+                        // another job, not already holding one of our stages),
+                        // each its own History item — a quick spread of
+                        // variations across the fleet. Off = the normal single
+                        // run placed by affinity.
+                        parallel_toggle := CheckBox{
+                            text: "all free boxes in parallel"
+                            active: false
+                            padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                            draw_text +: {
+                                color: #x828a93
+                                text_style: theme.font_regular{font_size: 8.5}
+                            }
+                        }
+
                         PanelHeading{ text: "Pipeline & routing" }
                         DropField{
                             FieldCaption{ text: "Type" }
@@ -1872,6 +1898,31 @@ script_mod! {
                             FieldCaption{ text: "Music length" }
                             music_len_drop := FieldDrop{}
                         }
+                        // Video post-process (enhance): each transform is
+                        // independently optional.
+                        enh_upscale_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Uprez" }
+                            enh_upscale_drop := FieldDrop{}
+                        }
+                        enh_tween_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Frame tween" }
+                            enh_tween_drop := FieldDrop{}
+                        }
+                        enh_flow_row := View{
+                            visible: false
+                            width: Fill height: Fit
+                            enh_flow_toggle := CheckBox{
+                                text: "motion vectors (arbitrary-rate playback)"
+                                active: true
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                        }
 
                         // Persistent selected-input chip: the managed asset
                         // the next transform run consumes. Populated by an
@@ -1962,28 +2013,6 @@ script_mod! {
                             run_tray_list := mod.widgets.RunTray{}
                         }
 
-
-                        action_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            margin: Inset{top: 4}
-                            generate_btn := PrimaryButton{ text: "Generate" width: Fill }
-                            pull_btn := GhostButton{ text: "Pull model" }
-                            retry_btn := ChipButton{ text: "Retry last" visible: false }
-                        }
-                        // One run per IDLE capable box (not up, not busy with
-                        // another job, not already holding one of our stages),
-                        // each its own History item — a quick spread of
-                        // variations across the fleet. Off = the normal single
-                        // run placed by affinity.
-                        parallel_toggle := CheckBox{
-                            text: "all free boxes in parallel"
-                            active: false
-                            padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
-                            draw_text +: {
-                                color: #x828a93
-                                text_style: theme.font_regular{font_size: 8.5}
-                            }
-                        }
 
                         PanelHeading{ text: "Now running" }
                         now_card := Card{
@@ -4191,6 +4220,20 @@ impl App {
                 .collect(),
         );
         music_len_drop.set_selected_item(cx, music_default);
+        for (id, default_ix) in [(ids!(enh_upscale_drop), 1usize), (ids!(enh_tween_drop), 1)] {
+            let drop = self.ui.combo_box(cx, id);
+            drop.set_labels(
+                cx,
+                ENHANCE_FACTORS
+                    .iter()
+                    .map(|f| match f {
+                        1 => "off".to_string(),
+                        f => format!("x{f}"),
+                    })
+                    .collect(),
+            );
+            drop.set_selected_item(cx, default_ix);
+        }
         self.refresh_saved_presets_ui(cx);
         self.refresh_model_ui(cx, true);
         self.refresh_voice_ui(cx);
@@ -5161,6 +5204,15 @@ impl App {
         self.ui
             .widget(cx, ids!(music_params_row))
             .set_visible(cx, active("music"));
+        self.ui
+            .widget(cx, ids!(enh_upscale_row))
+            .set_visible(cx, active("enhance"));
+        self.ui
+            .widget(cx, ids!(enh_tween_row))
+            .set_visible(cx, active("enhance"));
+        self.ui
+            .widget(cx, ids!(enh_flow_row))
+            .set_visible(cx, active("enhance"));
         self.sync_preset_name_box(cx);
     }
 
@@ -5223,6 +5275,17 @@ impl App {
                 .min(VIDEO_INTERPOLATE.len() - 1)],
             image_lora: self.selected_lora(cx),
             music_seconds,
+            enhance_upscale: ENHANCE_FACTORS[self
+                .ui
+                .combo_box(cx, ids!(enh_upscale_drop))
+                .selected_item()
+                .min(ENHANCE_FACTORS.len() - 1)],
+            enhance_interpolate: ENHANCE_FACTORS[self
+                .ui
+                .combo_box(cx, ids!(enh_tween_drop))
+                .selected_item()
+                .min(ENHANCE_FACTORS.len() - 1)],
+            enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
         }
     }
 
@@ -5726,6 +5789,17 @@ impl App {
                     .min(VIDEO_INTERPOLATE.len() - 1)],
                 image_lora: self.selected_lora(cx),
                 music_seconds,
+                enhance_upscale: ENHANCE_FACTORS[self
+                    .ui
+                    .combo_box(cx, ids!(enh_upscale_drop))
+                    .selected_item()
+                    .min(ENHANCE_FACTORS.len() - 1)],
+                enhance_interpolate: ENHANCE_FACTORS[self
+                    .ui
+                    .combo_box(cx, ids!(enh_tween_drop))
+                    .selected_item()
+                    .min(ENHANCE_FACTORS.len() - 1)],
+                enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
             },
             input,
         })
@@ -6002,8 +6076,27 @@ impl App {
     /// a mesh run behind it whose slot is free. Bounded by
     /// [`MAX_ACTIVE_RUNS`] on top of per-endpoint capacity.
     fn try_dispatch_pending(&mut self, cx: &mut Cx) {
-        if self.ui.modal(cx, ids!(license_modal)).is_open() || self.license_resume.is_some() {
+        if self.ui.modal(cx, ids!(license_modal)).is_open() {
+            if !self.run_queue.is_empty() {
+                self.set_caption(
+                    cx,
+                    "LICENSE",
+                    "run queued — accept or decline the license to start it",
+                );
+            }
             return;
+        }
+        // A pending license resume with no modal on screen is a wedge (the
+        // modal was dismissed some other way). Drop the stale resume — the
+        // dispatch below re-detects the unacked model and reopens the modal
+        // properly, instead of parking every future run in silence.
+        if let Some(resume) = self.license_resume.take() {
+            log!("license: stale resume with modal closed — recovering and re-dispatching");
+            // The parked run was already removed from the queue when the
+            // modal opened; put it back so it isn't lost.
+            if let LicenseResume::Dispatch(run) = resume {
+                self.run_queue.insert(0, run);
+            }
         }
         let mut index = 0;
         while index < self.run_queue.len() {
@@ -6024,7 +6117,10 @@ impl App {
                     self.dispatch_run(cx, run, &[]);
                 }
                 DispatchPlan::Wait { reason } => {
+                    // A held run must say so on screen, not just in the log —
+                    // a silent park reads as "Generate does nothing".
                     log!("scheduler: run held — {reason}");
+                    self.set_caption(cx, "QUEUE", &format!("run held — {reason}"));
                     index += 1;
                 }
             }
@@ -6034,6 +6130,7 @@ impl App {
 
     fn dispatch_run(&mut self, cx: &mut Cx, run: PendingRun, avoid: &[String]) {
         if self.fleet.is_none() {
+            self.set_caption(cx, "FLEET", "no fleet discovered yet — run dropped, press Generate again");
             return;
         }
         if let Some(prompt) = self.first_unacked_model(
@@ -11133,8 +11230,6 @@ impl App {
                 }
                 Some(job) if self.import_queue.has_job(job) => "Waiting",
                 Some(_) => "Load",
-                // Nothing to load until a folder is chosen — say so on the
-                // button rather than offering a click that does nothing.
                 None => "Pick first",
             },
         );
@@ -13095,6 +13190,8 @@ impl MatchEvent for App {
             ids!(vid_size_drop),
             ids!(vid_len_drop),
             ids!(music_len_drop),
+            ids!(enh_upscale_drop),
+            ids!(enh_tween_drop),
         ];
         if stage_drops
             .iter()
