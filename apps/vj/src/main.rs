@@ -39,6 +39,10 @@ mod flow;
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
 mod fx;
+// Lazy ANIMATED thumbnails for vjeffect tiles: a hidden slot-mode VjFxView
+// renders each effect offscreen into a declared-cells sheet the grid
+// already knows how to animate (digest-keyed disk cache; see fx_thumbs.rs).
+mod fx_thumbs;
 mod import_ui;
 mod gen;
 mod lanes;
@@ -517,6 +521,10 @@ script_mod! {
                             // its texture replaces the slot's decoder texture.
                             slot_flow_a := FlowWarpView{}
                             slot_flow_b := FlowWarpView{}
+                            // Offscreen vjeffect thumbnail renderer: one
+                            // hidden slot-mode effect pass at a time, its
+                            // sheets fed back through the thumb decode lane.
+                            fx_thumbs := VjFxThumbs{}
                             // Three MODES, not five content lanes: VJ is the
                             // visual surface (one explorer, preset chips
                             // inside it), DJ the two-deck music mode, SFX the
@@ -2152,6 +2160,9 @@ enum CatPurpose {
     Detail { surface: Surface, gen: CatGen, asset: AssetId },
     Manifest { surface: Surface, gen: CatGen, asset: AssetId, revision: AssetRevisionId },
     Thumb { revision: AssetRevisionId },
+    /// A vjeffect's splash source, fetched to render its ANIMATED thumbnail
+    /// offscreen (see fx_thumbs.rs).
+    FxSource { asset: AssetId, revision: AssetRevisionId },
     JobProfiles,
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
@@ -2333,6 +2344,28 @@ fn select_visual_file(manifest: &AssetManifest) -> Option<TileMedia> {
         }
     }
     None
+}
+
+/// A vjeffect's one real file: the splash document (role `Source`, media
+/// `Text`). It is the tile's "playable" file — the thumbnail renderer
+/// fetches it to run the effect offscreen — so an effect tile resolves
+/// Ready instead of wearing "no playable file" across the whole library.
+fn select_vjfx_source(manifest: &AssetManifest) -> Option<TileMedia> {
+    if manifest.kind != AssetKind::VjEffect {
+        return None;
+    }
+    let file = select_file(
+        manifest,
+        FileRole::Source,
+        TierPreference::PreferWithAnyFallback(DeviceTier::High),
+        7,
+    )
+    .ok()?;
+    (file.media == MediaType::Text).then_some(TileMedia {
+        blob: file.blob,
+        len: file.byte_len,
+        media: file.media,
+    })
 }
 
 /// The `stateful-billboard` manifest text a grouped sprite actor publishes
@@ -3675,6 +3708,15 @@ pub struct App {
     /// Thumbnail fetches in flight, so a re-request cannot pile up.
     #[rust]
     thumb_inflight: HashSet<AssetRevisionId>,
+    /// Effect-source fetches in flight for the vjeffect thumbnail renderer
+    /// (at most one — the renderer is strictly serial).
+    #[rust]
+    fx_source_inflight: HashSet<AssetRevisionId>,
+    /// Sheet decodes handed to the thumb lane for rendered/cached effect
+    /// thumbnails, by submit time — a decode the epoch guard dropped is
+    /// simply asked again a few seconds later (the cache file is idempotent).
+    #[rust]
+    fx_decode_pending: HashMap<AssetRevisionId, f64>,
     /// `VJ_TRACE_THUMBS=1` — log every tile texture transition.
     #[rust(std::env::var_os("VJ_TRACE_THUMBS").is_some())]
     trace_thumbs: bool,
@@ -7026,6 +7068,9 @@ impl App {
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
         self.pump_import(cx);
+        // Lazy vjeffect thumbnails: feed the one-at-a-time offscreen
+        // renderer and land its finished sheets in the thumb decode lane.
+        self.pump_fx_thumbs(cx);
         // The output window starts CLOSED (cleaner for testing; the OUTPUT
         // button reopens it). Done here, not in Startup, because the native
         // window may not exist yet at Startup; `VJ_OUTPUT=1` keeps the old
@@ -7337,6 +7382,11 @@ impl App {
                                 log!("thumb: fetch FAILED {revision}: {error}");
                             }
                         }
+                        CatPurpose::FxSource { revision, .. } => {
+                            // Transient: the pump asks again on a later tick.
+                            self.fx_source_inflight.remove(&revision);
+                            log!("fx thumb: source fetch FAILED {revision}: {error}");
+                        }
                         CatPurpose::JobProfiles => {
                             self.gen.profiles_failed(error.to_string());
                         }
@@ -7401,7 +7451,8 @@ impl App {
                 ClientOutput::AssetManifest(manifest),
             ) => {
                 let media = match surface {
-                    Surface::Video => select_visual_file(&manifest),
+                    Surface::Video => select_visual_file(&manifest)
+                        .or_else(|| select_vjfx_source(&manifest)),
                     Surface::Music | Surface::Sfx => select_file(
                         &manifest,
                         FileRole::Audio,
@@ -7478,6 +7529,32 @@ impl App {
                 if surface == Surface::Video && self.pending_click == Some(asset) {
                     self.pending_click = None;
                     self.video_tile_clicked(cx, asset);
+                }
+            }
+            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { path, .. }) => {
+                // The splash text is here: hand the render job to the hidden
+                // offscreen effect host. Small file, read in place.
+                self.fx_source_inflight.remove(&revision);
+                let title = self
+                    .video_model
+                    .tile(&asset)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| revision.to_string());
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        let widget = self.ui.widget(cx, ids!(fx_thumbs));
+                        if let Some(mut thumbs) =
+                            widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
+                        {
+                            thumbs.enqueue(
+                                cx,
+                                fx_thumbs::FxThumbJob { asset, revision, title, source },
+                            );
+                        };
+                    }
+                    Err(error) => {
+                        log!("fx thumb: {title} source unreadable: {error}");
+                    }
                 }
             }
             (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
@@ -8112,6 +8189,7 @@ impl App {
                         self.thumb_clock += 1;
                         self.thumb_used.insert(revision, self.thumb_clock);
                         self.thumb_inflight.remove(&revision);
+                        self.fx_decode_pending.remove(&revision);
                         if frames.len() > 1 {
                             self.thumb_anims
                                 .insert(revision, (frames.clone(), thumb.fps));
@@ -8127,6 +8205,18 @@ impl App {
                         // wanted, which is what makes a transient 404 after a
                         // republish heal itself.
                         self.thumb_inflight.remove(&revision);
+                        // A rendered effect sheet that will not decode is a
+                        // bad cache file: drop it so the renderer writes a
+                        // fresh one instead of resubmitting it forever.
+                        if self.fx_decode_pending.remove(&revision).is_some() {
+                            let cache = service::session_config_from_env()
+                                .cache_parent
+                                .join("cache-vjfx-thumbs");
+                            let _ = std::fs::remove_file(fx_thumbs::cache_path(
+                                &cache, &revision,
+                            ));
+                            log!("fx thumb: sheet decode FAILED {revision}: {e}");
+                        }
                         if self.trace_thumbs {
                             log!("thumb: decode FAILED {revision}: {e}");
                         }
@@ -8249,6 +8339,146 @@ impl App {
                     log!("thumb: re-requesting {revision} (texture gone)");
                 }
             }
+        }
+    }
+
+    /// Lazy ANIMATED thumbnails for vjeffect tiles (see fx_thumbs.rs).
+    ///
+    /// Each pump tick: land any freshly rendered sheet in the thumb decode
+    /// lane (the same lane store thumbnails ride, so the grid needs no new
+    /// path), then — only while the renderer is idle — pick the next effect
+    /// tile still wearing its seeded placeholder, VISIBLE PADS FIRST. A
+    /// cached sheet decodes straight from disk; only a cache miss costs a
+    /// source fetch and an offscreen render, and never more than one at a
+    /// time.
+    fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
+        if self.up.is_none() {
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        let widget = self.ui.widget(cx, ids!(fx_thumbs));
+        let (results, idle, render_disabled, cache_dir) = {
+            let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
+                return;
+            };
+            if thumbs.cache_dir().is_none() {
+                thumbs.set_cache_dir(
+                    service::session_config_from_env()
+                        .cache_parent
+                        .join("cache-vjfx-thumbs"),
+                );
+            }
+            let Some(cache_dir) = thumbs.cache_dir().map(Path::to_path_buf) else { return };
+            (
+                thumbs.take_results(),
+                thumbs.is_idle(),
+                thumbs.disabled_reason().is_some(),
+                cache_dir,
+            )
+        };
+        for sheet in results {
+            self.fx_decode_pending.insert(sheet.revision, now);
+            self.decode.submit(DecodeJob::Thumb {
+                revision: sheet.revision,
+                path: sheet.path,
+                sheet: Some((sheet.cells, sheet.fps)),
+                legacy_may_be_sheet: false,
+                epoch: self.view_epoch,
+            });
+            self.grids_dirty = true;
+        }
+        // Candidates: the pads on screen lead, the rest of the loaded
+        // catalog window follows.
+        let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
+        order.extend(self.video_model.tiles().iter().map(|t| t.asset));
+        let mut seen: HashSet<AssetId> = HashSet::new();
+        let mut cache_decodes = 0usize;
+        for asset in order {
+            if !seen.insert(asset) {
+                continue;
+            }
+            let Some(tile) = self.video_model.tile(&asset) else { continue };
+            if tile.kind != Some(AssetKind::VjEffect) {
+                continue;
+            }
+            let Some(revision) = tile.revision else { continue };
+            // A revision whose picture already declares cells has a REAL
+            // animated thumbnail (store-side or ours) — nothing to do.
+            if tile.thumb.as_ref().is_some_and(|t| t.anim.is_some()) {
+                continue;
+            }
+            if self.thumb_anims.contains_key(&revision) {
+                continue;
+            }
+            if self
+                .fx_decode_pending
+                .get(&revision)
+                .is_some_and(|at| now - at < 3.0)
+            {
+                continue;
+            }
+            let failed = widget
+                .borrow::<fx_thumbs::VjFxThumbs>()
+                .is_some_and(|t| t.is_failed(&revision));
+            if failed {
+                continue;
+            }
+            let cache = fx_thumbs::cache_path(&cache_dir, &revision);
+            if cache.exists() {
+                // A relaunch must not re-render: decode the digest-keyed
+                // sheet straight off disk, bounded per tick.
+                let layout = std::fs::read(&cache)
+                    .ok()
+                    .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
+                match layout {
+                    Some((cells, fps)) => {
+                        self.fx_decode_pending.insert(revision, now);
+                        self.decode.submit(DecodeJob::Thumb {
+                            revision,
+                            path: cache,
+                            sheet: Some((cells, fps)),
+                            legacy_may_be_sheet: false,
+                            epoch: self.view_epoch,
+                        });
+                        cache_decodes += 1;
+                        if cache_decodes >= 6 {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Unreadable/unstamped cache file: drop it and let
+                        // the render path write a fresh one next tick.
+                        let _ = std::fs::remove_file(&cache);
+                    }
+                }
+                continue;
+            }
+            // Cache miss: one render pipeline at a time, and only while the
+            // renderer is idle and able.
+            if render_disabled || !idle || !self.fx_source_inflight.is_empty() {
+                continue;
+            }
+            if self.fx_source_inflight.contains(&revision) {
+                continue;
+            }
+            let Some(media) = tile.media.clone() else { continue };
+            if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
+                continue;
+            }
+            let Some(up) = self.up.as_mut() else { return };
+            if let Ok(id) = up.catalog.submit_with(
+                ClientRequest::FetchBlob {
+                    blob: media.blob,
+                    expected_len: Some(media.len),
+                    pin: false,
+                },
+                makepad_asset_client::SubmitOptions::newest_first(),
+            ) {
+                self.cat_reqs
+                    .insert(id, CatPurpose::FxSource { asset, revision });
+                self.fx_source_inflight.insert(revision);
+            }
+            break;
         }
     }
 
@@ -8657,6 +8887,8 @@ impl App {
                         Some(MediaType::Ply) => "SPLAT".to_string(),
                         Some(MediaType::Png) | Some(MediaType::Jpeg) => "TEX".to_string(),
                         Some(MediaType::Mp4) => "VID".to_string(),
+                        // A vjeffect's playable file is its splash text.
+                        Some(MediaType::Text) => "FX".to_string(),
                         _ => "ready".to_string(),
                     },
                     (catalog::TileState::Listed, _) | (catalog::TileState::Resolving, _) => {
@@ -11914,6 +12146,7 @@ impl AppMain for App {
         crate::flow_warp::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
+        crate::fx_thumbs::script_mod(vm);
         self::script_mod(vm)
     }
 

@@ -137,6 +137,10 @@ pub struct VjFxView {
     post: PostChain,
     #[rust]
     out_texture: Option<Texture>,
+    /// Slot-mode pass size override (default [`SLOT_PASS`]): a thumbnail
+    /// host renders small, the program slot renders full size.
+    #[rust]
+    slot_size: Option<DVec2>,
     /// Mesh bounds captured at build (l-systems auto-frame from them).
     #[rust]
     bounds: Option<(Vec3f, Vec3f)>,
@@ -374,6 +378,15 @@ impl VjFxView {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+    }
+
+    /// Slot-mode offscreen resolution (composite off). Thumbnail hosts set
+    /// a small one; the program slot keeps the [`SLOT_PASS`] default.
+    pub fn set_slot_size(&mut self, size: DVec2) {
+        self.slot_size = Some(DVec2 {
+            x: size.x.clamp(8.0, 4096.0),
+            y: size.y.clamp(8.0, 4096.0),
+        });
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
@@ -929,7 +942,7 @@ impl Widget for VjFxView {
         let pass_rect = if self.composite && rect.size.x > 1.0 && rect.size.y > 1.0 {
             Rect { pos: dvec2(0.0, 0.0), size: rect.size }
         } else {
-            Rect { pos: dvec2(0.0, 0.0), size: SLOT_PASS }
+            Rect { pos: dvec2(0.0, 0.0), size: self.slot_size.unwrap_or(SLOT_PASS) }
         };
         let sig = self.signals();
         let is_screen = matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Screen));
