@@ -1124,15 +1124,11 @@ script_mod! {
                                                 // the card takes no more
                                                 // width than its tile.
                                                 fx_slot_a_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // A breath between face and
-                                                // dials (user-calibrated).
-                                                // FIXED widths inside the Fit
-                                                // card: a Fill child resolves
-                                                // against the OUTER context
-                                                // and silently inflates the
-                                                // card past the tile (the
-                                                // unequal-padding report).
-                                                View{width: 142 height: 2}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1153,8 +1149,15 @@ script_mod! {
                                                     }
                                                 }
                                                 View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
                                                 View{
                                                     width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
@@ -1186,15 +1189,11 @@ script_mod! {
                                                 // the card takes no more
                                                 // width than its tile.
                                                 fx_slot_t_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // A breath between face and
-                                                // dials (user-calibrated).
-                                                // FIXED widths inside the Fit
-                                                // card: a Fill child resolves
-                                                // against the OUTER context
-                                                // and silently inflates the
-                                                // card past the tile (the
-                                                // unequal-padding report).
-                                                View{width: 142 height: 2}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1215,8 +1214,15 @@ script_mod! {
                                                     }
                                                 }
                                                 View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
                                                 View{
                                                     width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
@@ -1248,15 +1254,11 @@ script_mod! {
                                                 // the card takes no more
                                                 // width than its tile.
                                                 fx_slot_b_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // A breath between face and
-                                                // dials (user-calibrated).
-                                                // FIXED widths inside the Fit
-                                                // card: a Fill child resolves
-                                                // against the OUTER context
-                                                // and silently inflates the
-                                                // card past the tile (the
-                                                // unequal-padding report).
-                                                View{width: 142 height: 2}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
                                                 View{
                                                     width: Fit height: Fit flow: Down spacing: 2
                                                     View{
@@ -1277,8 +1279,15 @@ script_mod! {
                                                     }
                                                 }
                                                 View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
                                                 View{
                                                     width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
                                                     fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
                                                     View{width: Fill height: 1}
