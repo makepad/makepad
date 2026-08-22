@@ -20795,4 +20795,9 @@ mod imp {
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {}
 
+// `imp` is a populated module (the real CUDA kernel launch surface) on
+// linux/windows with the `makepad_ai_cuda_kernels` cfg, and an empty stub
+// otherwise (e.g. this macOS build) — the glob is only unused in the
+// stub configuration.
+#[allow(unused_imports)]
 pub use imp::*;

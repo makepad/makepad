@@ -198,13 +198,6 @@ mod own_db {
             self.column_i64(i).max(0) as u64
         }
 
-        pub fn column_u64_opt(&self, i: i32) -> ServerResult<Option<u64>> {
-            if self.column_is_null(i) {
-                return Ok(None);
-            }
-            Ok(Some(self.column_u64(i)))
-        }
-
         pub fn column_is_null(&self, i: i32) -> bool {
             matches!(self.value(i), None | Some(Value::Null))
         }

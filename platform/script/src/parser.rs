@@ -1018,10 +1018,6 @@ impl ScriptParser {
         self.slot_frames.push((ctx.slots_frame_at, names));
     }
 
-    fn slot_ctx(&mut self) -> Option<&mut SlotCtx> {
-        self.slot_ctxs.last_mut()
-    }
-
     /// A name that must stay dynamic in the innermost body.
     fn slot_poison(&mut self, name: LiveId) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {

@@ -1062,7 +1062,10 @@ impl HybridDecodeBatchLayout {
     }
 
     /// Per-token attention lower bounds, or `None` when every token may attend
-    /// from row 0 (the single-sequence case).
+    /// from row 0 (the single-sequence case). Test-only convenience over the
+    /// raw `attention_key_lower_bounds` field, which production code reads
+    /// directly.
+    #[cfg(test)]
     pub(crate) fn attention_key_lower_bounds(&self) -> Option<&[i32]> {
         (!self.attention_key_lower_bounds.is_empty()).then_some(&self.attention_key_lower_bounds)
     }

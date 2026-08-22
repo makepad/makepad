@@ -167,13 +167,6 @@ mod own_db {
             }
         }
 
-        pub fn column_u64_opt(&self, i: i32) -> ServerResult<Option<u64>> {
-            if matches!(self.value(i), None | Some(Value::Null)) {
-                return Ok(None);
-            }
-            Ok(Some(self.column_u64(i)))
-        }
-
         pub fn column_blob(&self, i: i32) -> Vec<u8> {
             match self.value(i) {
                 Some(Value::Blob(b)) => b.clone(),

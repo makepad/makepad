@@ -1704,21 +1704,6 @@ fn compiled_tensor_range(
     })
 }
 
-fn mem_range_ok(live: &[MetalMemRange], mr: &MetalMemRange) -> bool {
-    for cmp in live {
-        if mr.buf != cmp.buf {
-            continue;
-        }
-        if !mr.is_dst && !cmp.is_dst {
-            continue;
-        }
-        if mr.p0 < cmp.p1 && mr.p1 >= cmp.p0 {
-            return false;
-        }
-    }
-    true
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeRangeStatus {
     Concurrent,

@@ -161,17 +161,6 @@ impl SessionGraphParams {
         params
     }
 
-    fn verify(n_tokens: usize, attention_key_count: usize) -> Self {
-        Self {
-            kind: SessionGraphKind::MainVerify,
-            n_tokens,
-            n_outputs: n_tokens,
-            attention_key_base: 0,
-            attention_key_count,
-            n_seqs: 1,
-        }
-    }
-
     fn mtp_draft(n_tokens: usize, attention_key_count: usize) -> Self {
         Self {
             kind: SessionGraphKind::MtpDraft,

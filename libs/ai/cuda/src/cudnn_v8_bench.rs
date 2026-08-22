@@ -36,9 +36,6 @@ const CUDNN_TYPE_CONVOLUTION_MODE: i64 = 7;
 const CUDNN_TYPE_HEUR_MODE: i64 = 8;
 const CUDNN_TYPE_BACKEND_DESCRIPTOR: i64 = 15;
 
-const CUDNN_HEUR_MODE_INSTANT: i64 = 0;
-const CUDNN_CROSS_CORRELATION_I64: i64 = 1;
-
 const CUDNN_ATTR_CONVOLUTION_COMP_TYPE: i64 = 100;
 const CUDNN_ATTR_CONVOLUTION_CONV_MODE: i64 = 101;
 const CUDNN_ATTR_CONVOLUTION_DILATIONS: i64 = 102;
@@ -221,7 +218,7 @@ fn bench_v7(shape: &Shape, stream: cudaStream_t) -> Result<(f32, i32, i32, usize
     Ok((ms, algo_id(&desc), math_type(&desc), ws_bytes))
 }
 
-fn be_chk(api: &V8, st: Status, what: &str) -> Result<(), String> {
+fn be_chk(_api: &V8, st: Status, what: &str) -> Result<(), String> {
     if st == CUDNN_SUCCESS {
         Ok(())
     } else {

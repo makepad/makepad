@@ -259,6 +259,11 @@ pub enum CxOsOp {
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     SetTopmost(WindowId, bool),
+    /// `true`: drop the native maximized-state border/titlebar strip a
+    /// backend would otherwise keep (Windows only; other backends ignore
+    /// it) so a maximized window reads as a clean fullscreen picture
+    /// rather than a decorated window pinned to the work area.
+    SetChromelessWhenMaximized(WindowId, bool),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
@@ -447,6 +452,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
             Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
+            Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),

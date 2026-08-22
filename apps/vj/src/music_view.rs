@@ -2194,8 +2194,7 @@ impl Widget for VjWaveOverview {
 /// audio preview shows the same reader; the VJ keeps its name as an alias
 /// (`mod.widgets.VjLyricReader` in the script_mod above).
 pub use makepad_asset_widgets::lyric_reader::{
-    current_line, float_index, lyric_stamp, LyricEvent, LyricReader as VjLyricReader, LyricRow,
-    LYRIC_FOLLOW_RESUME_SECS,
+    lyric_stamp, LyricEvent, LyricReader as VjLyricReader, LyricRow,
 };
 
 // ---------------------------------------------------------------------------
