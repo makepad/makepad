@@ -54,6 +54,9 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        // Content coupling (CONTRACT.md): shape = (mode: 0 canopy tint —
+        // lsystem/grass — / 1 surface refraction — metaballs —, xz half-
+        // extent of the footprint, 0, 0), set by engines.rs uniforms().
         tex0: texture_2d(float)
         has_content: uniform(0.0)
         backface_culling: false
@@ -63,6 +66,7 @@ script_mod! {
         v_color: varying(vec4f)
         v_normal: varying(vec3f)
         v_world: varying(vec3f)
+        v_scr: varying(vec4f)
 
         // Document hook: extra displacement, world units.
         fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
@@ -126,9 +130,29 @@ script_mod! {
             self.v_normal = self.geom.geom_normal
             let grow_dim = 0.20 + 0.80 * g
             let c = self.fx_color(arc, attr, self.geom.geom_normal, world.xyz)
-            self.v_color = vec4(c.xyz * grow_dim, c.w)
+            // CONTENT COUPLING, canopy mode (shape.x 0): foliage picks up
+            // the live input0's colors — sampled by the plant's xz footprint
+            // at the REST position, so the colors stay glued to the canopy
+            // while the wind moves it. Tips take the video, trunks keep
+            // their own color (arc-weighted). fog.z is host-pre-gated to 0
+            // without real content: the standalone look stays classic.
+            let mut crgb = c.xyz
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 && self.shape.x < 0.5 {
+                let ext = max(self.shape.y, 0.5)
+                let cuv = clamp(
+                    vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5),
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
+                )
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                let tipness = smoothstep(0.12, 0.72, arc)
+                crgb = mix(crgb, texel.xyz * 1.3, cmix * tipness)
+            }
+            self.v_color = vec4(crgb * grow_dim, c.w)
             let view_pos = self.draw_pass.camera_view * world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
+            self.v_scr = self.vertex_pos
             return self.vertex_pos
         }
 
@@ -142,7 +166,25 @@ script_mod! {
             let lit = 0.55 + 0.45 * abs(dot(n, normalize(vec3(0.4, 0.8, 0.35))))
             let d = length(self.v_world - cam_pos)
             let fog = exp(0.0 - d * self.fog.x)
-            let glow = self.v_color.xyz * (lit * self.fog.y) + self.col_c.xyz * rim * 0.55
+            // CONTENT COUPLING, refraction mode (shape.x 1 — metaballs):
+            // the blob surface refracts the live input0 like glass —
+            // screen-space uv bent by the surface normal, strongest face-on
+            // (the rims keep their stock glow, so the silhouette reads).
+            let mut body = self.v_color.xyz * (lit * self.fog.y)
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 && self.shape.x > 0.5 {
+                let ndc = self.v_scr.xy / max(self.v_scr.w, 0.0001)
+                let suv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5)
+                let bent = clamp(
+                    suv + vec2(n.x, 0.0 - n.y) * 0.14,
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
+                )
+                let texel = self.tex0.sample_as_bgra(bent)
+                let glass = texel.xyz * ((0.35 + 0.95 * lit) * self.fog.y)
+                body = mix(body, glass, cmix * (1.0 - rim * 0.55))
+            }
+            let glow = body + self.col_c.xyz * rim * 0.55
             let final_rgb = glow.mix(self.col_bg.xyz, 1.0 - fog)
             return vec4(final_rgb, 1.0)
         }
@@ -279,6 +321,7 @@ script_mod! {
 
         v_color: varying(vec4f)
         v_side: varying(float)
+        v_cuv: varying(vec2f)
 
         fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
             let hue = attr.z
@@ -315,6 +358,10 @@ script_mod! {
             let energy = 0.35 + 1.15 * head + speed01 * 0.6
             self.v_color = vec4(c.xyz * energy, (1.0 - age) * 0.9)
             self.v_side = side
+            // Content-coupling uv: u = trail arc (the video flows headward
+            // along the strip), v = this ribbon's own scanline of the frame
+            // (hue picks the row; the strip's width spans a sliver of it).
+            self.v_cuv = vec2(age, clamp(attr.z * 0.88 + 0.06 + side * 0.03, 0.0, 1.0))
             self.vertex_pos = self.draw_pass.camera_projection * billboard
             return self.vertex_pos
         }
@@ -323,7 +370,22 @@ script_mod! {
             // Soft edges across the strip; premultiplied additive.
             let edge = 1.0 - abs(self.v_side)
             let a = smoothstep(0.0, 0.6, edge + 0.55) * self.v_color.w
-            return vec4(self.v_color.xyz * a, 0.0)
+            // CONTENT COUPLING: the live input0 streams along the ribbon
+            // (u scrolled by time). Brightness keeps the trail's own
+            // head-bright envelope — motion + taper stay the identity, the
+            // video becomes the ink. fog.z pre-gated: 0 = classic look.
+            let mut rgb = self.v_color.xyz
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 {
+                let cuv = vec2(fract(self.v_cuv.x + self.time_beat.x * 0.20), self.v_cuv.y)
+                let texel = self.tex0.sample_as_bgra(cuv)
+                // Clamped luminance transfer: the head stays brighter than
+                // the tail, but a bright frame can never blow the ribbon
+                // out to white — the video's own hue must survive.
+                let lum = clamp(dot(rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.2)
+                rgb = mix(rgb, texel.xyz * (0.40 + 1.1 * lum), cmix)
+            }
+            return vec4(rgb * a, 0.0)
         }
 
         fragment: fn() {
@@ -392,7 +454,20 @@ script_mod! {
             let d = length(self.v_world - cam.xyz / max(cam.w, 0.0001))
             let fog = exp(0.0 - d * self.fog.x)
             let neon = self.v_color.xyz * (ring * beat_gain) + self.col_c.xyz * rail
-            let base = self.v_color.xyz * 0.06
+            // CONTENT COUPLING: the live input0 papers the tube wall —
+            // wrapped once around the bore, repeated + time-scrolled along
+            // it, so the video streams past with the flight and brightens
+            // under each passing beat ring. The neon rings/rails stay on
+            // top: the identity is the geometry and the beat, the video is
+            // the wall it flies through. fog.z pre-gated: 0 = classic.
+            let mut base = self.v_color.xyz * 0.06
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 {
+                let cuv = vec2(around, fract(along * 3.0 + self.time_beat.x * 0.06))
+                let texel = self.tex0.sample_as_bgra(cuv)
+                let wall = texel.xyz * (0.30 + 0.45 * self.time_beat.w + ring * 0.35)
+                base = mix(base, wall, cmix)
+            }
             let rgb = ((base + neon) * self.fog.y).mix(self.col_bg.xyz, 1.0 - fog)
             return vec4(rgb, 1.0)
         }

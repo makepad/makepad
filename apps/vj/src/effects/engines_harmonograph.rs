@@ -256,7 +256,35 @@ script_mod! {
                 view_pos.w
             )
             let ink = self.fx_color(t, attr, self.geom.geom_normal, world.xyz)
-            let lit = ink.mix(self.col_c, tip)
+            // CONTENT COUPLING: the pen dips into the live input0 — color
+            // sampled along the curve parameter (u = t), each strand riding
+            // its own slowly drifting scanline, so the figure literally
+            // weaves the video into its thread. A small floor keeps dark
+            // video from erasing the stroke; the tip/growth/damping
+            // identity is untouched. fog.z pre-gated: 0 = classic ink.
+            let mut ink2 = ink
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 {
+                let cuv = vec2(
+                    t,
+                    fract(
+                        self.geom.geom_uv.y * 0.31 + attr.z * 0.41
+                            + self.time_beat.x * 0.02
+                    )
+                )
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                // 1.25 family gain: the pen must visibly take the dye even
+                // through near-white preset inks (default 0.5 → 0.625 mix).
+                ink2 = vec4(
+                    mix(
+                        ink.xyz,
+                        texel.xyz * 1.35 + vec3(0.04, 0.04, 0.04),
+                        clamp(cmix * 1.25, 0.0, 1.0)
+                    ),
+                    ink.w
+                )
+            }
+            let lit = ink2.mix(self.col_c, tip)
             let bright = (0.30 + 0.85 * tip + 0.25 * self.time_beat.w)
                 * (0.25 + 0.75 * envt) * self.fog.y
             // Wet ink: freshly drawn passages glow, older ones dry down.
