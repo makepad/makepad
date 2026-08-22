@@ -1,0 +1,46 @@
+// VIGIL — the same firefly engine wearing a sacred mood: flies become
+// candle flames just above a dark floor. Pattern taught: soft blink_sharp
+// (2.5) turns the strobe spike into slow breathing, tiny wander holds each
+// flame in place, and a gentle half-time sync swell (`env(bar)` at
+// beat_rate 0.5) makes the congregation of flames lean together per bar.
+{
+    name: "Vigil"
+    engine: "firefly"
+    seed: 33
+
+    flies: 520
+    blades: 1600
+    area: 6.5
+    fly_height: 0.5           // flames hover near the floor
+    fly_size: 0.17
+    sync: 0.4
+    p0: "0.3 * env(bar)"
+    blink_rate: 0.25
+    blink_sharp: 2.5          // breathing, not blinking
+    wander: 0.1
+    moon: 0.15
+    grass_height: 0.35
+    clump: 0.75
+
+    beat_pulse: 0.35
+    beat_rate: 0.5
+
+    sway: 0.2
+    sway_freq: 0.5
+
+    color_bg: #x070302
+    color_a: #x180d04
+    color_b: #xffaa33
+    color_c: #xfff0c8
+
+    cam_orbit: 0.035
+    cam_height: 0.9
+    cam_dist: 6.0
+    fog: 0.07
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.5, levels: 3},
+        {kind: "tiltshift", focus: 0.6, width: 0.3, levels: 2}
+    ]
+}

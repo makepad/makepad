@@ -1,0 +1,43 @@
+// JUNE FIELD — a dark summer meadow of fireflies pulled into sync by the
+// music. Pattern taught: the firefly engine's ONE emotional lever — blink
+// phase = mix(own clock, beat phase, sync) — driven by a binding: `p0`
+// ADDS to the base sync, so `env(bar)` makes the field snap together at
+// every bar start and dissolve back into chaos as the bar runs out.
+{
+    name: "June Field"
+    engine: "firefly"
+    seed: 61
+
+    flies: 900
+    blades: 8000
+    area: 9.0
+    fly_height: 1.8
+    fly_size: 0.11
+    sync: 0.18            // base: mostly chaos…
+    p0: "clamp(0.15 + 0.75 * env(bar), 0.0, 0.9)"  // …until the bar hits
+    blink_rate: 0.5
+    blink_sharp: 6.0
+    wander: 0.6
+    moon: 0.3
+    grass_height: 0.85
+    clump: 0.6
+
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    sway: 0.5
+    sway_freq: 0.7
+
+    color_bg: #x040a06
+    color_a: #x0a2412
+    color_b: #xaaff44
+    color_c: #xf8ffd0
+
+    cam_orbit: 0.05
+    cam_height: 1.4
+    fog: 0.05
+    glow: 1.1
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3}
+    ]
+}
