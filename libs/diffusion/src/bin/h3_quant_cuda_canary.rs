@@ -9,7 +9,7 @@ use makepad_diffusion::backend::{
     gpu_device_available, gpu_download, gpu_linear_nt_cached, gpu_runtime_trim, gpu_upload,
     gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_prefix_if_loaded, GpuLinearPart,
 };
-use makepad_ggml::quant::{
+use makepad_ai_common::quant::{
     dequantize_nvfp4_pairs_row, dequantize_q4_k, f32_to_f16, h3_nvfp4_pairs_pack,
     GGML_TYPE_H3_NVFP4_PAIRS,
     GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE, GGML_TYPE_Q4_K,
@@ -292,7 +292,7 @@ mod tests {
         let bytes = bf16_bytes(&values);
         for (index, chunk) in bytes.chunks_exact(2).enumerate() {
             let word = u16::from_le_bytes([chunk[0], chunk[1]]);
-            assert_eq!(makepad_ggml::quant::bf16_to_f32(word), values[index]);
+            assert_eq!(makepad_ai_common::quant::bf16_to_f32(word), values[index]);
         }
     }
 }

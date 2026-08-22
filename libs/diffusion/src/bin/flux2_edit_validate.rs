@@ -284,6 +284,7 @@ fn run() -> Result<(), String> {
         noise: noise.clone(),
         teacher_ref_tokens: None,
         teacher_embeds: None,
+        init: None,
     };
     let result = pipe.edit(&request).map_err(|err| err.to_string())?;
     // Warm pass: DiT weights are now cached; time this loop only.
@@ -416,6 +417,7 @@ fn run() -> Result<(), String> {
             noise: noise.clone(),
             teacher_ref_tokens: Some(teacher_ref),
             teacher_embeds: Some(teacher_emb),
+            init: None,
         };
         let teacher = pipe
             .edit(&teacher_req)

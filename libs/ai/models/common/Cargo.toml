@@ -1,0 +1,16 @@
+[package]
+name = "makepad-ai-common"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-family internals shared by the AI model family crates: DiffusionError, sharded safetensors, the gpu_* / try_* exec surface, progress hooks, host .pth / Metal-GEMM helpers."
+license = "MIT"
+
+[dependencies]
+makepad-ai-loader = { path = "../../loader" }
+# Must not be target-specific: when this crate is a path dep of another
+# standalone `[workspace]` (diffusion / family crates), cargo 1.92 drops
+# target-cfg deps. metal-precompile bakes the metallib at build time so
+# the first Metal dispatch is not a 13k-line shader compile.
+makepad-ai-cuda = { path = "../../cuda" }
+makepad-ai-metal = { path = "../../metal", features = ["metal-precompile"] }
+makepad-ai-llm = { path = "../../llm" }
