@@ -1,0 +1,39 @@
+// RIDGE RUNNER — the mountain-jet flagship: an endless alpenglow range
+// streaming under a fighter jet that weaves and BANKS through the valley,
+// afterburner pulsing on the beat (and on the bass once audio feeds p0).
+// Pattern taught: the mountainjet engine — heightmap streaming + a
+// view-space primitive jet in one static vertex stream.
+{
+    name: "Ridge Runner"
+    engine: "mountainjet"
+
+    res: 150
+    size: 36.0
+    height: 6.6
+    noise_scale: 0.15
+    scroll: 4.2
+    ridged: 0.72
+    cells: 44
+    look: "solid"
+    jet_size: 1.25
+    weave: 1.1
+
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    p0: "0.35 + 1.8 * bass"   // afterburner kick — bass once audio arrives
+
+    color_bg: #x241028
+    color_a: #x8a4a5c
+    color_b: #xffb070
+    color_c: #xfff0dc
+
+    cam_fov: 62.0
+    cam_height: 4.2
+    cam_orbit: 0.0
+    fog: 0.05
+    glow: 1.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3}
+    ]
+}

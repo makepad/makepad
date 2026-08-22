@@ -1,0 +1,54 @@
+// MOLTEN GLASS — four SDF blobs smooth-min blended into a floor puddle,
+// radii pumping on the beat: metaballs WITHOUT a CPU marching pass (the
+// raymarcher IS the iso-surface). Pattern taught: smin() blending in a
+// scene_sdf subclass + closed-form orbit centers from time, so the pixel
+// shader is the entire simulation.
+{
+    name: "Molten Glass"
+    engine: "raymarch"
+
+    steps: 64
+    max_dist: 26.0
+    cam: "orbit"
+    cam_speed: 0.18
+    cam_dist: 6.2
+    cam_height: 2.3
+    cam_fov: 56.0
+    shadow: 1
+
+    beat_pulse: 0.7
+    beat_rate: 1.0
+    fog: 0.06
+    glow: 1.1
+
+    color_bg: #x0a1012
+    color_a: #x18e0b0
+    color_b: #x9a2a70
+    color_c: #xeafff6
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxRaymarch {
+        scene_sdf: fn(p: vec3) -> vec2 {
+            // Blobs stay LOW (centers barely above the floor) and orbit
+            // tightly, so the smooth-min keeps them merged with the
+            // puddle and each other — liquid, never billiards.
+            let t = self.time_beat.x * 0.6
+            let swell = 0.18 * self.time_beat.w
+            let mut d = p.y + 1.1
+            let c1 = vec3(sin(t * 1.07) * 1.1, sin(t * 0.71) * 0.55 - 0.25, cos(t * 0.93) * 1.1)
+            let c2 = vec3(sin(t * 0.83 + 2.1) * 0.9, cos(t * 1.13) * 0.45 - 0.15, sin(t * 1.31 + 4.0) * 0.9)
+            let c3 = vec3(cos(t * 1.19 + 1.0) * 1.3, sin(t * 0.57 + 3.0) * 0.5 - 0.20, sin(t * 0.79 + 0.6) * 1.0)
+            let c4 = vec3(sin(t * 0.67 + 5.2) * 0.6, sin(t * 1.41 + 1.4) * 0.6 + 0.15, cos(t * 0.61 + 2.8) * 0.7)
+            d = self.smin(d, length(p - c1) - (0.80 + swell), 1.05)
+            d = self.smin(d, length(p - c2) - (0.64 + swell), 1.05)
+            d = self.smin(d, length(p - c3) - (0.56 + swell), 1.05)
+            d = self.smin(d, length(p - c4) - (0.50 + swell), 1.05)
+            // Material bands slide up the blobs with the beat count.
+            let m = fract(p.y * 0.30 + self.time_beat.y * 0.02)
+            return vec2(d, m)
+        }
+    }
+}
