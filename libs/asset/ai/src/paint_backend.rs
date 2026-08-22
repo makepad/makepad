@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use crate::trellis_backend::decode_png_rgba8;
 use makepad_gltf::{
     load_gltf_from_bytes, read_accessor_f32x2, read_accessor_f32x3, read_accessor_indices_u32,
-    write_glb_mesh, write_glb_mesh_textured, GlbTexturedMesh,
+    write_glb_mesh_textured, GlbTexturedMesh,
 };
 use makepad_ai_paint::contract::PbrMaterialSet;
 use makepad_ai_paint::digest;
@@ -537,6 +537,7 @@ mod tests {
     use crate::protocol::{GenerateRequestJson, NamedInputJson};
     use makepad_base64::base64_encode;
     use makepad_ai_paint::hunyuan;
+    use makepad_gltf::write_glb_mesh;
 
     fn cube_glb_no_uv() -> Vec<u8> {
         let cube = TriMesh::unit_cube();

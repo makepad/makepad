@@ -1665,7 +1665,7 @@ fn bsp46_to_glb(bytes: &[u8], textures: &Q3TexBank) -> Result<Bsp46World, String
             all.extend(mover_geom.iter().map(|m| &m.geom.positions[..]));
             crate::classic_import::merge_near_corners(&all)
         };
-        let mut weld_one = |geom: &mut PartGeom, pass: &dyn Fn(crate::classic_import::WeldSoup)| {
+        let weld_one = |geom: &mut PartGeom, pass: &dyn Fn(crate::classic_import::WeldSoup)| {
             let n = geom.positions.len();
             let mut normals = std::mem::take(&mut geom.normals);
             let mut colors = std::mem::take(&mut geom.colors);

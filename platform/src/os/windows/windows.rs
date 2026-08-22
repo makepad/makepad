@@ -705,6 +705,13 @@ impl Cx {
                         window.win32_window.set_topmost(is_topmost);
                     }
                 }
+                CxOsOp::SetChromelessWhenMaximized(window_id, chromeless) => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.win32_window.set_chromeless_when_maximized(chromeless);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)

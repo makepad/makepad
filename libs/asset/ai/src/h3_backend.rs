@@ -684,7 +684,12 @@ impl ContentBackend for H3Backend {
 
 /// Progress band the interpolation stage owns, between the generator's last
 /// phase and `audio-resample`.
+// Read by `expand_frames` below, whose only production caller lives behind
+// `#[cfg(feature = "interpolate")]`; kept ungated itself (see that fn's
+// doc) so the cadence law stays unit-tested without the feature.
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
 const INTERPOLATE_BASE: f64 = 0.91;
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
 const INTERPOLATE_SPAN: f64 = 0.02;
 
 /// Expands `clip` in place from `n` frames at [`H3_FPS`] to `n * factor`
@@ -700,6 +705,7 @@ const INTERPOLATE_SPAN: f64 = 0.02;
 /// `middle` is the interpolator; it is a parameter so this cadence law is
 /// unit-tested without weights, a GPU, or the `interpolate` feature.
 /// Cancellation is checked per frame pair.
+#[cfg_attr(not(feature = "interpolate"), allow(dead_code))]
 fn expand_frames(
     clip: &mut VideoClip,
     factor: u32,

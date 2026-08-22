@@ -1172,6 +1172,30 @@ impl WindowRef {
             false
         }
     }
+    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: zoom).
+    /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
+    /// `FullscreenWindow`/`NormalizeWindow` — not handled by every
+    /// backend), `maximize`/`restore` push the ops the Windows backend
+    /// actually implements, and `is_fullscreen()` reflects this state
+    /// there too (`window_geom.is_fullscreen` mirrors `get_is_maximized`).
+    pub fn maximize(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.maximize(cx);
+        }
+    }
+    /// See `maximize()`.
+    pub fn restore(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.restore(cx);
+        }
+    }
+    /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
+    /// other backends ignore it).
+    pub fn set_chromeless_when_maximized(&self, cx: &mut Cx, chromeless: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_chromeless_when_maximized(cx, chromeless);
+        }
+    }
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         if let Some(inner) = self.borrow() {
             inner.resize(cx, size);

@@ -47,6 +47,12 @@ const PROMPT_GENERIC: &str = include_str!("../prompts/expand_generic.txt");
 /// trimmed BEFORE publishing (never published, so it can never wedge the
 /// prefix check), and a decode that still diverges from what was already
 /// published is held back until it heals.
+// This whole "KV prefix cache" section is worker plumbing for the real
+// `llama_worker` module below (`#[cfg(feature = "llm")]`); a build without
+// that feature never constructs it, so mark it accordingly rather than
+// deleting production code that the crate's own default build (`llm` is a
+// default feature) exercises fully.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 fn next_stream_snapshot(prev: &str, decoded: &str) -> Option<String> {
     let trimmed = decoded.trim_end_matches('\u{fffd}');
     (trimmed.len() > prev.len() && trimmed.starts_with(prev)).then(|| trimmed.to_string())
@@ -70,11 +76,13 @@ fn next_stream_snapshot(prev: &str, decoded: &str) -> Option<String> {
 /// statistic — the reuse decision itself is still the literal text-prefix test,
 /// which is sound whatever this returns.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct PrefixOwner {
     kind: String,
     opening: u64,
 }
 
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 impl PrefixOwner {
     fn new(kind: &str, prompt_text: &str) -> Self {
         Self {
@@ -88,6 +96,7 @@ impl PrefixOwner {
     }
 }
 
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
@@ -100,6 +109,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// The prompt through the end of its first `user` turn — the part every turn
 /// of one conversation repeats. Falls back to the whole prompt when the
 /// transcript has no complete user turn yet (single-shot expander jobs).
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 fn conversation_opening(prompt_text: &str) -> &str {
     const USER_OPEN: &str = "<|im_start|>user\n";
     const TURN_END: &str = "<|im_end|>";
@@ -115,6 +125,7 @@ fn conversation_opening(prompt_text: &str) -> &str {
 
 /// Why a job could not reuse the resident KV.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) enum PrefixOutcome {
     /// The prompt extends the resident prefix: prefill only the delta.
     Hit,
@@ -145,6 +156,7 @@ pub(crate) enum PrefixOutcome {
 /// is accumulated, which turns "two chats re-prefill each other" from a
 /// modelled ~2.6 s/turn into a measured number from production traffic.
 #[derive(Default)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct PrefixCache {
     /// Prompt + reply + suffix the resident KV corresponds to.
     committed: String,
@@ -158,6 +170,7 @@ pub(crate) struct PrefixCache {
 }
 
 #[derive(Default, Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct PrefixStats {
     pub hits: u64,
     pub cold: u64,
@@ -167,6 +180,7 @@ pub(crate) struct PrefixStats {
     pub interleaved_millis: u64,
 }
 
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 impl PrefixCache {
     /// How many conversations to remember for miss classification. Larger than
     /// any plausible number of chats sharing one box, small enough to stay a
@@ -904,6 +918,7 @@ pub fn configured_context_per_lane() -> Option<u32> {
 ///
 /// A prompt that exactly fills the context leaves nowhere for the reply, and
 /// the failure lands at the first decode rather than at admission.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) const DECODE_HEADROOM: usize = 512;
 
 /// Drop the oldest non-system turn from a rendered ChatML prompt.
@@ -917,6 +932,7 @@ pub(crate) const DECODE_HEADROOM: usize = 512;
 /// is `<|im_start|>role\n...<|im_end|>\n` repeated, ending with an
 /// `<|im_start|>assistant\n` opener with no terminator — so the blocks are
 /// found by their delimiters and the opener is whatever follows the last one.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) fn drop_oldest_turn(prompt: &str) -> Option<String> {
     const START: &str = "<|im_start|>";
     const END: &str = "<|im_end|>\n";
@@ -975,6 +991,7 @@ pub fn configured_lane_count() -> usize {
 /// One helper rather than two literals, because the lane path and the solo
 /// path must sample identically: a box whose answers change depending on
 /// whether anyone else was talking is a bug nobody can reproduce.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 fn sampling_penalties() -> (f32, f32, usize) {
     fn env_f32(key: &str, default: f32) -> f32 {
         // Garbage reads as the default rather than as zero: a typo must not
@@ -1037,6 +1054,7 @@ mod penalty_tests {
 /// prefill and a turn stuck in decode are two different faults on two
 /// different code paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) enum TurnPhase {
     /// Submitted, with no lane of its own yet — queued behind other turns, or
     /// on a lane the worker could not attribute. It holds a queue slot and
@@ -1049,6 +1067,7 @@ pub(crate) enum TurnPhase {
     Decode,
 }
 
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 impl TurnPhase {
     /// How the phase reads in a log line and in the client's error.
     pub(crate) fn name(self) -> &'static str {
@@ -1080,14 +1099,17 @@ impl TurnPhase {
 /// 454 tok/s is 289 s of entirely legitimate silence. 300 s clears that worst
 /// case, clears the incident four times over, and is still short enough that
 /// an operator gets an answer instead of a frozen row.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) const DEFAULT_STALL_SECS: u64 = 300;
 
 /// The watchdog's budget, in one place so the decision and the log agree.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct StallPolicy {
     budget: std::time::Duration,
 }
 
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 impl StallPolicy {
     pub(crate) fn seconds(secs: u64) -> Self {
         Self {
@@ -1117,6 +1139,7 @@ impl StallPolicy {
 
 /// A turn that has stopped moving, and the two facts every report of it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct Stalled {
     pub(crate) phase: TurnPhase,
     pub(crate) idle: std::time::Duration,
@@ -1128,6 +1151,7 @@ pub(crate) struct Stalled {
 /// GPU, and a rule that can only be exercised there is a rule nobody checks.
 /// Everything the decision needs is here — which phase the turn is in, when it
 /// last moved, what time it is now, and the budget.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) fn stall_verdict(
     phase: TurnPhase,
     last_progress: std::time::Instant,
@@ -1571,7 +1595,7 @@ mod llama_worker {
             // brought exactly one thing. Then `next_step` admits that one job
             // into slot 0 with an empty queue, which is precisely the
             // condition the executor tests for the session-native path.
-            let alone = was_idle && arrivals.len() == 1;
+            let _alone = was_idle && arrivals.len() == 1;
             'arrival: for (job, cancel, events) in arrivals {
                 {
                 let tokens = match exec.session().vocab().tokenize(&job.prompt_text, true, true) {

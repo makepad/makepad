@@ -11,7 +11,6 @@ use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::error::AssetAiError;
-use crate::motion_backend::check_motion_output;
 use crate::motion_retarget::{
     classify_humanoid_branches, retarget_hy_motion_glb_with_report, HyMotionClipRef,
     RetargetOptions,

@@ -203,6 +203,14 @@ impl ContentBackend for VideoEnhanceBackend {
         }
     }
 
+    // `cancel` is only read by the `Gen::Native` arm below, which exists
+    // solely under the full upscale/interpolate/video feature combination;
+    // a build with a narrower feature set still needs the parameter to
+    // satisfy the trait signature.
+    #[cfg_attr(
+        not(all(feature = "upscale-native", feature = "interpolate", feature = "video")),
+        allow(unused_variables)
+    )]
     fn generate(
         &mut self,
         params: &GenerateParams,
