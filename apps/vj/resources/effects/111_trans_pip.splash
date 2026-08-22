@@ -1,0 +1,37 @@
+// PICTURE-IN-PICTURE — deck B inset over deck A. SIZE scales the inset,
+// POS walks it through the four corners (0 = top-left, sweep clockwise).
+// The fader FLIES IT IN: at 0 no inset, at full it sits there; mid-ride
+// it scales in — which makes it a click-autofade-friendly entrance too.
+{
+    name: "PiP"
+    engine: "transition"
+    // Overlay semantics: ridden to the fader's end the key STAYS fully
+    // applied (the composite is the destination) — never a snap to
+    // plain B. Zero only at the A end.
+    engage: "ramp"
+    p2: 0.5
+    dials: [
+        {name: "SIZE", bind: "p0", default: 0.4},
+        {name: "POS", bind: "p1", default: 0.9},
+        {name: "FRAME", bind: "p2", default: 0.5}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let size = (0.2 + self.user.x * 0.4) * t
+            // Corner tour: 0 TL, 0.25 TR, 0.5 BR, 0.75 BL.
+            let q = self.user.y * 4.0
+            let cx = mix(0.02, 0.98 - size, clamp(q, 0.0, 1.0) * step(q, 2.0) + step(2.0, q) * (1.0 - clamp(q - 2.0, 0.0, 1.0)))
+            let cy = mix(0.03, 0.97 - size, clamp(q - 1.0, 0.0, 1.0) * step(q, 3.0) + step(3.0, q) * (1.0 - clamp(q - 3.0, 0.0, 1.0)))
+            let local = vec2((uv.x - cx) / max(size, 0.001), (uv.y - cy) / max(size, 0.001))
+            let inside = step(0.0, local.x) * step(local.x, 1.0) * step(0.0, local.y) * step(local.y, 1.0)
+            let b = self.deck_b(local)
+            // A hairline border so the inset reads as a WINDOW; FRAME
+            // scales its width (mid-knob = the stock hairline, 0 = none).
+            let edge = min(min(local.x, 1.0 - local.x), min(local.y, 1.0 - local.y))
+            let border = step(edge, 0.02 * (self.user.z * 2.0)) * inside
+            let c = a.mix(b, inside * step(0.001, t))
+            return c.mix(vec4(1.0, 1.0, 1.0, 1.0), border * 0.7)
+        }
+    }
+}

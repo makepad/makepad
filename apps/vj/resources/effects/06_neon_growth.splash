@@ -1,0 +1,66 @@
+// NEON GROWTH — the classic bracketed L-system plant, growing in over
+// eight beats, swaying by branch depth. The rules text below IS the
+// program: it compiles to bytecode at load and the turtle emits the tubes.
+{
+    name: "Neon Growth"
+    engine: "lsystem"
+    seed: 7
+
+    axiom: "X"
+    rules: ["X=F[+X][-X]FX", "F=FF"]
+    iterations: 6
+    angle: 25.7
+    angle_jitter: 3.0
+    step: 0.10
+    radius: 0.05
+    sides: 5
+
+    grow: "loop"
+    grow_beats: 8
+    sway: "0.8 * (0.25 + 1.5*p0)"
+    sway_freq: 0.7
+    beat_pulse: "0.4 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    glow: "0.25 + 1.5*p2"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x020608
+    color_a: #x2affd0
+    color_b: #x0f8cff
+    color_c: #xccffee
+
+    cam_orbit: 0.18
+    fog: 0.035
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc from the root 0..1, attr = (depth, arc, hue, tube radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}

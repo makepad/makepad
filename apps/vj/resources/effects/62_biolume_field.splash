@@ -1,0 +1,59 @@
+// BIOLUME FIELD — the dark meadow that PULSES on the kick: near-black
+// grass whose glow is bound to the beat envelope. Bioluminescent night.
+{
+    name: "Biolume Field"
+    engine: "grass"
+    seed: 40
+
+    blades: 11000
+    area: 8.0
+    height: 0.7
+    width: 0.03
+    clump: 0.7
+
+    sway: "0.5 * (0.25 + 1.5*p1)"
+    sway_freq: 0.5
+    beat_pulse: "0.5 * (0.2 + 1.6*p2)"
+    glow: "(0.35 + env(phase) * 1.9) * (0.2 + 1.6*p0)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FLASH", bind: "p0", default: 0.5},
+        {name: "WIND", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x020608
+    color_a: #x0a3344
+    color_b: #x33ffcc
+    color_c: #xaaffee
+
+    cam_orbit: 0.07
+    fog: 0.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.7, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc along the blade 0..1, attr = (row, arc, hue, half width).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}

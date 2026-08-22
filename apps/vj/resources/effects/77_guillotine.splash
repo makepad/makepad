@@ -1,0 +1,70 @@
+// GUILLOTINE — thin chrome bars scissor-crossing on eighth notes: the
+// whole stack mirrors through the centre once per pulse, odd/even bars
+// parting in depth as they pass. Pattern taught: `beat_rate: 2` drives
+// the crossing clock (the choreography reads beat*rate directly, so the
+// document's rate IS the choreography tempo); hard `metal` + a bright
+// specular line make chrome out of the same two-stop gradient.
+{
+    name: "Guillotine"
+    engine: "copperbars"
+    seed: 13
+
+    bars: 30
+    mode: "scissor"
+    width: 16.0
+    span: 9.0
+    thickness: 0.22
+    depth: 0.9
+    amplitude: 1.5
+    weave: 1.7
+    metal: 6.0
+    beat_rate: 2
+
+    beat_pulse: 0.7
+    p0: "0.35 + 0.8*bass + 0.4*pulse"
+    p1: "0.5 + 0.7*env(phase)"
+
+    // PERFORMANCE DIALS — DANCE/THICK are the engine's own p0/p1 levers;
+    // GLOW routes p2 through the glow key.
+    p2: 0.5
+    dials: [
+        {name: "DANCE", bind: "p0", default: 0.5},
+        {name: "THICK", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05060a
+    color_a: #xf2f6fa      // chrome highlight
+    color_b: #x14181d      // near-black steel shadow
+    color_c: #xd0f0ff      // ice-white spec
+
+    cam_orbit: 0.035
+    cam_height: 0.5
+    cam_fov: 48.0
+    fog: 0.018
+    glow: "1.5 * (0.25 + 1.5*p2)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: "1.0 + 0.9*pulse", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the bar gradient axis 0..1, attr = (id, aux, r0, r1).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCopper {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let band = pow(clamp(sin(t * 3.14159265), 0.0, 1.0), max(self.flow.z, 0.5))
+            let base = self.col_b.mix(self.col_a, band)
+            let sline = 1.0 - clamp(abs(t - 0.68) * 9.0, 0.0, 1.0)
+            let spec = pow(sline, 3.0) * (0.5 + self.time_beat.w * 0.8)
+            let vary = 0.85 + 0.30 * attr.z
+            return vec4(base.xyz * vary + self.col_c.xyz * spec, 1.0)
+        }
+    }
+}

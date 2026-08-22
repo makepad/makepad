@@ -1,0 +1,54 @@
+// RIBBON STORM — flow-field ribbon trails orbiting a torus band, feedback
+// trails smearing them into silk.
+{
+    name: "Ribbon Storm"
+    engine: "ribbons"
+    seed: 11
+
+    ribbons: 36
+    trail: 70
+    width: 0.13
+    flow_speed: 2.6
+    swirl: 1.8
+    bound: 5.0
+
+    beat_pulse: "0.6 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x060310
+    color_a: #x40c8ff
+    color_b: #xff50e0
+    color_c: #xffffff
+
+    cam_orbit: 0.12
+    fog: 0.025
+
+    stages: [
+        {kind: "feedback", amount: "min(0.7 + (p1-0.5)*0.54, 0.97)", zoom: 1.006, rotate: 0.003, dim: 0.94},
+        {kind: "bloom", threshold: 0.4, strength: "1.4 * (0.25 + 1.5*p2)", levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = trail age 0..1, attr = (ribbon, age, hue, side).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxRibbon {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let hue = attr.z
+            let base = self.col_a.mix(self.col_b, hue).mix(self.col_c, self.time_beat.w * 0.5)
+            return base
+        }
+    }
+}

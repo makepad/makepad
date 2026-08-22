@@ -1,0 +1,61 @@
+// METABALL KALEIDO — a MESH engine under a fullscreen warp: liquid blobs
+// folded six ways. Pattern taught: warp stages stack on ANY engine, not
+// just the screen family.
+{
+    name: "Metaball Kaleido"
+    engine: "metaballs"
+    seed: 14
+
+    blobs: 6
+    grid: 30
+    extent: 3.0
+    blob_radius: 0.95
+    orbit: 1.8
+    orbit_speed: 0.9
+    beat_swell: 0.5
+
+    beat_pulse: "0.55 * (0.2 + 1.6*p2)"
+    // PERFORMANCE DIALS — resting positions = the stock look, exact
+    // (SEGS rides the kaleido fold count directly: p0 0.55 = today's 6-way).
+    p0: 0.55  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SEGS", bind: "p0", default: 0.55},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x080210
+    color_a: #xff5599
+    color_b: #x5533ff
+    color_c: #xffffff
+
+    cam_orbit: 0.15
+    fog: 0.03
+
+    stages: [
+        {kind: "kaleido", p1: "p0", p2: "(0.1 + pulse * 0.4) * (0.2 + 1.6*p1)"},
+        {kind: "bloom", threshold: 0.45, strength: 1.4, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = height 0..1, attr = (blob, height, blob hue, distance).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
+}

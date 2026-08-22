@@ -1,0 +1,31 @@
+// PUSH — deck B shoves deck A off the screen, both actually MOVING
+// (the difference from a wipe: the pictures slide, the edge does not
+// just reveal). FLIP pushes from the left instead.
+{
+    name: "Push"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.0},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let flip = step(0.5, self.user.y)
+            let x = mix(uv.x, 1.0 - uv.x, flip)
+            let u = x + t
+            // SOFT feathers the seam between the sliding decks
+            // (0 = the stock hard cut).
+            let soft = 0.0005 + self.user.x * 0.2
+            let m = smoothstep(1.0 - soft, 1.0 + soft, u)
+            let ax = mix(clamp(u, 0.0, 1.0), 1.0 - clamp(u, 0.0, 1.0), flip)
+            let bx = mix(clamp(u - 1.0, 0.0, 1.0), 1.0 - clamp(u - 1.0, 0.0, 1.0), flip)
+            let ca = self.deck_a(vec2(ax, uv.y))
+            let cb = self.deck_b(vec2(bx, uv.y))
+            let c = ca.mix(cb, m)
+            // DIP: duck through black mid-slide (0 = off).
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

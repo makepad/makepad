@@ -1,0 +1,85 @@
+// BEAT SALVO — hard techno emitters: a burst SLAMS on every beat,
+// alternating left/right, in venue-laser colors. Minimal script, maximal
+// punch — the template for "just hit on the beat".
+{
+    name: "Beat Salvo"
+    engine: "emitters"
+    particles: 1400
+    size: 0.15
+
+    // PERFORMANCE DIALS — the tick reads the dial params as fx.p0..fx.p3;
+    // mid-knob reproduces the stock salvo exactly.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BURST", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x030306
+    cam_dist: 13.0
+    cam_height: 1.0
+    cam_orbit: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: "1.8 * (0.25 + 1.5*p2)", levels: 3},
+        {kind: "feedback", amount: "min(0.45 + (p1-0.5)*0.8, 0.97)", zoom: 1.01, rotate: 0.0, dim: 0.85}
+    ]
+
+    frame: fn(fx) {
+        let out = []
+        if fx.phase < fx.dt * 2.0 {
+            let side = modf(fx.beat, 2.0) * 2.0 - 1.0
+            let col = #x00ffcc
+            let col2 = #x0066ff
+            if side > 0.0 {
+                col = #xff2299
+                col2 = #xaa00ff
+            }
+            out.push({
+                kind: "burst"
+                pos: vec3(side * 4.0, 1.0, 0.0)
+                life: 1.1
+                // BURST dial: slam reach + spark size ride fx.p0.
+                speed: 7.0 * (0.5 + fx.p0)
+                size: 0.26 * (0.4 + 1.2 * fx.p0)
+                gravity: 0.4
+                color: col
+                color2: col2
+                seed: fx.beat * 1.3
+            })
+        }
+        return out
+    }
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxEmitter {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let heat = clamp(1.0 - attr.y * 3.0, 0.0, 1.0)
+            let tint0 = self.e_col_a.mix(self.e_col_b, t)
+            let pal = tint0.xyz.mix(
+                content.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(cmix * 1.2, 0.0, 1.0)
+            )
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
+            let fade = (1.0 - t) * (1.0 - t)
+            return vec4(rgb, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.4, d)
+            let halo = 1.0 - smoothstep(0.1, 0.9, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
+}

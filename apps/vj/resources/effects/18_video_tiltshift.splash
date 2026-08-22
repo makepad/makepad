@@ -1,0 +1,22 @@
+// VIDEO TILTSHIFT — the miniature look as an effect pass: pyramid blur
+// mixed back by a screen-Y focus ramp; the focus line breathes with the
+// bar. Runs on the channel content in effect-pass mode.
+{
+    name: "Video Tiltshift"
+    engine: "screen"
+    input0: "test"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FOCUS", bind: "p0", default: 0.5},
+        {name: "BLUR", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "tiltshift", focus: "0.5 + sin(bar * tau) * 0.15 + (p0-0.5)*0.6",
+         width: "0.22 * (0.2 + 1.6*p1)", levels: 3},
+        {kind: "bloom", threshold: 0.6, strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+}
