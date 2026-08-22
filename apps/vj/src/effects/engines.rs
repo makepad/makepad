@@ -295,11 +295,15 @@ pub struct LsystemEngine {
     built: bool,
     pub segments: usize,
     pub truncated: bool,
+    /// XZ half-extent of the built plant(s) — the content-coupling canopy
+    /// footprint (shape.y): the shader maps world xz over it to sample
+    /// input0 across the foliage. Set at build; 3.0 until then.
+    pub extent: f32,
 }
 
 impl LsystemEngine {
     pub fn new(cfg: LsystemConfig) -> Self {
-        Self { cfg, built: false, segments: 0, truncated: false }
+        Self { cfg, built: false, segments: 0, truncated: false, extent: 3.0 }
     }
 
     fn build(&mut self, mesh: &mut FxMesh) {
@@ -338,10 +342,25 @@ impl LsystemEngine {
             }
         }
         self.segments = total;
+        // Canopy footprint for the content coupling: xz half-extent over
+        // everything built (all ring copies included).
+        let floats = super::mesh::VERT_FLOATS;
+        let mut ext = 0.5f32;
+        for v in mesh.verts.chunks(floats) {
+            ext = ext.max(v[0].abs()).max(v[2].abs());
+        }
+        if ext.is_finite() {
+            self.extent = ext;
+        }
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        EngineUniforms::default()
+        // shape = (content mode 0 = canopy tint, canopy xz half-extent, 0, 0)
+        // — consumed by the DrawVjFxMesh content coupling only.
+        EngineUniforms {
+            shape: vec4(0.0, self.extent.max(0.5), 0.0, 0.0),
+            flow: vec4(0.0, 0.0, 0.0, 0.0),
+        }
     }
 }
 
@@ -627,7 +646,14 @@ impl MetaballsEngine {
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        EngineUniforms::default()
+        // shape = (content mode 1 = surface refraction, extent, 0, 0) —
+        // the DrawVjFxMesh content coupling refracts input0 through the
+        // blob surface instead of canopy-tinting it.
+        let ext = if self.cfg.extent.is_finite() { self.cfg.extent } else { 3.0 };
+        EngineUniforms {
+            shape: vec4(1.0, ext.clamp(0.5, 100.0), 0.0, 0.0),
+            flow: vec4(0.0, 0.0, 0.0, 0.0),
+        }
     }
 }
 
@@ -1292,7 +1318,13 @@ impl GrassEngine {
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        EngineUniforms::default()
+        // shape = (content mode 0 = field tint, meadow half-extent, 0, 0):
+        // blade tips pick up input0 mapped over the meadow footprint.
+        let area = if self.cfg.area.is_finite() { self.cfg.area } else { 9.0 };
+        EngineUniforms {
+            shape: vec4(0.0, area.clamp(0.5, 100.0), 0.0, 0.0),
+            flow: vec4(0.0, 0.0, 0.0, 0.0),
+        }
     }
 }
 

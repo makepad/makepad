@@ -1397,7 +1397,26 @@ script_mod! {
             self.v_gust = clamp(gust, 0.0, 3.0)
             let grow_dim = 0.20 + 0.80 * g
             let c = self.fx_color(arc, attr, self.geom.geom_normal, world.xyz)
-            self.v_color = vec4(c.xyz * grow_dim, c.w)
+            // CONTENT COUPLING, canopy mode — the same law as DrawVjFxMesh
+            // (shaders.rs): foliage picks up the live input0's colors by
+            // the plant's xz footprint (shape.y = half-extent, engines.rs),
+            // sampled at the REST position so the field-driven wind never
+            // smears them. Tips take the video, trunks keep their color.
+            // fog.z is host-pre-gated to 0 without real content.
+            let mut crgb = c.xyz
+            let cmix = self.has_content * self.fog.z
+            if cmix > 0.001 && self.shape.x < 0.5 {
+                let ext = max(self.shape.y, 0.5)
+                let cuv = clamp(
+                    vec2(twisted.x, twisted.z) / (ext * 2.0) + vec2(0.5, 0.5),
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 1.0)
+                )
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                let tipness = smoothstep(0.12, 0.72, arc)
+                crgb = mix(crgb, texel.xyz * 1.3, cmix * tipness)
+            }
+            self.v_color = vec4(crgb * grow_dim, c.w)
             let view_pos = self.draw_pass.camera_view * world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
             return self.vertex_pos

@@ -1204,7 +1204,18 @@ impl VjFxView {
             ShaderKind::Harmono => draw_engine!(&mut self.draw_harmono),
             ShaderKind::Forge => draw_engine!(&mut self.draw_forge),
             ShaderKind::Copper => draw_engine!(&mut self.draw_copper),
-            ShaderKind::Domino => draw_engine!(&mut self.draw_domino),
+            ShaderKind::Domino => {
+                // Content projection footprint: the layout's xz half-extent
+                // (the shader maps world xz over it to sample input0).
+                if let Engine::Domino(e) = &doc.engine {
+                    self.draw_domino.draw_vars.set_uniform(
+                        cx3d.cx,
+                        live_id!(u_area),
+                        &[e.extent.clamp(1.0, 200.0)],
+                    );
+                }
+                draw_engine!(&mut self.draw_domino)
+            }
             ShaderKind::Tiles => draw_engine!(&mut self.draw_tiles),
             ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
             ShaderKind::Raymarch => {
