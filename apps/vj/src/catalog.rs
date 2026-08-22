@@ -277,6 +277,9 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     /// change (text, category, kinds) and by an explicit re-sort — never by
     /// the event-driven refresh that a publish triggers.
     resort: bool,
+    /// TRANSITION lane: sort by the seed registry's everyday→rare rank
+    /// instead of newest-first, so the lane is the same every night.
+    pub rank_aliases: bool,
 }
 
 /// Rows in one grid column — the height of the PENDING head column. Must
@@ -358,6 +361,7 @@ impl<C: Clone> BrowseModel<C> {
             tiles: Vec::new(),
             index: HashMap::new(),
             total: 0,
+            rank_aliases: false,
             next_cursors: vec![None; lanes],
             restarting: vec![false; lanes],
             pages_pending: 0,
@@ -600,9 +604,24 @@ impl<C: Clone> BrowseModel<C> {
             // Newest first: the operator reads the strip left-to-right as
             // "what just came in" — tonight's generations lead.
             let stamps = &self.stamps;
-            self.order.sort_by_key(|asset| {
-                std::cmp::Reverse(stamps.get(asset).copied().unwrap_or(0))
-            });
+            if self.rank_aliases {
+                // Everyday→rare, the seed registry's order; ties (unknown
+                // docs) fall back to newest-first.
+                let tiles = &self.tiles;
+                let index = &self.index;
+                self.order.sort_by_key(|asset| {
+                    let rank = index
+                        .get(asset)
+                        .and_then(|&i| tiles[i].alias.as_deref())
+                        .map(crate::effects::seed::transition_rank)
+                        .unwrap_or(usize::MAX);
+                    (rank, std::cmp::Reverse(stamps.get(asset).copied().unwrap_or(0)))
+                });
+            } else {
+                self.order.sort_by_key(|asset| {
+                    std::cmp::Reverse(stamps.get(asset).copied().unwrap_or(0))
+                });
+            }
         }
         let _ = resorted;
         let mut cmds = self.pump_resolves();

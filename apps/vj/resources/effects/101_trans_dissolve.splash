@@ -6,7 +6,7 @@
 // law (fast-in vs fast-out), DIP ducks through black mid-fade, FLASH
 // lifts to white mid-fade.
 {
-    name: "Dissolve"
+    name: "Crossfade"
     engine: "transition"
     p0: 0.5
     dials: [

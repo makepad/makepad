@@ -243,6 +243,20 @@ impl FxSlots {
     }
 
     /// Click on a slot tile: arm it, switch the arm, or disarm.
+    /// ONE-SHOT consumption: an ACCEPTED load on `kind` spends the arm —
+    /// returns true when it was armed. A refusal never calls this, so a
+    /// wrong-type click keeps the arm for the right tile. (A latched arm
+    /// that survived its load silently owned every later effect click —
+    /// the "auto-drop stopped working" wedge.)
+    pub fn consume_armed(&mut self, kind: FxSlotKind) -> bool {
+        if self.armed == Some(kind) {
+            self.armed = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns whether that slot is armed afterwards.
     pub fn toggle_arm(&mut self, kind: FxSlotKind) -> bool {
         if self.armed == Some(kind) {
@@ -263,6 +277,13 @@ impl FxSlots {
         slot.rev = rev;
         slot.bypass = false;
         slot.note = None;
+        // A NEW doc lands UNTOUCHED: the previous occupant's dial values
+        // must never bleed onto this one's dials (the "every wipe dips
+        // dark" report — the old effect's third knob kept applying to the
+        // freshly loaded wipe's DIP). The host layers the effect's OWN
+        // sticky profile on top afterwards, if one exists.
+        slot.p = [None; 3];
+        slot.speed = FxSlotState::default().speed;
     }
 
     /// CLEAR: back to the factory-default empty slot (arming untouched).
@@ -955,6 +976,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_accepted_load_consumes_the_arm_and_a_refusal_keeps_it() {
+        let mut slots = FxSlots::default();
+        assert!(slots.toggle_arm(FxSlotKind::EffectA));
+        assert!(slots.consume_armed(FxSlotKind::EffectA));
+        assert_eq!(slots.armed, None, "one-shot: the arm is spent");
+        assert!(!slots.consume_armed(FxSlotKind::EffectA), "nothing left to spend");
+        // A refusal path never consumes: arming stays for the right tile.
+        assert!(slots.toggle_arm(FxSlotKind::Transition));
+        assert!(!slots.consume_armed(FxSlotKind::EffectB));
+        assert_eq!(slots.armed, Some(FxSlotKind::Transition));
+    }
+
+    #[test]
     fn arming_is_a_toggle_and_a_switch() {
         let mut m = FxSlots::default();
         // No arm: an FX-tile click is a CONTENT cue, not a slot load.
@@ -970,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_switches_on_and_keeps_the_knobs() {
+    fn loading_switches_on_and_resets_the_previous_docs_knobs() {
         let mut m = FxSlots::default();
         let slot = m.slot_mut(FxSlotKind::EffectA);
         slot.bypass = true;
@@ -982,8 +1016,16 @@ mod tests {
         assert_eq!(slot.title.as_deref(), Some("Neon Growth"));
         assert!(!slot.bypass, "a fresh load is ON");
         assert_eq!(slot.note, None, "stale errors do not survive a load");
-        assert_eq!(slot.speed, 0.8, "the operator's levers stay put");
-        assert_eq!(slot.p, [None, Some(0.9), None]);
+        // THE DIAL LAW REVERSED (user): the previous occupant's dial values
+        // must never bleed onto the new doc — "when i switch transitions
+        // dont keep the dial values of the previous one". A new load lands
+        // UNTOUCHED; the host layers the effect's OWN sticky profile after.
+        assert_eq!(
+            slot.speed,
+            FxSlotState::default().speed,
+            "the old doc's clock never rides the new doc"
+        );
+        assert_eq!(slot.p, [None, None, None], "dials land untouched");
         assert!(m.any_running());
         m.clear(FxSlotKind::EffectA);
         assert_eq!(*m.slot(FxSlotKind::EffectA), FxSlotState::default());

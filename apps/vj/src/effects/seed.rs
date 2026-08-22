@@ -161,10 +161,31 @@ pub const TRANSITION_TAG: &str = "transition";
 /// family plus the input-driven tiles/lens looks — every one of them shapes
 /// `input0` (the program mix, in transition-slot mode) rather than replacing
 /// it with an unrelated scene.
+/// ORDER IS THE LANE ORDER: everyday → rare. The plain crossfade leads,
+/// then the broadcast classics (wipes, iris, push, blinds), the MX50
+/// keys/overlays, and the art transitions last. `transition_rank` turns an
+/// alias into its index here — the TRANSITION chip sorts by it, so the
+/// lane reads the same every night regardless of publish stamps.
 pub const TRANSITION_PRESETS: &[&str] = &[
-    "16_kaleido_video",
+    // The everyday one, #1 by law.
+    "101_trans_dissolve",
+    // Broadcast classics.
+    "102_trans_wipe",
+    "103_trans_wipe_v",
+    "104_trans_iris",
+    "105_trans_push",
+    "106_trans_blinds",
+    // MX50 keys / overlays.
+    "107_trans_lumakey",
+    "108_trans_chromakey",
+    "109_trans_additive",
+    "110_trans_negative",
+    "111_trans_pip",
+    "112_trans_screenmix",
+    // Art transitions, rarest last.
     "17_video_trails",
     "18_video_tiltshift",
+    "16_kaleido_video",
     "48_mirror_hall",
     "49_vhs_breakup",
     "50_mosaic_pump",
@@ -176,22 +197,20 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "80_bar_shatter",
     "81_conveyor_wall",
     "89_beat_lens",
-    "101_trans_dissolve",
-    "102_trans_wipe",
-    "103_trans_wipe_v",
-    "104_trans_iris",
-    "105_trans_push",
-    "106_trans_blinds",
-    "107_trans_lumakey",
-    "108_trans_chromakey",
-    "109_trans_additive",
-    "110_trans_negative",
-    "111_trans_pip",
-    "112_trans_screenmix",
 ];
 
 pub fn is_transition_preset(name: &str) -> bool {
     TRANSITION_PRESETS.contains(&name)
+}
+
+/// The alias's position in the rarity order above; unknown docs (imported
+/// or generated transitions) sort after every bundled one.
+pub fn transition_rank(alias: &str) -> usize {
+    let name = alias.rsplit('/').next().unwrap_or(alias);
+    TRANSITION_PRESETS
+        .iter()
+        .position(|preset| *preset == name)
+        .unwrap_or(usize::MAX)
 }
 
 fn preset_tags(name: &str) -> Vec<String> {

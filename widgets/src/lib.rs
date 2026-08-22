@@ -64,6 +64,8 @@ pub mod drop_down2;
 pub mod popup_menu;
 pub mod slider;
 pub mod text_input;
+pub mod tip;
+pub mod value_input;
 
 pub mod splitter;
 
@@ -558,6 +560,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
+    crate::tip::script_mod(vm);
+    crate::value_input::script_mod(vm);
     crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);

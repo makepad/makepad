@@ -497,7 +497,7 @@ script_mod! {
         draw_bg +: {
             spin: instance(0.0)
             failed: instance(0.0)
-            color_ring: uniform(#x3ee0b0)
+            color_ring: uniform(#xff5c39)
             color_fail: uniform(#xff5c5c)
             pixel: fn() {
                 let p = (self.pos - vec2(0.5, 0.5)) * self.rect_size
@@ -531,9 +531,9 @@ script_mod! {
         padding: 0
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x161b22
+            color: #x1e232b
             border_color: #xffffff2a
-            border_color_selected: #x3ee0b0
+            border_color_selected: #xff5c39
             selected: instance(0.0)
             border_size: 1.0
             border_radius: 7.0
@@ -570,13 +570,13 @@ script_mod! {
                     align: Align{x: 0.0, y: 0.5}
                     grid_pad := Label{
                         text: ""
-                        draw_text.color: #x3ee0b0
+                        draw_text.color: #xff5c39
                         draw_text.text_style: theme.font_bold{font_size: 8}
                     }
                     View{width: Fill height: 1}
                     grid_state := Label{
                         text: ""
-                        draw_text.color: #x3ee0b0
+                        draw_text.color: #xff5c39
                         draw_text.text_style.font_size: 8
                     }
                 }
@@ -643,7 +643,7 @@ script_mod! {
                 spacing: 4
                 padding: 7
                 draw_bg +: {
-                    color: #x1a2029
+                    color: #x222831
                     border_color: #xffffff2a
                     border_size: 1.0
                     border_radius: 6.0
@@ -724,13 +724,13 @@ script_mod! {
 
     let PadCell = RoundedView{
         width: Fill
-        height: 56
+        height: Fill
         padding: 0
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x151a21
+            color: #x1d222a
             border_color: #xffffff2e
-            border_color_selected: #x3ee0b0
+            border_color_selected: #xff5c39
             selected: instance(0.0)
             empty: instance(0.0)
             border_size: 1.0
@@ -774,7 +774,7 @@ script_mod! {
                     flow: Right
                     grid_pad := Label{
                         text: ""
-                        draw_text.color: #x3ee0b0cc
+                        draw_text.color: #xff5c39cc
                         draw_text.text_style: theme.font_bold{font_size: 7}
                     }
                     View{width: Fill height: 1}
@@ -897,7 +897,7 @@ script_mod! {
         ..mod.draw.DrawQuad
         color_off: uniform(#x1b232c)
         color_rim: uniform(#xffffff2e)
-        color_beat: uniform(#x3ee0b0)
+        color_beat: uniform(#xff5c39)
         color_down: uniform(#xfff1c8)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -927,41 +927,41 @@ script_mod! {
     mod.widgets.VjPadMatrixBase = #(VjPadMatrix::register_widget(vm))
     mod.widgets.VjPadMatrix = set_type_default() do mod.widgets.VjPadMatrixBase{
         width: Fill
-        height: Fit
+        height: Fill
         flow: Down
         spacing: 4
         View{
             width: Fill
-            height: Fit
+            height: Fill
             flow: Right
             spacing: 6
             View{
                 width: Fill
-                height: Fit
+                height: Fill
                 flow: Down
                 spacing: 4
                 r0 := View{
-                    width: Fill height: Fit flow: Right spacing: 4
+                    width: Fill height: Fill flow: Right spacing: 4
                     c1 := PadCell{} c2 := PadCell{} c3 := PadCell{} c4 := PadCell{}
                     c5 := PadCell{} c6 := PadCell{} c7 := PadCell{} c8 := PadCell{}
                 }
                 r1 := View{
-                    width: Fill height: Fit flow: Right spacing: 4
+                    width: Fill height: Fill flow: Right spacing: 4
                     c1 := PadCell{} c2 := PadCell{} c3 := PadCell{} c4 := PadCell{}
                     c5 := PadCell{} c6 := PadCell{} c7 := PadCell{} c8 := PadCell{}
                 }
                 r2 := View{
-                    width: Fill height: Fit flow: Right spacing: 4
+                    width: Fill height: Fill flow: Right spacing: 4
                     c1 := PadCell{} c2 := PadCell{} c3 := PadCell{} c4 := PadCell{}
                     c5 := PadCell{} c6 := PadCell{} c7 := PadCell{} c8 := PadCell{}
                 }
                 r3 := View{
-                    width: Fill height: Fit flow: Right spacing: 4
+                    width: Fill height: Fill flow: Right spacing: 4
                     c1 := PadCell{} c2 := PadCell{} c3 := PadCell{} c4 := PadCell{}
                     c5 := PadCell{} c6 := PadCell{} c7 := PadCell{} c8 := PadCell{}
                 }
                 r4 := View{
-                    width: Fill height: Fit flow: Right spacing: 4
+                    width: Fill height: Fill flow: Right spacing: 4
                     c1 := PadCell{} c2 := PadCell{} c3 := PadCell{} c4 := PadCell{}
                     c5 := PadCell{} c6 := PadCell{} c7 := PadCell{} c8 := PadCell{}
                 }
@@ -988,7 +988,7 @@ script_mod! {
             }
         }
         draw_thumb +: {
-            color: #x3ee0b0
+            color: #xff5c39
             hover: instance(0.0)
             down: instance(0.0)
             pixel: fn() {

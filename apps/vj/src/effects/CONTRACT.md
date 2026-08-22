@@ -281,13 +281,28 @@ particles are stateless vertex-shader work. The tick touches emitters only
   mid,high])`; free-runs at `set_bpm` otherwise.
 - Thumbnails (lazy, animated — VJ-side): host a hidden `VjFxView` in slot
   mode (pass renders at SLOT_PASS; a host can wrap it in a small widget
-  rect with composite on), feed a few beats, grab frames. The runtime hook
-  is exactly the slot-mode API above; the VJ-side cache is follow-up work.
+  rect with composite on), feed a few beats, grab frames. The VJ-side
+  cache is fx_thumbs.rs. TRANSITION docs sheet the COMPLETE sweep:
+  frame k of N renders with `p3 = k/(N-1)` (frame-indexed — first frame
+  pure deck A, last pure deck B), never a wall-clock capture window.
+- Offscreen heartbeat idiom (status quo): every offscreen host (fx slots,
+  thumbs, mesh/splat/flow) lives as a 4x4 widget in the always-drawn top
+  bar — its draw_walk both orchestrates the child pass AND issues the
+  sample draw that IS the pass dependency. The 4x4s stack in ONE overlay
+  slot under a bar-colored cover so no sampled pixel shows. The cleaner
+  design — no parked widgets, passes driven per frame via
+  `Cx::repaint_pass` from the pump — first requires lifting the hosts'
+  pass orchestration out of draw_walk (they only run when walked); until
+  that refactor, the cover-quad idiom is the law.
 - Host param overrides (the VJ's EFFECT-SLOT knobs, fx_slot.rs):
   `set_user_override([Option<f32>; 4])` pins any of `p0..p3` over the
   document's binding (`None` = the doc's value stays in charge), and
   `set_speed_scale(f32)` multiplies the document's own clock. TRANSITION
-  slot convention: the host drives `p3` with `triangle(program_mix)` (0 at
+  slot convention: two-input (`engine: "transition"`) docs get `p3` = the
+  crossfader position itself, and the doc-declared `engage:` profile
+  ("triangle" default, "ramp" for overlay/key docs that stay applied at
+  the B end) decides how the host rides them. Input0-only docs keep the
+  premix path: the host drives `p3` with `triangle(program_mix)` (0 at
   the fader ends, 1 mid-fade), so a transition-suited document can bind its
   intensity to `p3`. Transition-suited presets carry the `transition`
   catalog tag (seed.rs `TRANSITION_PRESETS`/`TRANSITION_TAG`).
