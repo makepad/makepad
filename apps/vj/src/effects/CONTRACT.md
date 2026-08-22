@@ -536,6 +536,24 @@ particles are stateless vertex-shader work. The tick touches emitters only
 
 ## Rules that bit us already (do not relearn)
 
+- **A look must be a BOUNDED function of `time` and `beat`.** Both signals
+  are unbounded and, on a deck, neither starts at zero: `beat` is the
+  host's SONG clock (`beat_clock.position_at`), so an effect cued an hour
+  into a set gets its FIRST frame at beat ~6000, and `time` free-runs for
+  as long as the slot holds the document. Anything that steers geometry —
+  a fold angle, a scale, a domain size — must therefore be periodic
+  (`sin`/`cos`/`fract` of the clock), or clamped, or both. A term like
+  `angle = 0.52 + beat * 0.010` reads beautifully in the gallery, whose
+  captures never run past a couple of seconds, and shows BLACK on the deck
+  (86_fractal_descent shipped that way and was reported as "doesn't render
+  in the video channels"). "Never repeats" is still available honestly:
+  sum two slow sines whose frequency ratio is not a simple fraction.
+  A monotone term is only safe under `fract`/`floor`-hash (the city's
+  per-beat window re-roll) or as a phase fed straight to `sin`.
+  THE INSTRUMENT: `VJFX_CAPTURE=600@1.0` renders the document at t = 600 s
+  (the widget's beat restarts with the document and advances at the same
+  fixed step), so grabbing a family at 0 / 60 / 600 / 3600 s is a
+  five-minute sweep and every frame must still hold a picture.
 - Instance fields are vec4/f32 only, AFTER `#[deref] draw_vars`.
 - The shader compiler has a silent size budget — keep shaders modest; new
   looks go in NEW shaders, not new branches of old ones.

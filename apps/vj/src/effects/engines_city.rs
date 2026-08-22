@@ -30,9 +30,11 @@
 //!   normal = face normal (sky: inward, trail: lateral)
 //!
 //! # Document keys (`engine: "city"`)
-//! `style` ("night" | "retro" | "tron"), `blocks` (8, ≤14 blocks/side),
+//! `style` ("night" | "retro" | "tron"), `blocks` (8, ≤[`MAX_BLOCKS`]
+//! blocks/side — the skyline DEPTH dial),
 //! `block` (6.0 block pitch), `street` (0.34 street fraction of the pitch),
-//! `towers` (240 cap), `max_h` (10), `win` (0.30 window size, world),
+//! `towers` (240, ≤[`MAX_TOWERS`]), `max_h` (10), `win` (0.30 window size,
+//! world),
 //! `density` (0.55 lit fraction), `flicker` (0.12 fraction re-rolled per
 //! beat), `trails` (0, ≤16), `trail_beats` (8 sweep loop), `wall_h` (1.3),
 //! `alt` (camera altitude, default 1.05 * max_h), `fly` (1.0 speed),
@@ -48,6 +50,22 @@
 use super::engines::{CamPose, EngineUniforms};
 use super::mesh::{FxMesh, FxRng};
 use makepad_widgets::*;
+
+/// Blocks per side, hard ceiling. THE SKYLINE DEPTH DIAL: the camera path,
+/// the look-ahead, the ground plane and the sky cylinder are all scaled by
+/// the city's half-extent, so growing `blocks` at a fixed `block` pitch
+/// adds ROWS RECEDING TO THE HORIZON without changing how the near field
+/// frames — the towers themselves keep their world size and simply run
+/// further back. 28 blocks at the default 6.0 pitch spans an 84-unit
+/// half-extent; what that costs is set by the tower cap below, not by
+/// this one.
+pub const MAX_BLOCKS: usize = 28;
+
+/// Towers placed, hard ceiling. A tower is 20 vertices / 10 triangles
+/// (4 facades + roof, no bottom) and every lit window is pixel math, so
+/// the ceiling costs 52k vertices — the distance rows are nearly free
+/// geometry and cheap pixels (a far tower covers a handful of texels).
+pub const MAX_TOWERS: usize = 2600;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum CityStyle {
@@ -133,7 +151,7 @@ pub struct CityEngine {
 
 impl CityEngine {
     pub fn new(cfg: CityConfig) -> Self {
-        let blocks = cfg.blocks.clamp(2, 14) as f32;
+        let blocks = cfg.blocks.clamp(2, MAX_BLOCKS) as f32;
         let extent = blocks * Self::san(cfg.block, 6.0).clamp(1.0, 40.0) * 0.5;
         Self { cfg, built: false, extent, placed: 0 }
     }
@@ -226,7 +244,7 @@ impl CityEngine {
 
     pub(crate) fn build(&mut self, mesh: &mut FxMesh) {
         let mut rng = FxRng::new(self.cfg.seed);
-        let blocks = self.cfg.blocks.clamp(2, 14);
+        let blocks = self.cfg.blocks.clamp(2, MAX_BLOCKS);
         let pitch = Self::san(self.cfg.block, 6.0).clamp(1.0, 40.0);
         let street = Self::san(self.cfg.street, 0.34).clamp(0.05, 0.8);
         let max_h = Self::san(self.cfg.max_h, 10.0).clamp(1.0, 60.0);
@@ -269,7 +287,7 @@ impl CityEngine {
         }
 
         // ---- towers (class 0): 2x2 pads per block, downtown height profile
-        let cap = self.cfg.towers.clamp(4, 900);
+        let cap = self.cfg.towers.clamp(4, MAX_TOWERS);
         let mut placed = 0usize;
         let mut id = 0.0f32;
         'blocks: for bx in 0..blocks {
