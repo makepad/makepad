@@ -375,6 +375,10 @@ pub struct GenPipe {
     /// cyclic motion, the published asset is tagged `loop`, and the audio
     /// track is skipped (a pad loop is a visual).
     pub loop_video: bool,
+    /// The video post-processor: takes the clip on the program deck as its
+    /// source (no prompt needed) and returns it upscaled, frame-tweened and
+    /// carrying motion vectors for arbitrary-rate playback.
+    pub enhance: bool,
 }
 
 pub const GEN_PIPES: &[GenPipe] = &[
@@ -385,6 +389,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         expand: true,
         alpha: false,
         loop_video: false,
+        enhance: false,
     },
     GenPipe {
         label: "expand → alpha",
@@ -393,6 +398,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         expand: true,
         alpha: true,
         loop_video: false,
+        enhance: false,
     },
     GenPipe {
         label: "expand → video",
@@ -401,6 +407,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         expand: true,
         alpha: false,
         loop_video: false,
+        enhance: false,
     },
     GenPipe {
         label: "expand → video loop",
@@ -409,6 +416,16 @@ pub const GEN_PIPES: &[GenPipe] = &[
         expand: true,
         alpha: false,
         loop_video: true,
+        enhance: false,
+    },
+    GenPipe {
+        label: "uprez / tween deck clip",
+        kind: "video.enhance",
+        namespace: "gen",
+        expand: false,
+        alpha: false,
+        loop_video: false,
+        enhance: true,
     },
     GenPipe {
         label: "expand → music",
@@ -417,6 +434,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         expand: true,
         alpha: false,
         loop_video: false,
+        enhance: false,
     },
 ];
 
@@ -442,6 +460,9 @@ pub struct GenModel {
     published_assets: Vec<AssetId>,
     /// Picked row of [`VIDEO_LENGTHS`] for video pipes.
     video_length: usize,
+    /// The program deck's loaded clip (revision id + short label), refreshed
+    /// by the host before every generate — the enhance pipe's source.
+    pub enhance_source: Option<(String, String)>,
 }
 
 impl Default for ProfilesState {
@@ -608,8 +629,20 @@ impl GenModel {
     /// the profile's advertised defaults with the prompt merged on top.
     pub fn generate(&mut self, now_ms: u64) -> Vec<GenCmd> {
         self.last_error = None;
-        let prompt = self.prompt.trim().to_string();
-        if prompt.is_empty() {
+        let pipe = self.selected_pipe();
+        let mut prompt = self.prompt.trim().to_string();
+        if pipe.enhance {
+            // The source clip is the content; the prompt (if any) only
+            // titles the row.
+            let Some((_, label)) = self.enhance_source.clone() else {
+                self.last_error =
+                    Some("load a clip on the program deck first — enhance takes the playing clip".to_string());
+                return Vec::new();
+            };
+            if prompt.is_empty() {
+                prompt = format!("uprez/tween {label}");
+            }
+        } else if prompt.is_empty() {
             self.last_error = Some("prompt is empty".to_string());
             return Vec::new();
         }
@@ -617,7 +650,6 @@ impl GenModel {
             self.last_error = Some("prompt too long".to_string());
             return Vec::new();
         }
-        let pipe = self.selected_pipe();
         let mut pairs: Vec<(String, Value)> = Vec::new();
         if let Some(profile) = self
             .profiles
@@ -637,6 +669,17 @@ impl GenModel {
             let (frames, steps) = VIDEO_LENGTHS[self.video_length.min(VIDEO_LENGTHS.len() - 1)];
             pairs.push(("frames".to_string(), Value::Int(frames as i64)));
             pairs.push(("steps".to_string(), Value::Int(steps as i64)));
+        }
+        if pipe.enhance {
+            let (revision, _) = self.enhance_source.clone().expect("guarded above");
+            pairs.push(("source_revision".to_string(), s(revision)));
+            pairs.push(("upscale".to_string(), Value::Int(2)));
+            pairs.push(("interpolate".to_string(), Value::Int(2)));
+            pairs.push(("flow_map".to_string(), Value::Bool(true)));
+            pairs.push((
+                "tags".to_string(),
+                Value::Arr(vec![s("loop"), s("enhanced")]),
+            ));
         }
         pairs.push(("expand".to_string(), Value::Bool(pipe.expand)));
         if pipe.alpha {
@@ -1381,4 +1424,40 @@ mod tests {
             .message
             .contains("retrying"));
     }
+
+    #[test]
+    fn enhance_pipe_takes_the_deck_clip_and_refuses_without_one() {
+        let mut model = GenModel::new();
+        let enhance = GEN_PIPES
+            .iter()
+            .position(|p| p.enhance)
+            .expect("enhance pipe exists");
+        model.select_profile(enhance);
+        assert_eq!(GEN_PIPES[enhance].kind, "video.enhance");
+
+        // No deck clip: an honest refusal, no row, no command.
+        model.set_prompt(String::new());
+        let cmds = model.generate(1_000);
+        assert!(cmds.is_empty());
+        assert!(model.last_error.as_deref().unwrap_or("").contains("program deck"));
+
+        // With a source: the body carries the revision + the fixed recipe,
+        // and an empty prompt still yields a titled row.
+        model.enhance_source = Some(("arev_deadbeef".to_string(), "clip …deadbeef".to_string()));
+        let cmds = model.generate(2_000);
+        assert_eq!(cmds.len(), 1);
+        let GenCmd::Enqueue { kind, body, .. } = &cmds[0] else {
+            panic!("expected enqueue")
+        };
+        assert_eq!(kind, "video.enhance");
+        let Value::Obj(pairs) = body else { panic!("obj body") };
+        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        assert_eq!(get("source_revision"), Some(s("arev_deadbeef")));
+        assert_eq!(get("upscale"), Some(Value::Int(2)));
+        assert_eq!(get("interpolate"), Some(Value::Int(2)));
+        assert_eq!(get("flow_map"), Some(Value::Bool(true)));
+        assert!(matches!(get("tags"), Some(Value::Arr(tags)) if tags.len() == 2));
+        assert!(matches!(get("prompt"), Some(Value::Str(p)) if p.contains("deadbeef")));
+    }
+
 }

@@ -1017,6 +1017,9 @@ fn wire_request(
         }),
         audio: body.get("audio").and_then(Value::as_bool),
         interpolate: u32_of("interpolate"),
+        // Enhance (video post-process)
+        upscale: u32_of("upscale"),
+        flow_map: body.get("flow_map").and_then(Value::as_bool),
         // Audio / music / speech
         seconds: f64_of("seconds"),
         lyrics: str_of("lyrics"),
