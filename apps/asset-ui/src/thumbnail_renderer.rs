@@ -20,7 +20,7 @@
 //! - FRAMING: every subject is scaled by its largest extent onto the same
 //!   studio box, feet on y=0. One camera frames every card.
 
-use crate::mesh_view::pbr_preview::{parse_mesh_glb, PbrPreview};
+use crate::mesh_view::pbr_preview::{parse_material_bearing_glb, PbrPreview};
 use crate::mesh_view::{extract_base_color, image_texture, is_playable_skin};
 use makepad_render::play::LocoState;
 use makepad_render::skin::{PoseBuffer, SkinnedModel};
@@ -85,6 +85,22 @@ pub(crate) struct ThumbnailJob {
     pub(crate) ao_png: Option<Vec<u8>>,
     /// World first-person camera (engine metres / radians).
     pub(crate) spawn: Option<([f32; 3], f32, f32)>,
+}
+
+/// Pack the captured views into ONE picture that declares itself: a 4x4
+/// sheet of 256² cells, stamped with the cell layout and the rate, so the
+/// grid and the preview well rotate the card with no code that knows what a
+/// turntable is. The first cell is the canonical front, which is what a
+/// still context draws.
+fn pack_turntable(tiles: &[Vec<u8>]) -> Option<Vec<u8>> {
+    use makepad_asset_importer::anim_icon;
+    if tiles.is_empty() {
+        return None;
+    }
+    let sheet = anim_icon::pack_grid(tiles, THUMBNAIL_SIZE, TURNTABLE_COLS)
+        .map_err(|error| log!("turntable: pack failed: {error}"))
+        .ok()?;
+    Some(anim_icon::stamp_layout(&sheet.png, sheet.cells(), TURNTABLE_FPS))
 }
 
 /// A completed model-only PNG. The app commits it through `Library`, which
@@ -300,13 +316,49 @@ pub(crate) fn thumbnail_frame_from_spawn(spawn: ([f32; 3], f32, f32)) -> Thumbna
     }
 }
 
+/// Views a model icon carries: a full turn in sixteen steps of 22.5°, so a
+/// card in the library ROTATES instead of showing one frozen three-quarter
+/// angle. The first is the canonical front, which is what a still context —
+/// an old reader, a card that is not animating — draws.
+pub const TURNTABLE_STEPS: usize = 16;
+/// Packed 4x4 at the icon size: a 1024² sheet, inside every budget.
+pub const TURNTABLE_COLS: usize = 4;
+/// A slow turn. Fast enough to read as motion, slow enough to look at.
+pub const TURNTABLE_FPS: f32 = 9.0;
+
+/// The sixteen views of a turntable, framed IDENTICALLY.
+///
+/// Each step is the same model at a different yaw, so each would fit the
+/// square at its own distance — and a card whose subject grew and shrank as
+/// it turned would look broken. Every step therefore uses the widest
+/// distance any step needs, and the model turns inside a fixed frame.
+pub(crate) fn turntable_frames(min: Vec3f, max: Vec3f) -> Vec<ThumbnailFrame> {
+    let step = std::f32::consts::TAU / TURNTABLE_STEPS as f32;
+    let mut frames: Vec<ThumbnailFrame> = (0..TURNTABLE_STEPS)
+        .map(|i| thumbnail_frame_at(min, max, step * i as f32))
+        .collect();
+    let widest = frames
+        .iter()
+        .map(|f| f.cam_distance)
+        .fold(0.0f32, f32::max);
+    for frame in &mut frames {
+        frame.cam_distance = widest;
+    }
+    frames
+}
+
 pub(crate) fn thumbnail_frame_from_bounds(min: Vec3f, max: Vec3f) -> ThumbnailFrame {
+    thumbnail_frame_at(min, max, 0.0)
+}
+
+/// The canonical framing, with the model turned `extra_yaw` further.
+fn thumbnail_frame_at(min: Vec3f, max: Vec3f, extra_yaw: f32) -> ThumbnailFrame {
     let (min, max) = sanitize_bounds(min, max);
     let size = max - min;
     let extent = size.x.max(size.y).max(size.z).max(THUMBNAIL_MIN_AXIS);
     let scale = THUMBNAIL_SUBJECT_EXTENT / extent;
     let center = (min + max) * 0.5;
-    let transform = thumbnail_center_then_yaw(center, THUMBNAIL_MODEL_YAW, scale);
+    let transform = thumbnail_center_then_yaw(center, THUMBNAIL_MODEL_YAW + extra_yaw, scale);
     let mut world = [Vec3f::default(); 8];
     for (src, dst) in aabb_corners(min, max).iter().zip(world.iter_mut()) {
         let p = transform.transform_vec4(vec4(src.x, src.y, src.z, 1.0));
@@ -403,7 +455,6 @@ enum ThumbnailSubject {
         texture: Texture,
         palette: Vec<Mat4f>,
         bounds: Option<(Vec3f, Vec3f)>,
-        transform: Mat4f,
     },
     /// Material-bearing GLB. Fit + GPU meshes live on `ThumbnailRenderer.pbr`.
     Pbr,
@@ -418,6 +469,12 @@ struct ThumbnailActive {
     rendered: bool,
     readback_attempts: u8,
     gpu_waits: u8,
+    /// Remaining views of a turntable, and the ones already captured. Empty
+    /// for a one-picture icon (a world's first-person view, which the walker
+    /// preview animates instead).
+    turntable: Vec<ThumbnailFrame>,
+    step: usize,
+    tiles: Vec<Vec<u8>>,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -453,6 +510,12 @@ pub struct ThumbnailRenderer {
     draw_bg: DrawSceneTexture,
     #[new]
     pass: DrawPass,
+    /// The pass's main draw list. The scene renderer opens and CLOSES its
+    /// own list, so anything drawn after it (the PBR hero) would otherwise
+    /// land in the host window's list — outside this pass, invisible in the
+    /// readback. Every draw of the pass nests inside this one.
+    #[new]
+    pass_list: DrawList,
     #[new]
     draw_list: DrawList,
     #[new]
@@ -617,6 +680,13 @@ impl ThumbnailRenderer {
                 job.ao_png.is_some()
             );
 
+            // A world is shown by walking it, not by turning it; everything
+            // else that is a mesh gets a full turn.
+            let turntable = match job.spawn {
+                Some(_) => Vec::new(),
+                None => turntable_frames(min, max),
+            };
+            let frame = turntable.first().cloned().unwrap_or(frame);
             self.active = Some(ThumbnailActive {
                 file: job.file,
                 subject,
@@ -626,6 +696,9 @@ impl ThumbnailRenderer {
                 rendered: false,
                 readback_attempts: 0,
                 gpu_waits: 0,
+                turntable,
+                step: 0,
+                tiles: Vec::new(),
             });
         }
     }
@@ -667,7 +740,6 @@ impl ThumbnailRenderer {
                         texture: image_texture(cx, base_color),
                         palette,
                         bounds: Some(bounds),
-                        transform: frame.transform,
                     },
                     frame,
                     bounds.0,
@@ -683,8 +755,12 @@ impl ThumbnailRenderer {
             }
         }
 
-        // Raw Kenney / TRELLIS / factors-only: same DrawPbr MeshView uses.
-        if let Some(gltf) = parse_mesh_glb(&job.glb) {
+        // Same routing law as MeshView: a material-bearing GLB (paint
+        // output, textured Kenney) lights through DrawPbr; a bare TRELLIS
+        // hull or factors-only model takes the game statue lane, which
+        // computes normals and bakes baseColorFactor / COLOR_0 (DrawPbr on
+        // a mesh without normals came out as an unshaded white silhouette).
+        if let Some(gltf) = parse_material_bearing_glb(&job.glb) {
             match self
                 .pbr
                 .load(&mut self.draw_pbr, cx, gltf, self.generation)
@@ -745,6 +821,7 @@ impl ThumbnailRenderer {
                 transform: frame.transform,
                 dynamic: true,
                 depth_order: 0.0,
+                part_poses: Vec::new(),
             }),
             frame,
             min,
@@ -795,7 +872,11 @@ impl ThumbnailRenderer {
         // Clear-color readback = the GPU has not delivered the mesh yet.
         // Same camera, more frames. Never treat the asset as blank.
         if let Some(rgba) = &rgba {
-            if capture_is_clear_only(rgba, THUMBNAIL_CLEAR)
+            // Only the FIRST view waits: by the time the model has turned
+            // once the GPU has plainly delivered it, and a legitimately
+            // empty angle (an edge-on plane) must not restart the turn.
+            if active.step == 0
+                && capture_is_clear_only(rgba, THUMBNAIL_CLEAR)
                 && active.gpu_waits < THUMBNAIL_MAX_GPU_WAITS
             {
                 active.gpu_waits = active.gpu_waits.saturating_add(1);
@@ -812,6 +893,57 @@ impl ThumbnailRenderer {
             }
         }
 
+        // A turntable captures this view and turns to the next one. Only
+        // when every step is in hand is there a picture to encode.
+        if !active.turntable.is_empty() {
+            match rgba {
+                Some(rgba) => active.tiles.push(rgba),
+                None => {
+                    let file = active.file.clone();
+                    self.rejected_thumbnails.push(file);
+                    self.finish_active(cx);
+                    return;
+                }
+            }
+            active.step += 1;
+            if let Some(next) = active.turntable.get(active.step).cloned() {
+                // The model turns; the camera does not — so EVERY lane has
+                // to be handed the step's transform. Only the statue lane
+                // was, which is why props turned and rigged characters did
+                // not: a character's sixteen frames were sixteen copies of
+                // step 0. Nobody saw it, because a still card only ever
+                // draws frame 0 — but the VLM annotator reads the whole
+                // sheet, so every character in the catalog was described
+                // from one small view of its back, and "old man with a
+                // brown hat and a sword" was a guess (2026-08-21: the user
+                // saw a monkey).
+                //
+                // The skinned lane now reads `active.frame.transform` at
+                // draw time and has no copy of its own to go stale.
+                match &mut active.subject {
+                    ThumbnailSubject::Statue(instance) => {
+                        instance.transform = next.transform;
+                    }
+                    ThumbnailSubject::Pbr => self.pbr.set_fit(next.transform),
+                    ThumbnailSubject::Character { .. } => {}
+                }
+                active.frame = next;
+                active.rendered = false;
+                active.frames_drawn = 0;
+                active.warmup_target = THUMBNAIL_WARMUP_FRAMES;
+                self.area.redraw(cx);
+                return;
+            }
+            let tiles = std::mem::take(&mut active.tiles);
+            let file = active.file.clone();
+            match pack_turntable(&tiles) {
+                Some(png) => self.rendered_thumbnails.push(RenderedThumbnail { file, png }),
+                None => self.rejected_thumbnails.push(file),
+            }
+            self.finish_active(cx);
+            return;
+        }
+
         let encoded = rgba.and_then(|rgba| {
             makepad_asset_ai::testpattern::encode_png_rgba(&rgba, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
                 .map_err(|error| log!("thumbnail {file}: PNG encode failed: {error}"))
@@ -822,6 +954,10 @@ impl ThumbnailRenderer {
         } else {
             self.rejected_thumbnails.push(file);
         }
+        self.finish_active(cx);
+    }
+
+    fn finish_active(&mut self, cx: &mut Cx) {
         self.active = None;
         self.queue.finish_active();
         self.renderer = Renderer::default();
@@ -870,6 +1006,7 @@ impl ThumbnailRenderer {
         if let Some(scene_state) = preview_scene_state(look, rect, cx.time()) {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
+            self.pass_list.begin_always(cx3d);
             let mut character_items = Vec::new();
             let mut character_textures = Vec::new();
             let statues = match &active.subject {
@@ -879,10 +1016,9 @@ impl ThumbnailRenderer {
                     texture,
                     palette,
                     bounds,
-                    transform,
                 } => {
                     character_items.push(
-                        SkinnedDraw::new(1, *rig, *transform)
+                        SkinnedDraw::new(1, *rig, frame.transform)
                             .with_texture(0)
                             .with_bounds(*bounds)
                             .with_palette(palette.clone()),
@@ -926,6 +1062,7 @@ impl ThumbnailRenderer {
             if is_pbr {
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
+            self.pass_list.end(cx3d);
         }
         cx.end_pass(&self.pass);
         self.pass.set_dpi_factor(cx, 1.0);
@@ -1016,6 +1153,56 @@ mod tests {
         queue.finish_active();
         assert!(queue.take_next().is_none());
         assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// A TURNTABLE HAS TO TURN.
+    ///
+    /// Sixteen steps, sixteen different angles, one shared distance so the
+    /// subject does not grow and shrink as it goes round. The live failure
+    /// this pins was one lane down from here — the skinned lane never
+    /// received the step's transform, so every rigged character's sheet was
+    /// sixteen copies of frame 0 — and it was invisible because a still card
+    /// only ever draws frame 0. The VLM annotator reads the whole sheet, so
+    /// every character description in the catalog was written from one small
+    /// view of the model's back.
+    #[test]
+    fn every_turntable_step_is_a_different_angle_at_one_distance() {
+        let frames = turntable_frames(vec3f(-0.3, 0.0, -0.3), vec3f(0.3, 1.8, 0.3));
+        assert_eq!(frames.len(), TURNTABLE_STEPS);
+
+        // One distance for all of them: a subject that swelled mid-turn
+        // would read as broken.
+        let distance = frames[0].cam_distance;
+        assert!(distance.is_finite() && distance > 0.0);
+        for frame in &frames {
+            assert_eq!(frame.cam_distance, distance);
+            assert_eq!(frame.yaw, THUMBNAIL_CAM_YAW, "the MODEL turns, not the camera");
+            assert_eq!(frame.pitch, THUMBNAIL_CAM_PITCH);
+        }
+
+        // Sixteen DISTINCT rotations — the property the skinned lane was
+        // silently throwing away.
+        let mut seen: Vec<[f32; 4]> = Vec::new();
+        for frame in &frames {
+            let v = &frame.transform.v;
+            let key = [v[0], v[2], v[8], v[10]]; // the yaw basis
+            assert!(
+                !seen.iter().any(|s| s
+                    .iter()
+                    .zip(key.iter())
+                    .all(|(a, b)| (a - b).abs() < 1.0e-4)),
+                "two steps share an angle: {key:?}"
+            );
+            seen.push(key);
+        }
+
+        // And it is a full circle: the last step is one step short of home.
+        let back = frames[TURNTABLE_STEPS - 1].transform.v;
+        let home = frames[0].transform.v;
+        assert!(
+            (back[0] - home[0]).abs() > 1.0e-3 || (back[2] - home[2]).abs() > 1.0e-3,
+            "the turn must not land back where it started"
+        );
     }
 
     #[test]

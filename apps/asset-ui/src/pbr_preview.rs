@@ -23,9 +23,10 @@
 //! This file is a child module of mesh_view.rs (declared there via
 //! `#[path]`) because main.rs is owned by another lane and must not change.
 
-use makepad_gltf::{load_gltf_from_bytes, LoadedGltf};
+use makepad_gltf::{decode_mesh_primitive, load_gltf_from_bytes, LoadedGltf};
 use makepad_widgets::*;
 use makepad_xr::render::{GltfDrawObject, GltfMaterialState, GltfRenderer};
+use makepad_widgets::shader::draw_pbr::{DrawPbrMaterialState, DrawPbrTextureSet, PbrMeshHandle};
 
 /// Same fit rule as the statue path: normalize by the LARGEST dimension so
 /// wide/flat models don't blow past the view, feet on the ground plane.
@@ -202,18 +203,6 @@ pub fn parse_material_bearing_glb(glb: &[u8]) -> Option<MaterialBearingGltf> {
     Some(MaterialBearingGltf(loaded))
 }
 
-/// Any GLB with a mesh primitive, including Kenney unlit / factors-only.
-/// Thumbnails use this so a mesh always has a DrawPbr subject.
-pub fn parse_mesh_glb(glb: &[u8]) -> Option<MaterialBearingGltf> {
-    let loaded = load_gltf_from_bytes(glb, None).ok()?;
-    let has_mesh = loaded
-        .document
-        .meshes_slice()
-        .iter()
-        .any(|mesh| !mesh.primitives.is_empty());
-    has_mesh.then_some(MaterialBearingGltf(loaded))
-}
-
 /// World AABB over every draw object (local bounds through the node's world
 /// transform). None for empty scenes or any non-finite corner — a malformed
 /// mesh is rejected rather than fitted to garbage.
@@ -299,6 +288,93 @@ pub(crate) fn scaled_step(value: f32, up: bool, lo: f32, hi: f32) -> f32 {
     stepped.clamp(lo, hi)
 }
 
+/// Inspection views of the PBR branch (DrawPbr `u_view_mode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PbrViewMode {
+    #[default]
+    Lit,
+    /// Base color as authored, no lighting.
+    Albedo,
+    /// Shading normals (normal map applied) as RGB.
+    Normals,
+    Metallic,
+    Roughness,
+    /// White matte-ish material, lit: shape and shading without textures.
+    Clay,
+    /// Clay + triangle edges (topology).
+    Wire,
+}
+
+impl PbrViewMode {
+    pub const ALL: [PbrViewMode; 7] = [
+        PbrViewMode::Lit,
+        PbrViewMode::Albedo,
+        PbrViewMode::Normals,
+        PbrViewMode::Metallic,
+        PbrViewMode::Roughness,
+        PbrViewMode::Clay,
+        PbrViewMode::Wire,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PbrViewMode::Lit => "Lit",
+            PbrViewMode::Albedo => "Albedo",
+            PbrViewMode::Normals => "Normals",
+            PbrViewMode::Metallic => "Metallic",
+            PbrViewMode::Roughness => "Roughness",
+            PbrViewMode::Clay => "Clay",
+            PbrViewMode::Wire => "Wireframe",
+        }
+    }
+
+    /// The shader's `u_view_mode` value.
+    pub fn shader_value(self) -> f32 {
+        match self {
+            PbrViewMode::Lit => 0.0,
+            PbrViewMode::Albedo => 1.0,
+            PbrViewMode::Normals => 2.0,
+            PbrViewMode::Metallic => 3.0,
+            PbrViewMode::Roughness => 4.0,
+            PbrViewMode::Clay => 5.0,
+            PbrViewMode::Wire => 6.0,
+        }
+    }
+}
+
+/// Per-triangle-unique copy of a primitive with barycentrics in TEXCOORD_0
+/// and flat normals — what DrawPbr's wire view draws. `None` for a
+/// primitive that is not a triangle list.
+pub(crate) fn wire_mesh_arrays(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Option<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
+    if indices.len() < 3 || indices.len() % 3 != 0 {
+        return None;
+    }
+    let tri_count = indices.len() / 3;
+    let mut pos = Vec::with_capacity(tri_count * 3);
+    let mut nrm = Vec::with_capacity(tri_count * 3);
+    let mut uv = Vec::with_capacity(tri_count * 3);
+    let mut idx = Vec::with_capacity(tri_count * 3);
+    for tri in indices.chunks_exact(3) {
+        let a = *positions.get(tri[0] as usize)?;
+        let b = *positions.get(tri[1] as usize)?;
+        let c = *positions.get(tri[2] as usize)?;
+        let e1 = vec3f(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+        let e2 = vec3f(c[0] - a[0], c[1] - a[1], c[2] - a[2]);
+        let n = Vec3f::cross(e1, e2);
+        let n = if n.length() > 1.0e-12 { n.normalize() } else { vec3f(0.0, 1.0, 0.0) };
+        let n = [n.x, n.y, n.z];
+        let base = pos.len() as u32;
+        pos.extend_from_slice(&[a, b, c]);
+        nrm.extend_from_slice(&[n, n, n]);
+        uv.extend_from_slice(&[[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]);
+        idx.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    Some((pos, nrm, uv, idx))
+}
+
 /// The static PBR branch state MeshView owns: the retained glTF renderer,
 /// its fitted transform, host controls and the honest status. The DrawPbr
 /// shader itself stays a `#[live]` field on MeshView (script registration);
@@ -308,11 +384,31 @@ pub struct PbrPreview {
     renderer: Option<GltfRenderer>,
     fit: Option<Mat4f>,
     bounds: Option<(Vec3f, Vec3f)>,
+    /// Fitted model height (feet at y=0), the tilt pivot for the turntable.
+    fit_height: f32,
+    /// Turntable: the model spins about +Y (feet stay grounded) and tilts
+    /// about `tilt_axis` through its mid-height, while camera, key light
+    /// and environment stay put — the way you judge speculars: turn the
+    /// object under a fixed studio, not the studio around the object.
+    pub turntable_yaw: f32,
+    pub turntable_tilt: f32,
+    pub tilt_axis: Vec3f,
+    /// Inspection view (lit by default).
+    pub view_mode: PbrViewMode,
+    /// Direct + environment specular off (`u_spec_strength` = 0); default
+    /// (false) keeps them on.
+    pub speculars_off: bool,
+    /// Wire copies of the draw objects (parallel to `renderer.draw_objects`;
+    /// `None` where a primitive was not a triangle list). Built at load.
+    wire_meshes: Vec<Option<PbrMeshHandle>>,
     pub controls: PbrDisplayControls,
     pub status: Option<PbrStatus>,
     /// Host-supplied equirect environment, applied at the next draw (env
     /// cube building needs a CxDraw). Survives model reloads on purpose.
     pending_env: Option<Vec<u8>>,
+    /// Drop the custom environment at the next draw (back to the
+    /// procedural sky).
+    pending_env_reset: bool,
     custom_env: bool,
 }
 
@@ -325,6 +421,7 @@ impl PbrPreview {
         self.fit = None;
         self.bounds = None;
         self.status = None;
+        self.wire_meshes.clear();
         draw.clear_meshes();
     }
 
@@ -373,7 +470,20 @@ impl PbrPreview {
             custom_env: self.custom_env,
         });
         self.bounds = Some((min, max));
+        self.fit_height = (max.y - min.y) * _scale;
         self.fit = Some(fit);
+        // Wire copies for the topology view: same primitives, per-triangle
+        // vertices with barycentric UVs (see `wire_mesh_arrays`).
+        self.wire_meshes = renderer
+            .draw_objects
+            .iter()
+            .map(|object| {
+                let decoded = decode_mesh_primitive(&loaded, object.mesh_index, object.primitive_index).ok()?;
+                let (pos, nrm, uv, idx) = wire_mesh_arrays(&decoded.positions, &decoded.indices)?;
+                draw.upload_indexed_triangles_mesh(cx, &pos, Some(&nrm), None, Some(&uv), None, &idx)
+                    .ok()
+            })
+            .collect();
         self.renderer = Some(renderer);
         Ok(())
     }
@@ -421,6 +531,13 @@ impl PbrPreview {
     #[allow(dead_code)]
     pub fn set_env_equirect(&mut self, bytes: Vec<u8>) {
         self.pending_env = Some(bytes);
+        self.pending_env_reset = false;
+    }
+
+    /// Back to DrawPbr's procedural sky environment at the next draw.
+    pub fn clear_env(&mut self) {
+        self.pending_env = None;
+        self.pending_env_reset = true;
     }
 
     /// Light/exposure/environment keys for the focused pane. Returns false
@@ -485,6 +602,13 @@ impl PbrPreview {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        if std::mem::take(&mut self.pending_env_reset) {
+            draw.reset_default_env();
+            self.custom_env = false;
+            if let Some(status) = &mut self.status {
+                status.custom_env = false;
+            }
+        }
         if let Some(bytes) = self.pending_env.take() {
             match draw.load_default_env_equirect_from_bytes(cx, &bytes, None) {
                 Ok(()) => {
@@ -501,19 +625,217 @@ impl PbrPreview {
         draw.light_color = rig.light_color;
         draw.ambient = rig.ambient;
         draw.env_intensity = rig.env_intensity;
+        draw.spec_strength = if self.speculars_off { 0.0 } else { 0.9 };
+        draw.view_mode = self.view_mode.shader_value();
         draw.reset_matrix();
         let Some(fit) = self.fit else {
             return;
         };
-        if let Err(e) = renderer.draw_with_transform(draw, cx, fit) {
+        let world = turntable_transform(
+            fit,
+            self.fit_height,
+            self.turntable_yaw,
+            self.turntable_tilt,
+            self.tilt_axis,
+        );
+        if self.view_mode == PbrViewMode::Wire {
+            // Wire copies with a neutral material (the shader ignores the
+            // textures in clay/wire anyway) and the default environment.
+            let env = Some(draw.default_env_texture(cx));
+            let material = DrawPbrMaterialState {
+                textures: DrawPbrTextureSet {
+                    env,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            for (object, wire) in renderer.draw_objects.iter().zip(&self.wire_meshes) {
+                let Some(handle) = *wire else { continue };
+                draw.set_transform(Mat4f::mul(&world, &object.world_transform));
+                draw.apply_material_state(&material);
+                if let Err(e) = draw.draw_mesh(cx, handle) {
+                    log!("mesh_view pbr: wire draw failed: {e}");
+                }
+            }
+            return;
+        }
+        if let Err(e) = renderer.draw_with_transform(draw, cx, world) {
             log!("mesh_view pbr: draw failed: {e}");
         }
     }
 }
 
+/// `fit` followed by a spin about +Y (feet stay on the slab) and a tilt
+/// about `tilt_axis` through the model's mid-height.
+pub(crate) fn turntable_transform(
+    fit: Mat4f,
+    fit_height: f32,
+    yaw: f32,
+    tilt: f32,
+    tilt_axis: Vec3f,
+) -> Mat4f {
+    if yaw == 0.0 && tilt == 0.0 {
+        return fit;
+    }
+    let spin = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
+    let mut world = Mat4f::mul(&spin, &fit);
+    if tilt != 0.0 && tilt_axis.length() > 1.0e-6 {
+        let pivot = vec3f(0.0, fit_height.max(0.0) * 0.5, 0.0);
+        let rot = Pose {
+            orientation: Quat::from_axis_angle(tilt_axis.normalize(), tilt),
+            position: vec3f(0.0, 0.0, 0.0),
+        }
+        .to_mat4();
+        let about_pivot = Mat4f::mul(
+            &Mat4f::translation(pivot),
+            &Mat4f::mul(&rot, &Mat4f::translation(pivot * -1.0)),
+        );
+        world = Mat4f::mul(&about_pivot, &world);
+    }
+    world
+}
+
+/// Studio product-shot rig: a strong warm-white key from upper camera-left,
+/// a little less fill, and the reflections doing the talking. Pair with
+/// [`studio_equirect_png`].
+pub const STUDIO_LIGHT_DIR: Vec3f = Vec3f { x: -0.55, y: 0.75, z: 0.55 };
+pub const STUDIO_LIGHT_INTENSITY: f32 = 1.35;
+pub const STUDIO_AMBIENT: f32 = 0.30;
+pub const STUDIO_ENV_INTENSITY: f32 = 1.9;
+
+impl PbrDisplayControls {
+    /// The day-studio rig (see [`STUDIO_LIGHT_DIR`]).
+    pub fn studio() -> Self {
+        Self {
+            light_dir: STUDIO_LIGHT_DIR,
+            light_color: vec3(1.0, 0.98, 0.94),
+            light_intensity: STUDIO_LIGHT_INTENSITY,
+            ambient: STUDIO_AMBIENT,
+            env_intensity: STUDIO_ENV_INTENSITY,
+            ..Self::default()
+        }
+    }
+}
+
+/// Procedural studio environment as an equirect PNG (`W×H`, lon→u with
+/// +X at u=0.5 and +Z at u=0.75, +Y at the top): a neutral grey cyclorama
+/// with a large soft key box, a smaller fill box, a thin rim strip and a
+/// dark floor. Metallic and glossy surfaces read from the sharp bright
+/// boxes; the procedural sky gradient gave them nothing to reflect.
+pub fn studio_equirect_png() -> Vec<u8> {
+    const W: usize = 512;
+    const H: usize = 256;
+    let mut rgba = vec![0u8; W * H * 4];
+    let softbox = |dir: Vec3f, center: Vec3f, half_w: f32, half_h: f32, up: Vec3f| -> f32 {
+        // Angular box: distance of `dir` from the box centre measured along
+        // the box's own right/up axes (in radians), with soft edges.
+        let c = center.normalize();
+        let right = Vec3f::cross(up, c).normalize();
+        let up = Vec3f::cross(c, right).normalize();
+        let d = dir.dot(c);
+        if d <= 0.0 {
+            return 0.0;
+        }
+        let x = dir.dot(right).atan2(d).abs();
+        let y = dir.dot(up).atan2(d).abs();
+        // Wide, smooth edges: DrawPbr samples the environment without
+        // roughness prefiltering, so a hard box edge would print as a
+        // stripe across every rough surface. Smoothstep over ~0.35 rad.
+        let soft = |d: f32| {
+            let t = 1.0 - (d / 0.35).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        soft((x - half_w).max(0.0)) * soft((y - half_h).max(0.0))
+    };
+    for y in 0..H {
+        let v = (y as f32 + 0.5) / H as f32;
+        let lat = (0.5 - v) * std::f32::consts::PI;
+        for x in 0..W {
+            let u = (x as f32 + 0.5) / W as f32;
+            let lon = (u - 0.5) * 2.0 * std::f32::consts::PI;
+            let dir = vec3(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+            // Cyclorama: mid grey walls, lighter towards the top, dark floor.
+            let up_t = (dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+            let mut c = if dir.y < -0.15 {
+                vec3(0.05, 0.05, 0.055)
+            } else {
+                vec3(0.16, 0.165, 0.175) + vec3(0.06, 0.06, 0.06) * up_t
+            };
+            let key = softbox(dir, STUDIO_LIGHT_DIR, 0.45, 0.32, vec3(0.0, 1.0, 0.0));
+            let fill = softbox(dir, vec3(0.75, 0.25, 0.60), 0.32, 0.26, vec3(0.0, 1.0, 0.0));
+            let rim = softbox(dir, vec3(0.30, 0.55, -0.85), 0.60, 0.10, vec3(0.0, 1.0, 0.0));
+            c = c + vec3(0.92, 0.90, 0.86) * key + vec3(0.50, 0.54, 0.60) * fill + vec3(0.7, 0.7, 0.7) * rim;
+            let i = (y * W + x) * 4;
+            rgba[i] = (c.x.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 1] = (c.y.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 2] = (c.z.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 3] = 255;
+        }
+    }
+    makepad_asset_ai::testpattern::encode_png_rgba(&rgba, W, H).expect("studio equirect encodes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_mesh_carries_barycentrics_and_flat_normals() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
+        let indices = [0u32, 1, 2, 2, 1, 3];
+        let (pos, nrm, uv, idx) = wire_mesh_arrays(&positions, &indices).unwrap();
+        assert_eq!(pos.len(), 6);
+        assert_eq!(idx, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(uv[0], [1.0, 0.0]);
+        assert_eq!(uv[1], [0.0, 1.0]);
+        assert_eq!(uv[2], [0.0, 0.0]);
+        // Both triangles face +Z (counter-clockwise), flat per triangle.
+        assert!(nrm.iter().all(|n| (n[2] - 1.0).abs() < 1e-6));
+        assert!(wire_mesh_arrays(&positions, &indices[..4]).is_none());
+        assert!(wire_mesh_arrays(&positions, &[0, 1, 9]).is_none());
+        assert_eq!(PbrViewMode::Wire.shader_value(), 6.0);
+        assert_eq!(PbrViewMode::ALL.len(), 7);
+    }
+
+    #[test]
+    fn turntable_spins_about_the_feet_and_tilts_about_mid_height() {
+        let fit = Mat4f::identity();
+        // Pure yaw: a point on the ground plane stays on it, and a quarter
+        // turn about +Y maps +X to -Z.
+        let m = turntable_transform(fit, 2.0, std::f32::consts::FRAC_PI_2, 0.0, vec3f(1.0, 0.0, 0.0));
+        let p = m.transform_vec4(vec4(1.0, 0.0, 0.0, 1.0));
+        assert!(p.y.abs() < 1e-5 && (p.z + 1.0).abs() < 1e-5, "{p:?}");
+        // Pure tilt about X through mid-height (y=1): the pivot is fixed and
+        // the top comes forward while the feet go back.
+        let m = turntable_transform(fit, 2.0, 0.0, 0.5, vec3f(1.0, 0.0, 0.0));
+        let pivot = m.transform_vec4(vec4(0.0, 1.0, 0.0, 1.0));
+        assert!((pivot.x).abs() < 1e-5 && (pivot.y - 1.0).abs() < 1e-5 && pivot.z.abs() < 1e-5);
+        let top = m.transform_vec4(vec4(0.0, 2.0, 0.0, 1.0));
+        let feet = m.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
+        assert!((top.z + feet.z).abs() < 1e-5 && top.z.abs() > 0.4, "{top:?} {feet:?}");
+        // Identity when nothing is dialed.
+        assert_eq!(turntable_transform(fit, 2.0, 0.0, 0.0, vec3f(1.0, 0.0, 0.0)).v, fit.v);
+    }
+
+    #[test]
+    fn studio_equirect_is_a_bright_key_over_a_grey_room() {
+        let png = studio_equirect_png();
+        let image = ImageBuffer::from_png(&png).unwrap();
+        assert_eq!((image.width, image.height), (512, 256));
+        // The key box centre (upper camera-left) is near white; the floor is dark.
+        let px = |u: f32, v: f32| {
+            let x = (u * 512.0) as usize;
+            let y = (v * 256.0) as usize;
+            let p = image.data[y * 512 + x];
+            ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff)
+        };
+        let lon = STUDIO_LIGHT_DIR.z.atan2(STUDIO_LIGHT_DIR.x);
+        let lat = STUDIO_LIGHT_DIR.normalize().y.asin();
+        let (kr, _, _) = px(0.5 + lon / (2.0 * std::f32::consts::PI), 0.5 - lat / std::f32::consts::PI);
+        assert!(kr > 240, "key box centre should be near white, got {kr}");
+        let (fr, _, _) = px(0.1, 0.95);
+        assert!(fr < 40, "floor should be dark, got {fr}");
+    }
 
     #[test]
     fn resolve_applies_exposure_to_every_light_source() {
