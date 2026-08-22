@@ -51,10 +51,14 @@ use std::path::Path;
 ///   is an `ALTER TABLE ADD COLUMN` or a `CREATE ... IF NOT EXISTS`, so the
 ///   step costs one index build and no table rewrite however large the
 ///   store is.
+/// - v10: reference blobs (`blob_refs`) — catalogued content whose bytes stay
+///   at an external path the store reads but never owns, writes or deletes.
+///   One `CREATE TABLE IF NOT EXISTS` and one index; no existing table is
+///   touched and no row is rewritten, so the step is free on any store.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 9;
+pub const SERVER_SCHEMA_VERSION: i64 = 10;
 
 pub struct AssetServerCore {
     db: Db,
@@ -208,11 +212,39 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                     db.exec("create catalog schema", CATALOG_SCHEMA)?;
                     db.exec("create gc schema", crate::gc::GC_SCHEMA)?;
                 }
+                // v10: reference blobs. One new table and one index, both
+                // IF NOT EXISTS, and nothing existing is read or rewritten:
+                // this step costs the same on an empty root and a ten-
+                // million-object one.
+                9 => {
+                    db.exec("create blob ref schema", crate::blobrefs::BLOBREF_SCHEMA)?;
+                }
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }
             db.exec("set user_version", &format!("PRAGMA user_version={}", version + 1))
         })?;
     }
+}
+
+/// What admitting a file by reference did. `deduped` means the catalog
+/// already knew this digest; `owned` means the store holds the bytes in its
+/// own CAS, so no reference was recorded and the external file is incidental.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefCommit {
+    pub blob_id: BlobId,
+    pub size: u64,
+    pub deduped: bool,
+    pub owned: bool,
+    /// The absolute path recorded (or, when `owned`, the path that was read).
+    pub path: std::path::PathBuf,
+}
+
+/// One bounded page of a reference re-scan.
+#[derive(Clone, Debug, Default)]
+pub struct RefRescanPage {
+    pub entries: Vec<(crate::blobrefs::BlobRef, crate::blobrefs::RefState)>,
+    /// Resume key: pass as `after` for the next page. `None` = finished.
+    pub next: Option<BlobId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -309,6 +341,10 @@ impl AssetServerCore {
         &self.cas
     }
 
+    pub fn blob_refs(&self) -> crate::blobrefs::BlobRefs<'_> {
+        crate::blobrefs::BlobRefs { db: &self.db, budgets: &self.budgets }
+    }
+
     pub fn gc(&self) -> crate::gc::Gc<'_> {
         crate::gc::Gc { db: &self.db, budgets: &self.budgets }
     }
@@ -376,11 +412,99 @@ impl AssetServerCore {
 
     /// Read a blob the catalog knows about, verifying its digest. Unrecorded
     /// objects are invisible: catalog first, then CAS, both fail closed.
+    ///
+    /// A blob the CAS does not hold may still be a REFERENCE (see
+    /// [`crate::blobrefs`]): bytes the store catalogued where they already
+    /// lay. Those are read from their external path and verified exactly as
+    /// hard as a CAS object — same length check, same full-digest check
+    /// before a single byte is returned. The CAS is tried first so a blob
+    /// that exists both ways is served from the copy the store owns.
     pub fn read_blob(&self, blob_id: &BlobId) -> ServerResult<Vec<u8>> {
         if !self.catalog().has_blob(blob_id)? {
             return Err(ServerError::NotFound { what: "blob record" });
         }
+        if self.cas.contains(blob_id) {
+            return self.cas.read_verified(blob_id);
+        }
+        if let Some(entry) = self.blob_refs().lookup(blob_id)? {
+            return crate::blobrefs::read_verified(&entry, &self.budgets);
+        }
+        // Recorded, not in the CAS, not referenced: the object is gone.
+        // `read_verified` produces the established NotFound for that.
         self.cas.read_verified(blob_id)
+    }
+
+    /// Is this blob held as a reference rather than owned bytes? Callers that
+    /// must plan a response length before reading (the batch pull) ask this
+    /// so they can cheaply re-stat the external file first.
+    pub fn blob_ref_of(&self, blob_id: &BlobId) -> ServerResult<Option<crate::blobrefs::BlobRef>> {
+        if self.cas.contains(blob_id) {
+            return Ok(None);
+        }
+        self.blob_refs().lookup(blob_id)
+    }
+
+    // ---- reference blobs (bytes the store catalogues but does not copy) ----
+
+    /// Admit a file WHERE IT LIES: hash it in place, record the `blobs` row,
+    /// then the `blob_refs` row. Nothing is copied and nothing is written to
+    /// the file.
+    ///
+    /// Ordering mirrors the CAS admission law (hash first, catalog second):
+    /// a crash between the two steps leaves a `blobs` row whose bytes cannot
+    /// be found, which every read refuses loudly, and never a reference row
+    /// for a blob the catalog does not know.
+    ///
+    /// Idempotent. Re-importing an unchanged file re-derives the same digest
+    /// and reports `deduped`. If the store ALREADY OWNS these bytes in its
+    /// CAS, no reference is recorded at all: owned bytes are strictly better
+    /// than a promise about someone else's file.
+    pub fn put_blob_ref(&self, path: &Path, now_ms: u64) -> ServerResult<BlobRefCommit> {
+        let scan = crate::blobrefs::scan_file(path, &self.budgets)?;
+        let already = self.catalog().has_blob(&scan.blob_id)?;
+        self.catalog().record_blob(&scan.blob_id, scan.size, now_ms)?;
+        let owned = self.cas.contains(&scan.blob_id);
+        if !owned {
+            self.blob_refs()
+                .record(&scan.blob_id, &scan.path, scan.size, scan.mtime_ms, now_ms)?;
+        }
+        Ok(BlobRefCommit {
+            blob_id: scan.blob_id,
+            size: scan.size,
+            deduped: already,
+            owned,
+            path: scan.path,
+        })
+    }
+
+    /// What a reference looks like on disk right now, without producing
+    /// bytes. `None` when the blob is not a reference at all.
+    pub fn verify_blob_ref(
+        &self,
+        blob_id: &BlobId,
+    ) -> ServerResult<Option<crate::blobrefs::RefState>> {
+        Ok(self
+            .blob_refs()
+            .lookup(blob_id)?
+            .map(|entry| crate::blobrefs::verify(&entry, &self.budgets)))
+    }
+
+    /// One bounded page of a whole-library re-scan: verify up to `limit`
+    /// references in digest order and report each one's state. The caller
+    /// chooses the cost per call and resumes with `next`.
+    pub fn rescan_blob_refs(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ServerResult<RefRescanPage> {
+        let entries = self.blob_refs().list(after, limit)?;
+        let next = entries.last().map(|e| e.blob_id);
+        let mut states = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let state = crate::blobrefs::verify(&entry, &self.budgets);
+            states.push((entry, state));
+        }
+        Ok(RefRescanPage { entries: states, next })
     }
 
     // ---- deterministic stock seeding ---------------------------------------

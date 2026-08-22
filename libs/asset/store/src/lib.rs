@@ -7,6 +7,11 @@
 //! - **CAS** ([`cas`]): filesystem SHA-256 store. Streaming hash-while-write
 //!   into temp files, fsync + atomic rename commit, dedup by digest,
 //!   re-hash-on-read corruption refusal, orphan cleanup on restart.
+//! - **Reference blobs** ([`blobrefs`]): content the store catalogues without
+//!   copying — the original file stays at its own path and only its path,
+//!   size and digest are recorded. Every read re-verifies all three, so such
+//!   a blob can become unavailable but never wrong. For libraries of video
+//!   too large to duplicate; the store never deletes a referenced file.
 //! - **Catalog** ([`catalog`]): SQLite (WAL) rows for blobs, immutable
 //!   asset/game revisions keyed by the SHA-256 of their canonical manifest
 //!   bytes, staged/published/quarantined candidates, mutable alias heads,
@@ -44,6 +49,7 @@
 //! transport auth secrets, and randomness for opaque IDs.
 
 pub mod auth;
+pub mod blobrefs;
 pub mod budget;
 pub mod cas;
 pub mod catalog;
@@ -59,6 +65,7 @@ pub mod variants;
 mod sqlite;
 
 pub use auth::{token_hash, Auth, Capability, PrincipalId, Scope};
+pub use blobrefs::{BlobRef, BlobRefs, RefScan, RefState};
 pub use budget::Budgets;
 pub use cas::{BlobCommit, BlobWriter, Cas};
 pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
@@ -80,7 +87,9 @@ pub use search::{
     SearchQuery, SearchViewer, ViewerScope, Visibility,
 };
 pub use seed::{stock_asset_id, SeedAsset, SeedReport, StockSeedSource};
-pub use server::{AssetServerCore, RecoverReport, SERVER_SCHEMA_VERSION};
+pub use server::{
+    AssetServerCore, BlobRefCommit, RecoverReport, RefRescanPage, SERVER_SCHEMA_VERSION,
+};
 
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.
 pub mod host;
