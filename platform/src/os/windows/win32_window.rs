@@ -208,6 +208,11 @@ pub struct Win32Window {
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
     pub is_popup: bool,
+    /// See `CxOsOp::SetChromelessWhenMaximized`: drop the maximized-state
+    /// border/thickframe strip `extended_client_border_thickness` would
+    /// otherwise keep, so a maximized window is a clean fullscreen client
+    /// area rather than a decorated window pinned to the work area.
+    pub chromeless_when_maximized: bool,
     ime_saved_himc: HIMC,
 }
 
@@ -285,11 +290,17 @@ impl Win32Window {
     /// Resize is emulated via `WM_NCHITTEST` `HT*` returns instead.
     ///
     /// Maximized windows still keep border+thickframe insets so the client
-    /// matches the monitor work area.
+    /// matches the monitor work area — unless `chromeless_when_maximized`
+    /// is set, in which case maximized stays fully client-sized too, same
+    /// as restored: a projector output has nowhere for a work-area strip
+    /// to make sense.
     fn extended_client_border_thickness(&self) -> RECT {
         let style = self.get_style();
         let ex_style = self.get_ex_style();
-        if (style.0 & WS_CAPTION.0) == WS_CAPTION.0 && self.get_is_maximized() {
+        if (style.0 & WS_CAPTION.0) == WS_CAPTION.0
+            && self.get_is_maximized()
+            && !self.chromeless_when_maximized
+        {
             // Caption is drawn into the client; keep only border+thickframe for work-area.
             self.frame_border_thickness(
                 WINDOW_STYLE((style.0 & !WS_CAPTION.0) | WS_BORDER.0 | WS_THICKFRAME.0),
@@ -561,6 +572,7 @@ impl Win32Window {
             track_mouse_event: false,
             is_fullscreen,
             is_popup: false,
+            chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
     }
@@ -614,6 +626,7 @@ impl Win32Window {
             track_mouse_event: false,
             is_fullscreen: false,
             is_popup: true,
+            chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
     }
@@ -1282,6 +1295,14 @@ impl Win32Window {
                 .unwrap();
             }
         }
+    }
+
+    /// See `CxOsOp::SetChromelessWhenMaximized`. Forces a `WM_NCCALCSIZE`
+    /// pass so a currently-maximized window picks up the new insets right
+    /// away instead of waiting for its next resize/move.
+    pub fn set_chromeless_when_maximized(&mut self, chromeless: bool) {
+        self.chromeless_when_maximized = chromeless;
+        self.force_frame_change();
     }
 
     pub fn get_is_topmost(&self) -> bool {

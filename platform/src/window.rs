@@ -254,6 +254,16 @@ impl CxWindowPool {
         );
     }
 
+    /// Every allocated window slot, as a generation-correct `WindowId`.
+    /// Callers usually want to skip the ones whose `is_created` is false.
+    pub fn id_iter(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.0
+            .pool
+            .iter()
+            .enumerate()
+            .map(|(index, item)| WindowId(index, item.generation))
+    }
+
     pub fn is_valid(&self, v: WindowId) -> bool {
         if v.0 < self.0.pool.len() {
             if self.0.pool[v.0].generation == v.1 {
@@ -333,7 +343,7 @@ impl WindowHandle {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
-        cxwindow.create_title = "Makepad".to_string();
+        cxwindow.create_title = crate::remote::tag_window_title("Makepad".to_string());
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cxwindow.create_app_id = default_app_id();
@@ -436,7 +446,8 @@ impl ScriptHook for ScriptWindowHandle {
         let cx = vm.host.cx_mut();
         let window_id = self.handle.window_id();
         if !self.title.is_empty() {
-            cx.windows[window_id].create_title = self.title.clone();
+            cx.windows[window_id].create_title =
+                crate::remote::tag_window_title(self.title.clone());
         }
         if !self.app_id.is_empty() {
             cx.windows[window_id].create_app_id = self.app_id.clone();
@@ -490,7 +501,7 @@ impl WindowHandle {
         title: String,
     ) {
         let window = &mut cx.windows[self.window_id()];
-        window.create_title = title;
+        window.create_title = crate::remote::tag_window_title(title);
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
         window.is_fullscreen = is_fullscreen;
@@ -548,6 +559,18 @@ impl WindowHandle {
 
     pub fn set_topmost(&mut self, cx: &mut Cx, set_topmost: bool) {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
+    }
+
+    /// Windows only: a maximized window normally keeps a border/titlebar
+    /// strip so its client area matches the monitor work area. Setting this
+    /// drops that strip while maximized instead, so the window reads as a
+    /// clean fullscreen picture (a projector output, say) rather than a
+    /// decorated window pinned to the screen. Other backends ignore it.
+    pub fn set_chromeless_when_maximized(&mut self, cx: &mut Cx, chromeless: bool) {
+        cx.push_unique_platform_op(CxOsOp::SetChromelessWhenMaximized(
+            self.window_id(),
+            chromeless,
+        ));
     }
 
     pub fn set_window_visuals(&mut self, cx: &mut Cx, visuals: WindowVisuals) {
