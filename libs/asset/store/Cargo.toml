@@ -16,25 +16,9 @@ path = "src/lib.rs"
 name = "makepad-asset-store"
 path = "src/bin/makepad-asset-store.rs"
 
-[features]
-# Run the catalog on Makepad's own SQLite-format engine instead of linking
-# libsqlite3. Off by default on unix: the C library stays the shipping path
-# until this has soaked. Same file format either way.
-#
-# ON WINDOWS IT IS NOT A CHOICE. There is no system libsqlite3 to link
-# against — `link.exe` simply cannot open `sqlite3.lib` — so every Windows
-# build uses the own engine whether or not the feature is named. The `cfg`s
-# in `sqlite.rs`/`host/appdb.rs` read `any(feature = "own-db", windows)`,
-# and the target dependency below makes the crate available there
-# unconditionally.
-own-db = ["dep:makepad-sqlite"]
-
-[target.'cfg(windows)'.dependencies]
-# Not optional: Windows has no libsqlite3 to fall back to.
-makepad-sqlite = { path = "../../sqlite_query" }
 
 [dependencies]
-makepad-sqlite = { path = "../../sqlite_query", optional = true }
+makepad-sqlite = { path = "../../sqlite_query" }
 makepad-asset-data = { path = "../data" }
 makepad-asset-chat = { path = "../chat" }
 makepad-asset-client = { path = "../client" }

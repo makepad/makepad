@@ -361,13 +361,16 @@ impl<'a> BlobRefs<'a> {
             .ok_or(ServerError::InvalidInput { what: "blob ref path encoding" })?;
         let mut s = self.db.prepare(
             "record blob ref",
+            // Parameter-form upsert: the own engine executes `DO UPDATE SET
+            // col = ?n` (the catalog's alias upsert is its parse test) but
+            // not the `excluded.` pseudo-table yet.
             "INSERT INTO blob_refs(blob_id, path, size, mtime_ms, recorded_ms)
              VALUES(?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(blob_id) DO UPDATE SET
-                 path = excluded.path,
-                 size = excluded.size,
-                 mtime_ms = excluded.mtime_ms,
-                 recorded_ms = excluded.recorded_ms",
+                 path = ?2,
+                 size = ?3,
+                 mtime_ms = ?4,
+                 recorded_ms = ?5",
         )?;
         s.bind_blob(1, blob_id.as_bytes())?;
         s.bind_text(2, text)?;
