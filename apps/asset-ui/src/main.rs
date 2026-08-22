@@ -85,6 +85,7 @@ use crate::asset_store_state::{
 use makepad_asset_client::GcStatusDto;
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
 use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
+use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipeline::{
     ENHANCE_FACTORS,
     consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
@@ -2531,10 +2532,10 @@ script_mod! {
                                             margin: Inset{left: 16 top: 10}
                                             text: "Video results (mp4) appear here."
                                         }
-                                        video_img := Image{
+                                        viewer_video := VideoView{
                                             width: Fill
                                             height: Fill
-                                            fit: ImageFit.Smallest
+                                            margin: Inset{left: 8 right: 8 bottom: 8}
                                         }
                                     }
 
@@ -3761,6 +3762,12 @@ pub struct App {
     library: Option<Library>,
     #[rust]
     video: Option<VideoPlayer>,
+    /// The file the viewer's current video came from — Restart and the loop
+    /// toggle re-open it.
+    video_path: Option<PathBuf>,
+    /// Which library row the rail's video player currently belongs to, so a
+    /// well refresh does not reopen (and restart) the playing clip.
+    library_video_file: Option<String>,
     #[rust]
     video_texture: Option<Texture>,
     #[rust]
@@ -7312,6 +7319,8 @@ impl App {
                         &format!("{}x{}  {}", player.width, player.height, path.display()),
                     );
                     self.video = Some(player);
+                    self.video_path = Some(path.clone());
+                    self.sync_video_transport(cx);
                     self.video_pump = cx.new_next_frame();
                     self.show_page(cx, id!(video_page));
                     true
@@ -9171,8 +9180,11 @@ impl App {
                     generation: open.generation,
                     copy_to: open.copy_to,
                 },
-            store: None,
-        });
+                // The catalog source rides along — dropping it here is how
+                // "view this store video" once became a read of an empty
+                // path ("No such file or directory").
+                store: open.store,
+            });
         }
     }
 
@@ -10251,6 +10263,22 @@ impl App {
         let file = store_file_id(&asset);
         let item = self.catalog_work.get(&file).cloned();
         let asset_key = asset.to_string();
+        // Selecting away from a playing rail clip stops it — the player
+        // belongs to the selection, not to the app forever.
+        let selecting_video = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("video/"))
+            .unwrap_or(false);
+        if !selecting_video
+            && self
+                .library_video_file
+                .as_deref()
+                .is_some_and(|owned| owned != file.as_str())
+        {
+            self.stop_video_playback();
+            self.clear_video_frame(cx);
+            self.library_video_file = None;
+        }
 
         // A WORLD walks itself: the shared well runs the same autonomous
         // walkthrough the VJ does — build the level's collision and
@@ -10366,6 +10394,40 @@ impl App {
                 self.show_preview(cx, PreviewContent::Empty("Loading the model…".into()));
                 return;
             }
+        }
+
+        // Video: the shared player widget. The same app-owned player that
+        // serves the big viewer serves the rail — whichever surface is
+        // showing, the pump feeds both widget faces.
+        let is_video = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("video/"))
+            .unwrap_or(false);
+        if is_video {
+            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                if self.library_video_file.as_deref() != Some(file.as_str()) {
+                    self.stop_video_playback();
+                    self.clear_video_frame(cx);
+                    match VideoPlayer::new(&path.to_string_lossy()) {
+                        Ok(player) => {
+                            self.library_video_file = Some(file.clone());
+                            self.video = Some(player);
+                            self.video_path = Some(path);
+                            self.video_pump = cx.new_next_frame();
+                        }
+                        Err(error) => log!("library preview: {file} video open failed: {error}"),
+                    }
+                }
+                let aspect = self
+                    .video
+                    .as_ref()
+                    .map(|player| player.width.max(1) as f64 / player.height.max(1) as f64)
+                    .unwrap_or(16.0 / 9.0);
+                self.show_preview(cx, PreviewContent::Video { aspect });
+                return;
+            }
+            self.show_preview(cx, PreviewContent::Empty("Fetching the clip…".into()));
+            return;
         }
 
         // Audio: the DJ player. The catalog thumbnail goes up instantly and
@@ -11943,7 +12005,9 @@ impl App {
     /// state, or an error state.
     fn clear_video_frame(&mut self, cx: &mut Cx) {
         self.video_texture = None;
-        self.ui.image(cx, ids!(video_img)).set_texture(cx, None);
+        if let Some(mut video) = self.viewer_video(cx).borrow_mut::<VideoView>() {
+            video.set_frame(cx, None);
+        }
         self.ui.label(cx, ids!(video_info)).set_text(cx, "");
     }
 
@@ -12249,6 +12313,74 @@ impl App {
 
     // -- per-frame video pump ----------------------------------------------------
 
+
+    /// Push the player's clock + state into the shared video widget(s).
+    fn sync_video_transport(&mut self, cx: &mut Cx) {
+        let (fraction, playing, position) = match &self.video {
+            Some(player) => {
+                let duration = player.duration_secs();
+                let position = player.position_secs();
+                let fraction = if duration > 0.0 {
+                    (position / duration).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (
+                    fraction,
+                    !player.is_paused(),
+                    format!(
+                        "{}:{:04.1} / {}:{:04.1}",
+                        position as u32 / 60,
+                        position % 60.0,
+                        duration as u32 / 60,
+                        duration % 60.0
+                    ),
+                )
+            }
+            None => (1.0, false, "ended".to_string()),
+        };
+        let scrubbing = self
+            .viewer_video(cx)
+            .borrow::<VideoView>()
+            .map(|video| video.is_scrubbing())
+            .unwrap_or(false);
+        if !scrubbing {
+            if let Some(mut video) = self.viewer_video(cx).borrow_mut::<VideoView>() {
+                video.set_transport(cx, fraction, playing, &position);
+            }
+            if let Some(preview) = self
+                .ui
+                .widget(cx, ids!(detail_content))
+                .borrow::<ContentPreview>()
+            {
+                preview.set_video_transport(cx, fraction, playing, &position);
+            }
+        }
+    }
+
+    fn viewer_video(&self, cx: &mut Cx) -> WidgetRef {
+        self.ui.widget(cx, ids!(viewer_video))
+    }
+
+    /// Re-opens the viewer's current video from the start. False when no
+    /// video was open in the viewer.
+    fn restart_viewer_video(&mut self, cx: &mut Cx) -> bool {
+        let Some(path) = self.video_path.clone() else { return false };
+        self.stop_video_playback();
+        match VideoPlayer::new(&path.to_string_lossy()) {
+            Ok(player) => {
+                self.video = Some(player);
+                self.sync_video_transport(cx);
+                self.video_pump = cx.new_next_frame();
+                true
+            }
+            Err(error) => {
+                log!("video restart failed: {error}");
+                false
+            }
+        }
+    }
+
     fn pump_video(&mut self, cx: &mut Cx) {
         let Some(player) = &mut self.video else { return };
         if let Some(frame) = player.take_due_frame() {
@@ -12265,22 +12397,43 @@ impl App {
                             updated: TextureUpdated::Full,
                         },
                     ));
-                    self.ui
-                        .image(cx, ids!(video_img))
-                        .set_texture(cx, self.video_texture.clone());
+                    if let Some(mut video) =
+                        self.viewer_video(cx).borrow_mut::<VideoView>()
+                    {
+                        video.set_frame(cx, self.video_texture.clone());
+                    }
+                    if let Some(preview) = self
+                        .ui
+                        .widget(cx, ids!(detail_content))
+                        .borrow::<ContentPreview>()
+                    {
+                        preview.set_video_frame(cx, self.video_texture.clone());
+                    }
                 }
             }
-            self.ui.image(cx, ids!(video_img)).redraw(cx);
+            self.sync_video_transport(cx);
         }
         if let Some(player) = &self.video {
             if player.at_end() {
                 // Real EOS: decode thread exited (end of stream or error)
-                // and every due frame is shown. The pump chain ends here
-                // instead of re-arming at frame rate forever; the soundtrack
-                // tail drains from the audio callback on its own.
+                // and every due frame is shown. Loop restarts the clip (VJ
+                // loops preview as loops); otherwise the pump chain ends
+                // here and Play/Restart bring it back.
+                let looping = self
+                    .viewer_video(cx)
+                    .borrow::<VideoView>()
+                    .map(|video| video.looping())
+                    .unwrap_or(true);
+                if looping && self.restart_viewer_video(cx) {
+                    return;
+                }
                 self.ui
                     .label(cx, ids!(video_info))
-                    .set_text(cx, "ended — click the history card to replay");
+                    .set_text(cx, "ended — Play restarts it");
+                return;
+            }
+            if player.is_paused() {
+                // Paused: keep the chain parked; the Play click re-arms it.
                 return;
             }
         }
@@ -12852,6 +13005,44 @@ impl MatchEvent for App {
             }
             AudioAction::None => {}
         }
+        // The rail's video transport: same player the big viewer drives.
+        let rail_video_action = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+            .map(|preview| preview.video_action(cx, actions))
+            .unwrap_or(VideoAction::None);
+        match rail_video_action {
+            VideoAction::TogglePlay => {
+                if let Some(player) = &mut self.video {
+                    if player.is_paused() {
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else {
+                        player.pause();
+                    }
+                } else {
+                    self.restart_viewer_video(cx);
+                }
+                self.sync_video_transport(cx);
+            }
+            VideoAction::Restart => {
+                self.restart_viewer_video(cx);
+            }
+            VideoAction::Seek(fraction) => {
+                if self.video.is_none() {
+                    self.restart_viewer_video(cx);
+                }
+                if let Some(player) = &mut self.video {
+                    let duration = player.duration_secs();
+                    if duration > 0.0 {
+                        player.seek(fraction.clamp(0.0, 1.0) * duration);
+                        self.video_pump = cx.new_next_frame();
+                    }
+                }
+            }
+            VideoAction::ToggleLoop | VideoAction::None => {}
+        }
         // The separated layers: four mute toggles over one shared playhead.
         for (lane, id) in [
             (0usize, ids!(layer_drums_toggle)),
@@ -13087,6 +13278,48 @@ impl MatchEvent for App {
                 cx,
                 if on { "auto-run armed: snaps + generates whenever idle" } else { "live" },
             );
+        }
+        {
+            let viewer_video = self.viewer_video(cx);
+            let action = viewer_video
+                .borrow::<VideoView>()
+                .map(|_| ())
+                .and_then(|_| actions.find_widget_action(viewer_video.widget_uid()))
+                .map(|action| action.cast::<VideoAction>())
+                .unwrap_or(VideoAction::None);
+            match action {
+                VideoAction::TogglePlay => {
+                    if let Some(player) = &mut self.video {
+                        if player.is_paused() {
+                            player.resume();
+                            self.video_pump = cx.new_next_frame();
+                        } else {
+                            player.pause();
+                        }
+                    } else {
+                        // "ended": the player is gone at EOS — play means
+                        // bring the clip back from the start.
+                        self.restart_viewer_video(cx);
+                    }
+                    self.sync_video_transport(cx);
+                }
+                VideoAction::Restart => {
+                    self.restart_viewer_video(cx);
+                }
+                VideoAction::Seek(fraction) => {
+                    if self.video.is_none() {
+                        self.restart_viewer_video(cx);
+                    }
+                    if let Some(player) = &mut self.video {
+                        let duration = player.duration_secs();
+                        if duration > 0.0 {
+                            player.seek(fraction.clamp(0.0, 1.0) * duration);
+                            self.video_pump = cx.new_next_frame();
+                        }
+                    }
+                }
+                VideoAction::ToggleLoop | VideoAction::None => {}
+            }
         }
         if self.ui.button(cx, ids!(retry_btn)).clicked(actions) {
             // Retry re-dispatches the SAME spec — including its group id, so

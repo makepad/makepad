@@ -13,6 +13,7 @@
 //! blank panel.
 
 use crate::audio_view::{AudioAction, AudioView};
+use crate::video_view::{VideoAction, VideoView};
 use crate::clip::ClipFormat;
 use makepad_widgets::*;
 
@@ -48,6 +49,10 @@ pub enum PreviewContent {
         playing: bool,
         position: String,
     },
+    /// A clip, playing. The host owns the player and pumps frames + the
+    /// playhead through [`ContentPreview::video_view`]-style passthroughs;
+    /// `aspect` (width ÷ height) shapes the well before the first frame.
+    Video { aspect: f64 },
     /// A mesh, turning on a turntable. Bytes in, never an asset id: the host
     /// resolved the catalog, this draws what it was handed.
     ///
@@ -112,6 +117,10 @@ script_mod! {
                 width: Fill height: Fill
                 audio := mod.widgets.AudioView{}
             }
+            video_face := View{
+                width: Fill height: Fill
+                video := mod.widgets.VideoView{}
+            }
             scene_face := View{
                 width: Fill height: Fill
                 scene := mod.widgets.SceneView{}
@@ -135,6 +144,8 @@ enum WellShape {
     Picture { aspect: f64 },
     /// A track: a band of picture with the transport under it.
     Track,
+    /// A clip: its picture at aspect, with the video transport under it.
+    Video { aspect: f64 },
     /// A turntable or a walkthrough: generous, because that is the point.
     Scene,
 }
@@ -184,6 +195,9 @@ impl ContentPreview {
             }
             WellShape::Track => {
                 (width / TRACK_BAND_ASPECT).clamp(TRACK_BAND_MIN, TRACK_BAND_MAX) + TRANSPORT_H
+            }
+            WellShape::Video { aspect } => {
+                (width / aspect.max(0.01)).clamp(PICTURE_MIN_H, width) + TRANSPORT_H
             }
             WellShape::Scene => SCENE_H,
         }
@@ -257,6 +271,11 @@ impl ContentPreview {
                 }
                 self.face(cx, id!(audio_face));
             }
+            PreviewContent::Video { aspect } => {
+                self.set_still(cx, None);
+                self.shape = WellShape::Video { aspect };
+                self.face(cx, id!(video_face));
+            }
             PreviewContent::Mesh { glb, texture_png } => {
                 self.set_still(cx, None);
                 self.shape = WellShape::Scene;
@@ -286,6 +305,38 @@ impl ContentPreview {
             .borrow::<AudioView>()
             .map(|audio| audio.is_scrubbing())
             .unwrap_or(false)
+    }
+
+    /// The video face's frame sink: the host pumps decoded frames here.
+    pub fn set_video_frame(&self, cx: &mut Cx, texture: Option<Texture>) {
+        if let Some(mut video) = self.view.widget(cx, ids!(video)).borrow_mut::<VideoView>() {
+            video.set_frame(cx, texture);
+        }
+    }
+
+    /// The video face's playhead + button faces.
+    pub fn set_video_transport(&self, cx: &mut Cx, fraction: f64, playing: bool, position: &str) {
+        if let Some(mut video) = self.view.widget(cx, ids!(video)).borrow_mut::<VideoView>() {
+            video.set_transport(cx, fraction, playing, position);
+        }
+    }
+
+    /// What the user asked of the video transport this pass.
+    pub fn video_action(&self, cx: &mut Cx, actions: &Actions) -> VideoAction {
+        let uid = self.view.widget(cx, ids!(video)).widget_uid();
+        match actions.find_widget_action(uid) {
+            Some(action) => action.cast(),
+            None => VideoAction::None,
+        }
+    }
+
+    /// The video face's loop toggle state.
+    pub fn video_looping(&self, cx: &mut Cx) -> bool {
+        self.view
+            .widget(cx, ids!(video))
+            .borrow::<VideoView>()
+            .map(|video| video.looping())
+            .unwrap_or(true)
     }
 
     /// What the user asked of the transport this pass.

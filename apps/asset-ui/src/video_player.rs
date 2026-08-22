@@ -18,7 +18,7 @@ use makepad_widgets::log;
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,9 @@ struct Shared {
     /// honored stop request. Together with an empty ring this is the
     /// player's real EOS state: the pump must stop re-arming on it.
     done: AtomicBool,
+    /// Requested playback position in 100ns units; -1 = none. The decode
+    /// thread consumes it (reopen + discard up to the target).
+    seek_100ns: AtomicI64,
 }
 
 /// Soundtrack-queue ownership ticket. Every player claims a fresh epoch; a
@@ -44,11 +47,22 @@ struct Shared {
 /// its pushes bounce off the queue (see [`VideoPlayer::drop`]).
 static NEXT_CLIP_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+/// Half a frame at 60 fps: a seek target inside a frame's span lands on
+/// that frame instead of the next.
+const FRAME_EPS_100NS: i64 = 83_000;
+
 pub struct VideoPlayer {
     pub width: u32,
     pub height: u32,
+    /// Container-reported duration; 0 when the container does not say.
+    pub duration_100ns: i64,
     shared: Arc<Shared>,
     started: Option<Instant>,
+    last_pts: i64,
+    /// While paused: when the pause began. The clock rebases by the paused
+    /// span on resume, so playback continues where it stopped instead of
+    /// skipping the frames "missed" on the wall clock.
+    paused_at: Option<Instant>,
     epoch: u64,
 }
 
@@ -91,6 +105,7 @@ impl VideoPlayer {
             frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            seek_100ns: AtomicI64::new(-1),
         });
         let thread_shared = shared.clone();
         let thread_path = path.to_string();
@@ -110,15 +125,53 @@ impl VideoPlayer {
         Ok(Self {
             width: info.width,
             height: info.height,
+            duration_100ns: info.duration_100ns,
             shared,
             started: None,
+            last_pts: 0,
+            paused_at: None,
             epoch,
         })
     }
 
     /// The newest frame whose pts has been reached; `None` keeps whatever is
     /// on the texture. Call once per render frame.
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Freeze the picture; the soundtrack mutes with it. Idempotent.
+    pub fn pause(&mut self) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(Instant::now());
+            video_audio().lock().unwrap().muted = true;
+        }
+    }
+
+    /// Continue from the paused position by pushing the clock base forward
+    /// by the paused span. Idempotent.
+    pub fn resume(&mut self) {
+        if let Some(paused_at) = self.paused_at.take() {
+            if let Some(started) = &mut self.started {
+                *started += paused_at.elapsed();
+            }
+            video_audio().lock().unwrap().muted = false;
+        }
+    }
+
     pub fn take_due_frame(&mut self) -> Option<Vec<u32>> {
+        if self.paused_at.is_some() {
+            // Paused normally: hold the picture. Freshly seeked while
+            // paused (clock unset): show the seek target frame once.
+            if self.started.is_some() {
+                return None;
+            }
+            let mut frames = self.shared.frames.lock().unwrap();
+            let frame = frames.pop_front()?;
+            self.last_pts = frame.pts_100ns;
+            // Keep the clock unset: resume rebases at the next frame.
+            return Some(frame.bgra);
+        }
         let mut frames = self.shared.frames.lock().unwrap();
         let first_pts = frames.front()?.pts_100ns;
         let started = *self.started.get_or_insert_with(|| {
@@ -129,7 +182,34 @@ impl VideoPlayer {
         while frames.front().is_some_and(|f| f.pts_100ns <= media_100ns) {
             due = frames.pop_front();
         }
+        if let Some(frame) = &due {
+            self.last_pts = frame.pts_100ns;
+        }
         due.map(|f| f.bgra)
+    }
+
+    pub fn position_secs(&self) -> f64 {
+        self.last_pts as f64 / 10_000_000.0
+    }
+
+    pub fn duration_secs(&self) -> f64 {
+        self.duration_100ns as f64 / 10_000_000.0
+    }
+
+    /// Jump playback to `secs`. The decode thread reopens the file and
+    /// discards up to the target; the picture clock rebases on the first
+    /// frame that arrives, so play continues from there (paused stays
+    /// paused, showing the seeked frame).
+    pub fn seek(&mut self, secs: f64) {
+        let target = (secs.max(0.0) * 10_000_000.0) as i64;
+        self.shared.seek_100ns.store(target, Ordering::Release);
+        self.shared.frames.lock().unwrap().clear();
+        self.started = None;
+        self.last_pts = target;
+        let mut audio = video_audio().lock().unwrap();
+        if audio.owner == self.epoch {
+            audio.clear();
+        }
     }
 
     /// True end-of-playback for the frame pump: the decode thread has exited
@@ -164,6 +244,92 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return;
+        }
+        let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
+        if seek >= 0 {
+            // Reopen and discard up to the target. All-intra clips land
+            // frame-exact instantly; GOP clips decode-discard from the
+            // start (short clips, hardware decoder — fast enough for a
+            // scrub).
+            match VideoFileDecoder::open(&path) {
+                Ok(fresh) => {
+                    decoder = fresh;
+                    audio_eos = !info.has_audio;
+                    shared.frames.lock().unwrap().clear();
+                    loop {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
+                            break; // newer scrub target supersedes this one
+                        }
+                        match decoder.next_frame() {
+                            Ok(Some(frame)) if frame.pts_100ns + FRAME_EPS_100NS < seek => {}
+                            Ok(Some(frame)) => {
+                                nv12::nv12_to_rgb8(
+                                    &frame.nv12,
+                                    frame.width,
+                                    frame.height,
+                                    &mut rgb_scratch,
+                                );
+                                let mut bgra =
+                                    Vec::with_capacity((frame.width * frame.height) as usize);
+                                for px in rgb_scratch.chunks_exact(3) {
+                                    bgra.push(
+                                        0xff00_0000
+                                            | ((px[0] as u32) << 16)
+                                            | ((px[1] as u32) << 8)
+                                            | px[2] as u32,
+                                    );
+                                }
+                                shared
+                                    .frames
+                                    .lock()
+                                    .unwrap()
+                                    .push_back(Frame { pts_100ns: frame.pts_100ns, bgra });
+                                break;
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                log!("video: seek decode error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    // Audio follows the picture: drop queued samples and
+                    // skip the soundtrack forward to the target.
+                    if info.has_audio {
+                        video_audio().lock().unwrap().clear_for(epoch);
+                        loop {
+                            if shared.stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            match decoder.next_audio() {
+                                Ok(Some(chunk)) if chunk.pts_100ns < seek => {}
+                                Ok(Some(chunk)) => {
+                                    video_audio().lock().unwrap().push_i16(
+                                        epoch,
+                                        &chunk.samples,
+                                        chunk.channels,
+                                        chunk.sample_rate,
+                                    );
+                                    break;
+                                }
+                                Ok(None) => {
+                                    audio_eos = true;
+                                    break;
+                                }
+                                Err(_) => {
+                                    audio_eos = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => log!("video: seek reopen failed: {}", e),
+            }
+            continue;
         }
         if info.has_audio && !audio_eos {
             while video_audio().lock().unwrap().buffered_secs() < AUDIO_AHEAD_SECS {
@@ -245,6 +411,17 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
 // ---------------------------------------------------------------------------
 // Soundtrack queue (identical mixer shape to the wav player in audio.rs)
 // ---------------------------------------------------------------------------
+
+impl VideoAudio {
+    /// Epoch-guarded queue drop for a seek: only the owning player's decode
+    /// thread may flush what it queued.
+    fn clear_for(&mut self, epoch: u64) {
+        if self.owner == epoch {
+            self.frames.clear();
+            self.cursor = 0.0;
+        }
+    }
+}
 
 pub struct VideoAudio {
     frames: VecDeque<(f32, f32)>,
@@ -374,6 +551,7 @@ mod tests {
             frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            seek_100ns: AtomicI64::new(-1),
         });
         shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: 0,
@@ -382,8 +560,11 @@ mod tests {
         let mut player = VideoPlayer {
             width: 2,
             height: 2,
+            duration_100ns: 0,
             shared: shared.clone(),
             started: None,
+            last_pts: 0,
+            paused_at: None,
             epoch: u64::MAX,
         };
         // Still decoding: never EOS, with or without buffered frames.
