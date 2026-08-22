@@ -55,10 +55,13 @@ use std::path::Path;
 ///   at an external path the store reads but never owns, writes or deletes.
 ///   One `CREATE TABLE IF NOT EXISTS` and one index; no existing table is
 ///   touched and no row is rewritten, so the step is free on any store.
+/// - v11: the search kind CHECK accepts `vjeffect` (the VJ's effect
+///   documents are catalog content like anything else). Same copy+rename
+///   retrofit v6 and v7 used — SQLite cannot ALTER a CHECK.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 10;
+pub const SERVER_SCHEMA_VERSION: i64 = 11;
 
 pub struct AssetServerCore {
     db: Db,
@@ -218,6 +221,18 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                 // million-object one.
                 9 => {
                     db.exec("create blob ref schema", crate::blobrefs::BLOBREF_SCHEMA)?;
+                }
+                // v11: the kind CHECK gains `vjeffect`. Identical retrofit to
+                // v6/v7: rebuild the table with this build's CHECK, which is
+                // idempotent and carries every kind the current list names.
+                10 => {
+                    if table_exists(db, "search_annotations")? {
+                        db.exec(
+                            "rebuild search_annotations kind check",
+                            crate::search::KIND_CHECK_REBUILD_SQL,
+                        )?;
+                    }
+                    db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
                 }
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }
