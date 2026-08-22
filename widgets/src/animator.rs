@@ -319,7 +319,12 @@ impl ScriptHook for Animator {
             return false;
         };
         let obj_ref = vm.bx.heap.new_object_ref(obj);
-        self.vm_id = vm.cx_mut().script_ref_vm_id(&obj_ref);
+        // Minted from the VM we are running in, so this always resolves; the
+        // fallback only exists because the lookup is fallible in general.
+        self.vm_id = vm
+            .cx_mut()
+            .script_ref_vm_id(&obj_ref)
+            .unwrap_or(crate::widget_async::MAIN_SPLASH_VM_ID);
 
         let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {

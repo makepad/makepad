@@ -569,6 +569,10 @@ pub struct PortalList {
     /// Whether the PortalList was actively scrolling during the most recent finger down hit.
     #[rust]
     was_scrolling: bool,
+    /// The running total of all user-driven scrolling of this list.
+    /// See [`PortalListRef::user_scroll_travel()`].
+    #[rust]
+    user_scroll_travel: f64,
 
     // Cross-boundary text selection support
     /// Enable text selection across items (for TextFlow content)
@@ -1395,7 +1399,13 @@ impl PortalList {
             // the template ref itself is exact; for a non-isolated (main-app) list it
             // yields MAIN_SPLASH_VM_ID, i.e. exactly `cx.with_vm`, so normal usage is
             // unchanged.
-            let vm_id = cx.script_ref_vm_id(template_ref);
+            let Some(vm_id) = cx.script_ref_vm_id(template_ref) else {
+                // The isolate that minted this template has been reclaimed, so
+                // the list is on its way out too. An empty item is the only
+                // honest answer: instantiating from a dead heap is what the
+                // comment above warns about.
+                return (WidgetRef::empty(), false);
+            };
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
                     if occ.get().template == template {
@@ -1584,8 +1594,12 @@ impl PortalList {
         transition_to_pulldown: bool,
         bounce_velocity: f64,
         touch: bool,
+        user_driven: bool,
     ) {
         let mut delta = delta;
+        if user_driven {
+            self.user_scroll_travel += delta;
+        }
         let fingers_down = !clip_top && !transition_to_pulldown;
         let extent = self.area.rect(cx).size.index(self.vec_index);
 
@@ -2268,6 +2282,7 @@ impl Widget for PortalList {
         }
 
         let mut scroll_to = None;
+        let bar_pos_before = self.scroll_bar.get_scroll_pos();
         self.scroll_bar
             .handle_event_with(cx, event, &mut |_cx, action| {
                 if let ScrollBarAction::Scroll {
@@ -2312,6 +2327,10 @@ impl Widget for PortalList {
                         * self.view_window as f64) as usize;
                     self.first_scroll = 0.0;
                 }
+
+                // Bar-driven movement doesn't pass through `delta_top_scroll`,
+                // so account for it here.
+                self.user_scroll_travel -= scroll_to - bar_pos_before;
 
                 // A scroll-bar drag stops every other kind of motion, so a leftover
                 // fling, bounce, or OS momentum stream can't resume from wherever
@@ -2423,7 +2442,7 @@ impl Widget for PortalList {
         // One rect test here guards the entire item subtree from high-rate
         // mouse-move fan-out.
         if let Event::MouseMove(e) = event {
-            let inside = self.area.clipped_rect(cx).contains(e.abs);
+            let inside = self.area.is_valid(cx) && self.area.clipped_rect(cx).contains(e.abs);
             if !inside && !self.pointer_was_inside {
                 pass_through_to_children = false;
             }
@@ -2465,7 +2484,7 @@ impl Widget for PortalList {
                     if self.first_id > self.range_start || self.first_scroll < 0.0 {
                         let distance = (top_edge + scroll_margin - mouse_pos).max(1.0);
                         let scroll_speed = (5.0 + distance * 0.5).clamp(5.0, 50.0);
-                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false);
+                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false, true);
                         self.area.redraw(cx);
                     }
                 } else if mouse_pos > bottom_edge - scroll_margin {
@@ -2473,7 +2492,7 @@ impl Widget for PortalList {
                     if !self.at_end {
                         let distance = (mouse_pos - (bottom_edge - scroll_margin)).max(1.0);
                         let scroll_speed = -(5.0 + distance * 0.5).clamp(5.0, 50.0);
-                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false);
+                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false, true);
                         self.area.redraw(cx);
                     }
                 }
@@ -2545,7 +2564,7 @@ impl Widget for PortalList {
                         {
                             *next_frame = cx.new_next_frame();
                         }
-                        self.delta_top_scroll(cx, delta_val, true, false, 0.0, false);
+                        self.delta_top_scroll(cx, delta_val, true, false, 0.0, false, false);
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
@@ -2579,7 +2598,7 @@ impl Widget for PortalList {
                                 let ov = fling.allows_overscroll();
                                 let fling_velocity = fling.velocity;
                                 let before = (self.first_id, self.first_scroll);
-                                self.delta_top_scroll(cx, displacement, !ov, ov, fling_velocity, true);
+                                self.delta_top_scroll(cx, displacement, !ov, ov, fling_velocity, true, false);
                                 let moved = (self.first_id, self.first_scroll) != before;
                                 if let ScrollState::Flick { parked, .. } =
                                     &mut self.scroll_state
@@ -2745,7 +2764,7 @@ impl Widget for PortalList {
                                     .map_or(1.0 / 240.0, |prev| (e.time - prev).max(1.0 / 240.0));
                                 let max_v = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
                                 let velocity = (delta / dt).clamp(-max_v, max_v);
-                                self.delta_top_scroll(cx, delta, false, true, velocity, false);
+                                self.delta_top_scroll(cx, delta, false, true, velocity, false, false);
                                 if matches!(self.scroll_state, ScrollState::Pulldown { .. }) {
                                     // The bounce owns the motion now; drop the rest of the
                                     // stream so it can't fight the spring.
@@ -2846,7 +2865,7 @@ impl Widget for PortalList {
                             if delta != 0.0 {
                                 self.tail_range = false;
                                 self.detect_tail_in_draw = true;
-                                self.delta_top_scroll(cx, delta, true, false, 0.0, false);
+                                self.delta_top_scroll(cx, delta, true, false, 0.0, false, true);
                                 self.area.redraw(cx);
                             }
                         }
@@ -2863,7 +2882,7 @@ impl Widget for PortalList {
                                 self.last_finger_scroll_time = Some(e.time);
                             }
                             self.scroll_state = ScrollState::Stopped;
-                            self.delta_top_scroll(cx, delta, false, false, 0.0, false);
+                            self.delta_top_scroll(cx, delta, false, false, 0.0, false, true);
                             self.area.redraw(cx);
                         }
                         // `None` (wheels) applies the delta directly and clips at the edges.
@@ -2876,7 +2895,7 @@ impl Widget for PortalList {
                             self.scroll_state = ScrollState::Stopped;
                             // Clip to the top and don't transition to pulldown; overscroll bounce
                             // is only for touch drag/flick.
-                            self.delta_top_scroll(cx, delta, true, false, 0.0, false);
+                            self.delta_top_scroll(cx, delta, true, false, 0.0, false, true);
                             // Note: we intentionally do NOT reset `at_end` here.
                             // `at_end` is authoritatively recalculated each draw cycle
                             // in `end()`, and the redraw is already triggered below.
@@ -3097,7 +3116,7 @@ impl Widget for PortalList {
 
                             let old_sample = *samples.last().unwrap();
                             push_sample(samples, new_abs, e.time);
-                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false, 0.0, true);
+                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false, 0.0, true, true);
                             self.area.redraw(cx);
                         }
                     }
@@ -3348,6 +3367,28 @@ impl PortalListRef {
             return 0.0;
         };
         inner.first_scroll
+    }
+
+    /// Returns the running total of all user-driven scrolling of this list, in pixels.
+    ///
+    /// This sums every scroll delta the *user* requested: wheel and trackpad
+    /// deltas (including OS momentum), touch drags, scroll-bar drags, and
+    /// selection auto-scroll. A positive delta moves the view towards the start
+    /// of the range (revealing lower-index items), a negative one towards the
+    /// end. A delta absorbed at a clamped edge still counts. Movement the list
+    /// performs on its own (smooth scrolling, fling coasting, bounce-back,
+    /// tail-following) is excluded.
+    ///
+    /// Sample it at two points in time and subtract to learn whether the user
+    /// scrolled the list in between, and in which direction, even while the
+    /// list is also moving programmatically. Unlike comparing [`Self::first_id()`],
+    /// this is unaffected by items being inserted or removed, since it measures
+    /// movement rather than position.
+    pub fn user_scroll_travel(&self) -> f64 {
+        let Some(inner) = self.borrow() else {
+            return 0.0;
+        };
+        inner.user_scroll_travel
     }
 
     /// Returns a compact debug line with the current animated scroll state.

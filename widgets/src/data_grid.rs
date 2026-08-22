@@ -947,7 +947,12 @@ impl DataGrid {
             return None;
         };
         let template_value: ScriptValue = template_ref.as_object().into();
-        let vm_id = cx.script_ref_vm_id(template_ref);
+        // For a non-isolated (main-app) grid this is exactly `cx.with_vm`. When
+        // the isolate that minted the template has been reclaimed there is no
+        // heap left to instantiate from, and no cell is the only honest answer.
+        let Some(vm_id) = cx.script_ref_vm_id(template_ref) else {
+            return None;
+        };
         let make_or_reuse = |cx: &mut Cx, reusable: &mut HashMap<LiveId, Vec<WidgetItem>>| {
             if let Some(reused) = reusable.get_mut(&template).and_then(|pool| pool.pop()) {
                 let widget_ref = reused.widget;

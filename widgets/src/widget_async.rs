@@ -89,11 +89,16 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         cx.stop_timer(timer);
         cx.script_data.timers.timers.retain(|t| t.id != id);
     }
-    // Sandbox roots die with their isolates.
+    // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
+    crate::splash_host::gc_bridge(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
+    state.dead_heaps.extend(dead_heaps.iter().copied());
     for vm_id in dead {
-        state.isolated_vms.vms.remove(&vm_id);
+        // Purge everything that HOLDS the isolate's values before dropping the
+        // heap those values live in: `script_to_widget_calls` carries a
+        // `ScriptObjectRef` into it, and `pending_script_to_widget_returns` a
+        // bare `ScriptValue`. Same reason `gc_bridge` above runs first.
         state.heap_to_vm.retain(|_, v| *v != vm_id);
         state.ui_handle_types.remove(&vm_id);
         state.vm_root_uids.remove(&vm_id);
@@ -104,6 +109,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
             .pending_script_to_widget_returns
             .retain(|(v, _), _| *v != vm_id);
         state.thread_map.retain(|(v, _), _| *v != vm_id);
+        state.isolated_vms.vms.remove(&vm_id);
     }
 }
 
@@ -208,11 +214,12 @@ struct CxWidgetAsync {
     ui_handle_types: HashMap<SplashVmId, ScriptHandleType>,
     global_ui_root_uid: WidgetUid,
     /// Maps a heap identity (see [`ScriptObjectRef::heap_key`]) to the isolate VM
-    /// that owns it. Only isolate heaps are inserted; a ref whose heap isn't here
-    /// (the main app heap, or an empty ref) resolves to `MAIN_SPLASH_VM_ID`. This
-    /// replaces per-widget uid registration: a widget's owning VM is derived
-    /// directly from its own `source` ref, so there are no coverage gaps for
-    /// lazily-created widgets and no wrong-heap fallbacks.
+    /// that owns it. Only isolate heaps are inserted, and an entry is removed the
+    /// moment its isolate dies — so a ref that misses here is either the main app
+    /// heap's (checked against the app VM's own key) or a dead isolate's, whose
+    /// calls are dropped rather than routed anywhere. This replaces per-widget uid
+    /// registration: a widget's owning VM is derived directly from its own
+    /// `source` ref, so there are no coverage gaps for lazily-created widgets.
     heap_to_vm: HashMap<usize, SplashVmId>,
     /// Each isolate's own view-root uid (set by [`inject_splash_ui_handle`]). Isolate `ui`
     /// handles are confined to this subtree so a mini-app can't reach host/sibling widgets.
@@ -221,6 +228,12 @@ struct CxWidgetAsync {
     current_vm_id: SplashVmId,
     /// Round-robin cursor for the per-pump isolate GC pass (last vm id serviced).
     gc_rr_last: u64,
+    /// Heaps of isolates that have been reclaimed. A widget can outlive the
+    /// isolate that minted it by a frame or two and still try to call back into
+    /// it; this is what tells such a ref apart from an app-VM one, so it can be
+    /// dropped instead of misrouted. Keys are only added once their isolate is
+    /// gone and removed again if a later heap is allocated at the same address.
+    dead_heaps: std::collections::HashSet<usize>,
 }
 
 #[derive(Default)]
@@ -310,7 +323,11 @@ pub trait CxSplashVmExt {
     /// minted by that widget (its `source`, a template, an `on_click` fn). This
     /// is exact — the heap identity comes from the ref itself — so it never
     /// mis-routes lazily-created widgets the way a uid registry could.
-    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> SplashVmId;
+    ///
+    /// `None` means the ref belongs to a heap that is gone: an isolate was torn
+    /// down while widgets it minted were still in the tree. Such a call must be
+    /// dropped, never redirected — see the note on the impl.
+    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> Option<SplashVmId>;
 }
 
 impl CxSplashVmExt for Cx {
@@ -355,10 +372,12 @@ impl CxSplashVmExt for Cx {
             // through the gated net runtime. Raw sockets are gated separately:
             // the stdlib's `net.socket_stream` errors when no net runtime is
             // configured, same as `net.http_request`.
+            // `cx.quit` would let any mini-app close the whole host process.
             let strip = crate::makepad_script::script! {
                 mod.fs = nil
                 mod.run = nil
                 mod.res = nil
+                mod.cx.quit = nil
             };
             vm.eval(strip);
             // Re-register `fs` as the JAILED per-app storage module: inside an
@@ -366,6 +385,10 @@ impl CxSplashVmExt for Cx {
             // (assigned by the host via Splash::set_sandbox_dir; without one,
             // every call errors). See splash_storage.rs for the containment.
             crate::splash_storage::script_mod(&mut vm);
+            // `host` is the brokered doorway to host services (location,
+            // clipboard, IPC, ...); requests queue for the embedding host to
+            // answer, and no host = nothing resolves. See splash_host.rs.
+            crate::splash_host::script_mod(&mut vm);
             vm.bx
         };
 
@@ -373,6 +396,10 @@ impl CxSplashVmExt for Cx {
         // sources, templates, on_click fns) routes back to this VM.
         let heap_key = bx.heap.heap_key();
         let state = self.global::<CxWidgetAsync>();
+        // A heap key is an allocation address, so a fresh heap can land on one
+        // a dead isolate used to own. Live registration wins over the memory of
+        // the dead one.
+        state.dead_heaps.remove(&heap_key);
         state.heap_to_vm.insert(heap_key, id);
         state.isolated_vms.vms.insert(
             id,
@@ -387,11 +414,20 @@ impl CxSplashVmExt for Cx {
     }
 
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
-        if vm_id == MAIN_SPLASH_VM_ID {
+        // "Already installed?" comes first, and the main-VM case has to prove
+        // it too: `with_vm` runs against whatever VM is currently parked on
+        // `Cx`, which during an isolate's own execution is that ISOLATE's. So
+        // an unguarded main-VM branch here silently runs app-VM work in an
+        // isolate's heap.
+        let current = self.global::<CxWidgetAsync>().current_vm_id;
+        if current == vm_id {
             return self.with_vm(f);
         }
-
-        if self.global::<CxWidgetAsync>().current_vm_id == vm_id {
+        if vm_id == MAIN_SPLASH_VM_ID {
+            debug_assert_eq!(
+                current, MAIN_SPLASH_VM_ID,
+                "main-VM script call while isolate {current:?} is installed on Cx"
+            );
             return self.with_vm(f);
         }
 
@@ -404,11 +440,15 @@ impl CxSplashVmExt for Cx {
         thread_id: ScriptThreadId,
         f: impl FnOnce(&mut ScriptVm) -> R,
     ) -> R {
-        if vm_id == MAIN_SPLASH_VM_ID {
+        let current = self.global::<CxWidgetAsync>().current_vm_id;
+        if current == vm_id {
             return self.with_vm_thread(thread_id, f);
         }
-
-        if self.global::<CxWidgetAsync>().current_vm_id == vm_id {
+        if vm_id == MAIN_SPLASH_VM_ID {
+            debug_assert_eq!(
+                current, MAIN_SPLASH_VM_ID,
+                "main-VM script call while isolate {current:?} is installed on Cx"
+            );
             return self.with_vm_thread(thread_id, f);
         }
 
@@ -417,17 +457,42 @@ impl CxSplashVmExt for Cx {
         })
     }
 
-    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> SplashVmId {
+    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> Option<SplashVmId> {
         let heap_key = script_ref.heap_key();
         if heap_key == 0 {
-            return MAIN_SPLASH_VM_ID;
+            return Some(MAIN_SPLASH_VM_ID);
         }
-        self.global::<CxWidgetAsync>()
-            .heap_to_vm
-            .get(&heap_key)
-            .copied()
-            .unwrap_or(MAIN_SPLASH_VM_ID)
+        let state = self.global::<CxWidgetAsync>();
+        if let Some(vm_id) = state.heap_to_vm.get(&heap_key).copied() {
+            return Some(vm_id);
+        }
+        // Not a live isolate's heap. Either the app VM's own — the common case,
+        // since the app VM is never in `heap_to_vm` — or one that has been
+        // reclaimed, and those two must not be confused.
+        //
+        // An isolate's widgets can outlive it by a frame: a tile dropped
+        // mid-gesture, an app force-stopped while its buttons are still in the
+        // tree. Each of those holds refs minted by the dead heap. Treating them
+        // as "not an isolate, therefore the app VM" routes a dead heap's
+        // objects INTO the app VM, which stores them in an args object of its
+        // own. Nothing complains at the time — the checked stores skip indices
+        // they cannot resolve — and then the next GC walks that object,
+        // indexes the app heap with a foreign heap's index, and panics
+        // somewhere else entirely, in code that did nothing wrong.
+        //
+        // So a heap we have reclaimed is remembered, and its calls are dropped
+        // rather than redirected — the same treatment
+        // `script_timer_dispatch_hook` already gives a dead isolate's timers.
+        if state.dead_heaps.contains(&heap_key) {
+            return None;
+        }
+        Some(MAIN_SPLASH_VM_ID)
     }
+}
+
+/// The isolate (if any) that owns a heap, for host-bridge response routing.
+pub(crate) fn vm_for_heap(cx: &mut Cx, heap_key: usize) -> Option<SplashVmId> {
+    cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()
 }
 
 /// Deliver `Event::NetworkResponses` to a Splash isolate's script (resolving its
@@ -851,7 +916,9 @@ impl CxWidgetToScriptCallExt for Cx {
         args: ScriptValue,
         from_method: LiveId,
     ) -> ScriptAsyncResult {
-        let vm_id = self.script_ref_vm_id(&source);
+        let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            return ScriptAsyncResult::MethodNotFound;
+        };
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_async_call_fwd(
                 target_uid,
@@ -875,7 +942,9 @@ impl CxWidgetToScriptCallExt for Cx {
         args: &[ScriptValue],
         from_method: LiveId,
     ) -> ScriptAsyncResult {
-        let vm_id = self.script_ref_vm_id(&source);
+        let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            return ScriptAsyncResult::MethodNotFound;
+        };
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_async_call(
                 target_uid,
@@ -897,7 +966,9 @@ impl CxWidgetToScriptCallExt for Cx {
         script_fn: ScriptFnRef,
         args: ScriptValue,
     ) {
-        let vm_id = self.script_ref_vm_id(&source);
+        let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            return;
+        };
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_call_fwd(target_uid, me, source, script_fn, args);
         });
@@ -911,7 +982,9 @@ impl CxWidgetToScriptCallExt for Cx {
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
     ) {
-        let vm_id = self.script_ref_vm_id(&source);
+        let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            return;
+        };
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_call(target_uid, me, source, script_fn, args);
         });
