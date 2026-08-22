@@ -95,6 +95,10 @@ pub struct VideoFileEncoderOptions {
     pub fps_den: u32,
     pub video_bitrate_bps: u32,
     pub audio: Option<PcmAudioTrackOptions>,
+    /// Every frame an IDR/key frame (GOP size 1). Costs bitrate but makes
+    /// the file cheaply decodable at ANY frame in ANY order — reverse and
+    /// bounce playback never forward-decode a GOP to reach a frame.
+    pub keyframe_only: bool,
 }
 
 impl Default for VideoFileEncoderOptions {
@@ -107,6 +111,7 @@ impl Default for VideoFileEncoderOptions {
             fps_den: 1,
             video_bitrate_bps: 8_000_000,
             audio: None,
+            keyframe_only: false,
         }
     }
 }

@@ -46,6 +46,8 @@ pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
 pub const LORA_STRENGTHS: &[f32] = &[1.0, 0.8, 0.6, 0.4, 1.2];
 /// RIFE interpolation factors offered for video (1 = off).
 pub const VIDEO_INTERPOLATE: &[u32] = &[1, 2, 4];
+/// Enhance-stage factor choices, shared by the uprez and tween pickers.
+pub const ENHANCE_FACTORS: &[u32] = &[1, 2, 4];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
 /// larger atlases trade bake time and device memory for sharper materials.
 pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
@@ -88,13 +90,17 @@ pub fn format_clock(seconds: f64) -> String {
 fn music_expansion_max_tokens(seconds: u32) -> u32 {
     // Official MiniMax Structured Captions are ~250-450 words in Arrangement
     // alone, plus tagged lyrics that scale with duration. The old 500-700
-    // budget truncated mid-caption and never reached `Lyrics:`.
+    // budget truncated mid-caption and never reached `Lyrics:`. The budget
+    // must ALSO cover Qwen3.8's open <think> block — the song plan alone can
+    // burn 1000+ tokens, and a budget exhausted inside think makes
+    // clean_expansion return the truncated reasoning dump (which then gets
+    // split on a draft `Lyrics:` and SUNG, bar counts and all).
+    // The service clamps max_tokens to 4096 (backend.rs) — values above the
+    // ceiling are silently wasted, so long songs pin to it exactly.
     match seconds.clamp(MUSIC_MIN_SECONDS, MUSIC_MAX_SECONDS) {
-        0..=60 => 1_100,
-        61..=120 => 1_400,
-        121..=180 => 1_600,
-        181..=240 => 1_800,
-        _ => 2_200,
+        0..=60 => 3_000,
+        61..=120 => 3_600,
+        _ => 4_096,
     }
 }
 
@@ -135,6 +141,13 @@ pub struct GenParams {
     /// Requested Music3 song ceiling in seconds. Captured in each run spec,
     /// so moving the UI picker cannot mutate already queued/running songs.
     pub music_seconds: u32,
+    /// Enhance stage resolution multiplier: 1 = off, 2/4 = RealESRGAN.
+    pub enhance_upscale: u32,
+    /// Enhance stage frame-rate multiplier: 1 = off, 2/4 = RIFE tween.
+    pub enhance_interpolate: u32,
+    /// Enhance stage: append the motion-vector `mkfl` box for
+    /// arbitrary-rate GPU playback.
+    pub enhance_flow: bool,
 }
 
 impl Default for GenParams {
@@ -154,6 +167,9 @@ impl Default for GenParams {
             video_audio: true,
             video_interpolate: 1,
             music_seconds: MUSIC_DEFAULT_SECONDS,
+            enhance_upscale: 2,
+            enhance_interpolate: 2,
+            enhance_flow: true,
         }
     }
 }
@@ -465,6 +481,16 @@ pub const PRESETS: &[Preset] = &[
     // (FLUX.2 klein, reference-image conditioned) returns the edited picture
     // — no segment/plan/composite chain needed. Consumer-only: refused
     // without a selected image.
+    // The VJ loop post-processor: select a video, get it back upscaled
+    // (RealESRGAN), frame-tweened (RIFE) and/or carrying a motion-vector
+    // `mkfl` box for arbitrary-rate GPU playback. One decode, one encode,
+    // all-intra output (bounce loops decode backwards). Consumer-only:
+    // refused without a selected video.
+    Preset::linear(
+        "video → upscale / tween / motionvec",
+        &["enhance"],
+        &[("enhance", "video-enhance")],
+    ),
     Preset::linear("edit selected image (instruction)", &["edit"], &[("edit", EDIT_MODEL)]),
     // Native RealESRGAN x4plus: select a picture, get it back at 4x
     // resolution. Consumer-only like `edit` — no prompt-only mode, refused
@@ -572,6 +598,7 @@ pub const PRESETS: &[Preset] = &[
 pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
+        "enhance" => Some(&["video/"]),
         "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale"
         | "control" | "inpaint" | "splat" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
@@ -589,6 +616,7 @@ pub fn consumer_only_domain(domain: &str) -> bool {
     matches!(
         domain,
         "edit" | "upscale" | "control" | "inpaint" | "depth" | "matte" | "segment" | "splat"
+            | "enhance"
     )
 }
 
@@ -628,6 +656,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "control" => "structure-guided render",
         "inpaint" => "Fill-dev inpaint",
         "splat" => "TripoSplat 3D gaussians",
+        "enhance" => "uprez / tween / motionvec",
         _ => domain,
     }
 }
@@ -1386,7 +1415,7 @@ impl Pipeline {
                         .clamp(MUSIC_MIN_SECONDS, MUSIC_MAX_SECONDS);
                     request.max_tokens = Some(music_expansion_max_tokens(seconds));
                     request.style = Some(format!(
-                        "Write an arrangement and enough original section-tagged lyrics for a target song length of {} ({} seconds). Pace the verses, choruses, bridge and instrumental passages for that duration; do not pad by merely repeating one line. The music model may end naturally before this upper bound.",
+                        "Keep any private reasoning to two or three sentences and spend the token budget on the answer itself — a budget burned on deliberation truncates the caption before the lyrics and fails the whole run. Write an arrangement and enough original section-tagged lyrics for a target song length of {} ({} seconds). Pace the verses, choruses, bridge and instrumental passages for that duration; do not pad by merely repeating one line. The music model may end naturally before this upper bound. Everything after the Lyrics: marker is sung verbatim — never write bar counts, BPM, durations, timing math, or planning notes in the lyrics ('8 bars' would literally be sung); a section tag line is the tag alone. Structure and pacing talk belongs in the caption's Arrangement block only.",
                         format_music_duration(seconds),
                         seconds,
                     ));
@@ -1435,6 +1464,15 @@ impl Pipeline {
             "splat" => {
                 request.prompt = Some(prompt);
             }
+            // Video post-process: the selected video rides as the seed
+            // input; each transform is independently optional (a
+            // motionvec-only pass over an existing clip is a valid job).
+            "enhance" => {
+                request.prompt = Some(prompt);
+                request.upscale = Some(self.gen.enhance_upscale);
+                request.interpolate = Some(self.gen.enhance_interpolate);
+                request.flow_map = Some(self.gen.enhance_flow);
+            }
             "speech" => {
                 request.text = Some(prompt);
                 // Voice packs are a Kokoro concept. IndexTTS 2.5 takes
@@ -1458,6 +1496,18 @@ impl Pipeline {
             "music" => {
                 let (description, lyrics) =
                     makepad_asset_ai::music3_backend::split_music_prompt(&prompt);
+                // An expansion stage promises the template's `Lyrics:`
+                // section (instrumental requests still carry it, holding
+                // only [Instrumental]). Its absence means the expander
+                // overran its budget inside <think> and the "expansion" is
+                // a truncated reasoning dump — refuse to sing that.
+                let expanded = self.stages[..stage].iter().any(|s| s.domain == "text");
+                if expanded && lyrics.is_empty() {
+                    return Err(
+                        "music expansion has no Lyrics: section (the LLM likely overran its budget mid-think) — run it again"
+                            .to_string(),
+                    );
+                }
                 request.prompt = Some(description);
                 if !lyrics.is_empty() {
                     request.lyrics = Some(lyrics);
@@ -4138,11 +4188,18 @@ mod tests {
 
         let expand = pipeline.request_for_stage(0).unwrap();
         assert_eq!(expand.target_domain.as_deref(), Some("music"));
-        assert_eq!(expand.max_tokens, Some(1_600));
+        assert_eq!(expand.max_tokens, Some(4_096));
         assert!(expand
             .style
             .as_deref()
             .is_some_and(|style| style.contains("3:00") && style.contains("180 seconds")));
+        // The lyric sheet is sung verbatim: the style direction must forbid
+        // bar counts / timing math after the Lyrics: marker (a run once sang
+        // "8 bars").
+        assert!(expand
+            .style
+            .as_deref()
+            .is_some_and(|style| style.contains("sung verbatim") && style.contains("bar counts")));
 
         put_output(
             &mut pipeline,
@@ -4167,6 +4224,42 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             Some("[Verse]\nCity lights are fading\n[Chorus]\nI found my way home")
         );
         assert_eq!(music.seconds, Some(180.0));
+    }
+
+    #[test]
+    fn expanded_music_without_lyrics_section_refuses_to_sing_the_think_dump() {
+        let mut pipeline = Pipeline::new(
+            "a stomping glam rock anthem",
+            &["text", "music"],
+            &[("music", "minimax-music3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        // A budget-exhausted expansion: truncated reasoning, no Lyrics: ever.
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            b"Global Metadata\nBasic Attributes: bpm is 128. Verse 1 carries cocky, conversational",
+        );
+        let err = pipeline.request_for_stage(1).unwrap_err();
+        assert!(err.contains("no Lyrics: section"), "got {err:?}");
+
+        // A direct music run (no text stage) may legitimately have no lyrics.
+        let mut direct = Pipeline::new(
+            "dub instrumental groove",
+            &["music"],
+            &[("music", "minimax-music3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        let request = direct.request_for_stage(0).unwrap();
+        assert!(request.lyrics.is_none());
+        let _ = &mut direct;
     }
 
     #[test]
@@ -4198,7 +4291,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         // Two concurrently held run objects retain their own selection.
         assert_eq!(one_minute.request_for_stage(0).unwrap().seconds, Some(60.0));
         let long_expand = five_minutes.request_for_stage(0).unwrap();
-        assert_eq!(long_expand.max_tokens, Some(2_200));
+        assert_eq!(long_expand.max_tokens, Some(4_096));
         assert!(long_expand
             .style
             .as_deref()
@@ -4604,6 +4697,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("image", "flux1-dev"),
             ("image", "flux1-schnell"),
             ("edit", "flux2-klein-4b"),
+            ("enhance", "video-enhance"),
             ("image", "flux2-dev"),
             ("image", "flux2-dev-q4-24g"),
             ("inpaint", "flux1-fill-dev"),
