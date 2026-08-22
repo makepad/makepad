@@ -19,13 +19,79 @@ use makepad_asset_data::AssetId;
 pub type GenTag = u64;
 
 /// Most job rows kept; beyond it the oldest TERMINAL row is dropped.
-pub const MAX_JOBS: usize = 16;
+/// Sized for fleet-wide spam: a six-box fleet cycling ~40 s loops turns
+/// rows over fast, and a burst of manual Queue presses must not eat the
+/// rows of jobs still running.
+pub const MAX_JOBS: usize = 32;
 /// Poll cadence per active job.
 pub const POLL_MS: u64 = 1_500;
 /// Most status polls issued per tick (bounds catalog-runtime queueing).
-pub const MAX_POLLS_PER_TICK: usize = 4;
+/// Must cover the whole in-flight fleet depth per cadence window or rows
+/// go stale exactly when the fleet is busiest.
+pub const MAX_POLLS_PER_TICK: usize = 8;
 /// Longest prompt accepted.
 pub const MAX_PROMPT_BYTES: usize = 2_000;
+
+/// Video length choices: (frames, denoise steps), the same sanctioned
+/// pairs the asset UI offers. Frames obey H3's 17n+5 alignment at 24 fps;
+/// steps scale with length so a longer clip is not a blurrier one.
+pub const VIDEO_LENGTHS: &[(u32, u32)] = &[(39, 30), (65, 30), (97, 40), (129, 50)];
+
+/// How many generations CONTINUOUS mode keeps in flight. Six matches the
+/// video fleet's ceiling (full H3 on the RTX 6000 + five Q4 4090s): the
+/// worker fans queued jobs out one per box, so keeping the queue this deep
+/// is what makes every box busy. Boxes not yet serving just leave jobs
+/// honestly pending — the queue never lies about it.
+pub const CONTINUOUS_IN_FLIGHT: usize = 6;
+
+/// Wait after a failed continuous submission before trying again, so a
+/// broken profile cannot spin the queue.
+pub const CONTINUOUS_BACKOFF_MS: u64 = 8_000;
+
+// --------------------------------------------------------------- blast mode
+
+/// Word banks for BLAST: one press fills every parallel pipe with an
+/// invented visual. Combinatorial enough (~10^4 shapes) that a night of
+/// blasting repeats nothing.
+const BLAST_SUBJECTS: &[&str] = &[
+    "a chrome jellyfish", "a wireframe panther", "liquid mercury dancers",
+    "a fractal cathedral", "neon koi fish", "a grinning holographic sun",
+    "molten glass orchids", "crystalline lightning", "a clockwork galaxy",
+    "smoke serpents", "prismatic soap bubbles", "an origami phoenix",
+    "magnetic ferrofluid spikes", "aurora ribbons", "glitching statues",
+];
+const BLAST_ACTIONS: &[&str] = &[
+    "pulsing to an unheard beat", "swirling into a vortex", "shattering and reforming",
+    "cascading in slow motion", "orbiting a black sun", "melting upward",
+    "strobing through color cycles", "breathing like a living thing",
+    "multiplying into infinity", "dissolving into particles",
+];
+const BLAST_SETTINGS: &[&str] = &[
+    "inside an endless mirror hall", "over a midnight ocean", "in a cathedral rave",
+    "under ultraviolet stage light", "against pure darkness", "in a neon-drenched alley",
+    "inside a giant lava lamp", "over a glass dancefloor", "in deep space",
+    "surrounded by falling embers",
+];
+const BLAST_STYLES: &[&str] = &[
+    "hyperreal", "synthwave", "iridescent", "monochrome with one neon accent",
+    "vhs-degraded", "macro lens", "volumetric fog", "high contrast",
+];
+
+/// One invented prompt. A tiny LCG keeps this dependency-free; the caller
+/// advances the seed between calls.
+pub fn blast_prompt(seed: &mut u64) -> String {
+    let mut next = |n: usize| {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 33) as usize) % n
+    };
+    format!(
+        "{} {} {}, {}, continuous forward motion",
+        BLAST_SUBJECTS[next(BLAST_SUBJECTS.len())],
+        BLAST_ACTIONS[next(BLAST_ACTIONS.len())],
+        BLAST_SETTINGS[next(BLAST_SETTINGS.len())],
+        BLAST_STYLES[next(BLAST_STYLES.len())],
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilesState {
@@ -94,6 +160,9 @@ pub struct GenJob {
     /// Prompt excerpt for the row.
     pub title: String,
     pub profile_label: String,
+    /// Job kind ("video.generate", …) — the row's copy names what the job
+    /// actually makes instead of promising VIDEO for everything.
+    pub kind: String,
     pub state: GenJobState,
     last_poll_ms: u64,
     /// Local wall-clock times. Elapsed UI uses these rather than the remote
@@ -112,10 +181,34 @@ pub struct GenJob {
     pub last_progress_permille: u16,
     /// Transient status transport warning. A successful status clears it.
     pub status_warning: Option<String>,
+    /// GPU box tag parsed from the worker's progress note ("@.203 …").
+    pub node_tag: Option<String>,
     /// Asset the worker's result document declared.
     pub produced: Option<AssetId>,
     /// The produced asset appeared on the catalog event stream.
     pub published: bool,
+}
+
+/// The product a job kind makes, in a row's words.
+fn product_word(kind: &str) -> &'static str {
+    match kind.split('.').next().unwrap_or("") {
+        "video" => "video",
+        "image" => "image",
+        "music" => "music track",
+        "audio" => "sound",
+        "speech" => "speech clip",
+        "mesh" => "mesh",
+        "splat" => "splat scene",
+        _ => "result",
+    }
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 impl GenJob {
@@ -133,8 +226,14 @@ impl GenJob {
             }
             (_, false, _) => "worker: waiting · node: waiting".to_string(),
             (_, true, GenNodeState::Waiting) => "worker: assigned · node: waiting".to_string(),
-            (_, true, GenNodeState::Queued) => "worker: assigned · node: queued".to_string(),
-            (_, true, GenNodeState::Active) => "worker: assigned · node: active".to_string(),
+            (_, true, GenNodeState::Queued) => match &self.node_tag {
+                Some(tag) => format!("gpu {tag} · queued on the box"),
+                None => "worker: assigned · node: queued".to_string(),
+            },
+            (_, true, GenNodeState::Active) => match &self.node_tag {
+                Some(tag) => format!("gpu {tag} · rendering"),
+                None => "worker: assigned · node: active".to_string(),
+            },
             (_, true, GenNodeState::Finished) => "worker: finished · node: finished".to_string(),
         };
         let (stage, mut message, progress_permille, tone) = match &self.state {
@@ -155,17 +254,18 @@ impl GenJob {
                 (stage, message, Some((*permille).min(1000)), GenJobTone::Active)
             }
             GenJobState::Succeeded => {
+                let product = product_word(&self.kind);
                 if self.published {
                     (
-                        "Video ready".to_string(),
-                        "Published to VIDEO — click its tile to cue it.".to_string(),
+                        format!("{} ready", capitalize(product)),
+                        format!("Published — the {product}'s tile is on its grid, click to cue it."),
                         Some(1000),
                         GenJobTone::Success,
                     )
                 } else {
                     (
                         "Generation complete — publishing".to_string(),
-                        "The result is being added to the VIDEO catalog.".to_string(),
+                        format!("The {product} is being added to the catalog."),
                         Some(1000),
                         GenJobTone::Success,
                     )
@@ -271,6 +371,14 @@ pub struct GenPipe {
     pub namespace: &'static str,
     pub expand: bool,
     pub alpha: bool,
+    /// A clip meant to run on a pad forever: the prompt is steered toward
+    /// cyclic motion, the published asset is tagged `loop`, and the audio
+    /// track is skipped (a pad loop is a visual).
+    pub loop_video: bool,
+    /// The video post-processor: takes the clip on the program deck as its
+    /// source (no prompt needed) and returns it upscaled, frame-tweened and
+    /// carrying motion vectors for arbitrary-rate playback.
+    pub enhance: bool,
 }
 
 pub const GEN_PIPES: &[GenPipe] = &[
@@ -280,6 +388,8 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
+        enhance: false,
     },
     GenPipe {
         label: "expand → alpha",
@@ -287,6 +397,8 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: true,
+        loop_video: false,
+        enhance: false,
     },
     GenPipe {
         label: "expand → video",
@@ -294,6 +406,26 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
+        enhance: false,
+    },
+    GenPipe {
+        label: "expand → video loop",
+        kind: "video.generate",
+        namespace: "gen",
+        expand: true,
+        alpha: false,
+        loop_video: true,
+        enhance: false,
+    },
+    GenPipe {
+        label: "uprez / tween deck clip",
+        kind: "video.enhance",
+        namespace: "gen",
+        expand: false,
+        alpha: false,
+        loop_video: false,
+        enhance: true,
     },
     GenPipe {
         label: "expand → music",
@@ -301,6 +433,8 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
+        enhance: false,
     },
 ];
 
@@ -313,6 +447,22 @@ pub struct GenModel {
     jobs: Vec<GenJob>,
     next_tag: GenTag,
     pub last_error: Option<String>,
+    /// CONTINUOUS: keep [`CONTINUOUS_IN_FLIGHT`] generations running,
+    /// submitting the next as each one finishes.
+    continuous: bool,
+    /// Host clock before which the loop must not submit again (error
+    /// backoff). Never blocks a manual GENERATE.
+    continuous_hold_ms: u64,
+    /// Assets the catalog event stream has already named, bounded. A fast
+    /// job publishes BEFORE the next status poll learns which asset it
+    /// produced — without this memory that event matched no row and was
+    /// gone, and the row said "being added to the catalog" forever.
+    published_assets: Vec<AssetId>,
+    /// Picked row of [`VIDEO_LENGTHS`] for video pipes.
+    video_length: usize,
+    /// The program deck's loaded clip (revision id + short label), refreshed
+    /// by the host before every generate — the enhance pipe's source.
+    pub enhance_source: Option<(String, String)>,
 }
 
 impl Default for ProfilesState {
@@ -324,7 +474,18 @@ impl Default for ProfilesState {
 impl GenModel {
     pub fn new() -> GenModel {
         GenModel {
-            selected: 2,
+            // This drawer is the VIDEO surface: the pipe an operator gets
+            // without touching the dropdown must make a video. Found by
+            // shape, not index, so reordering the pipe list cannot silently
+            // flip the default back to image (which is how "gimme a jumping
+            // rabbit" once came back as a picture).
+            selected: GEN_PIPES
+                .iter()
+                .position(|p| p.kind == "video.generate" && !p.loop_video)
+                .unwrap_or(0),
+            // The longest sanctioned clip (~5.4 s) — what the fleet default
+            // produced before the picker existed.
+            video_length: VIDEO_LENGTHS.len() - 1,
             ..GenModel::default()
         }
     }
@@ -336,6 +497,53 @@ impl GenModel {
 
     pub fn active_jobs(&self) -> usize {
         self.jobs.iter().filter(|j| !j.state.is_terminal()).count()
+    }
+
+    pub fn continuous(&self) -> bool {
+        self.continuous
+    }
+
+    /// Arm or disarm CONTINUOUS. Arming submits immediately if there is
+    /// room; disarming stops submitting and lets what is running finish —
+    /// a VJ never wants their screen to go dark mid-clip.
+    pub fn set_continuous(&mut self, on: bool, now_ms: u64) -> Vec<GenCmd> {
+        if self.continuous == on {
+            return Vec::new();
+        }
+        self.continuous = on;
+        if !on {
+            return Vec::new();
+        }
+        self.continuous_hold_ms = 0;
+        self.pump_continuous(now_ms)
+    }
+
+    /// Top the queue back up to [`CONTINUOUS_IN_FLIGHT`]. Degrades to plain
+    /// serial execution wherever the server runs one job at a time: with
+    /// the constant at 1 this submits exactly one job, then nothing until
+    /// it reaches a terminal state.
+    fn pump_continuous(&mut self, now_ms: u64) -> Vec<GenCmd> {
+        if !self.continuous || now_ms < self.continuous_hold_ms {
+            return Vec::new();
+        }
+        if self.profiles_state != ProfilesState::Ready {
+            return Vec::new();
+        }
+        let mut cmds = Vec::new();
+        while self.active_jobs() < CONTINUOUS_IN_FLIGHT {
+            let before = self.jobs.len();
+            let next = self.generate(now_ms);
+            if next.is_empty() {
+                // An empty prompt, a full queue, a refused profile: hold
+                // off rather than spin. `generate` already set last_error.
+                if self.jobs.len() == before {
+                    self.continuous_hold_ms = now_ms + CONTINUOUS_BACKOFF_MS;
+                }
+                break;
+            }
+            cmds.extend(next);
+        }
+        cmds
     }
 
     fn job_by_tag(&mut self, tag: GenTag) -> Option<&mut GenJob> {
@@ -383,12 +591,58 @@ impl GenModel {
         self.prompt = prompt;
     }
 
+    /// BLAST: one press queues an invented visual for every parallel pipe.
+    /// The operator's own prompt-box text is untouched.
+    pub fn blast(&mut self, now_ms: u64) -> Vec<GenCmd> {
+        let keep = self.prompt.clone();
+        let mut seed = now_ms ^ (self.next_tag.wrapping_mul(0x9e37_79b9));
+        let mut cmds = Vec::new();
+        for _ in 0..CONTINUOUS_IN_FLIGHT {
+            self.prompt = blast_prompt(&mut seed);
+            let fired = self.generate(now_ms);
+            if fired.is_empty() {
+                break; // rows full / profile refused — stop honestly
+            }
+            cmds.extend(fired);
+        }
+        self.prompt = keep;
+        cmds
+    }
+
+    pub fn set_video_length(&mut self, index: usize) {
+        self.video_length = index.min(VIDEO_LENGTHS.len() - 1);
+    }
+
+    pub fn video_length(&self) -> usize {
+        self.video_length
+    }
+
+    /// Dropdown rows for the length picker, in seconds at H3's 24 fps.
+    pub fn video_length_labels() -> Vec<String> {
+        VIDEO_LENGTHS
+            .iter()
+            .map(|(frames, _)| format!("{:.1} s", *frames as f64 / 24.0))
+            .collect()
+    }
+
     /// Submit the current prompt under the selected profile. The job body is
     /// the profile's advertised defaults with the prompt merged on top.
     pub fn generate(&mut self, now_ms: u64) -> Vec<GenCmd> {
         self.last_error = None;
-        let prompt = self.prompt.trim().to_string();
-        if prompt.is_empty() {
+        let pipe = self.selected_pipe();
+        let mut prompt = self.prompt.trim().to_string();
+        if pipe.enhance {
+            // The source clip is the content; the prompt (if any) only
+            // titles the row.
+            let Some((_, label)) = self.enhance_source.clone() else {
+                self.last_error =
+                    Some("load a clip on the program deck first — enhance takes the playing clip".to_string());
+                return Vec::new();
+            };
+            if prompt.is_empty() {
+                prompt = format!("uprez/tween {label}");
+            }
+        } else if prompt.is_empty() {
             self.last_error = Some("prompt is empty".to_string());
             return Vec::new();
         }
@@ -396,7 +650,6 @@ impl GenModel {
             self.last_error = Some("prompt too long".to_string());
             return Vec::new();
         }
-        let pipe = self.selected_pipe();
         let mut pairs: Vec<(String, Value)> = Vec::new();
         if let Some(profile) = self
             .profiles
@@ -404,14 +657,58 @@ impl GenModel {
             .find(|profile| profile.kind == pipe.kind)
         {
             if let Value::Obj(defaults) = profile.defaults.clone() {
-                pairs.extend(defaults.into_iter().filter(|(k, _)| k != "prompt"));
+                // The length picker owns frames/steps for video pipes; a
+                // duplicate key from the profile would shadow it.
+                let video = pipe.kind == "video.generate";
+                pairs.extend(defaults.into_iter().filter(|(k, _)| {
+                    k != "prompt" && !(video && (k == "frames" || k == "steps"))
+                }));
             }
+        }
+        if pipe.kind == "video.generate" {
+            let (frames, steps) = VIDEO_LENGTHS[self.video_length.min(VIDEO_LENGTHS.len() - 1)];
+            pairs.push(("frames".to_string(), Value::Int(frames as i64)));
+            pairs.push(("steps".to_string(), Value::Int(steps as i64)));
+        }
+        if pipe.enhance {
+            let (revision, _) = self.enhance_source.clone().expect("guarded above");
+            pairs.push(("source_revision".to_string(), s(revision)));
+            pairs.push(("upscale".to_string(), Value::Int(2)));
+            pairs.push(("interpolate".to_string(), Value::Int(2)));
+            pairs.push(("flow_map".to_string(), Value::Bool(true)));
+            pairs.push((
+                "tags".to_string(),
+                Value::Arr(vec![s("loop"), s("enhanced")]),
+            ));
         }
         pairs.push(("expand".to_string(), Value::Bool(pipe.expand)));
         if pipe.alpha {
             pairs.push(("alpha".to_string(), Value::Bool(true)));
         }
-        pairs.push(("prompt".to_string(), s(prompt.clone())));
+        if pipe.kind == "video.generate" {
+            // The VJ is a visuals instrument: no video it generates carries
+            // an audio track (saves the joint audio decode/mux fleet-side).
+            pairs.push(("audio".to_string(), Value::Bool(false)));
+        }
+        if pipe.loop_video {
+            // Tag the row so the grids can find loops as loops.
+            pairs.push(("tags".to_string(), Value::Arr(vec![s("loop")])));
+        }
+        // The video model has no native loop mode; the loop pipe steers the
+        // motion instead. The row's title stays the operator's own words.
+        let body_prompt = if pipe.loop_video {
+            // NEVER ask for "flowing back into the first" — H3 obliges by
+            // animating a literal boomerang and the clip rewinds on screen.
+            // A loop is made by the PLAYER's jump cut; the prompt only has
+            // to keep the motion steady so the cut lands soft.
+            format!(
+                "{prompt} — continuous one-directional motion at a steady pace, \
+                 no reversal, no boomerang, no rewind, no cuts, no camera jumps"
+            )
+        } else {
+            prompt.clone()
+        };
+        pairs.push(("prompt".to_string(), s(body_prompt)));
 
         // Bound the visible rows: drop the oldest terminal row; refuse when
         // every slot is an ACTIVE job.
@@ -436,6 +733,8 @@ impl GenModel {
             job: None,
             title,
             profile_label: pipe.label.to_string(),
+            kind: pipe.kind.to_string(),
+            node_tag: None,
             state: GenJobState::Submitting,
             last_poll_ms: now_ms,
             submitted_ms: now_ms,
@@ -492,15 +791,20 @@ impl GenModel {
 
     /// A polled status arrived. Unknown/foreign job ids are ignored.
     pub fn status_arrived(&mut self, status: &JobStatusDto) {
-        self.status_arrived_at(status, status.created_ms);
+        let _ = self.status_arrived_at(status, status.created_ms);
     }
 
     /// Timestamped status completion. The caller supplies its local clock;
     /// `status.created_ms` remains remote metadata and never drives elapsed.
-    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
-        let Some(row) = self.job_by_id(status.job) else { return };
+    ///
+    /// Returns follow-up commands the completion triggers (job CHAINS — a
+    /// finished stage enqueueing its successor). Empty until the chain lane
+    /// lands; the return type is the seam the host already drains.
+    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) -> Vec<GenCmd> {
+        let already_published = self.published_assets.clone();
+        let Some(row) = self.job_by_id(status.job) else { return Vec::new() };
         if row.state.is_terminal() {
-            return; // late duplicate
+            return Vec::new(); // late duplicate
         }
         row.last_update_ms = now_ms;
         row.status_warning = None;
@@ -516,7 +820,15 @@ impl GenModel {
                 }
             }
             JobStateDto::Running => {
-                let (permille, note) = status.progress.clone().unwrap_or((0, String::new()));
+                let (permille, mut note) = status.progress.clone().unwrap_or((0, String::new()));
+                // "@.203 denoise 11/49" — the worker names the GPU box in
+                // the note so the drawer can say WHO is rendering.
+                if let Some(rest) = note.strip_prefix('@') {
+                    if let Some((tag, stage)) = rest.split_once(' ') {
+                        row.node_tag = Some(tag.to_string());
+                        note = stage.to_string();
+                    }
+                }
                 row.worker_assigned = true;
                 row.node_state = node_state_from_note(&note);
                 row.started_ms.get_or_insert(now_ms);
@@ -528,6 +840,13 @@ impl GenModel {
             }
             JobStateDto::Succeeded => {
                 row.produced = status.result_asset;
+                // The publish event may have come and gone while this row
+                // still had no produced asset to match it against.
+                if let Some(asset) = status.result_asset {
+                    if already_published.contains(&asset) {
+                        row.published = true;
+                    }
+                }
                 row.last_progress_permille = 1000;
                 row.finished_ms = Some(now_ms);
                 // Success proves that a worker ran even if polling happened
@@ -553,6 +872,7 @@ impl GenModel {
                 GenJobState::Cancelled
             }
         };
+        Vec::new()
     }
 
     /// A status poll failed (transient transport): keep the row, retry on a
@@ -626,6 +946,12 @@ impl GenModel {
     /// is now visibly published (the tile itself arrives via the surface
     /// refresh the same event triggered).
     pub fn catalog_published(&mut self, asset: AssetId) {
+        if !self.published_assets.contains(&asset) {
+            if self.published_assets.len() >= 32 {
+                self.published_assets.remove(0);
+            }
+            self.published_assets.push(asset);
+        }
         for row in self.jobs.iter_mut() {
             if row.produced == Some(asset) {
                 row.published = true;
@@ -635,7 +961,9 @@ impl GenModel {
 
     /// Bounded round-robin status polling for active jobs.
     pub fn tick(&mut self, now_ms: u64) -> Vec<GenCmd> {
-        let mut cmds = Vec::new();
+        // CONTINUOUS submits from the same tick that polls: a job reaching
+        // a terminal state frees the slot, and the next tick fills it.
+        let mut cmds = self.pump_continuous(now_ms);
         for row in self.jobs.iter_mut() {
             if cmds.len() >= MAX_POLLS_PER_TICK {
                 break;
@@ -686,6 +1014,121 @@ mod tests {
         m
     }
 
+    /// Take the (single) enqueue out of a command batch.
+    fn enqueue_tag(cmds: &[GenCmd]) -> GenTag {
+        cmds.iter()
+            .find_map(|c| match c {
+                GenCmd::Enqueue { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .expect("expected an enqueue")
+    }
+
+    /// Drive one continuous submission all the way to a terminal state.
+    fn finish(m: &mut GenModel, cmds: &[GenCmd], job: JobId, now_ms: u64) {
+        let tag = enqueue_tag(cmds);
+        m.queued_at(tag, job, Some(now_ms));
+        m.status_arrived_at(&status(job, JobStateDto::Succeeded), now_ms);
+    }
+
+    /// CONTINUOUS is a refill loop, not a burst: it submits when a slot is
+    /// free and never runs more than the configured depth, so it degrades
+    /// to plain serial execution on a server that runs one job at a time.
+    #[test]
+    fn continuous_keeps_the_fleet_depth_in_flight_and_refills_on_completion() {
+        let mut m = ready_model();
+        m.set_prompt("a cathedral of static".into());
+
+        let armed = m.set_continuous(true, 1_000);
+        assert!(m.continuous());
+        assert_eq!(
+            armed.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            CONTINUOUS_IN_FLIGHT,
+            "arming fills the queue once"
+        );
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+
+        // While it runs, ticks poll but never submit.
+        for t in 0..4u64 {
+            let now = 3_000 + t * POLL_MS;
+            let cmds = m.tick(now);
+            assert!(
+                cmds.iter().all(|c| matches!(c, GenCmd::PollStatus { .. })),
+                "a full queue must not be topped up: {cmds:?}"
+            );
+            assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+        }
+
+        // One finishes; the very next tick refills exactly that slot.
+        finish(&mut m, &armed, job_id(1), 10_000);
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT - 1);
+        let cmds = m.tick(11_000);
+        assert_eq!(
+            cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            1,
+            "a completed job frees the slot and the loop refills it"
+        );
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+    }
+
+    #[test]
+    fn unchecking_stops_submitting_but_lets_the_running_job_finish() {
+        let mut m = ready_model();
+        m.set_prompt("keep going".into());
+        let armed = m.set_continuous(true, 0);
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+
+        assert!(m.set_continuous(false, 1_000).is_empty(), "disarming submits nothing");
+        assert!(!m.continuous());
+        assert_eq!(
+            m.active_jobs(),
+            CONTINUOUS_IN_FLIGHT,
+            "what is already running keeps running"
+        );
+
+        // Its completion does NOT start another.
+        finish(&mut m, &armed, job_id(2), 2_000);
+        let cmds = m.tick(3_000);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, GenCmd::Enqueue { .. })),
+            "an unchecked loop never submits again: {cmds:?}"
+        );
+        // Re-arming is a fresh start, and idempotent.
+        assert_eq!(
+            m.set_continuous(true, 4_000)
+                .iter()
+                .filter(|c| matches!(c, GenCmd::Enqueue { .. }))
+                .count(),
+            1
+        );
+        assert!(m.set_continuous(true, 5_000).is_empty(), "arming twice is one arm");
+    }
+
+    /// A submission the model refuses (an empty prompt) must not spin the
+    /// queue: the loop backs off and retries later, and recovers by itself
+    /// once the operator fixes the prompt.
+    #[test]
+    fn a_refused_submission_backs_off_instead_of_spinning() {
+        let mut m = ready_model();
+        m.set_prompt("   ".into());
+        let armed = m.set_continuous(true, 1_000);
+        assert!(armed.is_empty(), "an empty prompt submits nothing");
+        assert_eq!(m.last_error.as_deref(), Some("prompt is empty"));
+
+        // Inside the backoff window nothing is attempted again.
+        let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS - 1);
+        assert!(!cmds.iter().any(|c| matches!(c, GenCmd::Enqueue { .. })));
+
+        // After it, with a usable prompt, the loop starts on its own —
+        // filling every slot of the fleet depth at once.
+        m.set_prompt("now with words".into());
+        let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS);
+        assert_eq!(
+            cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            CONTINUOUS_IN_FLIGHT
+        );
+    }
+
     fn status(job: JobId, state: JobStateDto) -> JobStatusDto {
         JobStatusDto {
             job,
@@ -728,6 +1171,36 @@ mod tests {
         assert_eq!(body.get("model").and_then(Value::as_str), Some("h3"));
         assert_eq!(body.get("width").and_then(Value::as_u64), Some(640));
         assert_eq!(body.get("prompt").and_then(Value::as_str), Some("neon tunnel"));
+    }
+
+    /// The loop pipe is the video pipe plus loop steering: cyclic-motion
+    /// prompt, `loop` tag, no audio track — and the row title stays the
+    /// operator's own words.
+    #[test]
+    fn the_loop_pipe_steers_the_prompt_and_tags_the_row() {
+        let loop_index = GEN_PIPES
+            .iter()
+            .position(|p| p.loop_video)
+            .expect("a loop pipe");
+        let mut m = GenModel::new();
+        m.set_prompt("neon tunnel".into());
+        m.select_profile(loop_index);
+        let cmds = m.generate(0);
+        let GenCmd::Enqueue { kind, body, .. } = cmds[0].clone() else {
+            panic!()
+        };
+        assert_eq!(kind, "video.generate");
+        assert_eq!(body.get("audio").and_then(Value::as_bool), Some(false));
+        let tags = body.get("tags").and_then(Value::as_arr).expect("tags");
+        assert_eq!(tags.iter().filter_map(Value::as_str).collect::<Vec<_>>(), vec!["loop"]);
+        let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
+        assert!(prompt.starts_with("neon tunnel"), "{prompt}");
+        // The steering must forbid reversal — asking for a clip that "flows
+        // back into the first frame" made H3 animate literal boomerangs.
+        assert!(prompt.contains("no reversal"), "{prompt}");
+        assert!(prompt.contains("one-directional"), "{prompt}");
+        assert_eq!(m.jobs().next().unwrap().title, "neon tunnel");
+        assert_eq!(m.jobs().next().unwrap().profile_label, "expand → video loop");
     }
 
     #[test]
@@ -785,6 +1258,27 @@ mod tests {
         // A late duplicate status cannot resurrect a terminal row.
         m.status_arrived(&status(job_id(7), JobStateDto::Running));
         assert_eq!(m.jobs().next().unwrap().state, GenJobState::Succeeded);
+    }
+
+    /// A fast job publishes BEFORE the next status poll learns the produced
+    /// asset: the event must not be lost, or the row reads "being added to
+    /// the catalog" forever (seen live with 2.5-second image jobs).
+    #[test]
+    fn a_publish_event_that_beats_the_status_poll_still_lands() {
+        let mut m = GenModel::new();
+        m.set_prompt("a jumping rabbit".into());
+        let tag = enqueue_tag(&m.generate(0));
+        assert!(m.queued(tag, job_id(7)).is_empty());
+        let asset = AssetId::from_bytes([6; 16]);
+        // Event first — no row knows its produced asset yet.
+        m.catalog_published(asset);
+        // Status later names the asset; the remembered event must flip it.
+        let mut done = status(job_id(7), JobStateDto::Succeeded);
+        done.result_asset = Some(asset);
+        m.status_arrived(&done);
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.state, GenJobState::Succeeded);
+        assert!(row.published, "the early publish event was lost");
     }
 
     #[test]
@@ -846,7 +1340,8 @@ mod tests {
     fn tick_polls_active_jobs_bounded_and_spaced() {
         let mut m = ready_model();
         m.set_prompt("clip".into());
-        for i in 0..6u8 {
+        const JOBS: usize = MAX_POLLS_PER_TICK + 2;
+        for i in 0..JOBS as u8 {
             let tag = match m.generate(0)[0] {
                 GenCmd::Enqueue { tag, .. } => tag,
                 _ => panic!(),
@@ -857,12 +1352,12 @@ mod tests {
         assert!(m.tick(POLL_MS - 1).is_empty());
         // Due: at most MAX_POLLS_PER_TICK go out.
         let cmds = m.tick(POLL_MS);
-        assert_eq!(cmds.len(), MAX_POLLS_PER_TICK);
+        assert_eq!(cmds.len(), MAX_POLLS_PER_TICK.min(JOBS));
         // The remainder polls on the next tick; the first batch is spaced.
         let cmds = m.tick(POLL_MS + 1);
-        assert_eq!(cmds.len(), 6 - MAX_POLLS_PER_TICK);
+        assert_eq!(cmds.len(), JOBS.saturating_sub(MAX_POLLS_PER_TICK));
         // Terminal jobs stop polling entirely.
-        for i in 0..6u8 {
+        for i in 0..JOBS as u8 {
             m.status_arrived(&status(job_id(i + 1), JobStateDto::Cancelled));
         }
         assert!(m.tick(POLL_MS * 10).is_empty());
@@ -934,4 +1429,40 @@ mod tests {
             .message
             .contains("retrying"));
     }
+
+    #[test]
+    fn enhance_pipe_takes_the_deck_clip_and_refuses_without_one() {
+        let mut model = GenModel::new();
+        let enhance = GEN_PIPES
+            .iter()
+            .position(|p| p.enhance)
+            .expect("enhance pipe exists");
+        model.select_profile(enhance);
+        assert_eq!(GEN_PIPES[enhance].kind, "video.enhance");
+
+        // No deck clip: an honest refusal, no row, no command.
+        model.set_prompt(String::new());
+        let cmds = model.generate(1_000);
+        assert!(cmds.is_empty());
+        assert!(model.last_error.as_deref().unwrap_or("").contains("program deck"));
+
+        // With a source: the body carries the revision + the fixed recipe,
+        // and an empty prompt still yields a titled row.
+        model.enhance_source = Some(("arev_deadbeef".to_string(), "clip …deadbeef".to_string()));
+        let cmds = model.generate(2_000);
+        assert_eq!(cmds.len(), 1);
+        let GenCmd::Enqueue { kind, body, .. } = &cmds[0] else {
+            panic!("expected enqueue")
+        };
+        assert_eq!(kind, "video.enhance");
+        let Value::Obj(pairs) = body else { panic!("obj body") };
+        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        assert_eq!(get("source_revision"), Some(s("arev_deadbeef")));
+        assert_eq!(get("upscale"), Some(Value::Int(2)));
+        assert_eq!(get("interpolate"), Some(Value::Int(2)));
+        assert_eq!(get("flow_map"), Some(Value::Bool(true)));
+        assert!(matches!(get("tags"), Some(Value::Arr(tags)) if tags.len() == 2));
+        assert!(matches!(get("prompt"), Some(Value::Str(p)) if p.contains("deadbeef")));
+    }
+
 }
