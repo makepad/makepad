@@ -174,66 +174,6 @@ pub struct HitRow {
     pub updated_ms: u64,
 }
 
-/// The four buckets an operator actually thinks in, and the ones the Asset
-/// UI's Library shelves reduce to. HOT PRESETS: picking one SETS the filter
-/// rather than toggling a lane, which is what makes them feel like buttons
-/// on a deck instead of a checkbox farm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preset {
-    Video,
-    /// Meshes, props, vehicles, weapons, characters, MAPS and 3D scenes
-    /// (splats) — everything the slot renders in three dimensions.
-    ThreeD,
-    Image,
-    Audio,
-    /// The vjeffect content category on its own.
-    Effect,
-    /// Transition-suited vjeffects: the same lane narrowed to the
-    /// `transition` tag (see effects/seed.rs `TRANSITION_TAG`).
-    Transition,
-}
-
-impl Preset {
-    pub fn label(self) -> &'static str {
-        match self {
-            Preset::Video => "VIDEO",
-            Preset::ThreeD => "3D",
-            Preset::Image => "IMAGE",
-            Preset::Audio => "AUDIO",
-            Preset::Effect => "EFFECT",
-            Preset::Transition => "TRANSITION",
-        }
-    }
-
-    /// Catalog lanes to ask the server for.
-    pub fn kinds(self) -> Vec<AssetKind> {
-        match self {
-            // Effects live on the VIDEO chip: they are program-slot visual
-            // content the same way a clip is.
-            Preset::Video => vec![AssetKind::Video, AssetKind::VjEffect],
-            Preset::ThreeD => vec![
-                AssetKind::Mesh,
-                AssetKind::Character,
-                AssetKind::Prop,
-                AssetKind::Weapon,
-                AssetKind::Vehicle,
-                AssetKind::World,
-            ],
-            Preset::Image => vec![AssetKind::Texture, AssetKind::Billboard],
-            Preset::Audio => vec![AssetKind::Audio],
-            Preset::Effect | Preset::Transition => vec![AssetKind::VjEffect],
-        }
-    }
-
-    /// Positive tag filter the preset narrows by, if any.
-    pub fn tag(self) -> Option<&'static str> {
-        match self {
-            Preset::Transition => Some(crate::effects::seed::TRANSITION_TAG),
-            _ => None,
-        }
-    }
-}
-
 /// Which shelf a catalog row belongs on, classified the way the Asset UI's
 /// Library does it — by what the thing IS, not by the lane it arrived in.
 ///
@@ -281,23 +221,6 @@ pub fn shelf_of(kind: Option<AssetKind>, alias: Option<&str>, category: Option<&
             }
         }
         _ => "other",
-    }
-}
-
-/// Which hot preset a row answers to.
-pub fn preset_of(
-    kind: Option<AssetKind>,
-    alias: Option<&str>,
-    category: Option<&str>,
-) -> Option<Preset> {
-    match shelf_of(kind, alias, category) {
-        "video" | "effect" => Some(Preset::Video),
-        "image" | "sprite" => Some(Preset::Image),
-        "music" | "sfx" => Some(Preset::Audio),
-        "mesh" | "character" | "prop" | "weapon" | "vehicle" | "map" | "3D scene" => {
-            Some(Preset::ThreeD)
-        }
-        _ => None,
     }
 }
 
@@ -1256,28 +1179,18 @@ mod tests {
 }
 
 #[cfg(test)]
-mod preset_tests {
+mod shelf_tests {
     use super::*;
 
     #[test]
-    fn a_doom_map_is_3d_and_a_map_not_a_splat() {
+    fn a_doom_map_is_a_map_and_a_splat_is_a_scene() {
         // The bug this pins: `AssetKind::World` covers a Doom level AND a
         // Gaussian splat, so reading the kind alone shelved E1M1 as a splat.
         let alias = Some("doom/doom/worlds/doom1/e1m1");
         assert_eq!(shelf_of(Some(AssetKind::World), alias, None), "map");
         assert_eq!(shelf_of(Some(AssetKind::World), alias, Some("map")), "map");
-        assert_eq!(preset_of(Some(AssetKind::World), alias, None), Some(Preset::ThreeD));
-    }
-
-    #[test]
-    fn a_splat_is_a_3d_scene_by_its_category() {
-        let alias = Some("gen/splat/office-scan");
-        assert_eq!(shelf_of(Some(AssetKind::World), alias, Some("splat")), "3D scene");
-        assert_eq!(
-            preset_of(Some(AssetKind::World), alias, Some("splat")),
-            Some(Preset::ThreeD),
-            "a splat is still 3D"
-        );
+        let splat = Some("gen/splat/office-scan");
+        assert_eq!(shelf_of(Some(AssetKind::World), splat, Some("splat")), "3D scene");
         // Category beats the path: a splat published under a worlds/ alias
         // is a scene, not a level.
         assert_eq!(
@@ -1287,48 +1200,13 @@ mod preset_tests {
     }
 
     #[test]
-    fn every_3d_lane_answers_to_the_3d_preset() {
-        for kind in [
-            AssetKind::Mesh,
-            AssetKind::Character,
-            AssetKind::Prop,
-            AssetKind::Weapon,
-            AssetKind::Vehicle,
-            AssetKind::World,
-        ] {
-            assert_eq!(preset_of(Some(kind), None, None), Some(Preset::ThreeD), "{kind:?}");
-            assert!(Preset::ThreeD.kinds().contains(&kind), "{kind:?} is queried by the chip");
-        }
-    }
-
-    #[test]
-    fn video_images_sprites_and_audio_land_where_they_belong() {
-        assert_eq!(preset_of(Some(AssetKind::Video), None, None), Some(Preset::Video));
-        // Effects browse beside clips: they land on the program slots too.
-        assert_eq!(preset_of(Some(AssetKind::VjEffect), None, None), Some(Preset::Video));
+    fn shelves_name_what_things_are() {
         assert_eq!(shelf_of(Some(AssetKind::VjEffect), None, None), "effect");
-        assert!(Preset::Video.kinds().contains(&AssetKind::VjEffect));
-        assert_eq!(preset_of(Some(AssetKind::Texture), None, None), Some(Preset::Image));
-        // A sprite actor is a picture as far as browsing goes.
-        assert_eq!(preset_of(Some(AssetKind::Billboard), None, None), Some(Preset::Image));
         assert_eq!(shelf_of(Some(AssetKind::Billboard), None, None), "sprite");
         // Audio is ONE catalog lane; music vs sfx is a tag/alias question.
-        assert_eq!(preset_of(Some(AssetKind::Audio), None, None), Some(Preset::Audio));
         assert_eq!(shelf_of(Some(AssetKind::Audio), None, None), "sfx");
         assert_eq!(shelf_of(Some(AssetKind::Audio), None, Some("music")), "music");
         assert_eq!(shelf_of(Some(AssetKind::Audio), Some("gen/music/loop-a"), None), "music");
         assert_eq!(shelf_of(Some(AssetKind::Audio), Some("doom/doom/sfx/dsbfg"), None), "sfx");
-        assert_eq!(preset_of(None, None, None), None);
-    }
-
-    #[test]
-    fn the_preset_lanes_cover_every_visual_kind() {
-        let visual = BrowseModel::<u32>::visual_kinds();
-        for kind in visual {
-            let covered = [Preset::Video, Preset::ThreeD, Preset::Image]
-                .iter()
-                .any(|p| p.kinds().contains(&kind));
-            assert!(covered, "{kind:?} is in no hot preset");
-        }
     }
 }

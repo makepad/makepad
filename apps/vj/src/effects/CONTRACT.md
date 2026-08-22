@@ -90,6 +90,23 @@ Reading is forgiving: missing key = default, wrong type = default + warning
     grow_beats: 8           // const
     p0: 0.0  p1: 0.0  p2: 0.0  p3: 0.0   // free params -> self.user in shaders
 
+    // SELF-DESCRIBING DIALS: name the levers that mean something to THIS
+    // effect, so a host can label real knobs ("SYNC", "DRIVE") instead of
+    // dead "P1/P2" dials. The VJ shows a FIXED THREE dials per slot mapped
+    // to p0..p2 (fixed so MIDI mappings survive effect swaps); a param the
+    // doc does not declare shows dimmed and inert. p3 is the RESERVED
+    // lever: the transition slot drives it with triangle(program_mix), so
+    // bind transition intensity to p3 and do not declare a dial on it.
+    // `default` is only the knob's resting position — an untouched knob
+    // never overrides the doc's own binding. A doc with no block inherits
+    // its ENGINE's default set (doc.rs `engine_default_dials`; empty for
+    // engines whose stock shader reads no user params). AI-generated
+    // effects should always declare their dials.
+    dials: [
+        {name: "SWEEP", bind: "p0", default: 0.5},
+        {name: "DRIVE", bind: "p1", default: 0.3}
+    ]
+
     // palette
     color_bg: #x05060f   color_a: #x40f0ff
     color_b: #xff40a0    color_c: #xffffff

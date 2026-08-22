@@ -88,6 +88,12 @@ pub struct FxThumbJob {
     pub revision: AssetRevisionId,
     pub title: String,
     pub source: String,
+    /// Transition-tagged doc: the thumbnail PREVIEWS A TRANSITION — the
+    /// effect gets a sweeping premix of two distinct test patterns as
+    /// input0 while `p3` (the engage triangle) sweeps 0→1→0 across the
+    /// captured second, so the tile shows one picture becoming another
+    /// through the effect.
+    pub transition: bool,
 }
 
 /// A finished sheet, already written to the cache; the app feeds it to the
@@ -99,9 +105,15 @@ pub struct FxThumbSheet {
     pub fps: f32,
 }
 
-/// The cache file for one revision.
-pub fn cache_path(dir: &Path, revision: &AssetRevisionId) -> PathBuf {
-    dir.join(format!("{revision}.png"))
+/// The cache file for one revision. Transition previews render differently
+/// (two-input sweep), so they key their own file — a static sheet cached
+/// before the sweep existed is simply ignored, never shown.
+pub fn cache_path(dir: &Path, revision: &AssetRevisionId, transition: bool) -> PathBuf {
+    if transition {
+        dir.join(format!("{revision}-t.png"))
+    } else {
+        dir.join(format!("{revision}.png"))
+    }
 }
 
 /// The declared layout every sheet this module writes carries.
@@ -281,6 +293,12 @@ pub struct VjFxThumbs {
     readback_failures: u32,
     #[rust(false)]
     slot_sized: bool,
+    /// CPU premix for transition previews (two distinct patterns dissolved
+    /// by the sweep) — reused buffer + texture, like the runtime fallback.
+    #[rust]
+    trans_data: Vec<u32>,
+    #[rust]
+    trans_tex: Option<Texture>,
 }
 
 impl VjFxThumbs {
@@ -348,6 +366,10 @@ impl VjFxThumbs {
             }
             self.fx.set_bpm(120.0);
             self.fx.set_live(cx, true);
+            // A previous transition job's sweep input/override must never
+            // leak into the next document.
+            self.fx.set_input_texture(0, None);
+            self.fx.set_user_override([None; 4]);
             let t0 = std::time::Instant::now();
             match self.fx.set_effect_source(cx, "vjfx_thumb", &job.source) {
                 Ok(_) => {
@@ -470,13 +492,91 @@ impl VjFxThumbs {
         }
         let Some(active) = self.active.as_mut() else { return };
         let revision = active.job.revision;
-        let path = cache_path(&dir, &revision);
+        let path = cache_path(&dir, &revision, active.job.transition);
         active.phase = Phase::Encoding;
         active.encoder = Some(std::thread::spawn(move || {
             encode_and_write(tiles, path, revision)
         }));
         // The effect can stop ticking now — the pixels are on the worker.
         self.fx.clear_effect(cx);
+    }
+}
+
+impl VjFxThumbs {
+    const TRANS_W: usize = 192;
+    const TRANS_H: usize = 120;
+
+    /// The transition preview's input0: TWO visibly different test patterns
+    /// — a warm gradient with a drifting disc, and a cool grid with a
+    /// counter-drifting bar — dissolved by `m` (the thumbnail's sweeping
+    /// crossfade), exactly the slot runtime's premix-as-input0 contract.
+    fn transition_input(&mut self, cx: &mut Cx, m: f32, time: f32) -> Texture {
+        const W: usize = VjFxThumbs::TRANS_W;
+        const H: usize = VjFxThumbs::TRANS_H;
+        self.trans_data.resize(W * H, 0);
+        let m = m.clamp(0.0, 1.0);
+        let (dx, dy) = ((time * 0.7).cos() * 0.25, (time * 0.53).sin() * 0.2);
+        let bar = (time * 0.4).fract();
+        for y in 0..H {
+            let v = y as f32 / H as f32;
+            for x in 0..W {
+                let u = x as f32 / W as f32;
+                // A: warm diagonal gradient + travelling disc.
+                let mut ar = 0.85 - 0.5 * v;
+                let mut ag = 0.45 + 0.3 * u;
+                let mut ab = 0.15 + 0.2 * (1.0 - u);
+                let ddx = u - 0.5 - dx;
+                let ddy = v - 0.5 - dy;
+                if ddx * ddx + ddy * ddy < 0.02 {
+                    ar = 1.0;
+                    ag = 0.95;
+                    ab = 0.7;
+                }
+                // B: cool grid + counter-drifting vertical bar.
+                let gx = x % 24 < 2 || y % 24 < 2;
+                let mut br = 0.08;
+                let mut bg = 0.25 + 0.35 * v;
+                let mut bb = 0.7 + 0.3 * (1.0 - v);
+                if gx {
+                    br = 0.4;
+                    bg = 0.9;
+                    bb = 1.0;
+                }
+                if ((u + 1.0 - bar).fract() - 0.5).abs() < 0.03 {
+                    br = 0.9;
+                    bg = 1.0;
+                    bb = 1.0;
+                }
+                let r = ar + (br - ar) * m;
+                let g = ag + (bg - ag) * m;
+                let b = ab + (bb - ab) * m;
+                let (r8, g8, b8) = (
+                    (r.clamp(0.0, 1.0) * 255.0) as u32,
+                    (g.clamp(0.0, 1.0) * 255.0) as u32,
+                    (b.clamp(0.0, 1.0) * 255.0) as u32,
+                );
+                self.trans_data[y * W + x] = 0xff00_0000 | (r8 << 16) | (g8 << 8) | b8;
+            }
+        }
+        match &self.trans_tex {
+            Some(tex) => {
+                tex.set_data_u32(cx, W, H, self.trans_data.clone());
+                tex.clone()
+            }
+            None => {
+                let tex = Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width: W,
+                        height: H,
+                        data: Some(self.trans_data.clone()),
+                        updated: TextureUpdated::Full,
+                    },
+                );
+                self.trans_tex = Some(tex.clone());
+                tex
+            }
+        }
     }
 }
 
@@ -535,6 +635,26 @@ impl Widget for VjFxThumbs {
             .as_ref()
             .is_some_and(|a| a.phase != Phase::Encoding);
         if rendering {
+            // Transition previews: the sweeping two-pattern premix lands in
+            // input0 and the engage triangle in p3, every frame — the tile
+            // then SHOWS one picture becoming another through the effect.
+            let sweep = self.active.as_ref().and_then(|active| {
+                if !active.job.transition {
+                    return None;
+                }
+                let m = if active.phase == Phase::Capturing {
+                    ((now - active.started - PREROLL_SECS) / CAPTURE_SPAN).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                Some(m as f32)
+            });
+            if let Some(m) = sweep {
+                let tex = self.transition_input(cx.cx, m, now as f32);
+                self.fx.set_input_texture(0, Some(tex));
+                let tri = 1.0 - (2.0 * m - 1.0).abs();
+                self.fx.set_user_override([None, None, None, Some(tri)]);
+            }
             let t0 = std::time::Instant::now();
             let _ = self.fx.draw_walk(cx, scope, Walk::fill());
             let ms = t0.elapsed().as_secs_f32() * 1000.0;
