@@ -723,6 +723,11 @@ impl Cx {
                 CxOsOp::SetCursor(cursor) => {
                     with_win32_app(|app| app.set_mouse_cursor(cursor));
                 }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    // Runs on its own STA thread; the answer arrives as a
+                    // FileDialogAction, same contract as macOS.
+                    super::file_dialog::open_select_folder_dialog(settings);
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
