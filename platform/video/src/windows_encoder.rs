@@ -17,7 +17,8 @@ use {
         Win32::Media::MediaFoundation::{
             eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8, IMFAttributes,
             IMFByteStream, IMFMediaBuffer, IMFSample, IMFSinkWriter, IMFSinkWriterEx,
-            IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
+            IMFTransform, ICodecAPI, CODECAPI_AVEncMPVGOPSize,
+            MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
             MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
             MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFStartup,
             MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_HEVC,
@@ -32,6 +33,7 @@ use {
             MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
         },
         Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED},
+        Win32::System::Variant::{VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0},
     },
     std::sync::atomic::{AtomicI32, Ordering},
     std::sync::Once,
@@ -234,6 +236,41 @@ impl WindowsVideoFileEncoder {
                 .map_err(|e| hr_err("set input stride", e))?;
             sink.SetInputMediaType(video_stream, &in_type, None::<&IMFAttributes>)
                 .map_err(|e| hr_err("IMFSinkWriter::SetInputMediaType(video NV12)", e))?;
+            if options.keyframe_only {
+                // The H.264 MFT IGNORES MF_MT_MAX_KEYFRAME_SPACING on the
+                // media type (measured: 48-frame GOPs shipped regardless).
+                // The binding control is ICodecAPI on the sink writer's
+                // encoder — reachable only after SetInputMediaType created
+                // it. Service GUID GUID_NULL selects the codec api per the
+                // sink-writer contract. Failing to enforce all-intra is an
+                // ERROR here, not a downgrade: callers asked for it because
+                // reverse playback depends on it.
+                let mut raw: *mut core::ffi::c_void = core::ptr::null_mut();
+                sink.GetServiceForStream(
+                    video_stream,
+                    &GUID::zeroed(),
+                    &ICodecAPI::IID,
+                    &mut raw,
+                )
+                .map_err(|e| hr_err("GetServiceForStream(ICodecAPI)", e))?;
+                let codec = unsafe { ICodecAPI::from_raw(raw) };
+                let gop = VARIANT {
+                    Anonymous: VARIANT_0 {
+                        Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                            // VT_UI4 (the trimmed vendored crate carries the
+                            // VARENUM type but not this constant).
+                            vt: VARENUM(19),
+                            wReserved1: 0,
+                            wReserved2: 0,
+                            wReserved3: 0,
+                            Anonymous: VARIANT_0_0_0 { ulVal: 1 },
+                        }),
+                    },
+                };
+                codec
+                    .SetValue(&CODECAPI_AVEncMPVGOPSize, &gop)
+                    .map_err(|e| hr_err("ICodecAPI::SetValue(GOP size 1)", e))?;
+            }
 
             // Optional audio track: PCM in, AAC out.
             let mut audio_stream = None;
