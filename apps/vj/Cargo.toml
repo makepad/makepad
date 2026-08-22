@@ -39,3 +39,11 @@ makepad-gltf = { path = "../../libs/gltf" }
 makepad-xr = { path = "../../xr" }
 # Procedural placeholder thumbnails for bundled effect presets.
 jpeg-encoder = { path = "../../libs/jpeg-encoder", version = "0.6.1" }
+# FULLY-LOCAL MODE: the VJ hosts its own Asset Server in-process, on
+# loopback, when no external store is reachable. Same crate asset-ui and the
+# sandbox embed — the VJ stays a THIN CLIENT over it either way, talking
+# HTTP to 127.0.0.1 exactly as it talks to a remote store.
+makepad-asset-store = { path = "../../libs/asset/store" }
+# Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
+# pictures for audio, and the dimension probes for stills.
+makepad-asset-importer = { path = "../../libs/asset/importer" }
