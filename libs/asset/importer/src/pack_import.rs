@@ -3976,19 +3976,18 @@ fn probe_mp4_trusted(
             format!("{pack_path}: probe bytes do not match digest"),
         ));
     }
-    let hex = {
-        #[cfg(unix)]
-        {
-            unix::random_hex16()?
-        }
-        #[cfg(not(unix))]
-        {
-            return Err(PackImportError::new(
-                PackImportErrorKind::Io,
-                format!("{pack_path}: getentropy probe dir unavailable"),
-            ));
-        }
-    };
+    // Split rather than nested: an ATTRIBUTED BLOCK in tail position is a
+    // statement, so `let hex = { #[cfg(not(unix))] { return … ; } }` binds
+    // `()` on Windows instead of diverging — which is exactly how this
+    // stopped compiling off unix. `return` as the initializer expression
+    // has type `!` and coerces, so both arms really do bind a String.
+    #[cfg(unix)]
+    let hex = unix::random_hex16()?;
+    #[cfg(not(unix))]
+    let hex: String = return Err(PackImportError::new(
+        PackImportErrorKind::Io,
+        format!("{pack_path}: getentropy probe dir unavailable"),
+    ));
     let dir = std::env::temp_dir().join(format!(".pack-import-probe-{hex}"));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
