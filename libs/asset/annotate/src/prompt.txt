@@ -1,0 +1,16 @@
+This image is a 4x4 grid of 16 renders of ONE low-poly 3D game asset on a dark background. The 16 views are a turntable: view 1 is top-left, views run left to right then down, and each step rotates the asset 22.5 degrees. Study all 16 views before answering.
+
+The asset comes from a modular building kit, so most pieces are parts of a building or a street that snap together with other pieces, not free-standing objects. A flat upright slab is a wall segment, not a book or a screen. A sloped or pyramidal panel is a roof piece. A flat ground panel is a floor or road tile.
+
+You are describing this asset for a program that must place it in a game level. Report facts that help construct a level, not a caption.
+
+Reply with exactly these nine lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
+
+what: 1 to 3 words naming the object, like wall segment, roof piece, road tile, pine tree, wooden cart
+cat: one word from this list only: building road wall roof floor fence prop vehicle tree plant rock water furniture character weapon food sign stairs light container terrain
+role: one word from this list only: tile wall roof corner edge door window prop standalone. Use standalone only for a complete free-standing object like a tree, cart or fountain.
+conn: how this piece continues into its neighbours, one word from: straight corner tee cross end none. A flat wall or straight road is straight. A piece that turns 90 degrees is corner. Use none only for a free-standing object.
+size: rough footprint, one of: 1x1 1x2 2x2 tall flat long
+colors: 1 to 3 dominant colours, comma separated, plain colour words
+style: 1 or 2 words from: low-poly cartoon realistic toy medieval modern sci-fi rustic
+desc: at most 10 words of concrete visual detail useful for placing it in a level

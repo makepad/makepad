@@ -4,7 +4,7 @@
 //! ships `.pk3` / `.bsp` / `.md3` as asset types:
 //!
 //! - PK3 (zip) → extracted files for the parsers below
-//! - BSP `IBSP` version 46 → one flat `World` GLB (visible faces + atlas)
+//! - BSP `IBSP` version 46 → one `World` GLB (one primitive per shader, tiling UVs)
 //! - MD3 → `Character` / `Weapon` / `Prop` GLB (first mesh, first frame)
 //! - TGA (and stored PNG) → atlas tiles / `Texture` PNG
 //! - WAV is copied by [`crate::classic_import`] after expand
@@ -27,9 +27,11 @@
 use crate::classic_import::{decode_png_stored, encode_png_rgba, ClassicAsset};
 use crate::vertex_skin;
 use makepad_asset_data::AssetKind;
-use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
+use makepad_gltf::{
+    write_glb_mesh_textured, write_glb_mesh_textured_parts, GlbTexturedMesh, GlbTexturedPart,
+};
 use makepad_zip_file::zip_read_central_directory;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const QUAKE3_SOURCE_ID: &str = "quake3";
@@ -42,17 +44,29 @@ pub const QUAKE3_CREDITS: &str = "id Software Quake III Arena demo";
 const SCALE: f32 = 1.0 / 64.0;
 /// Q3 `DEFAULT_VIEWHEIGHT` (standing).
 const VIEW_HEIGHT: f32 = 26.0;
+/// A spawn entity's origin sits this far above the floor (player bbox mins z).
+const ORIGIN_ABOVE_FLOOR: f32 = 24.0;
+/// Q3 `STEPSIZE`.
+const STEP_HEIGHT: f32 = 18.0;
 
 const LUMP_ENTITIES: usize = 0;
 const LUMP_TEXTURES: usize = 1;
+/// Brush models (`dmodel_t`): index 0 is the world, 1.. are the submodels a
+/// `func_*` entity references as `"model" "*N"`.
+const LUMP_MODELS: usize = 7;
 const LUMP_VERTICES: usize = 10;
 const LUMP_MESHVERTS: usize = 11;
 const LUMP_FACES: usize = 13;
+const LUMP_LIGHTMAPS: usize = 14;
 const LUMP_COUNT: usize = 17;
+const LIGHTMAP_W: usize = 128;
+const LIGHTMAP_BYTES: usize = LIGHTMAP_W * LIGHTMAP_W * 3;
 
 const TEX_SIZE: usize = 72;
 const VERT_SIZE: usize = 44;
 const FACE_SIZE: usize = 104;
+/// `float mins[3]; float maxs[3]; int face; int n_faces; int brush; int n_brushes;`
+const MODEL_SIZE: usize = 40;
 
 const FACE_POLYGON: i32 = 1;
 const FACE_PATCH: i32 = 2;
@@ -61,6 +75,16 @@ const FACE_MESH: i32 = 3;
 const SURF_SKY: i32 = 0x4;
 const SURF_NODRAW: i32 = 0x80;
 const SURF_SKIP: i32 = 0x200;
+
+// `contentFlags` of a shader lump entry (`q_shared.h`). Q3 marks a liquid on
+// the shader, not on the face — a brush textured `lavahell` is lava.
+const CONTENTS_LAVA: i32 = 0x8;
+const CONTENTS_SLIME: i32 = 0x10;
+const CONTENTS_WATER: i32 = 0x20;
+
+/// Q3's default door/plat `lip`: how much of the brush stays showing when it
+/// has finished travelling (`SP_func_door` / `SP_func_plat`, `g_mover.c`).
+const Q3_MOVER_LIP: f32 = 8.0;
 
 const MD3_IDENT: &[u8; 4] = b"IDP3";
 const MD3_VERSION: i32 = 15;
@@ -92,6 +116,32 @@ pub struct Q3TexBank {
     pub files: BTreeMap<String, PathBuf>,
     /// Material / shader name → diffusemap path (from `.mtr`).
     pub aliases: BTreeMap<String, String>,
+    /// Shader `detail` stage: high-frequency overlay + `tcMod scale`.
+    pub details: BTreeMap<String, ShaderDetail>,
+    /// Multi-stage look (alpha-over underlayer, additive fire).
+    pub surfaces: BTreeMap<String, ShaderSurface>,
+    /// Sky shader → `skyParms` FARBOX base path (`env/xnight2`). Only shaders
+    /// that name a box are here: a `skyparms - 512 -` cloud-layer sky has no
+    /// environment to resample and does not appear.
+    pub sky_boxes: BTreeMap<String, String>,
+}
+
+/// Q3 / Unreal-style close-up overlay. Mean ~0.5 so `2 * dest * src` is identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShaderDetail {
+    pub map: String,
+    pub scale: [f32; 2],
+}
+
+/// Baked Q3 stage stack used when a single albedo PNG has to stand in
+/// for `animMap` / `blendFunc` / scrolled underlayers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShaderSurface {
+    pub albedo: String,
+    pub under: Option<String>,
+    pub under_scale: [f32; 2],
+    pub additive: bool,
+    pub two_sided: bool,
 }
 
 impl Q3TexBank {
@@ -119,6 +169,63 @@ impl Q3TexBank {
             self.files.entry(k).or_insert(v);
         }
         self.aliases.extend(other.aliases);
+        self.details.extend(other.details);
+        self.surfaces.extend(other.surfaces);
+        self.sky_boxes.extend(other.sky_boxes);
+    }
+
+    /// The `skyParms` farbox base of a sky shader, if it named one.
+    pub fn sky_box_for(&self, name: &str) -> Option<&String> {
+        for key in candidate_tex_keys(name) {
+            if let Some(b) = self.sky_boxes.get(&key) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    pub fn detail_for(&self, name: &str) -> Option<&ShaderDetail> {
+        for key in candidate_tex_keys(name) {
+            if let Some(d) = self.details.get(&key) {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    pub fn surface_for(&self, name: &str) -> Option<&ShaderSurface> {
+        for key in candidate_tex_keys(name) {
+            if let Some(s) = self.surfaces.get(&key) {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Albedo for a BSP shader: follows aliases, composites an alpha
+    /// underlayer (blood / fire holes), and punches additive fire.
+    pub fn bake(&self, name: &str) -> Option<Q3Image> {
+        let surf = self.surface_for(name);
+        let albedo_name = surf
+            .map(|s| s.albedo.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name);
+        let mut img = self
+            .resolve(albedo_name)
+            .or_else(|| self.resolve(name))?;
+        if let Some(s) = surf {
+            if let Some(under_name) = s.under.as_ref() {
+                if let Some(under) = self.resolve(under_name) {
+                    img = composite_under(&img, &under, s.under_scale);
+                } else {
+                    force_opaque(&mut img);
+                }
+            }
+            if s.additive {
+                img = luma_to_alpha(img);
+            }
+        }
+        Some(img)
     }
 
     /// Decoded image for a shader / material / file path. Follows `.mtr`
@@ -297,6 +404,403 @@ pub fn load_tex_bank(root: &Path) -> Q3TexBank {
         insert_decoded(&mut bank.images, &key, img);
     }
     bank
+}
+
+/// `.shader` `map` / `qer_editorimage` → albedo path aliases.
+pub fn apply_shader_aliases(bank: &mut Q3TexBank, root: &Path) {
+    if !root.exists() {
+        return;
+    }
+    let mut files = Vec::new();
+    walk_files(root, &mut files, 0);
+    for path in files {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext != "shader" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        parse_shader_aliases(&text, bank);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ShaderStage {
+    map: String,
+    additive: bool,
+    alpha: bool,
+    scale: [f32; 2],
+}
+
+fn parse_shader_aliases(text: &str, bank: &mut Q3TexBank) {
+    let mut shader = String::new();
+    let mut depth = 0i32;
+    let mut editor = String::new();
+    let mut stages: Vec<ShaderStage> = Vec::new();
+    let mut detail_map = String::new();
+    let mut detail_scale = [1.0f32, 1.0];
+    let mut stage_map = String::new();
+    let mut stage_detail = false;
+    let mut stage_additive = false;
+    let mut stage_alpha = false;
+    let mut stage_scale = [1.0f32, 1.0];
+    let mut cull_none = false;
+    let flush = |shader: &str,
+                 stages: &[ShaderStage],
+                 editor: &str,
+                 detail_map: &str,
+                 detail_scale: [f32; 2],
+                 cull_none: bool,
+                 bank: &mut Q3TexBank| {
+        if shader.is_empty() {
+            return;
+        }
+        // Prefer the last non-additive surface (stone / lava / sky).
+        // Additive-only stacks (animMap flame) fall back to the first frame.
+        let albedo_idx = stages
+            .iter()
+            .rposition(|s| !s.additive)
+            .or_else(|| stages.first().map(|_| 0));
+        let albedo = albedo_idx
+            .map(|i| stages[i].map.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(editor);
+        if !albedo.is_empty() {
+            bank.add_alias(shader, albedo);
+        }
+        if !detail_map.is_empty() {
+            bank.details.insert(
+                normalize_tex_name(shader),
+                ShaderDetail {
+                    map: normalize_tex_name(detail_map),
+                    scale: detail_scale,
+                },
+            );
+        }
+        if let Some(i) = albedo_idx {
+            let a = &stages[i];
+            let mut surface = ShaderSurface {
+                albedo: normalize_tex_name(&a.map),
+                under: None,
+                under_scale: [1.0, 1.0],
+                additive: a.additive,
+                two_sided: cull_none || a.additive,
+            };
+            if a.alpha {
+                if let Some(under) = stages[..i].iter().rev().find(|s| !s.additive && !s.alpha) {
+                    surface.under = Some(normalize_tex_name(&under.map));
+                    surface.under_scale = under.scale;
+                }
+            }
+            if surface.under.is_some() || surface.additive || surface.two_sided {
+                bank.surfaces.insert(normalize_tex_name(shader), surface);
+            }
+        }
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if depth == 0 && !line.starts_with('{') && !line.starts_with('}') {
+            if !shader.is_empty() {
+                flush(
+                    &shader,
+                    &stages,
+                    &editor,
+                    &detail_map,
+                    detail_scale,
+                    cull_none,
+                    bank,
+                );
+            }
+            shader = line.split_whitespace().next().unwrap_or("").to_string();
+            editor.clear();
+            stages.clear();
+            detail_map.clear();
+            detail_scale = [1.0, 1.0];
+            cull_none = false;
+            continue;
+        }
+        if line.starts_with('{') {
+            depth += 1;
+            if depth == 2 {
+                stage_map.clear();
+                stage_detail = false;
+                stage_additive = false;
+                stage_alpha = false;
+                stage_scale = [1.0, 1.0];
+            }
+            continue;
+        }
+        if line.starts_with('}') {
+            if depth == 2 {
+                if stage_detail && !stage_map.is_empty() {
+                    detail_map = stage_map.clone();
+                    detail_scale = stage_scale;
+                } else if !stage_map.is_empty() {
+                    stages.push(ShaderStage {
+                        map: stage_map.clone(),
+                        additive: stage_additive,
+                        alpha: stage_alpha,
+                        scale: stage_scale,
+                    });
+                }
+            }
+            depth = (depth - 1).max(0);
+            if depth == 0 {
+                flush(
+                    &shader,
+                    &stages,
+                    &editor,
+                    &detail_map,
+                    detail_scale,
+                    cull_none,
+                    bank,
+                );
+                shader.clear();
+                editor.clear();
+                stages.clear();
+                detail_map.clear();
+                detail_scale = [1.0, 1.0];
+                cull_none = false;
+            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if depth == 1 && lower.starts_with("qer_editorimage") {
+            if let Some(p) = line.split_whitespace().nth(1) {
+                editor = p.to_string();
+            }
+            continue;
+        }
+        // `skyParms <farbox> <cloudheight> <nearbox>`. Only the farbox names an
+        // environment we can resample; `-`, a bare number and `full`/`half`
+        // are cloud-layer skies with no box at all.
+        if depth == 1 && lower.starts_with("skyparms") {
+            if let Some(farbox) = line.split_whitespace().nth(1) {
+                let f = farbox.to_ascii_lowercase();
+                let placeholder =
+                    f == "-" || f == "full" || f == "half" || f.parse::<f32>().is_ok();
+                if !placeholder && !shader.is_empty() {
+                    bank.sky_boxes
+                        .insert(normalize_tex_name(&shader), normalize_tex_name(farbox));
+                }
+            }
+            continue;
+        }
+        if depth == 1 && (lower == "cull none" || lower == "cull disable"
+            || lower.starts_with("cull none")
+            || lower.starts_with("cull disable"))
+        {
+            cull_none = true;
+            continue;
+        }
+        if depth != 2 {
+            continue;
+        }
+        if lower == "detail" || lower.starts_with("detail ") {
+            stage_detail = true;
+            continue;
+        }
+        if lower.starts_with("blendfunc") {
+            let kind = classify_blend(&lower);
+            stage_additive = kind == BlendKind::Additive;
+            stage_alpha = kind == BlendKind::Alpha;
+            continue;
+        }
+        if lower.starts_with("tcmod scale") || lower.starts_with("tcmod  scale") {
+            let mut it = line.split_whitespace();
+            let _ = it.next();
+            let _ = it.next();
+            let sx = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let sy = it.next().and_then(|s| s.parse().ok()).unwrap_or(sx);
+            stage_scale = [sx, sy];
+            continue;
+        }
+        if lower.starts_with("animmap ") {
+            let mut it = line.split_whitespace();
+            let _ = it.next();
+            let _ = it.next();
+            if let Some(p) = it.next() {
+                let pl = p.to_ascii_lowercase();
+                if !pl.starts_with('$') {
+                    stage_map = p.to_string();
+                }
+            }
+            continue;
+        }
+        if lower.starts_with("map ") || lower.starts_with("clampmap ") {
+            if let Some(p) = line.split_whitespace().nth(1) {
+                let pl = p.to_ascii_lowercase();
+                if !pl.starts_with('$') {
+                    stage_map = p.to_string();
+                }
+            }
+        }
+    }
+    flush(
+        &shader,
+        &stages,
+        &editor,
+        &detail_map,
+        detail_scale,
+        cull_none,
+        bank,
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlendKind {
+    Replace,
+    Alpha,
+    Additive,
+    Other,
+}
+
+fn classify_blend(lower: &str) -> BlendKind {
+    let mut it = lower.split_whitespace();
+    let _ = it.next();
+    let a = it.next().unwrap_or("");
+    let b = it.next().unwrap_or("");
+    if a == "add" || (a == "gl_one" && b == "gl_one") {
+        return BlendKind::Additive;
+    }
+    if a == "blend"
+        || (a == "gl_src_alpha" && b == "gl_one_minus_src_alpha")
+        || (a.contains("src_alpha") && b.contains("one_minus_src_alpha"))
+    {
+        return BlendKind::Alpha;
+    }
+    if a == "gl_one" && b == "gl_zero" {
+        return BlendKind::Replace;
+    }
+    BlendKind::Other
+}
+
+fn composite_under(over: &Q3Image, under: &Q3Image, scale: [f32; 2]) -> Q3Image {
+    let (ow, oh) = (over.w as usize, over.h as usize);
+    let (uw, uh) = (under.w as usize, under.h as usize);
+    if ow == 0 || oh == 0 || uw == 0 || uh == 0 {
+        let mut img = over.clone();
+        force_opaque(&mut img);
+        return img;
+    }
+    let sx = if scale[0].abs() < 1e-4 { 1.0 } else { scale[0] };
+    let sy = if scale[1].abs() < 1e-4 { 1.0 } else { scale[1] };
+    let mut rgba = over.rgba.clone();
+    for y in 0..oh {
+        for x in 0..ow {
+            let i = (y * ow + x) * 4;
+            let a = rgba[i + 3] as f32 / 255.0;
+            if a >= 0.995 {
+                rgba[i + 3] = 255;
+                continue;
+            }
+            let ux = ((x as f32 + 0.5) / ow as f32 * sx * uw as f32).rem_euclid(uw as f32) as usize;
+            let uy = ((y as f32 + 0.5) / oh as f32 * sy * uh as f32).rem_euclid(uh as f32) as usize;
+            let ui = (uy.min(uh - 1) * uw + ux.min(uw - 1)) * 4;
+            let ua = 1.0 - a;
+            for c in 0..3 {
+                let o = rgba[i + c] as f32;
+                let u = under.rgba[ui + c] as f32;
+                rgba[i + c] = (o * a + u * ua).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba[i + 3] = 255;
+        }
+    }
+    Q3Image {
+        w: over.w,
+        h: over.h,
+        rgba,
+    }
+}
+
+fn force_opaque(img: &mut Q3Image) {
+    for px in img.rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+fn luma_to_alpha(mut img: Q3Image) -> Q3Image {
+    // Official flame JPGs are mostly dim orange on black (mean ~15).
+    // A raw luma alpha falls under the walker's tex.w < 0.5 discard
+    // and the whole card vanishes. Keep any glow, punch only ink.
+    for px in img.rgba.chunks_exact_mut(4) {
+        let l = px[0].max(px[1]).max(px[2]);
+        if l < 10 {
+            px[3] = 0;
+            continue;
+        }
+        if l < 80 {
+            let g = 80.0 / l as f32;
+            px[0] = ((px[0] as f32) * g).min(255.0) as u8;
+            px[1] = ((px[1] as f32) * g).min(255.0) as u8;
+            px[2] = ((px[2] as f32) * g).min(255.0) as u8;
+        }
+        px[3] = 255;
+    }
+    img
+}
+
+/// Catalog cards for unique world/model albedo images (not aux maps).
+pub fn emit_texture_assets(
+    bank: &Q3TexBank,
+    staged: &Path,
+    source_id: &str,
+) -> Vec<ClassicAsset> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (key, img) in &bank.images {
+        if is_aux_tex_name(key) || key == "_default" {
+            continue;
+        }
+        // One card per unique bitmap. Alias keys (stem / no-prefix) share pixels.
+        let sig = (
+            img.w,
+            img.h,
+            img.rgba.len(),
+            img.rgba.get(0..16).unwrap_or(&[]).to_vec(),
+        );
+        if !seen.insert(format!("{sig:?}")) {
+            continue;
+        }
+        let slug = sanitize_slug(key);
+        let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) else {
+            continue;
+        };
+        let tkey = format!("textures/{slug}");
+        let trel = format!("{tkey}.png");
+        let dest = staged.join(&trel);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if dest.exists() {
+            out.push(ClassicAsset {
+                key: tkey,
+                kind: AssetKind::Texture,
+                rel_path: trel,
+                tags: vec!["texture".into(), source_id.into(), slug],
+                icon_rel: None,
+            });
+            continue;
+        }
+        if std::fs::write(&dest, png).is_ok() {
+            out.push(ClassicAsset {
+                key: tkey,
+                kind: AssetKind::Texture,
+                rel_path: trel,
+                tags: vec!["texture".into(), source_id.into(), slug],
+                icon_rel: None,
+            });
+        }
+    }
+    out
 }
 
 fn tex_file_rank(path: &Path) -> u8 {
@@ -532,6 +1036,14 @@ pub fn decode_tga(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
         let r = raw[p + 2];
         let a = if src_bpp == 4 { raw[p + 3] } else { 255 };
         rgba.extend_from_slice(&[r, g, b, a]);
+    }
+    // Many Q3 32-bit TGAs store unused alpha as 0. Default shaders are
+    // opaque; the walk viewer discards tex.w < 0.5, which deleted whole
+    // arch frames (skullarch_a/c) and left only the soffit C.
+    if src_bpp == 4 && rgba.chunks_exact(4).all(|p| p[3] == 0) {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
     }
     let origin_top = desc & 0x20 != 0;
     if !origin_top {
@@ -838,17 +1350,30 @@ pub fn convert_bsp46(
     textures: &Q3TexBank,
     source_id: &str,
 ) -> Result<Vec<ClassicAsset>, String> {
-    let (glb, spawn, used) = bsp46_to_glb(bytes, textures)?;
+    let world = bsp46_to_glb(bytes, textures)?;
     let slug = stem_slug(rel);
-    let key = format!("worlds/{slug}");
+    for w in &world.warnings {
+        eprintln!("[quake3-import] {slug}: {w}");
+    }
+    // Classic Quake maps — splash game worlds stay `worlds/`.
+    let key = format!("maps/{slug}");
     let rel_path = format!("{key}.glb");
     let dest = staged.join(&rel_path);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&dest, &glb).map_err(|e| e.to_string())?;
-    if let Some(spawn) = spawn {
-        write_spawn_sidecar(&dest, spawn);
+    std::fs::write(&dest, &world.glb).map_err(|e| e.to_string())?;
+    let nav = &world.nav;
+    if !nav.starts.is_empty()
+        || !nav.doors.is_empty()
+        || !nav.lifts.is_empty()
+        || !nav.teleports.is_empty()
+    {
+        write_spawn_sidecar(&dest, nav);
+    }
+    {
+        let place = bsp46_place(&entities_of(bytes), source_id, &key);
+        let _ = crate::world_place::write_place_sidecar(&dest, &place);
     }
     let icon_rel = crate::world_preview::write_spawn_preview(&dest)
         .ok()
@@ -858,9 +1383,8 @@ pub fn convert_bsp46(
         kind: AssetKind::World,
         rel_path,
         tags: vec![
-            "world".into(),
-            source_id.into(),
             "map".into(),
+            source_id.into(),
             "bsp46".into(),
             slug.clone(),
             "no-portals".into(),
@@ -868,7 +1392,7 @@ pub fn convert_bsp46(
         icon_rel,
     }];
     let mut seen = BTreeSet::new();
-    for name in used {
+    for name in world.used {
         if !seen.insert(name.clone()) {
             continue;
         }
@@ -903,10 +1427,16 @@ pub fn convert_bsp46(
     Ok(assets)
 }
 
-fn bsp46_to_glb(
-    bytes: &[u8],
-    textures: &Q3TexBank,
-) -> Result<(Vec<u8>, Option<WorldSpawn>, Vec<String>), String> {
+/// A converted Quake III map: the GLB, what a walker needs to stand in it,
+/// the shaders it used, and every fact the BSP could not express.
+struct Bsp46World {
+    glb: Vec<u8>,
+    nav: crate::world_nav::WorldNav,
+    used: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn bsp46_to_glb(bytes: &[u8], textures: &Q3TexBank) -> Result<Bsp46World, String> {
     if bytes.len() < 8 + LUMP_COUNT * 8 {
         return Err("BSP too small".into());
     }
@@ -922,19 +1452,20 @@ fn bsp46_to_glb(
     let vert_lump = lump(bytes, LUMP_VERTICES)?;
     let idx_lump = lump(bytes, LUMP_MESHVERTS)?;
     let face_lump = lump(bytes, LUMP_FACES)?;
-    let ent_lump = lump(bytes, LUMP_ENTITIES).ok();
 
     let n_tex = tex_lump.1 / TEX_SIZE;
     let n_vert = vert_lump.1 / VERT_SIZE;
     let n_idx = idx_lump.1 / 4;
     let n_face = face_lump.1 / FACE_SIZE;
 
-    let mut shaders = Vec::with_capacity(n_tex);
+    let mut shaders: Vec<Q3Shader> = Vec::with_capacity(n_tex);
     for i in 0..n_tex {
         let o = tex_lump.0 + i * TEX_SIZE;
-        let name = cstr(&bytes[o..o + 64]);
-        let flags = i32_le(bytes, o + 64);
-        shaders.push((name, flags));
+        shaders.push(Q3Shader {
+            name: cstr(&bytes[o..o + 64]),
+            surface: i32_le(bytes, o + 64),
+            contents: i32_le(bytes, o + 68),
+        });
     }
 
     let mut verts = Vec::with_capacity(n_vert);
@@ -947,10 +1478,16 @@ fn bsp46_to_glb(
                 f32_le(bytes, o + 8),
             ],
             st: [f32_le(bytes, o + 12), f32_le(bytes, o + 16)],
+            lmst: [f32_le(bytes, o + 20), f32_le(bytes, o + 24)],
             normal: [
                 f32_le(bytes, o + 28),
                 f32_le(bytes, o + 32),
                 f32_le(bytes, o + 36),
+            ],
+            color: [
+                bytes.get(o + 40).copied().unwrap_or(255) as f32 / 255.0,
+                bytes.get(o + 41).copied().unwrap_or(255) as f32 / 255.0,
+                bytes.get(o + 42).copied().unwrap_or(255) as f32 / 255.0,
             ],
         });
     }
@@ -960,36 +1497,30 @@ fn bsp46_to_glb(
         meshverts.push(i32_le(bytes, idx_lump.0 + i * 4));
     }
 
-    let mut images: BTreeMap<String, Q3Image> = BTreeMap::new();
-    images.insert("_default".into(), gray_image(64, 64));
+    let lm_bytes = lump(bytes, LUMP_LIGHTMAPS).ok();
+    let lm_atlas = pack_lightmap_atlas(bytes, lm_bytes);
+
+    let mut parts: BTreeMap<String, PartGeom> = BTreeMap::new();
     let mut used = Vec::new();
+    let mut seen = BTreeSet::new();
 
-    let mut positions = Vec::new();
-    let mut uvs = Vec::new();
-    let mut normals = Vec::new();
-    let mut indices = Vec::new();
-
-    // First pass: collect referenced shader images so the atlas is complete
-    // before we emit UVs.
-    for fi in 0..n_face {
-        let o = face_lump.0 + fi * FACE_SIZE;
-        let tex = i32_le(bytes, o);
-        let typ = i32_le(bytes, o + 8);
-        if typ != FACE_POLYGON && typ != FACE_MESH && typ != FACE_PATCH {
-            continue;
-        }
-        let Some((name, flags)) = shaders.get(tex as usize) else {
-            continue;
-        };
-        if skip_shader(name, *flags) {
-            continue;
-        }
-        if let Some(img) = textures.resolve(name) {
-            used.push(name.clone());
-            images.entry(name.clone()).or_insert(img);
+    // What leaves the static mesh, and why.
+    let entities = entities_of(bytes);
+    let models = bsp46_models(bytes);
+    let (movers, mut warnings) = bsp46_movers(&entities, &models);
+    let mut mover_of_face: BTreeMap<usize, usize> = BTreeMap::new();
+    for (mi, m) in movers.iter().enumerate() {
+        for f in m.first_face..m.first_face + m.num_faces {
+            mover_of_face.insert(f, mi);
         }
     }
-    let (atlas_png, uv_map) = pack_atlas(&images);
+    let mut mover_geom: Vec<MoverGeom> = vec![MoverGeom::default(); movers.len()];
+    let mut hazard_geom: BTreeMap<String, PartGeom> = BTreeMap::new();
+    // The sky only leaves the mesh when its picture can be BUILT: a
+    // `skyParms` cloud-layer sky has no environment to resample, and a hole
+    // where the lid was is worse than the lid.
+    let (sky_png, sky_shader) = bsp46_sky_panorama(&shaders, textures, &mut warnings);
+    let mut sky_geom = PartGeom::default();
 
     for fi in 0..n_face {
         let o = face_lump.0 + fi * FACE_SIZE;
@@ -999,77 +1530,619 @@ fn bsp46_to_glb(
         let n_vertexes = i32_le(bytes, o + 16);
         let first_idx = i32_le(bytes, o + 20);
         let n_meshverts = i32_le(bytes, o + 24);
+        let lm_num = i32_le(bytes, o + 28);
         let patch_w = i32_le(bytes, o + 96);
         let patch_h = i32_le(bytes, o + 100);
-        let (name, flags) = match shaders.get(tex as usize) {
+        let shader = match shaders.get(tex as usize) {
             Some(t) => t,
             None => continue,
         };
-        if skip_shader(name, *flags) {
+        let name = &shader.name;
+        if skip_shader(name, shader.surface) {
             continue;
         }
-        let slot = lookup_slot(&uv_map, name);
+        if typ != FACE_POLYGON && typ != FACE_MESH && typ != FACE_PATCH {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            used.push(name.clone());
+        }
+        // Sky first (it is never a mover), then the movers, then the liquids,
+        // then the level itself.
+        let geom = if sky_png.is_some() && shader.surface & SURF_SKY != 0 {
+            &mut sky_geom
+        } else if let Some(&mi) = mover_of_face.get(&fi) {
+            let m = &mut mover_geom[mi];
+            *m.shaders.entry(name.clone()).or_insert(0) += 1;
+            &mut m.geom
+        } else if shader.liquid() {
+            hazard_geom.entry(name.clone()).or_default()
+        } else {
+            parts.entry(name.clone()).or_default()
+        };
         match typ {
             FACE_POLYGON | FACE_MESH => emit_indexed_face(
-                &mut positions,
-                &mut uvs,
-                &mut normals,
-                &mut indices,
+                geom,
                 &verts,
                 &meshverts,
                 first_vert,
                 n_vertexes,
                 first_idx,
                 n_meshverts,
-                slot,
+                lm_num,
+                lm_atlas.as_ref(),
             ),
-            FACE_PATCH => emit_patch(
-                &mut positions,
-                &mut uvs,
-                &mut normals,
-                &mut indices,
-                &verts,
-                first_vert,
-                n_vertexes,
-                patch_w,
-                patch_h,
-                slot,
-            ),
+            FACE_PATCH => {
+                // q3map already triangulated some degenerate Bevel nets
+                // for the lightmap. Prefer that fill when it exists.
+                if n_meshverts >= 3 {
+                    emit_indexed_face(
+                        geom,
+                        &verts,
+                        &meshverts,
+                        first_vert,
+                        n_vertexes,
+                        first_idx,
+                        n_meshverts,
+                        lm_num,
+                        lm_atlas.as_ref(),
+                    );
+                } else {
+                    emit_patch(
+                        geom,
+                        &verts,
+                        first_vert,
+                        n_vertexes,
+                        patch_w,
+                        patch_h,
+                        lm_num,
+                        lm_atlas.as_ref(),
+                    );
+                }
+            }
             _ => {}
         }
     }
 
-    if positions.is_empty() || indices.is_empty() {
-        positions = vec![
+    for (name, geom) in &mut parts {
+        let two = textures
+            .surface_for(name)
+            .map(|s| s.two_sided)
+            .unwrap_or(false);
+        if two && geom.indices.len() >= 3 {
+            let extra: Vec<u32> = geom
+                .indices
+                .chunks_exact(3)
+                .flat_map(|t| [t[0], t[2], t[1]])
+                .collect();
+            geom.indices.extend(extra);
+        }
+    }
+
+    let gray = gray_image(64, 64);
+    let gray_png = encode_png_rgba(&gray.rgba, gray.w, gray.h).unwrap_or_default();
+    let mut pngs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut detail_pngs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut detail_scales: BTreeMap<String, [f32; 2]> = BTreeMap::new();
+    let mut glb_parts: Vec<GlbTexturedPart<'_>> = Vec::new();
+    let lm_png = lm_atlas.as_ref().map(|a| a.png.as_slice());
+    // Keep PNG bytes alive for the writer borrow.
+    for name in parts.keys() {
+        if let Some(img) = textures.bake(name) {
+            if let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) {
+                pngs.insert(name.clone(), png);
+            } else {
+                pngs.insert(name.clone(), gray_png.clone());
+            }
+        } else {
+            pngs.insert(name.clone(), gray_png.clone());
+        }
+        if let Some(det) = textures.detail_for(name) {
+            if let Some(img) = textures.resolve(&det.map) {
+                if let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) {
+                    detail_pngs.insert(name.clone(), png);
+                    detail_scales.insert(name.clone(), det.scale);
+                }
+            }
+        }
+    }
+    // Weld the T-junctions this converter's own tessellation leaves behind.
+    //
+    // `q3map` fixes the ones between brush faces, which is why nothing
+    // welded here for a long time. But a Q3 map is not only brushwork: this
+    // converter subdivides every patch itself, and where a curve meets the
+    // flat wall it abuts, neither side knows where the other cut. q3dm1
+    // came out of a pre-welded BSP with 668 cracks. Merge first (a pair of
+    // corners a hair apart poisons each other's cuts, so the splitter
+    // declines them), then split, over the world parts, the sky, the
+    // liquids and every mover from one grid — the cracks that show up most
+    // are the ones BETWEEN parts.
+    {
+        let merge = {
+            let mut all: Vec<&[[f32; 3]]> = parts.values().map(|g| &g.positions[..]).collect();
+            all.push(&sky_geom.positions[..]);
+            all.extend(hazard_geom.values().map(|g| &g.positions[..]));
+            all.extend(mover_geom.iter().map(|m| &m.geom.positions[..]));
+            crate::classic_import::merge_near_corners(&all)
+        };
+        let weld_one = |geom: &mut PartGeom, pass: &dyn Fn(crate::classic_import::WeldSoup)| {
+            let n = geom.positions.len();
+            let mut normals = std::mem::take(&mut geom.normals);
+            let mut colors = std::mem::take(&mut geom.colors);
+            let has_normals = normals.len() == n;
+            let has_colors = colors.len() == n;
+            pass(crate::classic_import::WeldSoup {
+                positions: &mut geom.positions,
+                uvs: &mut geom.uvs,
+                normals: has_normals.then_some(&mut normals),
+                colors: has_colors.then_some(&mut colors),
+                indices: &mut geom.indices,
+            });
+            geom.normals = normals;
+            geom.colors = colors;
+            // The lightmap UVs are a second stream the weld does not know
+            // about; a split would leave them the wrong length, and a
+            // length mismatch is what the writer checks. Rebuild them to
+            // the marker form rather than ship a half-updated stream.
+            if geom.lm_uvs.len() != geom.positions.len() {
+                geom.lm_uvs = vec![[0.0, 0.0]; geom.positions.len()];
+                geom.own_marker = true;
+            }
+        };
+        if !merge.is_empty() {
+            let apply = |soup: crate::classic_import::WeldSoup| {
+                merge.apply(soup);
+            };
+            for geom in parts
+                .values_mut()
+                .chain(std::iter::once(&mut sky_geom))
+                .chain(hazard_geom.values_mut())
+                .chain(mover_geom.iter_mut().map(|m| &mut m.geom))
+            {
+                weld_one(geom, &apply);
+            }
+        }
+        let weld = {
+            let mut all: Vec<&[[f32; 3]]> = parts.values().map(|g| &g.positions[..]).collect();
+            all.push(&sky_geom.positions[..]);
+            all.extend(hazard_geom.values().map(|g| &g.positions[..]));
+            all.extend(mover_geom.iter().map(|m| &m.geom.positions[..]));
+            crate::classic_import::weld_parts(&all)
+        };
+        let split = |soup: crate::classic_import::WeldSoup| {
+            weld.split(soup);
+        };
+        for geom in parts
+            .values_mut()
+            .chain(std::iter::once(&mut sky_geom))
+            .chain(hazard_geom.values_mut())
+            .chain(mover_geom.iter_mut().map(|m| &mut m.geom))
+        {
+            weld_one(geom, &split);
+        }
+    }
+    // A Q3 level is PRELIT: its light is already in COLOR_0, from the
+    // lightmap atlas where there is one and from the drawvert colours where
+    // there is not. The `lightmapTexture` marker is what tells the renderer
+    // so; without it the analytic sun multiplies an already-lit level. A
+    // vertex-lit-only map has no atlas to point at, so — exactly as the Doom
+    // converter does — the marker points back at the part's own albedo with
+    // zero UVs, which a prelit shader never samples.
+    for geom in parts.values_mut() {
+        let has_lm = lm_png.is_some() && geom.lm_uvs.iter().any(|uv| uv[0] >= 0.0);
+        if !has_lm {
+            geom.lm_uvs = vec![[0.0, 0.0]; geom.positions.len()];
+            geom.own_marker = true;
+        }
+    }
+    for (name, geom) in &parts {
+        if geom.indices.len() < 3 {
+            continue;
+        }
+        let png = pngs.get(name).unwrap_or(&gray_png);
+        let detail = detail_pngs.get(name).map(|p| p.as_slice());
+        let dscale = detail_scales.get(name).copied().unwrap_or([0.0, 0.0]);
+        glb_parts.push(GlbTexturedPart {
+            positions: &geom.positions,
+            uvs: &geom.uvs,
+            indices: &geom.indices,
+            base_color_png: png,
+            normals: Some(&geom.normals),
+            base_color_factor: None,
+            colors: Some(&geom.colors),
+            lightmap_png: Some(if geom.own_marker { png } else { lm_png.unwrap_or(png) }),
+            lightmap_uvs: Some(&geom.lm_uvs),
+            detail_png: detail,
+            detail_scale: dscale,
+        });
+    }
+
+    let glb = if glb_parts.is_empty() {
+        let positions = vec![
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [1.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
         ];
-        uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        normals = vec![[0.0, 1.0, 0.0]; 4];
-        indices = vec![0, 1, 2, 0, 2, 3];
-    }
-
-    let glb = write_glb_mesh_textured(&GlbTexturedMesh {
-        positions: &positions,
-        normals: Some(&normals),
-        uvs: &uvs,
-        indices: &indices,
-        base_color_png: &atlas_png,
-        metallic_roughness_png: None,
-        double_sided: true,
-        colors: None,
-    });
+        let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        write_glb_mesh_textured(&GlbTexturedMesh {
+            positions: &positions,
+            normals: None,
+            uvs: &uvs,
+            indices: &indices,
+            base_color_png: &gray_png,
+            metallic_roughness_png: None,
+            double_sided: true,
+            colors: None,
+        })
+    } else {
+        write_glb_mesh_textured_parts(&glb_parts, true)
+    };
     if !glb.starts_with(b"glTF") {
         return Err("GLB writer failed".into());
     }
-    let spawn = ent_lump.and_then(|(off, len)| bsp46_spawn(&bytes[off..off + len]));
-    Ok((glb, spawn, used))
+
+    // ---- the contract nodes -------------------------------------------
+    //
+    // `inject_nodes` paints an added node with the LEVEL's material 0 unless
+    // the node brings its own image. Quake III already writes one material
+    // per shader, so material 0 is whichever shader sorted first — a door
+    // repainted with it would be visibly wrong. Every node here therefore
+    // carries its own image.
+    //
+    // A node has ONE mesh with ONE material, and a Q3 face keeps its raw
+    // TILING st (values far outside 0..1, drawn with GL_REPEAT). Packing a
+    // per-node atlas would have to clamp those, so a door's wall would stop
+    // tiling: the atlas is not an option here, and the honest choice is one
+    // image per node. Measured on the demo pack, every `func_door` is a
+    // single shader (q3dm7 `*5` 12 faces / 1 shader, `*6` 78 faces / 1
+    // shader), so this repaints nothing in practice; a door that does span
+    // shaders takes its most-used one and says so.
+    let mut extra: Vec<crate::glb_nodes::ExtraNode> = Vec::new();
+    for (mi, mover) in movers.iter().enumerate() {
+        let m = &mover_geom[mi];
+        if m.geom.indices.len() < 3 {
+            continue;
+        }
+        let shader = m
+            .shaders
+            .iter()
+            .max_by_key(|(name, n)| (**n, std::cmp::Reverse(name.as_str())))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        if m.shaders.len() > 1 {
+            warnings.push(format!(
+                "{} spans {} shaders; painted with `{shader}`",
+                mover.name,
+                m.shaders.len()
+            ));
+        }
+        let png = shader_png(textures, &shader, &gray_png);
+        // A `start_open` door is baked OPEN; the contract authors it CLOSED.
+        let positions: Vec<[f32; 3]> = if mover.shift == [0.0; 3] {
+            m.geom.positions.clone()
+        } else {
+            m.geom
+                .positions
+                .iter()
+                .map(|p| {
+                    [
+                        p[0] + mover.shift[0],
+                        p[1] + mover.shift[1],
+                        p[2] + mover.shift[2],
+                    ]
+                })
+                .collect()
+        };
+        let mut node = match mover.kind {
+            MoverKind::Door => crate::glb_nodes::ExtraNode::door_vector(
+                mover.name.clone(),
+                positions,
+                m.geom.uvs.clone(),
+                m.geom.indices.clone(),
+                mover.travel,
+                mover.axis,
+            ),
+            MoverKind::Lift => crate::glb_nodes::ExtraNode::lift(
+                mover.name.clone(),
+                positions,
+                m.geom.uvs.clone(),
+                m.geom.indices.clone(),
+                m.geom.colors.clone(),
+                mover.top_y,
+                mover.top_y + mover.travel[1],
+            ),
+        };
+        // Baked light travels with the geometry, like the level mesh's:
+        // `door_vector` has no colour argument, so it is set here.
+        node.colors = m.geom.colors.clone();
+        node.images = vec![png];
+        extra.push(node);
+    }
+    for (n, (name, geom)) in hazard_geom.iter().enumerate() {
+        if geom.indices.len() < 3 {
+            continue;
+        }
+        let stem = name.rsplit('/').next().unwrap_or(name);
+        let mut node = crate::glb_nodes::ExtraNode::hazard(
+            format!("hazard_{}", n + 1),
+            geom.positions.clone(),
+            geom.uvs.clone(),
+            geom.indices.clone(),
+            geom.colors.clone(),
+            q3_liquid_damage(name),
+            stem,
+            true,
+            // A Q3 liquid is a volume you swim through, not a floor you stand
+            // on — the surface must not stop a walker.
+            false,
+        );
+        node.images = vec![shader_png(textures, name, &gray_png)];
+        extra.push(node);
+    }
+    if let (Some(png), false) = (sky_png, sky_geom.indices.len() < 3) {
+        extra.push(crate::glb_nodes::ExtraNode::sky(
+            std::mem::take(&mut sky_geom.positions),
+            std::mem::take(&mut sky_geom.uvs),
+            std::mem::take(&mut sky_geom.indices),
+            vec![png],
+            // The renderer has no cube sampler: `cube` is sampled as the
+            // equirect twin `crate::skybox` just built, one image, no wrap
+            // multiplier and no phase offset.
+            "cube",
+            1.0,
+            0.0,
+            &sky_shader,
+            None,
+            None,
+        ));
+    }
+    let glb = match crate::glb_nodes::inject_nodes(&glb, &extra) {
+        Ok(g) => g,
+        Err(e) => {
+            warnings.push(format!("contract nodes not injected: {e}"));
+            glb
+        }
+    };
+
+    let (nav, nav_warnings) = bsp46_nav(&entities, &models, &movers);
+    warnings.extend(nav_warnings);
+    Ok(Bsp46World {
+        glb,
+        nav,
+        used,
+        warnings,
+    })
+}
+
+/// A shader lump entry: its name and the two flag words q3map wrote.
+#[derive(Clone, Debug)]
+struct Q3Shader {
+    name: String,
+    surface: i32,
+    contents: i32,
+}
+
+impl Q3Shader {
+    /// Quake III marks a liquid on the shader's CONTENTS, not on the face.
+    fn liquid(&self) -> bool {
+        self.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_WATER) != 0
+    }
+}
+
+/// What a Q3 liquid does to a swimmer, on the same percent-per-second scale
+/// the Doom and Quake 1 hazards use: lava is lethal, slime hurts, water is
+/// harmless. Q3 itself deals 30/10/0 per second in `G_CheckWaterEvents`;
+/// these are the shared classic numbers so one walker reads them all.
+fn q3_liquid_damage(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.contains("lava") {
+        20
+    } else if n.contains("slime") {
+        10
+    } else {
+        0
+    }
+}
+
+/// The albedo PNG of one shader, falling back to the level's gray.
+fn shader_png(textures: &Q3TexBank, name: &str, gray_png: &[u8]) -> Vec<u8> {
+    textures
+        .bake(name)
+        .and_then(|img| encode_png_rgba(&img.rgba, img.w, img.h).ok())
+        .unwrap_or_else(|| gray_png.to_vec())
+}
+
+/// The sky's equirect panorama, if the map's sky shader names a `skyParms`
+/// farbox whose six `env/` faces are all in the pack.
+///
+/// Returns the PNG and the sky shader's own name. Without one, the caller
+/// leaves those faces in the level mesh: Q3 draws a `q3map_sun` cloud-layer
+/// sky on the same brushes, and a hole where the lid was would be a worse lie
+/// than the lid.
+fn bsp46_sky_panorama(
+    shaders: &[Q3Shader],
+    textures: &Q3TexBank,
+    warnings: &mut Vec<String>,
+) -> (Option<Vec<u8>>, String) {
+    let sky: Vec<&Q3Shader> = shaders.iter().filter(|s| s.surface & SURF_SKY != 0).collect();
+    if sky.is_empty() {
+        return (None, String::new());
+    }
+    for s in &sky {
+        let Some(base) = textures.sky_box_for(&s.name) else {
+            warnings.push(format!(
+                "sky shader `{}` has no skyParms farbox (cloud-layer sky) — \
+                 its faces stay opaque geometry",
+                s.name
+            ));
+            continue;
+        };
+        let mut faces: [Option<crate::skybox::CubeFace>; 6] = Default::default();
+        let mut missing = Vec::new();
+        for (i, suffix) in crate::skybox::FACE_SUFFIXES.iter().enumerate() {
+            match textures.resolve(&format!("{base}_{suffix}")) {
+                Some(img) => faces[i] = crate::skybox::CubeFace::new(img.w, img.h, img.rgba),
+                None => missing.push(*suffix),
+            }
+        }
+        match crate::skybox::cube_to_equirect_png(&faces) {
+            Some(png) => {
+                if !missing.is_empty() {
+                    warnings.push(format!(
+                        "sky box `{base}` is missing {} — those directions are black",
+                        missing.join("/")
+                    ));
+                }
+                return (Some(png), s.name.clone());
+            }
+            None => warnings.push(format!(
+                "sky box `{base}` is missing {} — its faces stay opaque geometry",
+                if missing.is_empty() {
+                    "usable faces".to_string()
+                } else {
+                    missing.join("/")
+                }
+            )),
+        }
+    }
+    (None, String::new())
+}
+
+#[derive(Clone, Default)]
+struct PartGeom {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 3]>,
+    lm_uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+    /// The part carries no real lightmap, so its prelit marker points back at
+    /// its own albedo (see the writer loop).
+    own_marker: bool,
+}
+
+/// One mover's geometry plus which shaders its faces used, so the node can be
+/// painted with the one that covers most of it.
+#[derive(Clone, Default)]
+struct MoverGeom {
+    geom: PartGeom,
+    shaders: BTreeMap<String, usize>,
+}
+
+struct LightmapAtlas {
+    png: Vec<u8>,
+    cols: u32,
+    rows: u32,
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+}
+
+fn pack_lightmap_atlas(bytes: &[u8], lm: Option<(usize, usize)>) -> Option<LightmapAtlas> {
+    let (off, len) = lm?;
+    if len < LIGHTMAP_BYTES {
+        return None;
+    }
+    let pages = (len / LIGHTMAP_BYTES).max(1);
+    let cols = (pages as f32).sqrt().ceil() as u32;
+    let rows = pages.div_ceil(cols as usize) as u32;
+    let w = cols * LIGHTMAP_W as u32;
+    let h = rows * LIGHTMAP_W as u32;
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for p in 0..pages {
+        let src = off + p * LIGHTMAP_BYTES;
+        if src + LIGHTMAP_BYTES > bytes.len() {
+            break;
+        }
+        let col = (p as u32) % cols;
+        let row = (p as u32) / cols;
+        for y in 0..LIGHTMAP_W {
+            for x in 0..LIGHTMAP_W {
+                let si = src + (y * LIGHTMAP_W + x) * 3;
+                let dx = col as usize * LIGHTMAP_W + x;
+                let dy = row as usize * LIGHTMAP_W + y;
+                let di = (dy * w as usize + dx) * 4;
+                rgba[di] = bytes[si];
+                rgba[di + 1] = bytes[si + 1];
+                rgba[di + 2] = bytes[si + 2];
+                rgba[di + 3] = 255;
+            }
+        }
+    }
+    let png = encode_png_rgba(&rgba, w, h).ok()?;
+    Some(LightmapAtlas {
+        png,
+        cols,
+        rows,
+        rgba,
+        w,
+        h,
+    })
+}
+
+fn atlas_lm_uv(atlas: &LightmapAtlas, lm_num: i32, st: [f32; 2]) -> [f32; 2] {
+    if lm_num < 0 {
+        return [-1.0, -1.0];
+    }
+    let page = lm_num as u32;
+    let col = page % atlas.cols;
+    let row = page / atlas.cols;
+    let u = (col as f32 + st[0].clamp(0.0, 1.0)) / atlas.cols as f32;
+    let v = (row as f32 + st[1].clamp(0.0, 1.0)) / atlas.rows as f32;
+    [u, v]
+}
+
+fn sample_atlas(atlas: &LightmapAtlas, uv: [f32; 2]) -> [f32; 3] {
+    if uv[0] < 0.0 {
+        return [1.0, 1.0, 1.0];
+    }
+    let x = ((uv[0] * (atlas.w - 1) as f32).round() as u32).min(atlas.w - 1);
+    let y = ((uv[1] * (atlas.h - 1) as f32).round() as u32).min(atlas.h - 1);
+    let i = ((y * atlas.w + x) * 4) as usize;
+    [
+        atlas.rgba[i] as f32 / 255.0,
+        atlas.rgba[i + 1] as f32 / 255.0,
+        atlas.rgba[i + 2] as f32 / 255.0,
+    ]
+}
+
+/// Q3 lightmaps are stored dark (overbright). Do **not** multiply by the
+/// drawvert color — that is a separate vertex-lit path and made rooms black.
+fn apply_lightmap(c: [f32; 3]) -> [f32; 3] {
+    [
+        (c[0] * 4.0).clamp(0.22, 1.0),
+        (c[1] * 4.0).clamp(0.22, 1.0),
+        (c[2] * 4.0).clamp(0.22, 1.0),
+    ]
+}
+
+fn vert_lit(
+    v: &DrawVert,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
+) -> ([f32; 3], [f32; 2]) {
+    if let Some(atlas) = atlas {
+        if lm_num >= 0 {
+            let uv = atlas_lm_uv(atlas, lm_num, v.lmst);
+            return (apply_lightmap(sample_atlas(atlas, uv)), uv);
+        }
+    }
+    (
+        [
+            (v.color[0] * 2.0).clamp(0.22, 1.0),
+            (v.color[1] * 2.0).clamp(0.22, 1.0),
+            (v.color[2] * 2.0).clamp(0.22, 1.0),
+        ],
+        [-1.0, -1.0],
+    )
 }
 
 fn skip_shader(name: &str, flags: i32) -> bool {
-    if flags & (SURF_NODRAW | SURF_SKY | SURF_SKIP) != 0 {
+    // Keep SURF_SKY: those faces are the outdoor hull. Skipping them
+    // left a huge gray void in the courtyard corner.
+    if flags & (SURF_NODRAW | SURF_SKIP) != 0 {
         return true;
     }
     let n = name.to_ascii_lowercase();
@@ -1078,17 +2151,15 @@ fn skip_shader(name: &str, flags: i32) -> bool {
 }
 
 fn emit_indexed_face(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
+    geom: &mut PartGeom,
     verts: &[DrawVert],
     meshverts: &[i32],
     first_vert: i32,
     n_vertexes: i32,
     first_idx: i32,
     n_meshverts: i32,
-    slot: AtlasSlot,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
 ) {
     if n_meshverts < 3 || n_vertexes <= 0 {
         return;
@@ -1100,8 +2171,9 @@ fn emit_indexed_face(
     }
     let base_vert = first_vert as usize;
     let nverts = n_vertexes as usize;
+    let mut cache: HashMap<usize, u32> = HashMap::new();
     for tri in meshverts[start..start + count].chunks_exact(3) {
-        let mut corners = [0usize; 3];
+        let mut corners = [0u32; 3];
         let mut ok = true;
         for k in 0..3 {
             let idx = tri[k];
@@ -1110,21 +2182,14 @@ fn emit_indexed_face(
                 ok = false;
                 break;
             }
-            corners[k] = vi;
+            corners[k] = *cache
+                .entry(vi)
+                .or_insert_with(|| emit_vert(geom, &verts[vi], lm_num, atlas));
         }
         if !ok {
             continue;
         }
-        emit_tri(
-            positions,
-            uvs,
-            normals,
-            indices,
-            &verts[corners[0]],
-            &verts[corners[1]],
-            &verts[corners[2]],
-            slot,
-        );
+        emit_indexed_tri(geom, corners[0], corners[1], corners[2]);
     }
 }
 
@@ -1140,17 +2205,23 @@ fn resolve_meshvert(idx: i32, first_vert: usize, n_vertexes: usize) -> usize {
     }
 }
 
+/// ioquake3 `r_subdivisions` default. Remaining sagitta (Quake units)
+/// after uniform UV splits; a 90° gothic arch then gets 4 on-curve
+/// segments (~22° facets). The dark C was the control hull, not a
+/// need for 8–16 samples per cell.
+const PATCH_SUBDIVISIONS: f32 = 4.0;
+const PATCH_LEVEL_MIN: usize = 2;
+const PATCH_LEVEL_MAX: usize = 6;
+
 fn emit_patch(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
+    geom: &mut PartGeom,
     verts: &[DrawVert],
     first_vert: i32,
     n_vertexes: i32,
     patch_w: i32,
     patch_h: i32,
-    slot: AtlasSlot,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
 ) {
     if patch_w < 3 || patch_h < 3 {
         return;
@@ -1167,55 +2238,190 @@ fn emit_patch(
     if base.saturating_add(w * h) > verts.len() {
         return;
     }
-    // Cheap 2-sample tessellation (3×3 output per 3×3 Bezier).
-    const LEVEL: usize = 2;
+    // Evaluate on the quadratic, not the control hull. One level for the
+    // whole patch so shared cell edges weld. Index the grid — do not
+    // emit three unique verts per triangle.
     let ctrl = |r: usize, c: usize| &verts[base + r * w + c];
-    let mut r = 0usize;
-    while r + 2 < h {
-        let mut c = 0usize;
-        while c + 2 < w {
-            let mut grid = vec![DrawVert::default(); (LEVEL + 1) * (LEVEL + 1)];
-            for iy in 0..=LEVEL {
-                let ty = iy as f32 / LEVEL as f32;
-                for ix in 0..=LEVEL {
-                    let tx = ix as f32 / LEVEL as f32;
-                    grid[iy * (LEVEL + 1) + ix] = bezier_patch(
-                        [
-                            [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
-                            [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
-                            [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
-                        ],
-                        tx,
-                        ty,
-                    );
-                }
-            }
-            for iy in 0..LEVEL {
-                for ix in 0..LEVEL {
-                    let i00 = iy * (LEVEL + 1) + ix;
-                    let i10 = i00 + 1;
-                    let i01 = i00 + (LEVEL + 1);
-                    let i11 = i01 + 1;
-                    emit_tri(
-                        positions, uvs, normals, indices, &grid[i00], &grid[i10], &grid[i11], slot,
-                    );
-                    emit_tri(
-                        positions, uvs, normals, indices, &grid[i00], &grid[i11], &grid[i01], slot,
-                    );
-                }
-            }
-            c += 2;
+    let cells_x = (w - 1) / 2;
+    let cells_y = (h - 1) / 2;
+    let mut level = PATCH_LEVEL_MIN;
+    for cy in 0..cells_y {
+        for cx in 0..cells_x {
+            let r = cy * 2;
+            let c = cx * 2;
+            let cell = [
+                [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
+                [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
+                [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
+            ];
+            level = level.max(patch_cell_level(cell));
         }
-        r += 2;
+    }
+    let nx = cells_x * level;
+    let ny = cells_y * level;
+    let stride = nx + 1;
+    let mut grid = vec![DrawVert::default(); stride * (ny + 1)];
+    for iy in 0..=ny {
+        let cell_y = (iy / level).min(cells_y.saturating_sub(1));
+        let ty = (iy - cell_y * level) as f32 / level as f32;
+        for ix in 0..=nx {
+            let cell_x = (ix / level).min(cells_x.saturating_sub(1));
+            let tx = (ix - cell_x * level) as f32 / level as f32;
+            let r = cell_y * 2;
+            let c = cell_x * 2;
+            let cell = [
+                [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
+                [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
+                [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
+            ];
+            grid[iy * stride + ix] = bezier_patch_eval(cell, tx, ty);
+        }
+    }
+    // ioquake3 drops columns/rows whose midpoints sit on the chord
+    // (Radiant Bevel / IBevel repeat a corner 7×). Keeping them and
+    // always splitting 00–11 deletes the spandrel and leaves a C.
+    let (grid, cols, rows) = collapse_patch_grid(grid, stride, ny + 1);
+    let mut ids = vec![0u32; cols * rows];
+    for iy in 0..rows {
+        for ix in 0..cols {
+            ids[iy * cols + ix] = emit_vert(geom, &grid[iy * cols + ix], lm_num, atlas);
+        }
+    }
+    for iy in 0..rows.saturating_sub(1) {
+        for ix in 0..cols.saturating_sub(1) {
+            let i00 = ids[iy * cols + ix];
+            let i10 = ids[iy * cols + ix + 1];
+            let i01 = ids[(iy + 1) * cols + ix];
+            let i11 = ids[(iy + 1) * cols + ix + 1];
+            emit_patch_quad(geom, i00, i10, i01, i11);
+        }
     }
 }
 
-fn bezier_patch(ctrl: [[&DrawVert; 3]; 3], u: f32, v: f32) -> DrawVert {
-    let mut col = [DrawVert::default(); 3];
-    for i in 0..3 {
-        col[i] = bezier_vert(ctrl[i][0], ctrl[i][1], ctrl[i][2], u);
+/// Drop a column/row when every sample is within 0.1 Quake units of the
+/// previous kept line — the `maxLen < 0.1` test in `R_SubdividePatchToGrid`.
+fn collapse_patch_grid(
+    grid: Vec<DrawVert>,
+    cols: usize,
+    rows: usize,
+) -> (Vec<DrawVert>, usize, usize) {
+    if cols == 0 || rows == 0 || grid.len() < cols * rows {
+        return (grid, cols, rows);
     }
-    bezier_vert(&col[0], &col[1], &col[2], v)
+    let keep_col = {
+        let mut keep = vec![true; cols];
+        let mut prev = 0usize;
+        for c in 1..cols {
+            let mut max_d = 0.0f32;
+            for r in 0..rows {
+                max_d = max_d.max(vert_dist(&grid[r * cols + c], &grid[r * cols + prev]));
+            }
+            if max_d < 0.1 {
+                keep[c] = false;
+            } else {
+                prev = c;
+            }
+        }
+        keep
+    };
+    let keep_row = {
+        let mut keep = vec![true; rows];
+        let mut prev = 0usize;
+        for r in 1..rows {
+            let mut max_d = 0.0f32;
+            for c in 0..cols {
+                if !keep_col[c] {
+                    continue;
+                }
+                max_d = max_d.max(vert_dist(&grid[r * cols + c], &grid[prev * cols + c]));
+            }
+            if max_d < 0.1 {
+                keep[r] = false;
+            } else {
+                prev = r;
+            }
+        }
+        keep
+    };
+    let nc = keep_col.iter().filter(|k| **k).count().max(1);
+    let nr = keep_row.iter().filter(|k| **k).count().max(1);
+    if nc == cols && nr == rows {
+        return (grid, cols, rows);
+    }
+    let mut out = Vec::with_capacity(nc * nr);
+    for r in 0..rows {
+        if !keep_row[r] {
+            continue;
+        }
+        for c in 0..cols {
+            if keep_col[c] {
+                out.push(grid[r * cols + c]);
+            }
+        }
+    }
+    (out, nc, nr)
+}
+
+fn vert_dist(a: &DrawVert, b: &DrawVert) -> f32 {
+    let dx = a.pos[0] - b.pos[0];
+    let dy = a.pos[1] - b.pos[1];
+    let dz = a.pos[2] - b.pos[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn emit_patch_quad(geom: &mut PartGeom, i00: u32, i10: u32, i01: u32, i11: u32) {
+    let a = tri_area_l1(geom, i00, i10, i11) + tri_area_l1(geom, i00, i11, i01);
+    let b = tri_area_l1(geom, i00, i10, i01) + tri_area_l1(geom, i10, i11, i01);
+    if a >= b {
+        emit_indexed_tri(geom, i00, i10, i11);
+        emit_indexed_tri(geom, i00, i11, i01);
+    } else {
+        emit_indexed_tri(geom, i00, i10, i01);
+        emit_indexed_tri(geom, i10, i11, i01);
+    }
+}
+
+fn tri_area_l1(geom: &PartGeom, ia: u32, ib: u32, ic: u32) -> f32 {
+    let pa = geom.positions[ia as usize];
+    let pb = geom.positions[ib as usize];
+    let pc = geom.positions[ic as usize];
+    let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+    (e1[1] * e2[2] - e1[2] * e2[1]).abs()
+        + (e1[2] * e2[0] - e1[0] * e2[2]).abs()
+        + (e1[0] * e2[1] - e1[1] * e2[0]).abs()
+}
+
+/// Uniform splits so remaining sagitta stays under `r_subdivisions`.
+/// Quadratic error scales as 1/n², so n = ceil(sqrt(err / 4)).
+fn patch_cell_level(cell: [[&DrawVert; 3]; 3]) -> usize {
+    let mut err2 = 0.0f32;
+    for i in 0..3 {
+        err2 = err2.max(bezier_chord_err2(cell[i][0], cell[i][1], cell[i][2]));
+        err2 = err2.max(bezier_chord_err2(cell[0][i], cell[1][i], cell[2][i]));
+    }
+    let n = (err2.sqrt() / PATCH_SUBDIVISIONS).sqrt().ceil() as usize;
+    n.clamp(PATCH_LEVEL_MIN, PATCH_LEVEL_MAX)
+}
+
+fn bezier_chord_err2(a: &DrawVert, b: &DrawVert, c: &DrawVert) -> f32 {
+    let lin = [
+        (a.pos[0] + c.pos[0]) * 0.5,
+        (a.pos[1] + c.pos[1]) * 0.5,
+        (a.pos[2] + c.pos[2]) * 0.5,
+    ];
+    let bez = bezier_pos(a, b, c, 0.5);
+    let dx = lin[0] - bez[0];
+    let dy = lin[1] - bez[1];
+    let dz = lin[2] - bez[2];
+    dx * dx + dy * dy + dz * dz
+}
+
+fn bezier_patch_eval(ctrl: [[&DrawVert; 3]; 3], u: f32, v: f32) -> DrawVert {
+    let c0 = bezier_vert(ctrl[0][0], ctrl[0][1], ctrl[0][2], u);
+    let c1 = bezier_vert(ctrl[1][0], ctrl[1][1], ctrl[1][2], u);
+    let c2 = bezier_vert(ctrl[2][0], ctrl[2][1], ctrl[2][2], u);
+    bezier_vert(&c0, &c1, &c2, v)
 }
 
 fn bezier_vert(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> DrawVert {
@@ -1239,23 +2445,45 @@ fn bezier_vert(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> DrawVert {
     DrawVert {
         pos: mix3(a.pos, b.pos, c.pos),
         st: mix2(a.st, b.st, c.st),
+        lmst: mix2(a.lmst, b.lmst, c.lmst),
         normal: mix3(a.normal, b.normal, c.normal),
+        color: mix3(a.color, b.color, c.color),
     }
 }
 
-fn emit_tri(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
-    a: &DrawVert,
-    b: &DrawVert,
-    c: &DrawVert,
-    slot: AtlasSlot,
-) {
-    let pa = xform(a.pos);
-    let pb = xform(b.pos);
-    let pc = xform(c.pos);
+fn bezier_pos(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> [f32; 3] {
+    let s = 1.0 - t;
+    let w0 = s * s;
+    let w1 = 2.0 * s * t;
+    let w2 = t * t;
+    [
+        a.pos[0] * w0 + b.pos[0] * w1 + c.pos[0] * w2,
+        a.pos[1] * w0 + b.pos[1] * w1 + c.pos[1] * w2,
+        a.pos[2] * w0 + b.pos[2] * w1 + c.pos[2] * w2,
+    ]
+}
+
+fn emit_vert(
+    geom: &mut PartGeom,
+    v: &DrawVert,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
+) -> u32 {
+    let i = geom.positions.len() as u32;
+    geom.positions.push(xform(v.pos));
+    // Raw tiling ST. Q3 v=0 is OpenGL bottom; glTF v=0 is top.
+    geom.uvs.push([v.st[0], 1.0 - v.st[1]]);
+    geom.normals.push(xform_dir(v.normal));
+    let (color, lm_uv) = vert_lit(v, lm_num, atlas);
+    geom.colors.push(color);
+    geom.lm_uvs.push(lm_uv);
+    i
+}
+
+fn emit_indexed_tri(geom: &mut PartGeom, ia: u32, ib: u32, ic: u32) {
+    let pa = geom.positions[ia as usize];
+    let pb = geom.positions[ib as usize];
+    let pc = geom.positions[ic as usize];
     let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
     let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
     let area = (e1[1] * e2[2] - e1[2] * e2[1]).abs()
@@ -1264,16 +2492,7 @@ fn emit_tri(
     if area < 1e-10 {
         return;
     }
-    let i = positions.len() as u32;
-    positions.extend_from_slice(&[pa, pb, pc]);
-    // Q3 ST: v=0 is OpenGL bottom. Atlas PNG is top-down (glTF).
-    uvs.push(slot_uv(slot, a.st[0], 1.0 - a.st[1]));
-    uvs.push(slot_uv(slot, b.st[0], 1.0 - b.st[1]));
-    uvs.push(slot_uv(slot, c.st[0], 1.0 - c.st[1]));
-    normals.push(xform_dir(a.normal));
-    normals.push(xform_dir(b.normal));
-    normals.push(xform_dir(c.normal));
-    indices.extend_from_slice(&[i, i + 1, i + 2]);
+    geom.indices.extend_from_slice(&[ia, ib, ic]);
 }
 
 fn xform(p: [f32; 3]) -> [f32; 3] {
@@ -1294,7 +2513,9 @@ fn xform_dir(n: [f32; 3]) -> [f32; 3] {
 struct DrawVert {
     pos: [f32; 3],
     st: [f32; 2],
+    lmst: [f32; 2],
     normal: [f32; 3],
+    color: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1304,74 +2525,534 @@ struct WorldSpawn {
     pitch: f32,
 }
 
-fn write_spawn_sidecar(glb: &Path, spawn: WorldSpawn) {
-    let text = format!(
-        "world-spawn 1\n{:.4} {:.4} {:.4}\n{:.5} {:.5}\n",
-        spawn.pos[0], spawn.pos[1], spawn.pos[2], spawn.yaw, spawn.pitch
-    );
-    let _ = std::fs::write(glb.with_extension("spawn"), text);
+fn write_spawn_sidecar(glb: &Path, nav: &crate::world_nav::WorldNav) {
+    let _ = std::fs::write(glb.with_extension("spawn"), nav.to_text());
 }
 
-fn bsp46_spawn(text: &[u8]) -> Option<WorldSpawn> {
-    let text = std::str::from_utf8(text).ok()?;
-    let mut best: Option<(u8, WorldSpawn)> = None;
-    for raw in text.split(|c| c == '{' || c == '}') {
-        let block = raw.trim();
-        if block.is_empty() {
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+/// One entity block of the entity lump, keys in file order.
+///
+/// Quake II and Quake III write the same `{ "key" "value" }` lump, so the
+/// Quake II importer parses its own entities with this too.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Q3Entity {
+    pub keys: Vec<(String, String)>,
+}
+
+impl Q3Entity {
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn class(&self) -> &str {
+        self.get("classname").unwrap_or("")
+    }
+
+    pub fn float(&self, key: &str) -> Option<f32> {
+        self.get(key).and_then(|v| v.trim().parse::<f32>().ok())
+    }
+
+    pub fn origin(&self) -> Option<[f32; 3]> {
+        let mut it = self.get("origin")?.split_whitespace();
+        let x = it.next()?.parse::<f32>().ok()?;
+        let y = it.next()?.parse::<f32>().ok()?;
+        let z = it.next()?.parse::<f32>().ok()?;
+        Some([x, y, z])
+    }
+
+    /// Q3's `angle` is the yaw alone; `angles` is `pitch yaw roll`
+    /// (`F_ANGLEHACK` in `g_spawn.c` turns `angle` into `angles[1]`).
+    pub fn angles(&self) -> (f32, f32) {
+        let mut pitch = 0.0f32;
+        let mut yaw = self.float("angle").unwrap_or(0.0);
+        if let Some(v) = self.get("angles") {
+            let mut it = v.split_whitespace();
+            if let (Some(p), Some(y)) = (it.next(), it.next()) {
+                pitch = p.parse().unwrap_or(0.0);
+                yaw = y.parse().unwrap_or(yaw);
+            }
+        }
+        (pitch, yaw)
+    }
+
+    /// The brush submodel this entity moves, from `"model" "*N"`.
+    pub fn submodel(&self) -> Option<usize> {
+        self.get("model")?.strip_prefix('*')?.trim().parse().ok()
+    }
+}
+
+/// Every `{ "key" "value" … }` block of the entity lump.
+///
+/// The lump is flat — an entity never nests — so brace depth is enough, and
+/// a quoted value may contain spaces, braces or backslashes (`"music"
+/// "music\sonic5.wav"`), which a `split('"')` scan mangles.
+pub(crate) fn parse_entities(text: &str) -> Vec<Q3Entity> {
+    let mut out = Vec::new();
+    let mut current: Option<Q3Entity> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        let mut class = "";
-        let mut origin = None;
-        let mut angle = 0.0f32;
-        let mut pitch = 0.0f32;
-        for line in block.lines() {
-            let kv: Vec<&str> = line.split('"').filter(|s| !s.trim().is_empty()).collect();
-            if kv.len() < 2 {
+        if line.starts_with('{') {
+            current = Some(Q3Entity::default());
+            continue;
+        }
+        if line.starts_with('}') {
+            if let Some(e) = current.take() {
+                if !e.keys.is_empty() {
+                    out.push(e);
+                }
+            }
+            continue;
+        }
+        let Some(entity) = current.as_mut() else {
+            continue;
+        };
+        let bytes = line.as_bytes();
+        let mut quote = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b == b'"')
+            .map(|(i, _)| i);
+        let (Some(a), Some(b), Some(c), Some(d)) =
+            (quote.next(), quote.next(), quote.next(), quote.next())
+        else {
+            continue;
+        };
+        entity.keys.push((line[a + 1..b].to_string(), line[c + 1..d].to_string()));
+    }
+    out
+}
+
+/// The same, from the raw entity lump: NUL-terminated, and not always UTF-8
+/// (mappers typed map titles in whatever code page they had).
+pub(crate) fn parse_entity_lump(text: &[u8]) -> Vec<Q3Entity> {
+    let text = &text[..text.iter().position(|b| *b == 0).unwrap_or(text.len())];
+    match std::str::from_utf8(text) {
+        Ok(t) => parse_entities(t),
+        Err(_) => parse_entities(&text.iter().map(|b| *b as char).collect::<String>()),
+    }
+}
+
+fn entities_of(bytes: &[u8]) -> Vec<Q3Entity> {
+    match lump(bytes, LUMP_ENTITIES) {
+        Ok((off, len)) => parse_entity_lump(&bytes[off..off + len]),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Q3 is Z-up: map `(x, y, z)` → GLB `(x, z, −y)`, scaled to metres.
+fn map_to_glb(o: [f32; 3]) -> [f32; 3] {
+    [o[0] * SCALE, o[2] * SCALE, -o[1] * SCALE]
+}
+
+/// Yaw 0 looks down −Z and grows toward −X, the convention every classic
+/// converter in this crate writes.
+fn map_yaw(angle: f32) -> f32 {
+    std::f32::consts::FRAC_PI_2 - angle.to_radians()
+}
+
+/// An eye position above a spawn/teleport-destination origin.
+fn eye_of(o: [f32; 3]) -> [f32; 3] {
+    let mut p = map_to_glb(o);
+    p[1] += VIEW_HEIGHT * SCALE;
+    p
+}
+
+// ---------------------------------------------------------------------------
+// Brush models and the movers that reference them
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Bsp46Model {
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    first_face: usize,
+    num_faces: usize,
+}
+
+fn bsp46_models(bytes: &[u8]) -> Vec<Bsp46Model> {
+    let Ok((off, len)) = lump(bytes, LUMP_MODELS) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(len / MODEL_SIZE);
+    for i in 0..len / MODEL_SIZE {
+        let o = off + i * MODEL_SIZE;
+        if o + MODEL_SIZE > bytes.len() {
+            break;
+        }
+        out.push(Bsp46Model {
+            mins: [f32_le(bytes, o), f32_le(bytes, o + 4), f32_le(bytes, o + 8)],
+            maxs: [
+                f32_le(bytes, o + 12),
+                f32_le(bytes, o + 16),
+                f32_le(bytes, o + 20),
+            ],
+            first_face: i32_le(bytes, o + 24).max(0) as usize,
+            num_faces: i32_le(bytes, o + 28).max(0) as usize,
+        });
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MoverKind {
+    Door,
+    Lift,
+}
+
+/// A brush submodel that MOVES, resolved to its face range and its open pose.
+#[derive(Clone, Debug)]
+struct Q3Mover {
+    /// Same string as the glTF node, the clip and the nav entry.
+    name: String,
+    kind: MoverKind,
+    first_face: usize,
+    num_faces: usize,
+    /// Brush centre in GLB space (metres) at the pose the BSP bakes.
+    centre: [f32; 3],
+    /// Offset from the pose the node's geometry is AUTHORED in to the far
+    /// pose, GLB metres.
+    travel: [f32; 3],
+    /// What to add to the baked vertices so they sit in the authored pose.
+    /// Zero for everything except a `start_open` door, whose brushes q3map
+    /// baked OPEN (see [`bsp46_movers`]).
+    shift: [f32; 3],
+    /// Dominant axis of `travel`, for the node extras.
+    axis: &'static str,
+    /// The walkable surface a lift rests at (its brush top), GLB metres.
+    top_y: f32,
+}
+
+fn dominant_axis(v: [f32; 3]) -> &'static str {
+    if v[1].abs() >= v[0].abs() && v[1].abs() >= v[2].abs() {
+        "y"
+    } else if v[0].abs() >= v[2].abs() {
+        "x"
+    } else {
+        "z"
+    }
+}
+
+/// `func_door` and `func_plat` submodels, with the travel Q3's own movers use.
+///
+/// The arithmetic is `SP_func_door` / `SP_func_plat` in `g_mover.c`, and it is
+/// the same one [`crate::classic_import::quake`]'s `quake_doors` implements for
+/// Quake 1 (that file is another lane's; this is a local copy, not a call):
+///
+/// * a door travels along `angle` — `-1` up, `-2` down, otherwise a compass
+///   yaw — by its own size on that axis minus `lip` (default 8). The BSP bakes
+///   the CLOSED pose, unless `spawnflags & 1` (`START_OPEN`) swapped `pos1`
+///   and `pos2`, in which case it baked the OPEN one.
+/// * a plat travels DOWN by `height`, or by its own Z size minus `lip` when
+///   `height` is unset. The BSP bakes the RAISED pose. (`SP_func_plat` has no
+///   `START_OPEN`.)
+fn bsp46_movers(entities: &[Q3Entity], models: &[Bsp46Model]) -> (Vec<Q3Mover>, Vec<String>) {
+    let mut out: Vec<Q3Mover> = Vec::new();
+    let mut warnings = Vec::new();
+    let mut doors = 0usize;
+    let mut lifts = 0usize;
+    for e in entities {
+        let kind = match e.class() {
+            "func_door" => MoverKind::Door,
+            "func_plat" => MoverKind::Lift,
+            // A sinusoid on `height`/`phase` with no open/closed pair:
+            // `world_nav::NavDoor` and `ExtraNode` cannot express it, so its
+            // brushes stay in the static mesh where a walker meets them.
+            "func_bobbing" | "func_train" | "func_rotating" | "func_pendulum" => {
+                warnings.push(format!(
+                    "{}: not a door or a lift — its brushes stay static",
+                    e.class()
+                ));
                 continue;
             }
-            match kv[0] {
-                "classname" => class = kv[1],
-                "origin" => {
-                    let mut it = kv[1].split_whitespace();
-                    if let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) {
-                        if let (Ok(x), Ok(y), Ok(z)) =
-                            (x.parse::<f32>(), y.parse::<f32>(), z.parse::<f32>())
-                        {
-                            origin = Some([x, y, z]);
-                        }
-                    }
-                }
-                "angle" => {
-                    angle = kv[1].parse().unwrap_or(0.0);
-                }
-                "angles" => {
-                    let mut it = kv[1].split_whitespace();
-                    if let (Some(p), Some(y), Some(_r)) = (it.next(), it.next(), it.next()) {
-                        pitch = p.parse().unwrap_or(0.0);
-                        angle = y.parse().unwrap_or(angle);
-                    }
-                }
-                _ => {}
+            // A damage volume, but Q3 marks one with the `common/trigger`
+            // shader, which is SURF_NODRAW: the submodel has no drawable
+            // faces at all, so there is nothing to carve into a hazard node.
+            // Both demo maps that have one (q3dm17, q3tourney2) are like
+            // this. Record the fact rather than invent geometry for it.
+            "trigger_hurt" => {
+                let faces = e
+                    .submodel()
+                    .and_then(|i| models.get(i))
+                    .map(|m| m.num_faces)
+                    .unwrap_or(0);
+                warnings.push(format!(
+                    "trigger_hurt (dmg {}) has {faces} drawable faces — a damage \
+                     volume is not geometry, so it is not published as a hazard",
+                    e.get("dmg").unwrap_or("2")
+                ));
+                continue;
             }
+            _ => continue,
+        };
+        let Some(index) = e.submodel() else { continue };
+        let Some(model) = models.get(index).copied() else {
+            warnings.push(format!("{} references missing *{index}", e.class()));
+            continue;
+        };
+        if model.num_faces == 0 {
+            warnings.push(format!(
+                "{} *{index} has no drawable faces — nothing to move",
+                e.class()
+            ));
+            continue;
         }
-        let rank = match class {
+        let size = [
+            model.maxs[0] - model.mins[0],
+            model.maxs[1] - model.mins[1],
+            model.maxs[2] - model.mins[2],
+        ];
+        let lip = e.float("lip").unwrap_or(Q3_MOVER_LIP);
+        let mut shift = [0.0f32; 3];
+        let (travel, axis) = match kind {
+            MoverKind::Door => {
+                let (_, angle) = e.angles();
+                let dir = if (angle + 1.0).abs() < 0.01 {
+                    [0.0, 0.0, 1.0]
+                } else if (angle + 2.0).abs() < 0.01 {
+                    [0.0, 0.0, -1.0]
+                } else {
+                    let r = angle.to_radians();
+                    [r.cos(), r.sin(), 0.0]
+                };
+                let span = (dir[0] * size[0]).abs()
+                    + (dir[1] * size[1]).abs()
+                    + (dir[2] * size[2]).abs();
+                let distance = (span - lip).max(0.0);
+                if distance <= 0.0 {
+                    warnings.push(format!("func_door *{index} travels nowhere (lip {lip})"));
+                    continue;
+                }
+                let mut t = [
+                    dir[0] * distance * SCALE,
+                    dir[2] * distance * SCALE,
+                    -dir[1] * distance * SCALE,
+                ];
+                // `START_OPEN` swaps `pos1`/`pos2`, so the baked brush IS the
+                // open pose and CLOSED sits one travel further along. The
+                // contract wants the geometry authored closed and the node
+                // resting open, so shift the vertices to closed and open back
+                // the other way — which lands exactly on the baked pose.
+                if (e.float("spawnflags").unwrap_or(0.0) as i32) & 1 != 0 {
+                    shift = t;
+                    t = [-t[0], -t[1], -t[2]];
+                }
+                (t, dominant_axis(t))
+            }
+            MoverKind::Lift => {
+                let height = e.float("height").filter(|h| *h > 0.0).unwrap_or(size[2] - lip);
+                if height <= 0.0 {
+                    warnings.push(format!("func_plat *{index} travels nowhere (lip {lip})"));
+                    continue;
+                }
+                ([0.0, -height * SCALE, 0.0], "y")
+            }
+        };
+        let name = match kind {
+            MoverKind::Door => {
+                doors += 1;
+                format!("door_{doors}")
+            }
+            MoverKind::Lift => {
+                lifts += 1;
+                format!("lift_{lifts}")
+            }
+        };
+        let mid = [
+            (model.mins[0] + model.maxs[0]) * 0.5,
+            (model.mins[1] + model.maxs[1]) * 0.5,
+            (model.mins[2] + model.maxs[2]) * 0.5,
+        ];
+        out.push(Q3Mover {
+            name,
+            kind,
+            first_face: model.first_face,
+            num_faces: model.num_faces,
+            centre: map_to_glb(mid),
+            travel,
+            shift,
+            axis,
+            top_y: model.maxs[2] * SCALE,
+        });
+    }
+    (out, warnings)
+}
+
+// ---------------------------------------------------------------------------
+// Navigation facts
+// ---------------------------------------------------------------------------
+
+/// Everything a walker needs: every start, the engine's height constants, the
+/// movers, and the teleport pads with where they land.
+fn bsp46_nav(
+    entities: &[Q3Entity],
+    models: &[Bsp46Model],
+    movers: &[Q3Mover],
+) -> (crate::world_nav::WorldNav, Vec<String>) {
+    use crate::world_nav::{
+        deathmatch_name, player_start_name, NavDoor, NavStart, NavTeleport, WorldNav,
+    };
+    let mut warnings = Vec::new();
+    let mut primary: Option<NavStart> = None;
+    let mut extra_starts: Vec<NavStart> = Vec::new();
+    let mut deathmatch: Vec<NavStart> = Vec::new();
+    let mut floor_y = None;
+    for e in entities {
+        // `team_CTF_*player` is the ONE spot a team starts a round on, so it
+        // reads as a player start; `team_CTF_*spawn` is a respawn point among
+        // many, which is what `deathmatch_N` means.
+        let rank = match e.class() {
+            "info_player_start" => 0u8,
+            "info_player_coop" | "team_CTF_redplayer" | "team_CTF_blueplayer" => 1,
+            "info_player_deathmatch" | "team_CTF_redspawn" | "team_CTF_bluespawn" => 2,
+            _ => continue,
+        };
+        let Some(o) = e.origin() else { continue };
+        let (pitch, yaw) = e.angles();
+        let start = NavStart {
+            name: String::new(),
+            pos: eye_of(o),
+            yaw: map_yaw(yaw),
+            pitch: -pitch.to_radians(),
+        };
+        if rank == 0 && primary.is_none() {
+            floor_y = Some((o[2] - ORIGIN_ABOVE_FLOOR) * SCALE);
+            primary = Some(start);
+        } else if rank == 2 {
+            deathmatch.push(start);
+        } else {
+            extra_starts.push(start);
+        }
+    }
+    let mut starts = Vec::with_capacity(1 + extra_starts.len() + deathmatch.len());
+    for (i, mut s) in primary.into_iter().chain(extra_starts).enumerate() {
+        s.name = player_start_name(i);
+        starts.push(s);
+    }
+    for (i, mut s) in deathmatch.into_iter().enumerate() {
+        s.name = deathmatch_name(i);
+        starts.push(s);
+    }
+    let eye_height = (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) * SCALE;
+    // An arena map with no `info_player_start` (q3dm1 is one) leads with its
+    // first deathmatch spot, exactly as the Quake 1 converter does — the
+    // sidecar's three-line header must name somewhere a walker can stand.
+    let floor_y = floor_y.or_else(|| starts.first().map(|s| s.pos[1] - eye_height));
+
+    let mut teleports = Vec::new();
+    for e in entities {
+        if e.class() != "trigger_teleport" {
+            continue;
+        }
+        let Some(index) = e.submodel() else { continue };
+        let Some(model) = models.get(index).copied() else {
+            continue;
+        };
+        let Some(target) = e.get("target") else {
+            warnings.push(format!("trigger_teleport *{index} has no target"));
+            continue;
+        };
+        let dest = entities.iter().find(|d| {
+            d.get("targetname") == Some(target)
+                && matches!(d.class(), "misc_teleporter_dest" | "target_position")
+        });
+        let Some(dest) = dest.and_then(|d| d.origin().map(|o| (d, o))) else {
+            warnings.push(format!("trigger_teleport target `{target}` has no destination"));
+            continue;
+        };
+        let (_, yaw) = dest.0.angles();
+        teleports.push(NavTeleport {
+            name: format!("teleport_{}", teleports.len() + 1),
+            // Map +y becomes GLB −z, so the AABB flips on that axis.
+            pad_min: [model.mins[0] * SCALE, -model.maxs[1] * SCALE],
+            pad_max: [model.maxs[0] * SCALE, -model.mins[1] * SCALE],
+            dst: eye_of(dest.1),
+            yaw: map_yaw(yaw),
+        });
+    }
+
+    let mut doors = Vec::new();
+    let mut lifts = Vec::new();
+    for m in movers {
+        match m.kind {
+            // A Q3 door slides along its own vector; the nav summary says
+            // WHERE it is and how far it goes, the GLB clip says which way —
+            // the same split the Quake 1 converter publishes.
+            MoverKind::Door => {
+                let travel = (m.travel[0] * m.travel[0]
+                    + m.travel[1] * m.travel[1]
+                    + m.travel[2] * m.travel[2])
+                    .sqrt();
+                // The doorway centre at the CLOSED pose — which for a
+                // `start_open` door is the baked centre plus the shift.
+                let closed = [
+                    m.centre[0] + m.shift[0],
+                    m.centre[1] + m.shift[1],
+                    m.centre[2] + m.shift[2],
+                ];
+                doors.push(NavDoor {
+                    name: m.name.clone(),
+                    pos: closed,
+                    closed_y: closed[1],
+                    // A Quake III door mostly slides SIDEWAYS: the Y pair is
+                    // only the vertical part of the move, and `offset`
+                    // carries the whole of it.
+                    open_y: closed[1] + m.travel[1],
+                    offset: m.travel,
+                });
+                let _ = travel;
+            }
+            // A lift rests UP on the surface you stand on, and drops.
+            MoverKind::Lift => lifts.push(NavDoor::vertical(
+                m.name.clone(),
+                [m.centre[0], m.top_y, m.centre[2]],
+                m.top_y,
+                m.top_y + m.travel[1],
+            )),
+        }
+    }
+
+    (
+        WorldNav {
+            starts,
+            floor_y,
+            step_height: Some(STEP_HEIGHT * SCALE),
+            eye_height: Some(eye_height),
+            doors,
+            lifts,
+            teleports,
+            // Q3 arena maps have no exit and no keys: a match ends on a frag
+            // count, not on a switch. Publishing an invented `exit` would send
+            // a walker somewhere the map never meant.
+            markers: Vec::new(),
+        },
+        warnings,
+    )
+}
+
+/// The single spawn the `.place` sidecar's header carries: `info_player_start`
+/// outranks `info_player_deathmatch`, as it always did.
+fn bsp46_spawn(entities: &[Q3Entity]) -> Option<WorldSpawn> {
+    let mut best: Option<(u8, WorldSpawn)> = None;
+    for e in entities {
+        let rank = match e.class() {
             "info_player_start" => 0u8,
             "info_player_deathmatch" => 1,
             _ => continue,
         };
-        let o = match origin {
-            Some(o) => o,
-            None => continue,
-        };
-        let pos = [
-            o[0] * SCALE,
-            o[2] * SCALE + VIEW_HEIGHT * SCALE,
-            -o[1] * SCALE,
-        ];
-        let yaw = std::f32::consts::FRAC_PI_2 - angle.to_radians();
+        let Some(o) = e.origin() else { continue };
+        let (pitch, yaw) = e.angles();
         let spawn = WorldSpawn {
-            pos,
-            yaw,
+            pos: eye_of(o),
+            yaw: map_yaw(yaw),
             pitch: -pitch.to_radians(),
         };
         match best {
@@ -1380,6 +3061,47 @@ fn bsp46_spawn(text: &[u8]) -> Option<WorldSpawn> {
         }
     }
     best.map(|(_, s)| s)
+}
+
+fn bsp46_place(
+    entities: &[Q3Entity],
+    source: &str,
+    world_key: &str,
+) -> crate::world_place::WorldPlace {
+    let spawn = bsp46_spawn(entities).map(|s| (s.pos, s.yaw, s.pitch));
+    let mut places = Vec::new();
+    let mut i = 0usize;
+    for e in entities {
+        let Some(o) = e.origin() else { continue };
+        let class = e.class().to_string();
+        let model = e.get("model").unwrap_or("").to_string();
+        let (kind, asset) = if let Some((k, key)) = crate::world_place::q3_class_actor(&class) {
+            (k, key.to_string())
+        } else if class == "misc_model" && model.to_ascii_lowercase().ends_with(".md3") {
+            ("prop", crate::world_place::q3_md3_catalog_key(&model))
+        } else {
+            continue;
+        };
+        let (_, yaw) = e.angles();
+        places.push(crate::world_place::Place {
+            id: format!("ent-{i}"),
+            kind: kind.into(),
+            asset,
+            pos: map_to_glb(o),
+            yaw: map_yaw(yaw),
+            class,
+            width: 0.0,
+            height: 0.0,
+            align: String::new(),
+        });
+        i += 1;
+    }
+    crate::world_place::WorldPlace {
+        source: source.into(),
+        world: world_key.into(),
+        spawn,
+        places,
+    }
 }
 
 fn lump(bytes: &[u8], i: usize) -> Result<(usize, usize), String> {
@@ -1705,12 +3427,6 @@ fn q3_face_camera_dir(n: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn q3_face_viewer(p: [f32; 3]) -> [f32; 3] {
-    // After Q3→studio, +X forward is +Z (away from the camera). Flip 180°.
-    let p = q3_face_camera(p);
-    [-p[0], p[1], -p[2]]
-}
-
 /// Fold split player parts / weapon flash+barrel into whole cards.
 /// `files` is `(extracted path, pk3-relative path)` for every MD3.
 pub fn assemble_players_and_weapons(
@@ -1849,7 +3565,6 @@ fn assemble_player(
 
     let mut unique_frames = Vec::new();
     let mut named = Vec::new();
-    let frame_at = 0usize;
     unique_frames.push(rest.unique.clone());
     for (clip_name, pairs) in &clip_defs {
         if pairs.is_empty() {
@@ -1869,7 +3584,6 @@ fn assemble_player(
                 frames: (start..unique_frames.len()).collect(),
             });
         }
-        let _ = frame_at;
     }
     if named.is_empty() {
         unique_frames.truncate(1);
@@ -1956,15 +3670,14 @@ fn assemble_weapon(
     let barrel_rel = format!("models/weapons2/{name}/{name}_barrel.md3");
     let barrel_path = by_rel.get(&barrel_rel).cloned();
     let barrel_bytes = barrel_path.as_ref().and_then(|p| std::fs::read(p).ok());
-    let barrel = match (barrel_path.as_ref(), barrel_bytes.as_deref()) {
-        (Some(p), Some(b)) => Md3File::parse(b).ok().map(|m| (p.clone(), m)),
-        _ => None,
-    };
+    let barrel = barrel_bytes
+        .as_deref()
+        .and_then(|b| Md3File::parse(b).ok());
     let mut skins = load_md3_skins(gun_path);
-    if let Some((bp, _)) = &barrel {
+    if let Some(bp) = &barrel_path {
         skins.extend(load_md3_skins(bp));
     }
-    let posed = pose_weapon(&gun, barrel.as_ref().map(|(_, m)| m), textures, &skins)?;
+    let posed = pose_weapon(&gun, barrel.as_ref(), textures, &skins)?;
     if posed.unique.is_empty() || posed.indices.len() < 3 {
         return Err("assembled weapon empty".into());
     }
@@ -2120,7 +3833,7 @@ fn xform_point(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn xform_tag_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
+fn apply_tag_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     [
         t.axis[0][0] * p[0] + t.axis[1][0] * p[1] + t.axis[2][0] * p[2],
         t.axis[0][1] * p[0] + t.axis[1][1] * p[1] + t.axis[2][1] * p[2],
@@ -2132,9 +3845,9 @@ fn mul_tag(a: TagXform, b: TagXform) -> TagXform {
     TagXform {
         origin: xform_point(a, b.origin),
         axis: [
-            xform_tag_dir(a, b.axis[0]),
-            xform_tag_dir(a, b.axis[1]),
-            xform_tag_dir(a, b.axis[2]),
+            apply_tag_dir(a, b.axis[0]),
+            apply_tag_dir(a, b.axis[1]),
+            apply_tag_dir(a, b.axis[2]),
         ],
     }
 }
@@ -2151,7 +3864,7 @@ fn invert_tag(t: TagXform) -> TagXform {
     };
     let neg = [-t.origin[0], -t.origin[1], -t.origin[2]];
     TagXform {
-        origin: xform_tag_dir(inv, neg),
+        origin: apply_tag_dir(inv, neg),
         axis,
     }
 }
@@ -2277,7 +3990,10 @@ fn emit_md3_posed(
                 i16_le(bytes, vo + 4) as f32 * MD3_XYZ_SCALE,
             ];
             let world = xform_point(xf, p);
-            out.unique.push(q3_face_viewer(xform(world)));
+            // +X (Q3 forward) → +Z after xform + q3_face_camera, which is
+            // the play controller's authored forward. A further 180° flip
+            // made them moonwalk: travel was correct, facing was reversed.
+            out.unique.push(q3_face_camera(xform(world)));
             let so = s + ofs_st + vi * 8;
             out.uvs.push([f32_le(bytes, so), 1.0 - f32_le(bytes, so + 4)]);
         }
@@ -2681,12 +4397,397 @@ mod tests {
         let world = assets
             .iter()
             .find(|a| a.kind == AssetKind::World)
-            .expect("world");
-        assert_eq!(world.rel_path, "worlds/q3tri.glb");
+            .expect("map");
+        assert_eq!(world.rel_path, "maps/q3tri.glb");
         let glb = std::fs::read(staged.join(&world.rel_path)).expect("glb");
         assert!(glb.starts_with(b"glTF"), "not a glTF/GLB");
         assert!(glb.len() > 200);
+        let place_text =
+            std::fs::read_to_string(staged.join("maps/q3tri.place")).expect("place sidecar");
+        let place = crate::world_place::WorldPlace::parse(&place_text).expect("parse place");
+        assert_eq!(place.source, QUAKE3_SOURCE_ID);
+        assert_eq!(place.world, "maps/q3tri");
+        assert_eq!(place.places.len(), 1);
+        assert_eq!(place.places[0].kind, "player");
         let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn arched_patch_subdivides_instead_of_two_chords() {
+        // Tight 3×3 arch: end posts on the floor, peak 128 units up.
+        // Control peak is z=128; the curve peak is z=64. Dense eval
+        // must sit on the curve, not the hull.
+        let mut ctrl = vec![DrawVert::default(); 9];
+        for r in 0..3 {
+            for c in 0..3 {
+                let x = (c as f32 - 1.0) * 128.0;
+                let z = if c == 1 { 128.0 } else { 0.0 };
+                ctrl[r * 3 + c].pos = [x, (r as f32 - 1.0) * 16.0, z];
+                ctrl[r * 3 + c].normal = [0.0, 0.0, 1.0];
+            }
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &ctrl, 0, 9, 3, 3, -1, None);
+        let tris = geom.indices.len() / 3;
+        assert!(
+            (16..=48).contains(&tris),
+            "r_subdivisions=4 90° arch should be ~32 tris, got {tris}"
+        );
+        assert!(
+            geom.positions.len() < tris,
+            "patch grid must be indexed, got {} verts for {tris} tris",
+            geom.positions.len()
+        );
+        let max_z = geom
+            .positions
+            .iter()
+            .map(|p| p[1] / SCALE)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            max_z < 80.0,
+            "off-curve control peak leaked into the mesh: max_z={max_z}"
+        );
+        let near_peak = geom
+            .positions
+            .iter()
+            .filter(|p| {
+                let x = p[0] / SCALE;
+                let z = p[1] / SCALE;
+                x.abs() < 4.0 && (z - 64.0).abs() < 4.0
+            })
+            .count();
+        assert!(near_peak > 0, "curve peak (0, 64) missing from tessellation");
+    }
+
+    #[test]
+    fn inner_arch_mesh_follows_curve_not_control_hull() {
+        // q3dm1 `textures/gothic_door/xian_tourneyarch_inside2` 5×3: the
+        // interior control row sits at z=380, the true Bezier mid at z=357.
+        // Emitting the hull is the dark faceted cavity in the doorway.
+        let xs = [572.0f32, 572.0, 672.0, 772.0, 772.0];
+        let zs = [288.0f32, 380.0, 380.0, 380.0, 288.0];
+        let mut pts = vec![DrawVert::default(); 15];
+        for r in 0..3 {
+            for c in 0..5 {
+                pts[r * 5 + c].pos = [xs[c], 1664.0 - r as f32 * 236.0, zs[c]];
+            }
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &pts, 0, 15, 5, 3, -1, None);
+        // Engine Y is Q3 Z. Control posts (572,380)/(772,380) are off-curve;
+        // the crown (672,380) and mids (~597,357)/(~747,357) are on it.
+        let xz: Vec<(f32, f32)> = geom
+            .positions
+            .iter()
+            .map(|p| (p[0] / SCALE, p[1] / SCALE))
+            .collect();
+        // Tangent at t=0 is vertical, so on-curve samples stay near x=572
+        // while z climbs. Only the control posts themselves are off-curve.
+        let leaked_posts = xz
+            .iter()
+            .filter(|(x, z)| {
+                ((*x - 572.0).abs() < 1.5 && (*z - 380.0).abs() < 1.5)
+                    || ((*x - 772.0).abs() < 1.5 && (*z - 380.0).abs() < 1.5)
+            })
+            .count();
+        assert_eq!(
+            leaked_posts, 0,
+            "off-curve control posts leaked into the mesh"
+        );
+        // The C-cavity is the control shelf across the corners. On the
+        // curve, z stays below ~371 for x<620 (and x>724).
+        let left_shelf = xz.iter().filter(|(x, z)| *x < 620.0 && *z > 375.0).count();
+        let right_shelf = xz.iter().filter(|(x, z)| *x > 724.0 && *z > 375.0).count();
+        assert_eq!(
+            left_shelf + right_shelf,
+            0,
+            "z=380 control shelf leaked into the corners (left={left_shelf} right={right_shelf})"
+        );
+        // t=0.5 of each cell is (597,357)/(747,357). Level 3 samples
+        // 0, 1/3, 2/3, 1 — still on the curve, just not at that exact mid.
+        let left_rise = xz
+            .iter()
+            .any(|(x, z)| *x > 575.0 && *x < 620.0 && *z > 320.0 && *z < 373.0);
+        let right_rise = xz
+            .iter()
+            .any(|(x, z)| *x > 724.0 && *x < 769.0 && *z > 320.0 && *z < 373.0);
+        assert!(
+            left_rise && right_rise,
+            "on-curve rise missing (left={left_rise} right={right_rise})"
+        );
+        let tris = geom.indices.len() / 3;
+        assert!(
+            (16..=80).contains(&tris),
+            "on-curve r_subdivisions=4 should be a few dozen tris, got {tris}"
+        );
+        assert!(
+            geom.positions.len() < tris,
+            "patch grid must be indexed, got {} verts for {tris} tris",
+            geom.positions.len()
+        );
+    }
+
+    #[test]
+    fn radiant_ibevel_fills_the_spandrel() {
+        // Radiant IBevel 3×3: p1 repeated 7×. The fill is the triangle
+        // from the elbow (0,64) to the curve (0,0)→(64,64), not a C
+        // along that curve.
+        let p0 = [0.0f32, 0.0, 0.0];
+        let p1 = [0.0, 0.0, 64.0];
+        let p2 = [64.0, 0.0, 64.0];
+        let net = [p0, p1, p1, p1, p1, p1, p2, p1, p1];
+        let mut ctrl = vec![DrawVert::default(); 9];
+        for (i, p) in net.iter().enumerate() {
+            ctrl[i].pos = *p;
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &ctrl, 0, 9, 3, 3, -1, None);
+        assert!(
+            geom.indices.len() >= 3,
+            "IBevel emitted no triangles"
+        );
+        let mut covered = false;
+        for tri in geom.indices.chunks_exact(3) {
+            let pts: Vec<(f32, f32)> = tri
+                .iter()
+                .map(|&i| {
+                    let p = geom.positions[i as usize];
+                    (p[0] / SCALE, p[1] / SCALE)
+                })
+                .collect();
+            let cx = (pts[0].0 + pts[1].0 + pts[2].0) / 3.0;
+            let cz = (pts[0].1 + pts[1].1 + pts[2].1) / 3.0;
+            if cx < 32.0 && cz > 32.0 {
+                covered = true;
+                break;
+            }
+        }
+        assert!(
+            covered,
+            "IBevel lost the spandrel (only the inner curve remains)"
+        );
+    }
+
+    #[test]
+    fn shader_detail_stage_is_not_the_albedo() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/gothic_block/blocks17_sandy
+{
+qer_editorimage textures/gothic_block/blocks17.tga
+{
+map $lightmap
+rgbGen identity
+}
+{
+map textures/gothic_block/sand2.tga
+blendfunc GL_DST_COLOR GL_SRC_COLOR
+detail
+tcMod scale 2.90 2.234
+}
+{
+map textures/gothic_block/blocks17.tga
+tcMod scale 0.25 0.25
+blendfunc GL_DST_COLOR GL_ZERO
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases.get("textures/gothic_block/blocks17_sandy").map(|s| s.as_str()),
+            Some("textures/gothic_block/blocks17")
+        );
+        let d = bank
+            .detail_for("textures/gothic_block/blocks17_sandy")
+            .expect("detail stage");
+        assert_eq!(d.map, "textures/gothic_block/sand2");
+        assert!((d.scale[0] - 2.90).abs() < 1e-4);
+        assert!((d.scale[1] - 2.234).abs() < 1e-4);
+    }
+
+    #[test]
+    fn animmap_becomes_the_albedo() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1side
+{
+surfaceparm trans
+cull none
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+{
+animMap 10 textures/sfx/flame2.tga textures/sfx/flame1.tga
+blendFunc GL_ONE GL_ONE
+}
+{
+map textures/sfx/flameball.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases.get("textures/sfx/flame1side").map(|s| s.as_str()),
+            Some("textures/sfx/flame1")
+        );
+        let s = bank
+            .surface_for("textures/sfx/flame1side")
+            .expect("additive flame surface");
+        assert!(s.additive);
+        assert_eq!(s.albedo, "textures/sfx/flame1");
+    }
+
+    #[test]
+    fn alpha_stage_keeps_the_scrolled_underlayer() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/gothic_floor/largerblock3b_ow
+{
+{
+map textures/sfx/firegorre.tga
+tcmod scroll 0 1
+tcmod scale 4 4
+blendFunc GL_ONE GL_ZERO
+}
+{
+map textures/gothic_floor/largerblock3b_ow.tga
+blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+}
+{
+map $lightmap
+blendFunc GL_DST_COLOR GL_ONE_MINUS_DST_ALPHA
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases
+                .get("textures/gothic_floor/largerblock3b_ow")
+                .map(|s| s.as_str()),
+            Some("textures/gothic_floor/largerblock3b_ow")
+        );
+        let s = bank
+            .surface_for("textures/gothic_floor/largerblock3b_ow")
+            .expect("blood puddle surface");
+        assert_eq!(s.under.as_deref(), Some("textures/sfx/firegorre"));
+        assert!((s.under_scale[0] - 4.0).abs() < 1e-4);
+        assert!(!s.additive);
+    }
+
+    #[test]
+    fn bake_composites_under_alpha_and_stays_opaque() {
+        let mut bank = Q3TexBank::default();
+        let mut over = vec![0u8; 4 * 4];
+        // checker: opaque stone / punched hole
+        over[0..4].copy_from_slice(&[80, 70, 60, 255]);
+        over[4..8].copy_from_slice(&[80, 70, 60, 0]);
+        over[8..12].copy_from_slice(&[80, 70, 60, 0]);
+        over[12..16].copy_from_slice(&[80, 70, 60, 255]);
+        bank.images.insert(
+            "textures/gothic_floor/largerblock3b_ow".into(),
+            Q3Image {
+                w: 2,
+                h: 2,
+                rgba: over,
+            },
+        );
+        bank.images.insert(
+            "textures/sfx/firegorre".into(),
+            Q3Image {
+                w: 1,
+                h: 1,
+                rgba: vec![180, 20, 20, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/gothic_floor/largerblock3b_ow
+{
+{
+map textures/sfx/firegorre.tga
+blendFunc GL_ONE GL_ZERO
+}
+{
+map textures/gothic_floor/largerblock3b_ow.tga
+blendFunc blend
+}
+}
+"#,
+            &mut bank,
+        );
+        let img = bank
+            .bake("textures/gothic_floor/largerblock3b_ow")
+            .expect("bake");
+        assert_eq!(img.rgba[3], 255, "stone stays opaque");
+        assert_eq!(&img.rgba[4..8], &[180, 20, 20, 255], "hole shows blood");
+        assert!(img.rgba.chunks_exact(4).all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn bake_additive_fire_punches_black() {
+        let mut bank = Q3TexBank::default();
+        bank.images.insert(
+            "textures/sfx/flame1".into(),
+            Q3Image {
+                w: 1,
+                h: 2,
+                rgba: vec![0, 0, 0, 255, 255, 180, 20, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1side
+{
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        let img = bank.bake("textures/sfx/flame1side").expect("bake");
+        assert_eq!(img.rgba[3], 0, "black fire background is transparent");
+        assert_eq!(img.rgba[7], 255, "bright fire stays solid");
+    }
+
+    #[test]
+    fn bake_dim_flame_survives_alpha_discard() {
+        let mut bank = Q3TexBank::default();
+        bank.images.insert(
+            "textures/sfx/flame1".into(),
+            Q3Image {
+                w: 1,
+                h: 1,
+                rgba: vec![40, 18, 6, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1_hell
+{
+cull none
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        let s = bank.surface_for("textures/sfx/flame1_hell").expect("surf");
+        assert!(s.two_sided);
+        let img = bank.bake("textures/sfx/flame1_hell").expect("bake");
+        assert!(img.rgba[3] >= 128, "dim fire must beat tex.w < 0.5 discard");
+        assert!(img.rgba[0] >= 80, "dim fire must be lifted so it reads");
     }
 
     #[test]
@@ -2742,11 +4843,22 @@ mod tests {
             "expected maps+models, got bsp={bsp_ok} md3={md3_n} extract_fail={md3_ok} warn={}",
             warnings.len()
         );
-        let bank = load_tex_bank(&out);
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
         assert!(
             bank.images.len() > 50,
             "demo jpg/tga bank too small: {}",
             bank.images.len()
+        );
+        assert!(
+            bank.aliases.contains_key("textures/sfx/flame1side"),
+            "animMap flame1side must alias to a flame frame"
+        );
+        assert!(
+            bank.surface_for("textures/gothic_floor/largerblock3b_ow")
+                .and_then(|s| s.under.as_ref())
+                .is_some(),
+            "blood puddle must keep the firegorre underlayer"
         );
         let bsp = files
             .iter()
@@ -2757,6 +4869,171 @@ mod tests {
         let worlds = convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID)
             .expect("q3dm1 convert");
         assert!(worlds.iter().any(|a| a.kind == AssetKind::World));
+        let glb_bytes = std::fs::read(staged.join("maps/q3dm1.glb")).expect("q3dm1 glb");
+        assert!(
+            glb_bytes.len() < 22_000_000,
+            "q3dm1 GLB still bloated after r_subdivisions=4: {} bytes",
+            glb_bytes.len()
+        );
+        let place_text =
+            std::fs::read_to_string(staged.join("maps/q3dm1.place")).expect("q3dm1 place");
+        let place = crate::world_place::WorldPlace::parse(&place_text).expect("parse q3dm1 place");
+        assert!(
+            place.places.iter().any(|p| p.kind == "weapon"),
+            "q3dm1 should place weapons"
+        );
+        assert!(
+            place
+                .places
+                .iter()
+                .any(|p| p.class == "misc_model" && p.asset.starts_with("props/")),
+            "q3dm1 should place misc_model props"
+        );
+        // ---- the contract, on the real map ----------------------------
+        let nav = crate::world_nav::WorldNav::parse(
+            &std::fs::read_to_string(staged.join("maps/q3dm1.spawn")).expect("q3dm1 spawn"),
+        )
+        .expect("parse q3dm1 spawn");
+        // q3dm1 has SIX `info_player_deathmatch` and no `info_player_start`
+        // at all, so — exactly as the Quake 1 converter does — the first
+        // deathmatch spot leads and the sidecar header names somewhere a
+        // walker can stand.
+        assert!(
+            nav.starts.len() >= 6,
+            "q3dm1 publishes every spawn, got {:?}",
+            nav.starts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+        assert!(nav.starts.iter().any(|s| s.name == "deathmatch_1"));
+        assert!(nav.anchors().iter().any(|a| a.name == "deathmatch_1"));
+        assert!(nav.floor_y.is_some() && nav.eye_height.is_some());
+        // …and it is a single-brush-model map: no door, no plat, no
+        // teleporter. Asserting one here would be asserting a fiction.
+        assert!(
+            nav.doors.is_empty() && nav.lifts.is_empty() && nav.teleports.is_empty(),
+            "q3dm1 has one brush model and no movers"
+        );
+        let root_json = makepad_asset_client::json::parse(glb_json(&glb_bytes).as_bytes())
+            .expect("q3dm1 glb json");
+        // Its sky (`textures/skies/tim_hell`) is a `q3map_sun` cloud-layer
+        // sky: `skyparms - 384 -` names no box, and the demo pak0.pk3 ships
+        // no `env/` directory at all, so the lid stays where id drew one.
+        assert!(
+            !root_json
+                .get("nodes")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .iter()
+                .any(|n| n.get("name").and_then(makepad_asset_client::json::Value::as_str)
+                    == Some("sky")),
+            "no farbox, no sky node"
+        );
+        // Every level material declares the map PRELIT: q3dm1 has a lightmap
+        // atlas, so the marker points at it.
+        let materials = root_json.get("materials").unwrap().as_arr().unwrap();
+        let level_prims = root_json.get("meshes").unwrap().as_arr().unwrap()[0]
+            .get("primitives")
+            .unwrap()
+            .as_arr()
+            .unwrap()
+            .to_vec();
+        for p in &level_prims {
+            let mi = p
+                .get("material")
+                .and_then(makepad_asset_client::json::Value::as_i64)
+                .expect("material") as usize;
+            assert!(
+                materials[mi]
+                    .get("extras")
+                    .and_then(|e| e.get("lightmapTexture"))
+                    .is_some(),
+                "a prelit map must never be lit twice"
+            );
+        }
+        // `q3map` runs its own T-junction fix, so a Q3 BSP arrives welded and
+        // this converter adds no weld pass. Measure it rather than assume it.
+        let parts = crate::world_preview::extract_glb_parts(&glb_bytes).expect("parts");
+        let soup: Vec<(&[[f32; 3]], &[u32])> = parts
+            .iter()
+            .map(|part| (&part.pos[..], &part.indices[..]))
+            .collect();
+        let left = crate::classic_import::weld_t_junctions_left(&soup);
+        eprintln!(
+            "q3dm1: {} parts, {} triangles, {left} T-junctions",
+            parts.len(),
+            soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
+        );
+        // 668 before the weld, 2 after. They were never brush seams —
+        // `q3map` really did weld those — they are where this converter's
+        // own patch tessellation meets the brushwork it abuts: `emit_patch`
+        // picks a subdivision level per patch and `collapse_patch_grid`
+        // drops chordal rows, neither of which the neighbouring polygon
+        // knows about. Welding does not fight q3map, it finishes what this
+        // converter started. The two that survive are corner pairs further
+        // apart than the merge tolerance, which is a physical six
+        // millimetres and does not stretch for a coarser source grid. A
+        // ratchet: it may only fall.
+        assert!(
+            left <= 2,
+            "q3dm1 T-junctions rose to {left} (ratchet 2) — \
+             surfaces crack where they meet"
+        );
+
+        // q3dm7 is the demo map that HAS movers: two `func_door`s.
+        if let Some(bsp) = files.iter().find(|f| f.rel == "maps/q3dm7.bsp") {
+            let bytes = std::fs::read(&bsp.path).unwrap();
+            convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID).expect("q3dm7");
+            let dm7 = std::fs::read(staged.join("maps/q3dm7.glb")).expect("q3dm7 glb");
+            let dm7_json = makepad_asset_client::json::parse(glb_json(&dm7).as_bytes())
+                .expect("q3dm7 glb json");
+            let names: Vec<String> = dm7_json
+                .get("nodes")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .iter()
+                .filter_map(|n| {
+                    n.get("name")
+                        .and_then(makepad_asset_client::json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            assert!(
+                names.iter().filter(|n| n.starts_with("door_")).count() == 2,
+                "q3dm7 has two func_doors, got {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n.starts_with("hazard_")),
+                "q3dm7's lava is a hazard node, got {names:?}"
+            );
+            let clips: Vec<String> = dm7_json
+                .get("animations")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .iter()
+                .filter_map(|a| {
+                    a.get("name")
+                        .and_then(makepad_asset_client::json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            assert!(clips.contains(&"door_1".to_string()), "{clips:?}");
+            assert!(clips.contains(&"door_2".to_string()), "{clips:?}");
+            let dm7_nav = crate::world_nav::WorldNav::parse(
+                &std::fs::read_to_string(staged.join("maps/q3dm7.spawn")).expect("q3dm7 spawn"),
+            )
+            .expect("parse q3dm7 spawn");
+            assert_eq!(dm7_nav.doors.len(), 2, "{:?}", dm7_nav.doors);
+            assert_eq!(dm7_nav.teleports.len(), 1, "{:?}", dm7_nav.teleports);
+            for want in ["door_1", "door_2", "teleport_1"] {
+                assert!(
+                    dm7_nav.anchors().iter().any(|a| a.name == want),
+                    "missing anchor {want}"
+                );
+            }
+        }
+
         let lower = files
             .iter()
             .find(|f| f.rel == "models/players/sarge/lower.md3")
@@ -2772,6 +5049,23 @@ mod tests {
         )
         .expect("sarge lower");
         assert_eq!(asset.kind, AssetKind::Character);
+        let md3s: Vec<(PathBuf, String)> = files
+            .iter()
+            .filter(|f| f.rel.ends_with(".md3"))
+            .map(|f| (f.path.clone(), f.rel.clone()))
+            .collect();
+        let (assembled, drop) =
+            assemble_players_and_weapons(&md3s, &staged, QUAKE3_SOURCE_ID, &bank);
+        assert!(
+            assembled.iter().any(|a| a.key == "characters/sarge"),
+            "sarge assembled, got {:?}",
+            assembled.iter().map(|a| a.key.as_str()).collect::<Vec<_>>()
+        );
+        assert!(drop.contains("characters/sarge-lower"));
+        assert!(
+            assembled.iter().any(|a| a.key == "weapons/shotgun"),
+            "shotgun assembled"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2800,6 +5094,147 @@ mod tests {
     }
 
     #[test]
+    fn tga_32bit_unused_alpha_is_opaque() {
+        let mut tga = vec![0u8; 18 + 2 * 2 * 4];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 0x20;
+        // BGRA: red with alpha 0 (Q3 "unused channel" convention).
+        tga[18..].copy_from_slice(&[0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0]);
+        let (rgba, w, h) = decode_tga(&tga).expect("tga");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba[3], 255, "all-zero alpha must not punch the mesh");
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    /// One structure for every map: whatever a map HAS, it publishes the same
+    /// way, and what it does not have it does not fake.
+    #[test]
+    fn all_demo_maps_publish_the_same_map_contract() {
+        use crate::world_nav::WorldNav;
+        use makepad_asset_client::json::Value;
+        let pk3 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/quake3/demoq3/pak0.pk3");
+        if !pk3.is_file() {
+            return;
+        }
+        let root = tmp_dir("q3contract");
+        let out = root.join("pk3");
+        let mut warnings = Vec::new();
+        let files = expand_pk3(&pk3, &out, &mut warnings).expect("expand");
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
+        let staged = root.join("staged");
+        // The demo pack ships NO `env/` directory, so no map in it can build
+        // an equirect sky. If that ever changes, this is where it shows.
+        assert!(
+            !out.join("env").is_dir(),
+            "the demo pak0.pk3 has no skybox faces"
+        );
+        // (map, doors, lifts, teleports, starts at least)
+        let expect = [
+            ("q3dm1", 0usize, 0usize, 0usize, 6usize),
+            ("q3dm7", 2, 0, 1, 14),
+            ("q3dm17", 0, 0, 3, 11),
+            ("q3tourney2", 0, 0, 2, 8),
+        ];
+        for (slug, doors, lifts, teleports, starts) in expect {
+            let rel = format!("maps/{slug}.bsp");
+            let Some(bsp) = files.iter().find(|f| f.rel == rel) else {
+                panic!("{rel} missing from the demo pk3");
+            };
+            let bytes = std::fs::read(&bsp.path).unwrap();
+            convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID).expect(&rel);
+            let glb = std::fs::read(staged.join(format!("maps/{slug}.glb"))).expect("glb");
+            let json = makepad_asset_client::json::parse(glb_json(&glb).as_bytes()).expect("json");
+            let names: Vec<String> = json
+                .get("nodes")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .iter()
+                .filter_map(|n| n.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            let count = |prefix: &str| names.iter().filter(|n| n.starts_with(prefix)).count();
+            assert_eq!(count("door_"), doors, "{slug} doors: {names:?}");
+            assert_eq!(count("lift_"), lifts, "{slug} lifts: {names:?}");
+            assert!(
+                !names.iter().any(|n| n == "sky"),
+                "{slug}: every demo sky is a cloud-layer sky with no farbox"
+            );
+            let nav = WorldNav::parse(
+                &std::fs::read_to_string(staged.join(format!("maps/{slug}.spawn")))
+                    .expect("spawn sidecar"),
+            )
+            .expect("parse spawn");
+            assert_eq!(nav.doors.len(), doors, "{slug} nav doors");
+            assert_eq!(nav.lifts.len(), lifts, "{slug} nav lifts");
+            assert_eq!(nav.teleports.len(), teleports, "{slug} nav teleports");
+            assert!(
+                nav.starts.len() >= starts,
+                "{slug} starts: {:?}",
+                nav.starts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+            );
+            // Heights are the same engine constants everywhere.
+            assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
+            assert!((nav.step_height.unwrap() - STEP_HEIGHT / 64.0).abs() < 1e-4);
+            assert!(nav.floor_y.is_some(), "{slug} floor");
+            // Q3 has no exit and no keys: nothing is invented.
+            assert!(nav.markers.is_empty(), "{slug} markers");
+            // Every mover and pad reaches the catalog under its own name.
+            let anchors = nav.anchors();
+            for d in nav.doors.iter().chain(&nav.lifts) {
+                assert!(anchors.iter().any(|a| a.name == d.name), "{slug} {}", d.name);
+            }
+            for t in &nav.teleports {
+                assert!(anchors.iter().any(|a| a.name == t.name), "{slug} {}", t.name);
+            }
+            eprintln!(
+                "{slug}: {} nodes, {doors} doors, {lifts} lifts, {} hazards, {teleports} teleports, {} starts",
+                names.len(),
+                count("hazard_"),
+                nav.starts.len()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconvert_local_q3dm1_work_source() {
+        let pk3 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/quake3/demoq3/pak0.pk3");
+        let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/ai_content_app/import/quake3/work/source");
+        if !pk3.is_file() || (!staged.join("worlds").is_dir() && !staged.join("maps").is_dir()) {
+            return;
+        }
+        let root = tmp_dir("q3dm1bake");
+        let out = root.join("pk3");
+        let mut warnings = Vec::new();
+        let files = expand_pk3(&pk3, &out, &mut warnings).expect("expand");
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
+        for rel in [
+            "maps/q3dm1.bsp",
+            "maps/q3dm7.bsp",
+            "maps/q3dm17.bsp",
+            "maps/q3tourney2.bsp",
+        ] {
+            let Some(bsp) = files.iter().find(|f| f.rel == rel) else {
+                continue;
+            };
+            let bytes = std::fs::read(&bsp.path).unwrap();
+            convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID)
+                .expect(rel);
+        }
+        let glb = staged.join("maps/q3dm1.glb");
+        assert!(glb.is_file(), "q3dm1.glb missing after bake reconvert");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn dxt1_4x4_solid_red() {
         let mut dds = vec![0u8; 128 + 8];
         dds[0..4].copy_from_slice(b"DDS ");
@@ -2818,55 +5253,116 @@ mod tests {
         assert_eq!(rgba[3], 255);
     }
 
-    fn build_minimal_bsp46() -> Vec<u8> {
-        let entities = b"{\n\"classname\" \"info_player_start\"\n\"origin\" \"0 0 64\"\n}\n\0";
-        let mut tex = vec![0u8; TEX_SIZE];
-        tex[..16].copy_from_slice(b"textures/test/a\0");
+    struct ShaderSpec {
+        name: &'static str,
+        surface: i32,
+        contents: i32,
+    }
+
+    /// One convex polygon face, wound as the BSP would: positions in Q3 map
+    /// space (Z-up, map units), tiling `st`.
+    struct FaceSpec {
+        tex: usize,
+        verts: Vec<([f32; 3], [f32; 2])>,
+    }
+
+    struct ModelSpec {
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        first_face: usize,
+        n_faces: usize,
+    }
+
+    /// A hand-built IBSP 46 with the six lumps this converter reads. Every
+    /// contract fixture below is one of these, so a CI machine with no `.pk3`
+    /// still exercises doors, lifts, hazards, the sky and the `.spawn`.
+    fn build_bsp46(
+        entities: &str,
+        shaders: &[ShaderSpec],
+        faces: &[FaceSpec],
+        models: &[ModelSpec],
+    ) -> Vec<u8> {
+        let mut ent = entities.as_bytes().to_vec();
+        ent.push(0);
+        let mut tex = Vec::new();
+        for s in shaders {
+            let mut t = vec![0u8; TEX_SIZE];
+            let n = s.name.as_bytes();
+            assert!(n.len() < 64, "shader name too long");
+            t[..n.len()].copy_from_slice(n);
+            write_i32(&mut t, 64, s.surface);
+            write_i32(&mut t, 68, s.contents);
+            tex.extend_from_slice(&t);
+        }
         let mut verts = Vec::new();
-        // Triangle in XY (Z-up): (0,0,0) (64,0,0) (0,64,0) → engine (0,0,0)(1,0,0)(0,0,-1)
-        for (pos, st) in [
-            ([0.0f32, 0.0, 0.0], [0.0f32, 0.0]),
-            ([64.0, 0.0, 0.0], [1.0, 0.0]),
-            ([0.0, 64.0, 0.0], [0.0, 1.0]),
-        ] {
-            let mut v = vec![0u8; VERT_SIZE];
-            write_f32(&mut v, 0, pos[0]);
-            write_f32(&mut v, 4, pos[1]);
-            write_f32(&mut v, 8, pos[2]);
-            write_f32(&mut v, 12, st[0]);
-            write_f32(&mut v, 16, st[1]);
-            write_f32(&mut v, 28, 0.0);
-            write_f32(&mut v, 32, 0.0);
-            write_f32(&mut v, 36, 1.0);
-            v[40..44].copy_from_slice(&[255, 255, 255, 255]);
-            verts.extend_from_slice(&v);
-        }
         let mut idx = Vec::new();
-        for i in [0i32, 1, 2] {
-            idx.extend_from_slice(&i.to_le_bytes());
+        let mut face_lump = Vec::new();
+        let mut first_vert = 0i32;
+        let mut first_idx = 0i32;
+        for f in faces {
+            for (pos, st) in &f.verts {
+                let mut v = vec![0u8; VERT_SIZE];
+                write_f32(&mut v, 0, pos[0]);
+                write_f32(&mut v, 4, pos[1]);
+                write_f32(&mut v, 8, pos[2]);
+                write_f32(&mut v, 12, st[0]);
+                write_f32(&mut v, 16, st[1]);
+                write_f32(&mut v, 28, 0.0);
+                write_f32(&mut v, 32, 0.0);
+                write_f32(&mut v, 36, 1.0);
+                v[40..44].copy_from_slice(&[255, 255, 255, 255]);
+                verts.extend_from_slice(&v);
+            }
+            // Meshverts are face-relative, which is what `resolve_meshvert`
+            // expects for anything under `n_vertexes`.
+            let n = f.verts.len() as i32;
+            let mut count = 0i32;
+            for i in 1..n - 1 {
+                for k in [0, i, i + 1] {
+                    idx.extend_from_slice(&k.to_le_bytes());
+                    count += 1;
+                }
+            }
+            let mut face = vec![0u8; FACE_SIZE];
+            write_i32(&mut face, 0, f.tex as i32);
+            write_i32(&mut face, 4, -1); // effect
+            write_i32(&mut face, 8, FACE_POLYGON);
+            write_i32(&mut face, 12, first_vert);
+            write_i32(&mut face, 16, n);
+            write_i32(&mut face, 20, first_idx);
+            write_i32(&mut face, 24, count);
+            write_i32(&mut face, 28, -1); // no lightmap page
+            face_lump.extend_from_slice(&face);
+            first_vert += n;
+            first_idx += count;
         }
-        let mut face = vec![0u8; FACE_SIZE];
-        write_i32(&mut face, 0, 0); // texture
-        write_i32(&mut face, 4, -1); // effect
-        write_i32(&mut face, 8, FACE_POLYGON);
-        write_i32(&mut face, 12, 0); // first vert
-        write_i32(&mut face, 16, 3);
-        write_i32(&mut face, 20, 0); // first meshvert
-        write_i32(&mut face, 24, 3);
+        let mut model_lump = Vec::new();
+        for m in models {
+            let mut b = vec![0u8; MODEL_SIZE];
+            for k in 0..3 {
+                write_f32(&mut b, k * 4, m.mins[k]);
+                write_f32(&mut b, 12 + k * 4, m.maxs[k]);
+            }
+            write_i32(&mut b, 24, m.first_face as i32);
+            write_i32(&mut b, 28, m.n_faces as i32);
+            model_lump.extend_from_slice(&b);
+        }
 
         let header = 8 + LUMP_COUNT * 8;
         let mut lumps = [(0usize, 0usize); LUMP_COUNT];
         let mut off = header;
-        lumps[LUMP_ENTITIES] = (off, entities.len());
-        off += entities.len();
-        lumps[LUMP_TEXTURES] = (off, tex.len());
-        off += tex.len();
-        lumps[LUMP_VERTICES] = (off, verts.len());
-        off += verts.len();
-        lumps[LUMP_MESHVERTS] = (off, idx.len());
-        off += idx.len();
-        lumps[LUMP_FACES] = (off, face.len());
-        off += face.len();
+        let payloads = [
+            (LUMP_ENTITIES, ent.as_slice()),
+            (LUMP_TEXTURES, tex.as_slice()),
+            (LUMP_MODELS, model_lump.as_slice()),
+            (LUMP_VERTICES, verts.as_slice()),
+            (LUMP_MESHVERTS, idx.as_slice()),
+            (LUMP_FACES, face_lump.as_slice()),
+        ];
+        for (i, payload) in payloads {
+            lumps[i] = (off, payload.len());
+            off += payload.len();
+        }
 
         let mut out = vec![0u8; off];
         out[0..4].copy_from_slice(b"IBSP");
@@ -2877,12 +5373,1062 @@ mod tests {
             out[o + 4..o + 8].copy_from_slice(&(*llen as u32).to_le_bytes());
         }
         let mut cur = header;
-        for payload in [entities.as_slice(), tex.as_slice(), verts.as_slice(), idx.as_slice(), face.as_slice()]
-        {
+        for (_, payload) in payloads {
             out[cur..cur + payload.len()].copy_from_slice(payload);
             cur += payload.len();
         }
         out
+    }
+
+    fn build_minimal_bsp46() -> Vec<u8> {
+        build_bsp46(
+            "{\n\"classname\" \"info_player_start\"\n\"origin\" \"0 0 64\"\n}\n",
+            &[ShaderSpec {
+                name: "textures/test/a",
+                surface: 0,
+                contents: 1,
+            }],
+            // Triangle in XY (Z-up): (0,0,0) (64,0,0) (0,64,0)
+            // → engine (0,0,0) (1,0,0) (0,0,-1)
+            &[FaceSpec {
+                tex: 0,
+                verts: vec![
+                    ([0.0, 0.0, 0.0], [0.0, 0.0]),
+                    ([64.0, 0.0, 0.0], [1.0, 0.0]),
+                    ([0.0, 64.0, 0.0], [0.0, 1.0]),
+                ],
+            }],
+            &[ModelSpec {
+                mins: [0.0; 3],
+                maxs: [64.0, 64.0, 0.0],
+                first_face: 0,
+                n_faces: 1,
+            }],
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // The unified map contract
+    // -----------------------------------------------------------------------
+
+    /// A door on model `*1`, a plat on `*2`, a teleport trigger on `*3`, a sky
+    /// face, a lava face, and three spawns.
+    fn build_contract_bsp46() -> Vec<u8> {
+        let entities = concat!(
+            "{\n\"classname\" \"worldspawn\"\n\"message\" \"Contract Arena\"\n",
+            "\"music\" \"music\\test.wav\"\n}\n",
+            "{\n\"classname\" \"info_player_start\"\n\"origin\" \"0 0 64\"\n\"angle\" \"90\"\n}\n",
+            "{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"128 0 64\"\n",
+            "\"angle\" \"180\"\n}\n",
+            "{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"256 0 64\"\n}\n",
+            "{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n}\n",
+            "{\n\"classname\" \"func_plat\"\n\"model\" \"*2\"\n\"height\" \"64\"\n}\n",
+            "{\n\"classname\" \"trigger_teleport\"\n\"model\" \"*3\"\n\"target\" \"tdest\"\n}\n",
+            "{\n\"classname\" \"misc_teleporter_dest\"\n\"targetname\" \"tdest\"\n",
+            "\"origin\" \"512 64 32\"\n\"angle\" \"270\"\n}\n",
+        );
+        let quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
+            vec![
+                (a, [0.0, 0.0]),
+                (b, [1.0, 0.0]),
+                (c, [1.0, 1.0]),
+                (d, [0.0, 1.0]),
+            ]
+        };
+        build_bsp46(
+            entities,
+            &[
+                ShaderSpec { name: "textures/test/a", surface: 0, contents: 1 },
+                ShaderSpec { name: "textures/test/door", surface: 0, contents: 1 },
+                ShaderSpec { name: "textures/test/plat", surface: 0, contents: 1 },
+                ShaderSpec {
+                    name: "textures/skies/testsky",
+                    surface: SURF_SKY | 0x400,
+                    contents: 1,
+                },
+                ShaderSpec {
+                    name: "textures/liquids/lavatest",
+                    surface: 0,
+                    contents: CONTENTS_LAVA,
+                },
+            ],
+            &[
+                // 0: world floor
+                FaceSpec {
+                    tex: 0,
+                    verts: quad(
+                        [0.0, 0.0, 0.0],
+                        [256.0, 0.0, 0.0],
+                        [256.0, 256.0, 0.0],
+                        [0.0, 256.0, 0.0],
+                    ),
+                },
+                // 1: the sky lid
+                FaceSpec {
+                    tex: 3,
+                    verts: quad(
+                        [0.0, 0.0, 512.0],
+                        [256.0, 0.0, 512.0],
+                        [256.0, 256.0, 512.0],
+                        [0.0, 256.0, 512.0],
+                    ),
+                },
+                // 2: a lava pool
+                FaceSpec {
+                    tex: 4,
+                    verts: quad(
+                        [0.0, -256.0, 0.0],
+                        [256.0, -256.0, 0.0],
+                        [256.0, -128.0, 0.0],
+                        [0.0, -128.0, 0.0],
+                    ),
+                },
+                // 3: the door leaf, authored CLOSED
+                FaceSpec {
+                    tex: 1,
+                    verts: quad(
+                        [0.0, 0.0, 0.0],
+                        [64.0, 0.0, 0.0],
+                        [64.0, 0.0, 128.0],
+                        [0.0, 0.0, 128.0],
+                    ),
+                },
+                // 4: the plat top, authored RAISED
+                FaceSpec {
+                    tex: 2,
+                    verts: quad(
+                        [128.0, 0.0, 64.0],
+                        [192.0, 0.0, 64.0],
+                        [192.0, 64.0, 64.0],
+                        [128.0, 64.0, 64.0],
+                    ),
+                },
+            ],
+            &[
+                ModelSpec {
+                    mins: [0.0, -256.0, 0.0],
+                    maxs: [256.0, 256.0, 512.0],
+                    first_face: 0,
+                    n_faces: 3,
+                },
+                // *1 func_door: 128 tall, opens UP by 128 - lip 8 = 120.
+                ModelSpec {
+                    mins: [0.0, 0.0, 0.0],
+                    maxs: [64.0, 16.0, 128.0],
+                    first_face: 3,
+                    n_faces: 1,
+                },
+                // *2 func_plat: top at z=64, `height` 64 down.
+                ModelSpec {
+                    mins: [128.0, 0.0, 0.0],
+                    maxs: [192.0, 64.0, 64.0],
+                    first_face: 4,
+                    n_faces: 1,
+                },
+                // *3 trigger_teleport: a clip brush, no drawable faces at all.
+                ModelSpec {
+                    mins: [300.0, -32.0, 0.0],
+                    maxs: [364.0, 32.0, 128.0],
+                    first_face: 0,
+                    n_faces: 0,
+                },
+            ],
+        )
+    }
+
+    /// A 4x4 solid-colour 24-bit TGA, top-left origin.
+    fn write_tga(path: &Path, color: [u8; 3]) {
+        let (w, h) = (4usize, 4usize);
+        let mut tga = vec![0u8; 18 + w * h * 3];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&(w as u16).to_le_bytes());
+        tga[14..16].copy_from_slice(&(h as u16).to_le_bytes());
+        tga[16] = 24;
+        tga[17] = 0x20;
+        for px in tga[18..].chunks_exact_mut(3) {
+            px.copy_from_slice(&[color[2], color[1], color[0]]);
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, tga).unwrap();
+    }
+
+    /// A pack whose `textures/skies/testsky` shader names a `skyParms` farbox
+    /// and whose six `env/` faces are all present.
+    fn contract_sky_bank(root: &Path) -> Q3TexBank {
+        const COLORS: [[u8; 3]; 6] = [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [0, 255, 255],
+            [255, 0, 255],
+        ];
+        for (i, suf) in crate::skybox::FACE_SUFFIXES.iter().enumerate() {
+            write_tga(&root.join(format!("env/testenv_{suf}.tga")), COLORS[i]);
+        }
+        let _ = std::fs::create_dir_all(root.join("scripts"));
+        std::fs::write(
+            root.join("scripts/testsky.shader"),
+            "textures/skies/testsky\n{\n\tsurfaceparm sky\n\tskyParms env/testenv - -\n}\n\
+             textures/skies/cloudsky\n{\n\tsurfaceparm sky\n\tskyparms - 512 -\n}\n",
+        )
+        .unwrap();
+        let mut bank = load_tex_bank(root);
+        apply_shader_aliases(&mut bank, root);
+        bank
+    }
+
+    fn glb_json(glb: &[u8]) -> String {
+        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        String::from_utf8_lossy(&glb[20..20 + len]).to_string()
+    }
+
+    fn glb_bin(glb: &[u8]) -> Vec<u8> {
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let at = 20 + json_len;
+        let bin_len = u32::from_le_bytes(glb[at..at + 4].try_into().unwrap()) as usize;
+        glb[at + 8..at + 8 + bin_len].to_vec()
+    }
+
+    fn as_f32(v: &makepad_asset_client::json::Value) -> f32 {
+        use makepad_asset_client::json::Value;
+        match v {
+            Value::F64(f) => *f as f32,
+            Value::Int(i) => *i as f32,
+            _ => f32::NAN,
+        }
+    }
+
+    fn extra_f32(extras: &makepad_asset_client::json::Value, key: &str) -> f32 {
+        extras.get(key).map(as_f32).unwrap_or(f32::NAN)
+    }
+
+    /// Read a float accessor's values through its bufferView.
+    fn read_accessor(
+        root: &makepad_asset_client::json::Value,
+        bin: &[u8],
+        index: i64,
+    ) -> Vec<f32> {
+        use makepad_asset_client::json::Value;
+        let acc = &root.get("accessors").unwrap().as_arr().unwrap()[index as usize];
+        let vi = acc.get("bufferView").and_then(Value::as_i64).unwrap() as usize;
+        let view = &root.get("bufferViews").unwrap().as_arr().unwrap()[vi];
+        let off = view.get("byteOffset").and_then(Value::as_i64).unwrap_or(0) as usize;
+        let len = view.get("byteLength").and_then(Value::as_i64).unwrap() as usize;
+        bin[off..off + len]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    /// The PNG bytes a node's own material paints with.
+    fn node_image(
+        root: &makepad_asset_client::json::Value,
+        bin: &[u8],
+        node: &makepad_asset_client::json::Value,
+    ) -> Vec<u8> {
+        use makepad_asset_client::json::Value;
+        let mi = root
+            .get("meshes")
+            .unwrap()
+            .as_arr()
+            .unwrap()
+            .get(node.get("mesh").and_then(Value::as_i64).unwrap() as usize)
+            .and_then(|m| m.get("primitives"))
+            .and_then(Value::as_arr)
+            .and_then(|p| p[0].get("material"))
+            .and_then(Value::as_i64)
+            .expect("material");
+        let ti = root.get("materials").unwrap().as_arr().unwrap()[mi as usize]
+            .get("pbrMetallicRoughness")
+            .and_then(|p| p.get("baseColorTexture"))
+            .and_then(|t| t.get("index"))
+            .and_then(Value::as_i64)
+            .expect("baseColorTexture");
+        let si = root.get("textures").unwrap().as_arr().unwrap()[ti as usize]
+            .get("source")
+            .and_then(Value::as_i64)
+            .expect("source");
+        let vi = root.get("images").unwrap().as_arr().unwrap()[si as usize]
+            .get("bufferView")
+            .and_then(Value::as_i64)
+            .expect("bufferView") as usize;
+        let view = &root.get("bufferViews").unwrap().as_arr().unwrap()[vi];
+        let off = view.get("byteOffset").and_then(Value::as_i64).unwrap_or(0) as usize;
+        let len = view.get("byteLength").and_then(Value::as_i64).unwrap() as usize;
+        bin[off..off + len].to_vec()
+    }
+
+    #[test]
+    fn a_func_door_exports_as_an_animated_node_and_leaves_the_level_mesh() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3door");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        let bin = glb_bin(&glb);
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let (node_index, door) = nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.get("name").and_then(Value::as_str) == Some("door_1"))
+            .expect("door_1 node");
+        let extras = door.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("door"));
+        assert_eq!(extras.get("default").and_then(Value::as_str), Some("open"));
+        assert_eq!(extras.get("axis").and_then(Value::as_str), Some("y"));
+        assert_eq!(
+            extras.get("states").and_then(Value::as_arr).map(|a| a.len()),
+            Some(2)
+        );
+        // `angle -1` is UP; a 128-tall brush minus the default lip 8 travels
+        // 120 units = 1.875 m.
+        let travel = 120.0 / 64.0;
+        assert!(
+            (extra_f32(extras, "travel") - travel).abs() < 1e-4,
+            "travel {}",
+            extra_f32(extras, "travel")
+        );
+        let offset = extras.get("offset").unwrap().as_arr().unwrap();
+        assert!(as_f32(&offset[0]).abs() < 1e-6);
+        assert!((as_f32(&offset[1]) - travel).abs() < 1e-4);
+        assert!(as_f32(&offset[2]).abs() < 1e-6);
+        // The geometry is authored CLOSED, so the node RESTS open.
+        let rest = door.get("translation").expect("rest pose").as_arr().unwrap();
+        assert!((as_f32(&rest[1]) - travel).abs() < 1e-4);
+
+        // One LINEAR translation clip named like the node: t=0 closed,
+        // t=seconds open.
+        let anims = root.get("animations").unwrap().as_arr().unwrap();
+        let clip = anims
+            .iter()
+            .find(|a| a.get("name").and_then(Value::as_str) == Some("door_1"))
+            .expect("door_1 clip");
+        let sampler = &clip.get("samplers").unwrap().as_arr().unwrap()[0];
+        assert_eq!(
+            sampler.get("interpolation").and_then(Value::as_str),
+            Some("LINEAR")
+        );
+        let times = read_accessor(&root, &bin, sampler.get("input").unwrap().as_i64().unwrap());
+        assert_eq!(times.len(), 2, "two keyframes");
+        assert!(times[0].abs() < 1e-6);
+        assert!((times[1] - crate::glb_nodes::DOOR_SECONDS).abs() < 1e-6);
+        let values = read_accessor(&root, &bin, sampler.get("output").unwrap().as_i64().unwrap());
+        assert_eq!(values.len(), 6, "two VEC3 keys");
+        assert_eq!(&values[0..3], &[0.0, 0.0, 0.0], "t=0 is the authored pose");
+        assert!((values[4] - travel).abs() < 1e-4, "t=1 is open: {values:?}");
+        let channel = &clip.get("channels").unwrap().as_arr().unwrap()[0];
+        let target = channel.get("target").unwrap();
+        assert_eq!(
+            target.get("node").and_then(Value::as_i64),
+            Some(node_index as i64)
+        );
+        assert_eq!(
+            target.get("path").and_then(Value::as_str),
+            Some("translation")
+        );
+
+        // The leaf left the static mesh: only the world shader is still a
+        // primitive of mesh 0 (sky, lava, door and plat all went to nodes).
+        let level = &root.get("meshes").unwrap().as_arr().unwrap()[0];
+        assert_eq!(
+            level.get("primitives").and_then(Value::as_arr).map(|p| p.len()),
+            Some(1),
+            "door/plat/sky/lava must not be baked into the level mesh"
+        );
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn a_func_plat_exports_as_a_lift_node_resting_up() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3plat");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        let bin = glb_bin(&glb);
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let lift = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("lift_1"))
+            .expect("lift_1 node");
+        let extras = lift.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("lift"));
+        assert_eq!(extras.get("default").and_then(Value::as_str), Some("up"));
+        // Top of the brush at z=64 → 1 m; `height 64` drops it to 0.
+        assert!((extra_f32(extras, "up") - 1.0).abs() < 1e-4);
+        assert!(extra_f32(extras, "down").abs() < 1e-4);
+        assert!((extra_f32(extras, "travel") + 1.0).abs() < 1e-4);
+        assert!(
+            (extra_f32(extras, "wait") - crate::glb_nodes::LIFT_WAIT_SECONDS).abs() < 1e-4
+        );
+        // A lift RESTS up — the level is baked with it raised.
+        assert!(
+            lift.get("translation").is_none(),
+            "a lift rests at the authored (up) pose"
+        );
+        let clip = root
+            .get("animations")
+            .unwrap()
+            .as_arr()
+            .unwrap()
+            .iter()
+            .find(|a| a.get("name").and_then(Value::as_str) == Some("lift_1"))
+            .expect("lift_1 clip")
+            .clone();
+        let sampler = &clip.get("samplers").unwrap().as_arr().unwrap()[0];
+        let values = read_accessor(&root, &bin, sampler.get("output").unwrap().as_i64().unwrap());
+        assert_eq!(&values[0..3], &[0.0, 0.0, 0.0], "t=0 is UP");
+        assert!((values[4] + 1.0).abs() < 1e-4, "t=1 is DOWN: {values:?}");
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn a_lava_shader_exports_as_its_own_hazard_node() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3lava");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let hazard = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("hazard_1"))
+            .expect("hazard_1 node");
+        let extras = hazard.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("hazard"));
+        assert_eq!(extras.get("damage").and_then(Value::as_i64), Some(20));
+        assert_eq!(extras.get("flat").and_then(Value::as_str), Some("lavatest"));
+        assert_eq!(extras.get("liquid").and_then(Value::as_bool), Some(true));
+        // A Q3 liquid is a volume you swim through, not a floor.
+        assert_eq!(extras.get("solid").and_then(Value::as_bool), Some(false));
+        assert!(hazard.get("translation").is_none(), "a hazard does not move");
+        // Its triangles are ONLY in that node: nothing in the level mesh sits
+        // on the lava plane (map y −256..−128 → GLB z +2..+4).
+        let parts = crate::world_preview::extract_glb_parts(&glb).expect("parts");
+        let on_lava = parts[0].indices.chunks_exact(3).any(|tri| {
+            [
+                parts[0].pos[tri[0] as usize],
+                parts[0].pos[tri[1] as usize],
+                parts[0].pos[tri[2] as usize],
+            ]
+            .iter()
+            .all(|p| p[2] > 1.9)
+        });
+        assert!(!on_lava, "lava must leave the level mesh");
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn a_skyparms_farbox_becomes_one_equirect_sky_node() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3sky");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        assert_eq!(
+            bank.sky_box_for("textures/skies/testsky").map(|s| s.as_str()),
+            Some("env/testenv"),
+            "skyParms farbox must be parsed"
+        );
+        assert!(
+            bank.sky_box_for("textures/skies/cloudsky").is_none(),
+            "`skyparms - 512 -` names no box"
+        );
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        let bin = glb_bin(&glb);
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let sky = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("sky"))
+            .expect("sky node");
+        let extras = sky.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("sky"));
+        // The renderer has no cube sampler: `cube` means "the equirect twin",
+        // one image, no wrap multiplier and no phase offset.
+        assert_eq!(
+            extras.get("projection").and_then(Value::as_str),
+            Some("cube")
+        );
+        assert!((extra_f32(extras, "repeat") - 1.0).abs() < 1e-6);
+        assert!(extra_f32(extras, "offset").abs() < 1e-6);
+        assert_eq!(
+            extras.get("texture").and_then(Value::as_str),
+            Some("textures/skies/testsky")
+        );
+        assert!(
+            extras.get("layers").is_none(),
+            "a cube sky is ONE image, not a layer stack"
+        );
+        // Its own picture, at the size `skybox` declares.
+        let png = node_image(&root, &bin, sky);
+        let (rgba, w, h) = decode_png_stored(&png).expect("sky png");
+        assert_eq!((w, h), (crate::skybox::EQUIRECT_W, crate::skybox::EQUIRECT_H));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Equirect u=0.5 is the renderer's GLB +Z, which the geometry map
+        // (`map (x, y, z) → GLB (x, z, −y)`) makes map −Y — the `ft` face,
+        // yellow here. v≈0 is GLB +Y = map +Z, the `up` cap. This is the
+        // orientation `skybox` asserts, checked end to end through a BSP.
+        let px = |u: f32, v: f32| {
+            let x = ((u * w as f32) as u32).min(w - 1) as usize;
+            let y = ((v * h as f32) as u32).min(h - 1) as usize;
+            let o = (y * w as usize + x) * 4;
+            [rgba[o], rgba[o + 1], rgba[o + 2]]
+        };
+        assert_eq!(px(0.5, 0.5), [255, 255, 0], "GLB +Z is the `ft` face");
+        assert_eq!(px(0.5, 0.01), [0, 255, 255], "the zenith is the `up` face");
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn a_cloud_layer_sky_keeps_its_faces_rather_than_punching_a_hole() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3cloudsky");
+        // Same map, but the pack has no `env/` box for its sky shader — which
+        // is every sky in the Quake III demo pak0.pk3.
+        let bank = Q3TexBank::default();
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        assert!(
+            !root
+                .get("nodes")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .iter()
+                .any(|n| n.get("name").and_then(Value::as_str) == Some("sky")),
+            "no picture, no sky node"
+        );
+        // The lid stays where the engine drew one, so the courtyard is not a
+        // hole: the level mesh keeps the sky shader's own primitive.
+        let level = &root.get("meshes").unwrap().as_arr().unwrap()[0];
+        assert_eq!(
+            level.get("primitives").and_then(Value::as_arr).map(|p| p.len()),
+            Some(2),
+            "world + sky lid stay in the level mesh"
+        );
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn every_level_part_declares_itself_prelit() {
+        use makepad_asset_client::json::{self, Value};
+        let staged = tmp_dir("q3prelit");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        // This fixture is vertex-lit (no lightmap lump), which used to ship
+        // COLOR_0 with no marker at all — the analytic sun then multiplied an
+        // already-lit level. Every level primitive's material must say prelit.
+        let level = &root.get("meshes").unwrap().as_arr().unwrap()[0];
+        let materials = root.get("materials").unwrap().as_arr().unwrap();
+        let prims = level.get("primitives").unwrap().as_arr().unwrap();
+        assert!(!prims.is_empty());
+        for p in prims {
+            let mi = p.get("material").and_then(Value::as_i64).expect("material") as usize;
+            assert!(
+                materials[mi]
+                    .get("extras")
+                    .and_then(|e| e.get("lightmapTexture"))
+                    .is_some(),
+                "a prelit map must never be lit twice"
+            );
+            assert!(
+                p.get("attributes")
+                    .and_then(|a| a.get("TEXCOORD_1"))
+                    .is_some(),
+                "the marker needs its (zero) uv set"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn a_converted_map_publishes_every_start_door_lift_and_teleport() {
+        use crate::world_nav::WorldNav;
+        let staged = tmp_dir("q3spawn");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let text =
+            std::fs::read_to_string(staged.join("maps/contract.spawn")).expect("spawn sidecar");
+        // The first three lines are still the `world-spawn 1` the library reads.
+        assert!(text.starts_with("world-spawn 1\n"));
+        let nav = WorldNav::parse(&text).expect("parse spawn");
+
+        // Every start, not one winner.
+        let names: Vec<&str> = nav.starts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["player_start", "deathmatch_1", "deathmatch_2"]);
+        let start = &nav.starts[0];
+        // origin (0,0,64) → GLB (0, 64/64 + 26/64, 0), yaw 90° → 0.
+        assert!(start.pos[0].abs() < 1e-4);
+        assert!((start.pos[1] - (64.0 + VIEW_HEIGHT) / 64.0).abs() < 1e-4);
+        assert!(start.yaw.abs() < 1e-4, "angle 90 looks down −Z");
+        assert!((nav.floor_y.unwrap() - (64.0 - ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
+        assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
+        assert!((nav.step_height.unwrap() - STEP_HEIGHT / 64.0).abs() < 1e-4);
+
+        assert_eq!(nav.doors.len(), 1);
+        assert_eq!(nav.doors[0].name, "door_1");
+        // Brush centre (32, 8, 64) → GLB (0.5, 1.0, −0.125); it opens 120 up.
+        assert!((nav.doors[0].pos[0] - 0.5).abs() < 1e-4, "{:?}", nav.doors[0]);
+        assert!((nav.doors[0].closed_y - 1.0).abs() < 1e-4, "{:?}", nav.doors[0]);
+        assert!(
+            (nav.doors[0].open_y - (1.0 + 120.0 / 64.0)).abs() < 1e-4,
+            "{:?}",
+            nav.doors[0]
+        );
+
+        assert_eq!(nav.lifts.len(), 1);
+        assert_eq!(nav.lifts[0].name, "lift_1");
+        assert!((nav.lifts[0].closed_y - 1.0).abs() < 1e-4, "rests UP");
+        assert!(nav.lifts[0].open_y.abs() < 1e-4, "drops to 0");
+
+        assert_eq!(nav.teleports.len(), 1);
+        let t = &nav.teleports[0];
+        assert_eq!(t.name, "teleport_1");
+        // Pad x 300..364, map y −32..32 → GLB z −0.5..0.5.
+        assert!((t.pad_min[0] - 300.0 / 64.0).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_max[0] - 364.0 / 64.0).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_min[1] + 0.5).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_max[1] - 0.5).abs() < 1e-4, "{t:?}");
+        // Destination (512, 64, 32) at eye height, facing `angle 270`.
+        assert!((t.dst[0] - 8.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[1] - (32.0 + VIEW_HEIGHT) / 64.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[2] + 1.0).abs() < 1e-4, "{t:?}");
+        assert!(
+            (t.yaw - (std::f32::consts::FRAC_PI_2 - 270f32.to_radians())).abs() < 1e-4,
+            "{t:?}"
+        );
+
+        // A Q3 arena ends on a frag count: there is no exit and there are no
+        // keys, so no marker is invented.
+        assert!(nav.markers.is_empty());
+
+        // And the same facts arrive on the catalog anchors.
+        let anchors = nav.anchors();
+        for want in [
+            "floor_height",
+            "step_height",
+            "eye_height",
+            "player_start",
+            "deathmatch_1",
+            "deathmatch_2",
+            "door_1",
+            "lift_1",
+            "teleport_1",
+        ] {
+            assert!(
+                anchors.iter().any(|a| a.name == want),
+                "missing anchor {want}: {:?}",
+                anchors.iter().map(|a| a.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        let lift = anchors.iter().find(|a| a.name == "lift_1").unwrap();
+        assert!(
+            (lift.transform.pos.y - 1.0).abs() < 1e-4,
+            "the lift anchor sits at the UP floor"
+        );
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    /// The exported sky read back by the RENDERER's own parser and its CPU
+    /// twin of the sky shader: the picture is only right if the consumer
+    /// lands on the face the engine draws in that direction.
+    #[test]
+    fn the_renderer_reads_our_cube_sky_the_way_quake3_drew_it() {
+        use makepad_render::model::{SkyProjection, StaticModel};
+        let staged = tmp_dir("q3skyread");
+        let bank = contract_sky_bank(&staged.join("pack"));
+        convert_bsp46(
+            &build_contract_bsp46(),
+            "maps/contract.bsp",
+            &staged,
+            &bank,
+            QUAKE3_SOURCE_ID,
+        )
+        .expect("convert");
+        let glb = std::fs::read(staged.join("maps/contract.glb")).expect("glb");
+        let model = StaticModel::parse_glb(&glb).expect("renderer parses it");
+        assert!(model.prelit, "a Q3 map is prelit — the sun must not light it");
+        let sky = model.sky.expect("renderer found the sky part");
+        assert_eq!(sky.projection, SkyProjection::Cube);
+        assert_eq!(sky.repeat, 1.0);
+        assert_eq!(sky.offset, 0.0);
+        assert_eq!(sky.images.len(), 1, "one equirect twin, not six faces");
+        assert!(sky.images[0].starts_with(b"\x89PNG"));
+        assert!(!sky.vertices.is_empty(), "sky faces are real geometry");
+        assert!(sky.indices.len() >= 3);
+
+        let (rgba, w, h) = decode_png_stored(&sky.images[0]).expect("panorama");
+        // A direction of the model API's own vector type, without naming its
+        // math crate (not a dependency here).
+        let dir = |x: f32, y: f32, z: f32| {
+            let mut v = model.min;
+            v.x = x;
+            v.y = y;
+            v.z = z;
+            v
+        };
+        let look = |x: f32, y: f32, z: f32| -> [u8; 3] {
+            let uv = sky.direction_uv(dir(x, y, z), 0, 0.0);
+            let px = ((uv[0].rem_euclid(1.0) * w as f32) as u32).min(w - 1) as usize;
+            let py = ((uv[1].clamp(0.0, 0.999) * h as f32) as u32).min(h - 1) as usize;
+            let o = (py * w as usize + px) * 4;
+            [rgba[o], rgba[o + 1], rgba[o + 2]]
+        };
+        // The geometry map is `map (x, y, z) → GLB (x, z, −y)`, so reading it
+        // back: GLB +X is map +X (`rt`), GLB +Z is map −Y (`ft`), GLB −Z is
+        // map +Y (`bk`), GLB +Y is map +Z (`up`). Note the map's +Y — the
+        // direction Radiant calls "back" — is what lands on the GLB's own −Z
+        // forward. These are the assertions a picture would be judged on: no
+        // quarter turn, no mirror, no swapped poles.
+        assert_eq!(look(1.0, 0.0, 0.0), [255, 0, 0], "GLB +X is `rt`");
+        assert_eq!(look(-1.0, 0.0, 0.0), [0, 0, 255], "GLB −X is `lf`");
+        assert_eq!(look(0.0, 0.0, 1.0), [255, 255, 0], "GLB +Z is `ft`");
+        assert_eq!(look(0.0, 0.0, -1.0), [0, 255, 0], "GLB −Z is `bk`");
+        assert_eq!(look(0.0, 1.0, 0.0), [0, 255, 255], "the zenith is `up`");
+        assert_eq!(look(0.0, -1.0, 0.0), [255, 0, 255], "the nadir is `dn`");
+        // The horizon is continuous: every column of the panorama's middle
+        // row is one of the four walls, never the caps and never a gap.
+        let walls = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+        for i in 0..64 {
+            let a = (i as f32 / 64.0) * std::f32::consts::TAU;
+            let c = look(a.sin(), 0.0, a.cos());
+            assert!(walls.contains(&c), "horizon gap at {a}: {c:?}");
+        }
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    #[ignore = "visual: writes PNGs for a human to look at"]
+    fn zz_visual_grab_q3_map_with_a_cube_sky() {
+        use makepad_render::model::StaticModel;
+        let pk3 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/quake3/demoq3/pak0.pk3");
+        if !pk3.is_file() {
+            return;
+        }
+        let grabs = std::env::var("Q3_GRAB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let _ = std::fs::create_dir_all(&grabs);
+        let root = tmp_dir("q3visual");
+        let out = root.join("pk3");
+        let mut warnings = Vec::new();
+        let files = expand_pk3(&pk3, &out, &mut warnings).expect("expand");
+        // A recognisable environment box: sky above, ground below, a bright
+        // band exactly at the horizon, one hue per wall.
+        const WALL: [[u8; 3]; 4] = [
+            [220, 90, 90],
+            [90, 220, 90],
+            [90, 120, 240],
+            [230, 210, 90],
+        ];
+        for (i, suf) in crate::skybox::FACE_SUFFIXES.iter().enumerate() {
+            let (w, h) = (64usize, 64usize);
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    let c = match i {
+                        4 => [120, 180, 255],
+                        5 => [80, 60, 40],
+                        _ => {
+                            let t = y as f32 / (h - 1) as f32;
+                            if (t - 0.5).abs() < 0.03 {
+                                [255, 255, 255]
+                            } else {
+                                let base = WALL[i];
+                                let k = if t < 0.5 { 1.0 } else { 0.45 };
+                                [
+                                    (base[0] as f32 * k) as u8,
+                                    (base[1] as f32 * k) as u8,
+                                    (base[2] as f32 * k) as u8,
+                                ]
+                            }
+                        }
+                    };
+                    // A tick every 16 columns pins yaw.
+                    let c = if x % 16 == 0 { [255, 255, 255] } else { c };
+                    rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+                }
+            }
+            let png = encode_png_rgba(&rgba, w as u32, h as u32).unwrap();
+            let (px, pw, ph) = decode_png_stored(&png).unwrap();
+            assert_eq!((pw, ph), (w as u32, h as u32));
+            let mut tga = vec![0u8; 18 + w * h * 3];
+            tga[2] = 2;
+            tga[12..14].copy_from_slice(&(w as u16).to_le_bytes());
+            tga[14..16].copy_from_slice(&(h as u16).to_le_bytes());
+            tga[16] = 24;
+            tga[17] = 0x20;
+            for (j, p) in px.chunks_exact(4).enumerate() {
+                tga[18 + j * 3..18 + j * 3 + 3].copy_from_slice(&[p[2], p[1], p[0]]);
+            }
+            let dest = out.join(format!("env/testenv_{suf}.tga"));
+            let _ = std::fs::create_dir_all(dest.parent().unwrap());
+            std::fs::write(dest, tga).unwrap();
+        }
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
+        let staged = root.join("staged");
+        for (slug, sky_shader) in [
+            ("q3dm7", "textures/skies/toxicskytim_dm8"),
+            ("q3dm1", "textures/skies/tim_hell"),
+        ] {
+            // The demo pack's skies are cloud-layer skies with no farbox, so
+            // stand one in to exercise the path a retail/point-release map
+            // takes (`nightsky_xian_dm1` → `env/xnight2`).
+            let mut b = bank.clone();
+            b.sky_boxes
+                .insert(sky_shader.to_string(), "env/testenv".to_string());
+            let bsp = files
+                .iter()
+                .find(|f| f.rel == format!("maps/{slug}.bsp"))
+                .expect("bsp");
+            let bytes = std::fs::read(&bsp.path).unwrap();
+            convert_bsp46(&bytes, &bsp.rel, &staged, &b, QUAKE3_SOURCE_ID).expect(slug);
+            let glb_path = staged.join(format!("maps/{slug}.glb"));
+            let glb = std::fs::read(&glb_path).unwrap();
+            let model = StaticModel::parse_glb(&glb).expect("parse");
+            let sky = model.sky.expect("sky node");
+            let (pan, pw, ph) = decode_png_stored(&sky.images[0]).unwrap();
+            let nav = crate::world_nav::WorldNav::parse(
+                &std::fs::read_to_string(glb_path.with_extension("spawn")).unwrap(),
+            )
+            .unwrap();
+            let s = nav.primary().unwrap();
+            let world =
+                crate::world_preview::raster_glb_from_spawn(&glb, (s.pos, s.yaw, s.pitch))
+                    .expect("raster");
+            let (mut rgba, w, h) = decode_png_stored(&world).unwrap();
+            // Same camera basis `raster_glb_from_spawn` used, inverted.
+            let pitch = s.pitch.clamp(-0.6, 0.4);
+            let (cy, sy) = (s.yaw.cos(), s.yaw.sin());
+            let (cp, sp) = (pitch.cos(), pitch.sin());
+            let fwd = [sy * cp, sp, -cy * cp];
+            let right = [cy, 0.0, sy];
+            let up = [
+                right[1] * fwd[2] - right[2] * fwd[1],
+                right[2] * fwd[0] - right[0] * fwd[2],
+                right[0] * fwd[1] - right[1] * fwd[0],
+            ];
+            let focal = (w as f32 * 0.5) / (75.0f32.to_radians() * 0.5).tan();
+            let dir_of = |v: [f32; 3]| {
+                let mut d = model.min;
+                d.x = v[0];
+                d.y = v[1];
+                d.z = v[2];
+                d
+            };
+            for py in 0..h as usize {
+                for px in 0..w as usize {
+                    let o = (py * w as usize + px) * 4;
+                    if rgba[o..o + 3] != [26, 31, 41] {
+                        continue;
+                    }
+                    let cx = (px as f32 + 0.5 - w as f32 * 0.5) / focal;
+                    let cyy = -(py as f32 + 0.5 - h as f32 * 0.5) / focal;
+                    let d = [
+                        right[0] * cx + up[0] * cyy + fwd[0],
+                        right[1] * cx + up[1] * cyy + fwd[1],
+                        right[2] * cx + up[2] * cyy + fwd[2],
+                    ];
+                    let uv = sky.direction_uv(dir_of(d), 0, 0.0);
+                    let sx = ((uv[0].rem_euclid(1.0) * pw as f32) as u32).min(pw - 1) as usize;
+                    let sv = ((uv[1].clamp(0.0, 0.999) * ph as f32) as u32).min(ph - 1) as usize;
+                    let si = (sv * pw as usize + sx) * 4;
+                    rgba[o..o + 3].copy_from_slice(&pan[si..si + 3]);
+                }
+            }
+            let png = encode_png_rgba(&rgba, w, h).unwrap();
+            let dest = grabs.join(format!("{slug}-sky.png"));
+            std::fs::write(&dest, png).unwrap();
+            eprintln!("grab {}", dest.display());
+            let pan_dest = grabs.join(format!("{slug}-panorama.png"));
+            std::fs::write(&pan_dest, &sky.images[0]).unwrap();
+            eprintln!("grab {}", pan_dest.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn func_bobbing_is_reported_not_forced_into_a_door() {
+        let entities = concat!(
+            "{\n\"classname\" \"func_bobbing\"\n\"model\" \"*1\"\n\"height\" \"32\"\n}\n",
+            "{\n\"classname\" \"func_door\"\n\"model\" \"*2\"\n\"angle\" \"90\"\n}\n",
+            "{\n\"classname\" \"trigger_hurt\"\n\"model\" \"*3\"\n\"dmg\" \"100\"\n}\n",
+        );
+        let ents = parse_entities(entities);
+        let models = vec![
+            Bsp46Model::default(),
+            Bsp46Model {
+                mins: [0.0; 3],
+                maxs: [64.0, 64.0, 64.0],
+                first_face: 0,
+                num_faces: 2,
+            },
+            Bsp46Model {
+                mins: [0.0; 3],
+                maxs: [64.0, 128.0, 64.0],
+                first_face: 2,
+                num_faces: 2,
+            },
+            // A damage volume: `common/trigger` is SURF_NODRAW, so q3map
+            // wrote the brush with no drawable face at all.
+            Bsp46Model {
+                mins: [0.0; 3],
+                maxs: [512.0, 512.0, 8.0],
+                first_face: 0,
+                num_faces: 0,
+            },
+        ];
+        let (movers, warnings) = bsp46_movers(&ents, &models);
+        // A sinusoid has no open/closed pair, so it is NOT a door: its faces
+        // stay in the static mesh and the fact is reported instead of faked.
+        assert_eq!(movers.len(), 1);
+        assert_eq!(movers[0].name, "door_1");
+        assert_eq!(movers[0].kind, MoverKind::Door);
+        assert!(
+            warnings.iter().any(|w| w.contains("func_bobbing")),
+            "{warnings:?}"
+        );
+        // The same for a damage volume: no geometry, so no hazard node.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("trigger_hurt") && w.contains("0 drawable faces")),
+            "{warnings:?}"
+        );
+        // `angle 90` is +Y in map space, which is −Z in the GLB.
+        let travel = (128.0 - Q3_MOVER_LIP) / 64.0;
+        assert!(movers[0].travel[0].abs() < 1e-4, "{:?}", movers[0]);
+        assert!(
+            (movers[0].travel[2] + travel).abs() < 1e-4,
+            "{:?}",
+            movers[0]
+        );
+        assert_eq!(movers[0].axis, "z");
+    }
+
+    #[test]
+    fn a_start_open_door_is_re_authored_closed_so_it_rests_where_the_bsp_baked_it() {
+        // `SP_func_door` swaps pos1/pos2 on spawnflag 1, so q3map baked the
+        // brush OPEN. The contract wants geometry authored CLOSED resting
+        // OPEN — which must land back exactly on the baked pose, or the door
+        // is a slab across its own doorway.
+        let model = Bsp46Model {
+            mins: [0.0; 3],
+            maxs: [64.0, 16.0, 128.0],
+            first_face: 0,
+            num_faces: 1,
+        };
+        let models = vec![Bsp46Model::default(), model];
+        let plain = parse_entities("{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n}\n");
+        let (plain, _) = bsp46_movers(&plain, &models);
+        let open = parse_entities(
+            "{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n\"spawnflags\" \"1\"\n}\n",
+        );
+        let (open, _) = bsp46_movers(&open, &models);
+        let travel = (128.0 - Q3_MOVER_LIP) / 64.0;
+        // Ordinary door: baked closed, opens UP.
+        assert_eq!(plain[0].shift, [0.0; 3]);
+        assert!((plain[0].travel[1] - travel).abs() < 1e-4, "{:?}", plain[0]);
+        // start_open: baked OPEN, so the vertices move UP to closed and the
+        // door opens back DOWN by the same amount.
+        assert!((open[0].shift[1] - travel).abs() < 1e-4, "{:?}", open[0]);
+        assert!((open[0].travel[1] + travel).abs() < 1e-4, "{:?}", open[0]);
+        // shift + travel = 0: resting open IS the pose the BSP baked.
+        for k in 0..3 {
+            assert!(
+                (open[0].shift[k] + open[0].travel[k]).abs() < 1e-5,
+                "{:?}",
+                open[0]
+            );
+        }
+        // The nav summary reports the CLOSED height, not the baked one.
+        let nav = bsp46_nav(
+            &parse_entities(
+                "{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n\"spawnflags\" \"1\"\n}\n",
+            ),
+            &models,
+            &open,
+        )
+        .0;
+        let baked_centre = 64.0 / 64.0;
+        assert!(
+            (nav.doors[0].closed_y - (baked_centre + travel)).abs() < 1e-4,
+            "{:?}",
+            nav.doors[0]
+        );
+    }
+
+    #[test]
+    fn entity_values_keep_their_spaces_and_backslashes() {
+        let ents = parse_entities(
+            "{\n\"classname\" \"worldspawn\"\n\"message\" \"The Longest Yard\"\n\
+             \"music\" \"music\\sonic5.wav\"\n\"origin\" \"1 2 3\"\n}\n",
+        );
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].class(), "worldspawn");
+        assert_eq!(ents[0].get("message"), Some("The Longest Yard"));
+        assert_eq!(ents[0].get("music"), Some("music\\sonic5.wav"));
+        assert_eq!(ents[0].origin(), Some([1.0, 2.0, 3.0]));
     }
 
     fn build_minimal_md3() -> Vec<u8> {

@@ -115,6 +115,28 @@ pub trait ToolExecutor {
     /// (advertised profiles, or why none are available).
     fn capability_doc(&mut self) -> String;
 
+    /// The tool vocabulary this executor supports, rendered into the system
+    /// prompt at every send. The default is the broker's content base list;
+    /// a game-client executor appends [`tools::sandbox_definitions`]. The
+    /// typed parser accepts the FULL vocabulary regardless — a call outside
+    /// this executor's list is answered with a typed `Unavailable`, never
+    /// executed by accident.
+    fn tool_definitions(&mut self) -> Vec<crate::tools::ToolDef> {
+        tools::definitions()
+    }
+
+    /// True when `call` must be executed by the session's CLIENT — the app
+    /// that owns the state the tool touches (the sandbox owns the game
+    /// world). The session then emits the ToolCall event as usual but PARKS
+    /// the turn instead of calling [`ToolExecutor::execute`]; the owner
+    /// feeds the client's answer back through
+    /// [`Session::provide_client_outcome`] (or times the wait out with a
+    /// `Failed` outcome). Default: nothing is client-executed.
+    fn client_executes(&mut self, call: &ContentToolCall) -> bool {
+        let _ = call;
+        false
+    }
+
     /// Execute one typed call. `progress` may be called with
     /// `(permille, note)` any number of times; `cancel` should be observed
     /// by long-running tools.
@@ -152,6 +174,9 @@ enum Phase {
     /// A provider turn is streaming; `collected` accumulates deltas as a
     /// fallback for providers that do not repeat full text in `Done`.
     Streaming { collected: String },
+    /// A client-executed tool call was emitted; the turn is parked until
+    /// the owner provides the client's outcome (or a timeout outcome).
+    AwaitingClientTool { call_id: String },
 }
 
 /// One conversation bound to one provider and one local [`Origin`].
@@ -171,6 +196,21 @@ pub struct Session {
     sealed: Option<String>,
     tool_executed_this_turn: bool,
     executed_mutation: bool,
+    /// Visible assistant text preceding a PARKED client tool call, kept for
+    /// the tool round once the client's outcome arrives.
+    pending_clean: String,
+    /// The tool-round budget was reached: the model got one FINAL
+    /// completion round ("answer with what you have") and any further tool
+    /// line it emits is not executed — the turn ends with its text.
+    budget_final: bool,
+    /// The current round's call rendered in the model's trained template,
+    /// recorded into the assistant history entry by `tool_round` (textual
+    /// lane only).
+    last_call_trained: Option<String>,
+    /// Serving facts the provider reported, waiting for the next delta to
+    /// ride out on. Presentation only — dropping it changes nothing but a
+    /// readout.
+    pending_serving: Option<crate::wire::ServingFacts>,
 }
 
 impl Session {
@@ -196,6 +236,10 @@ impl Session {
             sealed: None,
             tool_executed_this_turn: false,
             executed_mutation: false,
+            pending_clean: String::new(),
+            budget_final: false,
+            last_call_trained: None,
+            pending_serving: None,
         }
     }
 
@@ -217,6 +261,17 @@ impl Session {
 
     pub fn is_idle(&self) -> bool {
         matches!(self.phase, Phase::Idle)
+    }
+
+    /// The cooperative cancel flag this session hands to running tools.
+    ///
+    /// An owner that drives the session from a worker thread may raise this
+    /// from ANOTHER thread to interrupt a long tool (`operation.wait` runs
+    /// up to two minutes) immediately, instead of waiting for its `cancel`
+    /// command to reach the worker's queue. `send` resets the flag at the
+    /// start of every turn, so a raise on an idle session is harmless.
+    pub fn cancel_flag(&self) -> CancelFlag {
+        self.cancel.clone()
     }
 
     pub fn is_sealed(&self) -> bool {
@@ -278,13 +333,23 @@ impl Session {
             user_text.push('\n');
         }
         user_text.push_str(text);
+        // Recency beats the system block. After one chatty exchange the
+        // model settles into assistant mode and answers "make me a girl"
+        // with a joke or a character sheet, while the tool that does it
+        // sits unused in a list thousands of tokens back. One short line,
+        // last thing before it generates, puts the tools back in front of
+        // it — and only from the second turn, because a fresh session
+        // already acts.
+        if self.turn > 0 {
+            user_text.push_str(TOOL_REMINDER);
+        }
         if user_text.len() > MAX_MESSAGE_BYTES {
             return Err(SendRefusal::TooLarge { what: "message" });
         }
         self.push_history(ChatRole::User, user_text)
             .map_err(|_| SendRefusal::TooLarge { what: "message" })?;
 
-        let defs = tools::definitions();
+        let defs = tools_exec.tool_definitions();
         let cap = tools_exec.capability_doc();
         self.system = if self.provider.kind().uses_native_tools() {
             tools::render_native_system(&defs, &cap)
@@ -295,6 +360,7 @@ impl Session {
         self.tool_rounds = 0;
         self.tool_executed_this_turn = false;
         self.executed_mutation = false;
+        self.budget_final = false;
         self.cancel.reset();
         if let Err(message) = self.begin_provider_turn() {
             self.history.pop();
@@ -318,6 +384,8 @@ impl Session {
         if self.should_seal_after_tool() {
             self.seal("cancelled after a tool executed");
         }
+        self.pending_clean.clear();
+        self.last_call_trained = None;
         self.phase = Phase::Idle;
         self.emit(ChatEventBody::Cancelled);
     }
@@ -328,7 +396,13 @@ impl Session {
         if matches!(self.phase, Phase::Idle) {
             return;
         }
-        for ev in self.provider.poll() {
+        // A parked turn waits for provide_client_outcome (or the owner's
+        // timeout); the provider has nothing meaningful to say meanwhile.
+        if matches!(self.phase, Phase::AwaitingClientTool { .. }) {
+            return;
+        }
+        let events = self.provider.poll();
+        for ev in events {
             match ev {
                 ProviderEvent::Status { note, permille } => {
                     self.emit(ChatEventBody::ToolProgress {
@@ -336,6 +410,12 @@ impl Session {
                         permille,
                         note,
                     });
+                }
+                ProviderEvent::Serving(facts) => {
+                    // Held for the delta it describes — these facts ride ON a
+                    // delta, so they normally arrive with the text they
+                    // describe.
+                    self.pending_serving = Some(facts);
                 }
                 ProviderEvent::Delta(text) => {
                     if let Phase::Streaming { collected } = &mut self.phase {
@@ -350,14 +430,20 @@ impl Session {
                             return;
                         }
                     }
-                    for chunk in split_delta_text(&text) {
-                        self.emit(ChatEventBody::Delta { text: chunk });
+                    // The facts describe the END of this text, so only the
+                    // last chunk of a split carries them.
+                    let chunks = split_delta_text(&text);
+                    let last = chunks.len().saturating_sub(1);
+                    for (i, chunk) in chunks.into_iter().enumerate() {
+                        let serving =
+                            if i == last { self.pending_serving.take() } else { None };
+                        self.emit(ChatEventBody::Delta { text: chunk, serving });
                     }
                 }
                 ProviderEvent::FunctionCall { call_id, name, arguments } => {
                     let visible = match &self.phase {
                         Phase::Streaming { collected } => collected.clone(),
-                        Phase::Idle => String::new(),
+                        _ => String::new(),
                     };
                     self.finish_native_function(visible, call_id, name, arguments, tools_exec);
                     return;
@@ -374,10 +460,13 @@ impl Session {
                     return;
                 }
                 ProviderEvent::Done { text } => {
+                    // Whatever the last facts were, they belong to this turn
+                    // and there is no further delta to carry them.
+                    self.flush_serving();
                     let full = if text.is_empty() {
                         match &self.phase {
                             Phase::Streaming { collected } => collected.clone(),
-                            Phase::Idle => String::new(),
+                            _ => String::new(),
                         }
                     } else {
                         text
@@ -386,6 +475,28 @@ impl Session {
                     return;
                 }
             }
+        }
+        // A SILENT phase still has news. The model spends the start of every
+        // turn inside its think block, and if that reasoning is not being
+        // streamed as text there is no delta for the facts to ride on — so a
+        // client would see nothing at all during precisely the wait it most
+        // wants explained, and its rate readout would freeze at whatever the
+        // last text carried.
+        //
+        // An empty-text delta is the vehicle because the alternative — a new
+        // event tag — is a refusal on older clients, and the whole point of
+        // this block is that it is additive. Receivers append text and render
+        // facts; appending "" is a no-op by construction.
+        self.flush_serving();
+    }
+
+    /// Emit any held serving facts on their own, with no text.
+    fn flush_serving(&mut self) {
+        if let Some(serving) = self.pending_serving.take() {
+            self.emit(ChatEventBody::Delta {
+                text: String::new(),
+                serving: Some(serving),
+            });
         }
     }
 
@@ -417,6 +528,22 @@ impl Session {
             self.emit(ChatEventBody::Done);
             return;
         }
+        // The post-budget completion round: whatever the model says IS the
+        // answer; a tool line in it is cut off, not executed.
+        if self.budget_final {
+            let visible = match toolcall::extract(&full) {
+                Extract::None => toolcall::split_thinking(&full).visible,
+                Extract::Call { clean, .. } | Extract::Malformed { clean, .. } => clean,
+            };
+            if let Err(body) = self.finish_assistant_text(visible) {
+                self.phase = Phase::Idle;
+                self.emit(body);
+                return;
+            }
+            self.phase = Phase::Idle;
+            self.emit(ChatEventBody::Done);
+            return;
+        }
         match toolcall::extract(&full) {
             Extract::None => {
                 let visible = toolcall::split_thinking(&full).visible;
@@ -429,7 +556,8 @@ impl Session {
                 self.emit(ChatEventBody::Done);
             }
             Extract::Malformed { clean, reason } => {
-                self.tool_round(clean, None, ToolOutcome::Refused { what: reason }, tools_exec);
+                let what = corrected(reason, tools_exec);
+                self.tool_round(clean, None, ToolOutcome::Refused { what }, tools_exec);
             }
             Extract::Call { clean, name, args } => {
                 let call_id = format!("tc_{}_{}", self.turn, self.tool_rounds + 1);
@@ -445,13 +573,61 @@ impl Session {
                     name: name.clone(),
                     args: emit_args,
                 });
+                self.last_call_trained = Some(render_trained_call(&name, &args));
                 let outcome = match ContentToolCall::parse(&name, &args) {
-                    Err(reason) => ToolOutcome::Refused { what: reason },
-                    Ok(call) => self.run_tool(&call_id, &call, tools_exec),
+                    Err(reason) => ToolOutcome::Refused { what: corrected(reason, tools_exec) },
+                    Ok(call) => {
+                        if tools_exec.client_executes(&call) {
+                            self.park_for_client(clean, call_id, &call);
+                            return;
+                        }
+                        self.run_tool(&call_id, &call, tools_exec)
+                    }
                 };
                 self.tool_round(clean, Some(call_id), outcome, tools_exec);
             }
         }
+    }
+
+    /// Emit nothing further and wait for the session owner to feed the
+    /// CLIENT's outcome back. The ToolCall event was already emitted, so
+    /// the client sees exactly what to execute.
+    fn park_for_client(&mut self, clean: String, call_id: String, call: &ContentToolCall) {
+        self.tool_executed_this_turn = true;
+        if is_mutating(call) {
+            self.executed_mutation = true;
+        }
+        self.pending_clean = clean;
+        self.phase = Phase::AwaitingClientTool { call_id };
+    }
+
+    /// The call id of the client-executed tool this session is parked on.
+    pub fn awaiting_client_tool(&self) -> Option<&str> {
+        match &self.phase {
+            Phase::AwaitingClientTool { call_id } => Some(call_id),
+            _ => None,
+        }
+    }
+
+    /// Feed a parked client tool its outcome (from the wire, or a timeout
+    /// `Failed` from the owner) and resume the turn.
+    pub fn provide_client_outcome(
+        &mut self,
+        call_id: &str,
+        outcome: ToolOutcome,
+        tools_exec: &mut dyn ToolExecutor,
+    ) -> Result<(), &'static str> {
+        match &self.phase {
+            Phase::AwaitingClientTool { call_id: waiting } if waiting == call_id => {}
+            Phase::AwaitingClientTool { .. } => return Err("tool call id mismatch"),
+            _ => return Err("no client tool is awaiting a result"),
+        }
+        if let ToolOutcome::Ok { value } = &outcome {
+            harvest_revisions(value, &mut self.known);
+        }
+        let clean = std::mem::take(&mut self.pending_clean);
+        self.tool_round(clean, Some(call_id.to_string()), outcome, tools_exec);
+        Ok(())
     }
 
     fn finish_native_function(
@@ -491,9 +667,9 @@ impl Session {
                 (
                     name,
                     Value::Obj(Vec::new()),
-                    Some(refused(format!(
-                        "unknown tool '{}'",
-                        bounded(&api_name, 32)
+                    Some(refused(corrected(
+                        format!("unknown tool '{}'", bounded(&api_name, 32)),
+                        tools_exec,
                     ))),
                 )
             }
@@ -524,8 +700,14 @@ impl Session {
         let outcome = match outcome {
             Some(o) => o,
             None => match ContentToolCall::parse(&canonical, &args) {
-                Err(reason) => ToolOutcome::Refused { what: reason },
-                Ok(call) => self.run_tool(&call_id, &call, tools_exec),
+                Err(reason) => ToolOutcome::Refused { what: corrected(reason, tools_exec) },
+                Ok(call) => {
+                    if tools_exec.client_executes(&call) {
+                        self.park_for_client(visible, call_id, &call);
+                        return;
+                    }
+                    self.run_tool(&call_id, &call, tools_exec)
+                }
             },
         };
         self.tool_round(visible, Some(call_id), outcome, tools_exec);
@@ -577,7 +759,29 @@ impl Session {
             self.fail_closed_tool_round("history_full", "session history budget exhausted");
             return;
         }
-        let assistant = nonempty(clean_text);
+        // The textual lane records the CALL in the assistant turn, in the
+        // model's TRAINED spelling. Without it the in-context history shows
+        // assistant turns that never call tools (only paired results), and
+        // the model imitates that — observed live as turns ending on prose
+        // like "Now the car-kit models." mid-build. In-context examples
+        // beat instructions; make the history look exactly like what we
+        // want more of.
+        let assistant = if self.provider.kind() == ProviderKind::FleetQwen {
+            match &self.last_call_trained {
+                Some(call) if clean_text.len() + call.len() + 1 < MAX_MESSAGE_BYTES => {
+                    let mut text = clean_text;
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(call);
+                    text
+                }
+                _ => nonempty(clean_text),
+            }
+        } else {
+            nonempty(clean_text)
+        };
+        self.last_call_trained = None;
         if self.push_history(ChatRole::Assistant, assistant).is_err() {
             self.fail_closed_tool_round(
                 "turn_too_large",
@@ -600,12 +804,27 @@ impl Session {
             return;
         }
         self.tool_rounds += 1;
-        if self.tool_rounds >= MAX_TOOL_ROUNDS {
-            self.fail_closed_tool_round(
-                "tool_budget",
-                &format!("tool round budget ({MAX_TOOL_ROUNDS}) exhausted"),
-            );
-            return;
+        if self.tool_rounds >= MAX_TOOL_ROUNDS && !self.budget_final {
+            // Native-tool providers keep the fail-closed shape (their
+            // sessions seal after tools anyway). The textual lane degrades
+            // GRACEFULLY: a turn that spent its budget exploring still
+            // ends in an answer or a build, never a dead session — the
+            // model gets ONE final completion round with a nudge, and any
+            // further tool line it emits is not executed.
+            if self.provider.kind().uses_native_tools() {
+                self.fail_closed_tool_round(
+                    "tool_budget",
+                    &format!("tool round budget ({MAX_TOOL_ROUNDS}) exhausted"),
+                );
+                return;
+            }
+            self.budget_final = true;
+            let nudge = "{\"note\":\"tool budget reached — no more tool calls this \
+                         turn; answer or build with what you already have\"}";
+            if self.push_history(ChatRole::Tool, nudge.to_string()).is_err() {
+                self.fail_closed_tool_round("history_full", "session history budget exhausted");
+                return;
+            }
         }
         if self.provider.kind().uses_native_tools() {
             let Some(id) = call_id else {
@@ -717,6 +936,58 @@ impl Session {
     }
 }
 
+/// One call in Qwen's trained tool template, for the assistant history of
+/// the textual lane. String parameter values go in raw; everything else is
+/// JSON — the symmetric inverse of `toolcall`'s native extractor.
+/// Appended to every user message after the first (see `Session::send`).
+/// Short on purpose: it rides in the history for the rest of the session.
+const TOOL_REMINDER: &str = "\n\n(Your tools are live this turn. If this asks for \
+something to happen — in the world, in the store, on the fleet — do it with a tool \
+call. Prose is for reporting what you did.)";
+
+/// Turn a "that tool does not exist" refusal into a CORRECTION.
+///
+/// A bare "unknown tool 'world'" is a dead end. Models reach for a tool
+/// from their own training — `computer_use`, a browser tool, or the
+/// namespaced shape `world` + `{"action": "get_source"}` instead of
+/// `world.get_source` — and a refusal that only says no leaves them to
+/// conclude they have no tools at all and tell the user so. Naming the
+/// real surface in the result walks them straight back into it.
+fn corrected(reason: String, tools_exec: &mut dyn ToolExecutor) -> String {
+    if !reason.starts_with("unknown tool") {
+        return reason;
+    }
+    let defs = tools_exec.tool_definitions();
+    let names: Vec<&str> = defs.iter().map(|d| d.name).collect();
+    format!(
+        "{reason}. This session has exactly these tools, and the name is the \
+         WHOLE dotted name (world.get_source, not world with an action \
+         argument): {}. Call one of them.",
+        names.join(", ")
+    )
+}
+
+fn render_trained_call(name: &str, args: &Value) -> String {
+    let api = tools::api_from_canonical(name).unwrap_or_else(|| name.replace('.', "_"));
+    let mut out = String::from("<tool_call>\n<function=");
+    out.push_str(&api);
+    out.push_str(">\n");
+    if let Value::Obj(pairs) = args {
+        for (key, value) in pairs {
+            out.push_str("<parameter=");
+            out.push_str(key);
+            out.push_str(">\n");
+            match value {
+                Value::Str(s) => out.push_str(s),
+                other => out.push_str(&other.to_json()),
+            }
+            out.push_str("\n</parameter>\n");
+        }
+    }
+    out.push_str("</function>\n</tool_call>");
+    out
+}
+
 /// History entries must be non-empty for the wire bound; a tool-only reply
 /// still records a placeholder so the transcript stays coherent.
 fn bounded(s: &str, max: usize) -> &str {
@@ -750,6 +1021,13 @@ fn is_mutating(call: &ContentToolCall) -> bool {
             | ContentToolCall::OperationCreate { .. }
             | ContentToolCall::OperationCancel { .. }
             | ContentToolCall::OperationRetry { .. }
+            | ContentToolCall::WorldPlace { .. }
+            | ContentToolCall::WorldRemove { .. }
+            | ContentToolCall::WorldMove { .. }
+            | ContentToolCall::WorldSetSource { .. }
+            | ContentToolCall::WorldSetPlayerModel { .. }
+            | ContentToolCall::WorldSpawn { .. }
+            | ContentToolCall::WorldTune { .. }
     )
 }
 

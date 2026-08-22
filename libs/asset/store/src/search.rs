@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// created before schema v2 (tests/migration.rs proves the parity).
 const KIND_DDL: &str = "kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard'))";
+'audio','video','skybox','world','prefab','billboard','game','vjeffect'))";
 
 /// The canonical-alias column's definition. Must stay identical in the CREATE
 /// below and in `canon_alias_migration_sql()`, which retrofits the column onto
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -180,6 +180,8 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -198,6 +200,8 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "world" => AssetKind::World,
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
+        "game" => AssetKind::Game,
+        "vjeffect" => AssetKind::VjEffect,
         _ => return None,
     })
 }
@@ -215,15 +219,30 @@ pub(crate) fn canon_alias_migration_sql() -> String {
     format!("ALTER TABLE search_annotations ADD COLUMN {CANON_ALIAS_DDL}")
 }
 
-/// v5 -> v6: rebuild `search_annotations` so the kind CHECK accepts
-/// `billboard`. SQLite cannot ALTER a CHECK; copy + rename is the retrofit.
+/// The browse-mode total order, verbatim: `canon_alias ASC, asset_id ASC`.
+/// Without it every browse page is a full table scan plus a temp b-tree sort
+/// of the whole annotation table, and the keyset predicate cannot seek.
+///
+/// It lives outside `SEARCH_SCHEMA` because that string is also executed by
+/// the v1 -> v2 step, where `canon_alias` does not exist yet; the v2 -> v3
+/// step runs this immediately after adding the column, and the v7 -> v8 step
+/// runs it for roots that predate the index.
+pub(crate) const SEARCH_CANON_INDEX_SQL: &str = "
+CREATE INDEX IF NOT EXISTS search_annotations_by_canon
+    ON search_annotations(canon_alias, asset_id);
+";
+
+/// Rebuild `search_annotations` so the kind CHECK matches this build's
+/// `KIND_DDL` (v5 -> v6 added `billboard`, v6 -> v7 added `game`). SQLite
+/// cannot ALTER a CHECK; copy + rename is the retrofit, and re-running it
+/// is harmless, so every kind-widening step reuses this one statement.
 pub(crate) const KIND_CHECK_REBUILD_SQL: &str = "
-CREATE TABLE search_annotations_v6(
+CREATE TABLE search_annotations_rebuild(
     asset_id BLOB PRIMARY KEY,
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -238,7 +257,7 @@ CREATE TABLE search_annotations_v6(
     updated_ms INTEGER NOT NULL,
     canon_alias TEXT NOT NULL DEFAULT ''
 );
-INSERT INTO search_annotations_v6(
+INSERT INTO search_annotations_rebuild(
     asset_id, namespace, kind, visibility, owner, title, description,
     creator, generator, backend, model, prompt, provenance, live,
     updated_ms, canon_alias
@@ -249,9 +268,11 @@ SELECT
     updated_ms, canon_alias
 FROM search_annotations;
 DROP TABLE search_annotations;
-ALTER TABLE search_annotations_v6 RENAME TO search_annotations;
+ALTER TABLE search_annotations_rebuild RENAME TO search_annotations;
 CREATE INDEX IF NOT EXISTS search_annotations_by_ns ON search_annotations(namespace);
 CREATE INDEX IF NOT EXISTS search_annotations_by_kind ON search_annotations(kind);
+CREATE INDEX IF NOT EXISTS search_annotations_by_canon
+    ON search_annotations(canon_alias, asset_id);
 ";
 
 /// Mutable, searchable metadata for one asset. Entirely separate from the
@@ -288,6 +309,9 @@ pub struct SearchFilters<'a> {
     pub kind: Option<AssetKind>,
     pub category: Option<&'a str>,
     pub tag: Option<&'a str>,
+    /// Negative tag filter: assets carrying this tag are excluded, even when
+    /// `tag` also matches. Server-side so frontends never post-filter pages.
+    pub exclude_tag: Option<&'a str>,
     pub creator: Option<&'a str>,
     pub generator: Option<&'a str>,
     pub backend: Option<&'a str>,
@@ -304,6 +328,14 @@ pub struct SearchQuery<'a> {
     pub text: &'a str,
     pub filters: SearchFilters<'a>,
     pub page_size: u32,
+    /// How many facet rows to return with the page; 0 asks for none.
+    ///
+    /// Facets ride the page rather than a route of their own so they are
+    /// counted in the SAME read snapshot as the hits — a separate call
+    /// could land either side of a commit and show counts that disagree
+    /// with the rows on screen. Callers that do not need them (a game
+    /// binding an alias, a pad wall paging through kinds) pay nothing.
+    pub facets: u32,
 }
 
 /// What the caller may see. The transport layer resolves credentials into
@@ -333,6 +365,11 @@ pub struct SearchHit {
     /// pointing at this asset; `None` when no alias does. Second key of the
     /// result order, after score and before asset id.
     pub alias: Option<String>,
+    /// When this asset's search row last changed, epoch ms — the annotation
+    /// is rewritten on every publish, so this is "last touched" as the
+    /// catalog knows it. A list that shows a date needs one per row, and a
+    /// per-row detail request to find it would be a request per row.
+    pub updated_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -342,6 +379,35 @@ pub struct SearchPage {
     pub total: u64,
     /// Present iff more results exist; feed back verbatim to continue.
     pub cursor: Option<Vec<u8>>,
+    /// Label counts over the WHOLE result set (not just this page), most
+    /// used first. Empty unless the query asked for facets — see
+    /// [`SearchQuery::facets`].
+    pub facets: Vec<Facet>,
+}
+
+/// Which vocabulary a facet label belongs to. Both are annotation labels;
+/// they are separate filters (`category` / `tag`) and separate index rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacetKind {
+    Category,
+    Tag,
+}
+
+impl FacetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FacetKind::Category => "category",
+            FacetKind::Tag => "tag",
+        }
+    }
+}
+
+/// One label of the current result set, and how many of its assets carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Facet {
+    pub kind: FacetKind,
+    pub label: String,
+    pub count: u64,
 }
 
 // ---- validation helpers ----------------------------------------------------
@@ -515,6 +581,10 @@ const CURSOR_VERSION: u8 = 2;
 /// Everything except the variable alias bytes.
 const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 2 + 16 + 8;
 const CURSOR_CHECK_LEN: usize = 8;
+/// Longest encoded search cursor: the fixed frame plus a maximal alias.
+/// The HTTP routes decode cursors against THIS bound — a smaller one turned
+/// every page boundary that fell on a long alias into "malformed cursor".
+pub const MAX_SEARCH_CURSOR_BYTES: usize = CURSOR_FIXED_LEN + MAX_ALIAS_BYTES;
 
 /// The keyset a cursor carries: resume strictly after this position in the
 /// total order `score DESC, canon_alias ASC, asset_id ASC`.
@@ -768,6 +838,36 @@ pub(crate) fn backfill_alias_index(db: &Db, budgets: &Budgets) -> ServerResult<(
     Ok(())
 }
 
+/// Delete one asset's entire searchable footprint — annotation row, labels,
+/// postings, alias postings — inside the caller's transaction, and advance
+/// the index generation if anything was there. Retirement uses this: a
+/// retired asset is ABSENT from the index rather than filtered out of it, so
+/// no query pays a predicate for content that no longer exists. Returns
+/// whether an annotation row was removed.
+pub(crate) fn clear_annotation_in_tx(db: &Db, asset_id: &[u8]) -> ServerResult<bool> {
+    let mut s = db.prepare(
+        "clear annotation",
+        "DELETE FROM search_annotations WHERE asset_id = ?1",
+    )?;
+    s.bind_blob(1, asset_id)?;
+    s.run()?;
+    drop(s);
+    let existed = db.changes() > 0;
+    for (sql, op) in [
+        ("DELETE FROM search_labels WHERE asset_id = ?1", "clear labels"),
+        ("DELETE FROM search_postings WHERE asset_id = ?1", "clear postings"),
+        ("DELETE FROM search_alias_postings WHERE asset_id = ?1", "clear alias postings"),
+    ] {
+        let mut s = db.prepare(op, sql)?;
+        s.bind_blob(1, asset_id)?;
+        s.run()?;
+    }
+    if existed {
+        bump_generation(db)?;
+    }
+    Ok(existed)
+}
+
 pub struct Search<'a> {
     pub(crate) db: &'a Db,
     pub(crate) budgets: &'a Budgets,
@@ -965,26 +1065,7 @@ impl<'a> Search<'a> {
     /// index generation advances only when a row was actually removed.
     pub fn clear_annotation(&self, asset_id: &AssetId) -> ServerResult<()> {
         self.db.tx(|db| {
-            let mut s = db.prepare(
-                "clear annotation",
-                "DELETE FROM search_annotations WHERE asset_id = ?1",
-            )?;
-            s.bind_blob(1, asset_id.as_bytes())?;
-            s.run()?;
-            drop(s);
-            let existed = db.changes() > 0;
-            for (sql, op) in [
-                ("DELETE FROM search_labels WHERE asset_id = ?1", "clear labels"),
-                ("DELETE FROM search_postings WHERE asset_id = ?1", "clear postings"),
-                ("DELETE FROM search_alias_postings WHERE asset_id = ?1", "clear alias postings"),
-            ] {
-                let mut s = db.prepare(op, sql)?;
-                s.bind_blob(1, asset_id.as_bytes())?;
-                s.run()?;
-            }
-            if existed {
-                bump_generation(db)?;
-            }
+            clear_annotation_in_tx(db, asset_id.as_bytes())?;
             Ok(())
         })
     }
@@ -1063,6 +1144,13 @@ impl<'a> Search<'a> {
         if query.page_size == 0 {
             return Err(ServerError::InvalidInput { what: "search page size zero" });
         }
+        if query.facets > self.budgets.max_search_facets {
+            return Err(ServerError::OverBudget {
+                what: "search facets",
+                limit: self.budgets.max_search_facets as u64,
+                found: query.facets as u64,
+            });
+        }
         if query.page_size > self.budgets.max_search_results {
             return Err(ServerError::OverBudget {
                 what: "search page size",
@@ -1088,7 +1176,7 @@ impl<'a> Search<'a> {
         if let Some(ns) = f.namespace {
             validate_namespace(ns)?;
         }
-        for l in [f.category, f.tag] {
+        for l in [f.category, f.tag, f.exclude_tag] {
             if let Some(l) = l {
                 check_label(l)?;
             }
@@ -1122,7 +1210,12 @@ impl<'a> Search<'a> {
         };
         // A viewer scoped to zero namespaces sees nothing, by construction.
         if matches!(&scope_namespaces, Some(v) if v.is_empty()) {
-            return Ok(SearchPage { hits: Vec::new(), total: 0, cursor: None });
+            return Ok(SearchPage {
+                hits: Vec::new(),
+                total: 0,
+                cursor: None,
+                facets: Vec::new(),
+            });
         }
 
         // -- fingerprint the full query shape for cursor binding -------------
@@ -1178,6 +1271,7 @@ impl<'a> Search<'a> {
                 let score = s.column_u64(5);
                 let kind = read_kind_column(&s, 6)?;
                 let canon = s.column_text(7);
+                let updated_ms = s.column_u64(8);
                 let snippet = build_snippet(
                     &title,
                     &description,
@@ -1194,6 +1288,7 @@ impl<'a> Search<'a> {
                     score,
                     live,
                     alias,
+                    updated_ms,
                 });
             }
             let cursor = if more {
@@ -1208,7 +1303,43 @@ impl<'a> Search<'a> {
             } else {
                 None
             };
-            Ok(SearchPage { hits, total, cursor })
+            // Facets come out of the SAME snapshot as the page: the counts
+            // a user sees can never describe a different generation than
+            // the rows under them. The candidate set is the query without
+            // its keyset or page limit, so a facet counts every match, not
+            // just this page's.
+            let facets = if query.facets == 0 {
+                Vec::new()
+            } else {
+                let (facet_sql, facet_binds) = build_facet_sql(
+                    &terms,
+                    browse,
+                    f,
+                    &viewer.principal,
+                    &scope_namespaces,
+                    query.facets as u64,
+                );
+                let mut s = db.prepare("search facets", &facet_sql)?;
+                apply_binds(&mut s, &facet_binds)?;
+                let mut out = Vec::new();
+                while s.step()? {
+                    let kind = match s.column_text(0).as_str() {
+                        "category" => FacetKind::Category,
+                        "tag" => FacetKind::Tag,
+                        // The label index only ever holds those two kinds
+                        // (a CHECK constraint says so); anything else is a
+                        // corrupt row, not a new vocabulary to guess at.
+                        _ => continue,
+                    };
+                    out.push(Facet {
+                        kind,
+                        label: s.column_text(1),
+                        count: s.column_u64(2),
+                    });
+                }
+                out
+            };
+            Ok(SearchPage { hits, total, cursor, facets })
         })
     }
 }
@@ -1236,6 +1367,7 @@ fn fingerprint(
         f.kind.map(kind_name),
         f.category,
         f.tag,
+        f.exclude_tag,
         f.creator,
         f.generator,
         f.backend,
@@ -1299,6 +1431,25 @@ mod tests {
     }
 
     #[test]
+    fn longest_cursor_fits_the_route_bound() {
+        let alias = "a".repeat(MAX_ALIAS_BYTES);
+        let bytes = encode_cursor(7, &[3u8; 32], 9, &alias, &AssetId::from_bytes([1u8; 16]));
+        assert_eq!(bytes.len(), MAX_SEARCH_CURSOR_BYTES);
+        assert!(
+            decode_cursor(&bytes, &[3u8; 32]).is_ok(),
+            "a maximal alias must round-trip"
+        );
+        // A realistic pack alias is well past the old 128-byte bound's
+        // 53-byte alias room and must round-trip too.
+        let long = "kenney/modular-dungeon-kit/wall-doorway-round-cracked-narrow";
+        assert!(long.len() > 53);
+        let bytes = encode_cursor(1, &[0u8; 32], 1, long, &AssetId::from_bytes([2u8; 16]));
+        assert!(bytes.len() > 128, "this cursor exceeds the old bound");
+        assert!(bytes.len() <= MAX_SEARCH_CURSOR_BYTES);
+        assert!(decode_cursor(&bytes, &[0u8; 32]).is_ok());
+    }
+
+    #[test]
     fn kind_names_round_trip_and_are_all_in_the_check() {
         let all = [
             AssetKind::Mesh,
@@ -1314,6 +1465,7 @@ mod tests {
             AssetKind::World,
             AssetKind::Prefab,
             AssetKind::Billboard,
+            AssetKind::Game,
         ];
         for kind in all {
             assert_eq!(kind_parse(kind_name(kind)), Some(kind));
@@ -1329,6 +1481,31 @@ mod tests {
 /// `limit: None` the statement is the COUNT form (no keyset, no order); with
 /// a limit it is the page form. All caller strings travel as binds — SQL text
 /// varies only by clause structure, never by content.
+/// Label counts over the same candidate set the page is cut from, most used
+/// first. `build_sql`'s counting form is exactly that candidate SELECT
+/// wrapped in a COUNT, so the facet query reuses it as a subquery: one
+/// definition of "what matches", three uses (count, page, facets).
+fn build_facet_sql(
+    terms: &[String],
+    browse: bool,
+    f: &SearchFilters<'_>,
+    principal: &Option<PrincipalId>,
+    scope: &Option<Vec<&str>>,
+    limit: u64,
+) -> (String, Vec<Bind>) {
+    let (candidates, mut binds) = build_candidate_sql(terms, browse, f, principal, scope);
+    let sql = format!(
+        "SELECT l.kind, l.label, COUNT(*) AS n
+         FROM search_labels l
+         JOIN ({candidates}) c ON c.asset_id = l.asset_id
+         GROUP BY l.kind, l.label
+         ORDER BY n DESC, l.kind ASC, l.label ASC
+         LIMIT ?"
+    );
+    binds.push(Bind::U64(limit));
+    (sql, binds)
+}
+
 fn build_sql(
     terms: &[String],
     browse: bool,
@@ -1338,16 +1515,61 @@ fn build_sql(
     keyset: Option<&Keyset>,
     limit: Option<u64>,
 ) -> (String, Vec<Bind>) {
+    let counting = limit.is_none();
+    let (mut sql, mut binds) = build_candidate_sql(terms, browse, f, principal, scope);
+    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
+    // In browse mode every score is 0, so the score comparison degenerates
+    // and only the (alias, asset) tail remains.
+    if let Some(k) = keyset {
+        if browse {
+            sql.push_str(" AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))");
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        } else {
+            sql.push_str(
+                " AND (score < ? OR (score = ? AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))))",
+            );
+            binds.push(Bind::U64(k.score));
+            binds.push(Bind::U64(k.score));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        }
+    }
+    if counting {
+        sql.insert_str(0, "SELECT COUNT(*) FROM (");
+        sql.push(')');
+    } else {
+        if browse {
+            sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
+        } else {
+            sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");
+        }
+        sql.push_str(" LIMIT ?");
+        binds.push(Bind::U64(limit.unwrap_or(1)));
+    }
+    (sql, binds)
+}
+
+/// Everything that decides WHETHER an asset matches — the term join or the
+/// browse scan, visibility, scope and every filter — with no keyset, order
+/// or limit. Counting wraps it, the page appends its keyset and order to it,
+/// and the facet aggregation joins the label index against it, so all three
+/// answer for exactly the same set.
+fn build_candidate_sql(
+    terms: &[String],
+    browse: bool,
+    f: &SearchFilters<'_>,
+    principal: &Option<PrincipalId>,
+    scope: &Option<Vec<&str>>,
+) -> (String, Vec<Bind>) {
     let mut binds: Vec<Bind> = Vec::new();
     let mut sql = String::with_capacity(1024);
-    let counting = limit.is_none();
-    if counting {
-        sql.push_str("SELECT COUNT(*) FROM (");
-    }
     if browse {
         sql.push_str(
             "SELECT a.asset_id, a.namespace, a.title, a.description, a.live, 0 AS score, a.kind,
-                    a.canon_alias
+                    a.canon_alias, a.updated_ms
              FROM search_annotations a WHERE 1=1",
         );
     } else {
@@ -1358,7 +1580,7 @@ fn build_sql(
         // alias terms are public, so they carry the same weight for both
         // columns of the union.
         sql.push_str(
-            ") AS score, a.kind, a.canon_alias FROM (
+            ") AS score, a.kind, a.canon_alias, a.updated_ms FROM (
                 SELECT term, asset_id, weight_public, weight_owner FROM search_postings
                 UNION ALL
                 SELECT term, asset_id, weight, weight FROM search_alias_postings
@@ -1414,6 +1636,16 @@ fn build_sql(
             binds.push(Bind::Text(v.to_string()));
         }
     }
+    // Exclusion reads the same label index; it is applied after the positive
+    // label clauses so an asset carrying both `tag` and `exclude_tag` drops.
+    // Being part of the shared builder, it binds identically in the COUNT,
+    // the page and the facet form, so they never disagree.
+    if let Some(v) = f.exclude_tag {
+        sql.push_str(
+            " AND NOT EXISTS(SELECT 1 FROM search_labels l WHERE l.asset_id = a.asset_id AND l.kind = 'tag' AND l.label = ?)",
+        );
+        binds.push(Bind::Text(v.to_string()));
+    }
     if let Some(owner) = &f.owner {
         sql.push_str(" AND a.owner IS NOT NULL AND a.owner = ?");
         binds.push(Bind::Blob(owner.0.to_vec()));
@@ -1421,42 +1653,9 @@ fn build_sql(
     if f.live_only {
         sql.push_str(" AND a.live = 1");
     }
-    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
-    // In browse mode every score is 0, so the score comparison degenerates
-    // and only the (alias, asset) tail remains.
-    if browse {
-        if let Some(k) = keyset {
-            sql.push_str(
-                " AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))",
-            );
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Blob(k.asset.to_vec()));
-        }
-    } else {
+    if !browse {
         sql.push_str(" GROUP BY a.asset_id HAVING COUNT(DISTINCT p.term) = ?");
         binds.push(Bind::U64(terms.len() as u64));
-        if let Some(k) = keyset {
-            sql.push_str(
-                " AND (score < ? OR (score = ? AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))))",
-            );
-            binds.push(Bind::U64(k.score));
-            binds.push(Bind::U64(k.score));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Blob(k.asset.to_vec()));
-        }
-    }
-    if counting {
-        sql.push(')');
-    } else {
-        if browse {
-            sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
-        } else {
-            sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");
-        }
-        sql.push_str(" LIMIT ?");
-        binds.push(Bind::U64(limit.unwrap_or(1)));
     }
     (sql, binds)
 }

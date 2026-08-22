@@ -111,6 +111,7 @@ fn seed_image(client: &mut AssetClient, tag: &str) -> (makepad_asset_data::Asset
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.rights = PublishRights::declared(

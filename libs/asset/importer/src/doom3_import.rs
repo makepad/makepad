@@ -1350,6 +1350,7 @@ fn convert_md5_billboard(
     let (atlas, slots, shaders) = rig_atlas(&rig, textures);
     let slug = path_slug(mesh_rel);
     let key = format!("billboards/{slug}");
+    let manifest_dir = key.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
     let mut frames = Vec::new();
     let mut states = Vec::new();
     let letters = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -1383,9 +1384,15 @@ fn convert_md5_billboard(
                     BB_DIM,
                     [0, 0, 0, 0],
                 );
-                let file = format!("{key}_{}_{rot}.png", letter.to_ascii_lowercase());
+                let staged_rel = format!("{key}_{}_{rot}.png", letter.to_ascii_lowercase());
                 let png = encode_png_rgba(&tile, BB_DIM as u32, BB_DIM as u32)?;
-                write_bytes(staged, &file, &png)?;
+                write_bytes(staged, &staged_rel, &png)?;
+                // `file` is relative to the MANIFEST, not to staged: the
+                // manifest lands beside these frames in `billboards/`.
+                let file = staged_rel
+                    .strip_prefix(&format!("{manifest_dir}/"))
+                    .unwrap_or(&staged_rel)
+                    .to_string();
                 frames.push(crate::stateful_billboard::SpriteFrame {
                     letter,
                     rot,
@@ -1393,6 +1400,7 @@ fn convert_md5_billboard(
                     h: BB_DIM as u32,
                     file,
                     flip: false,
+                    cell: None,
                 });
             }
         }
@@ -1422,22 +1430,34 @@ fn convert_md5_billboard(
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "idle".into());
     let facings = frames.iter().map(|f| f.rot).max().unwrap_or(1);
-    let bb = crate::stateful_billboard::StatefulBillboard {
+    let mut bb = crate::stateful_billboard::StatefulBillboard {
         prefix: slug.clone(),
         role: crate::stateful_billboard::SpriteRole::Character,
         preview: preview.clone(),
         facings,
         mirrors: if facings >= 5 { 8 } else { 0 },
         states,
-        frames: frames.clone(),
+        frames,
+        sheet: None,
     };
     let rel_path = format!("{key}.billboard");
-    write_bytes(staged, &rel_path, bb.to_text().as_bytes())?;
-    let icon_rel = frames
-        .iter()
-        .find(|f| f.rot == 1)
-        .map(|f| f.file.clone())
-        .or_else(|| frames.first().map(|f| f.file.clone()));
+    // One packed sheet per actor, never one PNG per rendered pose.
+    let manifest = staged.join(&rel_path);
+    if let Some(parent) = manifest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let written = crate::billboard_sheet::write_with_sheet(&manifest, &mut bb)
+        .map_err(|e| format!("{rel_path}: {e}"))?;
+    for frame in &written.consumed {
+        let _ = std::fs::remove_file(frame);
+    }
+    let icon_rel = written
+        .thumb
+        .as_deref()
+        .unwrap_or(&written.sheet)
+        .strip_prefix(staged)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"));
     Ok(Some(ClassicAsset {
         key,
         kind: AssetKind::Billboard,
@@ -2546,7 +2566,18 @@ surface { /* material */ "textures/test" /* numVerts */ 3 /* numIndexes */ 3
         )
         .expect("convert");
         let glb = std::fs::read(staged.join(&asset.rel_path)).expect("glb");
-        assert!(glb.windows(4).any(|w| w == [200, 40, 20, 255]), "albedo in glb");
+        // The atlas rides in the BIN chunk as a compressed PNG, so look at
+        // its decoded pixels rather than at raw bytes in the container.
+        let at = glb
+            .windows(8)
+            .position(|w| w == b"\x89PNG\r\n\x1a\n")
+            .expect("embedded png");
+        let (rgba, _, _) =
+            crate::classic_import::decode_png_stored(&glb[at..]).expect("decode atlas");
+        assert!(
+            rgba.chunks_exact(4).any(|px| px == [200, 40, 20, 255]),
+            "albedo in glb"
+        );
         let _ = std::fs::remove_dir_all(&staged);
     }
 

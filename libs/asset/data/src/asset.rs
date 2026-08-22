@@ -34,6 +34,13 @@ pub enum AssetKind {
     /// keyed PNG frames with real alpha — not a mesh. The engine draws the
     /// facing quad; do not bake one into a GLB.
     Billboard,
+    /// A playable game: splash source text (`FileRole::Source`, `Text`)
+    /// that the sandbox runs. Everything it references (models, audio)
+    /// is resolved through the catalog — a game never embeds bytes.
+    Game,
+    /// A VJ effect document: splash source text (`FileRole::Source`,
+    /// `Text`) evaluated by the vj effect runtime (apps/vj/src/effects).
+    VjEffect,
 }
 
 canon_enum!(AssetKind {
@@ -50,6 +57,8 @@ canon_enum!(AssetKind {
     World = 10,
     Prefab = 11,
     Billboard = 12,
+    Game = 13,
+    VjEffect = 14,
 });
 
 impl AssetKind {
@@ -90,6 +99,26 @@ pub enum FileRole {
     Source,
     /// 16-bit grayscale PNG metric depth in millimeters (0 = invalid).
     Depth,
+    /// 3D Gaussian splat scene (PLY): the render payload of a splat
+    /// `World`. Drawn by the splat renderer, never meshed.
+    Splat,
+    /// Baked per-asset ambient-occlusion atlas (grayscale PNG) that the
+    /// `AoMesh` role's `ao_uv` lane samples. Published beside the render
+    /// GLB so a game streams the bake with the model instead of re-baking.
+    AoTexture,
+    /// Separated drum stem of an `Audio` asset (Ogg Vorbis). Stems are a
+    /// precomputed side-channel: either all four stem roles are present on
+    /// a revision or none are, so a client never mixes a partial set.
+    StemDrums,
+    /// Separated bass stem (Ogg Vorbis).
+    StemBass,
+    /// Separated vocal stem (Ogg Vorbis).
+    StemVocals,
+    /// Separated residual "other" stem (Ogg Vorbis).
+    StemOther,
+    /// Word-aligned lyrics for an `Audio` asset (JSON, the karaoke line/
+    /// word/confidence shape documented in `makepad-audio-lyrics`).
+    Lyrics,
 }
 
 canon_enum!(FileRole {
@@ -110,6 +139,13 @@ canon_enum!(FileRole {
     Video = 14,
     Source = 15,
     Depth = 16,
+    Splat = 17,
+    AoTexture = 18,
+    StemDrums = 19,
+    StemBass = 20,
+    StemVocals = 21,
+    StemOther = 22,
+    Lyrics = 23,
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,6 +160,12 @@ pub enum MediaType {
     Bin,
     /// Validated UTF-8 text (for retained sources only).
     Text,
+    /// Gaussian-splat point cloud (`ply` header; ascii or binary body).
+    Ply,
+    /// MPEG-1/2/2.5 Layer III audio (the music library's native container).
+    Mp3,
+    /// Validated UTF-8 JSON (structured side-channel documents).
+    Json,
 }
 
 canon_enum!(MediaType {
@@ -135,6 +177,9 @@ canon_enum!(MediaType {
     Mp4 = 5,
     Bin = 6,
     Text = 7,
+    Ply = 8,
+    Mp3 = 9,
+    Json = 10,
 });
 
 impl FileRole {
@@ -149,10 +194,32 @@ impl FileRole {
             Albedo | Normal | Orm | Texture => matches!(media, Png | Jpeg | Bin),
             PreviewFront | PreviewSide => matches!(media, Png | Jpeg),
             Turntable | Video => matches!(media, Mp4),
-            Audio => matches!(media, Wav | Ogg),
+            Audio => matches!(media, Wav | Ogg | Mp3),
             Source => true,
             Depth => matches!(media, Png),
+            Splat => matches!(media, Ply),
+            AoTexture => matches!(media, Png),
+            StemDrums | StemBass | StemVocals | StemOther => matches!(media, Ogg),
+            Lyrics => matches!(media, Json),
         }
+    }
+
+    /// The four stem side-channel roles, in the deck lane order
+    /// (drums, bass, vocals, other is the storage order here; consumers
+    /// reorder for display).
+    pub const STEMS: [FileRole; 4] = [
+        FileRole::StemDrums,
+        FileRole::StemBass,
+        FileRole::StemVocals,
+        FileRole::StemOther,
+    ];
+
+    /// Whether this role is one of the four stem side-channels.
+    pub fn is_stem(self) -> bool {
+        matches!(
+            self,
+            FileRole::StemDrums | FileRole::StemBass | FileRole::StemVocals | FileRole::StemOther
+        )
     }
 }
 
@@ -293,19 +360,257 @@ canon_enum!(ThumbnailMedia {
     Jpeg = 1,
 });
 
+/// What a declared region of a thumbnail picture IS.
+///
+/// Append-only: the tags below are frozen, new kinds take the next free
+/// number, and a reader that meets an unknown tag refuses rather than
+/// guessing. This is the whole point of the views contract — a consumer that
+/// wants to know "is this picture a sprite sheet?" reads the answer instead
+/// of measuring the pixels and hoping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ThumbnailViewKind {
+    /// A plain picture: a render, a still, a texture page.
+    Image,
+    /// A log-frequency spectrogram.
+    Fft,
+    /// A waveform strip.
+    Wave,
+    /// Cells of a packed sprite sheet, cycling.
+    Anim,
+}
+
+canon_enum!(ThumbnailViewKind {
+    Image = 0,
+    Fft = 1,
+    Wave = 2,
+    Anim = 3,
+});
+
+/// A pixel rectangle inside the thumbnail, top-left anchored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThumbnailRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// A uniform cell grid inside the thumbnail plus the half-open cell range
+/// this view covers. Cell `i` sits at `((i % cols) * cell_w, (i / cols) *
+/// cell_h)` — the same packing `stateful_billboard`'s sheet layout uses, so
+/// an importer stamps what it actually wrote rather than a description of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThumbnailCells {
+    pub cols: u32,
+    pub cell_w: u32,
+    pub cell_h: u32,
+    /// Index of the first cell in this view's range.
+    pub first: u32,
+    /// How many cells the range covers.
+    pub count: u32,
+}
+
+/// Where a view lives in the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThumbnailLayout {
+    Rect(ThumbnailRect),
+    Cells(ThumbnailCells),
+}
+
+/// One declared region of a thumbnail: what it is, where it is, and how fast
+/// it moves if it moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThumbnailView {
+    pub kind: ThumbnailViewKind,
+    pub layout: ThumbnailLayout,
+    /// Cycling rate for a moving view; `None` for a still one.
+    pub fps: Option<f32>,
+}
+
+impl ThumbnailView {
+    /// A whole-picture view of one kind.
+    pub fn whole(kind: ThumbnailViewKind, width: u32, height: u32) -> Self {
+        Self {
+            kind,
+            layout: ThumbnailLayout::Rect(ThumbnailRect { x: 0, y: 0, w: width, h: height }),
+            fps: None,
+        }
+    }
+
+    /// A rectangular region of one kind.
+    pub fn rect(kind: ThumbnailViewKind, x: u32, y: u32, w: u32, h: u32) -> Self {
+        Self { kind, layout: ThumbnailLayout::Rect(ThumbnailRect { x, y, w, h }), fps: None }
+    }
+
+    /// A cycling cell range.
+    pub fn cells(kind: ThumbnailViewKind, cells: ThumbnailCells, fps: f32) -> Self {
+        Self { kind, layout: ThumbnailLayout::Cells(cells), fps: Some(fps) }
+    }
+
+    /// Canonical order key: kind first, then where the region sits. Sorted
+    /// and unique on this, so a producer that discovered its views in any
+    /// order still ships identical bytes, and the same region can never be
+    /// declared twice.
+    fn sort_key(&self) -> (u8, u8, [u32; 5]) {
+        match self.layout {
+            ThumbnailLayout::Rect(r) => (self.kind.tag(), 0, [r.x, r.y, r.w, r.h, 0]),
+            ThumbnailLayout::Cells(c) => {
+                (self.kind.tag(), 1, [c.first, c.count, c.cols, c.cell_w, c.cell_h])
+            }
+        }
+    }
+
+    /// Check the region against the picture it claims to live in.
+    fn validate(&self, width: u32, height: u32) -> Result<(), AssetDataError> {
+        match self.layout {
+            ThumbnailLayout::Rect(r) => {
+                if r.w == 0 || r.h == 0 {
+                    return Err(AssetDataError::Malformed { what: "thumbnail view rect" });
+                }
+                // Saturating: a region that overflows u32 is out of bounds by
+                // construction, and must refuse rather than wrap into range.
+                if r.x.saturating_add(r.w) > width || r.y.saturating_add(r.h) > height {
+                    return Err(AssetDataError::Malformed { what: "thumbnail view rect bounds" });
+                }
+            }
+            ThumbnailLayout::Cells(c) => {
+                if c.cols == 0 || c.cell_w == 0 || c.cell_h == 0 || c.count == 0 {
+                    return Err(AssetDataError::Malformed { what: "thumbnail view cells" });
+                }
+                let last = c.first.saturating_add(c.count).saturating_sub(1);
+                let right = (last % c.cols).saturating_add(1).saturating_mul(c.cell_w);
+                let bottom = (last / c.cols).saturating_add(1).saturating_mul(c.cell_h);
+                if right > width || bottom > height {
+                    return Err(AssetDataError::Malformed { what: "thumbnail view cells bounds" });
+                }
+            }
+        }
+        if let Some(fps) = self.fps {
+            if !fps.is_finite() || fps <= 0.0 {
+                return Err(AssetDataError::Malformed { what: "thumbnail view fps" });
+            }
+            if fps > MAX_THUMBNAIL_FPS {
+                return Err(AssetDataError::OverBudget {
+                    what: "thumbnail view fps",
+                    limit: MAX_THUMBNAIL_FPS as u64,
+                    found: fps as u64,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn encode(&self, w: &mut CanonWriter) {
+        w.u8(self.kind.tag());
+        match self.layout {
+            ThumbnailLayout::Rect(r) => {
+                w.u8(0);
+                w.u32(r.x);
+                w.u32(r.y);
+                w.u32(r.w);
+                w.u32(r.h);
+            }
+            ThumbnailLayout::Cells(c) => {
+                w.u8(1);
+                w.u32(c.cols);
+                w.u32(c.cell_w);
+                w.u32(c.cell_h);
+                w.u32(c.first);
+                w.u32(c.count);
+            }
+        }
+        match self.fps {
+            None => w.bool(false),
+            Some(fps) => {
+                w.bool(true);
+                w.f32(fps);
+            }
+        }
+    }
+
+    fn decode(r: &mut CanonReader) -> Result<Self, AssetDataError> {
+        let kind = ThumbnailViewKind::decode(r)?;
+        let layout = match r.u8("thumbnail view layout")? {
+            0 => ThumbnailLayout::Rect(ThumbnailRect {
+                x: r.u32("thumbnail view rect")?,
+                y: r.u32("thumbnail view rect")?,
+                w: r.u32("thumbnail view rect")?,
+                h: r.u32("thumbnail view rect")?,
+            }),
+            1 => ThumbnailLayout::Cells(ThumbnailCells {
+                cols: r.u32("thumbnail view cells")?,
+                cell_w: r.u32("thumbnail view cells")?,
+                cell_h: r.u32("thumbnail view cells")?,
+                first: r.u32("thumbnail view cells")?,
+                count: r.u32("thumbnail view cells")?,
+            }),
+            found => {
+                return Err(AssetDataError::BadTag { what: "ThumbnailLayout", found });
+            }
+        };
+        let fps = if r.bool("thumbnail view fps present")? {
+            Some(r.f32("thumbnail view fps")?)
+        } else {
+            None
+        };
+        Ok(Self { kind, layout, fps })
+    }
+}
+
 /// The mandatory primary thumbnail of every published mesh-bearing asset:
 /// its own content-addressed blob, PNG or JPEG, at least 256x256, stored
 /// outside the GLB so search results can draw a grid without fetching meshes.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// One picture, always. [`views`](Self::views) is metadata ABOUT that picture
+/// — which parts of it are what — and never a second blob: a consumer that
+/// ignores it draws exactly the image it drew before, which is why the field
+/// could be added without a schema break for anyone who does not want it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ThumbnailMeta {
     pub blob: BlobId,
     pub media: ThumbnailMedia,
     pub width: u32,
     pub height: u32,
     pub byte_len: u64,
+    /// Declared regions of the picture, canonical order by
+    /// [`ThumbnailView::sort_key`]. Empty means "one picture, take it as it
+    /// comes" — exactly what every revision baked before this field existed
+    /// says, so absence is never a claim.
+    pub views: Vec<ThumbnailView>,
 }
 
 impl ThumbnailMeta {
+    /// The plain single-picture thumbnail: no declared regions.
+    pub fn plain(blob: BlobId, media: ThumbnailMedia, width: u32, height: u32, byte_len: u64)
+        -> Self
+    {
+        Self { blob, media, width, height, byte_len, views: Vec::new() }
+    }
+
+    /// Sort the declared views into canonical order. Producers that built
+    /// them in discovery order call this before validating; duplicates still
+    /// refuse there.
+    pub fn canonicalize(&mut self) {
+        self.views.sort_by_key(|v| v.sort_key());
+    }
+
+    /// The first declared view of a kind, if any.
+    pub fn view(&self, kind: ThumbnailViewKind) -> Option<&ThumbnailView> {
+        self.views.iter().find(|v| v.kind == kind)
+    }
+
+    /// The declared cell layout of a cycling sheet, if this picture says it
+    /// is one. The ONE question every grid and preview asks; answered from
+    /// the manifest, never from the pixel dimensions.
+    pub fn animation(&self) -> Option<(ThumbnailCells, f32)> {
+        self.views.iter().find_map(|v| match (v.kind, v.layout) {
+            (ThumbnailViewKind::Anim, ThumbnailLayout::Cells(c)) => {
+                Some((c, v.fps.unwrap_or(8.0)))
+            }
+            _ => None,
+        })
+    }
+
     pub fn validate(&self) -> Result<(), AssetDataError> {
         for (what, dim) in [("thumbnail width", self.width), ("thumbnail height", self.height)] {
             if dim < THUMBNAIL_MIN_DIM {
@@ -335,6 +640,17 @@ impl ThumbnailMeta {
                 found: self.byte_len,
             });
         }
+        if self.views.len() > MAX_THUMBNAIL_VIEWS {
+            return Err(AssetDataError::OverBudget {
+                what: "thumbnail views",
+                limit: MAX_THUMBNAIL_VIEWS as u64,
+                found: self.views.len() as u64,
+            });
+        }
+        check_sorted_unique(&self.views, |v| v.sort_key(), "thumbnail views")?;
+        for view in &self.views {
+            view.validate(self.width, self.height)?;
+        }
         Ok(())
     }
 
@@ -344,16 +660,30 @@ impl ThumbnailMeta {
         w.u32(self.width);
         w.u32(self.height);
         w.u64(self.byte_len);
+        // APPENDED, never interleaved: everything above is byte-for-byte the
+        // shape thumbnails have always had, so a reader built before views
+        // existed walks those five fields off the wire unchanged.
+        w.u32(self.views.len() as u32);
+        for view in &self.views {
+            view.encode(w);
+        }
     }
 
     pub(crate) fn decode(r: &mut CanonReader) -> Result<Self, AssetDataError> {
-        Ok(Self {
+        let mut out = Self {
             blob: BlobId::decode(r)?,
             media: ThumbnailMedia::decode(r)?,
             width: r.u32("thumbnail width")?,
             height: r.u32("thumbnail height")?,
             byte_len: r.u64("thumbnail byte_len")?,
-        })
+            views: Vec::new(),
+        };
+        let count = r.count("thumbnail views", MAX_THUMBNAIL_VIEWS)?;
+        out.views.reserve(count);
+        for _ in 0..count {
+            out.views.push(ThumbnailView::decode(r)?);
+        }
+        Ok(out)
     }
 }
 
@@ -724,12 +1054,19 @@ pub enum Redistribution {
     AttributionRequired,
     /// May not be redistributed: never enters a public catalog or lock.
     Forbidden,
+    /// User-owned content that may be served on the owner's own LAN (this
+    /// asset server and the clients it discovers) but must never leave it:
+    /// no internet-facing catalog, no content-set lock shipped elsewhere,
+    /// no peer transfer beyond the LAN. Shareware game data the user holds
+    /// a copy of is the canonical case.
+    LanLocal,
 }
 
 canon_enum!(Redistribution {
     Allowed = 0,
     AttributionRequired = 1,
     Forbidden = 2,
+    LanLocal = 3,
 });
 
 /// Whether derivatives (AO bakes, LODs, transcodes, remixes) may be produced
@@ -741,12 +1078,17 @@ pub enum DerivativePolicy {
     AttributionRequired,
     /// No derivative may be produced; derivation requests fail closed.
     Forbidden,
+    /// Derivatives only for local preview/use (thumbnails, AO, LODs,
+    /// transcodes served on the owner's LAN); nothing derived may leave
+    /// the LAN, same boundary as [`Redistribution::LanLocal`].
+    LocalPreview,
 }
 
 canon_enum!(DerivativePolicy {
     Allowed = 0,
     AttributionRequired = 1,
     Forbidden = 2,
+    LocalPreview = 3,
 });
 
 /// The complete rights record of one piece of content: exact license
@@ -905,6 +1247,9 @@ impl AssetManifest {
         self.files.sort_by_key(|f| f.sort_key());
         self.dependencies.sort();
         self.anchors.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(thumbnail) = &mut self.thumbnail {
+            thumbnail.canonicalize();
+        }
         if let Some(recipe) = &mut self.spawn_recipe {
             recipe.params.sort_by(|a, b| a.name.cmp(&b.name));
         }
@@ -1017,8 +1362,35 @@ impl AssetManifest {
                 return Err(AssetDataError::Malformed { what: "audio metrics" });
             }
         }
+        // Stem and lyric side-channels belong to audio assets only, and the
+        // four stems travel together: all or none, so a client never has to
+        // mix a partial stem set against the original.
+        let has_stem_or_lyrics =
+            self.files.iter().any(|f| f.role.is_stem() || f.role == FileRole::Lyrics);
+        if has_stem_or_lyrics && self.kind != AssetKind::Audio {
+            return Err(AssetDataError::Malformed {
+                what: "stem/lyrics side-channel on a non-audio asset",
+            });
+        }
+        let stems_present = FileRole::STEMS
+            .iter()
+            .filter(|role| self.files.iter().any(|f| f.role == **role))
+            .count();
+        if stems_present != 0 && stems_present != 4 {
+            return Err(AssetDataError::Missing {
+                what: "stem side-channels must be all four or none",
+            });
+        }
         if self.kind == AssetKind::Video && !self.files.iter().any(|f| f.role == FileRole::Video) {
             return Err(AssetDataError::Missing { what: "video role" });
+        }
+        if self.kind == AssetKind::Game
+            && !self
+                .files
+                .iter()
+                .any(|f| f.role == FileRole::Source && f.media == MediaType::Text)
+        {
+            return Err(AssetDataError::Missing { what: "game source role" });
         }
         if matches!(
             self.kind,
