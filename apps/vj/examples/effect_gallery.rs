@@ -79,11 +79,43 @@ pub struct App {
     /// (without it, effects run standalone on the animated fallback).
     #[rust]
     input_tex: Option<Texture>,
+    /// `VJFX_SWEEP=<dir>`: the parity sweep — grab every document once at
+    /// the pinned clock, then quit. See [`Sweep`].
+    #[rust]
+    sweep: Option<Sweep>,
+    #[rust]
+    frame: NextFrame,
+}
+
+/// THE PARITY SWEEP (`VJFX_SWEEP=<dir>`, with `VJFX_CAPTURE=<frames>`).
+///
+/// A self-terminating capture run: load document i, let the widget advance
+/// its fixed frame budget and freeze, write one PNG, move on, quit after
+/// the last one. Every grab is then a pure function of the document, so
+/// two sweeps over two builds compare pixel for pixel — which is how a
+/// shader migration proves it changed no look. Existing PNGs are skipped,
+/// so an interrupted sweep resumes instead of restarting.
+#[derive(Default)]
+pub struct Sweep {
+    dir: std::path::PathBuf,
+    /// Frames still to let pass before asking for this document's grab.
+    settle: u32,
+    /// Frames spent waiting for the PNG file to appear (bounded).
+    waited: u32,
+    /// Where the current grab is being written (None = still settling).
+    pending: Option<std::path::PathBuf>,
+    done: bool,
 }
 
 impl App {
+    /// `VJFX_DIR=<dir>` points the gallery at another preset directory —
+    /// how the migration measured its own cost, by running ONE binary over
+    /// the pre- and post-migration document sets.
     fn docs_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/effects")
+        match std::env::var("VJFX_DIR") {
+            Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+            _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/effects"),
+        }
     }
 
     fn load_docs(&mut self) {
@@ -104,7 +136,99 @@ impl App {
             }
         }
         docs.sort_by(|a, b| a.0.cmp(&b.0));
+        // `VJFX_ONLY=a,b,c` keeps just the documents whose name contains one
+        // of the fragments — a one-family sweep instead of the whole
+        // library (and a much shorter capture run).
+        if let Ok(only) = std::env::var("VJFX_ONLY") {
+            let want: Vec<String> = only.split(',').map(|s| s.trim().to_string()).collect();
+            docs.retain(|(n, _)| want.iter().any(|w| !w.is_empty() && n.contains(w.as_str())));
+        }
         self.docs = docs;
+    }
+
+    /// `VJFX_CAPTURE=<frames>` or `<frames>@<dt seconds>` (default step
+    /// 1/60 s). Unset = the live free-running clock.
+    fn capture_config() -> Option<(f64, u32)> {
+        let spec = std::env::var("VJFX_CAPTURE").ok()?;
+        let (frames, dt) = match spec.split_once('@') {
+            Some((f, d)) => (f, d.parse::<f64>().ok()?),
+            None => (spec.as_str(), 1.0 / 60.0),
+        };
+        Some((dt.clamp(0.0001, 1.0), frames.parse::<u32>().ok()?.clamp(1, 100_000)))
+    }
+
+    /// One sweep step, driven off the app's own frame timer. Waits out the
+    /// widget's capture budget, asks for the PNG, waits for it to land,
+    /// advances — and quits when the library is exhausted.
+    fn sweep_step(&mut self, cx: &mut Cx) {
+        let Some(sweep) = &mut self.sweep else { return };
+        if sweep.done {
+            return;
+        }
+        if let Some(path) = sweep.pending.clone() {
+            sweep.waited += 1;
+            if !path.exists() && sweep.waited < 240 {
+                return;
+            }
+            if !path.exists() {
+                log!("effect_gallery sweep: NO GRAB for {}", path.display());
+            }
+            sweep.pending = None;
+            sweep.waited = 0;
+            let next = self.current + 1;
+            if next >= self.docs.len() {
+                if let Some(sweep) = &mut self.sweep {
+                    sweep.done = true;
+                }
+                log!("effect_gallery sweep: complete ({} documents)", self.docs.len());
+                cx.quit();
+                return;
+            }
+            self.sweep_show(cx, next);
+            return;
+        }
+        if sweep.settle > 0 {
+            sweep.settle -= 1;
+            return;
+        }
+        // The widget has frozen on its last capture frame: whatever is on
+        // screen now is the document's deterministic frame.
+        let (name, _) = self.docs[self.current].clone();
+        let path = sweep.dir.join(format!("{name}.png"));
+        sweep.pending = Some(path.clone());
+        cx.capture_next_frame_to_file(path);
+    }
+
+    /// Load document `index` for the sweep, skipping any already grabbed.
+    fn sweep_show(&mut self, cx: &mut Cx, index: usize) {
+        let mut index = index;
+        let (budget, dir) = match &self.sweep {
+            Some(s) => (Self::capture_config().map(|c| c.1).unwrap_or(90), s.dir.clone()),
+            None => return,
+        };
+        while index < self.docs.len() {
+            let name = self.docs[index].0.clone();
+            if !dir.join(format!("{name}.png")).exists() {
+                break;
+            }
+            index += 1;
+        }
+        if index >= self.docs.len() {
+            if let Some(sweep) = &mut self.sweep {
+                sweep.done = true;
+            }
+            log!("effect_gallery sweep: complete (nothing left to grab)");
+            cx.quit();
+            return;
+        }
+        self.show(cx, index);
+        if let Some(sweep) = &mut self.sweep {
+            // The widget freezes after `budget` frames; a small margin
+            // covers the load frame and the compositor catching up.
+            sweep.settle = budget + 12;
+            sweep.waited = 0;
+            sweep.pending = None;
+        }
     }
 
     fn show(&mut self, cx: &mut Cx, index: usize) {
@@ -125,7 +249,19 @@ impl App {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(122.0);
         view.set_bpm(bpm);
+        // DETERMINISTIC CAPTURE (the parity harness): `VJFX_CAPTURE=<frames>`
+        // — optionally `<frames>@<dt>` — makes the widget advance by a fixed
+        // step for exactly that many frames after the load and then freeze,
+        // so a grab is a pure function of the document. This is what a
+        // before/after migration sweep compares; without it the wall clock
+        // decides what is on screen and no two grabs match.
+        view.set_capture(Self::capture_config());
+        // LOAD COST: document eval + hook-object build + engine build. The
+        // shader itself compiles lazily on first draw, so this is the CPU
+        // half of "what does a document with its own shader cost?".
+        let t0 = std::time::Instant::now();
         let result = view.set_effect_source(cx, &key, &source);
+        let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
         // Content coupling verify lever: VJFX_INPUT=<image> binds a real
         // texture to input 0 (a stand-in for the channel's live video).
         if let Ok(path) = std::env::var("VJFX_INPUT") {
@@ -152,7 +288,7 @@ impl App {
             Err(e) => (format!("[{}/{}] {} FAILED", self.current + 1, self.docs.len(), key), e),
         };
         drop(view);
-        log!("effect_gallery: {} — {}", title, status);
+        log!("effect_gallery: {} — {} [load {:.2} ms]", title, status, load_ms);
         self.ui.label(cx, ids!(fx_name)).set_text(cx, &title);
         self.ui.label(cx, ids!(fx_status)).set_text(cx, &status);
         self.ui.redraw(cx);
@@ -176,11 +312,23 @@ impl AppMain for App {
             // the requested (or first) document.
             self.started = true;
             self.load_docs();
+            if let Ok(dir) = std::env::var("VJFX_SWEEP") {
+                let dir = std::path::PathBuf::from(dir);
+                let _ = std::fs::create_dir_all(&dir);
+                self.sweep = Some(Sweep { dir, ..Default::default() });
+                self.frame = cx.new_next_frame();
+                self.sweep_show(cx, 0);
+                return;
+            }
             let start = std::env::var("VJFX_DOC")
                 .ok()
                 .and_then(|want| self.docs.iter().position(|(n, _)| *n == want))
                 .unwrap_or(0);
             self.show(cx, start);
+        }
+        if self.frame.is_event(event).is_some() {
+            self.frame = cx.new_next_frame();
+            self.sweep_step(cx);
         }
         if let Event::KeyDown(ke) = event {
             match ke.key_code {

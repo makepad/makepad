@@ -47,4 +47,20 @@
         {kind: "bloom", threshold: 0.42, strength: 1.6, levels: 3},
         {kind: "feedback", amount: 0.30, zoom: 1.004, rotate: 0.0, dim: 0.96}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = height 0..1, attr = (class, id, hash, height/phase).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCity {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let v = 0.8 + 0.4 * attr.z
+            return self.col_a.mix(self.col_b, clamp(t * 0.8 + attr.z * 0.3, 0.0, 1.0)) * v
+        }
+    }
 }

@@ -48,4 +48,21 @@
         {kind: "bloom", threshold: 0.4, strength: 1.4, levels: 3},
         {kind: "feedback", amount: 0.4, zoom: 1.002, rotate: 0.0, dim: 0.93}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = curve position 0..1, attr = (strand, t, rnd, side).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxHarmono {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let strand01 = self.geom.geom_uv.y
+            let hue = fract(t * 0.85 + strand01 * 0.34 + self.user.w)
+            return self.col_a.mix(self.col_b, hue)
+        }
+    }
 }

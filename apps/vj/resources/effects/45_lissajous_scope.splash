@@ -35,4 +35,19 @@
     stages: [
         {kind: "bloom", threshold: "clamp(0.35 - (p2-0.5)*0.5, 0.02, 0.95)", strength: 1.6, levels: 3}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash, radius).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            return self.col_a.mix(self.col_b, t)
+        }
+    }
 }

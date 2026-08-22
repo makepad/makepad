@@ -55,4 +55,28 @@
     stages: [
         {kind: "bloom", threshold: 0.5, strength: 1.2, levels: 3}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = height 0..1, attr = (slope, grid line, uv.x, uv.y).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTerrain {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let grad = self.col_a.mix(self.col_b, t).xyz
+            let beat_glow = 1.0 + self.time_beat.w * 1.1
+            let drape = content.xyz * (0.42 + 0.85 * attr.x)
+                * (1.0 + self.time_beat.w * 0.30)
+            let surface = (grad * 0.30 * attr.x)
+                .mix(drape, clamp(cmix * 1.25, 0.0, 1.0))
+            let gline = grad.mix(content.xyz * 1.3, cmix * 0.55)
+            let neon = gline * attr.y * beat_glow * 1.6
+                + self.col_c.xyz * attr.y * t * 0.6
+            return vec4(surface + neon, 1.0)
+        }
+    }
 }

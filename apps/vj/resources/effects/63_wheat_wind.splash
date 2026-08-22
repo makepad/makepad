@@ -36,4 +36,26 @@
     stages: [
         {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
     ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = arc along the blade 0..1, attr = (row, arc, hue, half width).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxMesh {
+        fx_displace: fn(pos: vec3, normal: vec3, attr: vec4) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let base = self.col_a.mix(self.col_b, clamp(attr.z, 0.0, 1.0))
+            let tip = self.col_c * (clamp(t, 0.0, 1.0) * 0.35)
+            let flash = self.col_c * (self.time_beat.w * 0.5)
+            return vec4(base.xyz + tip.xyz + flash.xyz, 1.0)
+        }
+    }
 }
