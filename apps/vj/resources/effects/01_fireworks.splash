@@ -1,0 +1,34 @@
+// FIREWORKS — staggered burst shells, stateless GPU particles.
+// The vertex shader re-derives every spark from (id, seed, time); the CPU
+// uploaded one quad per particle once and will never touch it again.
+{
+    name: "Fireworks"
+    engine: "particles"
+    mode: "burst"
+    seed: 12
+
+    count: 9000
+    spread: 7.0
+    size: 0.14
+    rate: 0.35
+    gravity: 1.1
+
+    speed: 1.0
+    beat_pulse: 0.65
+    beat_rate: 1.0
+
+    color_bg: #x040308
+    color_a: #xffd24a
+    color_b: #x66aaff
+    color_c: #xfff6e0
+
+    cam_dist: 16.0
+    cam_height: 3.5
+    cam_orbit: 0.05
+    fog: 0.02
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3},
+        {kind: "feedback", amount: 0.55, zoom: 1.0, rotate: 0.0, dim: 0.9}
+    ]
+}

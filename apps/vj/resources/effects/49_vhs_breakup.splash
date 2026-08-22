@@ -1,0 +1,13 @@
+// VHS BREAKUP — the degraded-tape look: glitch slices + chroma bleed +
+// posterize crush, all pumping with the beat. Three stacked warps.
+{
+    name: "VHS Breakup"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "glitch", p1: 0.75, p2: "0.15 + pulse * 0.7"},
+        {kind: "chroma", p1: "0.2 + pulse * 0.5", p2: 0.0},
+        {kind: "posterize", p1: 0.55, p2: 0.55}
+    ]
+}

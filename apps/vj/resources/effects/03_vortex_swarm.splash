@@ -1,0 +1,30 @@
+// VORTEX SWARM — a rising helix of embers, tighter at the waist.
+{
+    name: "Vortex Swarm"
+    engine: "particles"
+    mode: "vortex"
+    seed: 21
+
+    count: 7000
+    spread: 5.0
+    size: 0.09
+    rate: 0.22
+    swirl: 2.2
+
+    beat_pulse: 0.55
+    beat_rate: 2.0
+
+    color_bg: #x02080a
+    color_a: #x38ffc8
+    color_b: #x1a66ff
+    color_c: #xd8fff2
+
+    cam_dist: 11.0
+    cam_height: 1.2
+    cam_orbit: 0.14
+    fog: 0.03
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 3}
+    ]
+}

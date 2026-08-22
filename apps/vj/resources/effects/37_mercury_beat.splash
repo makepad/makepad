@@ -1,0 +1,31 @@
+// MERCURY BEAT — hard metal: fast chrome-white blobs SLAMMING wider on
+// every beat (beat_swell high), chroma-split rim.
+{
+    name: "Mercury Beat"
+    engine: "metaballs"
+    seed: 21
+
+    blobs: 8
+    grid: 34
+    extent: 3.4
+    blob_radius: 0.85
+    orbit: 2.2
+    orbit_speed: 1.4
+    beat_swell: 0.8
+
+    beat_pulse: 0.8
+
+    color_bg: #x06060a
+    color_a: #x6a7488
+    color_b: #x2a3344
+    color_c: #xdde8ff
+
+    cam_orbit: 0.18
+    fog: 0.03
+    glow: 0.9
+
+    stages: [
+        {kind: "chroma", p1: "pulse * 0.5", p2: 0.25},
+        {kind: "bloom", threshold: 0.7, strength: 1.2, levels: 3}
+    ]
+}

@@ -179,6 +179,7 @@ pub fn server_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 

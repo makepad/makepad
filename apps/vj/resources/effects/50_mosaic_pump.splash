@@ -1,0 +1,13 @@
+// MOSAIC PUMP — pixelation whose BLOCK SIZE snaps on the beat (p2 bound
+// to the pulse): the picture crunches to chunky blocks on every kick and
+// melts back between them.
+{
+    name: "Mosaic Pump"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "pixelate", p1: 0.55, p2: "pulse"},
+        {kind: "bloom", threshold: 0.55, strength: 1.15, levels: 2}
+    ]
+}

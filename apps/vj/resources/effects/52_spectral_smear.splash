@@ -1,0 +1,17 @@
+// SPECTRAL SMEAR — heavy chroma displacement whose ANGLE sweeps with the
+// bar, over a rotating feedback wash and a soft blur: the content smears
+// into drifting spectra. Calm-psychedelic register.
+{
+    name: "Spectral Smear"
+    engine: "screen"
+    input0: "test"
+
+    bar_beats: 8
+
+    stages: [
+        {kind: "chroma", p1: 0.7, p2: "bar"},
+        {kind: "feedback", amount: 0.82, zoom: 1.008,
+         rotate: "0.004 + pulse * 0.006", dim: 0.96},
+        {kind: "blur", levels: 1}
+    ]
+}

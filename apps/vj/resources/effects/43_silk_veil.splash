@@ -1,0 +1,31 @@
+// SILK VEIL — a few WIDE slow ribbons in pastel light, tilt-shifted:
+// fabric in zero gravity. Calm ambient.
+{
+    name: "Silk Veil"
+    engine: "ribbons"
+    seed: 2
+
+    ribbons: 14
+    trail: 150
+    width: 0.26
+    flow_speed: 1.7
+    swirl: 0.9
+    bound: 5.0
+
+    beat_pulse: 0.2
+    beat_rate: 0.25
+
+    color_bg: #x100a14
+    color_a: #xeeb8dd
+    color_b: #xa8c8f0
+    color_c: #xfff0f6
+
+    cam_dist: 9.0
+    cam_orbit: 0.06
+    fog: 0.02
+
+    stages: [
+        {kind: "tiltshift", focus: 0.5, width: 0.35, levels: 2},
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 2}
+    ]
+}

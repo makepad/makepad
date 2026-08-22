@@ -1,0 +1,30 @@
+// REACTIVE RELIEF — the second texture-input demo: the terrain's height IS
+// input0's luminance (tex_displace 1.0). Feed it the channel video and the
+// picture becomes a landscape.
+{
+    name: "Reactive Relief"
+    engine: "heightmap"
+    input0: "test"
+
+    res: 140
+    size: 26.0
+    height: 3.4
+    scroll: 0.6
+    tex_displace: 1.0
+
+    beat_pulse: 0.5
+    beat_rate: 1.0
+
+    color_bg: #x040a08
+    color_a: #x30ff90
+    color_b: #xf0ff40
+    color_c: #xffffff
+
+    cam_fov: 58.0
+    cam_height: 5.0
+    fog: 0.045
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 2}
+    ]
+}

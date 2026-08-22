@@ -1,0 +1,30 @@
+// RIBBON STORM — flow-field ribbon trails orbiting a torus band, feedback
+// trails smearing them into silk.
+{
+    name: "Ribbon Storm"
+    engine: "ribbons"
+    seed: 11
+
+    ribbons: 36
+    trail: 70
+    width: 0.13
+    flow_speed: 2.6
+    swirl: 1.8
+    bound: 5.0
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+
+    color_bg: #x060310
+    color_a: #x40c8ff
+    color_b: #xff50e0
+    color_c: #xffffff
+
+    cam_orbit: 0.12
+    fog: 0.025
+
+    stages: [
+        {kind: "feedback", amount: 0.7, zoom: 1.006, rotate: 0.003, dim: 0.94},
+        {kind: "bloom", threshold: 0.4, strength: 1.4, levels: 3}
+    ]
+}

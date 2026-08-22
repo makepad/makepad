@@ -1,0 +1,32 @@
+// PLANKTON DRIFT — calm ambient: a slow teal vortex of tiny motes, half
+// tempo, soft blur. The quiet one between bangers.
+{
+    name: "Plankton Drift"
+    engine: "particles"
+    mode: "vortex"
+    seed: 5
+
+    count: 9000
+    spread: 5.5
+    size: 0.045
+    rate: 0.06
+    swirl: 0.5
+
+    beat_pulse: 0.2
+    beat_rate: 0.5
+
+    color_bg: #x02100e
+    color_a: #x2fd8c0
+    color_b: #x1a6688
+    color_c: #xccfff4
+
+    cam_dist: 9.0
+    cam_height: 0.8
+    cam_orbit: 0.05
+    fog: 0.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 3},
+        {kind: "blur", levels: 1}
+    ]
+}

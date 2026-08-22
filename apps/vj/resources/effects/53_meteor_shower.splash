@@ -1,0 +1,56 @@
+// METEOR SHOWER — scripted emitters: jets streak DOWN across the sky on
+// the off-beats; where each one "lands", a ring shock pops two beats
+// later. Pattern taught: slot-less spawns for one-shots, staggered kinds.
+{
+    name: "Meteor Shower"
+    engine: "emitters"
+    particles: 900
+    size: 0.12
+
+    color_bg: #x040208
+    cam_dist: 16.0
+    cam_height: 3.0
+    cam_orbit: 0.02
+
+    stages: [
+        {kind: "feedback", amount: 0.65, zoom: 1.0, rotate: 0.0, dim: 0.88},
+        {kind: "bloom", threshold: 0.35, strength: 1.6, levels: 3}
+    ]
+
+    frame: fn(fx) {
+        let out = []
+        // A meteor on every beat, entering high on one side.
+        if fx.phase < fx.dt * 2.0 {
+            let lane = modf(fx.beat * 2.7, 12.0) - 6.0
+            out.push({
+                kind: "jet"
+                pos: vec3(lane + 6.0, 8.0, 0.0 - modf(fx.beat, 4.0))
+                vel: vec3(-6.0, -5.5, 0.0)
+                life: 1.6
+                speed: 0.9
+                size: 0.16
+                fraction: 0.45
+                gravity: 0.0
+                color: #xffffff
+                color2: #x88bbff
+                seed: fx.beat
+            })
+        }
+        // The impact ring where a meteor from two beats ago came down.
+        if fx.phase < fx.dt * 2.0 && modf(fx.beat, 2.0) < 0.5 {
+            let lane2 = modf((fx.beat - 2.0) * 2.7, 12.0) - 6.0
+            out.push({
+                kind: "ring"
+                pos: vec3(lane2 - 3.0, -1.0, 0.0)
+                life: 1.4
+                speed: 5.0
+                size: 0.16
+                fraction: 0.8
+                color: #xffffff
+                color2: #x99aaff
+                seed: fx.beat * 3.3
+            })
+        }
+        return out
+    }
+}

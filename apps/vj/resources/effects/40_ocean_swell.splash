@@ -1,0 +1,30 @@
+// OCEAN SWELL — low rolling water: smooth (unridged) noise, small height,
+// slow scroll, blue-on-blue with a tiltshift horizon. Calm ambient.
+{
+    name: "Ocean Swell"
+    engine: "heightmap"
+
+    res: 120
+    size: 32.0
+    height: 1.3
+    noise_scale: 0.13
+    scroll: 1.2
+
+    beat_pulse: 0.2
+    beat_rate: 0.25
+
+    color_bg: #x030a16
+    color_a: #x1a55aa
+    color_b: #x44bbee
+    color_c: #xcceeff
+
+    cam_fov: 58.0
+    cam_height: 2.2
+    fog: 0.045
+    glow: 1.1
+
+    stages: [
+        {kind: "tiltshift", focus: 0.42, width: 0.3, levels: 3},
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+}

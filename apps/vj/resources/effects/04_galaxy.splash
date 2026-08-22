@@ -1,0 +1,31 @@
+// GALAXY — a slow three-armed spiral disc; inner stars orbit faster
+// (differential rotation is what makes it read as a galaxy, not a ring).
+{
+    name: "Galaxy"
+    engine: "particles"
+    mode: "galaxy"
+    seed: 33
+
+    count: 14000
+    spread: 8.0
+    size: 0.075
+    rate: 0.05
+    swirl: 2.4
+
+    beat_pulse: 0.35
+    beat_rate: 0.5
+
+    color_bg: #x030208
+    color_a: #xb080ff
+    color_b: #xffd090
+    color_c: #xffffff
+
+    cam_dist: 12.0
+    cam_height: 5.5
+    cam_orbit: 0.06
+    fog: 0.015
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.7, levels: 4}
+    ]
+}

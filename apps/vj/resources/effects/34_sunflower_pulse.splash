@@ -1,0 +1,29 @@
+// SUNFLOWER PULSE — phyllotaxis: golden-angle floret spiral breathing on
+// the beat. Pattern taught: mode "phyllo" is pure placement math — the
+// whole flower is one closed form in the vertex shader.
+{
+    name: "Sunflower Pulse"
+    engine: "particles"
+    mode: "phyllo"
+    seed: 1
+
+    count: 2600
+    spread: 5.5
+    size: 0.16
+
+    beat_pulse: 0.6
+
+    color_bg: #x0a0704
+    color_a: #xffcc33
+    color_b: #xcc6a1a
+    color_c: #xfff2bb
+
+    cam_dist: 10.0
+    cam_height: 6.5
+    cam_orbit: 0.10
+    fog: 0.02
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.4, levels: 3}
+    ]
+}
