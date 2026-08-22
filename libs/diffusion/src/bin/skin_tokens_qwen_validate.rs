@@ -24,7 +24,7 @@ use makepad_diffusion::backend::{
     gpu_download, gpu_linear_nt_cached_bf16_mm, gpu_slice_rows, gpu_upload,
     gpu_weight_cache_ensure, GpuLinearPart,
 };
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
 use std::time::Instant;
 

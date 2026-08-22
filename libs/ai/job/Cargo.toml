@@ -1,0 +1,7 @@
+[package]
+name = "makepad-ai-job"
+version = "0.1.0"
+edition = "2021"
+description = "The one cross-model contract: progress events + cancellation. No tensors, no GPU."
+
+[dependencies]

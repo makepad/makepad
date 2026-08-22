@@ -1,0 +1,34 @@
+[package]
+name = "makepad-ai-speech"
+version = "0.1.0"
+edition = "2021"
+description = "Speech family: IndexTTS-2.5 + Kokoro (aiarch.md §1)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-ai-sfx = { path = "../sfx" }
+
+[dev-dependencies]
+makepad-voice = { path = "../../../voice" }
+
+[[bin]]
+name = "g2p_test"
+path = "src/bin/g2p_test.rs"
+
+[[bin]]
+name = "har_bisect"
+path = "src/bin/har_bisect.rs"
+
+[[bin]]
+name = "kokoro_probe"
+path = "src/bin/kokoro_probe.rs"
+
+[[bin]]
+name = "parity"
+path = "src/bin/parity.rs"
+
+[[bin]]
+name = "tts_test"
+path = "src/bin/tts_test.rs"

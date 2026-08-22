@@ -8,9 +8,25 @@ license = "MIT"
 [dependencies]
 # Bake ggml-metal.metallib at build time (same as llama/tts). Without this
 # the first Metal dispatch compiles the shader source at runtime.
-makepad-ggml = { path = "../ggml", features = ["metal-precompile"] }
-makepad-llama = { path = "../llama" }
-makepad-mlx = { path = "../mlx" }
+makepad-ai-llm = { path = "../ai/llm" }
+# Safetensors reader moved out of mlx (lane T2, /aiarch.md §1): mlx's other
+# ~89k LOC (chat/KV, qwen35moe, ...) has no consumers here. mlx itself stays
+# in the tree unbuilt until lane T3 deletes it.
+makepad-ai-loader = { path = "../ai/loader" }
+# DiffusionError/Result + the plain sharded-safetensors reader moved out to
+# the ai model workspace (lane T6a, /aiarch.md §1) so the family crates that
+# split out of this one later can share them without depending on all of
+# diffusion.
+makepad-ai-common = { path = "../ai/models/common" }
+makepad-ai-h3 = { path = "../ai/models/h3" }
+makepad-ai-flux = { path = "../ai/models/flux" }
+makepad-ai-vision = { path = "../ai/models/vision" }
+makepad-ai-rig = { path = "../ai/models/rig" }
+makepad-ai-motion = { path = "../ai/models/motion" }
+makepad-ai-sfx = { path = "../ai/models/sfx" }
+makepad-ai-music = { path = "../ai/models/music" }
+makepad-ai-speech = { path = "../ai/models/speech" }
+makepad-ai-trellis = { path = "../ai/models/trellis" }
 makepad-gltf = { path = "../gltf" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-zune-core = { path = "../zune/zune-core" }
@@ -197,6 +213,10 @@ path = "src/bin/flux2_check_te.rs"
 [[bin]]
 name = "flux2-edit-validate"
 path = "src/bin/flux2_edit_validate.rs"
+
+[[bin]]
+name = "flux2-dev-validate"
+path = "src/bin/flux2_dev_validate.rs"
 
 [[bin]]
 name = "h3-gguf-validate"

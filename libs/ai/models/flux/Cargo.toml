@@ -1,0 +1,15 @@
+[package]
+name = "makepad-ai-flux"
+version = "0.1.0"
+edition = "2021"
+description = "FLUX.1 / FLUX.2 image family plus CLIP-L and T5 encoders. Split out of libs/diffusion (lane T6, /aiarch.md)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-micro-serde = { path = "../../../micro_serde" }
+makepad-ai-llm = { path = "../../llm" }
+makepad-zune-core = { path = "../../../zune/zune-core" }
+makepad-zune-png = { path = "../../../zune/zune-png" }
+makepad-ai-h3 = { path = "../h3" }

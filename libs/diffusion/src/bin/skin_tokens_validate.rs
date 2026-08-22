@@ -23,7 +23,7 @@ use makepad_diffusion::backend::{
     gpu_linear_nt_cached_bf16_mm, gpu_perf_stats, gpu_skintokens_michelangelo_fourier,
     gpu_slice_cols, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart,
 };
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
 
 struct Npy {
