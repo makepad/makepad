@@ -1,0 +1,13 @@
+// VIDEO TRAILS — feedback zoom + chroma split over the live content, both
+// riding the beat through bindings. The classic VJ feedback wash.
+{
+    name: "Video Trails"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "feedback", amount: "0.7 + pulse * 0.25", zoom: 1.02,
+         rotate: "sin(bar * tau) * 0.01", dim: 0.96},
+        {kind: "chroma", p1: "pulse * 0.6", p2: "bar"}
+    ]
+}

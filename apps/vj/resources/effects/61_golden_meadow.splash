@@ -1,0 +1,33 @@
+// GOLDEN MEADOW — the nature loop: seven thousand grass blades in late
+// sun, gusts TRAVELING across the field (the wind is a continuous spatial
+// field — the same one the trees sway in — so a gust moves through the
+// meadow instead of every blade metronoming together).
+{
+    name: "Golden Meadow"
+    engine: "grass"
+    seed: 9
+
+    blades: 9000
+    area: 9.0
+    height: 0.9
+    clump: 0.55
+
+    sway: "0.9 + pulse * 0.5"
+    sway_freq: 0.8
+    beat_pulse: 0.25
+    beat_rate: 0.5
+
+    color_bg: #x180e06
+    color_a: #x7a5a18
+    color_b: #xffd75a
+    color_c: #xfff2cc
+
+    cam_orbit: 0.05
+    fog: 0.055
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.15, levels: 3},
+        {kind: "tiltshift", focus: 0.55, width: 0.34, levels: 2}
+    ]
+}

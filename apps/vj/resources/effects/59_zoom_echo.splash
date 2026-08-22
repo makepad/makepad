@@ -1,0 +1,14 @@
+// ZOOM ECHO — the infinite-zoom feedback corridor: strong zoom feedback
+// with a ripple riding the beat. The droste-adjacent classic.
+{
+    name: "Zoom Echo"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "feedback", amount: 0.88, zoom: "1.03 + pulse * 0.03",
+         rotate: 0.002, dim: 0.965},
+        {kind: "ripple", p1: "0.2 + pulse * 0.4", p2: 0.35},
+        {kind: "bloom", threshold: 0.65, strength: 1.05, levels: 2}
+    ]
+}

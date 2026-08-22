@@ -1,0 +1,33 @@
+// PIXEL DISSOLVE — the texture-input demo: every particle carries one
+// pixel of input0 (the channel's main content in effect-pass mode; the
+// gallery binds its test pattern). The image periodically dissolves into a
+// swirl and re-forms — beat position drives the dissolve.
+{
+    name: "Pixel Dissolve"
+    engine: "particles"
+    mode: "image"
+    seed: 2
+    input0: "test"
+
+    count: 16384
+    spread: 6.0
+    size: 0.085
+    rate: 0.0
+
+    beat_pulse: 0.4
+    beat_rate: 1.0
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 2}
+    ]
+}

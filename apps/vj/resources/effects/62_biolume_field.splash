@@ -1,0 +1,30 @@
+// BIOLUME FIELD — the dark meadow that PULSES on the kick: near-black
+// grass whose glow is bound to the beat envelope. Bioluminescent night.
+{
+    name: "Biolume Field"
+    engine: "grass"
+    seed: 40
+
+    blades: 11000
+    area: 8.0
+    height: 0.7
+    width: 0.03
+    clump: 0.7
+
+    sway: 0.5
+    sway_freq: 0.5
+    beat_pulse: 0.5
+    glow: "0.35 + env(phase) * 1.9"
+
+    color_bg: #x020608
+    color_a: #x0a3344
+    color_b: #x33ffcc
+    color_c: #xaaffee
+
+    cam_orbit: 0.07
+    fog: 0.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.7, levels: 3}
+    ]
+}

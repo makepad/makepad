@@ -1,0 +1,30 @@
+// NIGHT RIDGE — the night-vision flythrough: mono-green ridged terrain,
+// fast scroll, hard grid. Battlezone energy.
+{
+    name: "Night Ridge"
+    engine: "heightmap"
+
+    res: 140
+    size: 30.0
+    height: 4.0
+    noise_scale: 0.22
+    scroll: 5.5
+    ridged: 1.0
+
+    beat_pulse: 0.45
+
+    color_bg: #x020a04
+    color_a: #x22cc55
+    color_b: #x66ff99
+    color_c: #xccffdd
+
+    cam_fov: 74.0
+    cam_height: 3.2
+    fog: 0.05
+    glow: 1.25
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 2},
+        {kind: "posterize", p1: 0.7, p2: 0.6}
+    ]
+}

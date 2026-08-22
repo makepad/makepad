@@ -791,16 +791,20 @@ impl GenModel {
 
     /// A polled status arrived. Unknown/foreign job ids are ignored.
     pub fn status_arrived(&mut self, status: &JobStatusDto) {
-        self.status_arrived_at(status, status.created_ms);
+        let _ = self.status_arrived_at(status, status.created_ms);
     }
 
     /// Timestamped status completion. The caller supplies its local clock;
     /// `status.created_ms` remains remote metadata and never drives elapsed.
-    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
+    ///
+    /// Returns follow-up commands the completion triggers (job CHAINS — a
+    /// finished stage enqueueing its successor). Empty until the chain lane
+    /// lands; the return type is the seam the host already drains.
+    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) -> Vec<GenCmd> {
         let already_published = self.published_assets.clone();
-        let Some(row) = self.job_by_id(status.job) else { return };
+        let Some(row) = self.job_by_id(status.job) else { return Vec::new() };
         if row.state.is_terminal() {
-            return; // late duplicate
+            return Vec::new(); // late duplicate
         }
         row.last_update_ms = now_ms;
         row.status_warning = None;
@@ -868,6 +872,7 @@ impl GenModel {
                 GenJobState::Cancelled
             }
         };
+        Vec::new()
     }
 
     /// A status poll failed (transient transport): keep the row, retry on a

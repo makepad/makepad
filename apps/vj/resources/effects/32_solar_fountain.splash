@@ -1,0 +1,30 @@
+// SOLAR FOUNTAIN — a molten geyser: fountain particles in solar colors,
+// strong gravity, bloom pushed hot.
+{
+    name: "Solar Fountain"
+    engine: "particles"
+    mode: "fountain"
+    seed: 17
+
+    count: 7000
+    spread: 5.0
+    size: 0.11
+    rate: 0.6
+    gravity: 1.5
+
+    beat_pulse: 0.55
+
+    color_bg: #x0c0300
+    color_a: #xffdd55
+    color_b: #xff5511
+    color_c: #xfff6dd
+
+    cam_dist: 12.0
+    cam_height: 1.0
+    cam_orbit: 0.08
+    fog: 0.025
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.8, levels: 3}
+    ]
+}

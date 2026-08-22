@@ -1,0 +1,31 @@
+// ALPINE DAWN — the endless mountain range: ridged fbm peaks streaming
+// under a fixed camera, alpenglow palette, deep fog. (The virtual fighter
+// jet foreground is a planned engine — see IDEAS.md.)
+{
+    name: "Alpine Dawn"
+    engine: "heightmap"
+
+    res: 160
+    size: 36.0
+    height: 5.0
+    noise_scale: 0.17
+    scroll: 2.0
+    ridged: 0.65
+
+    beat_pulse: 0.25
+    beat_rate: 0.5
+
+    color_bg: #x1c0c18
+    color_a: #xff9a70
+    color_b: #xffe0e8
+    color_c: #xfff6ee
+
+    cam_fov: 64.0
+    cam_height: 4.6
+    fog: 0.055
+    glow: 1.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 3}
+    ]
+}

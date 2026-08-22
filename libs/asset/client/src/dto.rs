@@ -98,6 +98,7 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
         "game" => AssetKind::Game,
+        "vjeffect" => AssetKind::VjEffect,
         _ => return None,
     })
 }
@@ -118,6 +119,7 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 

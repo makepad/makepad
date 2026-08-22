@@ -1,0 +1,31 @@
+// LIQUID METAL — marching-tetrahedra metaballs, blob radii swelling on the
+// beat. The one genuinely per-frame-regenerated mesh in the library (the
+// honest slow path: field sample + march every frame, recycled buffers).
+{
+    name: "Liquid Metal"
+    engine: "metaballs"
+    seed: 3
+
+    blobs: 7
+    grid: 32
+    extent: 3.2
+    blob_radius: 1.0
+    orbit: 1.6
+    orbit_speed: 0.8
+    beat_swell: 0.5
+
+    beat_pulse: 0.45
+    beat_rate: 1.0
+
+    color_bg: #x050210
+    color_a: #x20e0c8
+    color_b: #xff3ca8
+    color_c: #xffffff
+
+    cam_orbit: 0.16
+    fog: 0.03
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.4, levels: 3}
+    ]
+}

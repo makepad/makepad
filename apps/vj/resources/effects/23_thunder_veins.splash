@@ -1,0 +1,39 @@
+// THUNDER VEINS — lightning as an L-system: huge angle jitter turns the
+// bracketed rule into forked bolts, and a ONE-BEAT growth loop makes it
+// STRIKE on every beat. Pattern taught: grow_beats 1 = per-beat regrowth.
+{
+    name: "Thunder Veins"
+    engine: "lsystem"
+    seed: 66
+
+    axiom: "X"
+    rules: ["X=F[+X][-X]FX", "F=F!F"]
+    iterations: 6
+    angle: 18.0
+    angle_jitter: 24.0
+    step: 0.09
+    radius: 0.035
+    radius_decay: 0.88
+    sides: 3
+
+    // The bolt stays fully built; the STROBE lives in the glow binding —
+    // near-dark between beats, white-hot on the hit. (A growth loop reads
+    // as drawing, not striking.)
+    sway: 0.1
+    speed: 1.4
+    beat_pulse: 1.2
+    glow: "0.15 + env(phase) * 2.8"
+
+    color_bg: #x030308
+    color_a: #x99bbff
+    color_b: #xffffff
+    color_c: #xcce0ff
+
+    cam_orbit: 0.05
+    fog: 0.02
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: 1.8, levels: 3},
+        {kind: "feedback", amount: 0.6, zoom: 1.0, rotate: 0.0, dim: 0.82}
+    ]
+}

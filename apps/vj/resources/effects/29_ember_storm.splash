@@ -1,0 +1,31 @@
+// EMBER STORM — burst particles in fire colors with heavy fallout and a
+// long feedback tail: campfire sparks scaled to a stadium.
+{
+    name: "Ember Storm"
+    engine: "particles"
+    mode: "burst"
+    seed: 9
+
+    count: 8000
+    spread: 6.0
+    size: 0.10
+    rate: 0.5
+    gravity: 1.8
+
+    beat_pulse: 0.6
+
+    color_bg: #x0a0402
+    color_a: #xff9030
+    color_b: #xff3a10
+    color_c: #xffd9a0
+
+    cam_dist: 14.0
+    cam_height: 2.0
+    cam_orbit: 0.06
+    fog: 0.03
+
+    stages: [
+        {kind: "feedback", amount: 0.7, zoom: 1.004, rotate: 0.0, dim: 0.90},
+        {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
+    ]
+}

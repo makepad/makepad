@@ -1,0 +1,34 @@
+// PARTICLE FLOW TUNNEL — rings of particles streaming past the camera,
+// feedback-zoomed into an infinite warp.
+{
+    name: "Warp Tunnel"
+    engine: "particles"
+    mode: "tunnel"
+    seed: 4
+
+    count: 6000
+    spread: 3.2
+    size: 0.10
+    rate: 0.55
+    swirl: 1.4
+    stretch: 3.0
+
+    beat_pulse: 0.8
+    beat_rate: 1.0
+
+    color_bg: #x030310
+    color_a: #x2ff0ff
+    color_b: #xff36c8
+    color_c: #xffffff
+
+    cam_dist: 3.2
+    cam_height: 0.0
+    cam_orbit: 0.0
+    cam_fov: 78.0
+    fog: 0.03
+
+    stages: [
+        {kind: "feedback", amount: 0.78, zoom: 1.035, rotate: 0.006, dim: 0.96},
+        {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 3}
+    ]
+}

@@ -1,0 +1,36 @@
+// SEAWEED BALLET — kelp columns rolling in a slow current. Pattern taught:
+// huge SWAY with a low frequency reads as underwater; the sway binding
+// adds a surge on every pulse.
+{
+    name: "Seaweed Ballet"
+    engine: "lsystem"
+    seed: 44
+
+    axiom: "S"
+    rules: ["S=F[&+S]F[&-S]FS", "F=FF"]
+    iterations: 5
+    angle: 14.0
+    angle_jitter: 5.0
+    step: 0.13
+    radius: 0.055
+    sides: 5
+    copies: 5
+
+    sway: "1.1 + pulse * 0.9"
+    sway_freq: 0.35
+    beat_pulse: 0.3
+    beat_rate: 0.5
+
+    color_bg: #x02141c
+    color_a: #x0f8866
+    color_b: #x33ccaa
+    color_c: #xbbffee
+
+    cam_orbit: 0.07
+    fog: 0.06
+    glow: 1.1
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+}

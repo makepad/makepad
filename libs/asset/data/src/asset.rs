@@ -38,6 +38,9 @@ pub enum AssetKind {
     /// that the sandbox runs. Everything it references (models, audio)
     /// is resolved through the catalog — a game never embeds bytes.
     Game,
+    /// A VJ effect document: splash source text (`FileRole::Source`,
+    /// `Text`) evaluated by the vj effect runtime (apps/vj/src/effects).
+    VjEffect,
 }
 
 canon_enum!(AssetKind {
@@ -55,6 +58,7 @@ canon_enum!(AssetKind {
     Prefab = 11,
     Billboard = 12,
     Game = 13,
+    VjEffect = 14,
 });
 
 impl AssetKind {
