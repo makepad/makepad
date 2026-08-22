@@ -1,0 +1,45 @@
+// GALE GROVE — the wind SIM FIELD driving L-SYSTEM trees: the same
+// `wind_field:` opt-in as the meadow, on branching geometry. The field is
+// sampled at each vertex's REST position, so parent and child branches
+// read the same wind at their joint and can never tear; gusts light what
+// they bend, so a kick sends a visible shudder traveling through the
+// grove. Pattern taught here: one wind field, any mesh engine.
+{
+    name: "Gale Grove"
+    engine: "lsystem"
+    seed: 23
+
+    axiom: "X"
+    rules: ["X=F[+X][-X][&X]FX", "F=FF"]
+    iterations: 5
+    angle: 24.0
+    angle_jitter: 5.0
+    step: 0.16
+    radius: 0.05
+    copies: 5
+
+    wind_field: "wind"
+    flow: 0.9
+    gust: "2.0 + pulse * 1.8"
+    travel: 0.26
+    decay: 0.5
+    scale: 2.2
+    extent: 6.0
+
+    sway: 0.5
+    beat_pulse: 0.25
+    beat_rate: 0.5
+
+    color_bg: #x0a0c14
+    color_a: #x2a5a3a
+    color_b: #x9adf7a
+    color_c: #xeaffe0
+
+    cam_orbit: 0.07
+    fog: 0.05
+    glow: 1.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 3}
+    ]
+}
