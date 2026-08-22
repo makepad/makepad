@@ -359,15 +359,6 @@ pub enum DrawShaderColorFormat {
     /// Blending is disabled on such pipelines — float blending is not
     /// universally supported and the consumers are data passes.
     Rf32,
-    /// Four-channel 16-bit float (pairs with `TextureFormat::RenderRGBAf16`).
-    /// Blending disabled — simulation/data passes write whole texels.
-    /// Declared as `color_format: @Rgba16F`.
-    Rgba16F,
-    /// Four-channel 32-bit float (pairs with `TextureFormat::RenderRGBAf32`):
-    /// the GPU-simulation state format (particle pos/vel, fluid fields).
-    /// Blending disabled — simulation/data passes write whole texels.
-    /// Declared as `color_format: @Rgba32F`.
-    Rgba32F,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -544,8 +535,6 @@ impl CxDrawShaderMapping {
             .as_id()
         {
             Some(id) if id == id!(Rf32) => DrawShaderColorFormat::Rf32,
-            Some(id) if id == id!(Rgba16F) => DrawShaderColorFormat::Rgba16F,
-            Some(id) if id == id!(Rgba32F) => DrawShaderColorFormat::Rgba32F,
             Some(id) if id == id!(Bgra8NoBlend) => DrawShaderColorFormat::Bgra8NoBlend,
             _ => DrawShaderColorFormat::Bgra8Unorm,
         };
