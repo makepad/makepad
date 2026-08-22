@@ -1,0 +1,40 @@
+// CONFETTI SWARM — the hard-techno flock: five hundred additive neon
+// gliders, and a PREDATOR dives through the swarm on every bar so the
+// whole formation detonates and re-forms in four beats. Pattern taught
+// here: `predator` is the flock's bar-synced scatter (CPU-side boids, no
+// binding needed), `additive: 1` flips the same engine from silhouettes
+// to light streaks, and pulse-driven feedback smears the scatter into
+// trails.
+{
+    name: "Confetti Swarm"
+    engine: "flock"
+    seed: 77
+
+    birds: 500
+    size: 0.11
+    flight_speed: 3.4
+    flap: 4.5
+    bound: 6.0
+    spacing: 0.34
+    vision: 1.4
+    goal_beats: 1
+    predator: 0.85
+    additive: 1.0
+    bank: 1.6
+    bar_beats: 4
+
+    beat_pulse: 1.1
+    cam_orbit: 0.14
+    fog: 0.05
+
+    color_bg: #x06040c
+    color_a: #x22ffcc
+    color_b: #xff2f9a
+    color_c: #xffffff
+
+    stages: [
+        {kind: "feedback", amount: "0.5 + 0.25 * pulse", zoom: 1.015,
+         rotate: 0.006, dim: 0.95},
+        {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
+    ]
+}

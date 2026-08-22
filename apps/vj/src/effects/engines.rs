@@ -16,7 +16,9 @@
 
 use super::engines_domino::DominoEngine;
 use super::engines_firefly::FireflyEngine;
+use super::engines_flock::FlockEngine;
 use super::engines_harmonograph::HarmonographEngine;
+use super::engines_tiles::TilesEngine;
 use super::lsys;
 use super::mesh::{FxMesh, FxRng};
 use makepad_widgets::*;
@@ -44,6 +46,10 @@ pub enum ShaderKind {
     Harmono,
     /// Toppling domino boxes, front = f(beat) (engines_domino).
     Domino,
+    /// Textured tile grid sampling input0 per tile (engines_tiles).
+    Tiles,
+    /// Oriented glider triangles, wing flap in the VS (engines_flock).
+    Flock,
 }
 
 /// Per-frame camera the engine suggests; the document can override knobs.
@@ -1385,6 +1391,8 @@ pub enum Engine {
     Firefly(FireflyEngine),
     Harmono(HarmonographEngine),
     Domino(DominoEngine),
+    Tiles(TilesEngine),
+    Flock(FlockEngine),
     /// Fullscreen: no mesh at all — input texture 0 IS the content and the
     /// stage chain does the work.
     Screen,
@@ -1402,6 +1410,8 @@ impl Engine {
             Engine::Firefly(_) => ShaderKind::Firefly,
             Engine::Harmono(_) => ShaderKind::Harmono,
             Engine::Domino(_) => ShaderKind::Domino,
+            Engine::Tiles(_) => ShaderKind::Tiles,
+            Engine::Flock(_) => ShaderKind::Flock,
             Engine::Screen => ShaderKind::Emitters, // never drawn; screen skips the scene pass
         }
     }
@@ -1419,6 +1429,8 @@ impl Engine {
             Engine::Firefly(_) => "firefly",
             Engine::Harmono(_) => "harmonograph",
             Engine::Domino(_) => "domino",
+            Engine::Tiles(_) => "tiles",
+            Engine::Flock(_) => "flock",
             Engine::Screen => "screen",
         }
     }
@@ -1525,6 +1537,27 @@ impl Engine {
                 e.build(mesh);
                 true
             }
+            Engine::Tiles(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::Flock(e) => {
+                if !e.warmed {
+                    // Pre-roll so the first visible frame is a formed flock.
+                    for k in 0..150 {
+                        e.step(1.0 / 60.0, k as f32 / 60.0, 0.0);
+                    }
+                    e.warmed = true;
+                }
+                e.step(dt.clamp(0.0, 0.1), time, beat_phase);
+                e.emit(mesh);
+                true
+            }
             Engine::Screen => false,
         }
     }
@@ -1541,6 +1574,8 @@ impl Engine {
             Engine::Firefly(e) => e.uniforms(),
             Engine::Harmono(e) => e.uniforms(),
             Engine::Domino(e) => e.uniforms(),
+            Engine::Tiles(e) => e.uniforms(),
+            Engine::Flock(e) => e.uniforms(),
             Engine::Emitters(_) | Engine::Screen => EngineUniforms::default(),
         }
     }
@@ -1550,6 +1585,7 @@ impl Engine {
     pub fn camera(&self, time: f32) -> Option<CamPose> {
         match self {
             Engine::Tunnel(e) => Some(e.camera(time)),
+            Engine::Tiles(e) => Some(e.camera(time)),
             _ => None,
         }
     }

@@ -1,0 +1,37 @@
+// DUSK MURMURATION — three hundred starlings against a violet evening sky.
+// Pattern taught here: the flock engine's GOAL POINT jumps every two beats,
+// so the cloud of birds banks and swings IN TIME without a single binding;
+// wing flap runs per bird in the vertex shader off baked phase hashes.
+// Silhouette mode (additive: 0) fogs the far birds into the sky — depth
+// for free.
+{
+    name: "Dusk Murmuration"
+    engine: "flock"
+    seed: 44
+
+    birds: 340
+    size: 0.16
+    flight_speed: 2.5
+    flap: 2.6
+    bound: 7.0
+    spacing: 0.58
+    vision: 1.9
+    goal_beats: 2
+    predator: 0.0
+    additive: 0.0
+    bank: 1.3
+
+    beat_pulse: 0.3
+    cam_orbit: 0.05
+    fog: 0.055
+
+    // Dark birds on a GLOWING dusk sky — the contrast IS the picture.
+    color_bg: #x33204f
+    color_a: #x150e24
+    color_b: #x3a2547
+    color_c: #xffb489
+
+    stages: [
+        {kind: "bloom", threshold: 0.8, strength: 0.7, levels: 3}
+    ]
+}

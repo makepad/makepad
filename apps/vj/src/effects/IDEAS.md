@@ -44,10 +44,10 @@ Every idea from the user's directives, mapped to its status. Statuses:
 | Fullscreen effect family (kaleido/chroma/glitch/radial blur/etc.) | done | `screen` engine + warp stages (16/17); also stack on any mesh engine |
 | Multipass texture chains (blur/bloom/tiltshift/feedback) | done | pyramid honors the bicubic/tent re-home law; 18 |
 | Video→particles→tiltshift hybrid | planned | all pieces exist (image particles + tiltshift stage) — preset to write; luma-driven size/lift needs a 3-line shader addition |
-| Tile-wave of the input image (textured-quad particles) | planned | design: tiles engine, per-tile uv window on the vertex stream, wave/conveyor/shatter modes; own shader (pixel samples input) |
+| Tile-wave of the input image (textured-quad particles) | done | `tiles` engine (engines_tiles.rs): per-tile uv window derived from a_id, baked flight vectors, own shader sampling input0; modes wave / bar-synced shatter (blast on the downbeat, holds reassembled) / conveyor / spiral; presets 79/80/81 verified |
 | Scriptable fireworks choreography | done | 19_fireworks_show — beat-sequenced launches, pops, rings, sparkle field from the doc's frame fn |
-| Clouds (billboard puff clusters) | planned | particle mode "clouds": cluster centers + huge soft sprites + wind drift — small addition to the particles shader |
-| Flock / murmuration | planned | CPU boids (~200 birds, O(N²) fine) emitting oriented glider tris per frame (ribbons-style regen); wing-flap phase on the stream |
+| Clouds (billboard puff clusters) | done | particle mode "clouds" (cluster centers + soft sprites + wind wrap); calm preset 33 (sunset cumulus, tiltshifted) + storm preset 84 (lightning-inside-the-cloud via gated beat_pulse binding + fx_color subclass) — both verified |
+| Flock / murmuration | done | `flock` engine (engines_flock.rs): CPU boids (O(N²), 0.77 ms @ 500 birds) emit banked glider tris per frame; wing flap in the VS off per-vertex amplitude+phase; goal jumps every `goal_beats`, drifting anchor keeps it streaming, predator scatters on the bar; presets 82/83 verified |
 | Animated pipes (3D-pipes lattice) | planned | lattice walk + elbow joints reusing tube emission; growth by birth order |
 | Procedural city flyover | planned | instanced tower boxes + window-grid pixel shader + beat-flicker via hash(tower, window, beat idx); camera path |
 | Boned/animated dancers (splash-constructed puppets) | planned | bones as uniforms (≤32 mat4 or pos+quat vec4 pairs), per-vertex bone index on the stream, binding-driven bone curves; crowd via instances |

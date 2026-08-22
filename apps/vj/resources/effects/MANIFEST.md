@@ -78,3 +78,9 @@ Regenerate the table when the library changes; the seeding module
 | 70_monastery_spiral | Monastery Spiral | domino | seven hundred ivory dominoes on an Archimedean |
 | 71_snare_garden | Snare Garden | domino | a branching domino tree: the trunk topples up the middle |
 | 72_serpent_strobe | Serpent Strobe | domino | hard techno dominoes: two thousand black tiles on a |
+| 79_tile_lagoon | Tile Lagoon | tiles/wave | the live content as a mosaic raft on a slow swell; tiles |
+| 80_bar_shatter | Bar Shatter | tiles/shatter | the picture explodes on the downbeat and reassembles |
+| 81_conveyor_wall | Conveyor Wall | tiles/conveyor | endless belt: alternate rows stream the image opposite |
+| 82_dusk_murmuration | Dusk Murmuration | flock | starling silhouettes on a glowing dusk sky; the goal |
+| 83_confetti_swarm | Confetti Swarm | flock | additive neon gliders; a predator dives through the swarm |
+| 84_storm_cell | Storm Cell | particles/clouds | dark cumulus with lightning INSIDE on the kick (gated |
