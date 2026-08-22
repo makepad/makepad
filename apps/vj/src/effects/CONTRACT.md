@@ -178,19 +178,26 @@ subclasses can always read them, no ceremony:
 - `self.col_a/col_b/col_c/col_bg`, `self.fog` = (density, glow, CONTENT
   MIX, 0)
 
-### Content coupling (every engine does something nice with input0)
+### Content coupling (every engine PLAYS the video, it does not tint with it)
 
 When a real channel video is bound to input 0 (the VJ's effect-pass
-mode), EVERY engine family folds it into its look — tint, texture, light;
-the effect's identity stays primary. The shared plumbing (pinned names):
+mode), EVERY engine family folds it into its look. **THE BAR: at the
+default strength a viewer must INSTANTLY SEE THE VIDEO PLAYING in the
+effect — a picture, not a tint.** Judge it at arm's length on a
+with-content grab; "the palette shifted" is a fail. The effect's
+identity stays primary (its geometry, motion and beat still own the
+frame), but the clip has to be legible in it. The shared plumbing
+(pinned names):
 
-- Doc key **`content`** (animatable, 0..1, default 0.5): the coupling
+- Doc key **`content`** (animatable, 0..1, default 0.75): the coupling
   strength. It reaches every fx shader as **`self.fog.z`**, PRE-GATED by
   the host to 0.0 whenever input0 holds no real content — the animated
   fallback pattern and `field:` inputs gate it off, so a coupling can
   never leak the test pattern and `fog.z == 0` is BY LAW exactly the
   classic standalone look. Mix your classic term toward your content term
-  by `self.fog.z`; tune so 0.5 infuses tastefully.
+  by `self.fog.z`; tune so 0.75 reads plainly and 1.0 is video-dominant.
+  (The first pass shipped 0.5 with ~0.35-0.65 family gains and was
+  rejected live as "I can barely make out the video".)
 - Uniform **`has_content: uniform(0.0)`** (declared on every fx family
   shader): the raw gate — 1.0 real content, 0.0 fallback/field — for
   BEHAVIORAL switches (engines like tiles/terrain/particles-image that
@@ -205,7 +212,35 @@ the effect's identity stays primary. The shared plumbing (pinned names):
 - Presets: a doc may re-bind `content` (`content: "0.3 + 0.6*p2"`) or
   declare a dial on a p-param routed into it — but never break an
   existing 3-dial set for it; a bare `content:` key without a dial is
-  fine. Docs that omit the key get the 0.5 default.
+  fine. Docs that omit the key get the 0.75 default.
+
+**STRUCTURE BEATS GAIN.** Two shapes of coupling, chosen by what the
+family actually puts on screen:
+
+- **Drape / project / mirror** — families that fill the frame with
+  surface (terrain, mountainjet's range, tunnel bore, city facades and
+  streets, raymarch materials, tiles, metaball glass, pipe and copper and
+  forge metal). The video becomes the surface: it REPLACES the base
+  colour under the family's own lighting rather than tinting it, because
+  a tint on a dark ramp is a mood, not a picture. Pick the mapping that
+  glues it to the geometry — scrolled grid uv for terrain, per-tower
+  facade uv for the city, planar-by-dominant-normal for the marcher,
+  screen uv nudged by the normal for anything that reads as metal or
+  glass (a mirror-direction env map squeezes a whole frame into a few
+  degrees of normal and always reads as a smear).
+- **The shared CONTENT BACKDROP** — families whose classic look is
+  BRIGHT SPARSE GEOMETRY over a near-black field (particles, emitters,
+  ribbons, plants, flies, pen, dominoes, pipes, shards, bars, swarms).
+  No gain on a few thousand thin triangles can carry a picture, so the
+  picture goes BEHIND them: `DrawVjFxBackdrop` (shaders.rs) draws one
+  clip-space quad at the far plane, writing no depth, before the engine
+  draw. Per-family dim lives in ONE table — `VjFxView::backdrop_level`
+  (view.rs); 0 opts a family out and the host then skips the draw
+  entirely, which is what keeps `content: 0` bit-exact. Flock and
+  stockcharts predate it and keep their own in-mesh backdrop quads.
+  The two shapes compose: a backdrop family should ALSO take the video
+  into its geometry, so the effect paints the clip instead of floating
+  over it.
 
 ### Vertex attribute conventions (the CubeVertex layout, 12 floats)
 
@@ -340,3 +375,15 @@ particles are stateless vertex-shader work. The tick touches emitters only
   the math on the second stage instead (engines_jet.rs grain).
 - Wind/growth displacement must be a function of CONTINUOUS per-vertex
   data (rest position, arc length) or connected geometry tears.
+- **Endless-terrain scroll sign.** The heightmap grid (and the jet's twin
+  of it) runs `uv.y` 0 at `z = -size/2` and 1 at `z = +size/2`, and the
+  camera sits at `+z` looking down `-z` — so `uv.y` INCREASES toward the
+  viewer. Sampling the field at `uv + scroll` walks features to
+  DECREASING `uv.y` as scroll grows: away from the camera, which reads as
+  flying BACKWARDS (it shipped that way and was reported). The scroll is
+  NEGATIVE; grid lines and the content drape must carry the same sign or
+  the land and its markings slide against each other.
+- Content couplings that BRIGHTEN (papered tunnel walls, drapes, mirror
+  reflections) run under the family's bloom/glow stages: a coupling tuned
+  to full level on the raw pass blooms the whole frame to white. Keep
+  the transferred level under 1 and check a preset that ships bloom.
