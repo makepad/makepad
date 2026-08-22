@@ -33,12 +33,15 @@ struct Frame {
 struct Shared {
     frames: Mutex<VecDeque<Frame>>,
     stop: AtomicBool,
-    /// The decode thread exited — end of stream, decode error, or a
-    /// honored stop request. Together with an empty ring this is the
-    /// player's real EOS state: the pump must stop re-arming on it.
+    /// The decode thread exited for good — a honored stop or a fatal
+    /// decode error. End-of-stream no longer ends the thread: it PARKS
+    /// (see `eos`) so seeks — loop restarts, scrubs — stay instant.
     done: AtomicBool,
+    /// The stream is fully decoded and the thread is parked waiting for a
+    /// seek or a stop. With an empty ring this is the player's EOS state.
+    eos: AtomicBool,
     /// Requested playback position in 100ns units; -1 = none. The decode
-    /// thread consumes it (reopen + discard up to the target).
+    /// thread consumes it (an in-place decoder seek — no reopen).
     seek_100ns: AtomicI64,
 }
 
@@ -105,6 +108,7 @@ impl VideoPlayer {
             frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            eos: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
         });
         let thread_shared = shared.clone();
@@ -217,7 +221,14 @@ impl VideoPlayer {
     /// been taken. The soundtrack tail may still be draining in the audio
     /// callback — that needs no frame pump.
     pub fn at_end(&self) -> bool {
-        self.shared.done.load(Ordering::Acquire) && self.shared.frames.lock().unwrap().is_empty()
+        (self.shared.eos.load(Ordering::Acquire) || self.shared.done.load(Ordering::Acquire))
+            && self.shared.frames.lock().unwrap().is_empty()
+    }
+
+    /// True while a seek request is still unconsumed by the decode thread —
+    /// the host coalesces scrub drags on this instead of flooding.
+    pub fn seek_pending(&self) -> bool {
+        self.shared.seek_100ns.load(Ordering::Acquire) >= 0
     }
 }
 
@@ -247,13 +258,12 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
         }
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
-            // Reopen and discard up to the target. All-intra clips land
-            // frame-exact instantly; GOP clips decode-discard from the
-            // start (short clips, hardware decoder — fast enough for a
-            // scrub).
-            match VideoFileDecoder::open(&path) {
-                Ok(fresh) => {
-                    decoder = fresh;
+            shared.eos.store(false, Ordering::Release);
+            // In-place decoder seek (SetCurrentPosition / reader rebuild in
+            // the platform layer, ~10 ms) — never a full reopen, which is
+            // what makes SCRUBBING realtime and a loop restart seamless.
+            match decoder.seek(seek) {
+                Ok(()) => {
                     audio_eos = !info.has_audio;
                     shared.frames.lock().unwrap().clear();
                     loop {
@@ -327,7 +337,7 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
                         }
                     }
                 }
-                Err(e) => log!("video: seek reopen failed: {}", e),
+                Err(e) => log!("video: decoder seek failed: {}", e),
             }
             continue;
         }
@@ -374,9 +384,10 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
                 });
             }
             Ok(None) => {
-                // End of stream: play ONCE and stop. The audio pump above
-                // only reads ~1s ahead, so push the rest of the soundtrack
-                // now; the queue then drains to silence and the thread ends.
+                // End of stream: drain the soundtrack tail, then PARK. The
+                // thread stays alive serving seeks — a loop restart or a
+                // scrub back into the clip is a ~10 ms decoder seek, not a
+                // teardown and reopen.
                 if info.has_audio && !audio_eos {
                     loop {
                         if shared.stop.load(Ordering::Relaxed) {
@@ -396,9 +407,19 @@ fn decode_loop(path: String, mut decoder: VideoFileDecoder, shared: &Shared, epo
                             }
                         }
                     }
+                    audio_eos = true;
                 }
-                log!("video: end of stream: {}", path);
-                return;
+                shared.eos.store(true, Ordering::Release);
+                while shared.eos.load(Ordering::Acquire) {
+                    if shared.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
+                        break; // the top of the loop consumes it
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                continue;
             }
             Err(e) => {
                 log!("video: decode error: {}", e);
@@ -551,6 +572,7 @@ mod tests {
             frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            eos: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
         });
         shared.frames.lock().unwrap().push_back(Frame {
