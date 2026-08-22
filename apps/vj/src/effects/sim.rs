@@ -1271,7 +1271,22 @@ script_mod! {
                 view_pos.w
             )
             let attr = vec4(id, speed, fract(id * 0.618), st.w)
-            self.v_color = self.fx_color(age01, attr, self.geom.geom_normal, world.xyz)
+            let c0 = self.fx_color(age01, attr, self.geom.geom_normal, world.xyz)
+            // CONTENT COUPLING (fog.z, pre-gated): each agent glows in the
+            // channel video's color at its screen position — the flock
+            // sweeps the clip's palette around while its motion, sprite
+            // and fade stay the classic look's. tex0 = input0 (slot 1).
+            let cc = self.draw_pass.camera_projection * view_pos
+            let suv = clamp(
+                vec2(cc.x, 0.0 - cc.y) / max(cc.w, 0.0001) * 0.5 + vec2(0.5, 0.5),
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
+            )
+            let vtex = self.tex0.sample_nearest(suv, 0.0)
+            self.v_color = vec4(
+                c0.xyz.mix(vtex.xyz * (0.85 + 0.55 * self.time_beat.w), self.fog.z * 0.85),
+                c0.w
+            )
             self.v_uv = self.geom.geom_uv
             self.vertex_pos = self.draw_pass.camera_projection * billboard
             return self.vertex_pos

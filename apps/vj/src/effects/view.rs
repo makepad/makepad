@@ -1389,7 +1389,16 @@ impl Widget for VjFxView {
                 };
                 let glow = doc.glow.value(&sig).max(0.0);
                 let warp = self.user_value(0, &sig);
-                let texmix = self.user_value(1, &sig).clamp(0.0, 1.0);
+                // CONTENT COUPLING: with real channel video bound, the
+                // doc's `content` strength floors the texmix dial — the
+                // clip shows through the dye wash by default. Standalone
+                // (fallback input) keeps the dial's classic behavior.
+                let content = if self.input0.is_some() {
+                    doc.content.value(&sig).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let texmix = self.user_value(1, &sig).clamp(0.0, 1.0).max(content);
                 (name, [glow, warp, texmix, 0.0], doc.palette)
             };
             match self.sim.fluid_view(
