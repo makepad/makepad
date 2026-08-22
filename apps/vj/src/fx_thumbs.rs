@@ -53,11 +53,14 @@ script_mod! {
     }
 }
 
-/// One packed cell of the sheet — near the 164x104 grid tile's aspect, so
-/// the animated tile draws close to full-bleed under the grid's aspect-fit.
-pub const CELL_W: usize = 160;
-pub const CELL_H: usize = 100;
-/// Sheet columns; 30 frames pack 6x5 into a 960x500 PNG.
+/// One packed cell of the sheet — the grid tile is ~164x104 layout points
+/// and thumbnails only ever draw at tile size, so a 128x80 cell (same
+/// 16:10, ~1.3x upscale on the tile) is visually indistinguishable there
+/// while cutting readback and sheet bytes by a third. 30 cells pack 6x5
+/// into a 768x400 PNG.
+pub const CELL_W: usize = 128;
+pub const CELL_H: usize = 80;
+/// Sheet columns.
 pub const SHEET_COLS: usize = 6;
 pub const FRAME_COUNT: usize = 30;
 /// The offscreen pass renders at cell size (times the display's dpi
