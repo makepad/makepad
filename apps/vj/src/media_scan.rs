@@ -32,6 +32,21 @@
 //! of gigabytes). It also means a file EDITED IN PLACE is not noticed here —
 //! that is what the store's reference re-scan is for, and it reports such a
 //! file as `content_changed` rather than letting it play as something else.
+//!
+//! ## The one exception: VARIABLE-FRAMERATE VIDEO IMPORT
+//!
+//! With [`ImportCtx::convert`] set, video files are not referenced — they are
+//! CONVERTED and the result is stored as an owned blob. The conversion (see
+//! `makepad_video_flow`) measures the motion between consecutive frames,
+//! re-encodes the clip all-intra so it decodes in any order, and embeds the
+//! motion field as the `mkfl` box. That is what lets the deck play the clip
+//! at any rate, forwards or backwards, through the flow-warp path instead of
+//! stepping frames at whatever rate the file was shot at.
+//!
+//! It is the opposite trade from the rest of this module and it is made
+//! deliberately, on the operator's explicit tick: the library gains a second
+//! copy of that clip, and gains the ability to scratch it. Images and audio
+//! are untouched either way.
 
 use makepad_asset_client::{
     AssetClient, ClientError, PublishBundle, PublishBundleFile, PublishRights, PublishThumbnail,
@@ -41,6 +56,7 @@ use makepad_asset_data::{
 };
 use makepad_asset_importer::thumbs;
 use makepad_asset_importer::videothumb::probe_video;
+use makepad_video_flow::{convert_video, ConvertError, ConvertOptions};
 use std::path::{Path, PathBuf};
 
 /// Namespace imported media lands in. Its own, so a wipe or a search filter
@@ -301,10 +317,13 @@ pub fn personal_rights(root: &Path) -> PublishRights {
 /// audio are read (they are small, and an audio spectrogram needs the
 /// samples), but only to DERIVE the thumbnail: those bytes are never
 /// uploaded as the payload.
-fn thumbnail_of(file: &MediaFile) -> Result<(PublishThumbnail, u32), String> {
+///
+/// `path` is separate from `file` because a converted clip is pictured from
+/// the CONVERTED file: the thumbnail must show what will actually play.
+fn thumbnail_of(file: &MediaFile, path: &Path) -> Result<(PublishThumbnail, u32), String> {
     match file.class {
         MediaClass::Video => {
-            let probe = probe_video(&file.path)?;
+            let probe = probe_video(path)?;
             if probe.duration_ms == 0 {
                 return Err("no measurable duration (unreadable video)".to_string());
             }
@@ -319,7 +338,7 @@ fn thumbnail_of(file: &MediaFile) -> Result<(PublishThumbnail, u32), String> {
             ))
         }
         MediaClass::Image => {
-            let bytes = std::fs::read(&file.path).map_err(|e| format!("read: {e}"))?;
+            let bytes = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
             match makepad_asset_importer::import::usable_image_thumb(&bytes) {
                 Some((thumb, media, w, h)) => {
                     Ok((PublishThumbnail::plain(thumb, media, w, h), 0))
@@ -345,7 +364,7 @@ fn thumbnail_of(file: &MediaFile) -> Result<(PublishThumbnail, u32), String> {
             }
         }
         MediaClass::Audio => {
-            let bytes = std::fs::read(&file.path).map_err(|e| format!("read: {e}"))?;
+            let bytes = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
             let pcm = thumbs::decode_audio(&bytes, file.media)?;
             let millis = thumbs::audio_millis(&bytes, file.media).unwrap_or(0);
             let thumb = thumbs::audio_thumbnail_jpeg(&pcm)?;
@@ -382,38 +401,100 @@ fn role_of(class: MediaClass) -> FileRole {
 /// What happened to one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileOutcome {
-    Published,
+    /// In the library. `converted` distinguishes the owned flow-warp blob
+    /// from the usual no-copy reference, and the note, when there is one, is
+    /// something the operator must be told about what landed (a conversion
+    /// that had to scale the clip down, or one that failed and fell back).
+    Published { converted: bool, note: Option<String> },
     /// The alias already points at something: already in the library.
     AlreadyPresent,
     Failed(String),
+    /// The operator stopped the run in the middle of this file.
+    Cancelled,
 }
 
-/// Import ONE file by reference. Returns quickly for a file already present.
+/// Where one file's slow phase has got to, for the panel's bar and label.
+#[derive(Clone, Copy, Debug)]
+pub struct FileProgress {
+    /// What is happening — "converting" is the only phase slow enough to
+    /// need naming so far.
+    pub phase: &'static str,
+    pub fraction: f64,
+}
+
+/// Everything one file's import needs beyond the file itself.
+pub struct ImportCtx<'a> {
+    pub rights: &'a PublishRights,
+    /// Set to a scratch directory to CONVERT videos for flow-warp playback
+    /// and store them as owned blobs; `None` keeps the no-copy reference
+    /// import for everything.
+    pub convert_dir: Option<&'a Path>,
+    pub convert_options: ConvertOptions,
+    /// Called during the slow phases so the bar keeps moving inside one file.
+    pub progress: &'a mut dyn FnMut(FileProgress),
+    /// Checked per frame during a conversion.
+    pub cancel: &'a dyn Fn() -> bool,
+}
+
+/// A converted clip's temp file, removed whatever happens next.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Import ONE file: by reference, or — for a video when `ctx.convert_dir` is
+/// set — converted for flow-warp playback and stored as bytes. Returns
+/// quickly for a file already present.
 pub fn import_file(
     client: &mut AssetClient,
     root: &Path,
     file: &MediaFile,
-    rights: &PublishRights,
+    ctx: &mut ImportCtx,
 ) -> FileOutcome {
     let Some(alias) = alias_for(&file.path) else {
         return FileOutcome::Failed("cannot derive an alias for this path".to_string());
     };
     // Cheap presence probe BEFORE anything expensive. One control-plane
     // round trip beats decoding a frame of every clip in a folder we
-    // already imported last week.
+    // already imported last week — and beats re-converting one.
     match client.resolve_alias(&alias) {
         Ok(_) => return FileOutcome::AlreadyPresent,
         Err(ClientError::NotFound { .. }) => {}
         Err(error) => return FileOutcome::Failed(format!("alias probe: {error}")),
     }
 
-    let (thumbnail, media_millis) = match thumbnail_of(file) {
-        Ok(v) => v,
-        Err(error) => return FileOutcome::Failed(error),
-    };
     let abs = match std::path::absolute(&file.path) {
         Ok(p) => p,
         Err(error) => return FileOutcome::Failed(format!("absolute path: {error}")),
+    };
+
+    // ---- the conversion route (videos only, and only when asked) --------
+    let mut note: Option<String> = None;
+    let mut converted: Option<(Scratch, String)> = None;
+    if let (MediaClass::Video, Some(dir)) = (file.class, ctx.convert_dir) {
+        match convert_for_flow(&abs, dir, ctx) {
+            Ok(ConvertOutcome::Converted { scratch, provenance, note: n }) => {
+                note = n;
+                converted = Some((scratch, provenance));
+            }
+            Ok(ConvertOutcome::Cancelled) => return FileOutcome::Cancelled,
+            // A clip we cannot convert is still a clip the operator asked to
+            // import: it lands by reference, and the reason it is not
+            // scratchable is REPORTED rather than swallowed.
+            Err(why) => note = Some(format!("{}: {why}; imported by reference", file.stem)),
+        }
+    }
+
+    let payload_path = converted
+        .as_ref()
+        .map(|(scratch, _)| scratch.0.clone())
+        .unwrap_or_else(|| abs.clone());
+    let (thumbnail, media_millis) = match thumbnail_of(file, &payload_path) {
+        Ok(v) => v,
+        Err(error) => return FileOutcome::Failed(error),
     };
     // Images declare their pixel dims in the manifest; other media must not.
     let dims = if matches!(file.class, MediaClass::Image) {
@@ -428,20 +509,42 @@ pub fn import_file(
         None
     };
 
+    let (files, provenance) = match &converted {
+        // The converted clip is the store's OWN blob: these bytes exist
+        // nowhere else, so referencing a temp file that is about to be
+        // deleted would be a dangling library entry.
+        Some((scratch, provenance)) => {
+            let bytes = match std::fs::read(&scratch.0) {
+                Ok(b) => b,
+                Err(error) => {
+                    return FileOutcome::Failed(format!("read converted clip: {error}"))
+                }
+            };
+            (
+                vec![PublishBundleFile::bytes(FileRole::Video, MediaType::Mp4, bytes, None)],
+                provenance.clone(),
+            )
+        }
+        // THE DEFAULT: a reference, not bytes. The store hashes this path in
+        // place; nothing is uploaded and nothing is duplicated.
+        None => (
+            vec![PublishBundleFile::reference(
+                role_of(file.class),
+                file.media,
+                abs.clone(),
+                dims,
+            )],
+            format!("referenced in place from {}", abs.display()),
+        ),
+    };
+
     let mut bundle = PublishBundle::new(
         MEDIA_NAMESPACE,
         kind_of(file.class),
         file.stem.clone(),
-        // THE POINT: a reference, not bytes. The store hashes this path in
-        // place; nothing is uploaded and nothing is duplicated.
-        vec![PublishBundleFile::reference(
-            role_of(file.class),
-            file.media,
-            abs.clone(),
-            dims,
-        )],
+        files,
         thumbnail,
-        rights.clone(),
+        ctx.rights.clone(),
     );
     bundle.alias = Some(alias);
     bundle.media_millis = media_millis;
@@ -450,14 +553,78 @@ pub fn import_file(
     // the moment it lands, with nobody typing metadata.
     bundle.tags = file.dirs.iter().map(|d| slug(d, 32)).collect();
     bundle.tags.push("local".to_string());
+    if converted.is_some() {
+        bundle.tags.push("flow".to_string());
+    }
     bundle.generator = "makepad-vj import".to_string();
-    bundle.provenance = format!("referenced in place from {}", abs.display());
+    bundle.provenance = provenance;
     bundle.description = format!("Imported from {}", root.display());
 
     match client.publish_bundle(&bundle) {
-        Ok(_) => FileOutcome::Published,
+        Ok(_) => FileOutcome::Published { converted: converted.is_some(), note },
         Err(error) => FileOutcome::Failed(format!("{error}")),
     }
+}
+
+enum ConvertOutcome {
+    Converted {
+        scratch: Scratch,
+        provenance: String,
+        note: Option<String>,
+    },
+    Cancelled,
+}
+
+/// Convert one video into a flow-carrying all-intra clip in `dir`.
+fn convert_for_flow(
+    source: &Path,
+    dir: &Path,
+    ctx: &mut ImportCtx,
+) -> Result<ConvertOutcome, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("conversion scratch dir: {e}"))?;
+    // Named from the source path so two clips converting in one run cannot
+    // collide, and a leftover from a killed run is overwritten rather than
+    // accumulated.
+    let scratch = Scratch(dir.join(format!(
+        "convert-{}-{}.mp4",
+        std::process::id(),
+        hex8(source.to_string_lossy().as_bytes())
+    )));
+    let progress = &mut *ctx.progress;
+    let report = match convert_video(
+        source,
+        &scratch.0,
+        &ctx.convert_options,
+        &mut |p| progress(FileProgress { phase: "converting", fraction: p.fraction }),
+        ctx.cancel,
+    ) {
+        Ok(report) => report,
+        Err(ConvertError::Cancelled) => return Ok(ConvertOutcome::Cancelled),
+        Err(error) => return Err(format!("flow conversion failed ({error})")),
+    };
+    let provenance = format!(
+        "flow-converted from {} — {}x{} all-intra, {} frames, {} motion pairs",
+        source.display(),
+        report.width,
+        report.height,
+        report.frames,
+        report.pairs
+    );
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut note = None;
+    if report.scale > 1 {
+        note = Some(format!(
+            "{name}: converted at {}x{} (1/{} size) so the clip fits the flow-warp cache",
+            report.width, report.height, report.scale
+        ));
+    }
+    if !report.warps {
+        note = Some(format!("{name}: {}", report.warp_note));
+    }
+    Ok(ConvertOutcome::Converted { scratch, provenance, note })
 }
 
 #[cfg(test)]

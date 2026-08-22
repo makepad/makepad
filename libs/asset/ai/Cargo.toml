@@ -115,6 +115,11 @@ makepad-render = { path = "../../render", optional = true }
 makepad-ai-llm = { path = "../../ai/llm", optional = true }
 makepad-ai-speech = { path = "../../ai/models/speech", optional = true }
 makepad-video = { path = "../../../platform/video", optional = true }
+# The `mkfl` motion payload: ONE definition, shared with the VJ's import
+# converter (which fills the same box from a classical, model-free flow
+# field). Default features off — the enhance stage owns its own codec seam
+# and only needs the format.
+makepad-video-flow = { path = "../../video_flow", default-features = false }
 
 [dev-dependencies]
 # Test-only: tests/service_e2e.rs drives the realtime websocket endpoint

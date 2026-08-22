@@ -26,11 +26,19 @@
 //! big library — but the first, the last and one per percent always get
 //! through, so the bar starts immediately and finishes exactly.
 //!
+//! With VARIABLE-FRAMERATE VIDEO IMPORT on, one file is no longer a moment:
+//! converting a clip decodes it, measures the motion of every frame pair and
+//! re-encodes the whole thing all-intra, which is seconds to minutes. So that
+//! file's own progress is reported INSIDE the step — the phase names itself
+//! ("converting 42%") and the bar advances fractionally across the file
+//! rather than sitting still and then jumping. A bar that does not move for
+//! four minutes is indistinguishable from a hang, and this one is not one.
+//!
 //! A worker that dies without a verdict becomes a VISIBLE FAILURE, never a
 //! bar that spins forever: the channel disconnecting mid-import is itself
 //! the error.
 
-use crate::media_scan::{self, FileOutcome, MediaFile, MediaScan};
+use crate::media_scan::{self, FileOutcome, FileProgress, ImportCtx, MediaFile, MediaScan};
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,15 +47,23 @@ use std::sync::Arc;
 use std::thread;
 
 /// What the panel is doing right now.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum ImportPhase {
     #[default]
     Idle,
     /// Walking the tree. `found` grows as it goes; there is no total yet,
     /// because knowing it would mean having already walked.
     Scanning { found: usize },
-    /// Publishing. `done` of `total`, and the file being worked on.
-    Importing { done: usize, total: usize, current: String },
+    /// Publishing. `done` of `total`, the file being worked on, and — while
+    /// a file's own slow phase runs — what that phase is and how far in it
+    /// is (0..1 within this one file).
+    Importing {
+        done: usize,
+        total: usize,
+        current: String,
+        phase: String,
+        file_fraction: f64,
+    },
     Done(ImportSummary),
     Failed(String),
     Cancelled(ImportSummary),
@@ -63,6 +79,9 @@ impl ImportPhase {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportSummary {
     pub published: usize,
+    /// How many of the published ones were CONVERTED for flow-warp playback
+    /// (a subset of `published`, not a separate bucket).
+    pub converted: usize,
     pub already_present: usize,
     pub failed: usize,
     /// Recognised-but-unpublishable files, with reasons.
@@ -100,6 +119,11 @@ pub struct ImportPanel {
     pub open: bool,
     /// The path the text field holds.
     pub path: String,
+    /// VARIABLE FRAMERATE VIDEO IMPORT: convert videos on the way in
+    /// (optical flow + all-intra re-encode + `mkfl`) and store them as owned
+    /// blobs, instead of referencing them where they lie. Persisted by the
+    /// panel's owner; images and audio are unaffected either way.
+    pub convert_video: bool,
     pub phase: ImportPhase,
     /// One line of human-readable status, always safe to draw.
     pub status: String,
@@ -112,6 +136,7 @@ impl Default for ImportPanel {
         Self {
             open: false,
             path: String::new(),
+            convert_video: false,
             phase: ImportPhase::Idle,
             status: "drop a folder here, or type a path".to_string(),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -138,11 +163,14 @@ impl ImportPanel {
         match &self.phase {
             ImportPhase::Idle => 0.0,
             ImportPhase::Scanning { .. } => 0.03,
-            ImportPhase::Importing { done, total, .. } => {
+            ImportPhase::Importing { done, total, file_fraction, .. } => {
                 if *total == 0 {
                     0.06
                 } else {
-                    0.06 + 0.94 * (*done as f64 / *total as f64)
+                    // The part of the current file that is already done
+                    // counts: with conversion on, one file can be minutes.
+                    let at = *done as f64 + file_fraction.clamp(0.0, 1.0);
+                    0.06 + 0.94 * (at / *total as f64).min(1.0)
                 }
             }
             ImportPhase::Done(_) | ImportPhase::Failed(_) | ImportPhase::Cancelled(_) => 1.0,
@@ -189,10 +217,12 @@ impl ImportPanel {
         self.status = format!("scanning {}…", root.display());
 
         let cache = cache_parent.join("import-cache");
+        let convert = self.convert_video;
         thread::Builder::new()
             .name("vj-media-import".into())
             .spawn(move || {
-                let verdict = run(&root, endpoints, server_id, token, cache, &tx, &cancel);
+                let verdict =
+                    run(&root, endpoints, server_id, token, cache, convert, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
             .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
@@ -249,8 +279,17 @@ pub fn describe(phase: &ImportPhase) -> String {
     match phase {
         ImportPhase::Idle => "drop a folder here, or type a path".to_string(),
         ImportPhase::Scanning { found } => format!("scanning… {found} media files so far"),
-        ImportPhase::Importing { done, total, current } => {
-            format!("importing {}/{} · {current}", done + 1, total)
+        ImportPhase::Importing { done, total, current, phase, file_fraction } => {
+            if phase.is_empty() {
+                format!("importing {}/{} · {current}", done + 1, total)
+            } else {
+                format!(
+                    "{phase} {}/{} · {current} {:.0}%",
+                    done + 1,
+                    total,
+                    file_fraction * 100.0
+                )
+            }
         }
         ImportPhase::Done(s) => summary_line("imported", s),
         ImportPhase::Cancelled(s) => summary_line("cancelled", s),
@@ -260,6 +299,9 @@ pub fn describe(phase: &ImportPhase) -> String {
 
 fn summary_line(verb: &str, s: &ImportSummary) -> String {
     let mut line = format!("{verb}: {} new", s.published);
+    if s.converted > 0 {
+        line.push_str(&format!(" · {} flow-converted", s.converted));
+    }
     if s.already_present > 0 {
         line.push_str(&format!(" · {} already in the library", s.already_present));
     }
@@ -273,15 +315,18 @@ fn summary_line(verb: &str, s: &ImportSummary) -> String {
 }
 
 /// The worker body. Everything expensive lives here.
+#[allow(clippy::too_many_arguments)]
 fn run(
     root: &Path,
     endpoints: ApiEndpoints,
     server_id: [u8; 16],
     token: String,
     cache: PathBuf,
+    convert_video: bool,
     tx: &mpsc::Sender<Msg>,
     cancel: &Arc<AtomicBool>,
 ) -> ImportPhase {
+    let convert_dir = cache.join("convert");
     let mut config = ClientConfig::new(cache);
     config.token = Some(token);
     let mut client = match AssetClient::connect(config, endpoints, Some(server_id)) {
@@ -308,6 +353,7 @@ fn run(
 
     let total = scan.files.len();
     let rights = media_scan::personal_rights(root);
+    let convert_options = makepad_video_flow::ConvertOptions::default();
     // The UI polls at 20 Hz; a ten-thousand-file library must not send ten
     // thousand messages. First, last, and about one per percent.
     let step = (total / 100).max(1);
@@ -315,20 +361,54 @@ fn run(
         if cancel.load(Ordering::SeqCst) {
             return ImportPhase::Cancelled(summary);
         }
+        let label = label_of(file);
         if index == 0 || index + 1 >= total || index % step == 0 {
             let _ = tx.send(Msg::Phase(ImportPhase::Importing {
                 done: index,
                 total,
-                current: label_of(file),
+                current: label.clone(),
+                phase: String::new(),
+                file_fraction: 0.0,
             }));
         }
-        match media_scan::import_file(&mut client, root, file, &rights) {
-            FileOutcome::Published => summary.published += 1,
+        // Inside one file: the conversion reports its own progress here, and
+        // it is forwarded as it arrives (the converter already throttles to
+        // a few messages a second).
+        let mut progress = |p: FileProgress| {
+            let _ = tx.send(Msg::Phase(ImportPhase::Importing {
+                done: index,
+                total,
+                current: label.clone(),
+                phase: p.phase.to_string(),
+                file_fraction: p.fraction,
+            }));
+        };
+        let cancelled = || cancel.load(Ordering::SeqCst);
+        let mut ctx = ImportCtx {
+            rights: &rights,
+            convert_dir: convert_video.then_some(convert_dir.as_path()),
+            convert_options,
+            progress: &mut progress,
+            cancel: &cancelled,
+        };
+        match media_scan::import_file(&mut client, root, file, &mut ctx) {
+            FileOutcome::Published { converted, note } => {
+                summary.published += 1;
+                if converted {
+                    summary.converted += 1;
+                }
+                if let Some(note) = note {
+                    summary.note(note);
+                }
+            }
             FileOutcome::AlreadyPresent => summary.already_present += 1,
             FileOutcome::Failed(why) => {
                 summary.failed += 1;
-                summary.note(format!("{}: {why}", label_of(file)));
+                summary.note(format!("{label}: {why}"));
             }
+            // Stopped in the middle of this file: the converter has already
+            // removed its half-written temp, and this run is over.
+            FileOutcome::Cancelled => return ImportPhase::Cancelled(summary),
         }
     }
     ImportPhase::Done(summary)
@@ -345,15 +425,25 @@ fn label_of(file: &MediaFile) -> String {
 mod tests {
     use super::*;
 
+    fn importing(done: usize, total: usize, phase: &str, fraction: f64) -> ImportPhase {
+        ImportPhase::Importing {
+            done,
+            total,
+            current: "clip.mp4".into(),
+            phase: phase.to_string(),
+            file_fraction: fraction,
+        }
+    }
+
     #[test]
     fn progress_is_monotonic_and_bounded() {
         let mut p = ImportPanel::default();
         assert_eq!(p.progress(), 0.0);
         p.phase = ImportPhase::Scanning { found: 3 };
         let scanning = p.progress();
-        p.phase = ImportPhase::Importing { done: 0, total: 10, current: "a".into() };
+        p.phase = importing(0, 10, "", 0.0);
         let start = p.progress();
-        p.phase = ImportPhase::Importing { done: 10, total: 10, current: "j".into() };
+        p.phase = importing(10, 10, "", 0.0);
         let end = p.progress();
         p.phase = ImportPhase::Done(ImportSummary::default());
         assert!(scanning > 0.0 && scanning <= start);
@@ -362,11 +452,33 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_file_moves_the_bar_inside_its_own_step() {
+        // The whole point of the conversion phase: four minutes on one clip
+        // must LOOK like four minutes of work, not a frozen bar.
+        let mut p = ImportPanel::default();
+        p.phase = importing(3, 10, "converting", 0.0);
+        let start = p.progress();
+        p.phase = importing(3, 10, "converting", 0.5);
+        let half = p.progress();
+        p.phase = importing(3, 10, "converting", 1.0);
+        let full = p.progress();
+        assert!(start < half && half < full, "{start} {half} {full}");
+        // And it never runs past where the NEXT file's step begins.
+        p.phase = importing(4, 10, "", 0.0);
+        assert!((full - p.progress()).abs() < 1e-9);
+        // The label says which phase, and how far in.
+        assert!(describe(&importing(3, 10, "converting", 0.42)).contains("converting 4/10"));
+        assert!(describe(&importing(3, 10, "converting", 0.42)).contains("42%"));
+        // With no named phase it stays the plain line it always was.
+        assert_eq!(describe(&importing(3, 10, "", 0.0)), "importing 4/10 · clip.mp4");
+    }
+
+    #[test]
     fn a_vanished_worker_becomes_a_visible_failure() {
         let mut p = ImportPanel::default();
         let (tx, rx) = mpsc::channel::<Msg>();
         p.rx = Some(rx);
-        p.phase = ImportPhase::Importing { done: 2, total: 9, current: "x".into() };
+        p.phase = importing(2, 9, "", 0.0);
         drop(tx); // the worker died without a verdict
         assert!(p.poll());
         match &p.phase {
@@ -406,6 +518,7 @@ mod tests {
     fn the_summary_line_reports_every_bucket() {
         let s = ImportSummary {
             published: 3,
+            converted: 2,
             already_present: 2,
             failed: 1,
             skipped: 4,
@@ -413,8 +526,12 @@ mod tests {
         };
         let line = summary_line("imported", &s);
         assert!(line.contains("3 new"));
+        assert!(line.contains("2 flow-converted"));
         assert!(line.contains("2 already"));
         assert!(line.contains("1 failed"));
         assert!(line.contains("4 unsupported"));
+        // Nothing converted, nothing said about conversion.
+        let plain = ImportSummary { published: 1, ..Default::default() };
+        assert!(!summary_line("imported", &plain).contains("flow-converted"));
     }
 }

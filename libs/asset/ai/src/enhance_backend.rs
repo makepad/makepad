@@ -20,24 +20,26 @@
 //! loop pipeline generates silent clips by design), and the drop is stated
 //! in the model note rather than happening as a silent surprise.
 //!
-//! ## The `mkfl` box payload (version 1)
+//! ## The `mkfl` box payload
 //!
-//! ```text
-//! magic   b"MKFL"            (4)
-//! version u16 LE = 1         flags u16 LE = 0
-//! pairs   u32 LE             final consecutive-frame pairs
-//! grid_w  u16 LE  grid_h u16 LE   flow grid dims (quarter source res)
-//! vid_w   u16 LE  vid_h  u16 LE   final video dims
-//! fps_num u32 LE  fps_den u32 LE  final video rate
-//! then pairs x grid_w*grid_h x 5 planar bytes:
-//!   f0x, f0y, f1x, f1y  (i8, quarter-pixel units at grid resolution)
-//!   mask                (u8, 0 = frame1, 255 = frame0)
-//! ```
+//! The format, its quantization and its box walk are NOT defined here: they
+//! live in `makepad-video-flow`, shared with the VJ's import converter, which
+//! writes the same box from a classical (model-free) motion field. One
+//! definition, two producers, one player contract — see that crate's
+//! `payload` module for the byte layout. The names below are re-exported so
+//! this backend's callers and tests keep their existing surface.
+//!
+//! What stays here is what is genuinely this backend's: RIFE as the source of
+//! the field, and the upscale/interpolate stages around it.
 
 use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::error::AssetAiError;
+
+pub use makepad_video_flow::{
+    append_mkfl_box, encode_flow_payload, find_mkfl_box, quantize_flow_pair,
+};
 
 #[cfg(all(feature = "upscale-native", feature = "interpolate", feature = "video"))]
 mod native {
@@ -136,117 +138,6 @@ pub fn enhance_factors(params: &GenerateParams) -> Result<(u32, u32, bool), Asse
         )));
     }
     Ok((upscale, interpolate, flow_map))
-}
-
-/// Appends the flow payload as one top-level `mkfl` box. MP4 is a plain box
-/// sequence, so `[u32 BE size]["mkfl"][payload]` after the last box is
-/// spec-legal and skipped by decoders (the same mechanism appended XMP uses).
-pub fn append_mkfl_box(mp4: &mut Vec<u8>, payload: &[u8]) {
-    let size = 8u64 + payload.len() as u64;
-    // The 32-bit box size covers every realistic flow payload; a >4GB
-    // sidecar would be a bug upstream.
-    mp4.extend_from_slice(&(size as u32).to_be_bytes());
-    mp4.extend_from_slice(b"mkfl");
-    mp4.extend_from_slice(payload);
-}
-
-/// Extracts an `mkfl` payload from an mp4 (players use this; also the test
-/// oracle for [`append_mkfl_box`]). Scans top-level boxes only.
-pub fn find_mkfl_box(mp4: &[u8]) -> Option<&[u8]> {
-    let mut at = 0usize;
-    while at + 8 <= mp4.len() {
-        let size = u32::from_be_bytes([mp4[at], mp4[at + 1], mp4[at + 2], mp4[at + 3]]) as usize;
-        let kind = &mp4[at + 4..at + 8];
-        if size < 8 {
-            return None;
-        }
-        if kind == b"mkfl" {
-            let end = at.checked_add(size)?;
-            return mp4.get(at + 8..end);
-        }
-        at = at.checked_add(size)?;
-    }
-    None
-}
-
-/// Serializes the version-1 flow payload header + planar samples.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_flow_payload(
-    pairs: u32,
-    grid_w: u16,
-    grid_h: u16,
-    vid_w: u16,
-    vid_h: u16,
-    fps_num: u32,
-    fps_den: u32,
-    samples: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(28 + samples.len());
-    out.extend_from_slice(b"MKFL");
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&pairs.to_le_bytes());
-    out.extend_from_slice(&grid_w.to_le_bytes());
-    out.extend_from_slice(&grid_h.to_le_bytes());
-    out.extend_from_slice(&vid_w.to_le_bytes());
-    out.extend_from_slice(&vid_h.to_le_bytes());
-    out.extend_from_slice(&fps_num.to_le_bytes());
-    out.extend_from_slice(&fps_den.to_le_bytes());
-    out.extend_from_slice(samples);
-    out
-}
-
-/// Quantizes one pair's flow field into the payload's planar bytes: flow in
-/// quarter-pixel i8 at grid resolution, mask in u8. `flow`/`mask` are the
-/// planar f32 fields at `(w, h)`; the grid is the 4:1 box average.
-pub fn quantize_flow_pair(
-    flow: &[f32],
-    mask: &[f32],
-    w: usize,
-    h: usize,
-    grid_w: usize,
-    grid_h: usize,
-) -> Vec<u8> {
-    let plane = w * h;
-    let grid_plane = grid_w * grid_h;
-    let mut out = vec![0u8; grid_plane * 5];
-    let step_x = w as f32 / grid_w as f32;
-    let step_y = h as f32 / grid_h as f32;
-    for gy in 0..grid_h {
-        for gx in 0..grid_w {
-            let x0 = (gx as f32 * step_x) as usize;
-            let x1 = (((gx + 1) as f32 * step_x) as usize).clamp(x0 + 1, w);
-            let y0 = (gy as f32 * step_y) as usize;
-            let y1 = (((gy + 1) as f32 * step_y) as usize).clamp(y0 + 1, h);
-            let count = ((x1 - x0) * (y1 - y0)) as f32;
-            let mut sums = [0.0f32; 5];
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let src = y * w + x;
-                    for c in 0..4 {
-                        sums[c] += flow[c * plane + src];
-                    }
-                    sums[4] += mask[src];
-                }
-            }
-            let dst = gy * grid_w + gx;
-            // Flow is stored at GRID resolution in quarter-pixel units, so
-            // the vector must be scaled by the grid/source ratio too.
-            for c in 0..4 {
-                let scale = if c % 2 == 0 {
-                    grid_w as f32 / w as f32
-                } else {
-                    grid_h as f32 / h as f32
-                };
-                let value = (sums[c] / count) * scale * 4.0;
-                out[c * grid_plane + dst] =
-                    (value.round().clamp(-127.0, 127.0) as i8) as u8;
-            }
-            out[4 * grid_plane + dst] =
-                ((sums[4] / count).clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-    }
-    out
 }
 
 /// Exact 2:1 box average of an interleaved RGB8 frame (both extents even).
