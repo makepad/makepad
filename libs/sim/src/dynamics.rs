@@ -26,11 +26,13 @@ use crate::TICK_DT;
 
 use makepad_box3d::body::*;
 use makepad_box3d::height_field::create_height_field;
-use makepad_box3d::hull::make_box_hull;
+use makepad_box3d::hull::{make_box_hull, make_offset_box_hull};
 use makepad_box3d::id::{BodyId, ShapeId};
+use makepad_box3d::joint::{create_spherical_joint, default_spherical_joint_def};
 use makepad_box3d::mesh::create_mesh;
 use makepad_box3d::math_functions::{
-    pos as b3pos, vec3 as b3vec3, Pos as B3Pos, Quat as B3Quat, Transform, Vec3 as B3Vec3,
+    inv_mul_quat, inv_rotate_vector, pos as b3pos, vec3 as b3vec3, Pos as B3Pos,
+    Quat as B3Quat, Transform, Vec3 as B3Vec3,
 };
 use makepad_box3d::mover::{clip_vector, solve_planes};
 use makepad_box3d::physics_world::{
@@ -79,11 +81,14 @@ pub const CAT_RIGID: u64 = 1 << 1;
 pub const CAT_MOVER: u64 = 1 << 2;
 /// Query-only ghosts: `collide:false` decor and seat-attached movers.
 pub const CAT_DECOR: u64 = 1 << 3;
+/// Articulated character limbs. They collide with world geometry and ordinary
+/// rigids, but not mover capsules or other ragdolls (including their own).
+pub const CAT_RAGDOLL: u64 = 1 << 4;
 /// Category carried by QUERIES only — never by a shape. Its presence in a
 /// shape's mask is what makes that shape ray-visible.
 pub const CAT_QUERY: u64 = 1 << 62;
 
-const SOLID_MASK: u64 = CAT_WORLD | CAT_RIGID | CAT_MOVER | CAT_QUERY;
+const SOLID_MASK: u64 = CAT_WORLD | CAT_RIGID | CAT_MOVER | CAT_RAGDOLL | CAT_QUERY;
 
 fn filter_of(kind: MirrorKind) -> Filter {
     let (category_bits, mask_bits) = match kind {
@@ -101,7 +106,7 @@ fn filter_of(kind: MirrorKind) -> Filter {
 pub fn raycast_filter() -> QueryFilter {
     QueryFilter {
         category_bits: CAT_QUERY,
-        mask_bits: CAT_WORLD | CAT_RIGID | CAT_MOVER | CAT_DECOR,
+        mask_bits: CAT_WORLD | CAT_RIGID | CAT_MOVER | CAT_DECOR | CAT_RAGDOLL,
         id: 0,
         name: "game.raycast",
     }
@@ -112,7 +117,7 @@ pub fn raycast_filter() -> QueryFilter {
 pub fn projectile_filter() -> QueryFilter {
     QueryFilter {
         category_bits: CAT_QUERY,
-        mask_bits: CAT_WORLD | CAT_RIGID | CAT_MOVER,
+        mask_bits: CAT_WORLD | CAT_RIGID | CAT_MOVER | CAT_RAGDOLL,
         id: 0,
         name: "projectile_ccd",
     }
@@ -161,6 +166,79 @@ pub struct MoverOverlap {
     pub rigid_id: u64,
 }
 
+/// Generic collider authored into a skinned asset. Coordinates are local to
+/// the corresponding skeleton node; runtime never sees the source asset's
+/// bone names or vendor.
+#[derive(Clone, Debug)]
+pub enum RagdollColliderSpec {
+    Capsule { point_a: Vec3f, point_b: Vec3f, radius: f32 },
+    Sphere { center: Vec3f, radius: f32 },
+    Box { center: Vec3f, half_extents: Vec3f },
+}
+
+#[derive(Clone, Debug)]
+pub struct RagdollBodySpec {
+    pub connection: String,
+    pub parent: Option<usize>,
+    pub collider: RagdollColliderSpec,
+    pub mass_fraction: f32,
+    pub cone_angle: f32,
+    pub twist_min: f32,
+    pub twist_max: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RagdollSpec {
+    pub bodies: Vec<RagdollBodySpec>,
+}
+
+/// Skeleton-node world pose used at activation and returned for skinning.
+#[derive(Clone, Debug)]
+pub struct RagdollBodyPose {
+    pub connection: String,
+    pub position: Vec3f,
+    pub rotation: Quat,
+}
+
+/// A gameplay hit strong enough to request an articulated knockdown. The
+/// presentation/asset layer decides whether the mover owns a compatible rig.
+#[derive(Clone, Copy, Debug)]
+pub struct MoverImpact {
+    pub mover_id: u64,
+    pub rigid_id: u64,
+    pub direction: Vec3f,
+    pub kick: f32,
+}
+
+#[derive(Clone, Debug)]
+struct RagdollLiveBody {
+    connection: String,
+    body: BodyId,
+}
+
+/// How long a ragdoll lies still, after it has stopped moving AND its
+/// knockdown timer has run out, before the character controller takes back
+/// over. Being clipped by a car should read as a real knockdown with a beat
+/// of "ouch" in it; springing up the instant the body stops rolling read as
+/// a glitch, not as getting up. Retune here — nothing else encodes the feel.
+pub const RAGDOLL_DOWNTIME_TICKS: u16 = 150;
+
+/// A ragdoll that never settles (wedged in geometry, balanced on a kerb)
+/// still has to hand control back eventually. Comfortably longer than the
+/// longest knockdown plus a full downtime, so it only ever fires for a body
+/// that genuinely refuses to come to rest.
+pub const RAGDOLL_MAX_TICKS: u32 = 600;
+
+#[derive(Clone, Debug)]
+struct RagdollInstance {
+    entity_id: u64,
+    bodies: Vec<RagdollLiveBody>,
+    root: usize,
+    age_ticks: u32,
+    settled_ticks: u16,
+    was_non_interactive: bool,
+}
+
 /// One live voxel-chunk collider (T4): a static box3d triangle mesh built
 /// from the chunk's render mesh — collision IS the visual, so a car drives
 /// exactly what the player sees.
@@ -192,6 +270,11 @@ pub struct RigidDynamics {
     /// the reason capsules are SENSOR shapes rather than solid ones whose
     /// contacts a pre-solve callback disables.
     pub overlaps: Vec<MoverOverlap>,
+    /// One-tick gameplay events. Snapshotted so rollback replays the same
+    /// activation request; consumers drain it at a simulation boundary.
+    impacts: Vec<MoverImpact>,
+    /// Authoritative articulated bodies. BodyIds survive Box3D snapshots.
+    ragdolls: Vec<RagdollInstance>,
 }
 
 impl Default for RigidDynamics {
@@ -212,12 +295,17 @@ impl RigidDynamics {
             // NAN forces the first reconcile to sync gravity.
             last_gravity: f32::NAN,
             overlaps: Vec::new(),
+            impacts: Vec::new(),
+            ragdolls: Vec::new(),
         }
     }
 
     /// Number of live mirrored bodies (tests/diagnostics).
     pub fn body_count(&self) -> usize {
-        self.mirror.len() + self.terrain_body.iter().len() + self.voxel_bodies.len()
+        self.mirror.len()
+            + self.terrain_body.iter().len()
+            + self.voxel_bodies.len()
+            + self.ragdolls.iter().map(|r| r.bodies.len()).sum::<usize>()
     }
 
     /// Live voxel-chunk colliders (tests/diagnostics).
@@ -302,6 +390,250 @@ impl RigidDynamics {
             b3vec3(axis_vel.x * mass, axis_vel.y * mass, axis_vel.z * mass),
             true,
         );
+        true
+    }
+
+    pub fn ragdoll_active(&self, entity_id: u64) -> bool {
+        self.ragdolls.iter().any(|r| r.entity_id == entity_id)
+    }
+
+    /// Drain impact requests at the next simulation boundary. Assets without
+    /// a generic ragdoll contract simply ignore the request and retain the
+    /// existing knockdown animation fallback.
+    pub fn take_mover_impacts(&mut self) -> Vec<MoverImpact> {
+        std::mem::take(&mut self.impacts)
+    }
+
+    pub fn ragdoll_body_poses(&self, entity_id: u64) -> Vec<RagdollBodyPose> {
+        let Some(ragdoll) = self.ragdolls.iter().find(|r| r.entity_id == entity_id) else {
+            return Vec::new();
+        };
+        ragdoll
+            .bodies
+            .iter()
+            .map(|part| {
+                let p = body_get_position(&self.world, part.body);
+                let q = body_get_rotation(&self.world, part.body);
+                RagdollBodyPose {
+                    connection: part.connection.clone(),
+                    position: vec3f(p.x, p.y, p.z),
+                    rotation: from_b3_quat(q),
+                }
+            })
+            .collect()
+    }
+
+    /// Replace one mover capsule with a generic articulated body graph. The
+    /// pose is the last rendered skeleton pose, handed over at a fixed-step
+    /// boundary so activation cannot pop or mutate physics during drawing.
+    pub fn activate_ragdoll(
+        &mut self,
+        entity: &mut Entity,
+        spec: &RagdollSpec,
+        poses: &[RagdollBodyPose],
+        scale: f32,
+        impact: MoverImpact,
+    ) -> bool {
+        if entity.id != impact.mover_id
+            || self.ragdoll_active(entity.id)
+            || spec.bodies.is_empty()
+            || !scale.is_finite()
+            || scale <= 0.0
+        {
+            return false;
+        }
+        let roots: Vec<usize> = spec
+            .bodies
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.parent.is_none().then_some(i))
+            .collect();
+        if roots.len() != 1 {
+            return false;
+        }
+        // Validate the complete graph and pose handoff before creating even
+        // one Box3D body: a malformed asset can never leave half a ragdoll.
+        for (i, body) in spec.bodies.iter().enumerate() {
+            if body.connection.is_empty()
+                || spec.bodies[..i]
+                    .iter()
+                    .any(|other| other.connection == body.connection)
+                || poses.iter().filter(|p| p.connection == body.connection).count() != 1
+                || body.parent.is_some_and(|p| p >= spec.bodies.len() || p == i)
+                || !body.mass_fraction.is_finite()
+                || body.mass_fraction <= 0.0
+                || !body.cone_angle.is_finite()
+                || !body.twist_min.is_finite()
+                || !body.twist_max.is_finite()
+                || body.twist_min > body.twist_max
+            {
+                return false;
+            }
+            let mut cursor = body.parent;
+            let mut hops = 0;
+            while let Some(parent) = cursor {
+                hops += 1;
+                if hops > spec.bodies.len() {
+                    return false;
+                }
+                cursor = spec.bodies[parent].parent;
+            }
+        }
+
+        let total_mass = push_mass_of(entity).max(1.0e-3);
+        let group_index = -(((entity.id % i32::MAX as u64) as i32).max(1));
+        let mut live = Vec::with_capacity(spec.bodies.len());
+        for body_spec in &spec.bodies {
+            let pose = poses
+                .iter()
+                .find(|p| p.connection == body_spec.connection)
+                .expect("validated ragdoll pose");
+            let mut body_def = default_body_def();
+            body_def.body_type = BodyType::Dynamic;
+            body_def.position = b3pos(pose.position.x, pose.position.y, pose.position.z);
+            body_def.rotation = to_b3_quat(pose.rotation);
+            body_def.linear_velocity = b3vec3(entity.vel.x, entity.vel.y, entity.vel.z);
+            body_def.linear_damping = 0.08;
+            body_def.angular_damping = 0.16;
+            body_def.gravity_scale = entity.gravity_scale;
+            body_def.user_data = entity.id;
+            let body = create_body(&mut self.world, &body_def);
+
+            let mut shape_def = default_shape_def();
+            shape_def.base_material.friction = 0.6;
+            shape_def.base_material.restitution = 0.0;
+            shape_def.user_data = entity.id;
+            shape_def.filter = Filter {
+                category_bits: CAT_RAGDOLL,
+                mask_bits: CAT_WORLD | CAT_RIGID | CAT_QUERY,
+                group_index,
+            };
+            let volume = match body_spec.collider {
+                RagdollColliderSpec::Capsule { point_a, point_b, radius } => {
+                    let a = point_a * scale;
+                    let b = point_b * scale;
+                    let r = sane_extent(radius * scale);
+                    let d = b - a;
+                    let stem = crate::math::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                    let volume = std::f32::consts::PI * r * r * stem
+                        + (4.0 / 3.0) * std::f32::consts::PI * r * r * r;
+                    shape_def.density = total_mass * body_spec.mass_fraction / volume.max(1.0e-5);
+                    create_capsule_shape(
+                        &mut self.world,
+                        body,
+                        &shape_def,
+                        &Capsule {
+                            center1: b3vec3(a.x, a.y, a.z),
+                            center2: b3vec3(b.x, b.y, b.z),
+                            radius: r,
+                        },
+                    );
+                    volume
+                }
+                RagdollColliderSpec::Sphere { center, radius } => {
+                    let c = center * scale;
+                    let r = sane_extent(radius * scale);
+                    let volume = (4.0 / 3.0) * std::f32::consts::PI * r * r * r;
+                    shape_def.density = total_mass * body_spec.mass_fraction / volume.max(1.0e-5);
+                    create_sphere_shape(
+                        &mut self.world,
+                        body,
+                        &shape_def,
+                        &Sphere { center: b3vec3(c.x, c.y, c.z), radius: r },
+                    );
+                    volume
+                }
+                RagdollColliderSpec::Box { center, half_extents } => {
+                    let c = center * scale;
+                    let half = vec3f(
+                        sane_extent(half_extents.x * scale),
+                        sane_extent(half_extents.y * scale),
+                        sane_extent(half_extents.z * scale),
+                    );
+                    let volume = 8.0 * half.x * half.y * half.z;
+                    shape_def.density = total_mass * body_spec.mass_fraction / volume.max(1.0e-5);
+                    let hull = make_offset_box_hull(
+                        half.x,
+                        half.y,
+                        half.z,
+                        b3vec3(c.x, c.y, c.z),
+                    );
+                    create_hull_shape(&mut self.world, body, &shape_def, &hull);
+                    volume
+                }
+            };
+            debug_assert!(volume.is_finite() && volume > 0.0);
+            live.push(RagdollLiveBody { connection: body_spec.connection.clone(), body });
+        }
+
+        // A child's skeleton-node origin is its joint anchor. Preserve the
+        // authored relative orientation as the neutral spherical-joint frame.
+        for (child, body_spec) in spec.bodies.iter().enumerate() {
+            let Some(parent) = body_spec.parent else { continue };
+            let parent_pose = poses
+                .iter()
+                .find(|p| p.connection == spec.bodies[parent].connection)
+                .expect("validated parent pose");
+            let child_pose = poses
+                .iter()
+                .find(|p| p.connection == body_spec.connection)
+                .expect("validated child pose");
+            let pq = to_b3_quat(parent_pose.rotation);
+            let cq = to_b3_quat(child_pose.rotation);
+            let delta = b3vec3(
+                child_pose.position.x - parent_pose.position.x,
+                child_pose.position.y - parent_pose.position.y,
+                child_pose.position.z - parent_pose.position.z,
+            );
+            let mut joint = default_spherical_joint_def();
+            joint.base.body_id_a = live[parent].body;
+            joint.base.body_id_b = live[child].body;
+            joint.base.local_frame_a = Transform {
+                p: inv_rotate_vector(pq, delta),
+                q: inv_mul_quat(pq, cq),
+            };
+            joint.base.local_frame_b = Transform::IDENTITY;
+            joint.base.collide_connected = false;
+            joint.enable_cone_limit = true;
+            joint.cone_angle = body_spec.cone_angle.clamp(0.01, std::f32::consts::PI);
+            joint.enable_twist_limit = true;
+            joint.lower_twist_angle = body_spec.twist_min;
+            joint.upper_twist_angle = body_spec.twist_max;
+            create_spherical_joint(&mut self.world, &joint);
+        }
+
+        // The inherited linear velocity carries the car hit. A modest tumble
+        // around the horizontal impact normal prevents a perfectly rigid fall.
+        let impulse_body = spec
+            .bodies
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.mass_fraction.total_cmp(&b.mass_fraction))
+            .map_or(roots[0], |(i, _)| i);
+        let impulse_mass = body_get_mass(&self.world, live[impulse_body].body);
+        body_apply_angular_impulse(
+            &mut self.world,
+            live[impulse_body].body,
+            b3vec3(
+                impact.direction.z * impact.kick * impulse_mass * 0.12,
+                0.0,
+                -impact.direction.x * impact.kick * impulse_mass * 0.12,
+            ),
+            true,
+        );
+
+        let was_non_interactive = entity.non_interactive;
+        entity.non_interactive = true;
+        entity.on_floor = false;
+        entity.floor_id = 0;
+        self.ragdolls.push(RagdollInstance {
+            entity_id: entity.id,
+            bodies: live,
+            root: roots[0],
+            age_ticks: 0,
+            settled_ticks: 0,
+            was_non_interactive,
+        });
         true
     }
 }
@@ -570,6 +902,23 @@ fn sync_voxel_colliders(dynamics: &mut RigidDynamics, voxel: Option<&crate::voxe
     dynamics.voxel_bodies = out;
 }
 
+fn prune_orphaned_ragdolls(dynamics: &mut RigidDynamics, entities: &[Entity]) {
+    if dynamics.ragdolls.is_empty() {
+        return;
+    }
+    let old = std::mem::take(&mut dynamics.ragdolls);
+    for ragdoll in old {
+        if crate::world::entity_index_sorted(entities, ragdoll.entity_id).is_some() {
+            dynamics.ragdolls.push(ragdoll);
+        } else {
+            for part in ragdoll.bodies {
+                // Box3D destroys attached joints with either body.
+                destroy_body(&mut dynamics.world, part.body);
+            }
+        }
+    }
+}
+
 /// Diff the (sorted) entity list against the (sorted) mirror: create missing
 /// bodies, destroy orphaned ones, propagate pose/velocity writes, sync
 /// terrain + gravity + voxel chunk colliders. Runs once per tick before the
@@ -582,6 +931,7 @@ pub fn reconcile(
     voxel: Option<&crate::voxel::VoxelField>,
     gravity: f32,
 ) {
+    prune_orphaned_ragdolls(dynamics, entities);
     sync_voxel_colliders(dynamics, voxel);
     if gravity != dynamics.last_gravity {
         world_set_gravity(&mut dynamics.world, b3vec3(0.0, -gravity, 0.0));
@@ -826,12 +1176,14 @@ pub fn step_dynamics(dynamics: &mut RigidDynamics, entities: &mut [Entity]) {
     // A purely static world (menus, dioramas) still skips the step, and
     // box3d never writes back to non-rigids, so mover-only worlds keep their
     // entity state bit-identical to the pre-capsule engine.
-    if !dynamics.mirror.iter().any(|m| {
+    if dynamics.ragdolls.is_empty()
+        && !dynamics.mirror.iter().any(|m| {
         matches!(
             m.kind,
             MirrorKind::Rigid | MirrorKind::Kinematic | MirrorKind::MoverCapsule
         )
-    }) {
+    })
+    {
         return;
     }
     world_step(&mut dynamics.world, TICK_DT, SUBSTEPS);
@@ -854,7 +1206,58 @@ pub fn step_dynamics(dynamics: &mut RigidDynamics, entities: &mut [Entity]) {
         entry.prev_vel = entry.vel;
         entry.vel = e.vel;
     }
+    update_ragdolls(dynamics, entities);
     update_overlaps(dynamics);
+}
+
+fn update_ragdolls(dynamics: &mut RigidDynamics, entities: &mut [Entity]) {
+    let mut remove = Vec::new();
+    for (ri, ragdoll) in dynamics.ragdolls.iter_mut().enumerate() {
+        let Some(at) = crate::world::entity_index_sorted(entities, ragdoll.entity_id) else {
+            remove.push(ri);
+            continue;
+        };
+        ragdoll.age_ticks = ragdoll.age_ticks.saturating_add(1);
+        let root = ragdoll.bodies[ragdoll.root].body;
+        let p = body_get_position(&dynamics.world, root);
+        let v = body_get_linear_velocity(&dynamics.world, root);
+        let e = &mut entities[at];
+        // Character entities store their AABB centre, while the skinned model
+        // and its root node are authored at the feet.
+        e.pos = vec3f(p.x, p.y + e.half.y, p.z);
+        e.vel = vec3f(v.x, v.y, v.z);
+        e.on_floor = false;
+        e.floor_id = 0;
+
+        let settled = ragdoll.bodies.iter().all(|part| {
+            let lv = body_get_linear_velocity(&dynamics.world, part.body);
+            let av = body_get_angular_velocity(&dynamics.world, part.body);
+            lv.x * lv.x + lv.y * lv.y + lv.z * lv.z < 0.09
+                && av.x * av.x + av.y * av.y + av.z * av.z < 0.25
+        });
+        if e.knocked_down == 0 && settled {
+            ragdoll.settled_ticks = ragdoll.settled_ticks.saturating_add(1);
+        } else {
+            ragdoll.settled_ticks = 0;
+        }
+        // Normal recovery waits for the gameplay timer, then for the body to
+        // lie still for [`RAGDOLL_DOWNTIME_TICKS`]. The safety cap prevents a
+        // wedged nonlethal ragdoll from suppressing control forever.
+        if ragdoll.settled_ticks >= RAGDOLL_DOWNTIME_TICKS
+            || (e.knocked_down == 0 && ragdoll.age_ticks >= RAGDOLL_MAX_TICKS)
+        {
+            e.non_interactive = ragdoll.was_non_interactive;
+            e.orient = Quat::default();
+            e.yaw = crate::math::atan2(-v.x, -v.z);
+            remove.push(ri);
+        }
+    }
+    for ri in remove.into_iter().rev() {
+        let ragdoll = dynamics.ragdolls.remove(ri);
+        for part in ragdoll.bodies {
+            destroy_body(&mut dynamics.world, part.body);
+        }
+    }
 }
 
 /// Rebuild the live-overlap set from the sensors' CURRENT overlap arrays
@@ -1253,6 +1656,9 @@ pub fn apply_mover_contacts(dynamics: &mut RigidDynamics, entities: &mut [Entity
             && crate::world::entity_index_sorted(entities, c.rigid_id).is_some()
     });
     for c in &overlaps {
+        if dynamics.ragdoll_active(c.mover_id) {
+            continue;
+        }
         let Some(mover_at) = crate::world::entity_index_sorted(entities, c.mover_id) else {
             continue;
         };
@@ -1291,6 +1697,14 @@ pub fn apply_mover_contacts(dynamics: &mut RigidDynamics, entities: &mut [Entity
                 let ticks =
                     (kick * KNOCKDOWN_TICKS_PER_SPEED).min(KNOCKDOWN_MAX_TICKS as f32) as u16;
                 e.knocked_down = e.knocked_down.max(ticks.max(KNOCKDOWN_MIN_TICKS));
+                if !dynamics.impacts.iter().any(|hit| hit.mover_id == c.mover_id) {
+                    dynamics.impacts.push(MoverImpact {
+                        mover_id: c.mover_id,
+                        rigid_id: c.rigid_id,
+                        direction: n,
+                        kick,
+                    });
+                }
             }
         }
     }
@@ -1337,7 +1751,11 @@ impl Clone for RigidDynamics {
     /// across the round trip, so the mirror table clones verbatim.
     fn clone(&self) -> Self {
         let mut world = create_world(&default_world_def());
-        if !self.mirror.is_empty() || self.terrain_body.is_some() || !self.voxel_bodies.is_empty() {
+        if !self.mirror.is_empty()
+            || self.terrain_body.is_some()
+            || !self.voxel_bodies.is_empty()
+            || !self.ragdolls.is_empty()
+        {
             let mut buf = RecBuffer::new();
             let mut rec = Recording::new();
             let bytes = serialize_world(&self.world, &mut buf, &mut rec);
@@ -1364,6 +1782,8 @@ impl Clone for RigidDynamics {
             // The live overlap set is world state: a rolled-back world must
             // replay the same impulses.
             overlaps: self.overlaps.clone(),
+            impacts: self.impacts.clone(),
+            ragdolls: self.ragdolls.clone(),
         }
     }
 }
@@ -1374,5 +1794,179 @@ impl std::fmt::Debug for RigidDynamics {
             .field("bodies", &self.body_count())
             .field("terrain", &self.terrain_rev)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod ragdoll_tests {
+    use super::*;
+
+    fn two_body_spec() -> RagdollSpec {
+        RagdollSpec {
+            bodies: vec![
+                RagdollBodySpec {
+                    connection: "root".into(),
+                    parent: None,
+                    collider: RagdollColliderSpec::Box {
+                        center: vec3f(0.0, 0.25, 0.0),
+                        half_extents: vec3f(0.2, 0.25, 0.15),
+                    },
+                    mass_fraction: 0.7,
+                    cone_angle: 0.0,
+                    twist_min: 0.0,
+                    twist_max: 0.0,
+                },
+                RagdollBodySpec {
+                    connection: "child".into(),
+                    parent: Some(0),
+                    collider: RagdollColliderSpec::Sphere {
+                        center: vec3f(0.0, 0.15, 0.0),
+                        radius: 0.18,
+                    },
+                    mass_fraction: 0.3,
+                    cone_angle: 0.7,
+                    twist_min: -0.3,
+                    twist_max: 0.3,
+                },
+            ],
+        }
+    }
+
+    fn two_body_poses() -> Vec<RagdollBodyPose> {
+        vec![
+            RagdollBodyPose {
+                connection: "root".into(),
+                position: vec3f(0.0, 2.0, 0.0),
+                rotation: Quat::default(),
+            },
+            RagdollBodyPose {
+                connection: "child".into(),
+                position: vec3f(0.0, 2.6, 0.0),
+                rotation: Quat::default(),
+            },
+        ]
+    }
+
+    #[test]
+    fn articulation_activates_clones_steps_and_cleans_up() {
+        let mut dynamics = RigidDynamics::new();
+        let mut entity = Entity {
+            id: 7,
+            kind: BodyKind::Mover,
+            half: vec3f(0.3, 0.9, 0.3),
+            collide: true,
+            gravity_scale: 1.0,
+            push_mass: 2.0,
+            knocked_down: 45,
+            ..Default::default()
+        };
+        let impact = MoverImpact {
+            mover_id: 7,
+            rigid_id: 99,
+            direction: vec3f(1.0, 0.0, 0.0),
+            kick: 6.0,
+        };
+        assert!(dynamics.activate_ragdoll(
+            &mut entity,
+            &two_body_spec(),
+            &two_body_poses(),
+            1.0,
+            impact,
+        ));
+        assert!(entity.non_interactive);
+        assert!(dynamics.ragdoll_active(7));
+        assert_eq!(dynamics.body_count(), 2);
+        assert_eq!(dynamics.ragdoll_body_poses(7).len(), 2);
+
+        let mut cloned = dynamics.clone();
+        let mut entities = vec![entity];
+        assert_eq!(cloned.body_count(), 2);
+        step_dynamics(&mut cloned, &mut entities);
+        assert!(cloned.ragdoll_active(7));
+        assert!(entities[0].pos.y.is_finite());
+
+        reconcile(&mut cloned, &[], None, None, None, 9.8);
+        assert!(!cloned.ragdoll_active(7));
+        assert_eq!(cloned.body_count(), 0);
+    }
+
+    /// A knocked-down character stays down for a beat. The ragdoll stops
+    /// moving almost immediately once it lands, so without a downtime the
+    /// villager a car just hit popped straight back onto their feet — the
+    /// hit read as a glitch rather than as a knockdown.
+    #[test]
+    fn a_settled_ragdoll_stays_down_for_the_downtime() {
+        let mut dynamics = RigidDynamics::new();
+        // No gravity, no starting velocity and a grazing contact that
+        // imparts nothing: the bodies are already at rest, so this measures
+        // the downtime itself and nothing else.
+        let mut entity = Entity {
+            id: 7,
+            kind: BodyKind::Mover,
+            half: vec3f(0.3, 0.9, 0.3),
+            collide: true,
+            gravity_scale: 0.0,
+            push_mass: 2.0,
+            knocked_down: 0,
+            ..Default::default()
+        };
+        assert!(dynamics.activate_ragdoll(
+            &mut entity,
+            &two_body_spec(),
+            &two_body_poses(),
+            1.0,
+            MoverImpact {
+                mover_id: 7,
+                rigid_id: 99,
+                direction: vec3f(1.0, 0.0, 0.0),
+                kick: 0.0,
+            },
+        ));
+        let mut entities = vec![entity];
+        let mut down_for = 0u32;
+        while dynamics.ragdoll_active(7) && down_for < RAGDOLL_MAX_TICKS {
+            step_dynamics(&mut dynamics, &mut entities);
+            down_for += 1;
+            assert_eq!(
+                entities[0].non_interactive,
+                dynamics.ragdoll_active(7),
+                "control state disagrees with the articulation at tick {down_for}"
+            );
+        }
+        assert!(!dynamics.ragdoll_active(7), "never stood up");
+        assert!(
+            down_for >= RAGDOLL_DOWNTIME_TICKS as u32,
+            "stood up after {down_for} ticks, before the {RAGDOLL_DOWNTIME_TICKS}-tick downtime"
+        );
+        // A settled body should need the downtime and little else; the
+        // safety cap must not be what ends an ordinary knockdown.
+        assert!(
+            down_for < RAGDOLL_MAX_TICKS,
+            "only the safety cap stood this ragdoll up"
+        );
+        assert!(!entities[0].non_interactive, "control was not handed back");
+        assert_eq!(dynamics.body_count(), 0, "ragdoll bodies outlived the ragdoll");
+    }
+
+    #[test]
+    fn malformed_articulation_is_atomic() {
+        let mut dynamics = RigidDynamics::new();
+        let mut entity = Entity { id: 7, kind: BodyKind::Mover, ..Default::default() };
+        let mut spec = two_body_spec();
+        spec.bodies[1].parent = Some(1);
+        assert!(!dynamics.activate_ragdoll(
+            &mut entity,
+            &spec,
+            &two_body_poses(),
+            1.0,
+            MoverImpact {
+                mover_id: 7,
+                rigid_id: 99,
+                direction: vec3f(1.0, 0.0, 0.0),
+                kick: 6.0,
+            },
+        ));
+        assert_eq!(dynamics.body_count(), 0);
+        assert!(!entity.non_interactive);
     }
 }
