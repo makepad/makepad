@@ -442,10 +442,17 @@ script_mod! {
                 vec2(0.0, 0.0),
                 vec2(1.0, 1.0)
             )
-            let env = self.tex0.sample_as_bgra(suv).xyz * (0.45 + 0.85 * lit)
+            // CLAMPED LUMINANCE TRANSFER (the ribbons lesson): a chrome
+            // lattice honestly mirroring a white sky, under this family's
+            // bloom, turned the whole manifold into one white blob. Divide
+            // the reflection down by its own luminance so bright frames
+            // compress and the pipe silhouettes survive.
+            let e0 = self.tex0.sample_as_bgra(suv).xyz
+            let el = clamp(dot(e0, vec3(0.299, 0.587, 0.114)), 0.0, 1.5)
+            let env = e0 * ((0.30 + 0.55 * lit) / (1.0 + el * 1.2))
             let body = (self.v_color.xyz * (lit + fill)).mix(env, clamp(cm * 1.25, 0.0, 1.0))
             let rgb = (body * self.fog.y
-                + env * ((rim * 2.0 + spec * 1.2) * cm)
+                + env * ((rim * 1.1 + spec * 0.7) * cm)
                 + self.col_c.xyz * (spec + rim) + hot)
                 .mix(self.col_bg.xyz, 1.0 - fogf)
             return vec4(rgb, 1.0)
