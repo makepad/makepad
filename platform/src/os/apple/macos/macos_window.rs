@@ -164,12 +164,14 @@ impl MacosWindow {
     unsafe fn defang_titlebar_container(&mut self) {
         let subclass = get_macos_class_global().titlebar_container;
         if subclass.is_null() {
+            crate::log!("defang: NSTitlebarContainerView class missing — native titlebar drags stay live");
             return;
         }
         // 0 = NSWindowCloseButton; its superview chain is
         // NSTitlebarView -> NSTitlebarContainerView.
         let close: ObjcId = msg_send![self.window, standardWindowButton: 0u64];
         if close == nil {
+            crate::log!("defang: no close button — native titlebar drags stay live");
             return;
         }
         let titlebar: ObjcId = msg_send![close, superview];
@@ -183,9 +185,17 @@ impl MacosWindow {
         let is_container: bool =
             msg_send![container, isKindOfClass: Class::get("NSTitlebarContainerView").unwrap()];
         if !is_container {
+            let cls: ObjcId = msg_send![container, class];
+            let name: *const std::os::raw::c_char = {
+                let s: ObjcId = msg_send![cls, description];
+                msg_send![s, UTF8String]
+            };
+            let name = std::ffi::CStr::from_ptr(name).to_string_lossy().to_string();
+            crate::log!("defang: container is {name}, not NSTitlebarContainerView — native drags stay live");
             return;
         }
         object_setClass(container, subclass as ObjcId);
+        crate::log!("defang: titlebar container swapped — WindowDragQuery decides drags");
     }
 
     pub fn set_window_level(&mut self, level: MacosWindowLevel) {
