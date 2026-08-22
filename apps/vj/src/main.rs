@@ -2338,9 +2338,9 @@ impl Default for ClipProfile {
             loop_on: true,
             pingpong: false,
             trim: (0.0, 1.0),
-            // Loops beat-sync at ♪1 by default — the surface follows the
-            // music unless the operator frees it.
-            rate: 1.0,
+            // Loops beat-sync at 4 beats a sweep by default — a bar of
+            // motion at 4/4, the natural read for a typical clip at 120.
+            rate: 4.0,
             muted: true,
             sync: true,
         }
@@ -4261,8 +4261,8 @@ pub struct App {
     /// or doubles on top).
     #[rust([1u32, 1u32])]
     slot_sync_beats: [u32; 2],
-    /// Per-deck loop speed relative to the beat fit: 0.5 / 1 / 2 / 4.
-    #[rust([1.0f32, 1.0f32])]
+    /// The beat chip, literally BEATS PER SWEEP: 8 / 4 / 2 / 1.
+    #[rust([4.0f32, 4.0f32])]
     slot_beat_rate: [f32; 2],
 
     /// Cue-well drag in progress: (slot, last pointer position).
@@ -6077,11 +6077,32 @@ p2 {}
         if !self.flow_active(i) {
             return;
         }
-        let rate = self.slot_flow_rate[i];
+        // THE SWEEP LAW reaches the warp clock too: the trim window is
+        // the range, one direction sweep spans the chip's beats, and a
+        // scratch hand overrides everything. (Before this the warp free-
+        // ran the whole clip — the brackets did NOTHING on an enhanced
+        // deck, which is exactly what the operator reported.)
+        let (t_in, t_out) = self.slot_trim[i];
         let bounce = self.slot_pingpong[i];
+        let scratching = self.slot_scratch[i].is_some();
+        let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
+        let beats = self.slot_beat_rate[i].round().clamp(1.0, 8.0) as f64;
+        let beat_secs = self
+            .current_beat()
+            .map(|beat| beat.period.as_secs_f64())
+            .unwrap_or(0.5);
+        let hand_rate = self.slot_flow_rate[i];
         self.flow_view(cx, slot, |cx, view| {
-            view.set_rate(rate);
+            view.set_window(t_in, t_out);
             view.set_bounce(bounce);
+            let rate = if scratching {
+                hand_rate
+            } else if synced {
+                view.law_rate(beats * beat_secs)
+            } else {
+                1.0
+            };
+            view.set_rate(rate);
             view.advance(cx, dt);
         });
     }
@@ -6103,10 +6124,10 @@ p2 {}
             return "—";
         }
         match rate {
-            r if r < 0.75 => ".5",
-            r if r < 1.5 => "1",
-            r if r < 3.0 => "2",
-            _ => "4",
+            r if r > 6.0 => "8",
+            r if r > 3.0 => "4",
+            r if r > 1.5 => "2",
+            _ => "1",
         }
     }
 
@@ -6292,8 +6313,11 @@ p2 {}
         let i = slot.index();
         if pos == 0.0 {
             if self.slot_scratch[i].take().is_some() {
-                // Release: rate + beat transport + the chip face all come
-                // back from the one authority.
+                // Release: the sweep re-engages from wherever the hand
+                // left the picture, then re-locks to the grid.
+                if let Some(player) = self.players[i].as_mut() {
+                    player.clear_scratch();
+                }
                 self.apply_slot_beat_sync(slot);
                 self.strip_shape[i] = None;
                 self.sync_slot_controls_ui(cx);
@@ -6313,9 +6337,10 @@ p2 {}
             // The warp clock runs any rate, both directions.
             self.slot_flow_rate[i] = mag * if pos < 0.0 { -1.0 } else { 1.0 };
         } else if let Some(player) = self.players[i].as_mut() {
-            player.set_beat_transport(false);
-            let rate = if pos > 0.0 { mag } else { (1.0 / mag).max(MIN_VIDEO_PLAYBACK_RATE) };
-            player.set_playback_rate(rate);
+            // Signed shuttle straight into the transport: negative IS
+            // reverse (the old set_playback_rate path could only slow a
+            // forward pacer — a backward scratch played slow-forward).
+            player.set_scratch(mag * if pos < 0.0 { -1.0 } else { 1.0 });
         }
         self.video_pump = cx.new_next_frame();
     }
@@ -6390,16 +6415,28 @@ p2 {}
             return;
         }
         let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
-        let chip = self.slot_beat_rate[i] as f64;
+        // THE CHIP IS BEATS PER SWEEP now (8/4/2/1) — never a playback
+        // rate. The player's pacer runs at 1.0 and the sweep's own step
+        // math sets the on-screen speed from the range and the grid.
+        let beats = self.slot_beat_rate[i].round().clamp(1.0, 8.0) as u8;
+        let hint = self
+            .current_beat()
+            .map(|beat| (beat.period.as_secs_f64() * 1e7) as i64)
+            .unwrap_or(0);
         self.applied_fit[i] = None;
         if let Some(player) = self.players[i].as_mut() {
-            if (player.playback_rate() - chip).abs() > 0.0015 {
-                player.set_playback_rate(chip);
+            if (player.playback_rate() - 1.0).abs() > 0.0015 {
+                player.set_playback_rate(1.0);
             }
+            player.set_beats_per_sweep(beats);
+            player.set_beat_hint(hint);
             player.set_beat_transport(synced);
         }
-        // FLOW WARP mirrors the same intent: constant chip rate.
-        self.slot_flow_rate[i] = chip;
+        // FLOW WARP: the law rate is derived per-pump (pump_flow); the
+        // stored rate only carries the scratch hand.
+        if self.slot_scratch[i].is_none() {
+            self.slot_flow_rate[i] = 1.0;
+        }
     }
 
     /// Alias kept for its many call sites; the ONE authority lives above.
@@ -8298,7 +8335,18 @@ p2 {}
                                         .unwrap_or_default();
                                     self.slot_loop[index] = profile.loop_on;
                                     self.slot_pingpong[index] = profile.pingpong;
-                                    self.slot_beat_rate[index] = profile.rate;
+                                    // The chip ladder is 8/4/2/1 now; a
+                                    // stale profile (old .5/1/2/4 scale)
+                                    // just falls to the default — no
+                                    // migration by design.
+                                    self.slot_beat_rate[index] =
+                                        if [8.0f32, 4.0, 2.0, 1.0]
+                                            .contains(&profile.rate)
+                                        {
+                                            profile.rate
+                                        } else {
+                                            4.0
+                                        };
                                     self.slot_beat_sync[index] = profile.sync;
                                     self.slot_sync_beats[index] = 1;
                                     self.slot_video_muted[index] = profile.muted;
@@ -13700,18 +13748,19 @@ impl MatchEvent for App {
                 self.save_clip_profile(slot);
                 self.video_pump = cx.new_next_frame();
             }
-            // THE ♪ CHIP — one control for sync mode + rate + status:
-            // click cycles ♪.5 → ♪1 → ♪2 → ♪4 (beat-synced, lit) → ♪—
-            // (free-running, dim) → ♪.5 …
+            // THE BEAT CHIP — the number IS the beats one sweep spans:
+            // click cycles 8 → 4 → 2 → 1 (beat-synced, lit) → — (free,
+            // dim) → 8 … (8 = slowest, a sweep stretched over 8 beats;
+            // 1 = a sweep per beat.)
             if self.ui.button(cx, Self::deck_rate_path(slot)).clicked(actions) {
                 let (sync, rate) = if !self.slot_beat_sync[i] {
-                    (true, 0.5)
+                    (true, 8.0)
                 } else {
                     match self.slot_beat_rate[i] {
-                        r if r < 0.75 => (true, 1.0),
-                        r if r < 1.5 => (true, 2.0),
-                        r if r < 3.0 => (true, 4.0),
-                        _ => (false, 1.0),
+                        r if r > 6.0 => (true, 4.0),
+                        r if r > 3.0 => (true, 2.0),
+                        r if r > 1.5 => (true, 1.0),
+                        _ => (false, 4.0),
                     }
                 };
                 self.slot_beat_sync[i] = sync;

@@ -93,31 +93,42 @@ pub fn endpoint_stride(frames: u64, pairs: u32) -> Option<usize> {
     Some((gaps / pairs) as usize)
 }
 
-/// Advance a pair-space position by `delta` (already rate·pps·dt, signed).
-/// Loop mode wraps over [0, pairs); bounce reflects at both ends, flipping
-/// `dir` (the triangle wave). Returns (position, dir).
-pub fn advance_position(pos: f64, dir: f64, delta: f64, pairs: f64, bounce: bool) -> (f64, f64) {
-    if pairs <= 0.0 {
-        return (0.0, 1.0);
+/// Advance a pair-space position by `delta` (already rate·pps·dt, signed)
+/// WITHIN the window [lo, hi] — the trim brackets mapped into pair space.
+/// Loop mode wraps over the window; bounce reflects at both of its ends,
+/// flipping `dir` (the triangle wave). A position outside the window (a
+/// live trim just moved it) is folded in first. Returns (position, dir).
+pub fn advance_position(
+    pos: f64,
+    dir: f64,
+    delta: f64,
+    lo: f64,
+    hi: f64,
+    bounce: bool,
+) -> (f64, f64) {
+    let span = hi - lo;
+    if !(span > 0.0) {
+        return (lo.max(0.0), 1.0);
     }
+    let pos = pos.clamp(lo, hi);
     if !bounce {
-        return ((pos + delta).rem_euclid(pairs), dir);
+        return (lo + (pos - lo + delta).rem_euclid(span), dir);
     }
     let mut p = pos + delta * dir;
     let mut dir = dir;
-    // A huge delta on a tiny clip can overshoot several reflections.
+    // A huge delta on a tiny window can overshoot several reflections.
     for _ in 0..16 {
-        if p < 0.0 {
-            p = -p;
+        if p < lo {
+            p = 2.0 * lo - p;
             dir = -dir;
-        } else if p > pairs {
-            p = 2.0 * pairs - p;
+        } else if p > hi {
+            p = 2.0 * hi - p;
             dir = -dir;
         } else {
             break;
         }
     }
-    (p.clamp(0.0, pairs), dir)
+    (p.clamp(lo, hi), dir)
 }
 
 /// Pack one pair's planar samples (4 planes i8 flow, 1 plane u8 mask; see
@@ -417,6 +428,9 @@ pub struct FlowWarpView {
     /// Bounce reflection state (+1 forward leg, -1 reverse leg).
     #[rust(1.0f64)]
     dir: f64,
+    /// Trim window as clip fractions (the brackets); (0,1) = whole clip.
+    #[rust((0.0f64, 1.0f64))]
+    window: (f64, f64),
     #[rust]
     bounce: bool,
     #[rust]
@@ -562,12 +576,55 @@ impl FlowWarpView {
             return;
         }
         let pairs = clip.data.pairs as f64;
+        let (lo, hi) = self.window_pairs(pairs);
         let delta = self.rate * clip.data.pairs_per_sec * dt;
         let (position, dir) =
-            advance_position(self.position, self.dir, delta, pairs, self.bounce);
+            advance_position(self.position, self.dir, delta, lo, hi, self.bounce);
         self.position = position;
         self.dir = dir;
         self.area.redraw(cx);
+    }
+
+    /// The trim window (fractions of the clip) in pair space.
+    fn window_pairs(&self, pairs: f64) -> (f64, f64) {
+        let lo = self.window.0.clamp(0.0, 1.0) * pairs;
+        let hi = self.window.1.clamp(0.0, 1.0) * pairs;
+        if hi - lo > 1e-6 { (lo, hi) } else { (0.0, pairs) }
+    }
+
+    /// The trim brackets, as fractions. A window CHANGE remaps the
+    /// position PROPORTIONALLY — the sweep-phase law: the picture keeps
+    /// its progress through the range, it never clamps to an edge and
+    /// never resets.
+    pub fn set_window(&mut self, lo: f64, hi: f64) {
+        let old = self.window;
+        if (old.0 - lo).abs() < 1e-9 && (old.1 - hi).abs() < 1e-9 {
+            return;
+        }
+        if let Some(pairs) = self.clip.as_ref().map(|c| c.data.pairs as f64) {
+            let (olo, ohi) = (old.0 * pairs, old.1 * pairs);
+            let ospan = (ohi - olo).max(1e-9);
+            let phase = ((self.position - olo) / ospan).clamp(0.0, 1.0);
+            let (nlo, nhi) = (lo.clamp(0.0, 1.0) * pairs, hi.clamp(0.0, 1.0) * pairs);
+            if nhi - nlo > 1e-6 {
+                self.position = nlo + phase * (nhi - nlo);
+            }
+        }
+        self.window = (lo, hi);
+    }
+
+    /// THE SWEEP LAW's rate for this clip: the rate that carries one
+    /// full window sweep in `sweep_secs` (the chip's beats × the beat
+    /// period). In natural-rate units, ready for `set_rate`.
+    pub fn law_rate(&self, sweep_secs: f64) -> f64 {
+        let Some(clip) = self.clip.as_ref() else { return 1.0 };
+        let pairs = clip.data.pairs as f64;
+        let (lo, hi) = self.window_pairs(pairs);
+        let pps = clip.data.pairs_per_sec.max(1e-6);
+        if sweep_secs <= 0.0 {
+            return 1.0;
+        }
+        (hi - lo) / (pps * sweep_secs)
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
@@ -737,29 +794,29 @@ mod tests {
 
     #[test]
     fn loop_position_wraps_both_directions() {
-        let (p, d) = advance_position(139.5, 1.0, 1.0, 140.0, false);
+        let (p, d) = advance_position(139.5, 1.0, 1.0, 0.0, 140.0, false);
         assert!((p - 0.5).abs() < 1e-9 && d == 1.0);
         // Negative rate wraps below zero.
-        let (p, _) = advance_position(0.25, 1.0, -1.0, 140.0, false);
+        let (p, _) = advance_position(0.25, 1.0, -1.0, 0.0, 140.0, false);
         assert!((p - 139.25).abs() < 1e-9);
     }
 
     #[test]
     fn bounce_reflects_and_flips_direction() {
         // Forward leg hits the end and reflects.
-        let (p, d) = advance_position(139.5, 1.0, 1.0, 140.0, true);
+        let (p, d) = advance_position(139.5, 1.0, 1.0, 0.0, 140.0, true);
         assert!((p - 139.5).abs() < 1e-9, "reflected to {p}");
         assert_eq!(d, -1.0);
         // Reverse leg hits zero and reflects forward.
-        let (p, d) = advance_position(0.25, -1.0, 1.0, 140.0, true);
+        let (p, d) = advance_position(0.25, -1.0, 1.0, 0.0, 140.0, true);
         assert!((p - 0.75).abs() < 1e-9, "reflected to {p}");
         assert_eq!(d, 1.0);
         // Negative rate on a forward leg walks backwards (delta carries the
         // sign; dir carries the reflection).
-        let (p, d) = advance_position(10.0, 1.0, -0.5, 140.0, true);
+        let (p, d) = advance_position(10.0, 1.0, -0.5, 0.0, 140.0, true);
         assert!((p - 9.5).abs() < 1e-9 && d == 1.0);
         // A huge delta on a tiny clip settles inside the range.
-        let (p, _) = advance_position(0.5, 1.0, 7.3, 2.0, true);
+        let (p, _) = advance_position(0.5, 1.0, 7.3, 0.0, 2.0, true);
         assert!((0.0..=2.0).contains(&p), "settled at {p}");
     }
 

@@ -264,6 +264,21 @@ struct SlotShared {
     /// beat HOLDS there; the next pulse launches the next sweep.
     beat_transport: AtomicBool,
     beat_pulse: AtomicU64,
+    /// BEATS PER SWEEP — the rate chip's value, literally (8/4/2/1: 8 =
+    /// one sweep stretched across eight beats, 1 = a sweep per beat).
+    beats_per_sweep: AtomicU8,
+    /// The beat period in presentation pts, HINTED by the app at cue and
+    /// on tempo changes so the law governs from the very first frame —
+    /// the pulse-learned period refines it but nothing waits for it.
+    beat_hint_100ns: AtomicI64,
+    /// SCRATCH override: while the operator shuttles by hand the beat
+    /// sweep disengages; sign and magnitude are natural-rate units.
+    scratch_active: AtomicBool,
+    scratch_rate_bits: AtomicU64,
+    /// The last PACING pts pushed to the ring, whatever stamped it — the
+    /// law-paced first pass and the sweep tiers hand the presentation
+    /// clock across seamlessly by continuing from here.
+    pace_tail_100ns: AtomicI64,
     /// Bumped by every trim change: a decoded-frame cache built under the
     /// old bounds only covers the old range, so the tiers hand control
     /// back and the next pass rebuilds.
@@ -325,6 +340,11 @@ impl SlotPlayer {
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
             beat_pulse: AtomicU64::new(0),
+            beats_per_sweep: AtomicU8::new(4),
+            beat_hint_100ns: AtomicI64::new(0),
+            scratch_active: AtomicBool::new(false),
+            scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(0),
             video_ready: AtomicBool::new(false),
@@ -473,6 +493,37 @@ impl SlotPlayer {
         self.shared.beat_transport.store(on, Ordering::Release);
     }
 
+    /// The rate chip, literally: BEATS PER SWEEP (8/4/2/1). Values are
+    /// clamped into that ladder; anything stale (an old 0.5x profile)
+    /// falls to the default 4.
+    pub fn set_beats_per_sweep(&mut self, beats: u8) {
+        let beats = if [8u8, 4, 2, 1].contains(&beats) { beats } else { 4 };
+        self.shared.beats_per_sweep.store(beats, Ordering::Release);
+    }
+
+    /// Beat-period hint in presentation pts (wall period × playback
+    /// rate): lets the sweep run law-paced from the FIRST frame of a cue
+    /// instead of free-wheeling one natural pass while it learns the
+    /// grid from pulses.
+    pub fn set_beat_hint(&mut self, period_100ns: i64) {
+        self.shared.beat_hint_100ns.store(period_100ns.max(0), Ordering::Release);
+    }
+
+    /// Manual SCRATCH shuttle: engage with a signed natural-rate factor
+    /// (+1 = natural forward, -2 = double-speed reverse). While active
+    /// the beat sweep disengages and the picture follows the hand within
+    /// the trim window, clamping at its edges. `clear_scratch` releases
+    /// — the sweep re-engages FROM THE CURRENT POSITION per the law (no
+    /// jump), re-locking to the grid over the next beats.
+    pub fn set_scratch(&mut self, rate: f64) {
+        self.shared.scratch_rate_bits.store(rate.to_bits(), Ordering::Release);
+        self.shared.scratch_active.store(true, Ordering::Release);
+    }
+
+    pub fn clear_scratch(&mut self) {
+        self.shared.scratch_active.store(false, Ordering::Release);
+    }
+
     /// One beat boundary: the transport turns/wraps NOW.
     pub fn beat_pulse(&mut self) {
         self.shared.beat_pulse.fetch_add(1, Ordering::AcqRel);
@@ -532,6 +583,14 @@ impl SlotPlayer {
         // clock — every wrapped pass was instantly "due" and the ring
         // drained at poll speed, a 200fps flicker instead of a loop.
         if first_pts + WRAP_MARGIN_100NS < self.last_pts {
+            self.base_media_100ns = first_pts;
+            self.clock_base = Some(Instant::now());
+        }
+        // ...and a FORWARD jump is a restart too: a transport handoff
+        // that lands on a farther pts must present NOW, not stall until
+        // the clock walks the gap (the stall scales with 1/rate — at a
+        // slow chip it read as playback stopping dead).
+        if first_pts > self.last_pts + 5_000_000 {
             self.base_media_100ns = first_pts;
             self.clock_base = Some(Instant::now());
         }
@@ -603,6 +662,11 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     // Latched when this decoder's seek fails: never retry a broken seam.
     let mut seek_bounce_broken = false;
     let mut trim_epoch_seen = shared.trim_epoch.load(Ordering::Acquire);
+    // Law-paced first pass state: the last REAL video pts seen and the
+    // last sane real inter-frame delta (used across wrap seams, where
+    // the real pts jump backward).
+    let mut last_real_pts: Option<i64> = None;
+    let mut last_real_delta: i64 = 416_667;
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -624,7 +688,12 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             pingpong_cache.clear();
             pingpong_cache_bytes = 0;
             pingpong_cache_complete = false;
-            pingpong_cache_partial = false;
+            // A post-SEEK pass covers target→OUT, not the window: it may
+            // never declare a complete cache (a scrub used to mint a
+            // tail-only cache the sweep then mapped the WHOLE trim onto —
+            // the "loops only the last third" lie). The wrap after this
+            // pass rebuilds from live IN and THAT pass completes.
+            pingpong_cache_partial = true;
             pass_frames = 0;
             match VideoFileDecoder::open(&path) {
                 Ok(d) => {
@@ -792,7 +861,56 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             // A frame past OUT falls into the next arm: the OUT handle IS
             // end-of-stream for every mode.
             Ok(Some(frame)) if frame.pts_100ns < trim_out => {
-                let cached = push_frame(&shared, frame, &mut rgb_scratch);
+                // THE LAW FROM THE FIRST FRAME: when the sweep transport
+                // owns this deck and the window is cache-able, the very
+                // first (cache-building) pass is already PACED like the
+                // sweep — real clip pts scaled so the pass spans the
+                // chip's beats — instead of one natural-rate loop that
+                // jarringly snaps to law speed when the cache completes.
+                // The compression is bounded (decode must keep up), and
+                // an over-budget window streams natural as before.
+                let real_pts = frame.pts_100ns;
+                let real_delta = match last_real_pts {
+                    Some(prev) if real_pts > prev && real_pts - prev < 10_000_000 => {
+                        real_pts - prev
+                    }
+                    _ => last_real_delta,
+                };
+                last_real_delta = real_delta.max(1);
+                let pace = {
+                    let transport =
+                        shared.beat_transport.load(Ordering::Acquire)
+                            && !shared.scratch_active.load(Ordering::Acquire);
+                    let hint = shared.beat_hint_100ns.load(Ordering::Acquire);
+                    let window = (trim_out.min(info.duration_100ns.max(1)) - trim_in)
+                        .max(1) as f64;
+                    let frame_bytes = (frame.width as usize)
+                        .saturating_mul(frame.height as usize)
+                        .saturating_mul(4);
+                    let cacheable = (window / last_real_delta as f64)
+                        * frame_bytes as f64
+                        <= MAX_PINGPONG_CACHE_BYTES as f64;
+                    if transport && hint > 0 && cacheable {
+                        let beats = shared
+                            .beats_per_sweep
+                            .load(Ordering::Acquire)
+                            .max(1) as f64;
+                        let scale =
+                            ((beats * hint as f64) / window).clamp(0.33, 32.0);
+                        let tail =
+                            shared.pace_tail_100ns.load(Ordering::Acquire);
+                        let base = match last_real_pts {
+                            Some(_) if tail > 0 => tail,
+                            _ => real_pts,
+                        };
+                        Some(base + ((real_delta as f64 * scale) as i64).max(1))
+                    } else {
+                        None
+                    }
+                };
+                last_real_pts = Some(real_pts);
+                let cached =
+                    push_frame_paced(&shared, frame, &mut rgb_scratch, pace);
                 pass_frames += 1;
                 if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::Once
                     && !pingpong_over_budget
@@ -841,7 +959,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     shared.muted.load(Ordering::Acquire),
                     mode,
                 );
-                if mode != PlayMode::Once && pingpong_cache_complete && silent {
+               if mode != PlayMode::Once && pingpong_cache_complete && silent {
                     // The whole clip is in memory and nothing needs the
                     // audio decoder: repeat it straight from the cache —
                     // end to start with no decoder reopen, which is what
@@ -890,6 +1008,12 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // what made every wrap of a streaming loop hiccup.
                     // Decoders that cannot seek fall to the reopen below
                     // unchanged (the pre-IN discard arm walks them up).
+                    // LIVE bounds, read NOW: the local was captured before
+                    // a possibly minutes-long cache repeat, and wrapping
+                    // to a stale IN rebuilt the old window forever (grow
+                    // the trim, nothing changes — the disconnect).
+                    let trim_in =
+                        shared.trim_in_100ns.load(Ordering::Acquire).max(0);
                     if decoder.seek(trim_in).is_ok() {
                         audio_eos = !info.has_audio;
                         continue;
@@ -989,13 +1113,31 @@ fn push_frame(
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
     rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
+    push_frame_paced(shared, frame, rgb_scratch, None)
+}
+
+/// Like [`push_frame`], but the ring copy may carry a synthetic PACING
+/// pts (the law-paced first pass) while the returned frame — what the
+/// repeat cache stores — always keeps the REAL clip pts.
+fn push_frame_paced(
+    shared: &Arc<SlotShared>,
+    frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
+    rgb_scratch: &mut Vec<u8>,
+    pace_pts: Option<i64>,
+) -> Frame {
     let converted = convert_frame(frame, rgb_scratch);
     let out = Frame {
         pts_100ns: converted.pts_100ns,
         clip_100ns: converted.clip_100ns,
         bgra: converted.bgra.clone(),
     };
-    shared.frames.lock().unwrap().push_back(converted);
+    let ring = Frame {
+        pts_100ns: pace_pts.unwrap_or(converted.pts_100ns),
+        clip_100ns: converted.clip_100ns,
+        bgra: converted.bgra,
+    };
+    shared.pace_tail_100ns.store(ring.pts_100ns, Ordering::Release);
+    shared.frames.lock().unwrap().push_back(ring);
     shared.video_ready.store(true, Ordering::Release);
     out
 }
@@ -1078,14 +1220,14 @@ fn advance_sweep(
 
 /// The beat lock's only corrective authority: a bounded phase NUDGE.
 /// At each observed pulse the sweep phase should sit on a grid multiple
-/// (`m` = 1 for chips ≥ 1 — a 2x sweep lands on halves AND wholes — and
-/// `m` = chip for slow chips, whose one sweep spans several beats).
+/// of `m` = 1/beats-per-sweep — a 4-beat sweep passes a beat at every
+/// quarter of its phase, and each must land on the pulse.
 /// The returned signed nudge walks the phase toward the nearest
 /// multiple, clamped to ±2% of a sweep per pulse: drift from rounding or
 /// a rate flip converges over a few beats, and the correction is far too
 /// small to ever read as a skip. NEVER a snap — a snap is a teleport.
-fn beat_phase_nudge(phase_at_beat: f64, rate: f64) -> f64 {
-    let m = rate.clamp(0.05, 1.0);
+fn beat_phase_nudge(phase_at_beat: f64, beats_per_sweep: f64) -> f64 {
+    let m = (1.0 / beats_per_sweep.max(1.0)).clamp(0.05, 1.0);
     let err = (phase_at_beat / m).round() * m - phase_at_beat;
     err.clamp(-0.02, 0.02)
 }
@@ -1098,7 +1240,15 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let mut deltas: Vec<i64> = cache.windows(2).map(|w| w[1].pts_100ns - w[0].pts_100ns).collect();
     deltas.sort_unstable();
     let delta = deltas[deltas.len() / 2].max(1);
-    let mut synth_pts = cache.last().map(|f| f.pts_100ns).unwrap_or(0);
+    // Continue the PACING clock from wherever the ring left it — the
+    // law-paced first pass runs a compressed/stretched pts domain, and
+    // starting from the cache's REAL tail would jump the pacer forward
+    // (a stall exactly as long as the compression saved).
+    let mut synth_pts = {
+        let tail = shared.pace_tail_100ns.load(Ordering::Acquire);
+        let real = cache.last().map(|f| f.pts_100ns).unwrap_or(0);
+        if tail > 0 { tail } else { real }
+    };
     let n = cache.len();
     let mut idx = n - 1;
     let mut forward = false;
@@ -1111,6 +1261,8 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let mut beat_anchor_pts: Option<i64> = None;
     let mut beat_media: i64 = 0;
     let mut transport_was_on = false;
+    let mut scratch_was_on = false;
+    let mut scratch_pos = 0f64;
     // Trim changes do NOT bounce control back here: the IN/OUT bounds are
     // read LIVE each frame below, so a shrinking range just tightens the
     // space the repeat moves in — playback never resets. Control only goes
@@ -1156,6 +1308,33 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
         let lo = cache.partition_point(|f| f.pts_100ns < t_in).min(n - 1);
         let hi = cache.partition_point(|f| f.pts_100ns < t_out).clamp(lo + 1, n);
+        if shared.scratch_active.load(Ordering::Acquire) {
+            // SCRATCH: the hand owns the transport. Follow it within the
+            // trim window, clamp at the edges, and mark the sweep
+            // disengaged so release re-engages FROM THIS POSITION.
+            if !scratch_was_on {
+                scratch_was_on = true;
+                scratch_pos = idx.clamp(lo, hi - 1) as f64;
+            }
+            let srate = f64::from_bits(
+                shared.scratch_rate_bits.load(Ordering::Acquire),
+            )
+            .clamp(-8.0, 8.0);
+            scratch_pos =
+                (scratch_pos + srate).clamp(lo as f64, (hi - 1) as f64);
+            idx = scratch_pos.round() as usize;
+            forward = srate >= 0.0;
+            transport_was_on = false;
+            synth_pts += delta;
+            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
+            shared.frames.lock().unwrap().push_back(Frame {
+                pts_100ns: synth_pts,
+                clip_100ns: cache[idx].pts_100ns,
+                bgra: cache[idx].bgra.clone(),
+            });
+            continue;
+        }
+        scratch_was_on = false;
         if shared.beat_transport.load(Ordering::Acquire) {
             let span = hi - lo;
             if !transport_was_on {
@@ -1178,15 +1357,20 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                     forward = true;
                 }
             }
-            let rate = f64::from_bits(
-                shared.playback_rate_bits.load(Ordering::Acquire),
-            )
-            .max(0.05);
-            // One sweep = one beat ÷ the chip, in presentation pts. Until
-            // the grid is learned (the first beat of a cue) sweep at the
-            // range's natural length — motion from the very first frame.
-            let sweep_pts = if beat_media > 0 {
-                beat_media as f64 / rate
+            // THE CHIP IS BEATS: one sweep spans exactly `beats` beat
+            // periods (8/4/2/1). The grid is the pulse-learned period,
+            // seeded by the app's HINT so the law paces from the very
+            // first frame of a cue; only with neither (no clock at all —
+            // impossible in the app) does the sweep fall to natural.
+            let beats =
+                shared.beats_per_sweep.load(Ordering::Acquire).max(1) as f64;
+            let grid = if beat_media > 0 {
+                beat_media as f64
+            } else {
+                shared.beat_hint_100ns.load(Ordering::Acquire) as f64
+            };
+            let sweep_pts = if grid > 0.0 {
+                grid * beats
             } else {
                 (span.max(2) as f64) * delta as f64
             };
@@ -1205,7 +1389,12 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                     let period = synth_pts - prev;
                     // A beat spans 0.2s..2s (300..30 BPM); anything else
                     // is a missed pulse or a stall — keep the estimate.
-                    if (2_000_000..20_000_000).contains(&period) {
+                    // And a period ≈ 2x the current one IS a missed pulse
+                    // (coalesced counter), not a tempo halving: adopting
+                    // it would halve the sweep cadence for a beat.
+                    let doubled = beat_media > 0
+                        && (period as f64 / beat_media as f64) > 1.7;
+                    if (2_000_000..20_000_000).contains(&period) && !doubled {
                         beat_media = period;
                     }
                 }
@@ -1214,7 +1403,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                     let qlen = shared.frames.lock().unwrap().len() as f64;
                     let presented = (sweep_phase - qlen * step).rem_euclid(1.0);
                     sweep_phase = (sweep_phase
-                        + beat_phase_nudge(presented, rate))
+                        + beat_phase_nudge(presented, beats))
                     .rem_euclid(1.0);
                 }
             }
@@ -1223,6 +1412,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             forward = dir;
             idx = sweep_index(sweep_phase, forward, lo, hi, mode);
             synth_pts += delta;
+            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
@@ -1234,13 +1424,17 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if mode == PlayMode::Loop {
             forward = true;
             idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
-            // REAL clip pts, wrapping each pass: the pacer's rebase absorbs
-            // the backward jump instantly (the frames are already decoded,
-            // so unlike the old reopen there is no starvation gap), and the
-            // beat-sync/loop-fit machinery keeps a sane position phase
-            // instead of a clip that grows older forever.
+            // ONE monotonic presentation timeline for every cache mode:
+            // the free loop used to queue REAL clip pts (rebase-on-wrap),
+            // and re-engaging the beat transport then resumed the synth
+            // domain far AHEAD of the pacer's clock — a forward jump the
+            // pacer only knew to WAIT out (at a slow chip that wait
+            // doubled: the "0.5 stops dead" report). Source position
+            // lives solely in clip_100ns.
+            synth_pts += delta;
+            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
             shared.frames.lock().unwrap().push_back(Frame {
-                pts_100ns: cache[idx].pts_100ns,
+                pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
                 bgra: cache[idx].bgra.clone(),
             });
@@ -1260,6 +1454,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         }
         idx = idx.clamp(lo, hi - 1);
         synth_pts += delta;
+        shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
         shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: synth_pts,
             clip_100ns: cache[idx].pts_100ns,
@@ -2836,6 +3031,11 @@ mod tests {
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
             beat_pulse: AtomicU64::new(0),
+            beats_per_sweep: AtomicU8::new(4),
+            beat_hint_100ns: AtomicI64::new(0),
+            scratch_active: AtomicBool::new(false),
+            scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(info.duration_100ns),
             video_ready: AtomicBool::new(false),
@@ -2937,6 +3137,11 @@ mod tests {
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
             beat_pulse: AtomicU64::new(0),
+            beats_per_sweep: AtomicU8::new(4),
+            beat_hint_100ns: AtomicI64::new(0),
+            scratch_active: AtomicBool::new(false),
+            scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
                 position_100ns: AtomicI64::new(0),
                 video_ready: AtomicBool::new(false),
@@ -2960,6 +3165,28 @@ mod tests {
         assert!(!pump_test_player(true, false, 1).needs_frame_pump());
         assert!(!pump_test_player(false, true, 0).needs_frame_pump());
         assert!(pump_test_player(false, true, 1).needs_frame_pump());
+    }
+
+    /// A FORWARD pts jump is a restart too: a transport handoff that
+    /// lands far ahead must present NOW — the pacer used to wait the gap
+    /// out at clock speed, which at a slow chip read as playback dead.
+    #[test]
+    fn forward_pts_jump_rebases_instead_of_stalling() {
+        let mut player = pump_test_player(false, false, 0);
+        player.last_pts = 1_000_000;
+        player.base_media_100ns = 1_000_000;
+        player.clock_base = Some(Instant::now());
+        player.shared.frames.lock().unwrap().push_back(Frame {
+            pts_100ns: 60_000_000, // six seconds ahead of the clock
+            clip_100ns: 2_000_000,
+            bgra: vec![0xff00_0000],
+        });
+        let got = player.take_due_frame();
+        assert!(got.is_some(), "forward jump stalled the pacer");
+        assert_eq!(
+            player.shared.position_100ns.load(Ordering::Acquire),
+            2_000_000
+        );
     }
 
     /// THE RATE-CHIP LAW: dialing .5/1/2/4 touches the PLAYBACK RATE and
@@ -3983,22 +4210,24 @@ mod beat_transport_tests {
     /// engage-offset onto the grid over a few beats — never a snap.
     #[test]
     fn nudge_is_bounded_zero_when_aligned_and_convergent() {
-        for rate in [0.5f64, 1.0, 2.0, 4.0] {
-            assert_eq!(beat_phase_nudge(0.0, rate), 0.0);
+        for beats in [1.0f64, 2.0, 4.0, 8.0] {
+            assert_eq!(beat_phase_nudge(0.0, beats), 0.0);
             for phase in [0.01f64, 0.13, 0.35, 0.49, 0.5, 0.77, 0.99] {
-                let nudge = beat_phase_nudge(phase, rate);
+                let nudge = beat_phase_nudge(phase, beats);
                 assert!(nudge.abs() <= 0.02 + 1e-12, "nudge {nudge} out of authority");
             }
         }
-        // Convergence at 1x: an 8%-off engage walks onto the grid.
+        // Convergence on a 1-beat sweep: an 8%-off engage walks onto the
+        // grid over a few pulses.
         let mut phase = 0.08f64;
         for _ in 0..8 {
             phase += beat_phase_nudge(phase, 1.0);
         }
         assert!(phase.abs() < 1e-9, "phase failed to converge: {phase}");
-        // Slow chip: one sweep spans two beats — the mid-sweep beat at
-        // phase 0.5 is ON the grid for m = 0.5, so no correction.
-        assert_eq!(beat_phase_nudge(0.5, 0.5), 0.0);
+        // A 4-beat sweep passes a beat at every quarter of its phase:
+        // 0.25 IS the grid — no correction; 0.30 pulls back toward it.
+        assert_eq!(beat_phase_nudge(0.25, 4.0), 0.0);
+        assert!(beat_phase_nudge(0.30, 4.0) < 0.0);
     }
 
     /// THE LAW END TO END through decode → cache → pacer, INSTRUMENTED:
@@ -4059,6 +4288,10 @@ mod beat_transport_tests {
         .expect("open");
         player.set_muted(true);
         player.set_mode(PlayMode::PingPong);
+        // Chip 1 = a sweep per beat; the HINT seeds the grid so the law
+        // paces from the first frame (no natural-rate first pass).
+        player.set_beats_per_sweep(1);
+        player.set_beat_hint((BEAT.as_secs_f64() * 1e7) as i64);
         player.set_beat_transport(true);
 
         // Present for ~14 beats, pulsing on the beat, recording identity
@@ -4136,6 +4369,98 @@ mod beat_transport_tests {
             "{turns} turns over ~{beats} beats — the sweep is not on the beat grid"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE TAIL-ONLY CACHE LIE, pinned: a mid-clip SCRUB rebuilds the
+    /// decoder from its target — that pass may NEVER declare a complete
+    /// cache (it covers target→OUT, not the window). The wrap after it
+    /// rebuilds from live IN, and the sweep must span the WHOLE range
+    /// again — not loop the tail the scrub left behind.
+    #[test]
+    fn a_scrub_never_leaves_a_tail_only_sweep() {
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        const W: u32 = 64;
+        const H: u32 = 32;
+        const FRAMES: usize = 12;
+        fn identity_of(bgra: &[u32]) -> usize {
+            let mid = bgra[(H as usize / 2) * W as usize + W as usize / 2];
+            (((mid >> 16) & 0xff) as usize) / 16
+        }
+        let dir = std::env::temp_dir()
+            .join(format!("vj-media-scrubtail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scrub.mp4");
+        let mut encoder = VideoFileEncoder::new(
+            path.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: W,
+                height: H,
+                fps_num: 24,
+                fps_den: 1,
+                video_bitrate_bps: 2_000_000,
+                audio: None,
+                keyframe_only: true,
+            },
+        )
+        .expect("encoder");
+        for index in 0..FRAMES {
+            encoder
+                .push_frame_rgb8(
+                    &vec![(index * 16 + 8) as u8; W as usize * H as usize * 3],
+                    None,
+                )
+                .expect("push");
+        }
+        encoder.finish().expect("finish");
+        let mixer = Mixer::new();
+        let mut player = SlotPlayer::open(
+            SlotId::A,
+            path.to_str().unwrap(),
+            MediaType::Mp4,
+            mixer,
+            true,
+            false,
+        )
+        .expect("open");
+        player.set_muted(true);
+        player.set_beats_per_sweep(1);
+        player.set_beat_hint(4_000_000);
+        player.set_beat_transport(true);
+        // Let the first window cache complete and the sweep run…
+        let warm = Instant::now() + Duration::from_millis(1_500);
+        while Instant::now() < warm {
+            let _ = player.take_due_frame();
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        // …then SCRUB to 60% and pulse the clock like the app would.
+        player.seek_fraction(0.6);
+        let mut ids: Vec<usize> = Vec::new();
+        let mut next_pulse = Instant::now() + Duration::from_millis(400);
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline {
+            if Instant::now() >= next_pulse {
+                player.beat_pulse();
+                next_pulse += Duration::from_millis(400);
+            }
+            if let Some(bgra) = player.take_due_frame() {
+                ids.push(identity_of(&bgra));
+            }
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        // The sweep must reach the head again — a tail-only cache never
+        // shows anything below the scrub target (frame 7).
+        assert!(
+            ids.iter().copied().min().unwrap_or(99) <= 1,
+            "sweep never returned to the head after a scrub: {ids:?}"
+        );
+        assert!(
+            ids.iter().copied().max().unwrap_or(0) + 2 >= FRAMES,
+            "sweep lost the tail after a scrub: {ids:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
