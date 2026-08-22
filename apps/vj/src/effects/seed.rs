@@ -97,6 +97,12 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("70_monastery_spiral", include_str!("../../resources/effects/70_monastery_spiral.splash")),
     ("71_snare_garden", include_str!("../../resources/effects/71_snare_garden.splash")),
     ("72_serpent_strobe", include_str!("../../resources/effects/72_serpent_strobe.splash")),
+    ("79_tile_lagoon", include_str!("../../resources/effects/79_tile_lagoon.splash")),
+    ("80_bar_shatter", include_str!("../../resources/effects/80_bar_shatter.splash")),
+    ("81_conveyor_wall", include_str!("../../resources/effects/81_conveyor_wall.splash")),
+    ("82_dusk_murmuration", include_str!("../../resources/effects/82_dusk_murmuration.splash")),
+    ("83_confetti_swarm", include_str!("../../resources/effects/83_confetti_swarm.splash")),
+    ("84_storm_cell", include_str!("../../resources/effects/84_storm_cell.splash")),
     ]
 }
 

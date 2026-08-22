@@ -1,0 +1,39 @@
+// TILE LAGOON — the calm ocean-of-tiles: the live content becomes a mosaic
+// raft rolling on a slow swell. Pattern taught here: the tiles engine's
+// "wave" mode tilts every tile with the LOCAL wave slope (the picture
+// glitters like water), and p1 breathes extra amplitude in on the bar so
+// the sea rises and settles once every four beats.
+{
+    name: "Tile Lagoon"
+    engine: "tiles"
+    mode: "wave"
+    seed: 5
+
+    grid: 30
+    spread: 8.0
+    aspect: 0.66
+    gap: 0.05
+    amp: 0.42
+    freq: 0.9
+
+    // Gentle pulse; the bar swell is the real motion driver.
+    beat_pulse: 0.25
+    p1: "0.35 * env(bar)"
+    // A faint constant grout shimmer keeps the lattice readable.
+    p2: "0.05 + 0.08 * pulse"
+
+    input0: "test"
+
+    color_bg: #x061018
+    color_a: #x3fd8c8
+    color_b: #x1a5f8a
+    color_c: #xbdf5ec
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "tiltshift", focus: 0.5, width: 0.34, levels: 2},
+        {kind: "bloom", threshold: 0.72, strength: 0.8, levels: 3}
+    ]
+}

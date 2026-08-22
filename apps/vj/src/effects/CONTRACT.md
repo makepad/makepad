@@ -169,6 +169,8 @@ subclasses can always read them, no ceremony:
 | firefly (flies) | fly id | 2.0 + height class | blink phase | blink rate rnd | corner | ANCHOR POSITION |
 | harmonograph | strand idx | curve t 0..1 | strand rnd | side ±1 | (t, strand01) | strand seed vec |
 | domino | branch id | arc index (dominoes) | tile hash | yaw (rad) | GROUND PIVOT (x, z) | LOCAL face normal (pos = LOCAL corner) |
+| tiles | tile index (grid coords + uv window derive from it) | radial 0..1 from plane centre | rnd (stagger/shade) | rnd (tumble) | corner 0/1 (tile-local uv) | SHATTER FLIGHT VECTOR (unit dir × flight distance, baked; pos = rest centre) |
+| flock | bird id | speed01 | hue | FLAP AMPLITUDE at this vertex (0 spine, wingspan at tips) | (along-body 0..1, flap phase hash) | banked UP vector (the flap axis) |
 
 Encode MORE data when your engine knows more — spare channels are the
 vertex shader's raw material. Document any new channel here.
@@ -179,9 +181,11 @@ vertex shader's raw material. Document any new channel here.
 `lsystem`, `metaballs`, `heightmap`, `ribbons`, `tunnel`, `emitters`
 (script-driven, below), `firefly` (synced meadow, engines_firefly.rs),
 `harmonograph` (pendulum ribbon, engines_harmonograph.rs), `domino`
-(topple run, engines_domino.rs), `screen` (no mesh — input0 straight into
-the stage chain: the fullscreen effect family). Engine keys: see the
-module docs in `mod.rs` (kept current) and `engines.rs`.
+(topple run, engines_domino.rs), `tiles` (input texture as a tile grid:
+wave/shatter/conveyor/spiral, engines_tiles.rs), `flock` (boid
+murmuration of gliders, engines_flock.rs), `screen` (no mesh — input0
+straight into the stage chain: the fullscreen effect family). Engine
+keys: see the module docs in `mod.rs` (kept current) and `engines.rs`.
 
 ### The emitters engine + `frame:` tick
 
