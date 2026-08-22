@@ -1,0 +1,10 @@
+[package]
+name = "makepad-example-datagrid"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad DataGrid example: sheets, big data, pixel grid, widget cells, charts"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
