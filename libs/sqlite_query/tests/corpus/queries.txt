@@ -1,0 +1,69 @@
+# Persistent SQL corpus: every statement here is run against this engine and
+# the system sqlite3 CLI on the fixture in tests/fuzz_sql.rs, and the results
+# must match exactly. Add any statement that ever disagreed.
+SELECT * FROM t ORDER BY id
+SELECT id, name, kind, n, r, b FROM t ORDER BY id
+SELECT id FROM t WHERE kind = 'a' ORDER BY id
+SELECT id FROM t WHERE kind <> 'a' ORDER BY id
+SELECT id FROM t WHERE kind IS NULL ORDER BY id
+SELECT id FROM t WHERE kind IS NOT NULL ORDER BY id
+SELECT id FROM t WHERE n > 10 AND n < 100 ORDER BY id
+SELECT id FROM t WHERE n BETWEEN 0 AND 40 ORDER BY id
+SELECT id FROM t WHERE n NOT BETWEEN 0 AND 40 ORDER BY id
+SELECT id FROM t WHERE name IN ('alpha','zeta',NULL) ORDER BY id
+SELECT id FROM t WHERE name NOT IN ('alpha','zeta') ORDER BY id
+SELECT id FROM t WHERE id IN (SELECT t_id FROM u) ORDER BY id
+SELECT id FROM t WHERE id NOT IN (SELECT t_id FROM u WHERE t_id IS NOT NULL) ORDER BY id
+SELECT id FROM t WHERE EXISTS(SELECT 1 FROM u WHERE u.t_id = t.id) ORDER BY id
+SELECT id FROM t WHERE NOT EXISTS(SELECT 1 FROM u WHERE u.t_id = t.id) ORDER BY id
+SELECT COUNT(*), COUNT(n), COUNT(DISTINCT kind), MIN(n), MAX(n), SUM(n), AVG(n), TOTAL(r) FROM t
+SELECT kind, COUNT(*) FROM t GROUP BY kind ORDER BY 1, 2
+SELECT kind, COUNT(*) c FROM t GROUP BY kind HAVING c > 1 ORDER BY 1
+SELECT DISTINCT kind FROM t ORDER BY 1
+SELECT id FROM t ORDER BY n
+SELECT id FROM t ORDER BY n DESC
+SELECT id FROM t ORDER BY r, id
+SELECT id FROM t ORDER BY b, id
+SELECT id, name FROM t ORDER BY name
+SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2
+SELECT t.id, u.tag FROM t JOIN u ON u.t_id = t.id ORDER BY 1, 2
+SELECT t.id, u.tag FROM t LEFT JOIN u ON u.t_id = t.id ORDER BY 1, 2
+SELECT t.id, u.id FROM t, u WHERE u.t_id = t.id ORDER BY 1, 2
+SELECT t.id FROM t JOIN u USING (id) ORDER BY 1
+SELECT k, m FROM k WHERE k > 'key-a' ORDER BY k
+SELECT k FROM k WHERE k = 'key-b'
+SELECT k FROM k WHERE k LIKE 'key%' ORDER BY k
+SELECT COALESCE(kind,'none'), LENGTH(name), LOWER(name), UPPER(name) FROM t ORDER BY id
+SELECT id, n+1, n-1, n*2, n/3, n%7 FROM t ORDER BY id
+SELECT id, r*2, r/0, n/0 FROM t ORDER BY id
+SELECT name || '-' || COALESCE(kind,'?') FROM t ORDER BY id
+SELECT hex(b), typeof(b), typeof(r), typeof(kind), typeof(id) FROM t ORDER BY id
+SELECT CASE WHEN n > 25 THEN 'big' WHEN n IS NULL THEN 'none' ELSE 'small' END, id FROM t ORDER BY 2
+SELECT CAST(r AS INTEGER), CAST(n AS TEXT), CAST(name AS BLOB), CAST('12abc' AS INTEGER) FROM t ORDER BY id
+SELECT '20' = 20, '20' = '20', 20 = 20.0, NULL = NULL, NULL IS NULL, 1 IS NOT 2
+SELECT id FROM t WHERE n = '20'
+SELECT id FROM t WHERE name = 'ALPHA' COLLATE NOCASE
+SELECT COUNT(*) FROM (SELECT id FROM t WHERE n > 15)
+SELECT x.kind, COUNT(*) FROM (SELECT kind FROM t WHERE kind IS NOT NULL) x GROUP BY x.kind ORDER BY 1
+SELECT id FROM t UNION SELECT id FROM u ORDER BY 1
+SELECT id FROM t UNION ALL SELECT id FROM u ORDER BY 1
+SELECT id FROM t INTERSECT SELECT t_id FROM u ORDER BY 1
+SELECT id FROM t EXCEPT SELECT t_id FROM u ORDER BY 1
+SELECT substr(name, 2, 3), instr(name, 'a'), replace(name, 'a', 'X'), trim('  x  ') FROM t ORDER BY id
+SELECT abs(n), round(r, 1), min(n, 5), max(n, 5), ifnull(kind, 'z'), nullif(kind, 'a') FROM t ORDER BY id
+SELECT id FROM t WHERE b IS NULL OR b > x'02' ORDER BY id
+SELECT id FROM t WHERE (kind = 'a' OR kind = 'b') AND n IS NOT NULL ORDER BY id
+SELECT id FROM t WHERE NOT (kind = 'a') ORDER BY id
+SELECT (SELECT COUNT(*) FROM u WHERE u.t_id = t.id), t.id FROM t ORDER BY 2
+SELECT 1 WHERE 1
+SELECT 1 WHERE 0
+SELECT NULL, 1, 1.5, 'x', x'ff'
+# bare columns in a GROUP BY (SQLite takes them from a row of the group, and
+# from the min/max row when there is exactly one such aggregate)
+SELECT kind, MAX(n), name FROM t GROUP BY kind ORDER BY 1
+SELECT kind, MIN(n), id FROM t GROUP BY kind ORDER BY 1
+SELECT kind, COUNT(*), MAX(id) FROM t GROUP BY kind ORDER BY 1
+# a subquery in FROM joined to a table: slot numbering must not be confused
+SELECT COUNT(*) FROM (SELECT id AS i FROM t) x JOIN u ON u.t_id = x.i
+SELECT x.i, u.tag FROM (SELECT id AS i FROM t WHERE n > 5) x JOIN u ON u.t_id = x.i ORDER BY 1, 2
+SELECT COUNT(*) FROM (SELECT id FROM t UNION ALL SELECT id FROM u) p JOIN t ON t.id = p.id
