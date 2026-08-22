@@ -2,20 +2,37 @@
 //!
 //! The bundled effect library seeds into the store with modest colored
 //! placeholder JPEGs (effects/seed.rs). This widget replaces them, tile by
-//! tile, with the real thing: it hosts a hidden slot-mode [`VjFxView`]
-//! (exactly the hosting contract in effects/CONTRACT.md), runs ONE effect at
-//! a time offscreen at thumbnail resolution, captures a bar's worth of
-//! frames spread across UI frames, and packs them into the SAME
-//! declared-cells sheet format the grid already animates for sprite actors
-//! and turntable icons — so the finished sheet re-enters through the
-//! existing `DecodeJob::Thumb` lane and the grid needs no new code path.
+//! tile, with the real thing: it hosts a small bank of hidden slot-mode
+//! [`VjFxView`]s (exactly the hosting contract in effects/CONTRACT.md), runs
+//! documents offscreen at thumbnail resolution, and packs a bar's worth of
+//! frames into the SAME declared-cells sheet format the grid already
+//! animates for sprite actors and turntable icons — so the finished sheet
+//! re-enters through the existing `DecodeJob::Thumb` lane and the grid needs
+//! no new code path.
+//!
+//! HOW THE FRAMES ARE MADE (the fast path):
+//!   * the effect's clock is HOST-DRIVEN ([`VjFxView::tick_manual`]): frame
+//!     k renders at document time `preroll + k/30`, so a sheet is one UI
+//!     frame per captured frame instead of one per 33ms of wall clock — and
+//!     it comes out identical on a slow machine and a fast one,
+//!   * each captured frame is downscaled ON THE GPU straight into its cell
+//!     of one 768x400 sheet target (a 4x4 grid of bilinear taps = the exact
+//!     16/64-tap box filter the CPU used to run), so the whole sheet costs
+//!     ONE readback instead of thirty,
+//!   * several documents render side by side ([`LANES`]), each in its own
+//!     view with its own passes, so a document's shader compile overlaps the
+//!     next one's capture instead of serializing behind it.
 //!
 //! Budget discipline (the VJ may be performing while this runs):
-//! - at most ONE effect is loaded/rendering at any moment,
-//! - the offscreen pass is thumbnail-sized ([`SLOT_W`]x[`SLOT_H`]), not
+//! - the work is spread over MANY responsive frames, never gulped: at most
+//!   [`LOADS_PER_FRAME`] document loads (splash eval + shader compile) and
+//!   [`READBACKS_PER_FRAME`] sheet readbacks per UI frame,
+//! - the lane count follows the frame clock ([`PACE_BAD`]): if the app's
+//!   frames get long, lanes are given back until they are short again,
+//! - a live set (output window up, a deck playing) drops the bank to a
+//!   single lane — see [`VjFxThumbs::set_full_speed`],
+//! - the offscreen passes are thumbnail-sized ([`SLOT_W`]x[`SLOT_H`]), not
 //!   program-sized,
-//! - at most ONE GPU readback per UI frame, and only on capture ticks
-//!   (~6 a second), each measured and reported,
 //! - PNG encode + cache write happen on a worker thread, never the UI
 //!   thread.
 //!
@@ -40,16 +57,65 @@ use makepad_asset_importer::classic_import::encode_png_rgba;
 use makepad_widgets::*;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // The GPU downscale: one captured frame lands in one cell of the sheet,
+    // box-filtered from the supersampled render. `self.pos` runs 0..1 over
+    // the cell and maps 1:1 onto the source, so one output pixel covers
+    // exactly `1/CELL_W x 1/CELL_H` of it; a 4x4 grid of BILINEAR taps
+    // inside that footprint averages 4x4 source texels at 4x supersample
+    // and 8x8 at 8x (each tap sitting on a 2x2 corner) — the same total
+    // average the CPU box filter used to compute, on the GPU, at a
+    // sixteenth of the readback.
+    set_type_default() do #(DrawVjFxThumbCell::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        tex_out: texture_2d(float)
+
+        tap: fn(uv: vec2) -> vec4 {
+            return self.tex_out.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+
+        pixel: fn() {
+            let px = vec2(1.0 / 128.0, 1.0 / 80.0)
+            let step = px * 0.25
+            let base = self.pos - px * 0.5 + step * 0.5
+            let sum = self.tap(base)
+                + self.tap(base + vec2(step.x, 0.0))
+                + self.tap(base + vec2(step.x * 2.0, 0.0))
+                + self.tap(base + vec2(step.x * 3.0, 0.0))
+                + self.tap(base + vec2(0.0, step.y))
+                + self.tap(base + vec2(step.x, step.y))
+                + self.tap(base + vec2(step.x * 2.0, step.y))
+                + self.tap(base + vec2(step.x * 3.0, step.y))
+                + self.tap(base + vec2(0.0, step.y * 2.0))
+                + self.tap(base + vec2(step.x, step.y * 2.0))
+                + self.tap(base + vec2(step.x * 2.0, step.y * 2.0))
+                + self.tap(base + vec2(step.x * 3.0, step.y * 2.0))
+                + self.tap(base + vec2(0.0, step.y * 3.0))
+                + self.tap(base + vec2(step.x, step.y * 3.0))
+                + self.tap(base + vec2(step.x * 2.0, step.y * 3.0))
+                + self.tap(base + vec2(step.x * 3.0, step.y * 3.0))
+            // Alpha forced opaque: render targets carry whatever alpha the
+            // effect blended, and the thumbnail is a picture.
+            return vec4((sum / 16.0).xyz, 1.0)
+        }
+    }
+
     mod.widgets.VjFxThumbsBase = #(VjFxThumbs::register_widget(vm))
     mod.widgets.VjFxThumbs = set_type_default() do mod.widgets.VjFxThumbsBase{
         width: 4
         height: 4
+        // One hidden host per capture lane (see LANES).
         fx: mod.widgets.VjFxView{ composite: false }
+        fx1: mod.widgets.VjFxView{ composite: false }
+        fx2: mod.widgets.VjFxView{ composite: false }
+        fx3: mod.widgets.VjFxView{ composite: false }
+        fx4: mod.widgets.VjFxView{ composite: false }
+        fx5: mod.widgets.VjFxView{ composite: false }
     }
 }
 
@@ -63,9 +129,15 @@ pub const CELL_H: usize = 80;
 /// Sheet columns.
 pub const SHEET_COLS: usize = 6;
 pub const FRAME_COUNT: usize = 30;
+const SHEET_ROWS: usize = FRAME_COUNT.div_ceil(SHEET_COLS);
+/// The sheet target's exact texel size — the GPU packs the cells, so the
+/// readback IS the finished sheet.
+const SHEET_W: usize = SHEET_COLS * CELL_W;
+const SHEET_H: usize = SHEET_ROWS * CELL_H;
 /// Supersampling: the offscreen pass renders at 4x the cell on each axis
-/// and the box downscale below averages the whole 4x4 footprint per output
-/// pixel — 16-tap SSAA, which is what keeps thin geometry (L-system twigs,
+/// (8x on a retina screen, where the child pass inherits the window's dpi)
+/// and the cell shader averages the whole footprint per output pixel —
+/// 16/64-tap SSAA, which is what keeps thin geometry (L-system twigs,
 /// candle flames, chart wicks) from shimmering in a 128x80 tile.
 const SUPERSAMPLE: usize = 4;
 const SLOT_W: f64 = (CELL_W * SUPERSAMPLE) as f64;
@@ -74,13 +146,42 @@ const SLOT_H: f64 = (CELL_H * SUPERSAMPLE) as f64;
 /// operator judged the earlier 6 fps sheet "a bit too low framerate" —
 /// half a bar of genuinely smooth motion beats a whole bar of slideshow.
 const CAPTURE_SPAN: f64 = 1.0;
+/// Document time between captured frames — and the exact `dt` each rendered
+/// frame is told passed, so the sheet plays back at the rate it was
+/// simulated at, on any machine.
+const FRAME_STEP: f64 = CAPTURE_SPAN / FRAME_COUNT as f64;
+/// Document time to run before the first captured frame, so effects that
+/// build (emitter plumes, feedback trails, growth ramps) are underway.
 const PREROLL_SECS: f64 = 0.9;
-/// Draw frames before the clock starts: the pass must have rendered at
-/// least once before the first readback can see anything.
+/// Preroll frames for a document whose picture depends on the ITERATION
+/// history of the frames before it ([`VjFxView::needs_stepped_time`]);
+/// everything else jumps its clock straight to the moment in ONE frame.
+const PREROLL_STEPS: usize = (PREROLL_SECS / FRAME_STEP) as usize;
+/// Draw frames before the clock starts: the document's shader compiles
+/// after the first draw that asks for it, so the first frames of a fresh
+/// document are the compile landing, not the effect.
 const WARMUP_DRAWS: u32 = 3;
 /// Playback rate the sheet declares: frames over the span they cover, so
 /// the tile replays at the speed the effect actually ran.
 pub const SHEET_FPS: f32 = FRAME_COUNT as f32 / CAPTURE_SPAN as f32;
+
+/// How many documents render side by side at full speed. Each lane is a
+/// whole [`VjFxView`] (its own passes, post chain, sim state), so lanes do
+/// not interfere; the cost of one is one more effect's worth of GPU per
+/// frame, which is why the pacing guard can hand them back.
+pub const LANES: usize = 6;
+/// Documents that may START in one UI frame. A load is a splash eval plus
+/// (usually) a shader compile — staggering them is what keeps regen from
+/// ever reading as a stall.
+const LOADS_PER_FRAME: usize = 1;
+/// Sheet readbacks per UI frame. A readback blocks the UI thread on the GPU
+/// (~3ms), so two is the ceiling and the rest wait a frame.
+const READBACKS_PER_FRAME: usize = 2;
+/// Frame period under which the bank may take another lane.
+const PACE_GOOD: f64 = 0.020;
+/// Frame period over which the bank gives a lane back — the app must stay
+/// draggable, scrollable and playable while the library regenerates.
+const PACE_BAD: f64 = 0.030;
 
 /// A render job: everything needed with no further lookups.
 pub struct FxThumbJob {
@@ -131,37 +232,37 @@ pub fn sheet_cells() -> ThumbnailCells {
     }
 }
 
-/// Box-filtered ASPECT-FILL downscale of a BGRA readback into one RGBA
-/// cell: every output pixel averages its whole source footprint, which is
-/// the "render 4x then downscale nicely" anti-aliasing. Cover, not
-/// stretch: a source aspect that differs from the cell's crops instead of
-/// squashing the picture.
-fn cell_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
-    let mut out = vec![0u8; CELL_W * CELL_H * 4];
+/// Where cell `index` sits in the sheet, in sheet pixels.
+fn cell_rect(index: usize) -> Rect {
+    Rect {
+        pos: dvec2(
+            ((index % SHEET_COLS) * CELL_W) as f64,
+            ((index / SHEET_COLS) * CELL_H) as f64,
+        ),
+        size: dvec2(CELL_W as f64, CELL_H as f64),
+    }
+}
+
+/// The readback (BGRA, whatever size the platform's pass produced) as the
+/// RGBA sheet the PNG wants. The GPU already packed the cells; all that is
+/// left is the swizzle, opaque alpha, and — only if a backend ignored the
+/// dpi override and handed back a scaled target — a box resample back onto
+/// the declared grid, so a stamped sheet always describes its own pixels.
+fn sheet_rgba_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; SHEET_W * SHEET_H * 4];
     if sw == 0 || sh == 0 || src.len() < sw * sh * 4 {
         return out;
     }
-    // Source window that matches the cell aspect, centred.
-    let cell_aspect = CELL_W as f64 / CELL_H as f64;
-    let src_aspect = sw as f64 / sh as f64;
-    let (win_w, win_h) = if src_aspect > cell_aspect {
-        (sh as f64 * cell_aspect, sh as f64)
-    } else {
-        (sw as f64, sw as f64 / cell_aspect)
-    };
-    let (off_x, off_y) = ((sw as f64 - win_w) * 0.5, (sh as f64 - win_h) * 0.5);
-    for y in 0..CELL_H {
-        let y0 = (off_y + y as f64 * win_h / CELL_H as f64) as usize;
-        let y1 = ((off_y + (y + 1) as f64 * win_h / CELL_H as f64) as usize)
-            .clamp(y0 + 1, sh);
-        for x in 0..CELL_W {
-            let x0 = (off_x + x as f64 * win_w / CELL_W as f64) as usize;
-            let x1 = ((off_x + (x + 1) as f64 * win_w / CELL_W as f64) as usize)
-                .clamp(x0 + 1, sw);
+    for y in 0..SHEET_H {
+        let y0 = y * sh / SHEET_H;
+        let y1 = ((y + 1) * sh / SHEET_H).clamp(y0 + 1, sh);
+        for x in 0..SHEET_W {
+            let x0 = x * sw / SHEET_W;
+            let x1 = ((x + 1) * sw / SHEET_W).clamp(x0 + 1, sw);
             let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
             for sy in y0..y1 {
                 for sx in x0..x1 {
-                    let si = (sy.min(sh - 1) * sw + sx.min(sw - 1)) * 4;
+                    let si = (sy * sw + sx) * 4;
                     // BGRA source.
                     b += src[si] as u32;
                     g += src[si + 1] as u32;
@@ -169,9 +270,7 @@ fn cell_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
                 }
             }
             let count = ((y1 - y0) * (x1 - x0)) as u32;
-            let di = (y * CELL_W + x) * 4;
-            // RGBA out, alpha forced opaque (render targets carry whatever
-            // alpha the effect blended; the thumbnail is a picture).
+            let di = (y * SHEET_W + x) * 4;
             out[di] = (r / count) as u8;
             out[di + 1] = (g / count) as u8;
             out[di + 2] = (b / count) as u8;
@@ -181,42 +280,29 @@ fn cell_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
     out
 }
 
-/// True when every captured cell is essentially black — the honesty gate:
-/// a black wall of tiles is worse than the seeded placeholders.
-fn all_black(cells: &[Vec<u8>]) -> bool {
-    !cells.iter().any(|cell| {
-        cell.chunks_exact(4)
-            .any(|px| px[0] > 12 || px[1] > 12 || px[2] > 12)
-    })
+/// True when the whole sheet is essentially black — the honesty gate: a
+/// black wall of tiles is worse than the seeded placeholders.
+fn all_black(rgba: &[u8]) -> bool {
+    !rgba
+        .chunks_exact(4)
+        .any(|px| px[0] > 12 || px[1] > 12 || px[2] > 12)
 }
 
-/// Pack captured cells into one RGBA sheet (row-major, [`SHEET_COLS`] wide).
-fn pack_sheet(cells: &[Vec<u8>]) -> (Vec<u8>, usize, usize) {
-    let rows = cells.len().div_ceil(SHEET_COLS).max(1);
-    let (w, h) = (SHEET_COLS * CELL_W, rows * CELL_H);
-    let mut sheet = vec![0u8; w * h * 4];
-    for (i, cell) in cells.iter().enumerate() {
-        let (cx0, cy0) = ((i % SHEET_COLS) * CELL_W, (i / SHEET_COLS) * CELL_H);
-        for y in 0..CELL_H {
-            let src = y * CELL_W * 4;
-            let dst = ((cy0 + y) * w + cx0) * 4;
-            let n = CELL_W * 4;
-            if cell.len() >= src + n && sheet.len() >= dst + n {
-                sheet[dst..dst + n].copy_from_slice(&cell[src..src + n]);
-            }
-        }
-    }
-    (sheet, w, h)
-}
-
-/// Encode + stamp + atomically land the cache file. Runs on a worker.
+/// Convert + gate + encode + stamp + atomically land the cache file. Runs
+/// on a worker: the UI thread never touches a sheet's pixels again after
+/// the readback.
 fn encode_and_write(
-    tiles: Vec<Vec<u8>>,
+    bgra: Vec<u8>,
+    sw: usize,
+    sh: usize,
     path: PathBuf,
     revision: AssetRevisionId,
 ) -> Result<FxThumbSheet, String> {
-    let (sheet, w, h) = pack_sheet(&tiles);
-    let png = encode_png_rgba(&sheet, w as u32, h as u32)?;
+    let sheet = sheet_rgba_from_bgra(&bgra, sw, sh);
+    if all_black(&sheet) {
+        return Err("rendered black".to_string());
+    }
+    let png = encode_png_rgba(&sheet, SHEET_W as u32, SHEET_H as u32)?;
     let png = anim_icon::stamp_layout(&png, sheet_cells(), SHEET_FPS);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("cache dir: {e}"))?;
@@ -227,12 +313,19 @@ fn encode_and_write(
     Ok(FxThumbSheet { revision, path, cells: sheet_cells(), fps: SHEET_FPS })
 }
 
-#[derive(PartialEq)]
+/// Where a lane's job is in its life. The clock only ever moves in
+/// [`VjFxView::tick_manual`] steps, so these are frame counts, not seconds.
+#[derive(Clone, Copy, PartialEq)]
 enum Phase {
-    /// Waiting for the pass to have drawn a few times.
-    Warmup,
-    /// Running the effect and capturing on schedule.
-    Capturing,
+    /// Drawing so the document's shader compiles; the clock stands still.
+    Warmup(u32),
+    /// Running the clock up to [`PREROLL_SECS`], in `left` steps of `dt`.
+    Preroll { left: usize, dt: f64 },
+    /// Rendering captured frame `k` into cell `k` of the sheet.
+    Capture(usize),
+    /// All thirty cells drawn; the readback waits one frame for the paint
+    /// that drew the last of them.
+    Readback,
     /// Worker thread encoding + writing the cache file.
     Encoding,
 }
@@ -240,17 +333,52 @@ enum Phase {
 struct ActiveJob {
     job: FxThumbJob,
     phase: Phase,
-    draws: u32,
-    /// App-clock time the capture window opened (set when warmup ends).
-    started: f64,
-    next_capture: f64,
-    captures: Vec<Vec<u8>>,
     encoder: Option<std::thread::JoinHandle<Result<FxThumbSheet, String>>>,
     // Honest numbers for the report line.
+    started: Instant,
+    frames: u32,
     load_ms: f32,
-    capture_ms_max: f32,
-    capture_ms_sum: f32,
-    draw_ms_max: f32,
+    read_ms: f32,
+}
+
+/// One lane's own render target: the sheet the GPU packs cell by cell, plus
+/// the pass that owns it. The effect's own passes are begun INSIDE this one
+/// (`make_child_pass`), which is what guarantees the cell blit reads the
+/// frame that was just rendered rather than the previous one — child passes
+/// are ordered before their parent.
+struct SheetTarget {
+    pass: DrawPass,
+    draw_list: DrawList2d,
+    texture: Texture,
+}
+
+impl SheetTarget {
+    fn new(cx: &mut Cx, name: &str) -> Self {
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width: SHEET_W, height: SHEET_H },
+                initial: true,
+            },
+        );
+        Self {
+            pass: DrawPass::new_with_name(cx, name),
+            draw_list: DrawList2d::new(cx),
+            texture,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Lane {
+    sheet: Option<SheetTarget>,
+    job: Option<ActiveJob>,
+    /// CPU premix for transition previews (two distinct patterns dissolved
+    /// by the sweep) — per lane, since lanes sit on different frames.
+    /// Premix docs use slot 0; two-deck (`duo`) docs get pattern A in slot
+    /// 0 and pattern B in slot 1.
+    trans_tex: [Option<Texture>; 2],
+    prepared: bool,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -263,14 +391,28 @@ pub struct VjFxThumbs {
     walk: Walk,
     #[layout]
     layout: Layout,
-    /// The hidden slot-mode effect host (CONTRACT.md's thumbnail hook).
+    /// The hidden slot-mode effect hosts, one per lane (CONTRACT.md's
+    /// thumbnail hook).
     #[live]
     fx: VjFxView,
-    /// Samples the effect's output into this widget's 4x4 rect so the
-    /// offscreen pass chain is a frame dependency (an unsampled render
-    /// target never renders).
+    #[live]
+    fx1: VjFxView,
+    #[live]
+    fx2: VjFxView,
+    #[live]
+    fx3: VjFxView,
+    #[live]
+    fx4: VjFxView,
+    #[live]
+    fx5: VjFxView,
+    /// Samples a sheet into this widget's 4x4 rect so the offscreen pass
+    /// chain is a frame dependency (an unsampled render target never
+    /// renders).
     #[live]
     draw_present: DrawVjFxPresent,
+    /// The GPU downscale: one captured frame into one cell.
+    #[live]
+    draw_cell: DrawVjFxThumbCell,
     #[rust]
     area: Area,
     #[rust]
@@ -280,7 +422,7 @@ pub struct VjFxThumbs {
     #[rust]
     queue: VecDeque<FxThumbJob>,
     #[rust]
-    active: Option<ActiveJob>,
+    lanes: Vec<Lane>,
     #[rust]
     results: Vec<FxThumbSheet>,
     /// Revisions that failed to render this session — never retried, their
@@ -295,16 +437,26 @@ pub struct VjFxThumbs {
     /// switch the feature off, a platform that never answers must.
     #[rust]
     readback_failures: u32,
-    #[rust(false)]
-    slot_sized: bool,
-    /// CPU premix for transition previews (two distinct patterns dissolved
-    /// by the sweep) — reused buffer + textures, like the runtime fallback.
-    /// Two texture slots: premix docs use slot 0; two-deck (`duo`) docs get
-    /// pattern A in slot 0 and pattern B in slot 1.
+    /// Scratch for the transition premix patterns (one lane at a time).
     #[rust]
     trans_data: Vec<u32>,
+    /// Politeness: a live set (output window up, a deck playing) keeps the
+    /// bank at one lane.
+    #[rust(true)]
+    full_speed: bool,
+    /// Lanes the pacing guard currently allows — ramps up from one so a
+    /// cold boot never opens with six compiles in a frame.
+    #[rust(1usize)]
+    allowed: usize,
     #[rust]
-    trans_tex: [Option<Texture>; 2],
+    last_frame_at: Option<Instant>,
+    // Session totals for the report line.
+    #[rust]
+    done_count: usize,
+    #[rust]
+    done_ms: f32,
+    #[rust]
+    batch_started: Option<Instant>,
 }
 
 impl VjFxThumbs {
@@ -316,13 +468,49 @@ impl VjFxThumbs {
         self.cache_dir.as_deref()
     }
 
-    /// Nothing loaded, nothing queued: the app may hand over the next job.
+    /// Nothing loaded, nothing queued: everything handed over is finished.
     pub fn is_idle(&self) -> bool {
-        self.active.is_none() && self.queue.is_empty()
+        self.queue.is_empty() && self.lanes.iter().all(|l| l.job.is_none())
+    }
+
+    /// How many more documents the bank can take right now — the app keeps
+    /// it fed instead of waiting for it to fall idle between documents.
+    pub fn free_lanes(&self) -> usize {
+        if self.disabled.is_some() {
+            return 0;
+        }
+        let busy = self.lanes.iter().filter(|l| l.job.is_some()).count() + self.queue.len();
+        self.lane_budget().saturating_sub(busy)
+    }
+
+    /// A live set is running: keep the bank to one lane. At boot, idle, or a
+    /// bulk regen it opens up to [`LANES`].
+    pub fn set_full_speed(&mut self, full_speed: bool) {
+        self.full_speed = full_speed;
+    }
+
+    fn lane_budget(&self) -> usize {
+        if self.full_speed {
+            self.allowed.clamp(1, LANES)
+        } else {
+            1
+        }
     }
 
     pub fn is_failed(&self, revision: &AssetRevisionId) -> bool {
         self.failed.contains_key(revision)
+    }
+
+    /// Already rendering or queued here. With several lanes in flight the
+    /// app can reach a tile again while its document is still on a lane —
+    /// without this it would fetch the source and render the same sheet
+    /// twice.
+    pub fn holds(&self, revision: &AssetRevisionId) -> bool {
+        self.queue.iter().any(|j| &j.revision == revision)
+            || self
+                .lanes
+                .iter()
+                .any(|l| l.job.as_ref().is_some_and(|a| &a.job.revision == revision))
     }
 
     pub fn disabled_reason(&self) -> Option<&str> {
@@ -338,20 +526,43 @@ impl VjFxThumbs {
             return;
         }
         let busy = self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.job.revision == job.revision)
+            .lanes
+            .iter()
+            .any(|l| l.job.as_ref().is_some_and(|a| a.job.revision == job.revision))
             || self.queue.iter().any(|j| j.revision == job.revision);
         if busy {
             return;
+        }
+        if self.batch_started.is_none() {
+            self.batch_started = Some(Instant::now());
         }
         self.queue.push_back(job);
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
     }
 
-    fn fail_active(&mut self, cx: &mut Cx, error: String) {
-        if let Some(active) = self.active.take() {
+    /// The lane bank, built on first use (one [`Lane`] per view field).
+    fn ensure_lanes(&mut self) {
+        while self.lanes.len() < LANES {
+            self.lanes.push(Lane::default());
+        }
+    }
+
+    /// The lane's view. Lanes are fixed struct fields (a widget's children
+    /// are declared, not allocated), so the index maps by hand.
+    fn view(&mut self, index: usize) -> &mut VjFxView {
+        match index {
+            0 => &mut self.fx,
+            1 => &mut self.fx1,
+            2 => &mut self.fx2,
+            3 => &mut self.fx3,
+            4 => &mut self.fx4,
+            _ => &mut self.fx5,
+        }
+    }
+
+    fn fail_lane(&mut self, cx: &mut Cx, index: usize, error: String) {
+        if let Some(active) = self.lanes[index].job.take() {
             log!(
                 "fx thumb: {} FAILED — {} (placeholder kept)",
                 active.job.title,
@@ -359,39 +570,53 @@ impl VjFxThumbs {
             );
             self.failed.insert(active.job.revision, error);
         }
-        self.fx.clear_effect(cx);
+        self.view(index).clear_effect(cx);
     }
 
-    /// Load the next queued document into the hidden view.
-    fn start_next(&mut self, cx: &mut Cx) {
-        while self.active.is_none() {
-            let Some(job) = self.queue.pop_front() else { return };
-            if !self.slot_sized {
-                self.slot_sized = true;
-                self.fx.set_slot_size(dvec2(SLOT_W, SLOT_H));
+    /// Hand queued documents to free lanes, at most [`LOADS_PER_FRAME`] a
+    /// frame so a compile never lands on top of another one.
+    fn start_jobs(&mut self, cx: &mut Cx) {
+        let budget = self.lane_budget();
+        let mut loads = 0;
+        for index in 0..LANES {
+            if loads >= LOADS_PER_FRAME || self.queue.is_empty() {
+                return;
             }
-            self.fx.set_bpm(120.0);
-            self.fx.set_live(cx, true);
+            if index >= budget || self.lanes[index].job.is_some() {
+                continue;
+            }
+            let running = self.lanes.iter().filter(|l| l.job.is_some()).count();
+            if running >= budget {
+                return;
+            }
+            let Some(job) = self.queue.pop_front() else { return };
+            loads += 1;
+            let prepared = self.lanes[index].prepared;
+            let t0 = Instant::now();
+            let view = self.view(index);
+            if !prepared {
+                view.set_slot_size(dvec2(SLOT_W, SLOT_H));
+                view.set_manual_clock(true);
+                view.set_bpm(120.0);
+            }
+            view.set_live(cx, true);
             // A previous transition job's sweep inputs/override must never
             // leak into the next document.
-            self.fx.set_input_texture(0, None);
-            self.fx.set_input_texture(1, None);
-            self.fx.set_user_override([None; 4]);
-            let t0 = std::time::Instant::now();
-            match self.fx.set_effect_source(cx, "vjfx_thumb", &job.source) {
+            view.set_input_texture(0, None);
+            view.set_input_texture(1, None);
+            view.set_user_override([None; 4]);
+            let loaded = view.set_effect_source(cx, "vjfx_thumb", &job.source);
+            self.lanes[index].prepared = true;
+            match loaded {
                 Ok(_) => {
-                    self.active = Some(ActiveJob {
+                    self.lanes[index].job = Some(ActiveJob {
                         job,
-                        phase: Phase::Warmup,
-                        draws: 0,
-                        started: 0.0,
-                        next_capture: 0.0,
-                        captures: Vec::new(),
+                        phase: Phase::Warmup(0),
                         encoder: None,
+                        started: t0,
+                        frames: 0,
                         load_ms: t0.elapsed().as_secs_f32() * 1000.0,
-                        capture_ms_max: 0.0,
-                        capture_ms_sum: 0.0,
-                        draw_ms_max: 0.0,
+                        read_ms: 0.0,
                     });
                 }
                 Err(error) => {
@@ -405,57 +630,180 @@ impl VjFxThumbs {
         }
     }
 
-    /// Harvest the encode worker without ever blocking the UI thread.
-    fn poll_encoder(&mut self, _cx: &mut Cx) {
-        let finished = self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.phase == Phase::Encoding && a.encoder.as_ref().is_some_and(|h| h.is_finished()));
-        if !finished {
-            return;
-        }
-        let Some(mut active) = self.active.take() else { return };
-        let Some(handle) = active.encoder.take() else { return };
-        match handle.join() {
-            Ok(Ok(sheet)) => {
-                log!(
-                    "fx thumb: {} rendered — {} frames over {:.1}s, load {:.1}ms, capture avg {:.2}ms max {:.2}ms, fx draw max {:.2}ms",
-                    active.job.title,
-                    FRAME_COUNT,
-                    CAPTURE_SPAN,
-                    active.load_ms,
-                    active.capture_ms_sum / FRAME_COUNT as f32,
-                    active.capture_ms_max,
-                    active.draw_ms_max,
-                );
-                self.results.push(sheet);
+    /// Harvest finished encode workers without ever blocking the UI thread.
+    fn poll_encoders(&mut self) {
+        for index in 0..self.lanes.len() {
+            let finished = self.lanes[index].job.as_ref().is_some_and(|a| {
+                a.phase == Phase::Encoding && a.encoder.as_ref().is_some_and(|h| h.is_finished())
+            });
+            if !finished {
+                continue;
             }
-            Ok(Err(error)) => {
-                log!(
-                    "fx thumb: {} encode failed — {error} (placeholder kept)",
-                    active.job.title
-                );
-                self.failed.insert(active.job.revision, error);
-            }
-            Err(_) => {
-                self.failed
-                    .insert(active.job.revision, "encode worker panicked".to_string());
+            let Some(mut active) = self.lanes[index].job.take() else { continue };
+            let Some(handle) = active.encoder.take() else { continue };
+            let total_ms = active.started.elapsed().as_secs_f32() * 1000.0;
+            match handle.join() {
+                Ok(Ok(sheet)) => {
+                    self.done_count += 1;
+                    self.done_ms += total_ms;
+                    log!(
+                        "fx thumb: {} rendered — {} frames over {:.1}s in {:.0}ms ({} draws, load {:.1}ms, readback {:.1}ms); {} done, avg {:.0}ms, {:.1}s elapsed",
+                        active.job.title,
+                        FRAME_COUNT,
+                        CAPTURE_SPAN,
+                        total_ms,
+                        active.frames,
+                        active.load_ms,
+                        active.read_ms,
+                        self.done_count,
+                        self.done_ms / self.done_count as f32,
+                        self.batch_started
+                            .map(|t| t.elapsed().as_secs_f32())
+                            .unwrap_or(0.0),
+                    );
+                    self.results.push(sheet);
+                }
+                Ok(Err(error)) => {
+                    log!(
+                        "fx thumb: {} FAILED — {error} (placeholder kept)",
+                        active.job.title
+                    );
+                    self.failed.insert(active.job.revision, error);
+                }
+                Err(_) => {
+                    self.failed
+                        .insert(active.job.revision, "encode worker panicked".to_string());
+                }
             }
         }
     }
 
-    /// One capture if it is due. At most one readback per UI frame by
-    /// construction (this runs once per draw).
-    fn try_capture(&mut self, cx: &mut Cx, now: f64) {
-        let due = {
-            let Some(active) = self.active.as_ref() else { return };
-            active.phase == Phase::Capturing && now >= active.next_capture
-        };
-        if !due {
-            return;
+    /// One lane's frame: advance its clock by exactly the step this frame
+    /// stands for, render the effect INSIDE the lane's sheet pass, and (on
+    /// a capture frame) blit it into its cell. Returns true when the sheet
+    /// is complete and waiting for its readback.
+    fn draw_lane(cx: &mut Cx2d, view: &mut VjFxView, lane: &mut Lane, cell: &mut DrawVjFxThumbCell, scratch: &mut Vec<u32>) -> bool {
+        let Some(active) = lane.job.as_mut() else { return false };
+        let phase = active.phase;
+        match phase {
+            Phase::Readback => return true,
+            Phase::Encoding => return false,
+            _ => {}
         }
-        let Some(texture) = self.fx.output_texture() else { return };
-        let t0 = std::time::Instant::now();
+        // What this frame stands for.
+        let (dt, capture) = match phase {
+            Phase::Warmup(_) => (0.0, None),
+            Phase::Preroll { dt, .. } => (dt, None),
+            Phase::Capture(k) => (FRAME_STEP, Some(k)),
+            _ => (0.0, None),
+        };
+        let clear = !matches!(phase, Phase::Capture(k) if k > 0);
+        view.tick_manual(cx.cx, dt);
+        active.frames += 1;
+
+        // Transition previews: the sweeping two-pattern premix lands in
+        // input0 and the engage triangle in p3 — the tile then SHOWS one
+        // picture becoming another through the effect. The sheet holds the
+        // COMPLETE transition, edge to edge: the frame captured into cell k
+        // renders p3 exactly at k/(N-1), first frame pure deck A, last pure
+        // deck B.
+        if active.job.transition {
+            let k = capture.unwrap_or(0);
+            let m = (k as f32 / (FRAME_COUNT - 1) as f32).clamp(0.0, 1.0);
+            // Document time, not wall time: the patterns drift the same way
+            // every run, so a sheet is reproducible.
+            let time = (PREROLL_SECS + k as f64 * FRAME_STEP) as f32;
+            if view.wants_deck_inputs() {
+                // Two-deck doc: the distinct patterns land on separate
+                // inputs and p3 sweeps as the crossfader would — the
+                // thumbnail replays the transition exactly.
+                let tex_a = transition_input(cx.cx, scratch, &mut lane.trans_tex[0], 0.0, time);
+                let tex_b = transition_input(cx.cx, scratch, &mut lane.trans_tex[1], 1.0, time);
+                view.set_input_texture(0, Some(tex_a));
+                view.set_input_texture(1, Some(tex_b));
+                view.set_user_override([None, None, None, Some(m)]);
+            } else {
+                // Premix doc: one input carrying the sweeping dissolve,
+                // intensity on the engage triangle.
+                let tex = transition_input(cx.cx, scratch, &mut lane.trans_tex[0], m, time);
+                view.set_input_texture(0, Some(tex));
+                let tri = 1.0 - (2.0 * m - 1.0).abs();
+                view.set_user_override([None, None, None, Some(tri)]);
+            }
+        }
+
+        // The sheet pass. The effect's own passes are begun inside it, so
+        // they are its CHILDREN and therefore execute first — the cell blit
+        // below reads the frame this very draw produced.
+        let sheet = lane
+            .sheet
+            .get_or_insert_with(|| SheetTarget::new(cx.cx, "vjfx_thumb_sheet"));
+        let size = dvec2(SHEET_W as f64, SHEET_H as f64);
+        sheet.pass.set_size(cx, size);
+        sheet.pass.set_color_texture(
+            cx.cx,
+            &sheet.texture,
+            if clear {
+                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 1.0))
+            } else {
+                // Load: the cells already drawn stay drawn.
+                DrawPassClearColor::InitWith(vec4(0.0, 0.0, 0.0, 1.0))
+            },
+        );
+        cx.make_child_pass(&sheet.pass);
+        // dpi 1.0: the sheet target is exact texels, so the readback IS the
+        // PNG (the effect's own pass keeps the window's dpi — it delegates
+        // up to the window, which is where the extra supersampling on a
+        // retina screen comes from).
+        cx.begin_pass(&sheet.pass, Some(1.0));
+        sheet.pass.set_size(cx, size);
+        sheet.draw_list.begin_always(cx);
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+        let _ = view.draw_walk(cx, &mut Scope::empty(), Walk::fill());
+        if let (Some(k), Some(texture)) = (capture, view.output_texture()) {
+            cell.draw_vars.set_texture(0, &texture);
+            cell.draw_abs(cx, cell_rect(k));
+        }
+        cx.end_pass_sized_turtle();
+        sheet.draw_list.end(cx);
+        cx.end_pass(&sheet.pass);
+
+        // Advance the phase for the next frame.
+        let stepped = view.needs_stepped_time();
+        let Some(active) = lane.job.as_mut() else { return false };
+        active.phase = match phase {
+            Phase::Warmup(n) if n + 1 < WARMUP_DRAWS => Phase::Warmup(n + 1),
+            Phase::Warmup(_) => {
+                if stepped {
+                    Phase::Preroll { left: PREROLL_STEPS, dt: FRAME_STEP }
+                } else {
+                    // Nothing in this document remembers the frames before
+                    // it: one jump lands on the same picture.
+                    Phase::Preroll { left: 1, dt: PREROLL_SECS }
+                }
+            }
+            Phase::Preroll { left, dt } if left > 1 => Phase::Preroll { left: left - 1, dt },
+            Phase::Preroll { .. } => Phase::Capture(0),
+            Phase::Capture(k) if k + 1 < FRAME_COUNT => Phase::Capture(k + 1),
+            Phase::Capture(_) => Phase::Readback,
+            other => other,
+        };
+        false
+    }
+
+    /// The sheet is drawn: read it back once and hand the pixels to a
+    /// worker. This is the only GPU->CPU transfer a thumbnail costs.
+    fn finish_lane(&mut self, cx: &mut Cx, index: usize) {
+        let Some(dir) = self.cache_dir.clone() else {
+            self.fail_lane(cx, index, "no cache dir configured".to_string());
+            return;
+        };
+        let Some(texture) = self.lanes[index].sheet.as_ref().map(|s| s.texture.clone()) else {
+            self.fail_lane(cx, index, "no sheet target".to_string());
+            return;
+        };
+        let t0 = Instant::now();
         let Some((w, h, bytes)) = cx.debug_read_render_texture(&texture) else {
             self.readback_failures += 1;
             if self.readback_failures >= 3 {
@@ -464,131 +812,123 @@ impl VjFxThumbs {
                 // cached sheets still decode.
                 self.disabled = Some("render-target readback unavailable".to_string());
             }
-            self.fail_active(cx, "render-target readback unavailable".to_string());
+            self.fail_lane(cx, index, "render-target readback unavailable".to_string());
             return;
         };
         self.readback_failures = 0;
-        let cell = cell_from_bgra(&bytes, w, h);
-        let ms = t0.elapsed().as_secs_f32() * 1000.0;
-        let done = {
-            let Some(active) = self.active.as_mut() else { return };
-            active.capture_ms_max = active.capture_ms_max.max(ms);
-            active.capture_ms_sum += ms;
-            active.captures.push(cell);
-            active.next_capture = now + CAPTURE_SPAN / FRAME_COUNT as f64;
-            active.captures.len() >= FRAME_COUNT
-        };
-        if done {
-            self.finish_captures(cx);
-        }
-    }
-
-    /// All frames in hand: stop the effect, hand the pixels to a worker.
-    fn finish_captures(&mut self, cx: &mut Cx) {
-        let Some(dir) = self.cache_dir.clone() else {
-            self.fail_active(cx, "no cache dir configured".to_string());
-            return;
-        };
-        let tiles = match self.active.as_mut() {
-            Some(active) => std::mem::take(&mut active.captures),
-            None => return,
-        };
-        if all_black(&tiles) {
-            self.fail_active(cx, "rendered black".to_string());
-            return;
-        }
-        let Some(active) = self.active.as_mut() else { return };
+        let read_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        let Some(active) = self.lanes[index].job.as_mut() else { return };
+        active.read_ms = read_ms;
         let revision = active.job.revision;
         let path = cache_path(&dir, &revision, active.job.transition);
         active.phase = Phase::Encoding;
         active.encoder = Some(std::thread::spawn(move || {
-            encode_and_write(tiles, path, revision)
+            encode_and_write(bytes, w, h, path, revision)
         }));
         // The effect can stop ticking now — the pixels are on the worker.
-        self.fx.clear_effect(cx);
+        self.view(index).clear_effect(cx);
+    }
+
+    /// Follow the frame clock: hand a lane back when frames get long, take
+    /// one when they are short again. This is what keeps a full-speed regen
+    /// from ever feeling like a hang.
+    fn pace(&mut self) {
+        let now = Instant::now();
+        let last = self.last_frame_at.replace(now);
+        let Some(last) = last else { return };
+        let period = now.duration_since(last).as_secs_f64();
+        // A long gap is the app being idle between bursts, not a slow
+        // frame; only judge frames that follow one another.
+        if period > 0.25 {
+            return;
+        }
+        if period > PACE_BAD {
+            self.allowed = self.allowed.saturating_sub(1).max(1);
+        } else if period < PACE_GOOD && self.allowed < LANES {
+            self.allowed += 1;
+        }
     }
 }
 
-impl VjFxThumbs {
-    const TRANS_W: usize = 192;
-    const TRANS_H: usize = 120;
+const TRANS_W: usize = 192;
+const TRANS_H: usize = 120;
 
-    /// The transition preview's input0: TWO visibly different test patterns
-    /// — a warm gradient with a drifting disc, and a cool grid with a
-    /// counter-drifting bar — dissolved by `m` (the thumbnail's sweeping
-    /// crossfade), exactly the slot runtime's premix-as-input0 contract.
-    fn transition_input(&mut self, cx: &mut Cx, m: f32, time: f32) -> Texture {
-        self.transition_input_into(cx, m, time, 0)
-    }
-
-    /// Render the premix at sweep position `m` into texture slot `slot`
-    /// (m = 0 → pure pattern A, m = 1 → pure pattern B).
-    fn transition_input_into(&mut self, cx: &mut Cx, m: f32, time: f32, slot: usize) -> Texture {
-        const W: usize = VjFxThumbs::TRANS_W;
-        const H: usize = VjFxThumbs::TRANS_H;
-        self.trans_data.resize(W * H, 0);
-        let m = m.clamp(0.0, 1.0);
-        let (dx, dy) = ((time * 0.7).cos() * 0.25, (time * 0.53).sin() * 0.2);
-        let bar = (time * 0.4).fract();
-        for y in 0..H {
-            let v = y as f32 / H as f32;
-            for x in 0..W {
-                let u = x as f32 / W as f32;
-                // A: warm diagonal gradient + travelling disc.
-                let mut ar = 0.85 - 0.5 * v;
-                let mut ag = 0.45 + 0.3 * u;
-                let mut ab = 0.15 + 0.2 * (1.0 - u);
-                let ddx = u - 0.5 - dx;
-                let ddy = v - 0.5 - dy;
-                if ddx * ddx + ddy * ddy < 0.02 {
-                    ar = 1.0;
-                    ag = 0.95;
-                    ab = 0.7;
-                }
-                // B: cool grid + counter-drifting vertical bar.
-                let gx = x % 24 < 2 || y % 24 < 2;
-                let mut br = 0.08;
-                let mut bg = 0.25 + 0.35 * v;
-                let mut bb = 0.7 + 0.3 * (1.0 - v);
-                if gx {
-                    br = 0.4;
-                    bg = 0.9;
-                    bb = 1.0;
-                }
-                if ((u + 1.0 - bar).fract() - 0.5).abs() < 0.03 {
-                    br = 0.9;
-                    bg = 1.0;
-                    bb = 1.0;
-                }
-                let r = ar + (br - ar) * m;
-                let g = ag + (bg - ag) * m;
-                let b = ab + (bb - ab) * m;
-                let (r8, g8, b8) = (
-                    (r.clamp(0.0, 1.0) * 255.0) as u32,
-                    (g.clamp(0.0, 1.0) * 255.0) as u32,
-                    (b.clamp(0.0, 1.0) * 255.0) as u32,
-                );
-                self.trans_data[y * W + x] = 0xff00_0000 | (r8 << 16) | (g8 << 8) | b8;
+/// The transition preview's input: TWO visibly different test patterns — a
+/// warm gradient with a drifting disc, and a cool grid with a
+/// counter-drifting bar — dissolved by `m` (the thumbnail's sweeping
+/// crossfade), exactly the slot runtime's premix-as-input0 contract.
+/// `m = 0` is pure pattern A, `m = 1` pure pattern B.
+fn transition_input(
+    cx: &mut Cx,
+    data: &mut Vec<u32>,
+    slot: &mut Option<Texture>,
+    m: f32,
+    time: f32,
+) -> Texture {
+    const W: usize = TRANS_W;
+    const H: usize = TRANS_H;
+    data.resize(W * H, 0);
+    let m = m.clamp(0.0, 1.0);
+    let (dx, dy) = ((time * 0.7).cos() * 0.25, (time * 0.53).sin() * 0.2);
+    let bar = (time * 0.4).fract();
+    for y in 0..H {
+        let v = y as f32 / H as f32;
+        for x in 0..W {
+            let u = x as f32 / W as f32;
+            // A: warm diagonal gradient + travelling disc.
+            let mut ar = 0.85 - 0.5 * v;
+            let mut ag = 0.45 + 0.3 * u;
+            let mut ab = 0.15 + 0.2 * (1.0 - u);
+            let ddx = u - 0.5 - dx;
+            let ddy = v - 0.5 - dy;
+            if ddx * ddx + ddy * ddy < 0.02 {
+                ar = 1.0;
+                ag = 0.95;
+                ab = 0.7;
             }
+            // B: cool grid + counter-drifting vertical bar.
+            let gx = x % 24 < 2 || y % 24 < 2;
+            let mut br = 0.08;
+            let mut bg = 0.25 + 0.35 * v;
+            let mut bb = 0.7 + 0.3 * (1.0 - v);
+            if gx {
+                br = 0.4;
+                bg = 0.9;
+                bb = 1.0;
+            }
+            if ((u + 1.0 - bar).fract() - 0.5).abs() < 0.03 {
+                br = 0.9;
+                bg = 1.0;
+                bb = 1.0;
+            }
+            let r = ar + (br - ar) * m;
+            let g = ag + (bg - ag) * m;
+            let b = ab + (bb - ab) * m;
+            let (r8, g8, b8) = (
+                (r.clamp(0.0, 1.0) * 255.0) as u32,
+                (g.clamp(0.0, 1.0) * 255.0) as u32,
+                (b.clamp(0.0, 1.0) * 255.0) as u32,
+            );
+            data[y * W + x] = 0xff00_0000 | (r8 << 16) | (g8 << 8) | b8;
         }
-        match &self.trans_tex[slot.min(1)] {
-            Some(tex) => {
-                tex.set_data_u32(cx, W, H, self.trans_data.clone());
-                tex.clone()
-            }
-            None => {
-                let tex = Texture::new_with_format(
-                    cx,
-                    TextureFormat::VecBGRAu8_32 {
-                        width: W,
-                        height: H,
-                        data: Some(self.trans_data.clone()),
-                        updated: TextureUpdated::Full,
-                    },
-                );
-                self.trans_tex[slot.min(1)] = Some(tex.clone());
-                tex
-            }
+    }
+    match slot {
+        Some(tex) => {
+            tex.set_data_u32(cx, W, H, data.clone());
+            tex.clone()
+        }
+        None => {
+            let tex = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: W,
+                    height: H,
+                    data: Some(data.clone()),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            *slot = Some(tex.clone());
+            tex
         }
     }
 }
@@ -610,105 +950,78 @@ impl WidgetNode for VjFxThumbs {
 
 impl Widget for VjFxThumbs {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // The hidden view runs its own NextFrame clock while a document is
-        // loaded; forwarding every event is what keeps it ticking.
+        // The hosts run on the manual clock (this widget drives every frame
+        // they render), but they are still widgets: forward the event.
         self.fx.handle_event(cx, event, scope);
-        if self.next_frame.is_event(event).is_some() {
-            if self.active.is_some() || !self.queue.is_empty() {
-                self.area.redraw(cx);
-                self.next_frame = cx.new_next_frame();
-            }
+        self.fx1.handle_event(cx, event, scope);
+        self.fx2.handle_event(cx, event, scope);
+        self.fx3.handle_event(cx, event, scope);
+        self.fx4.handle_event(cx, event, scope);
+        self.fx5.handle_event(cx, event, scope);
+        if self.next_frame.is_event(event).is_some() && !self.is_idle() {
+            self.area.redraw(cx);
+            self.next_frame = cx.new_next_frame();
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
-        self.poll_encoder(cx.cx);
-        self.start_next(cx.cx);
+        self.ensure_lanes();
+        self.pace();
+        self.poll_encoders();
+        self.start_jobs(cx.cx);
 
-        let now = cx.cx.seconds_since_app_start();
-        // Phase bookkeeping BEFORE this frame's pass: the readback sees the
-        // pixels the previous draw committed.
-        if let Some(active) = self.active.as_mut() {
-            if active.phase == Phase::Warmup {
-                active.draws += 1;
-                if active.draws >= WARMUP_DRAWS {
-                    active.phase = Phase::Capturing;
-                    active.started = now;
-                    active.next_capture = now + PREROLL_SECS;
-                }
+        let mut ready: Vec<usize> = Vec::new();
+        let mut last_sheet: Option<Texture> = None;
+        for index in 0..LANES {
+            if self.lanes[index].job.is_none() {
+                continue;
+            }
+            // Disjoint borrows: the lane's view field, its lane state, the
+            // shared cell shader and the premix scratch.
+            let (view, lane): (&mut VjFxView, &mut Lane) = match index {
+                0 => (&mut self.fx, &mut self.lanes[0]),
+                1 => (&mut self.fx1, &mut self.lanes[1]),
+                2 => (&mut self.fx2, &mut self.lanes[2]),
+                3 => (&mut self.fx3, &mut self.lanes[3]),
+                4 => (&mut self.fx4, &mut self.lanes[4]),
+                _ => (&mut self.fx5, &mut self.lanes[5]),
+            };
+            if Self::draw_lane(cx, view, lane, &mut self.draw_cell, &mut self.trans_data) {
+                ready.push(index);
+            }
+            if let Some(sheet) = self.lanes[index].sheet.as_ref() {
+                last_sheet = Some(sheet.texture.clone());
             }
         }
-        self.try_capture(cx.cx, now);
-
-        // The effect pass itself (a no-op walk when no document is loaded).
-        let rendering = self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.phase != Phase::Encoding);
-        if rendering {
-            // Transition previews: the sweeping two-pattern premix lands in
-            // input0 and the engage triangle in p3, every frame — the tile
-            // then SHOWS one picture becoming another through the effect.
-            let sweep = self.active.as_ref().and_then(|active| {
-                if !active.job.transition {
-                    return None;
-                }
-                // The sheet holds the COMPLETE transition, edge to edge:
-                // the frame that capture k will grab renders p3 exactly at
-                // k/(N-1) — first frame pure deck A, last pure deck B —
-                // instead of whatever slice of the sweep a wall-clock
-                // window happened to sample. (Capture cadence stays timed;
-                // the VALUE is index-driven, so jitter cannot bend the
-                // sweep.)
-                let m = if active.phase == Phase::Capturing {
-                    (active.captures.len() as f64 / (FRAME_COUNT - 1) as f64)
-                        .clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                Some(m as f32)
-            });
-            if let Some(m) = sweep {
-                if self.fx.wants_deck_inputs() {
-                    // Two-deck doc: the distinct patterns land on separate
-                    // inputs and p3 sweeps as the crossfader would — the
-                    // thumbnail replays the transition exactly.
-                    let tex_a = self.transition_input_into(cx.cx, 0.0, now as f32, 0);
-                    let tex_b = self.transition_input_into(cx.cx, 1.0, now as f32, 1);
-                    self.fx.set_input_texture(0, Some(tex_a));
-                    self.fx.set_input_texture(1, Some(tex_b));
-                    self.fx.set_user_override([None, None, None, Some(m)]);
-                } else {
-                    // Premix doc: one input carrying the sweeping dissolve,
-                    // intensity on the engage triangle.
-                    let tex = self.transition_input(cx.cx, m, now as f32);
-                    self.fx.set_input_texture(0, Some(tex));
-                    let tri = 1.0 - (2.0 * m - 1.0).abs();
-                    self.fx.set_user_override([None, None, None, Some(tri)]);
-                }
-            }
-            let t0 = std::time::Instant::now();
-            let _ = self.fx.draw_walk(cx, scope, Walk::fill());
-            let ms = t0.elapsed().as_secs_f32() * 1000.0;
-            if let Some(active) = self.active.as_mut() {
-                active.draw_ms_max = active.draw_ms_max.max(ms);
-            }
-            // Sample the output into our 4x4 rect: the frame dependency
-            // that makes the offscreen chain actually render.
-            if let Some(texture) = self.fx.output_texture() {
-                self.draw_present.draw_vars.set_texture(0, &texture);
-                self.draw_present.draw_abs(cx, rect);
-            }
+        // Readbacks are the one blocking thing here: bounded per frame.
+        for index in ready.into_iter().take(READBACKS_PER_FRAME) {
+            self.finish_lane(cx.cx, index);
+        }
+        // Sample a sheet into our 4x4 rect: the frame dependency that makes
+        // the offscreen chain actually render.
+        if let Some(texture) = last_sheet {
+            self.draw_present.draw_vars.set_texture(0, &texture);
+            self.draw_present.draw_abs(cx, rect);
         }
         cx.end_turtle_with_area(&mut self.area);
-        if self.active.is_some() || !self.queue.is_empty() {
+        if !self.is_idle() {
             self.area.redraw(cx.cx);
             self.next_frame = cx.cx.new_next_frame();
+        } else {
+            self.batch_started = None;
         }
         DrawStep::done()
     }
+}
+
+/// The GPU cell downscale (see the shader in `script_mod!` above).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawVjFxThumbCell {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 #[cfg(test)]
@@ -716,61 +1029,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sheet_geometry_declares_exactly_what_pack_sheet_writes() {
+    fn sheet_geometry_declares_exactly_what_the_gpu_packs() {
         let cells = sheet_cells();
-        let tiles: Vec<Vec<u8>> = (0..FRAME_COUNT)
-            .map(|i| vec![i as u8; CELL_W * CELL_H * 4])
-            .collect();
-        let (sheet, w, h) = pack_sheet(&tiles);
-        // The declared grid fits the sheet exactly (the same validation the
-        // store applies to a published thumbnail's views).
+        // The declared grid fits the sheet target exactly (the same
+        // validation the store applies to a published thumbnail's views).
         let last = cells.first + cells.count - 1;
         let right = ((last % cells.cols) + 1) * cells.cell_w;
         let bottom = ((last / cells.cols) + 1) * cells.cell_h;
-        assert!(right as usize <= w && bottom as usize <= h, "{right}x{bottom} vs {w}x{h}");
-        assert_eq!(sheet.len(), w * h * 4);
-        // Cell 5 sits at (1 * CELL_W, 1 * CELL_H): its first pixel carries
-        // its tile's fill byte.
-        let (x, y) = ((5 % SHEET_COLS) * CELL_W, (5 / SHEET_COLS) * CELL_H);
-        assert_eq!(sheet[(y * w + x) * 4], 5);
-        // Playback covers the capture span in real time.
+        assert!(
+            right as usize <= SHEET_W && bottom as usize <= SHEET_H,
+            "{right}x{bottom} vs {SHEET_W}x{SHEET_H}"
+        );
+        // Every cell rect lands inside the sheet, on its own row/column.
+        let r5 = cell_rect(5);
+        assert_eq!(r5.pos, dvec2((5 * CELL_W) as f64, 0.0));
+        let r6 = cell_rect(6);
+        assert_eq!(r6.pos, dvec2(0.0, CELL_H as f64));
+        let last_rect = cell_rect(FRAME_COUNT - 1);
+        assert!(last_rect.pos.x + last_rect.size.x <= SHEET_W as f64);
+        assert!(last_rect.pos.y + last_rect.size.y <= SHEET_H as f64);
+        // Playback covers the capture span in real time, and the clock the
+        // capture runs on is exactly that playback rate.
         assert!((SHEET_FPS * CAPTURE_SPAN as f32 - FRAME_COUNT as f32).abs() < 1e-6);
+        assert!((FRAME_STEP * SHEET_FPS as f64 - 1.0).abs() < 1e-9);
+        assert_eq!(PREROLL_STEPS, 27);
     }
 
     #[test]
-    fn cell_resample_is_cover_bgra_to_rgba_and_never_panics_on_junk() {
-        // A 2x-dpi readback (320x200) of solid blue-ish BGRA.
-        let (sw, sh) = (CELL_W * 2, CELL_H * 2);
-        let mut src = vec![0u8; sw * sh * 4];
+    fn readback_becomes_rgba_and_never_panics_on_junk() {
+        // An exact-size readback of solid blue-ish BGRA.
+        let mut src = vec![0u8; SHEET_W * SHEET_H * 4];
         for px in src.chunks_exact_mut(4) {
-            px.copy_from_slice(&[200, 100, 50, 255]); // B G R A
+            px.copy_from_slice(&[200, 100, 50, 128]); // B G R A
         }
-        let cell = cell_from_bgra(&src, sw, sh);
-        assert_eq!(cell.len(), CELL_W * CELL_H * 4);
-        assert_eq!(&cell[..4], &[50, 100, 200, 255], "BGRA -> RGBA swizzle");
-        // Wildly wrong aspect still fills the whole cell (cover-crop).
-        let tall = vec![128u8; 40 * 400 * 4];
-        let cell = cell_from_bgra(&tall, 40, 400);
-        assert!(cell.chunks_exact(4).all(|px| px[0] == 128 && px[3] == 255));
-        // Degenerate inputs return an empty cell rather than panicking.
-        let junk = cell_from_bgra(&[1, 2, 3], 999, 999);
-        assert_eq!(junk.len(), CELL_W * CELL_H * 4);
-        let zero = cell_from_bgra(&[], 0, 0);
-        assert_eq!(zero.len(), CELL_W * CELL_H * 4);
+        let sheet = sheet_rgba_from_bgra(&src, SHEET_W, SHEET_H);
+        assert_eq!(sheet.len(), SHEET_W * SHEET_H * 4);
+        assert_eq!(&sheet[..4], &[50, 100, 200, 255], "BGRA -> opaque RGBA");
+        // A backend that ignored the dpi override still lands on the grid.
+        let big = vec![128u8; SHEET_W * 2 * SHEET_H * 2 * 4];
+        let sheet = sheet_rgba_from_bgra(&big, SHEET_W * 2, SHEET_H * 2);
+        assert!(sheet.chunks_exact(4).all(|px| px[0] == 128 && px[3] == 255));
+        // Degenerate inputs return an empty sheet rather than panicking.
+        let junk = sheet_rgba_from_bgra(&[1, 2, 3], 999, 999);
+        assert_eq!(junk.len(), SHEET_W * SHEET_H * 4);
+        let zero = sheet_rgba_from_bgra(&[], 0, 0);
+        assert_eq!(zero.len(), SHEET_W * SHEET_H * 4);
     }
 
     #[test]
     fn the_black_gate_and_the_stamped_layout_round_trip() {
-        let black = vec![vec![0u8; CELL_W * CELL_H * 4]; 3];
-        assert!(all_black(&black), "black frames must be refused");
+        let black = vec![0u8; SHEET_W * SHEET_H * 4];
+        assert!(all_black(&black), "black sheets must be refused");
         let mut lit = black.clone();
-        lit[1][0] = 200;
+        lit[4] = 200;
         assert!(!all_black(&lit));
 
         // What encode_and_write stamps, decode-side read_layout must
         // recover — this is the whole cache-file contract.
-        let (sheet, w, h) = pack_sheet(&lit);
-        let png = encode_png_rgba(&sheet, w as u32, h as u32).expect("png");
+        let png = encode_png_rgba(&lit, SHEET_W as u32, SHEET_H as u32).expect("png");
         let png = anim_icon::stamp_layout(&png, sheet_cells(), SHEET_FPS);
         let (cells, fps) = anim_icon::read_layout(&png).expect("stamped layout");
         assert_eq!(cells, sheet_cells());
