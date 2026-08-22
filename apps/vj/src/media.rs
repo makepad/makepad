@@ -128,7 +128,12 @@ impl Drop for DecoderInput {
 }
 
 struct Frame {
+    /// Pacing timestamp — monotonic for the clock (synthetic in bounce).
     pts_100ns: i64,
+    /// TRUE clip position of this picture, for the position readout: in
+    /// bounce the pacing stamps climb forever while the picture runs
+    /// backward — the scrub bar follows this, never the pacing stamp.
+    clip_100ns: i64,
     bgra: Vec<u32>,
 }
 
@@ -511,7 +516,7 @@ impl SlotPlayer {
         }
         if let Some(frame) = &due {
             self.last_pts = frame.pts_100ns;
-            self.shared.position_100ns.store(frame.pts_100ns, Ordering::Release);
+            self.shared.position_100ns.store(frame.clip_100ns, Ordering::Release);
         }
         due.map(|f| f.bgra)
     }
@@ -926,7 +931,7 @@ fn convert_frame(
             0xff00_0000 | ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32,
         );
     }
-    Frame { pts_100ns: frame.pts_100ns, bgra }
+    Frame { pts_100ns: frame.pts_100ns, clip_100ns: frame.pts_100ns, bgra }
 }
 
 fn push_frame(
@@ -935,7 +940,11 @@ fn push_frame(
     rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
     let converted = convert_frame(frame, rgb_scratch);
-    let out = Frame { pts_100ns: converted.pts_100ns, bgra: converted.bgra.clone() };
+    let out = Frame {
+        pts_100ns: converted.pts_100ns,
+        clip_100ns: converted.clip_100ns,
+        bgra: converted.bgra.clone(),
+    };
     shared.frames.lock().unwrap().push_back(converted);
     shared.video_ready.store(true, Ordering::Release);
     out
@@ -969,9 +978,13 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let n = cache.len();
     let mut idx = n - 1;
     let mut forward = false;
-    // A trim change while we repeat: hand control back — the cache only
-    // covers the range it was decoded under.
-    let epoch0 = shared.trim_epoch.load(Ordering::Acquire);
+    // Trim changes do NOT bounce control back here: the IN/OUT bounds are
+    // read LIVE each frame below, so a shrinking range just tightens the
+    // space the repeat moves in — playback never resets. Control only goes
+    // back when the range GROWS past what this cache holds (the decoder
+    // must fetch the uncovered tail).
+    let cover_lo = cache.first().map(|f| f.clip_100ns).unwrap_or(0);
+    let cover_hi = cache.last().map(|f| f.clip_100ns).unwrap_or(0);
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -979,8 +992,13 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
             return;
         }
-        if shared.trim_epoch.load(Ordering::Acquire) != epoch0 {
-            return;
+        {
+            let t_in = shared.trim_in_100ns.load(Ordering::Acquire);
+            let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
+            // One-frame slack: pts snap to frame boundaries.
+            if t_in + delta < cover_lo || (t_out != i64::MAX && t_out - delta > cover_hi + delta) {
+                return;
+            }
         }
         let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
         if mode == PlayMode::Once {
@@ -1011,6 +1029,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             // instead of a clip that grows older forever.
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: cache[idx].pts_100ns,
+                clip_100ns: cache[idx].pts_100ns,
                 bgra: cache[idx].bgra.clone(),
             });
             continue;
@@ -1031,6 +1050,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         synth_pts += delta;
         shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: synth_pts,
+            clip_100ns: cache[idx].pts_100ns,
             bgra: cache[idx].bgra.clone(),
         });
     }
@@ -1104,13 +1124,13 @@ fn seek_bounce_playback(
         .map(|f| f.pts_100ns)
         .unwrap_or(0)
         .max(shared.position_100ns.load(Ordering::Acquire));
-    let mut serve = |shared: &SlotShared, bgra: Vec<u32>, synth_pts: &mut i64| {
+    let mut serve = |shared: &SlotShared, bgra: Vec<u32>, clip_100ns: i64, synth_pts: &mut i64| {
         *synth_pts += delta;
         shared
             .frames
             .lock()
             .unwrap()
-            .push_back(Frame { pts_100ns: *synth_pts, bgra });
+            .push_back(Frame { pts_100ns: *synth_pts, clip_100ns, bgra });
         shared.video_ready.store(true, Ordering::Release);
     };
     loop {
@@ -1156,7 +1176,7 @@ fn seek_bounce_playback(
                 if wait_ring(shared, has_audio, epoch0) {
                     return Ok(true);
                 }
-                serve(shared, frame.bgra, &mut synth_pts);
+                serve(shared, frame.bgra, frame.clip_100ns, &mut synth_pts);
             }
             // Strictly decreasing: every kept frame had pts < hi.
             hi = first_kept;
@@ -1173,7 +1193,7 @@ fn seek_bounce_playback(
                 Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => continue,
                 Ok(Some(f)) if f.pts_100ns < t_out => {
                     let frame = convert_frame(f, &mut rgb_scratch);
-                    serve(shared, frame.bgra, &mut synth_pts);
+                    serve(shared, frame.bgra, frame.clip_100ns, &mut synth_pts);
                 }
                 Ok(Some(_)) | Ok(None) => break,
                 Err(e) => return Err(e.to_string()),
@@ -2682,6 +2702,7 @@ mod tests {
         for index in 0..queued_frames {
             frames.push_back(Frame {
                 pts_100ns: index as i64,
+                clip_100ns: index as i64,
                 bgra: vec![0xff00_0000],
             });
         }

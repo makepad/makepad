@@ -112,7 +112,9 @@ pub struct FxThumbSheet {
 /// actually landed on some docs; bumping the key retired every one.
 pub fn cache_path(dir: &Path, revision: &AssetRevisionId, transition: bool) -> PathBuf {
     if transition {
-        dir.join(format!("{revision}-t2.png"))
+        // -t3: the sweep became frame-indexed (the whole transition edge
+        // to edge in one sheet); -t2 retired the shader-collision sheets.
+        dir.join(format!("{revision}-t3.png"))
     } else {
         dir.join(format!("{revision}.png"))
     }
@@ -653,8 +655,16 @@ impl Widget for VjFxThumbs {
                 if !active.job.transition {
                     return None;
                 }
+                // The sheet holds the COMPLETE transition, edge to edge:
+                // the frame that capture k will grab renders p3 exactly at
+                // k/(N-1) — first frame pure deck A, last pure deck B —
+                // instead of whatever slice of the sweep a wall-clock
+                // window happened to sample. (Capture cadence stays timed;
+                // the VALUE is index-driven, so jitter cannot bend the
+                // sweep.)
                 let m = if active.phase == Phase::Capturing {
-                    ((now - active.started - PREROLL_SECS) / CAPTURE_SPAN).clamp(0.0, 1.0)
+                    (active.captures.len() as f64 / (FRAME_COUNT - 1) as f64)
+                        .clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
