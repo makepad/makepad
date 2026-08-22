@@ -174,6 +174,7 @@ pub fn kind_str(k: AssetKind) -> &'static str {
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 

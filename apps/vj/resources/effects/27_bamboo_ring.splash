@@ -1,0 +1,38 @@
+// BAMBOO RING — eight upright canes around the camera. Pattern taught:
+// a mostly-unbranched rule (one F chain, rare side shoots) plus `copies`
+// builds a GROVE, and grow "loop" makes the grove shoot up over 4 bars.
+{
+    name: "Bamboo Ring"
+    engine: "lsystem"
+    seed: 8
+
+    axiom: "B"
+    rules: ["B=F[+G]FB", "G=FF", "F=FF"]
+    iterations: 4
+    angle: 28.0
+    step: 0.22
+    radius: 0.06
+    radius_decay: 0.9
+    sides: 5
+    copies: 8
+
+    grow: "loop"
+    grow_beats: 16
+    sway: 0.45
+    sway_freq: 0.7
+    beat_pulse: 0.35
+
+    color_bg: #x071006
+    color_a: #x5fae3a
+    color_b: #xcfe86a
+    color_c: #xf4ffdd
+
+    cam_orbit: 0.09
+    cam_height: 3.0
+    fog: 0.04
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 2}
+    ]
+}

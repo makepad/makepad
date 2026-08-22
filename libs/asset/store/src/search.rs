@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// created before schema v2 (tests/migration.rs proves the parity).
 const KIND_DDL: &str = "kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game'))";
+'audio','video','skybox','world','prefab','billboard','game','vjeffect'))";
 
 /// The canonical-alias column's definition. Must stay identical in the CREATE
 /// below and in `canon_alias_migration_sql()`, which retrofits the column onto
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -181,6 +181,7 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -200,6 +201,7 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
         "game" => AssetKind::Game,
+        "vjeffect" => AssetKind::VjEffect,
         _ => return None,
     })
 }
@@ -240,7 +242,7 @@ CREATE TABLE search_annotations_rebuild(
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,

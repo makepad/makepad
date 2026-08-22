@@ -1,0 +1,31 @@
+// METABALL KALEIDO — a MESH engine under a fullscreen warp: liquid blobs
+// folded six ways. Pattern taught: warp stages stack on ANY engine, not
+// just the screen family.
+{
+    name: "Metaball Kaleido"
+    engine: "metaballs"
+    seed: 14
+
+    blobs: 6
+    grid: 30
+    extent: 3.0
+    blob_radius: 0.95
+    orbit: 1.8
+    orbit_speed: 0.9
+    beat_swell: 0.5
+
+    beat_pulse: 0.55
+
+    color_bg: #x080210
+    color_a: #xff5599
+    color_b: #x5533ff
+    color_c: #xffffff
+
+    cam_orbit: 0.15
+    fog: 0.03
+
+    stages: [
+        {kind: "kaleido", p1: 0.55, p2: "0.1 + pulse * 0.4"},
+        {kind: "bloom", threshold: 0.45, strength: 1.4, levels: 3}
+    ]
+}

@@ -1,0 +1,36 @@
+// NEON GROWTH — the classic bracketed L-system plant, growing in over
+// eight beats, swaying by branch depth. The rules text below IS the
+// program: it compiles to bytecode at load and the turtle emits the tubes.
+{
+    name: "Neon Growth"
+    engine: "lsystem"
+    seed: 7
+
+    axiom: "X"
+    rules: ["X=F[+X][-X]FX", "F=FF"]
+    iterations: 6
+    angle: 25.7
+    angle_jitter: 3.0
+    step: 0.10
+    radius: 0.05
+    sides: 5
+
+    grow: "loop"
+    grow_beats: 8
+    sway: 0.8
+    sway_freq: 0.7
+    beat_pulse: 0.4
+    beat_rate: 1.0
+
+    color_bg: #x020608
+    color_a: #x2affd0
+    color_b: #x0f8cff
+    color_c: #xccffee
+
+    cam_orbit: 0.18
+    fog: 0.035
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.5, levels: 3}
+    ]
+}

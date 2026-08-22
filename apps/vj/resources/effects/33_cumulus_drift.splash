@@ -1,0 +1,35 @@
+// CUMULUS DRIFT — the calm-cloud preset: puff clusters in sunset light,
+// tilt-shifted into a miniature sky. Clouds are particle mode "clouds":
+// nine drifting clusters of big soft sprites.
+{
+    name: "Cumulus Drift"
+    engine: "particles"
+    mode: "clouds"
+    seed: 27
+
+    // Sparse + moderate sprites: the sprites are ADDITIVE, so a dense
+    // cluster of big ones burns to white — clouds need restraint.
+    count: 900
+    spread: 8.5
+    size: 0.65
+    rate: 0.02
+    swirl: 0.8
+
+    beat_pulse: 0.12
+    beat_rate: 0.25
+
+    color_bg: #x1a0e24
+    color_a: #xffb48a
+    color_b: #xcc6a9a
+    color_c: #xffe8d0
+
+    cam_dist: 18.0
+    cam_height: 1.5
+    cam_orbit: 0.03
+    fog: 0.02
+
+    stages: [
+        {kind: "tiltshift", focus: 0.5, width: 0.3, levels: 3},
+        {kind: "bloom", threshold: 0.75, strength: 0.9, levels: 3}
+    ]
+}

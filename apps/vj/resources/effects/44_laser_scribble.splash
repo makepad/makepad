@@ -1,0 +1,32 @@
+// LASER SCRIBBLE — thin fast acid-green trails tearing through frame,
+// glitch-sliced. Hard techno.
+{
+    name: "Laser Scribble"
+    engine: "ribbons"
+    seed: 51
+
+    ribbons: 60
+    trail: 40
+    width: 0.05
+    flow_speed: 4.5
+    swirl: 2.6
+    bound: 5.0
+
+    speed: 1.3
+    beat_pulse: 0.8
+
+    color_bg: #x030503
+    color_a: #x66ff33
+    color_b: #xccff00
+    color_c: #xffffff
+
+    cam_dist: 9.5
+    cam_orbit: 0.14
+    fog: 0.015
+
+    stages: [
+        {kind: "feedback", amount: 0.55, zoom: 1.006, rotate: 0.004, dim: 0.88},
+        {kind: "glitch", p1: 0.5, p2: "pulse * 0.7"},
+        {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 2}
+    ]
+}

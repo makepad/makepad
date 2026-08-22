@@ -6613,6 +6613,7 @@ fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 

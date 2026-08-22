@@ -37,3 +37,5 @@ makepad-show-control = { path = "../../libs/show_control" }
 makepad-gltf = { path = "../../libs/gltf" }
 # Gaussian-splat program slots: XrSceneView offscreen pass + ViewSplat.
 makepad-xr = { path = "../../xr" }
+# Procedural placeholder thumbnails for bundled effect presets.
+jpeg-encoder = { path = "../../libs/jpeg-encoder", version = "0.6.1" }

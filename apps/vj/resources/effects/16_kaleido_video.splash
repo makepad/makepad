@@ -1,0 +1,14 @@
+// KALEIDO VIDEO — the fullscreen family: no mesh at all. The channel's
+// content (input0; the gallery's test pattern) runs straight through a
+// beat-bound kaleidoscope and bloom. `p2` (spin) is a BINDING — it
+// evaluates every frame against the music signals.
+{
+    name: "Kaleido Video"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "kaleido", p1: 0.7, p2: "0.2 + pulse * 0.8"},
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 2}
+    ]
+}

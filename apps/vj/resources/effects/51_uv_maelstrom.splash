@@ -1,0 +1,13 @@
+// UV MAELSTROM — the screen-space tunnel warp + a swirl on top: the
+// content becomes an infinite spiraling throat.
+{
+    name: "UV Maelstrom"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "warp_tunnel", p1: 0.55, p2: "0.3 + pulse * 0.5"},
+        {kind: "swirl", p1: "sin(bar * tau) * 0.5", p2: 0.8},
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 2}
+    ]
+}

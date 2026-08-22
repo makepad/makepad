@@ -1,0 +1,29 @@
+// SYNTHWAVE GRID — the retro terrain flythrough. The grid mesh never
+// changes; the vertex shader displaces it with scrolling fbm and the pixel
+// shader draws the neon wireframe. Pure fast path.
+{
+    name: "Synthwave Grid"
+    engine: "heightmap"
+
+    res: 130
+    size: 34.0
+    height: 2.6
+    noise_scale: 0.14
+    scroll: 3.0
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+
+    color_bg: #x0c0018
+    color_a: #xff2cd8
+    color_b: #x2cd8ff
+    color_c: #xffffff
+
+    cam_fov: 62.0
+    fog: 0.05
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3}
+    ]
+}

@@ -1,0 +1,36 @@
+// NEON THICKET — hard-techno lsystem: boxy 90-degree branches, strobing
+// glow, chroma split on the pulse. Pattern taught: right angles + a
+// chroma warp stage turn a plant into circuitry.
+{
+    name: "Neon Thicket"
+    engine: "lsystem"
+    seed: 77
+
+    axiom: "X"
+    rules: ["X=F[+X][-X][/X]FX"]
+    iterations: 5
+    angle: 90.0
+    step: 0.18
+    radius: 0.045
+    sides: 4
+    copies: 2
+
+    sway: 0.12
+    twist: 0.0
+    speed: 1.2
+    beat_pulse: 0.9
+    glow: "0.7 + env(phase) * 1.6"
+
+    color_bg: #x050208
+    color_a: #x00ff88
+    color_b: #xff00cc
+    color_c: #xffffff
+
+    cam_orbit: 0.16
+    fog: 0.03
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3},
+        {kind: "chroma", p1: "pulse * 0.5", p2: 0.13}
+    ]
+}

@@ -1,0 +1,14 @@
+// MIRROR HALL — fullscreen family: the live content folded against itself
+// while a slow feedback rotation drags it into an endless corridor.
+{
+    name: "Mirror Hall"
+    engine: "screen"
+    input0: "test"
+
+    stages: [
+        {kind: "mirror", p1: 0.8, p2: 0.9},
+        {kind: "feedback", amount: 0.8, zoom: 1.025,
+         rotate: "sin(bar * tau) * 0.012", dim: 0.95},
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 2}
+    ]
+}

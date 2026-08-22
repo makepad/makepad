@@ -3479,6 +3479,12 @@ pub struct App {
     session_loss_since: Option<Instant>,
     #[rust]
     up: Option<SessionHandles>,
+    /// One-shot per process: the bundled vjeffect preset library has been
+    /// handed to the seeding worker (publish-if-absent into the local
+    /// store — see effects/seed.rs). A fresh/empty store gets the full
+    /// library as real catalog rows on first connect.
+    #[rust]
+    fx_presets_seeded: bool,
     /// The GEN drawer's broker chat (shared component; VJ profile).
     #[rust]
     chat: ChatBridge,
@@ -7039,6 +7045,44 @@ impl App {
                 SessionMsg::Up(up) => {
                     self.status_text = format!("connected {}", up.server_label);
                     self.up = Some(*up);
+                    // Seed the bundled vjeffect preset library into the local
+                    // store, publish-if-absent (idempotent; a user-edited
+                    // revision under a seeded alias is never touched). Runs
+                    // detached — the UI never waits on it.
+                    if !self.fx_presets_seeded {
+                        self.fx_presets_seeded = true;
+                        let endpoints = self.up.as_ref().unwrap().endpoints;
+                        let token = self.up.as_ref().unwrap().token.clone();
+                        let cache = service::session_config_from_env()
+                            .cache_parent
+                            .join("cache-vjfx-seed");
+                        std::thread::spawn(move || {
+                            let _ = std::fs::create_dir_all(&cache);
+                            let mut cfg = makepad_asset_client::ClientConfig::new(cache);
+                            cfg.token = token;
+                            match makepad_asset_client::AssetClient::connect(cfg, endpoints, None)
+                            {
+                                Ok(mut client) => {
+                                    let report =
+                                        crate::effects::seed::seed_presets(&mut client);
+                                    log!(
+                                        "vjfx preset seeding: {} present, {} published, {} failed{}",
+                                        report.present,
+                                        report.published,
+                                        report.failed.len(),
+                                        report
+                                            .failed
+                                            .first()
+                                            .map(|(a, e)| format!(" (first: {a}: {e})"))
+                                            .unwrap_or_default()
+                                    );
+                                }
+                                Err(error) => {
+                                    log!("vjfx preset seeding skipped: {error}");
+                                }
+                            }
+                        });
+                    }
                     if !self.gen_panel_loaded {
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);

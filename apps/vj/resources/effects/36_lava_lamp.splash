@@ -1,0 +1,31 @@
+// LAVA LAMP — the slow one: two-tone blobs rolling around each other,
+// quarter-tempo swell. Calm-ambient metaballs.
+{
+    name: "Lava Lamp"
+    engine: "metaballs"
+    seed: 6
+
+    blobs: 5
+    grid: 30
+    extent: 3.2
+    blob_radius: 0.85
+    orbit: 1.9
+    orbit_speed: 0.35
+    beat_swell: 0.25
+
+    beat_pulse: 0.25
+    beat_rate: 0.25
+
+    color_bg: #x140408
+    color_a: #xff5533
+    color_b: #xffaa22
+    color_c: #xffe0bb
+
+    cam_orbit: 0.09
+    fog: 0.025
+    glow: 1.15
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 3}
+    ]
+}

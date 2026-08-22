@@ -1,0 +1,16 @@
+// KALEIDO BLOOM FEED — the required combined chain over live content:
+// kaleidoscope -> bloom -> feedback, every stage beat-aware. The maximal
+// fullscreen stack.
+{
+    name: "Kaleido Bloom Feed"
+    engine: "screen"
+    input0: "test"
+
+    bar_beats: 8
+
+    stages: [
+        {kind: "kaleido", p1: "0.4 + tri(bar) * 0.5", p2: "0.15 + pulse * 0.5"},
+        {kind: "bloom", threshold: 0.5, strength: "1.1 + pulse * 0.6", levels: 3},
+        {kind: "feedback", amount: 0.7, zoom: 1.015, rotate: 0.005, dim: 0.94}
+    ]
+}

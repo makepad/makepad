@@ -1,0 +1,37 @@
+// CRYSTAL SPIRE — rigid hexagonal growth: 60-degree angles + rolls, zero
+// sway, six-sided tubes. Pattern taught: `/` roll between branches makes
+// TRUE 3D symmetry; sway 0 reads as mineral, not plant.
+{
+    name: "Crystal Spire"
+    engine: "lsystem"
+    seed: 12
+
+    axiom: "X"
+    rules: ["X=F[/+X][//-X][///+X]!FX", "F=FF"]
+    iterations: 5
+    angle: 60.0
+    step: 0.12
+    radius: 0.06
+    radius_decay: 0.78
+    sides: 6
+    copies: 3
+
+    grow: "pingpong"
+    grow_beats: 16
+    sway: 0.0
+    twist: 0.1
+    beat_pulse: 0.45
+
+    color_bg: #x040810
+    color_a: #x66e8ff
+    color_b: #xbbf4ff
+    color_c: #xffffff
+
+    cam_orbit: 0.14
+    fog: 0.025
+    glow: 1.3
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.5, levels: 3}
+    ]
+}

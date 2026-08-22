@@ -1,0 +1,26 @@
+// VIDEO SHATTER — the live content as particles + a glitch pass: the
+// picture explodes into pixels and the survivors tear sideways.
+{
+    name: "Video Shatter"
+    engine: "particles"
+    mode: "image"
+    seed: 19
+    input0: "test"
+
+    count: 10000
+    spread: 6.0
+    size: 0.11
+
+    beat_pulse: 0.6
+
+    color_bg: #x040406
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+
+    stages: [
+        {kind: "glitch", p1: 0.6, p2: "pulse * 0.9"},
+        {kind: "bloom", threshold: 0.55, strength: 1.2, levels: 2}
+    ]
+}
