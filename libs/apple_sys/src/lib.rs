@@ -71,6 +71,13 @@ extern "C" {
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
 
+#[link(name = "objc")]
+extern "C" {
+    /// libobjc: replace an instance's class at runtime (isa swizzle).
+    /// Returns the previous class.
+    pub fn object_setClass(obj: ObjcId, cls: ObjcId) -> ObjcId;
+}
+
 #[cfg(target_os = "ios")]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {
@@ -659,6 +666,9 @@ extern "C" {
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: CFStringRef;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
     pub static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
+    pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
+    pub static kVTProfileLevel_H264_Main_AutoLevel: CFStringRef;
+    pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
 
     pub fn VTCompressionSessionCreate(

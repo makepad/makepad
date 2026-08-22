@@ -8,3 +8,4 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 brotli = "8.0"
 makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-sqlite = { path = "../sqlite_query" }
