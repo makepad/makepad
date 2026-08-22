@@ -236,6 +236,10 @@ pub struct VjMeshView {
     /// A parked (held) slot keeps its last pose instead of dancing on.
     #[rust]
     paused: bool,
+    /// The musical clock, when the host has one and the slot is synced:
+    /// (continuous position in beats, bpm). None = free-run.
+    #[rust]
+    beat_clock: Option<(f64, f64)>,
     /// Does this view's picture reach a surface anyone is looking at? A
     /// walked level costs ~90 collision rays per tick plus a full pass
     /// render per frame, and the host (`sync_mesh_liveness`) is the only
@@ -357,6 +361,13 @@ impl VjMeshView {
 
     pub fn clip_index(&self) -> Option<usize> {
         self.dancer.as_ref().map(|d| d.clip)
+    }
+
+    /// The host's musical clock for this slot (or None to free-run). The
+    /// dancer's clip phase rides it directly — continuous by contract, so
+    /// no judder and no seams.
+    pub fn set_beat_clock(&mut self, clock: Option<(f64, f64)>) {
+        self.beat_clock = clock;
     }
 
     pub fn set_clip(&mut self, cx: &mut Cx, index: usize) {
@@ -898,8 +909,26 @@ impl Widget for VjMeshView {
                     continue;
                 }
                 if let Some(d) = self.dancer.as_mut() {
-                    // sample_clip wraps by duration: this IS the loop.
-                    d.clip_time += TICK_DT;
+                    match self.beat_clock {
+                        // SYNC: one clip cycle spans a musical unit — the
+                        // skeletal twin of the sprite law. The clock is
+                        // continuous, so the pose never jumps; the loop
+                        // point lands exactly on a musical boundary.
+                        Some((position, bpm)) if bpm > 0.0 => {
+                            let duration = d
+                                .model
+                                .clips
+                                .get(d.clip)
+                                .map(|c| c.duration.max(1.0e-4))
+                                .unwrap_or(1.0);
+                            let natural_beats = duration as f64 * bpm / 60.0;
+                            let cycle = clip_cycle_beats(natural_beats);
+                            let phase = (position / cycle as f64).rem_euclid(1.0);
+                            d.clip_time = (phase * duration as f64) as f32;
+                        }
+                        // Free-run: sample_clip wraps by duration — the loop.
+                        _ => d.clip_time += TICK_DT,
+                    }
                 }
                 if self.tour.is_some() {
                     // A level tours itself; it must not also spin.
@@ -1010,5 +1039,43 @@ impl Widget for VjMeshView {
             cx.set_pass_area(&self.pass, self.area);
         }
         DrawStep::done()
+    }
+}
+
+/// How many beats one cycle of a skeletal clip spans when the slot is
+/// beat-synced: the power of two (1..=8) nearest IN RATIO to the clip's
+/// natural length in beats at the current tempo. Powers of two are the
+/// point — any other rounding puts the loop somewhere that is not a
+/// musical boundary, and a dancer hitting the loop mid-phrase reads as a
+/// stumble. A 1.9s dance clip at 126bpm (~4 natural beats) dances one
+/// cycle per bar; a short 0.9s bounce locks to two beats.
+fn clip_cycle_beats(natural_beats: f64) -> u32 {
+    let want = natural_beats.max(0.51);
+    let exp = want.log2().floor().clamp(0.0, 3.0) as u32;
+    let below = 1u32 << exp;
+    let above = (below * 2).min(8);
+    match want / below as f64 <= above as f64 / want {
+        true => below,
+        false => above,
+    }
+}
+
+#[cfg(test)]
+mod beat_fit_tests {
+    use super::clip_cycle_beats;
+
+    #[test]
+    fn clip_cycles_land_on_powers_of_two_beats() {
+        // A ~4-natural-beat dance clip dances one cycle per bar.
+        assert_eq!(clip_cycle_beats(4.0), 4);
+        // Nearest IN RATIO: 3 beats is closer to 4 than to 2 (1.33 vs 1.5).
+        assert_eq!(clip_cycle_beats(3.0), 4);
+        // Short bounce locks to a single beat...
+        assert_eq!(clip_cycle_beats(1.1), 1);
+        // ...and a long phrase caps at eight beats (two bars).
+        assert_eq!(clip_cycle_beats(23.0), 8);
+        // Degenerate inputs stay sane.
+        assert_eq!(clip_cycle_beats(0.0), 1);
+        assert_eq!(clip_cycle_beats(f64::NAN.max(0.51)), 1);
     }
 }
