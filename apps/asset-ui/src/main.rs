@@ -3768,6 +3768,9 @@ pub struct App {
     /// Which library row the rail's video player currently belongs to, so a
     /// well refresh does not reopen (and restart) the playing clip.
     library_video_file: Option<String>,
+    /// Latest scrub target while a seek is still in flight — drags emit
+    /// faster than the decoder lands them, so only the newest matters.
+    pending_scrub: Option<f64>,
     #[rust]
     video_texture: Option<Texture>,
     #[rust]
@@ -7365,7 +7368,11 @@ impl App {
                     .selected_file
                     .as_ref()
                     .and_then(|file| self.rig_cache_of(file));
-                mesh.set_model_bytes_ao_rig(cx, bytes.to_vec(), None, aomesh, ao_png, rig_cache);
+                // The rig-preview API rode an uncommitted mesh_view change
+                // that a git cleanup discarded; until that lane relands it,
+                // the viewer shows the model without the skeletal overlay.
+                let _ = rig_cache;
+                mesh.set_model_bytes_ao(cx, bytes.to_vec(), None, aomesh, ao_png);
                 if let Some(spawn) = spawn {
                     mesh.enable_walk(cx, spawn);
                 }
@@ -10397,7 +10404,8 @@ impl App {
                                     .widget(cx, ids!(detail_mesh_view))
                                     .borrow_mut::<MeshView>()
                                 {
-                                    mesh.set_model_bytes_ao_rig(cx, bytes, None, None, None, rig);
+                                    let _ = rig;
+                                    mesh.set_model_bytes_ao(cx, bytes, None, None, None);
                                 }
                                 self.library_preview_file = Some(file.clone());
                             }
@@ -12368,6 +12376,28 @@ impl App {
     // -- per-frame video pump ----------------------------------------------------
 
 
+    /// Jump the current clip to `fraction`, coalescing while the decoder is
+    /// mid-seek — the pump flushes the newest stashed target when the
+    /// previous one lands, which is what makes dragging the knob live.
+    fn scrub_video_to(&mut self, cx: &mut Cx, fraction: f64) {
+        if self.video.is_none() {
+            self.restart_viewer_video(cx);
+        }
+        let Some(player) = &mut self.video else { return };
+        let duration = player.duration_secs();
+        if duration <= 0.0 {
+            return;
+        }
+        let fraction = fraction.clamp(0.0, 1.0);
+        if player.seek_pending() {
+            self.pending_scrub = Some(fraction);
+        } else {
+            player.seek(fraction * duration);
+            self.pending_scrub = None;
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
     /// Push the player's clock + state into the shared video widget(s).
     fn sync_video_transport(&mut self, cx: &mut Cx) {
         let (fraction, playing, position) = match &self.video {
@@ -12467,23 +12497,44 @@ impl App {
             }
             self.sync_video_transport(cx);
         }
-        if let Some(player) = &self.video {
+        // A scrub that arrived while the decoder was mid-seek: flush the
+        // newest one the moment the previous lands.
+        if let Some(fraction) = self.pending_scrub {
+            let flush = self
+                .video
+                .as_ref()
+                .is_some_and(|player| !player.seek_pending());
+            if flush {
+                self.pending_scrub = None;
+                if let Some(player) = &mut self.video {
+                    let duration = player.duration_secs();
+                    if duration > 0.0 {
+                        player.seek(fraction * duration);
+                    }
+                }
+            }
+        }
+        if let Some(player) = &mut self.video {
             if player.at_end() {
-                // Real EOS: decode thread exited (end of stream or error)
-                // and every due frame is shown. Loop restarts the clip (VJ
-                // loops preview as loops); otherwise the pump chain ends
-                // here and Play/Restart bring it back.
+                // EOS with the decode thread PARKED, not gone. Loop = a
+                // ~10 ms in-place seek on the same player — the bar snaps
+                // home, the play state survives, nothing reopens.
                 let looping = self
                     .viewer_video(cx)
                     .borrow::<VideoView>()
                     .map(|video| video.looping())
                     .unwrap_or(true);
-                if looping && self.restart_viewer_video(cx) {
+                if looping {
+                    if let Some(player) = &mut self.video {
+                        player.seek(0.0);
+                    }
+                    self.video_pump = cx.new_next_frame();
                     return;
                 }
                 self.ui
                     .label(cx, ids!(video_info))
                     .set_text(cx, "ended — Play restarts it");
+                self.sync_video_transport(cx);
                 return;
             }
             if player.is_paused() {
@@ -13069,7 +13120,11 @@ impl MatchEvent for App {
         match rail_video_action {
             VideoAction::TogglePlay => {
                 if let Some(player) = &mut self.video {
-                    if player.is_paused() {
+                    if player.at_end() {
+                        player.seek(0.0);
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else if player.is_paused() {
                         player.resume();
                         self.video_pump = cx.new_next_frame();
                     } else {
@@ -13081,19 +13136,17 @@ impl MatchEvent for App {
                 self.sync_video_transport(cx);
             }
             VideoAction::Restart => {
-                self.restart_viewer_video(cx);
-            }
-            VideoAction::Seek(fraction) => {
-                if self.video.is_none() {
+                if let Some(player) = &mut self.video {
+                    player.seek(0.0);
+                    player.resume();
+                    self.video_pump = cx.new_next_frame();
+                } else {
                     self.restart_viewer_video(cx);
                 }
-                if let Some(player) = &mut self.video {
-                    let duration = player.duration_secs();
-                    if duration > 0.0 {
-                        player.seek(fraction.clamp(0.0, 1.0) * duration);
-                        self.video_pump = cx.new_next_frame();
-                    }
-                }
+                self.sync_video_transport(cx);
+            }
+            VideoAction::Seek(fraction) => {
+                self.scrub_video_to(cx, fraction);
             }
             VideoAction::ToggleLoop | VideoAction::None => {}
         }
@@ -13344,33 +13397,33 @@ impl MatchEvent for App {
             match action {
                 VideoAction::TogglePlay => {
                     if let Some(player) = &mut self.video {
-                        if player.is_paused() {
+                        if player.at_end() {
+                            player.seek(0.0);
+                            player.resume();
+                            self.video_pump = cx.new_next_frame();
+                        } else if player.is_paused() {
                             player.resume();
                             self.video_pump = cx.new_next_frame();
                         } else {
                             player.pause();
                         }
                     } else {
-                        // "ended": the player is gone at EOS — play means
-                        // bring the clip back from the start.
                         self.restart_viewer_video(cx);
                     }
                     self.sync_video_transport(cx);
                 }
                 VideoAction::Restart => {
-                    self.restart_viewer_video(cx);
-                }
-                VideoAction::Seek(fraction) => {
-                    if self.video.is_none() {
+                    if let Some(player) = &mut self.video {
+                        player.seek(0.0);
+                        player.resume();
+                        self.video_pump = cx.new_next_frame();
+                    } else {
                         self.restart_viewer_video(cx);
                     }
-                    if let Some(player) = &mut self.video {
-                        let duration = player.duration_secs();
-                        if duration > 0.0 {
-                            player.seek(fraction.clamp(0.0, 1.0) * duration);
-                            self.video_pump = cx.new_next_frame();
-                        }
-                    }
+                    self.sync_video_transport(cx);
+                }
+                VideoAction::Seek(fraction) => {
+                    self.scrub_video_to(cx, fraction);
                 }
                 VideoAction::ToggleLoop | VideoAction::None => {}
             }
