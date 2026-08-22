@@ -32,6 +32,9 @@ mod decks;
 // standalone by the effect_gallery example.
 mod effects;
 mod flow;
+// FLOW-WARP PLAYBACK: GPU warp pre-pass over the mkfl motion fields — also
+// compiled standalone by the flow_warp_lab example.
+mod flow_warp;
 mod fx;
 mod gen;
 mod lanes;
@@ -502,6 +505,12 @@ script_mod! {
                                 camera.distance_min: 0.5
                                 splat := ViewSplat{}
                             }
+                            // Offscreen A/B flow-warp passes (see flow_warp.rs):
+                            // when a cued clip carries an mkfl motion payload,
+                            // this pass synthesizes the picture at any t and
+                            // its texture replaces the slot's decoder texture.
+                            slot_flow_a := FlowWarpView{}
+                            slot_flow_b := FlowWarpView{}
                             // Three MODES, not five content lanes: VJ is the
                             // visual surface (one explorer, preset chips
                             // inside it), DJ the two-deck music mode, SFX the
@@ -728,6 +737,9 @@ script_mod! {
                                                     slot_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     slot_a_loop := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
                                                     slot_a_pp := ChromeButton{width: 26 text: "\u{2194}"}
+                                                    // Only visible when the cued clip carries a flow
+                                                    // map; lit = warp playback (pp above = BOUNCE).
+                                                    slot_a_flow := ChromeButton{width: 40 text: "FLOW"}
                                                     slot_a_mute := ChromeButton{width: 26 text: "M"}
                                                     slot_a_sync := ChromeButton{width: 34 text: "♪1"}
                                                     slot_a_pos := ApcHSlider{width: Fill default: 0.0}
@@ -852,6 +864,7 @@ script_mod! {
                                                     slot_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     slot_b_loop := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
                                                     slot_b_pp := ChromeButton{width: 26 text: "\u{2194}"}
+                                                    slot_b_flow := ChromeButton{width: 40 text: "FLOW"}
                                                     slot_b_mute := ChromeButton{width: 26 text: "M"}
                                                     slot_b_sync := ChromeButton{width: 34 text: "♪1"}
                                                     slot_b_pos := ApcHSlider{width: Fill default: 0.0}
@@ -1843,6 +1856,10 @@ struct StripShape {
     looping: bool,
     spinning: bool,
     sync_beats: u32,
+    /// The cued clip carries a flow map (FLOW button shown at all).
+    flow_avail: bool,
+    /// Flow-warp playback is the active transport (FLOW lit).
+    flow_on: bool,
 }
 
 /// Clip-grid kind chips and the catalog kinds each one selects.
@@ -3621,9 +3638,23 @@ pub struct App {
     #[rust([true, true])]
     slot_loop: [bool; 2],
     /// Ping-pong (forward-backward bounce) per video slot; combined with
-    /// slot_loop into the player's PlayMode (ping-pong wins).
+    /// slot_loop into the player's PlayMode (ping-pong wins). With flow
+    /// warp active the same switch means BOUNCE (triangle-wave position).
     #[rust]
     slot_pingpong: [bool; 2],
+    /// FLOW WARP per slot: the load generation the pending/adopted flow
+    /// cache belongs to (0 = none), whether a clip is resident in the warp
+    /// view, the operator's FLOW toggle (default on — a flow clip warps
+    /// unless switched off), and the unquantized bars-fit rate pushed onto
+    /// the warp clock every pump (see apply_slot_beat_sync).
+    #[rust]
+    slot_flow_gen: [u64; 2],
+    #[rust]
+    slot_flow_avail: [bool; 2],
+    #[rust([true, true])]
+    slot_flow_on: [bool; 2],
+    #[rust([1.0f64, 1.0f64])]
+    slot_flow_rate: [f64; 2],
     /// Per-slot video audio mute (a pad loop is a visual).
     #[rust]
     slot_video_muted: [bool; 2],
@@ -4431,6 +4462,25 @@ impl App {
             .clock_secs(Instant::now())
             .filter(|_| self.beat_clock.running())
             .map(|secs| self.beat_clock.position_at(secs));
+        // The skeletal dancers ride the same clock the sprites do: a synced
+        // slot's mesh view gets (position-in-beats, bpm) every pump and
+        // fits one clip cycle to a musical unit; unsynced slots free-run.
+        let bpm = self.beat_clock.bpm();
+        for index in 0..2 {
+            let slot = if index == 0 { SlotId::A } else { SlotId::B };
+            let synced_slot = self.slot_beat_sync[index] && self.external_sync_enabled;
+            let clock = match (synced_slot, beat_position) {
+                (true, Some(position)) if bpm > 0.0 => Some((position, bpm)),
+                _ => None,
+            };
+            if let Some(mut view) = self
+                .ui
+                .widget(cx, Self::slot_mesh_path(slot))
+                .borrow_mut::<mesh_view::VjMeshView>()
+            {
+                view.set_beat_clock(clock);
+            }
+        }
         for index in 0..2 {
             if self.slot_held[index] {
                 continue; // parked: keep the last frame
@@ -4510,6 +4560,119 @@ impl App {
             SlotId::A => ids!(slot_a_mute),
             SlotId::B => ids!(slot_b_mute),
         }
+    }
+
+    // ---- flow warp (see flow_warp.rs) ---------------------------------------
+
+    fn slot_flow_btn_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_a_flow),
+            SlotId::B => ids!(slot_b_flow),
+        }
+    }
+
+    /// The offscreen warp pass widget of a slot.
+    fn slot_flow_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_flow_a),
+            SlotId::B => ids!(slot_flow_b),
+        }
+    }
+
+    /// Flow warp is this slot's picture transport right now.
+    fn flow_active(&self, i: usize) -> bool {
+        self.slot_flow_avail[i] && self.slot_flow_on[i] && self.slot_media[i] == SlotMedia::Video
+    }
+
+    /// Run `f` on a slot's warp view (no-op without the widget).
+    fn flow_view<R>(
+        &self,
+        cx: &mut Cx,
+        slot: SlotId,
+        f: impl FnOnce(&mut Cx, &mut flow_warp::FlowWarpView) -> R,
+    ) -> Option<R> {
+        let widget = self.ui.widget(cx, Self::slot_flow_path(slot));
+        let mut view = widget.borrow_mut::<flow_warp::FlowWarpView>()?;
+        Some(f(cx, &mut view))
+    }
+
+    /// Drop a slot's flow cache and transport (load superseded / slot closed).
+    fn clear_slot_flow(&mut self, cx: &mut Cx, slot: SlotId) {
+        let i = slot.index();
+        self.slot_flow_gen[i] = 0;
+        self.slot_flow_avail[i] = false;
+        self.slot_flow_rate[i] = 1.0;
+        self.flow_view(cx, slot, |cx, view| view.clear(cx));
+    }
+
+    /// Make the warp pass this slot's transport: the decoder is parked (flow
+    /// playback is silent, like ping-pong — reversed/warped audio is not a
+    /// thing a pad wants) and the warp clock takes over at the same position.
+    fn engage_flow(&mut self, cx: &mut Cx, slot: SlotId) {
+        let i = slot.index();
+        let (was_playing, pos) = match self.players[i].as_mut() {
+            Some(player) => {
+                let was = !player.is_paused();
+                let pos = player.position_secs();
+                player.set_paused(true);
+                player.set_muted(true);
+                (was, pos)
+            }
+            None => (false, 0.0),
+        };
+        self.flow_view(cx, slot, |cx, view| {
+            view.set_position_secs(cx, pos);
+            view.set_playing(was_playing);
+        });
+        self.apply_slot_beat_sync(slot);
+        self.refresh_program_lighting();
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Hand the picture back to the decoder at the warp clock's position.
+    fn disengage_flow(&mut self, cx: &mut Cx, slot: SlotId) {
+        let i = slot.index();
+        let state = self.flow_view(cx, slot, |_cx, view| {
+            let state = (view.is_playing(), view.position_secs());
+            view.set_playing(false);
+            state
+        });
+        let (playing, pos) = state.unwrap_or((false, 0.0));
+        let muted = self.slot_video_muted[i];
+        if let Some(player) = self.players[i].as_mut() {
+            player.set_muted(muted);
+            if player.duration_secs > 0.0 {
+                player.seek_fraction((pos / player.duration_secs).clamp(0.0, 1.0));
+            }
+            player.set_paused(!playing);
+        }
+        self.apply_slot_beat_sync(slot);
+        self.refresh_program_lighting();
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// The warp output as a program source, once a pass has rendered.
+    fn slot_flow_source(&self, cx: &mut Cx, slot: SlotId) -> Option<(Texture, f32)> {
+        if !self.flow_active(slot.index()) {
+            return None;
+        }
+        self.flow_view(cx, slot, |_cx, view| view.output()).flatten()
+    }
+
+    /// One display frame of flow transport: push the live rate/bounce state
+    /// onto the warp clock and advance it (the advance redraws the pass).
+    fn pump_flow(&mut self, cx: &mut Cx, slot: SlotId, dt: f64) {
+        let i = slot.index();
+        if !self.flow_active(i) {
+            return;
+        }
+        let rate = self.slot_flow_rate[i];
+        let bounce = self.slot_pingpong[i];
+        self.flow_view(cx, slot, |cx, view| {
+            view.set_rate(rate);
+            view.set_bounce(bounce);
+            view.advance(cx, dt);
+        });
     }
 
     /// The player mode a slot's toggles add up to (ping-pong wins).
@@ -4598,8 +4761,19 @@ impl App {
         }
     }
 
-    /// Pause/resume one slot's video (picture clock + its mixer bus).
+    /// Pause/resume one slot's video (picture clock + its mixer bus). With
+    /// flow warp active, the warp clock is the transport: the decoder stays
+    /// parked and play/pause drives the warp position instead.
     fn set_slot_paused(&mut self, cx: &mut Cx, slot: SlotId, paused: bool) {
+        if self.flow_active(slot.index()) {
+            self.flow_view(cx, slot, |_cx, view| view.set_playing(!paused));
+            if paused {
+                self.disarm_hazards(Some(cx));
+            }
+            self.refresh_program_lighting();
+            self.video_pump = cx.new_next_frame();
+            return;
+        }
         let Some(player) = self.players[slot.index()].as_mut() else { return };
         player.set_paused(paused);
         self.mixer.set_slot_paused(slot, paused);
@@ -4645,7 +4819,19 @@ impl App {
             }
             _ => 1.0,
         };
+        let duration = player.duration_secs;
         player.set_playback_rate(rate);
+        // FLOW WARP: the same bars-fit musical intent, but the warp clock is
+        // free of the 0.25..4 doubling ladder — the EXACT unquantized rate
+        // is what flow playback is for. Stored here and pushed onto the view
+        // every pump (this fn has no Cx).
+        self.slot_flow_rate[i] = match (bars, period) {
+            (0, _) | (_, None) => 1.0,
+            (n, Some(period)) if duration > 0.0 && period > 0.0 => {
+                duration / (n as f64 * 4.0 * period)
+            }
+            _ => 1.0,
+        };
     }
 
     /// Paint an icon button lit (accent) or at rest.
@@ -4721,6 +4907,14 @@ impl App {
                 Some(p) => (!p.is_paused(), p.position_secs(), p.duration_secs),
                 None => (false, 0.0, 0.0),
             };
+            // With flow warp active the warp clock is the transport the
+            // strip must mirror — the decoder underneath is parked.
+            let (playing, pos) = if self.flow_active(i) {
+                self.flow_view(cx, slot, |_cx, view| (view.is_playing(), view.position_secs()))
+                    .unwrap_or((playing, pos))
+            } else {
+                (playing, pos)
+            };
             // ROTATE latches on the operator's switch, never on a derived
             // motion state: a toggle that "applies" (the model reacts) but
             // stays dark is the bug this pins down.
@@ -4734,6 +4928,8 @@ impl App {
                 looping: self.slot_loop[i],
                 spinning,
                 sync_beats: self.slot_sync_beats[i],
+                flow_avail: self.slot_flow_avail[i],
+                flow_on: self.slot_flow_on[i],
             };
             if self.strip_shape[i].as_ref() != Some(&shape) {
                 self.strip_shape[i] = Some(shape.clone());
@@ -4750,6 +4946,18 @@ impl App {
                     // innocent-looking dark arrow.
                     self.paint_lit(cx, Self::slot_pp_path(slot), self.slot_pingpong[i]);
                     self.paint_lit(cx, Self::slot_mute_path(slot), self.slot_video_muted[i]);
+                    // FLOW chip: shown only when the clip carries a flow map,
+                    // lit while warp playback is the transport.
+                    self.ui
+                        .button(cx, Self::slot_flow_btn_path(slot))
+                        .set_visible(cx, shape.flow_avail);
+                    if shape.flow_avail {
+                        self.paint_lit(
+                            cx,
+                            Self::slot_flow_btn_path(slot),
+                            shape.flow_on,
+                        );
+                    }
                     let sync = shape.sync_beats;
                     self.ui.button(cx, Self::slot_sync_path(slot)).set_text(
                         cx,
@@ -6285,6 +6493,7 @@ impl App {
                     self.slot_held[slot.index()] = false;
                     self.players[slot.index()] = None;
                     self.slot_textures[slot.index()] = None;
+                    self.clear_slot_flow(cx, slot);
                     self.light_samples[slot.index()] = None;
                     self.light_analyzers[slot.index()].reset();
                     self.clear_slot_mesh(cx, slot);
@@ -6384,6 +6593,15 @@ impl App {
                                     self.players[slot.index()] = Some(player);
                                     self.apply_slot_beat_sync(slot);
                                     self.awaiting_preroll[slot.index()] = Some(gen);
+                                    // FLOW WARP probe: parse + full decode on
+                                    // a worker; the clip plays normally until
+                                    // (and unless) the cache lands.
+                                    self.slot_flow_gen[slot.index()] = gen;
+                                    self.decode.submit(DecodeJob::FlowClip {
+                                        gen,
+                                        slot: slot.index(),
+                                        path: path.clone(),
+                                    });
                                     // Fresh loop-analysis lane for this revision.
                                     self.slot_scan[slot.index()] = Some(item.revision);
                                     self.applied_fit[slot.index()] = None;
@@ -6415,8 +6633,12 @@ impl App {
                 CueCmd::BeginFade { schedule, from: _, to } => {
                     // The device clock already released this slot's audio at
                     // the exact scheduled sample; start the picture clock
-                    // and surface the program.
-                    if let Some(player) = self.players[to.index()].as_mut() {
+                    // and surface the program. With flow warp engaged the
+                    // warp clock IS the picture clock: the decoder stays
+                    // parked (flow playback is silent).
+                    if self.flow_active(to.index()) {
+                        self.flow_view(cx, to, |_cx, view| view.set_playing(true));
+                    } else if let Some(player) = self.players[to.index()].as_mut() {
                         player.set_paused(false);
                     }
                     if self.armed_fade.is_some_and(|armed| armed.schedule == schedule) {
@@ -6434,6 +6656,9 @@ impl App {
                         player.set_paused(true);
                     }
                     self.mixer.set_slot_paused(slot, true);
+                    // A parked flow slot freezes its warp clock too (the
+                    // cache stays resident: reclaiming the slot resumes).
+                    self.flow_view(cx, slot, |_cx, view| view.set_playing(false));
                     // A parked VIDEO freezes on its last frame; a parked 3D
                     // model keeps whatever the operator's ROTATE switch says
                     // (see `pump_splat`), so the lit latch and the picture
@@ -6463,6 +6688,7 @@ impl App {
                     self.players[slot.index()] = None; // detached teardown
                     self.awaiting_preroll[slot.index()] = None;
                     self.slot_textures[slot.index()] = None;
+                    self.clear_slot_flow(cx, slot);
                     self.slot_media[slot.index()] = SlotMedia::Empty;
                     self.billboards[slot.index()] = None;
                     self.clear_slot_mesh(cx, slot);
@@ -7151,7 +7377,11 @@ impl App {
                 self.run_gen_cmds(cmds);
             }
             (CatPurpose::JobStatus { .. }, ClientOutput::JobStatus(status)) => {
-                self.gen.status_arrived_at(&status, now_ms());
+                let chain_cmds = self.gen.status_arrived_at(&status, now_ms());
+                if !chain_cmds.is_empty() {
+                    self.run_gen_cmds(chain_cmds);
+                    self.grids_dirty = true;
+                }
             }
             (CatPurpose::JobCancel { job }, ClientOutput::JobCancelled(count)) => {
                 self.gen.cancel_confirmed_at(job, count, Some(now_ms()));
@@ -7585,6 +7815,45 @@ impl App {
                             self.slot_media[slot.index()] = SlotMedia::Empty;
                             let cmds = self.cue.preroll_failed(slot, gen, error);
                             self.run_cue_cmds(cx, cmds);
+                        }
+                    }
+                }
+                DecodeDone::FlowClip { gen, slot, result } => {
+                    let slot = if slot == 0 { SlotId::A } else { SlotId::B };
+                    let i = slot.index();
+                    // Staleness gate: the cache must belong to the load that
+                    // asked for it, and the slot must still be a video.
+                    if self.slot_flow_gen[i] != gen || self.slot_media[i] != SlotMedia::Video {
+                        continue;
+                    }
+                    match result {
+                        Ok(Some(data)) => {
+                            log!(
+                                "slot {slot:?}: FLOW map adopted — {} pairs, grid {}x{}, {}x{} @ stride {} ({} endpoint frames, {:.1} MB)",
+                                data.pairs,
+                                data.map.grid_w,
+                                data.map.grid_h,
+                                data.width,
+                                data.height,
+                                data.stride,
+                                data.frames.len(),
+                                (data.frames.len() * data.width * data.height * 4) as f64
+                                    / (1024.0 * 1024.0)
+                            );
+                            self.flow_view(cx, slot, |cx, view| view.set_clip(cx, data));
+                            self.slot_flow_avail[i] = true;
+                            if self.slot_flow_on[i] {
+                                self.engage_flow(cx, slot);
+                            }
+                            self.strip_shape[i] = None; // resync the strip (FLOW chip)
+                            self.sync_slot_controls_ui(cx);
+                            self.video_pump = cx.new_next_frame();
+                        }
+                        // No mkfl / over budget / unmappable: plays as today
+                        // (the worker already logged the WHY for the fallbacks).
+                        Ok(None) => {}
+                        Err(error) => {
+                            log!("slot {slot:?}: flow probe failed: {error} — playing as plain video");
                         }
                     }
                 }
@@ -9829,6 +10098,9 @@ impl App {
         let dt = (now - self.last_splat_pump.replace(now).unwrap_or(now)).clamp(0.0, 0.25) as f32;
         for slot in [SlotId::A, SlotId::B] {
             self.pump_splat(cx, slot, dt);
+            // Flow-warp transport: the free-running pair-space clock, one
+            // step per display frame (parked players cost nothing above).
+            self.pump_flow(cx, slot, dt as f64);
         }
         // The program mix mirrors the device-clock transition exactly: the
         // audio gains and this visual mix advance from one sample counter,
@@ -9838,14 +10110,24 @@ impl App {
         self.publish_program_lighting(mix);
         let mesh_a = self.slot_mesh_source(cx, SlotId::A).or_else(|| self.slot_splat_source(cx, SlotId::A));
         let mesh_b = self.slot_mesh_source(cx, SlotId::B).or_else(|| self.slot_splat_source(cx, SlotId::B));
+        // Flow warp is a pre-pass: its output texture REPLACES the decoder
+        // texture for that slot; everything downstream is untouched.
+        let flow_a = self.slot_flow_source(cx, SlotId::A);
+        let flow_b = self.slot_flow_source(cx, SlotId::B);
         let source = |index: usize,
                       kind: SlotMedia,
                       mesh: Option<(Texture, f32)>,
+                      flow: Option<(Texture, f32)>,
                       players: &[Option<SlotPlayer>; 2],
                       textures: &[Option<Texture>; 2],
                       aspects: &[f32; 2]| {
             if kind == SlotMedia::Mesh || kind == SlotMedia::Splat {
                 return mesh;
+            }
+            if kind == SlotMedia::Video {
+                if let Some(flow) = flow {
+                    return Some(flow);
+                }
             }
             let tex = textures[index].clone()?;
             let aspect = players[index]
@@ -9858,6 +10140,7 @@ impl App {
             0,
             self.slot_media[0],
             mesh_a,
+            flow_a,
             &self.players,
             &self.slot_textures,
             &self.slot_aspect,
@@ -9866,6 +10149,7 @@ impl App {
             1,
             self.slot_media[1],
             mesh_b,
+            flow_b,
             &self.players,
             &self.slot_textures,
             &self.slot_aspect,
@@ -10989,7 +11273,22 @@ impl MatchEvent for App {
                 if let Some(player) = self.players[i].as_mut() {
                     player.set_mode(mode);
                 }
+                // With flow warp active the same switch is BOUNCE — pump_flow
+                // mirrors slot_pingpong onto the warp clock every frame.
                 self.paint_lit(cx, Self::slot_pp_path(slot), self.slot_pingpong[i]);
+                self.video_pump = cx.new_next_frame();
+            }
+            if self.ui.button(cx, Self::slot_flow_btn_path(slot)).clicked(actions)
+                && self.slot_flow_avail[i]
+            {
+                self.slot_flow_on[i] = !self.slot_flow_on[i];
+                if self.slot_flow_on[i] {
+                    self.engage_flow(cx, slot);
+                } else {
+                    self.disengage_flow(cx, slot);
+                }
+                self.strip_shape[i] = None;
+                self.sync_slot_controls_ui(cx);
                 self.video_pump = cx.new_next_frame();
             }
             if self.ui.button(cx, Self::slot_mute_path(slot)).clicked(actions) {
@@ -11018,7 +11317,10 @@ impl MatchEvent for App {
             }
             if let Some(v) = self.ui.slider(cx, Self::slot_pos_path(slot)).end_slide(actions) {
                 self.mixer.flush_slot_audio(slot);
-                if let Some(player) = self.players[i].as_mut() {
+                if self.flow_active(i) {
+                    // Scrub the warp clock; the parked decoder stays put.
+                    self.flow_view(cx, slot, |cx, view| view.seek_fraction(cx, v));
+                } else if let Some(player) = self.players[i].as_mut() {
                     player.seek_fraction(v);
                 }
                 self.video_pump = cx.new_next_frame();
@@ -11336,6 +11638,7 @@ impl AppMain for App {
         makepad_asset_chat_ui::script_mod(vm);
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
+        crate::flow_warp::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         self::script_mod(vm)
