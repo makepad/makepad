@@ -38,6 +38,7 @@ workspace.members = [
     "examples/browser",
     "examples/camera",
     "examples/windows_blur",
+    "examples/direct_composition",
     "examples/floating_panel",
     "examples/glass",
     "examples/bugfix",

@@ -1,0 +1,9 @@
+[package]
+name = "makepad-example-direct-composition"
+version = "1.0.0"
+edition = "2021"
+description = "Manual test harness for Windows DirectComposition windows and child visuals"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
