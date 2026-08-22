@@ -7300,7 +7300,14 @@ impl App {
             let path = match prewritten {
                 Some(path) => path.to_path_buf(),
                 None => {
-                    let path = artifacts_dir().join(format!("artifact-{n}.mp4"));
+                    // UNIQUE path per open: the previous clip's DETACHED
+                    // decode thread may still hold the old file open, and
+                    // clobbering it mid-read kills the new decoder at birth
+                    // (the "no first frame until scrub" storm).
+                    static VIDEO_OPEN_SEQ: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let seq = VIDEO_OPEN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let path = artifacts_dir().join(format!("artifact-{n}-{seq}.mp4"));
                     if let Err(e) = std::fs::write(&path, bytes) {
                         log!("video artifact write failed: {e}");
                         return false;
@@ -8795,9 +8802,18 @@ impl App {
                         let (domain, content_type) = store_media_of(&bytes);
                         let title = self.store_asset_title(asset);
                         let clip_before = audio::clip_generation();
-                        if self.display_artifact(
+                        let displayed = self.display_artifact(
                             cx, domain, content_type, &bytes, 0, copy_to.as_deref(), false,
-                        ) {
+                        );
+                        if displayed && content_type.starts_with("video/") {
+                            // ONE player serves both faces: the rail must
+                            // know this file's clip is already open, or its
+                            // own refresh opens a second player and the two
+                            // fight over the decoder.
+                            self.library_video_file = Some(file.clone());
+                            self.refresh_library_preview(cx);
+                        }
+                        if displayed {
                             // A clicked CATALOG audio row plays immediately —
                             // music, sfx and speech alike; a library where
                             // every row needs a second Play click auditions
@@ -10404,20 +10420,13 @@ impl App {
             .map(|item| item.meta.content_type.starts_with("video/"))
             .unwrap_or(false);
         if is_video {
-            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
-                if self.library_video_file.as_deref() != Some(file.as_str()) {
-                    self.stop_video_playback();
-                    self.clear_video_frame(cx);
-                    match VideoPlayer::new(&path.to_string_lossy()) {
-                        Ok(player) => {
-                            self.library_video_file = Some(file.clone());
-                            self.video = Some(player);
-                            self.video_path = Some(path);
-                            self.video_pump = cx.new_next_frame();
-                        }
-                        Err(error) => log!("library preview: {file} video open failed: {error}"),
-                    }
-                }
+            // The viewer-open path (display_artifact) is the ONE opener for
+            // store clips; it marks ownership in library_video_file. The
+            // rail only opens a player itself when it has a materialized
+            // payload and nothing owns the file yet — never a second player
+            // for the same clip.
+            let owned = self.library_video_file.as_deref() == Some(file.as_str());
+            if owned && self.video.is_some() {
                 let aspect = self
                     .video
                     .as_ref()
@@ -10426,7 +10435,52 @@ impl App {
                 self.show_preview(cx, PreviewContent::Video { aspect });
                 return;
             }
-            self.show_preview(cx, PreviewContent::Empty("Fetching the clip…".into()));
+            if !owned {
+                if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                    self.stop_video_playback();
+                    self.clear_video_frame(cx);
+                    match VideoPlayer::new(&path.to_string_lossy()) {
+                        Ok(player) => {
+                            self.library_video_file = Some(file.clone());
+                            self.video = Some(player);
+                            self.video_path = Some(path);
+                            self.video_pump = cx.new_next_frame();
+                            let aspect = self
+                                .video
+                                .as_ref()
+                                .map(|p| p.width.max(1) as f64 / p.height.max(1) as f64)
+                                .unwrap_or(16.0 / 9.0);
+                            self.show_preview(cx, PreviewContent::Video { aspect });
+                            return;
+                        }
+                        Err(error) => log!("library preview: {file} video open failed: {error}"),
+                    }
+                }
+            }
+            // No player yet (payload still fetching): the well takes its
+            // FINAL video shape immediately — thumbnail aspect, thumbnail as
+            // the stand-in frame — so the panel below never reflows when the
+            // real player arrives a beat later (the "text renders first,
+            // then jumps down" glitch).
+            let thumb = self.preview_texture(cx, &asset_key);
+            let aspect = thumb
+                .as_ref()
+                .and_then(|texture| texture.get_format(cx).vec_width_height())
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .map(|(w, h)| w as f64 / h as f64)
+                // Catalog video thumbs are square crops; a square stand-in
+                // would reflow again when the real 16:9-ish frame arrives.
+                .filter(|aspect| (*aspect - 1.0).abs() > 0.05)
+                .unwrap_or(16.0 / 9.0);
+            self.show_preview(cx, PreviewContent::Video { aspect });
+            if let Some(preview) = self
+                .ui
+                .widget(cx, ids!(detail_content))
+                .borrow::<ContentPreview>()
+            {
+                preview.set_video_frame(cx, thumb);
+                preview.set_video_transport(cx, 0.0, false, "loading…");
+            }
             return;
         }
 
