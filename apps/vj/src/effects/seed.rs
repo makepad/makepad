@@ -103,6 +103,14 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("82_dusk_murmuration", include_str!("../../resources/effects/82_dusk_murmuration.splash")),
     ("83_confetti_swarm", include_str!("../../resources/effects/83_confetti_swarm.splash")),
     ("84_storm_cell", include_str!("../../resources/effects/84_storm_cell.splash")),
+    ("93_midnight_metropolis", include_str!("../../resources/effects/93_midnight_metropolis.splash")),
+    ("94_neon_grid_city", include_str!("../../resources/effects/94_neon_grid_city.splash")),
+    ("95_lightcycle_arena", include_str!("../../resources/effects/95_lightcycle_arena.splash")),
+    ("96_screensaver_pipes", include_str!("../../resources/effects/96_screensaver_pipes.splash")),
+    ("97_pressure_manifold", include_str!("../../resources/effects/97_pressure_manifold.splash")),
+    ("98_bull_terminal", include_str!("../../resources/effects/98_bull_terminal.splash")),
+    ("99_amber_exchange", include_str!("../../resources/effects/99_amber_exchange.splash")),
+    ("100_flash_crash", include_str!("../../resources/effects/100_flash_crash.splash")),
     ]
 }
 

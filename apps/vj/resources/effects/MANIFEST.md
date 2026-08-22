@@ -84,3 +84,11 @@ Regenerate the table when the library changes; the seeding module
 | 82_dusk_murmuration | Dusk Murmuration | flock | starling silhouettes on a glowing dusk sky; the goal |
 | 83_confetti_swarm | Confetti Swarm | flock | additive neon gliders; a predator dives through the swarm |
 | 84_storm_cell | Storm Cell | particles/clouds | dark cumulus with lightning INSIDE on the kick (gated |
+| 93_midnight_metropolis | Midnight Metropolis | city/night | realistic night flyover: window grids re-roll per beat, |
+| 94_neon_grid_city | Neon Grid City | city/retro | wireframe-neon towers, striped synthwave sun, hot-pink |
+| 95_lightcycle_arena | Lightcycle Arena | city/tron | fine-grid floor + ten light-cycle trail walls sweeping |
+| 96_screensaver_pipes | Screensaver Pipes | pipes | the classic lattice homage: glossy pipes grow in over 24 |
+| 97_pressure_manifold | Pressure Manifold | pipes | hard-techno pipes: the growth front LURCHES on the kick |
+| 98_bull_terminal | Bull Terminal | stockcharts | green-on-black phosphor tape: one candle per beat, beat- |
+| 99_amber_exchange | Amber Exchange | stockcharts | after-hours amber terminal drifting in 3D, two candles |
+| 100_flash_crash | Flash Crash | stockcharts | the red panic: bar-armed crash cascades + a pulse-driven |

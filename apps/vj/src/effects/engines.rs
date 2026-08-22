@@ -14,10 +14,13 @@
 //! evaluated at load, compiled into these configs, and from then on a frame
 //! is Rust `regen` (usually a no-op) + uniform writes.
 
+use super::engines_charts::ChartsEngine;
+use super::engines_city::CityEngine;
 use super::engines_domino::DominoEngine;
 use super::engines_firefly::FireflyEngine;
 use super::engines_flock::FlockEngine;
 use super::engines_harmonograph::HarmonographEngine;
+use super::engines_pipes::PipesEngine;
 use super::engines_tiles::TilesEngine;
 use super::lsys;
 use super::mesh::{FxMesh, FxRng};
@@ -50,6 +53,12 @@ pub enum ShaderKind {
     Tiles,
     /// Oriented glider triangles, wing flap in the VS (engines_flock).
     Flock,
+    /// Procedural city flyover: window-grid towers, banking cam (engines_city).
+    City,
+    /// 3D-pipes lattice, growth replayed on the beat (engines_pipes).
+    Pipes,
+    /// Candlestick terminal, beat-committed OHLC walk (engines_charts).
+    Charts,
 }
 
 /// Per-frame camera the engine suggests; the document can override knobs.
@@ -1393,6 +1402,9 @@ pub enum Engine {
     Domino(DominoEngine),
     Tiles(TilesEngine),
     Flock(FlockEngine),
+    City(CityEngine),
+    Pipes(PipesEngine),
+    Charts(ChartsEngine),
     /// Fullscreen: no mesh at all — input texture 0 IS the content and the
     /// stage chain does the work.
     Screen,
@@ -1412,6 +1424,9 @@ impl Engine {
             Engine::Domino(_) => ShaderKind::Domino,
             Engine::Tiles(_) => ShaderKind::Tiles,
             Engine::Flock(_) => ShaderKind::Flock,
+            Engine::City(_) => ShaderKind::City,
+            Engine::Pipes(_) => ShaderKind::Pipes,
+            Engine::Charts(_) => ShaderKind::Charts,
             Engine::Screen => ShaderKind::Emitters, // never drawn; screen skips the scene pass
         }
     }
@@ -1431,6 +1446,9 @@ impl Engine {
             Engine::Domino(_) => "domino",
             Engine::Tiles(_) => "tiles",
             Engine::Flock(_) => "flock",
+            Engine::City(_) => "city",
+            Engine::Pipes(_) => "pipes",
+            Engine::Charts(_) => "stockcharts",
             Engine::Screen => "screen",
         }
     }
@@ -1558,6 +1576,30 @@ impl Engine {
                 e.emit(mesh);
                 true
             }
+            Engine::City(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::Pipes(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
+            Engine::Charts(e) => {
+                // The OHLC walk: beat-committed candles, capacity-stable
+                // per-frame emission (the ribbons family).
+                e.regen(dt.clamp(0.0, 0.1), beat_phase, mesh);
+                true
+            }
             Engine::Screen => false,
         }
     }
@@ -1576,6 +1618,9 @@ impl Engine {
             Engine::Domino(e) => e.uniforms(),
             Engine::Tiles(e) => e.uniforms(),
             Engine::Flock(e) => e.uniforms(),
+            Engine::City(e) => e.uniforms(),
+            Engine::Pipes(e) => e.uniforms(),
+            Engine::Charts(e) => e.uniforms(),
             Engine::Emitters(_) | Engine::Screen => EngineUniforms::default(),
         }
     }
@@ -1586,6 +1631,7 @@ impl Engine {
         match self {
             Engine::Tunnel(e) => Some(e.camera(time)),
             Engine::Tiles(e) => Some(e.camera(time)),
+            Engine::City(e) => Some(e.camera(time)),
             _ => None,
         }
     }
