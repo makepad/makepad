@@ -226,7 +226,12 @@ impl Widget for Nv12View {
         self.pass.set_size(cx, size);
         self.pass.set_dpi_factor(cx, 1.0);
         self.draw_list.begin_always(cx);
+        // Pass-local turtle: same fix as the tween stages — without it
+        // the quad inherits the widget's on-screen clip and loses rows.
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
         self.draw_nv12.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size });
+        cx.end_pass_sized_turtle();
         self.draw_list.end(cx);
         cx.end_pass(&self.pass);
         self.rendered = true;
