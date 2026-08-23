@@ -13826,6 +13826,14 @@ p2 {}
                 self.local_tracks = wave_analysis::list_local_audio(&Self::local_music_dir());
             }
             self.music_rows.clear();
+            // Search/More/category are catalog controls; the local listing
+            // has no use for them.
+            self.ui
+                .view(cx, ids!(music_catalog))
+                .set_visible(cx, !self.music_local);
+        }
+        if self.ui.button(cx, ids!(music_import)).clicked(actions) {
+            self.open_import_picker(cx);
         }
         if self.music_refs.queue_clear.clicked(actions) {
             self.decks.clear_queue();
