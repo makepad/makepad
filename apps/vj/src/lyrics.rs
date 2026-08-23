@@ -1387,8 +1387,14 @@ fn run_job(
         return;
     }
     if *backend_failed {
-        status(out, &job, "lyrics: no transcriber");
-        return;
+        // Not latched across a model install: the INSTALL MODELS flow can
+        // put a whisper checkpoint on disk mid-session, and the next bake
+        // must try again instead of sitting on an old failure.
+        if whisper_model_path().is_none() {
+            status(out, &job, "lyrics: no transcriber");
+            return;
+        }
+        *backend_failed = false;
     }
 
     // The vocals stem, read straight out of the separation cache.
@@ -1407,6 +1413,14 @@ fn run_job(
     let samples = crate::stems::resample(&mono, rate, WHISPER_RATE);
     drop(mono);
 
+    // The Apple fallback yields to whisper the moment a checkpoint appears
+    // (the INSTALL MODELS flow drops one in mid-session): whisper's measured
+    // word path is strictly better than the dictation-tuned fallback.
+    if let Some(Transcriber::NativeApple(_)) = backend.as_ref() {
+        if whisper_model_path().is_some() {
+            *backend = None;
+        }
+    }
     if backend.is_none() {
         match Transcriber::open() {
             Ok(loaded) => *backend = Some(loaded),

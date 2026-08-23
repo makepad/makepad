@@ -49,6 +49,19 @@ pub fn stem_color(stem: usize) -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
+/// Push the stem palette into the wave-lane shader's four colour uniforms.
+fn set_stem_color_uniforms(lane: &mut DrawWaveLane, cx: &Cx2d) {
+    for (id, stem) in [
+        (live_id!(color_vocals), 0),
+        (live_id!(color_drums), 1),
+        (live_id!(color_bass), 2),
+        (live_id!(color_other), 3),
+    ] {
+        let c = stem_color(stem);
+        lane.draw_vars.set_uniform(cx, id, &[c.x, c.y, c.z, c.w]);
+    }
+}
+
 /// The same, greyed out for a killed lane.
 pub fn stem_color_killed() -> Vec4f {
     let c = STEM_COLOR_KILLED;
@@ -79,6 +92,14 @@ script_mod! {
         color_grid: uniform(#xffffff1e)
         color_grid_bar: uniform(#xffffff6e)
         color_head: uniform(#xf4f7fa)
+        // The stem palette, pushed from STEM_COLORS every draw so the
+        // waveform and the knobs cannot disagree. Uniforms, not instances:
+        // they are per-draw constants, and as instances they blew the
+        // D3D11 vs_5_0 32-input limit.
+        color_vocals: uniform(#fff)
+        color_drums: uniform(#fff)
+        color_bass: uniform(#fff)
+        color_other: uniform(#fff)
 
         // One column of one pyramid level. Each level is stored as its own
         // block of rows in the same texture, so a level is a row offset and
@@ -344,6 +365,10 @@ script_mod! {
                     width: 26
                     height: 18
                     text: "+"
+                    // A 26x18 chip: the theme's default button padding sat
+                    // the glyph off-centre.
+                    padding: 0
+                    align: Align{x: 0.5, y: 0.5}
                     draw_bg +: {
                         color: #x272e38
                         color_hover: #x2b3440
@@ -1136,6 +1161,81 @@ script_mod! {
                 music_queue := mod.widgets.VjTrackList{show_queue_button: false}
             }
         }
+
+        // ---- first-use model install: the row and its license gate ----
+        // Hidden on a provisioned machine. On a fresh checkout it invites
+        // the operator to install the stem splitter and the whisper
+        // transcriber; while the install worker runs it is the progress
+        // line. The modal is the license gate: nothing downloads before
+        // Accept, mirroring the asset UI's weight-license flow.
+        models_row := View{
+            visible: false
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: 8
+            align: Align{x: 0.0, y: 0.5}
+            models_state := MusicLabel{width: Fill text: ""}
+            models_install := MusicButton{width: 130 height: 20 text: "INSTALL MODELS"}
+        }
+
+        models_license_modal := Modal{
+            can_dismiss: true
+            content +: {
+                width: 560
+                height: Fit
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    padding: 20
+                    spacing: 10
+                    flow: Down
+                    draw_bg +: {
+                        color: #x16161b
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    Label{
+                        text: "About to download the deck models"
+                        draw_text.color: #xe8eef4
+                        draw_text.text_style: theme.font_bold{font_size: 12}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicValue{width: Fill text: "BS-RoFormer 4-stem splitter — 527 MB — MIT (ZFTurbo)"}
+                        LinkLabel{text: "Terms" url: "https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/LICENSE"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicValue{width: Fill text: "Whisper large-v3-turbo transcriber — 1.6 GB — MIT (OpenAI)"}
+                        LinkLabel{text: "Terms" url: "https://github.com/openai/whisper/blob/main/LICENSE"}
+                    }
+                    Label{
+                        width: Fill
+                        text: "Both weight sets are MIT-licensed. They download once into local/ inside the checkout — resumable, with size and sha256 pinned — and nothing is uploaded anywhere."
+                        draw_text.color: #x8e9aa7
+                        draw_text.text_style.font_size: 9
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 1.0, y: 0.5}
+                        models_download := MusicButton{width: 100 height: 22 text: "Download"}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1191,18 +1291,15 @@ pub struct DrawWaveLane {
     #[live(1.0)]
     pub active: f32,
     /// 1 once a stem texture is bound; 0 keeps the band colouring.
+    ///
+    /// The stem palette lives as four UNIFORMS in the script registration
+    /// (`color_vocals`..`color_other`), pushed via `set_uniform` every
+    /// draw — as instance inputs they tipped this shader over D3D11's
+    /// vs_5_0 limit of 32 vertex inputs (36 > 32: no waveform at all on
+    /// Windows). They are per-draw constants, so uniforms are their
+    /// honest storage class anyway.
     #[live]
     pub has_stems: f32,
-    /// The stem palette, pushed from [`STEM_COLORS`] every draw so the
-    /// waveform and the knobs cannot disagree.
-    #[live]
-    pub color_vocals: Vec4f,
-    #[live]
-    pub color_drums: Vec4f,
-    #[live]
-    pub color_bass: Vec4f,
-    #[live]
-    pub color_other: Vec4f,
     /// The stem knobs, so the wave shows the mix that will play.
     #[live(1.0)]
     pub gain_vocals: f32,
@@ -1909,10 +2006,7 @@ impl Widget for VjWaveScroll {
                     self.draw_lane.has_stems = 0.0;
                 }
             }
-            self.draw_lane.color_vocals = stem_color(0);
-            self.draw_lane.color_drums = stem_color(1);
-            self.draw_lane.color_bass = stem_color(2);
-            self.draw_lane.color_other = stem_color(3);
+            set_stem_color_uniforms(&mut self.draw_lane, cx);
             self.draw_lane.gain_vocals = lane.stem_gain[0];
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
@@ -2169,10 +2263,7 @@ impl Widget for VjWaveOverview {
         self.draw_lane.beat_cols = 0.0;
         self.draw_lane.beat_phase = 0.0;
         self.draw_lane.active = if self.active { 1.0 } else { 0.7 };
-        self.draw_lane.color_vocals = stem_color(0);
-        self.draw_lane.color_drums = stem_color(1);
-        self.draw_lane.color_bass = stem_color(2);
-        self.draw_lane.color_other = stem_color(3);
+        set_stem_color_uniforms(&mut self.draw_lane, cx);
         // The reference picture: every layer at full weight, whatever the
         // knobs are doing to the mix.
         self.draw_lane.gain_vocals = 1.0;
