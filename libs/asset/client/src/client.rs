@@ -424,6 +424,17 @@ impl AssetClient {
         self.api.resolve_alias(alias)
     }
 
+    /// Ask about MANY aliases at once (see [`crate::api::Api::alias_status`]).
+    /// `Err(NotFound)` = the server does not have the route; fall back to
+    /// [`Self::resolve_alias`] per entry.
+    pub fn alias_status(
+        &self,
+        entries: &[(makepad_asset_data::AssetAlias, Option<makepad_asset_data::BlobId>)],
+        tags: &[String],
+    ) -> ClientResult<Vec<crate::dto::AliasStatusDto>> {
+        self.api.alias_status(entries, tags)
+    }
+
     // ---- deletion ----------------------------------------------------------
 
     /// Delete an asset from the store (see [`crate::api::Api::retire_asset`]).

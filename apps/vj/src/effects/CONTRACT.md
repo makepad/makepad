@@ -3,6 +3,15 @@
 This file is the coordination contract for agents working on the VJ effect
 renderstack in parallel. Read it top to bottom before touching anything.
 
+**Editing documents while the VJ runs:** `apps/vj/LIVECODING.md`. Drop a
+`.splash` into `local/vjfx/` (or edit one in `resources/effects/`) and the
+store publishes a new revision of `vjfx/<file-stem>` without copying the
+file; the grid tile, its animated thumbnail and any slot RUNNING that
+document all follow within a second, and the compile verdict —
+`compile ok` or the shader compiler's own error text — lands in
+`local/vjfx/status/<stem>.status`. This file still owns what a document
+IS; that one owns the edit → live cycle.
+
 ## THE FIRST THING TO KNOW: a document carries its own shader
 
 **A `.splash` effect document is a complete, forkable unit. The pixel math

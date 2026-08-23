@@ -366,6 +366,10 @@ pub struct AssetStore {
     /// hosted server (the VJ's GEN tab, chat) and dispatches them to the
     /// LAN fleet. Without it those jobs sit at "waiting for agent" forever.
     jobs: Option<JobLoop>,
+    /// LIVECODING: observed origin directories → catalog, no copy. Declared
+    /// BEFORE `embedded` for the same reason `publish` is: joined while the
+    /// server it publishes into is still alive.
+    observe: Option<ObserveLoop>,
     /// In-process Asset Server. Held so drop shuts it down with the app.
     embedded: Option<makepad_asset_store::AssetServer>,
     connector: Option<SessionConnector>,
@@ -784,6 +788,11 @@ impl AssetStore {
             self.publish =
                 start_publish_loop(&server, token, self.library_dir.clone());
             self.jobs = start_job_loop(&server, token);
+            // LIVECODING: observed origin directories, catalogued in place.
+            // Only the HOST runs this — reference admission is loopback
+            // privilege, so an attached client never observes for somebody
+            // else's store.
+            self.observe = start_observe_loop(&server, token);
         }
         self.role = ServerRole::Host;
         self.embedded = Some(server);
@@ -1627,6 +1636,12 @@ fn start_embedded_asset_server_at(
         Beacon::Announce => Some(makepad_asset_store::DiscoveryConfig::lan_default()),
         Beacon::Silent => None,
     };
+    // Reference imports ON, LOOPBACK ONLY. The planes above bind 0.0.0.0 so
+    // the LAN can browse this library, but admitting content BY PATH stays a
+    // same-process privilege: the policy refuses any non-loopback caller, and
+    // the only loopback caller that uses it is this app's own observer (see
+    // `start_observe_loop`) cataloguing directories the user pointed it at.
+    cfg.blob_refs = makepad_asset_store::BlobRefPolicy::local_host();
     cfg.log = true;
     let server = makepad_asset_store::AssetServer::start(cfg)
         .map_err(|e| format!("embedded asset server: {e}"))?;
@@ -1781,6 +1796,87 @@ fn start_publish_loop(
         Ok(join) => Some(PublishLoop { join: Some(join) }),
         Err(error) => {
             log!("publish loop: could not spawn: {error}");
+            None
+        }
+    }
+}
+
+/// Stop flag for the single in-process observe loop.
+static OBSERVE_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Owns the observer thread; dropping the store stops and joins it.
+struct ObserveLoop {
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ObserveLoop {
+    fn drop(&mut self) {
+        OBSERVE_STOP.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Which directories this app observes. `ASSET_UI_FX_ORIGIN` names one
+/// explicitly; otherwise it is the checkout's `local/vjfx`, the same origin
+/// the VJ uses, so a livecoding session works whichever of the two is
+/// hosting the store that night.
+fn observe_origins() -> Vec<PathBuf> {
+    if let Some(dir) = env_alias(&["ASSET_UI_FX_ORIGIN", "VJ_FX_ORIGIN"]) {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return vec![PathBuf::from(dir)];
+        }
+    }
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vjfx");
+    let vj_presets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../vj/resources/effects");
+    let mut out = vec![checkout];
+    if vj_presets.is_dir() {
+        out.push(vj_presets);
+    }
+    out
+}
+
+/// Observe effect-document origins into the server this process hosts.
+/// Connect + watch happen on the thread; every failure is a log line.
+fn start_observe_loop(
+    server: &makepad_asset_store::AssetServer,
+    token: &str,
+) -> Option<ObserveLoop> {
+    let endpoints = localized_endpoints(server);
+    let server_id = server.server_id();
+    let token = token.to_string();
+    let cache = asset_ui_home().join("observe-cache");
+    let origins = observe_origins();
+    OBSERVE_STOP.store(false, Ordering::Release);
+    let join = std::thread::Builder::new()
+        .name("asset-ui-observe".to_string())
+        .spawn(move || {
+            let mut config = makepad_asset_client::ClientConfig::new(cache);
+            config.token = Some(token);
+            let mut client = match makepad_asset_client::AssetClient::connect(
+                config,
+                endpoints,
+                Some(server_id),
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    log!("observe loop: cannot connect to the embedded server: {error}");
+                    return;
+                }
+            };
+            makepad_asset_store::observe::run(
+                &mut client,
+                &makepad_asset_store::observe::ObserveConfig::vjfx(origins),
+                &OBSERVE_STOP,
+            );
+            log!("observe loop: stopped");
+        });
+    match join {
+        Ok(join) => Some(ObserveLoop { join: Some(join) }),
+        Err(error) => {
+            log!("observe loop: could not spawn: {error}");
             None
         }
     }

@@ -872,6 +872,80 @@ impl Api {
         Ok(detail)
     }
 
+    /// BATCH ALIAS STATUS — a whole bundled library's worth of "do you
+    /// already have this, and is it current?" in ONE round trip.
+    ///
+    /// `entries` pairs each alias with the Source blob the caller holds
+    /// (`None` = do not compare); `tags` names the annotation tags the
+    /// caller wants reported back per entry, which is how an ownership
+    /// convention like `builtin` is checked without a search per asset.
+    ///
+    /// Answers come back in request order and each echoes its own alias, so
+    /// nobody has to trust an ordinal alone.
+    pub fn alias_status(
+        &self,
+        entries: &[(AssetAlias, Option<BlobId>)],
+        tags: &[String],
+    ) -> ClientResult<Vec<dto::AliasStatusDto>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if entries.len() > wire::MAX_ALIAS_STATUS_ITEMS {
+            return Err(ClientError::InvalidInput { what: "alias status batch size" });
+        }
+        let items: Vec<json::Value> = entries
+            .iter()
+            .map(|(alias, source)| {
+                let mut pairs = vec![("alias", json::Value::Str(alias.as_str().to_string()))];
+                if let Some(blob) = source {
+                    pairs.push(("source", json::Value::Str(blob.to_string())));
+                }
+                json::obj(pairs)
+            })
+            .collect();
+        let body = json::obj(vec![
+            (
+                "tags",
+                json::Value::Arr(
+                    tags.iter().map(|t| json::Value::Str(t.clone())).collect(),
+                ),
+            ),
+            ("entries", json::Value::Arr(items)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_alias_status();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let resp = http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        let resp = self.accept(resp, &[200])?;
+        // A whole library's statuses is a bigger answer than an ordinary
+        // JSON route's, and it is all small fixed fields.
+        let max_body = wire::MAX_JSON_RESPONSE_BYTES * 4;
+        if resp.head().content_length > max_body {
+            return Err(ClientError::OverBudget {
+                what: "alias status body",
+                limit: max_body,
+                found: resp.head().content_length,
+            });
+        }
+        let bytes = resp.read_full(max_body)?;
+        let value = json::parse(&bytes)
+            .map_err(|_| ClientError::Protocol { what: "malformed json body" })?;
+        let rows = dto::parse_alias_status(&value)?;
+        if rows.len() != entries.len() {
+            return Err(ClientError::Protocol { what: "alias status entry count" });
+        }
+        // Positional identity, and the entry says its own alias: both have
+        // to agree or the answer describes something else.
+        for (row, (alias, _)) in rows.iter().zip(entries) {
+            if &row.alias != alias {
+                return Err(ClientError::Protocol { what: "alias status order" });
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn resolve_alias(&self, alias: &AssetAlias) -> ClientResult<AliasDto> {
         let path = wire::path_alias(alias);
         let mut req = Request::get(&path);
