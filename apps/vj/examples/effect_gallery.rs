@@ -283,6 +283,20 @@ impl App {
                 view.set_input_texture(0, Some(tex.clone()));
             }
         }
+        // THE DIAL LEVER (`VJFX_DIALS=p0,p1,p2,p3`, each a 0..1 float or
+        // `-` to leave that dial at the document's default): pins the user
+        // dials for this run, so a capture sweep can photograph one dial at
+        // its extremes and JUDGE whether the range is a real creative
+        // spectrum or a nothing-to-slow shrug.
+        if let Ok(spec) = std::env::var("VJFX_DIALS") {
+            let mut over = [None; 4];
+            for (i, part) in spec.split(',').take(4).enumerate() {
+                if let Ok(v) = part.trim().parse::<f32>() {
+                    over[i] = Some(v.clamp(0.0, 1.0));
+                }
+            }
+            view.set_user_override(over);
+        }
         // Transition docs render BLACK with nothing bound — give them the
         // same two distinct deck stand-ins the thumbnail renderer uses, so
         // the gallery (and any sweep grab) shows the transition working.

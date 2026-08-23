@@ -309,6 +309,68 @@ pub struct VjFxView {
     /// CPU encode cost of the last sim update (uniforms + pass encodes).
     #[rust]
     pub sim_ms: f32,
+
+    /// THE BAKE POOL (thumbnail batching — fx_thumbs.rs): a pass object
+    /// executes ONCE per paint, so the classic loop could only capture one
+    /// frame per UI beat and a 34-step sheet cost 34 display beats of
+    /// idle pacing. Each pooled step owns its own pass/draw-list/target
+    /// set; the host swaps one in, encodes one captured frame into it, and
+    /// several captured frames ride a single paint. Empty for every normal
+    /// host — nothing on the live path touches it.
+    #[rust]
+    bake_pool: Vec<BakeStep>,
+    /// True while a pooled step is swapped in (draw_scene switches its
+    /// geometry-upload rule to the per-step version check).
+    #[rust]
+    bake_active: bool,
+    /// The swapped-in step's last uploaded mesh version.
+    #[rust]
+    bake_geo_version: u64,
+    /// The sequential bake path's staged scene (sig, chain input) awaiting
+    /// its chain beat — see [`VjFxView::seq_scene_step`].
+    #[rust]
+    seq_staged: Option<(Signals, Texture)>,
+    /// The sequential path's alternate scene target: scene N+1 encodes
+    /// into the OTHER texture while step N's chain still reads this one,
+    /// so both may share a paint with no ordering assumption at all.
+    #[rust]
+    seq_color_alt: Option<Texture>,
+    /// Monotonic mesh content version: bumped on every dirty regen, so a
+    /// pooled step knows whether its own geometry copy is current.
+    #[rust]
+    mesh_version: u64,
+}
+
+/// One pooled bake step: everything the offscreen render of ONE captured
+/// frame must own so that S captured frames can be encoded into one paint
+/// without aliasing each other — pass + draw list (instance buffers),
+/// render targets, a post chain instance (its passes execute once per
+/// paint too), the per-step animated fallback input (rewritten per tick:
+/// a shared texture would make every step sample the LAST tick's
+/// pattern), and a per-step geometry for engines that regen per frame
+/// (one shared GPU buffer would leave every step drawing the last step's
+/// mesh).
+///
+/// ORDERING LAW: pass execution order among siblings follows pass-pool id
+/// order, which recycles — so within one paint, a step's CHAIN passes may
+/// execute before its SCENE pass. Scene encodes and chain runs of the
+/// same step therefore go in DIFFERENT paints (the host alternates
+/// scene/chain beats for staged documents); a stage-less document's blit
+/// reads the scene texture from the sheet pass, which as the passes'
+/// PARENT always executes after them, so it may blit in the same paint.
+struct BakeStep {
+    pass: DrawPass,
+    draw_list: DrawList,
+    color: Texture,
+    depth: Texture,
+    post: PostChain,
+    fallback: Option<Texture>,
+    fallback_data: Vec<u32>,
+    geometry: Option<Geometry>,
+    geometry_version: u64,
+    /// Captured at scene encode, replayed at the deferred chain run:
+    /// (this step's signal vector, the chain's input texture).
+    staged: Option<(Signals, Texture)>,
 }
 
 impl VjFxView {
@@ -326,6 +388,26 @@ impl VjFxView {
         // Post chain rebuilt for the new stage list (textures/passes only
         // allocated for what the doc asks for).
         self.post.configure(cx, &doc.stages);
+        // Pooled bake steps follow the document too: their chains carry the
+        // same stage list, their geometry copies are stale by definition.
+        // ONLY for documents that will actually batch: reconfiguring twelve
+        // chains for a sequential document would churn the pass-id free
+        // list for nothing — and sibling pass execution order follows pass
+        // ids, so churn is never free (see the ordering law on `BakeStep`).
+        if !self.bake_pool.is_empty() && !Self::doc_is_sequential(&doc) {
+            let mut pool = std::mem::take(&mut self.bake_pool);
+            for step in &mut pool {
+                step.post.configure(cx, &doc.stages);
+                step.geometry_version = 0;
+                step.staged = None;
+            }
+            self.bake_pool = pool;
+        } else {
+            for step in &mut self.bake_pool {
+                step.geometry_version = 0;
+                step.staged = None;
+            }
+        }
         // Sim fields rebuilt for the new field list (sim.rs).
         self.sim.configure(cx, &doc.fields);
         // A previous document's hook overrides must not leak into this one:
@@ -377,6 +459,7 @@ impl VjFxView {
             self.beat_pos = 0.0;
         }
         self.tick_error = None;
+        self.seq_staged = None;
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
         Ok(name)
@@ -1324,22 +1407,33 @@ impl VjFxView {
         let dirty = doc.engine.regen(self.frame_dt, time, phase, &mut self.mesh);
         if dirty {
             self.regen_ms = t0.elapsed().as_secs_f32() * 1000.0;
-            if self.bounds.is_none() && !self.mesh.verts.is_empty() {
-                let floats = super::mesh::VERT_FLOATS;
-                let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
-                let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
-                for v in self.mesh.verts.chunks(floats) {
-                    min.x = min.x.min(v[0]);
-                    min.y = min.y.min(v[1]);
-                    min.z = min.z.min(v[2]);
-                    max.x = max.x.max(v[0]);
-                    max.y = max.y.max(v[1]);
-                    max.z = max.z.max(v[2]);
-                }
-                self.bounds = Some((min, max));
-            }
+            self.mesh_version = self.mesh_version.wrapping_add(1);
+            self.note_mesh_bounds();
+        }
+        // Upload when the mesh changed — and, on a pooled bake step, when
+        // THIS step's geometry copy has never seen the current mesh (its
+        // `geometry` was swapped in by bake_begin, so the upload below
+        // lands in the step's own buffer, never a shared one).
+        let upload = if self.bake_active {
+            self.bake_geo_version != self.mesh_version
+        } else {
+            dirty
+        };
+        if upload {
             let geometry = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx));
-            self.mesh.upload_recycle(cx.cx, geometry);
+            if self.bake_active {
+                // Pooled steps each carry their own geometry copy, and the
+                // SAME mesh uploads into several of them. Recycle-upload
+                // MOVES the mesh vectors into the geometry (handing back
+                // the geometry's previous — empty — ones), so every step
+                // after the first would upload nothing: one good cell,
+                // twenty-nine black ones, and a vertex_buffer-None spam in
+                // the log. Clone-upload keeps the CPU mesh authoritative.
+                self.mesh.upload_clone(cx.cx, geometry);
+            } else {
+                self.mesh.upload_recycle(cx.cx, geometry);
+            }
+            self.bake_geo_version = self.mesh_version;
         }
         let Some(geometry) = &self.geometry else { return };
         let geometry_id = geometry.geometry_id();
@@ -1754,8 +1848,34 @@ impl Widget for VjFxView {
             self.sim_ms = self.sim.last_ms();
         }
 
+        let chain_input = self.render_scene(cx, pass_rect, &sig);
+        let final_texture = self.render_chain(cx, pass_rect, &sig, chain_input);
+        self.out_texture = Some(final_texture.clone());
+
+        // -- present -------------------------------------------------------
+        if self.composite && rect.size.x > 1.0 && rect.size.y > 1.0 {
+            self.draw_present.draw_vars.set_texture(0, &final_texture);
+            self.draw_present.draw_abs(cx, rect);
+            self.area = self.draw_present.area();
+            if !is_screen && !is_fluid {
+                cx.set_pass_area(&self.pass, self.area);
+            }
+        }
+        DrawStep::done()
+    }
+}
+
+impl VjFxView {
+    /// The offscreen SCENE HALF of one frame: the engine's own pass (or the
+    /// screen family's quad pass / the fluid view pass), producing the
+    /// texture the stage chain reads. Extracted from `draw_walk` verbatim so
+    /// the bake seam can encode it into a pooled step.
+    fn render_scene(&mut self, cx: &mut Cx2d, pass_rect: Rect, sig: &Signals) -> Texture {
+        let sig = *sig;
+        let is_screen = matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Screen));
+        let is_fluid = matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Fluid(_)));
         // -- scene pass (skipped by the fullscreen `screen` engine) --------
-        let chain_input = if is_screen {
+        if is_screen {
             let src = match self.input0.clone() {
                 Some(tex) => tex,
                 None => {
@@ -1841,52 +1961,333 @@ impl Widget for VjFxView {
                 DrawPassClearDepth::ClearWith(1.0),
             );
             cx.make_child_pass(&self.pass);
+            // This scene pass CONSUMES whatever sim state was updated this
+            // frame (wind/swarm textures, `field:` inputs): parent each
+            // field's final update pass under it so the graph — never
+            // pass-pool id order — puts the sim ahead of its consumer.
+            self.sim.link_consumer(cx, self.pass.draw_pass_id());
             cx.begin_pass(&self.pass, None);
             self.pass.set_size(cx, pass_rect.size);
             self.draw_scene(cx, pass_rect, &sig);
             cx.end_pass(&self.pass);
             self.color_texture.clone()
-        };
-
-        // -- post chain ----------------------------------------------------
-        let final_texture = if self.post.is_empty() {
-            chain_input
-        } else {
-            let resolved = self.resolve_stages(&sig);
-            let beat = [
-                sig.0[Signals::BEAT],
-                sig.0[Signals::PHASE],
-                sig.0[Signals::PULSE],
-                sig.0[Signals::TIME],
-            ];
-            self.post.run(
-                cx,
-                chain_input,
-                pass_rect.size,
-                &resolved,
-                beat,
-                &mut PostDraws {
-                    feedback: &mut self.draw_feedback,
-                    down: &mut self.draw_down,
-                    up: &mut self.draw_up,
-                    bloom_mix: &mut self.draw_bloom_mix,
-                    tilt_mix: &mut self.draw_tilt_mix,
-                    warp: &mut self.draw_warp,
-                    hold: &mut self.draw_hold,
-                },
-            )
-        };
-        self.out_texture = Some(final_texture.clone());
-
-        // -- present -------------------------------------------------------
-        if self.composite && rect.size.x > 1.0 && rect.size.y > 1.0 {
-            self.draw_present.draw_vars.set_texture(0, &final_texture);
-            self.draw_present.draw_abs(cx, rect);
-            self.area = self.draw_present.area();
-            if !is_screen && !is_fluid {
-                cx.set_pass_area(&self.pass, self.area);
-            }
         }
-        DrawStep::done()
+    }
+
+    /// The CHAIN HALF: the document's stage list over the scene output. A
+    /// stage-less document hands the input straight through (no pass at
+    /// all). Extracted from `draw_walk` verbatim for the bake seam.
+    fn render_chain(
+        &mut self,
+        cx: &mut Cx2d,
+        pass_rect: Rect,
+        sig: &Signals,
+        chain_input: Texture,
+    ) -> Texture {
+        if self.post.is_empty() {
+            return chain_input;
+        }
+        let resolved = self.resolve_stages(sig);
+        let beat = [
+            sig.0[Signals::BEAT],
+            sig.0[Signals::PHASE],
+            sig.0[Signals::PULSE],
+            sig.0[Signals::TIME],
+        ];
+        self.post.run(
+            cx,
+            chain_input,
+            pass_rect.size,
+            &resolved,
+            beat,
+            &mut PostDraws {
+                feedback: &mut self.draw_feedback,
+                down: &mut self.draw_down,
+                up: &mut self.draw_up,
+                bloom_mix: &mut self.draw_bloom_mix,
+                tilt_mix: &mut self.draw_tilt_mix,
+                warp: &mut self.draw_warp,
+                hold: &mut self.draw_hold,
+            },
+        )
+    }
+
+    /// Mesh bounds captured on the first non-empty regen (l-system
+    /// auto-framing reads them).
+    fn note_mesh_bounds(&mut self) {
+        if self.bounds.is_some() || self.mesh.verts.is_empty() {
+            return;
+        }
+        let floats = super::mesh::VERT_FLOATS;
+        let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
+        for v in self.mesh.verts.chunks(floats) {
+            min.x = min.x.min(v[0]);
+            min.y = min.y.min(v[1]);
+            min.z = min.z.min(v[2]);
+            max.x = max.x.max(v[0]);
+            max.y = max.y.max(v[1]);
+            max.z = max.z.max(v[2]);
+        }
+        self.bounds = Some((min, max));
+    }
+
+    // -- THE BAKE SEAM (fx_thumbs.rs — see `BakeStep`) ---------------------
+
+    /// Grow the bake pool to `n` steps. Pool passes keep their camera
+    /// matrix exactly like the view's own pass.
+    ///
+    /// A step created here configures its chain from the CURRENT document
+    /// straight away (batched documents only — the same gate as
+    /// `set_effect_source`'s pool reconfigure). Job startup loads the
+    /// document BEFORE the pool exists on a lane's first job, so without
+    /// this that job's pooled steps carried an empty `PostChain::new()`
+    /// and baked the raw scene with no stages — a subtly wrong sheet,
+    /// cached forever under the revision key.
+    pub fn bake_pool_ensure(&mut self, cx: &mut Cx, n: usize) {
+        while self.bake_pool.len() < n {
+            let pass = DrawPass::new_with_name(cx, "vjfx_bake_step");
+            cx.passes[pass.draw_pass_id()].keep_camera_matrix = true;
+            let color = Texture::new_with_format(
+                cx,
+                TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true },
+            );
+            let depth = Texture::new_with_format(
+                cx,
+                TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true },
+            );
+            let mut post = PostChain::new();
+            if let Some(doc) = &self.doc {
+                if !Self::doc_is_sequential(doc) {
+                    post.configure(cx, &doc.stages);
+                }
+            }
+            self.bake_pool.push(BakeStep {
+                pass,
+                draw_list: DrawList::new(cx),
+                color,
+                depth,
+                post,
+                fallback: None,
+                fallback_data: Vec::new(),
+                geometry: None,
+                geometry_version: 0,
+                staged: None,
+            });
+        }
+    }
+
+    /// Release the pool's MEMORY without releasing its IDENTITY: textures,
+    /// geometry copies and staged frames drop (the render-target bytes hand
+    /// back; fresh Auto-sized handles cost nothing until used), while the
+    /// pass, draw-list and chain OBJECTS live for the widget's lifetime.
+    /// Destroying them would push their pass ids into the recycler, and
+    /// sibling pass EXECUTION ORDER follows pass ids — the first build of
+    /// this pool freed and re-allocated on every idle/active edge, which
+    /// scrambled the id bands the sequential documents' own chain and sim
+    /// passes depend on and corrupted their sheets (alternating feedback
+    /// trails, black fluid bakes). Identity is permanent BY LAW.
+    pub fn bake_pool_release_memory(&mut self, cx: &mut Cx) {
+        for step in &mut self.bake_pool {
+            step.color = Texture::new_with_format(
+                cx,
+                TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true },
+            );
+            step.depth = Texture::new_with_format(
+                cx,
+                TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true },
+            );
+            step.fallback = None;
+            step.fallback_data = Vec::new();
+            step.geometry = None;
+            step.geometry_version = 0;
+            step.staged = None;
+        }
+    }
+
+    /// A document whose picture carries GPU state from frame to frame —
+    /// sim fields, a feedback or hold stage — must run its passes once per
+    /// paint in sequence.
+    fn doc_is_sequential(doc: &EffectDoc) -> bool {
+        !doc.fields.is_empty()
+            || doc
+                .stages
+                .iter()
+                .any(|s| matches!(s, StageCfg::Feedback { .. } | StageCfg::Hold { .. }))
+    }
+
+    /// How many capture steps of this DOCUMENT may share one paint. A
+    /// sequential document (see [`Self::doc_is_sequential`]) batches at 1 —
+    /// exactly the classic loop. Everything else batches up to the pool.
+    pub fn bake_batch_limit(&self) -> usize {
+        if self.bake_pool.is_empty() {
+            return 1;
+        }
+        if self.doc.as_ref().is_some_and(Self::doc_is_sequential) {
+            1
+        } else {
+            self.bake_pool.len()
+        }
+    }
+
+    /// True when this document's batched steps need their chain run in the
+    /// NEXT paint (see the ordering law on [`BakeStep`]): pass execution
+    /// order among siblings is not encode order, so a chain encoded in the
+    /// same paint as its scene may execute first and read a stale scene.
+    /// Stage-less documents have no chain passes and blit straight from
+    /// the scene texture, which the sheet pass (their parent) always reads
+    /// after they ran.
+    pub fn bake_needs_chain_beat(&self) -> bool {
+        !self.post.is_empty()
+    }
+
+    /// CPU-only preroll advance for batchable documents: run the engine
+    /// regen exactly as a drawn preroll frame would (same dt sequence,
+    /// same state), skipping the render whose pixels nobody ever saw.
+    /// Never used for sequential documents — their preroll draws feed
+    /// feedback/sim state and keep the classic one-draw-per-paint path.
+    pub fn bake_advance_only(&mut self) {
+        let sig = self.signals();
+        let time = sig.0[Signals::TIME];
+        let phase = sig.0[Signals::PHASE];
+        let Some(doc) = self.doc.as_mut() else { return };
+        let dirty = doc.engine.regen(self.frame_dt, time, phase, &mut self.mesh);
+        if dirty {
+            self.mesh_version = self.mesh_version.wrapping_add(1);
+            self.note_mesh_bounds();
+        }
+    }
+
+    /// SEQUENTIAL TWO-BEAT SEAM — the same ordering law as the pooled
+    /// steps, applied to the view's OWN pass set for documents that must
+    /// step one frame per paint (feedback/hold/sim state). The scene (and
+    /// the sim update feeding it) encodes in one paint; the chain runs in
+    /// the NEXT, reading a scene that has settled — because sibling pass
+    /// execution order follows recycled pass ids, a chain encoded beside
+    /// its scene may execute first and read a stale frame (live this is a
+    /// one-frame lag nobody sees; in a sheet bake it is cells that
+    /// alternate between two time streams, which is a flickering tile).
+    pub fn seq_scene_step(&mut self, cx: &mut Cx2d) {
+        if self.doc.is_none() {
+            return;
+        }
+        self.ensure_initialized(cx.cx);
+        // PING-PONG the scene target: with alternating textures, this
+        // paint's chain (reading LAST step's scene) and this scene encode
+        // never touch the same texture, so the host may put a chain run
+        // and the next scene into ONE paint — full one-step-per-paint
+        // throughput with zero pass-order assumptions. Sim-field documents
+        // must not pipeline (their scene IS the sim state) — the host
+        // checks [`VjFxView::bake_seq_pipeline`] before sharing a paint,
+        // but the ping-pong itself is always harmless.
+        let alt = self.seq_color_alt.get_or_insert_with(|| {
+            Texture::new_with_format(
+                cx.cx,
+                TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true },
+            )
+        });
+        std::mem::swap(alt, &mut self.color_texture);
+        let pass_rect =
+            Rect { pos: dvec2(0.0, 0.0), size: self.slot_size.unwrap_or(SLOT_PASS) };
+        let sig = self.signals();
+        // Sim fields advance with the scene beat (their state IS the frame).
+        if !self.sim.is_empty() {
+            let palette = self.doc.as_ref().map(|d| d.palette).unwrap_or_default();
+            self.sim.update(
+                cx,
+                &sig,
+                &palette,
+                &mut SimDraws {
+                    wind: &mut self.draw_sim_wind,
+                    swarm: &mut self.draw_sim_swarm,
+                    fluid_advect: &mut self.draw_fluid_advect,
+                    fluid_div: &mut self.draw_fluid_div,
+                    fluid_jacobi: &mut self.draw_fluid_jacobi,
+                    fluid_project: &mut self.draw_fluid_project,
+                    fluid_dye: &mut self.draw_fluid_dye,
+                },
+            );
+            self.sim_ms = self.sim.last_ms();
+        }
+        let chain_input = self.render_scene(cx, pass_rect, &sig);
+        self.seq_staged = Some((sig, chain_input));
+    }
+
+    /// True when a sequential document's chain beat may SHARE a paint
+    /// with the next scene encode: the ping-pong makes the textures
+    /// disjoint, EXCEPT for sim-field documents, whose chain input is the
+    /// sim's own state texture — the next scene's sim update would rewrite
+    /// it under the chain. Those keep strict alternation.
+    pub fn bake_seq_pipeline(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.fields.is_empty())
+    }
+
+    /// The deferred chain half of [`Self::seq_scene_step`]. For a
+    /// stage-less document this is free (the scene texture comes straight
+    /// back) and safe in the SAME paint; staged documents call it in the
+    /// next. Returns the finished frame.
+    pub fn seq_chain_step(&mut self, cx: &mut Cx2d) -> Option<Texture> {
+        let (sig, chain_input) = self.seq_staged.take()?;
+        let pass_rect =
+            Rect { pos: dvec2(0.0, 0.0), size: self.slot_size.unwrap_or(SLOT_PASS) };
+        let out = self.render_chain(cx, pass_rect, &sig, chain_input);
+        self.out_texture = Some(out.clone());
+        Some(out)
+    }
+
+    /// Swap pooled step `i`'s identity in (or back out — symmetric).
+    fn bake_swap(&mut self, i: usize) {
+        let mut pool = std::mem::take(&mut self.bake_pool);
+        {
+            let step = &mut pool[i];
+            std::mem::swap(&mut step.pass, &mut self.pass);
+            std::mem::swap(&mut step.draw_list, &mut self.draw_list);
+            std::mem::swap(&mut step.color, &mut self.color_texture);
+            std::mem::swap(&mut step.depth, &mut self.depth_texture);
+            std::mem::swap(&mut step.post, &mut self.post);
+            std::mem::swap(&mut step.fallback, &mut self.fallback_input);
+            std::mem::swap(&mut step.fallback_data, &mut self.fallback_data);
+            std::mem::swap(&mut step.geometry, &mut self.geometry);
+            std::mem::swap(&mut step.geometry_version, &mut self.bake_geo_version);
+        }
+        self.bake_pool = pool;
+    }
+
+    /// Encode one captured frame's SCENE into pooled step `i` (the host
+    /// has already advanced the clock with [`VjFxView::tick_manual`]).
+    /// The step's signals and chain input are staged for the chain run.
+    pub fn bake_scene_step(&mut self, cx: &mut Cx2d, i: usize) {
+        if self.doc.is_none() || i >= self.bake_pool.len() {
+            return;
+        }
+        self.ensure_initialized(cx.cx);
+        let pass_rect =
+            Rect { pos: dvec2(0.0, 0.0), size: self.slot_size.unwrap_or(SLOT_PASS) };
+        self.bake_swap(i);
+        self.bake_active = true;
+        let sig = self.signals();
+        let chain_input = self.render_scene(cx, pass_rect, &sig);
+        self.bake_active = false;
+        self.bake_swap(i);
+        self.bake_pool[i].staged = Some((sig, chain_input));
+    }
+
+    /// Run pooled step `i`'s chain over its staged scene and hand back the
+    /// finished frame. For a stage-less document this is free (the staged
+    /// scene texture comes straight back) and safe in the SAME paint as
+    /// the scene; staged documents call it in the NEXT paint.
+    pub fn bake_chain_step(&mut self, cx: &mut Cx2d, i: usize) -> Option<Texture> {
+        if self.doc.is_none() || i >= self.bake_pool.len() {
+            return None;
+        }
+        let (sig, chain_input) = self.bake_pool[i].staged.take()?;
+        let pass_rect =
+            Rect { pos: dvec2(0.0, 0.0), size: self.slot_size.unwrap_or(SLOT_PASS) };
+        self.bake_swap(i);
+        self.bake_active = true;
+        let out = self.render_chain(cx, pass_rect, &sig, chain_input);
+        self.bake_active = false;
+        self.bake_swap(i);
+        Some(out)
     }
 }

@@ -908,6 +908,12 @@ impl Cx {
         }
 
         let () = unsafe { msg_send![encoder, endEncoding] };
+        // RENDERER-OWNED TEXTURE CAPTURE: a capture requested for a texture
+        // THIS pass renders is blitted on this very command buffer — the
+        // producing queue — and delivered only from its completion handler,
+        // so the bytes provably follow the render (see
+        // `Cx::request_render_texture_capture`).
+        self.encode_render_texture_captures(metal_cx, draw_pass_id, command_buffer);
         // Which window this pass presents to, so a `--remote` grab can target one
         // window in a multi-window app instead of whichever pass presents first.
         let pass_window_id = self.get_pass_window_id(draw_pass_id).map(|w| w.id());
@@ -2033,6 +2039,155 @@ impl Cx {
             let () = msg_send![staging, release];
             let () = msg_send![queue, release];
             Some((width, height, bytes))
+        }
+    }
+}
+
+/// Renderer-owned capture requests (texture ids awaiting a pass that
+/// renders them) and finished results. Statics rather than Cx state because
+/// results are pushed from Metal completion threads (the
+/// SCREENSHOT_FILE_SINKS pattern in cx_shared.rs).
+static RENDER_TEXTURE_CAPTURE_REQUESTS: Mutex<Vec<crate::texture::TextureId>> =
+    Mutex::new(Vec::new());
+#[allow(clippy::type_complexity)]
+static RENDER_TEXTURE_CAPTURE_RESULTS: Mutex<
+    Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+> = Mutex::new(Vec::new());
+
+impl Cx {
+    /// RENDERER-OWNED capture of a render-target texture — the race-free
+    /// sibling of [`Cx::debug_read_render_texture`], which synchronizes on
+    /// a PRIVATE one-off queue with no ordering against in-flight work on
+    /// the producing queue (its bytes could be read before the pass that
+    /// drew them finished — intermittent half-rendered readbacks).
+    ///
+    /// Registers the request and returns true; the caller then repaints the
+    /// pass that renders into `texture` (`Cx::repaint_pass`) and polls
+    /// [`Cx::take_render_texture_captures`]. The next execution of that
+    /// pass encodes a blit to a shared staging texture ON ITS OWN COMMAND
+    /// BUFFER, and the buffer's completion handler delivers the bytes —
+    /// they provably follow the render. Bytes come back in the texture's
+    /// native 4-byte layout (BGRA8 = BGRA), full allocated size.
+    pub fn request_render_texture_capture(&mut self, texture: &Texture) -> bool {
+        let tid = texture.texture_id();
+        let mut requests = RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap();
+        if !requests.contains(&tid) {
+            requests.push(tid);
+        }
+        true
+    }
+
+    /// Drain every finished renderer-owned capture:
+    /// `(texture id, width, height, bytes)`.
+    #[allow(clippy::type_complexity)]
+    pub fn take_render_texture_captures(
+        &mut self,
+    ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        std::mem::take(&mut *RENDER_TEXTURE_CAPTURE_RESULTS.lock().unwrap())
+    }
+
+    /// The encode half of the capture (called from `draw_pass` right after
+    /// the render encoder ends): for each of this pass's color textures
+    /// with a pending request, blit to shared staging on the SAME command
+    /// buffer and hand the bytes over from its completion handler.
+    fn encode_render_texture_captures(
+        &mut self,
+        metal_cx: &MetalCx,
+        draw_pass_id: DrawPassId,
+        command_buffer: ObjcId,
+    ) {
+        if RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap().is_empty() {
+            return;
+        }
+        let tids: Vec<crate::texture::TextureId> = self.passes[draw_pass_id]
+            .color_textures
+            .iter()
+            .map(|ct| ct.texture.texture_id())
+            .collect();
+        for tid in tids {
+            let requested = {
+                let mut requests = RENDER_TEXTURE_CAPTURE_REQUESTS.lock().unwrap();
+                match requests.iter().position(|r| *r == tid) {
+                    Some(at) => {
+                        requests.remove(at);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !requested {
+                continue;
+            }
+            let (width, height, mtl_tex, pixel) = {
+                let cxtexture = &self.textures[tid];
+                let Some(alloc) = cxtexture.alloc.as_ref() else {
+                    crate::error!("render texture capture: texture has no allocation");
+                    continue;
+                };
+                let Some(tex) = cxtexture.os.texture.as_ref() else {
+                    crate::error!("render texture capture: texture has no MTLTexture");
+                    continue;
+                };
+                (alloc.width, alloc.height, tex.as_id(), alloc.pixel.clone())
+            };
+            unsafe {
+                let descriptor = RcObjcId::from_owned(
+                    NonNull::new(msg_send![class!(MTLTextureDescriptor), new]).unwrap(),
+                );
+                let () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
+                let () = msg_send![descriptor.as_id(), setDepth: 1u64];
+                let () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
+                let () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
+                let () = msg_send![descriptor.as_id(), setWidth: width as u64];
+                let () = msg_send![descriptor.as_id(), setHeight: height as u64];
+                let () = msg_send![
+                    descriptor.as_id(),
+                    setPixelFormat: texture_pixel_to_mtl_pixel(&pixel)
+                ];
+                let staging: ObjcId =
+                    msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id()];
+                if staging == nil {
+                    crate::error!("render texture capture: staging texture alloc failed");
+                    continue;
+                }
+                let blit: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+                let () = msg_send![blit, copyFromTexture: mtl_tex toTexture: staging];
+                let () = msg_send![blit, synchronizeTexture: staging slice: 0 level: 0];
+                let () = msg_send![blit, endEncoding];
+                let capture = Mutex::new(Some((tid, width, height, staging)));
+                let () = msg_send![
+                    command_buffer,
+                    addCompletedHandler: &objc_block!(move |_cmd: ObjcId| {
+                        if let Some((tid, width, height, staging)) =
+                            capture.lock().unwrap().take()
+                        {
+                            let mut bytes = vec![0u8; width * height * 4];
+                            let region = MTLRegion {
+                                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                                size: MTLSize {
+                                    width: width as u64,
+                                    height: height as u64,
+                                    depth: 1,
+                                },
+                            };
+                            let _: () = msg_send![
+                                staging,
+                                getBytes: bytes.as_mut_ptr()
+                                bytesPerRow: width * 4
+                                bytesPerImage: width * height * 4
+                                fromRegion: region
+                                mipmapLevel: 0
+                                slice: 0
+                            ];
+                            let () = msg_send![staging, release];
+                            RENDER_TEXTURE_CAPTURE_RESULTS
+                                .lock()
+                                .unwrap()
+                                .push((tid, width, height, bytes));
+                        }
+                    })
+                ];
+            }
         }
     }
 }

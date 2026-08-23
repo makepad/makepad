@@ -4017,14 +4017,19 @@ fn start_loop_worker() -> (
 
 /// Most cached thumbnail textures (revision-keyed, FIFO-evicted).
 /// Byte budget for the in-RAM thumbnail cache. Sized so ALL the lanes'
-/// thumbs stay warm together — filter flips must be RAM hits, never a
-/// redecode (sheet math: a 30-frame animated thumb at 128x80 BGRA is
-/// ~1.2 MB; ~120 effects+transitions is ~150 MB, videos on top). Eviction
-/// is purely LRU by this budget; nothing about a filter change drops
-/// textures by itself.
-const THUMB_CACHE_BYTES: usize = 512 * 1024 * 1024;
+/// thumbs stay warm together — filter flips AND scrolling must be RAM
+/// hits, never a redecode (sheet math at the 4K-class cells: a 30-frame
+/// sheet at 384x240 BGRA is ~11 MB, the whole 261-doc effect library
+/// ~3 GB). Two gigabytes keeps most of a session's working set resident
+/// on unified-memory machines — scrolling a lane must never visibly
+/// re-decode what was just on screen. Eviction is purely LRU by this
+/// budget; nothing about a filter change drops textures by itself.
+const THUMB_CACHE_BYTES: usize = 2048 * 1024 * 1024;
 /// One thumb texture's resident bytes (128x80 BGRA).
-const THUMB_TEX_BYTES: usize = 128 * 80 * 4;
+// Derived from the bake's actual cell size — hardcoded 128x80 undercounted
+// residency 9.2x once cells grew to the measured-4K spec, letting ~3GB of
+// decoded sheets sit under a 512MB estimated budget.
+const THUMB_TEX_BYTES: usize = fx_thumbs::CELL_W * fx_thumbs::CELL_H * 4;
 /// Thumbnails re-requested per grid rebuild after an eviction. A bank of
 /// three thousand tiles must not queue three thousand blob fetches at once.
 const MAX_THUMB_REFETCH: usize = 48;
@@ -4300,6 +4305,15 @@ pub struct App {
     light_track: usize,
     #[rust]
     video_pad_assets: Vec<Option<AssetId>>,
+    /// Aliases of PREFAB tiles under the visible window (no resolved row
+    /// yet) — the bake-priority feed reads revisions for them from
+    /// [`Self::fx_heads`], so scrolling onto prefabs still promotes them.
+    #[rust]
+    video_pad_pending: Vec<Option<String>>,
+    /// Each type-tab's remembered scroll position (pad-matrix bank):
+    /// leaving a lane remembers, returning restores.
+    #[rust]
+    lane_banks: Vec<(GridLane, usize)>,
     #[rust]
     video_pad_total: usize,
     /// GEN drawer visibility — HIDDEN by default (the grid earns the
@@ -6388,6 +6402,15 @@ p2 {}
     /// gesture; chip clicks go through [`Self::lane_chip_clicked`], which
     /// adds the click-again-for-ALL radio behavior.
     fn set_lane(&mut self, cx: &mut Cx, lane: GridLane) {
+        // Leaving a lane remembers its scroll position.
+        let previous = self.grid_lane;
+        if let Some(pads) = self.ui.widget(cx, ids!(video_grid)).borrow::<VjPadMatrix>() {
+            let bank = pads.bank;
+            match self.lane_banks.iter_mut().find(|(l, _)| *l == previous) {
+                Some(slot) => slot.1 = bank,
+                None => self.lane_banks.push((previous, bank)),
+            }
+        }
         self.grid_lane = lane;
         let (kinds, tag, exclude) = match lane {
             GridLane::All => (
@@ -6413,6 +6436,19 @@ p2 {}
         let cmds = self.video_model.set_lanes(kinds, tag, exclude);
         self.run_cat_cmds(Surface::Video, cmds);
         self.sync_lane_chips_ui(cx);
+        // Returning to a lane restores where the operator left it; a lane
+        // never visited starts at the top. The matrix clamps for itself if
+        // the lane shrank meanwhile.
+        let restored = self
+            .lane_banks
+            .iter()
+            .find(|(l, _)| *l == lane)
+            .map(|(_, bank)| *bank)
+            .unwrap_or(0);
+        if let Some(mut pads) = self.ui.widget(cx, ids!(video_grid)).borrow_mut::<VjPadMatrix>() {
+            pads.bank = restored;
+        }
+        self.ui.redraw(cx);
     }
 
     /// Radio semantics: a chip click selects that lane alone. One category
@@ -11183,13 +11219,24 @@ p2 {}
         // now (in pad order) and which effect tab is open. The bank pulls
         // by strict class against exactly this — these two facts are the
         // whole priority mechanism.
-        let visible: Vec<AssetRevisionId> = self
-            .video_pad_assets
-            .iter()
-            .flatten()
-            .filter_map(|asset| self.video_model.tile(asset))
-            .filter(|t| t.kind == Some(AssetKind::VjEffect))
-            .filter_map(|t| t.revision)
+        let visible: Vec<AssetRevisionId> = (0..self.video_pad_assets.len())
+            .filter_map(|pad| {
+                if let Some(asset) = self.video_pad_assets[pad] {
+                    return self
+                        .video_model
+                        .tile(&asset)
+                        .filter(|t| t.kind == Some(AssetKind::VjEffect))
+                        .and_then(|t| t.revision);
+                }
+                // A prefab under the scroll: no row yet, but the alias->head
+                // map knows its revision — a fast scroll must not demote
+                // exactly the tiles being looked at.
+                self.video_pad_pending
+                    .get(pad)
+                    .and_then(|alias| alias.as_ref())
+                    .and_then(|alias| self.fx_heads.get(alias))
+                    .map(|(revision, _)| *revision)
+            })
             .collect();
         let open_tab = if self.grid_lane.is_effect_lane() {
             Some(self.grid_lane == GridLane::Transition)
@@ -11699,6 +11746,15 @@ p2 {}
             self.video_pad_assets.clear();
             self.video_pad_assets
                 .extend((0..40).map(|pad| pads.visible_at(pad).map(|entry| entry.asset)));
+            // Prefabs under the window, by alias: their rows have not
+            // resolved yet, but the bake-priority feed must still count
+            // them as VISIBLE — a fast scroll lands on prefabs first.
+            self.video_pad_pending.clear();
+            self.video_pad_pending.extend((0..40).map(|pad| {
+                pads.paint_at(pad)
+                    .filter(|entry| entry.pending)
+                    .map(|entry| entry.sub.clone())
+            }));
             pads.at_tail()
         };
         // Page on demand: the window reached the loaded tail, so ask the
