@@ -1,0 +1,48 @@
+// MAZE — a square grid whose cells each turn their own patch of picture
+// (straight, swapped, or mirrored) off a per-cell hash, reading as a maze
+// of corridor tiles; the hash re-rolls on a beat-quantised cycle.
+{
+    name: "Maze"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SIZE", bind: "p0", default: 0.5},
+        {name: "CHAOS", bind: "p1", default: 0.5},
+        {name: "RATE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let cell = 0.03 + 0.1 * self.user.x
+            let cyc = floor(self.time_beat.y * (0.05 + 0.4 * self.user.z))
+            let sq = uv / cell
+            let sqi = floor(sq)
+            let sqf = fract(sq)
+            let hsh = fract(sin(sqi.x * 12.9898 + sqi.y * 78.233 + cyc * 3.7) * 43758.5453)
+            let turn = floor(hsh * 4.0)
+            let chaos = clamp(self.user.y, 0.0, 1.0)
+            let mut lf = sqf
+            if turn > 2.5 {
+                lf = vec2(1.0, 1.0) - sqf
+            } else if turn > 1.5 {
+                lf = vec2(1.0 - sqf.x, sqf.y)
+            } else if turn > 0.5 {
+                lf = vec2(sqf.y, sqf.x)
+            }
+            let folded = mix(sqf, lf, chaos)
+            let w = clamp(sqi * cell + folded * cell, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let tex = self.tex0.sample_as_bgra(w)
+            let wallx = min(sqf.x, 1.0 - sqf.x)
+            let wally = min(sqf.y, 1.0 - sqf.y)
+            let wall = 1.0 - smoothstep(0.0, 0.06, min(wallx, wally))
+            let out = tex.xyz * (1.0 - wall * 0.25)
+            return vec4(out, 1.0)
+        }
+    }
+}

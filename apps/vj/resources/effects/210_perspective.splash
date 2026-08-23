@@ -1,0 +1,139 @@
+// PERSPECTIVE — the picture stops being a texture and becomes a CARD held
+// in front of the camera: one video plane tilted on all three axes with a
+// real perspective divide, solved analytically per fragment.
+//
+// THIS FILE IS THE REFERENCE COPY of the plane-in-3D helper. `plane_uv`
+// below is carried verbatim by every doc in this family (the turn/tumble/
+// zoom/door/card transitions and the butterfly), because a preset doc is a
+// forkable unit — self-containedness beats DRY here.
+//
+// Pattern taught: camera at the origin looking down -z, one ray per
+// fragment, the plane a rectangle HINGED at a world point. Instead of
+// rotating the rectangle we push the RAY and the EYE into the plane's own
+// frame with the transposed rotation, where the plane is simply z = 0 —
+// one divide gives the hit, and the deck uv falls straight out of the
+// hit's x/y. Flat, centred, at unit distance the whole block collapses to
+// `uv` EXACTLY, which is what lets a sweep built on it start and end
+// pixel-clean.
+//
+// THE BACK OF THE CARD: the intersection already yields the mirrored
+// picture (past edge-on the u axis reverses on screen), so the back needs
+// no flip — it is only dimmed and cooled toward col_b, which is what makes
+// a turn read as a physical card turning over instead of a texture flip.
+{
+    name: "Perspective"
+    engine: "screen"
+    seed: 11
+
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact: at 0.5/0.5/0.5
+    // the card sits square to the camera and only breathes.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TILT", bind: "p0", default: 0.5},
+        {name: "SWING", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x04050c
+    color_a: #x40d8ff
+    color_b: #x2a3a6a
+    color_c: #xfff4e0
+
+    stages: [
+        {kind: "bloom", threshold: 0.62, strength: 1.0, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // ---- THE SHARED HELPER: one ray, one rotated video plane --------
+        // Camera at the origin looking down -z, one ray per fragment. The
+        // plane is the rectangle of half-extents (aspect, 1) * 0.5/f whose
+        // HINGE sits at world (piv.x, piv.y, -d), spun about that hinge by
+        // the Euler angles `ang` (Rz then Ry then Rx, radians). Rather
+        // than rotate the rectangle, the RAY and the EYE are pushed into
+        // the plane's own frame by the TRANSPOSED rotation (undo Z, then
+        // Y, then X) — there the plane is just z = 0, so ONE divide gives
+        // the hit. With ang = 0, piv = 0 and d = 1 this returns `uv`
+        // exactly; d alone scales the picture about the frame centre (the
+        // honest perspective size change of a plane moving in z).
+        // Returns (plane u, plane v, on-quad 0/1, front-facing 0/1).
+        plane_uv: fn(uv: vec2, ang: vec3, piv: vec2, d: float, f: float) -> vec4 {
+            // The `screen` family's shader carries no aspect uniform (only
+            // the duo and marcher families do), so the plane takes the VJ
+            // canvas aspect. Keep it in step with the output if that ever
+            // stops being 16:9.
+            let a = 1.7777
+            let c0 = cos(ang.x)
+            let s0 = sin(ang.x)
+            let c1 = cos(ang.y)
+            let s1 = sin(ang.y)
+            let c2 = cos(ang.z)
+            let s2 = sin(ang.z)
+            // The ray through this fragment (y up) and the eye, both
+            // measured from the hinge.
+            let rd = vec3((uv.x - 0.5) * a, 0.5 - uv.y, 0.0 - f)
+            let ro = vec3(0.0 - piv.x, 0.0 - piv.y, d)
+            let r1 = vec3(rd.x * c2 + rd.y * s2, rd.y * c2 - rd.x * s2, rd.z)
+            let o1 = vec3(ro.x * c2 + ro.y * s2, ro.y * c2 - ro.x * s2, ro.z)
+            let r2 = vec3(r1.x * c1 - r1.z * s1, r1.y, r1.x * s1 + r1.z * c1)
+            let o2 = vec3(o1.x * c1 - o1.z * s1, o1.y, o1.x * s1 + o1.z * c1)
+            let r3 = vec3(r2.x, r2.y * c0 + r2.z * s0, r2.z * c0 - r2.y * s0)
+            let o3 = vec3(o2.x, o2.y * c0 + o2.z * s0, o2.z * c0 - o2.y * s0)
+            // Intersect z = 0. A ray running parallel to the plane is
+            // NUDGED, never divided by zero — it simply lands far off the
+            // quad and fails the test below.
+            let den = r3.z + (1.0 - step(0.0001, abs(r3.z))) * 0.001
+            let k = 0.0 - o3.z / den
+            let hx = o3.x + k * r3.x + piv.x
+            let hy = o3.y + k * r3.y + piv.y
+            let pu = hx * f / a + 0.5
+            let pv = 0.5 - hy * f
+            // Inside the rectangle AND in front of the eye. The eye's z in
+            // the plane's frame is the side it is on: > 0 is the front.
+            let onq = step(0.0, pu) * step(pu, 1.0) * step(0.0, pv) * step(pv, 1.0)
+                * step(0.001, k)
+            return vec4(pu, pv, onq, step(0.0, o3.z))
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            // BOUNDED POSE. The dials park the card, two slow detuned
+            // sines breathe it and the eased beat pulse nudges it: every
+            // term is a sine or a clamped dial, so a card cued an hour
+            // into a set stands exactly where one cued at zero stands.
+            let tm = self.time_beat.x
+            let ax = (self.user.x - 0.5) * 1.5
+                + 0.07 * sin(tm * 0.31)
+                + 0.05 * self.time_beat.w
+            let ay = (self.user.y - 0.5) * 1.7 + 0.09 * sin(tm * 0.23 + 1.7)
+            let az = (self.user.z - 0.5) * 1.2 + 0.03 * sin(tm * 0.17 + 0.6)
+            // The card leans IN on the beat (pulse is 0..1, so bounded).
+            let d = 1.0 - 0.06 * self.time_beat.w
+            let p = self.plane_uv(uv, vec3(ax, ay, az), vec2(0.0, 0.0), d, 1.12)
+            let suv = clamp(vec2(p.x, p.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let tex = self.tex0.sample_as_bgra(suv)
+            // Front = the picture. Back = the same hit (already mirrored by
+            // the intersection) dimmed and cooled toward col_b.
+            let back = mix(tex.xyz, self.col_b.xyz, 0.35) * 0.42
+            let card = mix(back, tex.xyz, p.w)
+            // A hairline rim so the card has a physical EDGE.
+            let ed = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y))
+            let rim = (1.0 - smoothstep(0.0, 0.007, ed)) * p.z
+            // The void behind it: the palette floor with a soft centre glow.
+            let vg = clamp(1.0 - length(vec2((uv.x - 0.5) * 1.7777, uv.y - 0.5)) * 1.15, 0.0, 1.0)
+            let bg = self.col_bg.xyz + self.col_a.xyz * (0.06 * vg * vg)
+            let mut rgb = mix(bg, card, p.z)
+            rgb = rgb + self.col_c.xyz * (rim * 0.55)
+            // Without real content (cmix 0) the fallback pattern is all
+            // there is, so lift it a little to keep the frame alive.
+            let lift = 1.0 + (1.0 - clamp(cmix, 0.0, 1.0)) * 0.18
+            return vec4(rgb * (self.fog.y * lift), 1.0)
+        }
+    }
+}

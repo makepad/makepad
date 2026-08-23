@@ -1,0 +1,64 @@
+// PIXEL ORBIT — every particle carries one texel of input0 and circles a
+// great circle whose axis is hashed per particle, so the picture scatters
+// into a slow swarm of independent rings rather than one shared spin.
+{
+    name: "Pixel Orbit"
+    engine: "particles"
+    mode: "image"
+    seed: 161
+    input0: "test"
+
+    count: 10000
+    spread: 6.0
+    size: 0.095
+    rate: 0.0
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ORBIT", bind: "p0", default: 0.5},
+        {name: "SPEED", bind: "p1", default: 0.5},
+        {name: "TILT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "feedback", amount: "0.4 + 0.3*p1", zoom: 1.006, rotate: 0.0, dim: 0.95},
+        {kind: "bloom", threshold: 0.55, strength: 1.15, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program — each
+    // particle's own random direction seed (`dir`) becomes its orbit
+    // AXIS, and a Rodrigues rotation spins a fixed radius vector around
+    // it. Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        rot_axis: fn(v: vec3, axis: vec3, ang: float) -> vec3 {
+            let c = cos(ang)
+            let s = sin(ang)
+            return v * c + cross(axis, v) * s + axis * (dot(axis, v) * (1.0 - c))
+        }
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let axis = normalize(dir)
+            let seedv = vec3(0.0, 1.0, 0.0)
+            let perp = normalize(cross(axis, seedv) + vec3(0.0001, 0.0, 0.0))
+            let radius = spread * (0.35 + 0.55 * r0) * (0.4 + 1.3 * self.user.x)
+            let speed = 0.15 + 1.2 * self.user.y
+            let ang = self.time_beat.x * speed * (0.5 + r1) + id * 0.017
+            let p = self.rot_axis(perp * radius, axis, ang)
+            let tilt = 0.3 * self.user.z
+            return p + axis * sin(self.time_beat.x * 0.3 + id * 0.7) * radius * tilt
+        }
+    }
+}

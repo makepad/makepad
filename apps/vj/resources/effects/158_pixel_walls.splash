@@ -1,0 +1,61 @@
+// PIXEL WALLS — every particle carries one texel of input0; the grid
+// pulls apart down the centre seam into two facing walls on the beat,
+// each half keeping its own slice of picture, then breathes back flat.
+{
+    name: "Pixel Walls"
+    engine: "particles"
+    mode: "image"
+    seed: 158
+    input0: "test"
+
+    count: 14400
+    spread: 6.0
+    size: 0.085
+    rate: 0.0
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "GAP", bind: "p0", default: 0.5},
+        {name: "SPLIT", bind: "p1", default: 0.5},
+        {name: "DEPTH", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program — the
+    // flat HOME grid position is blended against a two-wall TARGET by a
+    // beat-driven breathing envelope. Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let gx = modf(id, w)
+            let gy = floor(id / w)
+            let u = gx / w - 0.5
+            let v = 0.5 - gy / w
+            let side = step(0.0, u) * 2.0 - 1.0
+            let gap = spread * (0.5 + 0.9 * self.user.x)
+            let rate = 0.3 + 1.4 * self.user.y
+            let breathe = 0.5 - 0.5 * cos(self.time_beat.y * 0.7853982 * rate)
+            let home = vec3(u * spread * 1.2, v * spread * 1.2, 0.0)
+            let curve = (0.5 - abs(u)) * spread * 0.6 * self.user.z
+            let wall = vec3(side * gap, v * spread * 1.3, curve)
+            return home.mix(wall, breathe)
+        }
+    }
+}

@@ -1,0 +1,29 @@
+// PANEL WIPE — the frame breaks into a grid of rectangular panels that
+// sweep in diagonal order, each panel carrying a small internal gradient
+// so it reads as a panel filling rather than a hard block-pop. PANELS
+// sets the grid density, FLIP reverses the sweep direction.
+{
+    name: "Panel Wipe"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.1},
+        {name: "PANELS", bind: "p1", default: 0.4},
+        {name: "FLIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let cols = 3.0 + floor(self.user.y * 6.0)
+            let rows = max(1.0, floor(cols / self.aspect() + 0.5))
+            let gx = floor(uv.x * cols)
+            let gy = floor(uv.y * rows)
+            let order = (gx + gy) / max(cols + rows - 2.0, 1.0)
+            let local = (fract(uv.x * cols) + fract(uv.y * rows)) * 0.5
+            let mut field = clamp(order * 0.8 + local * 0.2, 0.0, 1.0)
+            field = mix(field, 1.0 - field, step(0.5, self.user.z))
+            let soft = 0.01 + self.user.x * 0.25
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            return self.deck_b(uv).mix(self.deck_a(uv), m)
+        }
+    }
+}

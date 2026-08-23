@@ -1,0 +1,31 @@
+// PINWHEEL — the iris opens on a bladed edge instead of a smooth
+// circle: an angular sawtooth kinks the growing radius into rotor-blade
+// wedges. BLADES sets the blade count.
+{
+    name: "Pinwheel"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.07},
+        {name: "BLADES", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let c2 = vec2((uv.x - 0.5) * self.aspect(), uv.y - 0.5)
+            let r = length(c2)
+            let rmax = 0.5 * sqrt(self.aspect() * self.aspect() + 1.0)
+            let ang = atan2(c2.y, c2.x)
+            let blades = 4.0 + floor(self.user.y * 8.0)
+            let ang01 = fract(ang / 6.28318530718)
+            let twist = fract(ang01 * blades) - 0.5
+            let field = r + twist * rmax * 0.5
+            let soft = 0.01 + self.user.x * 0.15
+            let edge = t * (rmax + 2.0 * soft) - soft
+            let inside = smoothstep(edge + soft, edge - soft, field)
+            let c = self.deck_a(uv).mix(self.deck_b(uv), inside)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

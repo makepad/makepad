@@ -1,0 +1,29 @@
+// TILE — the frame repeats across a grid, zoomed and scrolling; a video
+// wall built from one source.
+{
+    name: "Tile"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "COUNT", bind: "p0", default: 0.5},
+        {name: "ZOOM", bind: "p1", default: 0.5},
+        {name: "SHIFT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let reps = mix(1.0, 7.0, self.user.x) + 1.0
+            let zoom = 0.2 + 1.6 * self.user.y
+            let shift = self.time_beat.x * 0.06 * (0.2 + 1.6 * self.user.z)
+            let w = fract(uv * reps / zoom + vec2(shift, shift * 0.6))
+            let tex = self.tex0.sample_as_bgra(w)
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

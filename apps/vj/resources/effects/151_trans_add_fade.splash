@@ -1,0 +1,29 @@
+// ADD FADE — a crossfade that blows out additively through the middle:
+// as deck B fades in, its light also pours on top of the mix (mid-fade
+// only), then the transition lands clean on pure B. CURVE bends both the
+// fade law and where the bloom peaks, BOOST sets the bloom's strength,
+// DIP ducks through black just before it.
+{
+    name: "Add Fade"
+    engine: "transition"
+    p0: 0.5
+    dials: [
+        {name: "CURVE", bind: "p0", default: 0.5},
+        {name: "BOOST", bind: "p1", default: 0.35},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let tt0 = clamp(t, 0.0, 1.0)
+            let curved = pow(tt0, pow(4.0, self.user.x * 2.0 - 1.0))
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let base = a.xyz.mix(b.xyz, curved)
+            let mid = 4.0 * curved * (1.0 - curved)
+            let bloom = mid * self.user.y * 1.2
+            let dim = 1.0 - mid * self.user.z * 0.9
+            let c = (base + b.xyz * bloom) * dim
+            return vec4(min(c.x, 1.0), min(c.y, 1.0), min(c.z, 1.0), 1.0)
+        }
+    }
+}
