@@ -140,7 +140,73 @@ struct Frame {
     /// bounce the pacing stamps climb forever while the picture runs
     /// backward — the scrub bar follows this, never the pacing stamp.
     clip_100ns: i64,
-    bgra: Vec<u32>,
+    px: Pixels,
+}
+
+/// A frame's pixel payload. NV12 is the RESIDENT form — 1.5 bytes per
+/// pixel STRAIGHT OFF THE DECODER, untouched by the CPU anywhere in the
+/// pipeline; the GPU unpacks it to RGBA in a texture-to-texture pass at
+/// present time (the operator's law: never convert 4K in a software
+/// loop). Bgra remains for producers that only have RGBA.
+#[derive(Clone)]
+pub enum Pixels {
+    Bgra(Vec<u32>),
+    Nv12 { data: Vec<u8>, width: u32, height: u32 },
+}
+
+impl Pixels {
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Pixels::Bgra(v) => v.len() * 4,
+            Pixels::Nv12 { data, .. } => data.len(),
+        }
+    }
+
+    /// CPU view of the picture as packed BGRA words — tests and the few
+    /// point-sampling consumers; the presentation path never calls this.
+    pub fn to_bgra(&self) -> Vec<u32> {
+        match self {
+            Pixels::Bgra(v) => v.clone(),
+            Pixels::Nv12 { data, width, height } => {
+                let mut out = Vec::new();
+                nv12::nv12_to_bgra_u32(data, *width, *height, &mut out);
+                out
+            }
+        }
+    }
+}
+
+impl Default for Pixels {
+    fn default() -> Self {
+        Pixels::Bgra(Vec::new())
+    }
+}
+
+/// Small BGRA proxy of an NV12 frame for the POINT-SAMPLING consumers
+/// (light zones, loop signatures): nearest-sampled, BT.709 limited — a
+/// few thousand texels on the CPU, never the full frame.
+pub fn nv12_proxy_bgra(data: &[u8], w: usize, h: usize, pw: usize, ph: usize) -> Vec<u32> {
+    let mut out = vec![0u32; pw * ph];
+    if w == 0 || h == 0 || data.len() < w * h * 3 / 2 {
+        return out;
+    }
+    let (y_plane, uv_plane) = data.split_at(w * h);
+    for py in 0..ph {
+        let sy = (py * h + h / 2) / ph.max(1);
+        let sy = sy.min(h - 1);
+        let uv_row = &uv_plane[(sy / 2) * w..];
+        for px_i in 0..pw {
+            let sx = ((px_i * w + w / 2) / pw.max(1)).min(w - 1);
+            let c = y_plane[sy * w + sx] as i32 - 16;
+            let d = uv_row[(sx / 2) * 2] as i32 - 128;
+            let e = uv_row[(sx / 2) * 2 + 1] as i32 - 128;
+            let r = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u32;
+            let g = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u32;
+            let b = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u32;
+            out[py * pw + px_i] = 0xff00_0000 | (r << 16) | (g << 8) | b;
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +369,12 @@ struct SlotShared {
     /// the button can track the live leg.
     dir_flip: AtomicU64,
     travel_forward: AtomicBool,
+    /// THE EAGER REPEAT CACHE: a dedicated worker decodes the trim window
+    /// at full hardware speed the moment a loop-capable mode is on — the
+    /// frame-exact transports unlock in a fraction of one play-through
+    /// (the old shape filled a cache at PLAYBACK pace as a side effect of
+    /// the first pass: "the clip must play once before it bounces").
+    repeat_cache: Mutex<RepeatCacheSlot>,
     /// The last PACING pts pushed to the ring, whatever stamped it — the
     /// law-paced first pass and the sweep tiers hand the presentation
     /// clock across seamlessly by continuing from here.
@@ -374,6 +446,7 @@ impl SlotPlayer {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(0),
@@ -541,7 +614,10 @@ impl SlotPlayer {
     /// clamped into that ladder; anything stale (an old 0.5x profile)
     /// falls to the default 4.
     pub fn set_beats_per_sweep(&mut self, beats: u8) {
-        let beats = if [8u8, 4, 2, 1].contains(&beats) { beats } else { 4 };
+        // The chip's real stops. 16 was missing after the chip grew its
+        // sixteenth row — the fallback silently played 16 as 4, which is
+        // why "16" ran FASTER than 8.
+        let beats = if [16u8, 8, 4, 2, 1].contains(&beats) { beats } else { 4 };
         self.shared.beats_per_sweep.store(beats, Ordering::Release);
     }
 
@@ -613,7 +689,7 @@ impl SlotPlayer {
 
     /// The newest due frame (call once per UI frame); `None` keeps the
     /// current texture. Rebases the clock on stream restarts (loop/seek).
-    pub fn take_due_frame(&mut self) -> Option<Vec<u32>> {
+    pub fn take_due_frame(&mut self) -> Option<Pixels> {
         if self.shared.paused.load(Ordering::Acquire) {
             return None;
         }
@@ -666,7 +742,7 @@ impl SlotPlayer {
             self.last_pts = frame.pts_100ns;
             self.shared.position_100ns.store(frame.clip_100ns, Ordering::Release);
         }
-        due.map(|f| f.bgra)
+        due.map(|f| f.px)
     }
 }
 
@@ -689,30 +765,14 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     };
     let info = decoder.info().clone();
     let mut audio_eos = !info.has_audio;
-    let mut rgb_scratch = Vec::new();
     let preroll_deadline = Instant::now() + PREROLL_AUDIO_TIMEOUT;
-    // Ping-pong frame cache: filled during a full forward pass that runs
-    // with the mode set, complete only when the WHOLE clip fit the budget.
-    // Any seek or reopen restarts it (a partial cache must never bounce).
-    let mut pingpong_cache: Vec<Frame> = Vec::new();
-    let mut pingpong_cache_bytes: usize = 0;
-    let mut pingpong_cache_complete = false;
-    let mut pingpong_over_budget = false;
-    // STICKY twin of the latch above: once THIS clip has ever blown the
-    // cache budget, the seek-tier handover gates stay open for the rest of
-    // the player's life. The per-pass latch resets on every wrap (a trim
-    // shrink may make the next pass fit), which used to close the REV /
-    // scratch handover for the first seconds of every pass — the operator
-    // pressed reverse mid-loop and nothing happened.
-    let mut clip_over_budget = false;
-    // Frames decoded this pass: a cache that started mid-pass (the mode
-    // flipped on partway through) covers only the TAIL and must never be
-    // declared complete — it bounces again from the next full pass.
-    let mut pass_frames: u64 = 0;
-    let mut pingpong_cache_partial = false;
+    // The repeat cache is EAGER now: `ensure_repeat_fill` (called every
+    // loop iteration below) keeps a dedicated worker decoding the trim
+    // window at full hardware speed into `shared.repeat_cache`; this pass
+    // only PLAYS. The whole per-pass collect/partial/complete dance died
+    // with the old shape.
     // Latched when this decoder's seek fails: never retry a broken seam.
     let mut seek_bounce_broken = false;
-    let mut trim_epoch_seen = shared.trim_epoch.load(Ordering::Acquire);
     // Law-paced first pass state: the last REAL video pts seen and the
     // last sane real inter-frame delta (used across wrap seams, where
     // the real pts jump backward).
@@ -722,30 +782,12 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-        // A trim change invalidates the frame cache (it only covers the
-        // old range); the rest of THIS pass can never complete one either.
-        let trim_epoch = shared.trim_epoch.load(Ordering::Acquire);
-        if trim_epoch != trim_epoch_seen {
-            trim_epoch_seen = trim_epoch;
-            pingpong_cache.clear();
-            pingpong_cache_bytes = 0;
-            pingpong_cache_complete = false;
-            pingpong_over_budget = false;
-            pingpong_cache_partial = pass_frames > 0;
-        }
+        // The eager fill worker: spawned/refreshed here (a no-op lock
+        // when settled). Trim-epoch invalidation lives inside it.
+        ensure_repeat_fill(&shared, path, &info);
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
-            pingpong_cache.clear();
-            pingpong_cache_bytes = 0;
-            pingpong_cache_complete = false;
-            // A post-SEEK pass covers target→OUT, not the window: it may
-            // never declare a complete cache (a scrub used to mint a
-            // tail-only cache the sweep then mapped the WHOLE trim onto —
-            // the "loops only the last third" lie). The wrap after this
-            // pass rebuilds from live IN and THAT pass completes.
-            pingpong_cache_partial = true;
-            pass_frames = 0;
             match VideoFileDecoder::open(&path) {
                 Ok(d) => {
                     decoder = d;
@@ -760,7 +802,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         match decoder.next_frame() {
                             Ok(Some(frame)) if frame.pts_100ns + 400_000 < seek => continue,
                             Ok(Some(frame)) => {
-                                push_frame(&shared, frame, &mut rgb_scratch);
+                                push_frame(&shared, frame);
                                 break;
                             }
                             Ok(None) => break,
@@ -815,7 +857,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             if shared.frames.lock().unwrap().is_empty() {
                 match decoder.next_frame() {
                     Ok(Some(frame)) => {
-                        push_frame(&shared, frame, &mut rgb_scratch);
+                        push_frame(&shared, frame);
                     }
                     Ok(None) => {
                         shared.end_of_stream.store(true, Ordering::Release);
@@ -937,7 +979,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         .max(1) as f64;
                     let frame_bytes = (frame.width as usize)
                         .saturating_mul(frame.height as usize)
-                        .saturating_mul(4);
+                        .saturating_mul(3)
+                        / 2;
                     let cacheable = (window / last_real_delta as f64)
                         * frame_bytes as f64
                         <= MAX_PINGPONG_CACHE_BYTES as f64;
@@ -960,27 +1003,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     }
                 };
                 last_real_pts = Some(real_pts);
-                let cached =
-                    push_frame_paced(&shared, frame, &mut rgb_scratch, pace);
-                pass_frames += 1;
-                if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::Once
-                    && !pingpong_over_budget
-                    && !pingpong_cache_complete
-                {
-                    if pingpong_cache.is_empty() && pass_frames > 1 {
-                        pingpong_cache_partial = true;
-                    }
-                    pingpong_cache_bytes += cached.bgra.len() * 4;
-                    if pingpong_cache_bytes > MAX_PINGPONG_CACHE_BYTES {
-                        pingpong_cache.clear();
-                        pingpong_cache_bytes = 0;
-                        pingpong_over_budget = true;
-                        clip_over_budget = true;
-                        eprintln!("vj-slot {slot:?}: clip exceeds the ping-pong cache budget; bouncing falls back to loop");
-                    } else {
-                        pingpong_cache.push(cached);
-                    }
-                }
+                push_frame_paced(&shared, frame, pace);
                 if shared.preroll_status.load(Ordering::Acquire)
                     != PrerollStatus::Ready as u8
                 {
@@ -988,31 +1011,57 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         .preroll_status
                         .store(PrerollStatus::Ready as u8, Ordering::Release);
                 }
-                // LIVE handover mid-pass: the operator flipped into a
-                // bounce/reverse (or grabbed the scratch wheel) on an
-                // over-budget clip. Waiting for this pass's EOS — the old
-                // shape — meant the button did NOTHING for up to a whole
-                // clip length. Hand over to the seek tier now.
+                // LIVE handover mid-pass — the eager fill's whole point:
+                // the moment the cache is ready (or the seek tier is the
+                // verdict) the frame-exact transport takes over, instead
+                // of the old wait for this pass's EOS ("the clip must
+                // play once first").
                 let live_mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
+                let scratching = shared.scratch_active.load(Ordering::Acquire);
+                let silent_now = repeat_is_silent(
+                    info.has_audio,
+                    shared.muted.load(Ordering::Acquire),
+                    live_mode,
+                );
+                let (cache, over_budget) = {
+                    let rc = shared.repeat_cache.lock().unwrap();
+                    (rc.frames.clone(), rc.over_budget)
+                };
+                if silent_now
+                    && (live_mode != PlayMode::Once || scratching)
+                    && cache.is_some()
+                {
+                    cache_playback(&shared, cache.as_ref().unwrap());
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let trim_in = shared.trim_in_100ns.load(Ordering::Acquire).max(0);
+                    if decoder.seek(trim_in).is_ok() {
+                        audio_eos = !info.has_audio;
+                        continue;
+                    }
+                    match VideoFileDecoder::open(&path) {
+                        Ok(d) => {
+                            decoder = d;
+                            audio_eos = !info.has_audio;
+                            continue;
+                        }
+                        Err(e) => {
+                            *shared.failure.lock().unwrap() = Some(e.to_string());
+                            return;
+                        }
+                    }
+                }
                 let wants_tier3 = matches!(
                     live_mode,
                     PlayMode::PingPong | PlayMode::Reverse
-                ) || shared.scratch_active.load(Ordering::Acquire);
-                if clip_over_budget
+                ) || scratching;
+                if over_budget
                     && wants_tier3
                     && !seek_bounce_broken
                     && info.duration_100ns > 0
-                    && repeat_is_silent(
-                        info.has_audio,
-                        shared.muted.load(Ordering::Acquire),
-                        live_mode,
-                    )
+                    && silent_now
                 {
-                    // The partial cache belongs to the abandoned pass.
-                    pingpong_cache.clear();
-                    pingpong_cache_bytes = 0;
-                    pingpong_cache_partial = false;
-                    pass_frames = 0;
                     match seek_bounce_playback(&mut decoder, &shared, &info) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -1051,28 +1100,17 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 }
             }
             Ok(Some(_)) | Ok(None) => {
-                if !pingpong_over_budget
-                    && !pingpong_cache.is_empty()
-                    && !pingpong_cache_partial
-                {
-                    pingpong_cache_complete = true;
-                }
-                // A tail-only cache is thrown away; the reopen below decodes
-                // the next pass from frame 0 with the mode already set, so
-                // THAT cache completes.
-                if pingpong_cache_partial {
-                    pingpong_cache.clear();
-                    pingpong_cache_bytes = 0;
-                    pingpong_cache_partial = false;
-                }
-                pass_frames = 0;
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
                 let silent = repeat_is_silent(
                     info.has_audio,
                     shared.muted.load(Ordering::Acquire),
                     mode,
                 );
-               if mode != PlayMode::Once && pingpong_cache_complete && silent {
+                let (cache, cache_over_budget) = {
+                    let rc = shared.repeat_cache.lock().unwrap();
+                    (rc.frames.clone(), rc.over_budget)
+                };
+                if mode != PlayMode::Once && silent && cache.is_some() {
                     // The whole clip is in memory and nothing needs the
                     // audio decoder: repeat it straight from the cache —
                     // end to start with no decoder reopen, which is what
@@ -1085,12 +1123,11 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // re-entered this branch forever — EOS → exit → EOS —
                     // a silent busy-spin that froze the picture with the
                     // loop lit.)
-                    cache_playback(&shared, &pingpong_cache);
+                    cache_playback(&shared, cache.as_ref().unwrap());
                 }
                 if (matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
                     || shared.scratch_active.load(Ordering::Acquire))
-                    && clip_over_budget
-                    && !pingpong_cache_complete
+                    && cache_over_budget
                     && silent
                     && !seek_bounce_broken
                     && info.duration_100ns > 0
@@ -1209,21 +1246,154 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
 }
 
 /// Decoded NV12 → the ring's BGRA frame (no queueing).
-fn convert_frame(
+/// The eager repeat cache's shared slot (see `ensure_repeat_fill`).
+#[derive(Default)]
+struct RepeatCacheSlot {
+    /// A COMPLETE decoded window — published whole, never partial.
+    frames: Option<Arc<Vec<Frame>>>,
+    /// Trim bounds the frames were built under.
+    built: (i64, i64),
+    /// Trim epoch the verdicts belong to; a trim change resets everything
+    /// (a smaller window may fit where the old one did not).
+    epoch: u64,
+    /// The window cannot fit the budget — the seek tier serves instead.
+    over_budget: bool,
+    /// A fill worker is running (dedupes spawns).
+    filling: bool,
+}
+
+/// Keep the eager fill honest and running: called once per decode-loop
+/// iteration. Cheap when settled (one lock). The budget verdict is
+/// ARITHMETIC — window length × NV12 frame bytes — so an over-budget clip
+/// is known the instant it is cued, not minutes into a decode.
+fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo) {
+    if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Once {
+        return;
+    }
+    let epoch = shared.trim_epoch.load(Ordering::Acquire);
+    let duration = info.duration_100ns.max(1);
+    let t_in = shared.trim_in_100ns.load(Ordering::Acquire).clamp(0, duration);
+    let t_out = shared.trim_out_100ns.load(Ordering::Acquire).clamp(t_in, duration);
+    {
+        let mut rc = shared.repeat_cache.lock().unwrap();
+        if rc.epoch != epoch {
+            rc.frames = None;
+            rc.over_budget = false;
+            rc.epoch = epoch;
+        }
+        if rc.filling || rc.over_budget {
+            return;
+        }
+        if rc.frames.is_some() && !cache_range_outgrown(rc.built, (t_in, t_out)) {
+            return;
+        }
+        let frame_bytes = (info.width as usize)
+            .saturating_mul(info.height as usize)
+            .saturating_mul(3)
+            / 2;
+        let delta = if info.fps_num > 0 {
+            ((10_000_000 * info.fps_den.max(1) as i64) / info.fps_num as i64).max(1)
+        } else {
+            416_667
+        };
+        let est = ((t_out - t_in).max(0) as f64 / delta as f64).ceil() * frame_bytes as f64;
+        if est > MAX_PINGPONG_CACHE_BYTES as f64 {
+            rc.over_budget = true;
+            eprintln!(
+                "vj repeat cache: window needs ~{:.0} MB (budget {} MB); the seek tier serves reverse/bounce",
+                est / 1e6,
+                MAX_PINGPONG_CACHE_BYTES >> 20
+            );
+            return;
+        }
+        rc.frames = None;
+        rc.filling = true;
+    }
+    let shared = shared.clone();
+    let path = path.to_string();
+    let _ = std::thread::Builder::new().name("vj-cache-fill".into()).spawn(move || {
+        let t0 = Instant::now();
+        let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out);
+        shared.repeat_cache.lock().unwrap().filling = false;
+        if tl_on() {
+            eprintln!("tl fill done ok={ok} in {}ms", t0.elapsed().as_millis());
+        }
+    });
+}
+
+/// The fill itself: a PRIVATE decoder, video track only, running at
+/// whatever speed the hardware gives. Aborts quietly on stop or a trim
+/// change; publishes only a whole window under its own epoch.
+fn repeat_fill_worker(
+    shared: &Arc<SlotShared>,
+    path: &str,
+    epoch: u64,
+    t_in: i64,
+    t_out: i64,
+) -> bool {
+    let Ok(mut decoder) = VideoFileDecoder::open(path) else { return false };
+    if t_in > 0 {
+        // Seek failure is fine: decode from zero, the discard arm below
+        // walks up to IN.
+        let _ = decoder.seek(t_in);
+    }
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut bytes = 0usize;
+    loop {
+        if shared.stop.load(Ordering::Acquire)
+            || shared.trim_epoch.load(Ordering::Acquire) != epoch
+        {
+            return false;
+        }
+        match decoder.next_frame() {
+            Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => {}
+            Ok(Some(f)) if f.pts_100ns < t_out => {
+                let frame = decoded_frame(f);
+                bytes += frame.px.byte_len();
+                if bytes > MAX_PINGPONG_CACHE_BYTES {
+                    // The arithmetic verdict missed (VFR denser than the
+                    // container's fps claim): same outcome, later.
+                    let mut rc = shared.repeat_cache.lock().unwrap();
+                    if rc.epoch == epoch {
+                        rc.over_budget = true;
+                    }
+                    eprintln!("vj repeat cache: fill blew the budget; the seek tier serves reverse/bounce");
+                    return false;
+                }
+                frames.push(frame);
+            }
+            Ok(Some(_)) | Ok(None) => break,
+            Err(_) => return false,
+        }
+    }
+    if frames.len() < 2 {
+        return false;
+    }
+    let mut rc = shared.repeat_cache.lock().unwrap();
+    if rc.epoch != epoch {
+        return false;
+    }
+    rc.built = (t_in, t_out);
+    rc.frames = Some(Arc::new(frames));
+    true
+}
+
+/// Wrap a decoded frame for residency: the NV12 planes MOVE straight in.
+fn decoded_frame(
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
-    _rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
-    let mut bgra = Vec::new();
-    nv12::nv12_to_bgra_u32(&frame.nv12, frame.width, frame.height, &mut bgra);
-    Frame { pts_100ns: frame.pts_100ns, clip_100ns: frame.pts_100ns, bgra }
+    Frame {
+        pts_100ns: frame.pts_100ns,
+        clip_100ns: frame.pts_100ns,
+        px: Pixels::Nv12 { data: frame.nv12, width: frame.width, height: frame.height },
+    }
 }
 
 fn push_frame(
     shared: &Arc<SlotShared>,
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
-    rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
-    push_frame_paced(shared, frame, rgb_scratch, None)
+    push_frame_paced(shared, frame, None)
 }
 
 /// Like [`push_frame`], but the ring copy may carry a synthetic PACING
@@ -1232,19 +1402,18 @@ fn push_frame(
 fn push_frame_paced(
     shared: &Arc<SlotShared>,
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
-    rgb_scratch: &mut Vec<u8>,
     pace_pts: Option<i64>,
 ) -> Frame {
-    let converted = convert_frame(frame, rgb_scratch);
+    let converted = decoded_frame(frame);
     let out = Frame {
         pts_100ns: converted.pts_100ns,
         clip_100ns: converted.clip_100ns,
-        bgra: converted.bgra.clone(),
+        px: converted.px.clone(),
     };
     let ring = Frame {
         pts_100ns: pace_pts.unwrap_or(converted.pts_100ns),
         clip_100ns: converted.clip_100ns,
-        bgra: converted.bgra,
+        px: converted.px,
     };
     shared.pace_tail_100ns.store(ring.pts_100ns, Ordering::Release);
     shared.frames.lock().unwrap().push_back(ring);
@@ -1360,8 +1529,22 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if tail > 0 { tail } else { real }
     };
     let n = cache.len();
-    let mut idx = n - 1;
-    let mut forward = false;
+    // ENGAGE FROM THE STREAM'S COMMITTED POSITION: with the eager fill,
+    // adoption can happen mid-pass (or right after a scrub) — starting
+    // anywhere else would teleport. The reference is the ring's TAIL (the
+    // newest frame already queued for presentation), not the presented
+    // position, which trails the queue and would splice a backward step
+    // in behind it. At an EOS handover both sit at the end, so this
+    // degenerates to the old n-1.
+    let pos = shared
+        .frames
+        .lock()
+        .unwrap()
+        .back()
+        .map(|f| f.clip_100ns)
+        .unwrap_or_else(|| shared.position_100ns.load(Ordering::Acquire));
+    let mut idx = cache.partition_point(|f| f.clip_100ns < pos).min(n - 1);
+    let mut forward = true;
     let mut last_mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
     let mut last_pulse = shared.beat_pulse.load(Ordering::Acquire);
     // Sweep-law transport state: the 0→1 phase of the current beat step,
@@ -1467,7 +1650,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
-                bgra: cache[idx].bgra.clone(),
+                px: cache[idx].px.clone(),
             });
             continue;
         }
@@ -1560,7 +1743,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
-                bgra: cache[idx].bgra.clone(),
+                px: cache[idx].px.clone(),
             });
             continue;
         }
@@ -1583,7 +1766,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
-                bgra: cache[idx].bgra.clone(),
+                px: cache[idx].px.clone(),
             });
             continue;
         } else if mode == PlayMode::Reverse {
@@ -1596,7 +1779,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             shared.frames.lock().unwrap().push_back(Frame {
                 pts_100ns: synth_pts,
                 clip_100ns: cache[idx].pts_100ns,
-                bgra: cache[idx].bgra.clone(),
+                px: cache[idx].px.clone(),
             });
             continue;
         } else if forward {
@@ -1618,7 +1801,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: synth_pts,
             clip_100ns: cache[idx].pts_100ns,
-            bgra: cache[idx].bgra.clone(),
+            px: cache[idx].px.clone(),
         });
     }
 }
@@ -1686,7 +1869,6 @@ fn seek_bounce_playback(
     } else {
         416_667 // assume 24 fps when the container is silent about it
     };
-    let mut rgb_scratch = Vec::new();
     // Continue the presentation clock from wherever the forward pass ended.
     let mut synth_pts = shared
         .frames
@@ -1696,7 +1878,7 @@ fn seek_bounce_playback(
         .map(|f| f.pts_100ns)
         .unwrap_or(0)
         .max(shared.position_100ns.load(Ordering::Acquire));
-    let serve = |shared: &SlotShared, bgra: Vec<u32>, clip_100ns: i64, synth_pts: &mut i64| {
+    let serve = |shared: &SlotShared, px: Pixels, clip_100ns: i64, synth_pts: &mut i64| {
         *synth_pts += delta;
         if tl_on() {
             eprintln!(
@@ -1709,7 +1891,7 @@ fn seek_bounce_playback(
             .frames
             .lock()
             .unwrap()
-            .push_back(Frame { pts_100ns: *synth_pts, clip_100ns, bgra });
+            .push_back(Frame { pts_100ns: *synth_pts, clip_100ns, px });
         shared.video_ready.store(true, Ordering::Release);
     };
     // A reverse window mid-collection: frames decoded so far (oldest
@@ -1804,18 +1986,18 @@ fn seek_bounce_playback(
                             last_clip as f64 / 1e7
                         );
                     }
-                    serve(shared, frame.bgra.clone(), frame.clip_100ns, &mut synth_pts);
+                    serve(shared, frame.px.clone(), frame.clip_100ns, &mut synth_pts);
                     continue;
                 }
                 let idx = (serve_idx.floor() as usize).min(current.len() - 1);
-                let bgra = std::mem::take(&mut current[idx].bgra);
+                let px = std::mem::take(&mut current[idx].px);
                 last_clip = current[idx].clip_100ns;
                 serve_idx = idx as f64 - 1.0;
                 ceiling = serve_idx;
                 if serve_idx < 0.0 {
                     drained_at = Some(Instant::now());
                 }
-                serve(shared, bgra, last_clip, &mut synth_pts);
+                serve(shared, px, last_clip, &mut synth_pts);
                 continue;
             }
             // 2) Arm the collector for the window below `hi`.
@@ -1870,13 +2052,13 @@ fn seek_bounce_playback(
                     Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => {}
                     Ok(Some(f)) if f.pts_100ns < c.hi => {
                         let cvt_t0 = Instant::now();
-                        let frame = convert_frame(f, &mut rgb_scratch);
+                        let frame = decoded_frame(f);
                         c.cvt_us += cvt_t0.elapsed().as_micros() as u64;
-                        c.bytes += frame.bgra.len() * 4;
+                        c.bytes += frame.px.byte_len();
                         c.frames.push_back(frame);
                         while c.bytes > REVERSE_WINDOW_MAX_BYTES && c.frames.len() > 1 {
                             let dropped = c.frames.pop_front().unwrap();
-                            c.bytes -= dropped.bgra.len() * 4;
+                            c.bytes -= dropped.px.byte_len();
                         }
                     }
                     Ok(Some(_)) | Ok(None) => {
@@ -1957,8 +2139,8 @@ fn seek_bounce_playback(
             match decoder.next_frame() {
                 Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => continue,
                 Ok(Some(f)) if f.pts_100ns < t_out => {
-                    let frame = convert_frame(f, &mut rgb_scratch);
-                    serve(shared, frame.bgra, frame.clip_100ns, &mut synth_pts);
+                    let frame = decoded_frame(f);
+                    serve(shared, frame.px, frame.clip_100ns, &mut synth_pts);
                 }
                 Ok(Some(_)) | Ok(None) => break,
                 Err(e) => return Err(e.to_string()),
@@ -3715,6 +3897,7 @@ mod tests {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(info.duration_100ns),
@@ -3738,7 +3921,7 @@ mod tests {
             assert!(Instant::now() < deadline, "seek bounce starved: {seen:?}");
             let frame = shared.frames.lock().unwrap().pop_front();
             match frame {
-                Some(frame) => seen.push((frame.pts_100ns, identity_of(&frame.bgra))),
+                Some(frame) => seen.push((frame.pts_100ns, identity_of(&frame.px.to_bgra()))),
                 None => std::thread::sleep(Duration::from_millis(2)),
             }
         }
@@ -3797,7 +3980,7 @@ mod tests {
             frames.push_back(Frame {
                 pts_100ns: index as i64,
                 clip_100ns: index as i64,
-                bgra: vec![0xff00_0000],
+                px: Pixels::Bgra(vec![0xff00_0000]),
             });
         }
         let mixer = Mixer::new();
@@ -3823,6 +4006,7 @@ mod tests {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
                 position_100ns: AtomicI64::new(0),
@@ -3861,7 +4045,7 @@ mod tests {
         player.shared.frames.lock().unwrap().push_back(Frame {
             pts_100ns: 60_000_000, // six seconds ahead of the clock
             clip_100ns: 2_000_000,
-            bgra: vec![0xff00_0000],
+            px: Pixels::Bgra(vec![0xff00_0000]),
         });
         let got = player.take_due_frame();
         assert!(got.is_some(), "forward jump stalled the pacer");
@@ -4846,7 +5030,7 @@ mod mode_flip_tests {
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline && ids.len() < FRAMES * 3 {
             if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra));
+                ids.push(identity_of(&bgra.to_bgra()));
             }
             std::thread::sleep(Duration::from_millis(4));
         }
@@ -4869,7 +5053,7 @@ mod mode_flip_tests {
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline && ids.len() < FRAMES * 3 {
             if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra));
+                ids.push(identity_of(&bgra.to_bgra()));
             }
             std::thread::sleep(Duration::from_millis(4));
         }
@@ -4896,7 +5080,7 @@ mod mode_flip_tests {
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline && ids.len() < FRAMES * 2 {
             if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra));
+                ids.push(identity_of(&bgra.to_bgra()));
             }
             std::thread::sleep(Duration::from_millis(4));
         }
@@ -4928,7 +5112,7 @@ mod mode_flip_tests {
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline && ids.len() < FRAMES * 2 {
             if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra));
+                ids.push(identity_of(&bgra.to_bgra()));
             }
             std::thread::sleep(Duration::from_millis(4));
         }
@@ -5204,7 +5388,7 @@ mod beat_transport_tests {
                 next_pulse += BEAT;
             }
             if let Some(bgra) = player.take_due_frame() {
-                seen.push((Instant::now(), identity_of(&bgra)));
+                seen.push((Instant::now(), identity_of(&bgra.to_bgra())));
             }
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -5344,7 +5528,7 @@ mod beat_transport_tests {
                 next_pulse += Duration::from_millis(400);
             }
             if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra));
+                ids.push(identity_of(&bgra.to_bgra()));
             }
             std::thread::sleep(Duration::from_millis(3));
         }

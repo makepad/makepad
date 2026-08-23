@@ -687,6 +687,19 @@ impl TextureFormat {
         }
     }
 
+    /// Fixed dimensions of a render-target texture, when declared. Auto
+    /// targets take their pass's size at draw time and report None here —
+    /// a consumer that needs dims for layout (e.g. Image) can only size a
+    /// Fixed target.
+    pub fn render_fixed_width_height(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::RenderBGRAu8 { size: TextureSize::Fixed { width, height }, .. } => {
+                Some((*width, *height))
+            }
+            _ => None,
+        }
+    }
+
     #[allow(unused)]
     pub(crate) fn as_vec_alloc(&self) -> Option<TextureAlloc> {
         match self {
