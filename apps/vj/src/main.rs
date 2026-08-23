@@ -39,6 +39,7 @@ mod flow;
 // FLOW-WARP PLAYBACK: GPU warp pre-pass over the mkfl motion fields — also
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
+mod flow_tween;
 mod nv12_view;
 // EFFECT SLOTS: the vjeffect content category's home in the mixer — three
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
@@ -584,6 +585,11 @@ script_mod! {
                             // slot textures here, on the GPU.
                             slot_nv12_a := Nv12View{}
                             slot_nv12_b := Nv12View{}
+                            // Realtime GPU frame tweening (flow_tween.rs):
+                            // in-between synthesis for slow-mo / scratch /
+                            // low-fps footage at display rate.
+                            slot_tween_a := FlowTweenView{}
+                            slot_tween_b := FlowTweenView{}
                             // Offscreen vjeffect thumbnail renderer: one
                             // hidden slot-mode effect pass at a time, its
                             // sheets fed back through the thumb decode lane.
@@ -3890,6 +3896,35 @@ impl BeatOverride {
 /// two beats at the same stride; a sixteen-frame one takes a bar. Powers of
 /// two are the whole point — any other rounding puts the loop point
 /// somewhere that is not a musical boundary, and the eye sees that.
+/// VJ_TWEEN_SELFTEST=1: synthetic-pair tween probe (see pump_tween_selftest).
+fn tween_selftest() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_TWEEN_SELFTEST").is_some())
+}
+
+/// The selftest's synthetic NV12 frame: flat 40-luma field with a bright
+/// 200-luma square at `(x0, y0)`, neutral chroma.
+fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8> {
+    let mut data = vec![0u8; w * h * 3 / 2];
+    for y in 0..h {
+        for x in 0..w {
+            let inside = x >= x0 && x < x0 + sq && y >= y0 && y < y0 + sq;
+            data[y * w + x] = if inside { 200 } else { 40 };
+        }
+    }
+    for b in &mut data[w * h..] {
+        *b = 128;
+    }
+    data
+}
+
+/// Realtime frame tweening is DEFAULT ON; VJ_NO_TWEEN=1 switches it off
+/// (the settings row will replace this).
+fn tween_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_NO_TWEEN").is_none())
+}
+
 fn sprite_cycle_beats(frames: usize) -> u32 {
     let want = (frames.max(1) as f64 / 4.0).max(1.0);
     let below = 1u32 << want.log2().floor().clamp(0.0, 3.0) as u32;
@@ -4856,6 +4891,17 @@ pub struct App {
     /// (None = the beat machinery owns the transport).
     #[rust]
     slot_scratch: [Option<f32>; 2],
+    /// Selftest sequencing: which debug view we are capturing (index into
+    /// the mode list), and frames waited since the last mode switch.
+    #[rust]
+    tween_selftest_step: (usize, u32),
+    /// FRAME TWEENER state per slot: the pair index the tween view holds,
+    /// and the position predictor (last published pos, predicted pos,
+    /// last prediction time in app seconds).
+    #[rust]
+    tween_pair: [Option<usize>; 2],
+    #[rust]
+    tween_pred: [(f64, f64, f64); 2],
     /// What the REV button last painted while TRACKING a bounce's live
     /// travel direction (None = the latch paint owns the button).
     #[rust]
@@ -7029,6 +7075,22 @@ p2 {}
         Some(f(cx, &mut view))
     }
 
+    /// Run `f` on a slot's frame-tween pass (no-op without the widget).
+    fn tween_view<R>(
+        &self,
+        cx: &mut Cx,
+        slot: SlotId,
+        f: impl FnOnce(&mut Cx, &mut flow_tween::FlowTweenView) -> R,
+    ) -> Option<R> {
+        let path: &[LiveId] = match slot {
+            SlotId::A => ids!(slot_tween_a),
+            SlotId::B => ids!(slot_tween_b),
+        };
+        let widget = self.ui.widget(cx, path);
+        let mut view = widget.borrow_mut::<flow_tween::FlowTweenView>()?;
+        Some(f(cx, &mut view))
+    }
+
     /// Run `f` on a slot's NV12 present pass (no-op without the widget).
     fn nv12_view<R>(
         &self,
@@ -7183,6 +7245,133 @@ p2 {}
             PlayMode::Once => PlayMode::Reverse,
             PlayMode::PingPong => PlayMode::PingPong,
         }
+    }
+
+    /// The selftest pump: feed the synthetic pair once, then cycle the
+    /// debug views (luma / field / warp), give each a few frames to
+    /// render, read the warp target back and write it to /tmp.
+    fn pump_tween_selftest(&mut self, cx: &mut Cx) {
+        const MODES: [(f32, &str); 6] = [
+            (2.0, "frame"),
+            (5.0, "luma_direct"),
+            (4.0, "luma_copy"),
+            (6.0, "seed"),
+            (1.0, "field"),
+            (0.0, "warp"),
+        ];
+        let (mode_ix, waited) = self.tween_selftest_step;
+        if mode_ix == MODES.len() {
+            // Numeric truth: read the float intermediates back and print
+            // channel stats — the shader-viz middleman kept lying.
+            for name in ["luma0", "luma1", "luma2", "luma_top", "seed", "fwd", "bwd"] {
+                let tex = self
+                    .tween_view(cx, SlotId::A, |_cx, view| view.debug_texture(name))
+                    .flatten();
+                let Some(tex) = tex else { continue };
+                let Some((w, h, bytes)) = cx.debug_read_render_texture(&tex) else {
+                    log!("tween selftest: {name}: READBACK FAILED");
+                    continue;
+                };
+                let px: Vec<f32> = if bytes.len() == w * h * 8 {
+                    // RGBAf16 target: decode half floats.
+                    bytes
+                        .chunks_exact(2)
+                        .map(|b| {
+                            let bits = u16::from_le_bytes([b[0], b[1]]);
+                            let sign = if bits >> 15 == 1 { -1.0f32 } else { 1.0 };
+                            let exp = ((bits >> 10) & 0x1f) as i32;
+                            let man = (bits & 0x3ff) as f32;
+                            match exp {
+                                0 => sign * man * 2f32.powi(-24),
+                                31 => sign * f32::INFINITY,
+                                _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+                            }
+                        })
+                        .collect()
+                } else {
+                    bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .collect()
+                };
+                let n = (px.len() / 4).max(1);
+                let (mut mn, mut mx, mut sum) = ([f32::MAX; 2], [f32::MIN; 2], [0.0f64; 2]);
+                for c in px.chunks_exact(4) {
+                    for k in 0..2 {
+                        mn[k] = mn[k].min(c[k]);
+                        mx[k] = mx[k].max(c[k]);
+                        sum[k] += c[k] as f64;
+                    }
+                }
+                // A picture says it instantly: normalized gray PNG per level.
+                let mut rgba = vec![0u8; w * h * 4];
+                for (i, c) in px.chunks_exact(4).enumerate().take(w * h) {
+                    let v = (c[0].abs().min(255.0) as u8).max((c[1].abs().min(255.0)) as u8);
+                    rgba[i * 4] = v;
+                    rgba[i * 4 + 1] = v;
+                    rgba[i * 4 + 2] = v;
+                    rgba[i * 4 + 3] = 255;
+                }
+                if let Ok(png) = makepad_asset_importer::classic_import::encode_png_rgba(
+                    &rgba, w as u32, h as u32,
+                ) {
+                    let _ = std::fs::write(format!("/tmp/tween_tex_{name}.png"), png);
+                }
+                let center = ((h / 2) * w + w / 2) * 4;
+                log!(
+                    "tween selftest: {name} {w}x{h} r[{:.2}..{:.2} avg {:.2}] g[{:.2}..{:.2} avg {:.2}] center=({:.2},{:.2})",
+                    mn[0], mx[0], sum[0] / n as f64,
+                    mn[1], mx[1], sum[1] / n as f64,
+                    px.get(center).copied().unwrap_or(-1.0),
+                    px.get(center + 1).copied().unwrap_or(-1.0)
+                );
+            }
+            self.tween_selftest_step = (mode_ix + 1, 0);
+            return;
+        }
+        if mode_ix > MODES.len() {
+            return;
+        }
+        let (w, h) = (512usize, 512usize);
+        let fed = self
+            .tween_view(cx, SlotId::A, |cx, view| {
+                if !view.has_pair() {
+                    let a = selftest_nv12(w, h, 128, 128, 64);
+                    let b = selftest_nv12(w, h, 136, 128, 64);
+                    view.set_pair(cx, &a, &b, w as u32, h as u32);
+                }
+                view.set_debug(cx, MODES[mode_ix].0);
+                view.set_t(cx, 0.5);
+                view.redraw(cx);
+                view.output_texture()
+            })
+            .flatten();
+        self.video_pump = cx.new_next_frame();
+        if waited < 8 {
+            self.tween_selftest_step = (mode_ix, waited + 1);
+            return;
+        }
+        let Some(tex) = fed else {
+            self.tween_selftest_step = (mode_ix, waited + 1);
+            return;
+        };
+        if let Some((tw, th, bgra)) = cx.debug_read_render_texture(&tex) {
+            let mut rgba = vec![0u8; bgra.len()];
+            for (o, px) in rgba.chunks_exact_mut(4).zip(bgra.chunks_exact(4)) {
+                o[0] = px[2];
+                o[1] = px[1];
+                o[2] = px[0];
+                o[3] = 255;
+            }
+            if let Ok(png) = makepad_asset_importer::classic_import::encode_png_rgba(
+                &rgba, tw as u32, th as u32,
+            ) {
+                let path = format!("/tmp/tween_selftest_{}.png", MODES[mode_ix].1);
+                let _ = std::fs::write(&path, png);
+                log!("tween selftest: wrote {path} ({tw}x{th})");
+            }
+        }
+        self.tween_selftest_step = (mode_ix + 1, 0);
     }
 
     /// The mode picker's row for a slot's flags (0 Forward, 1 Reverse,
@@ -7453,6 +7642,9 @@ p2 {}
         self.slot_textures[i] = None;
         self.clear_slot_flow(cx, slot);
         self.nv12_view(cx, slot, |cx, view| view.clear(cx));
+        self.tween_view(cx, slot, |cx, view| view.clear(cx));
+        self.tween_pair[i] = None;
+        self.tween_pred[i] = (0.0, 0.0, 0.0);
         self.light_samples[i] = None;
         self.light_analyzers[i].reset();
         self.clear_slot_mesh(cx, slot);
@@ -14683,6 +14875,75 @@ p2 {}
                 self.paint_icon_button(cx, Self::deck_rev_path(slot), lit);
             }
         }
+        // REALTIME FRAME TWEENING (flow_tween.rs): with a resident repeat
+        // cache, the presented picture becomes a GPU-warped in-between at
+        // the transport's fractional position — silky slow-mo and scratch,
+        // and low-fps footage smoothed to the display rate. Default ON;
+        // VJ_NO_TWEEN=1 disables (the settings toggle's first form).
+        // VJ_TWEEN_SELFTEST=1: no store, no video — a synthetic NV12
+        // pair (a square shifted +8 px) runs the whole tween stack, and
+        // each stage's view is read back and written as a PNG under
+        // /tmp/tween_selftest_*.png. The definitive shader-debug loop.
+        if tween_selftest() {
+            self.pump_tween_selftest(cx);
+        }
+        if tween_enabled() {
+            let now = cx.seconds_since_app_start();
+            for slot in [SlotId::A, SlotId::B] {
+                let i = slot.index();
+                let eligible = self.slot_media[i] == SlotMedia::Video
+                    && !self.flow_active(i)
+                    && self.players[i].is_some();
+                if !eligible {
+                    if self.tween_pair[i].take().is_some() {
+                        self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                    }
+                    continue;
+                }
+                let player = self.players[i].as_ref().unwrap();
+                let Some(cache) = player.cache_frames() else { continue };
+                if cache.len() < 2 {
+                    continue;
+                }
+                let (pub_pos, rate) = player.cache_pos();
+                // Predict between media ticks so a 25 fps clip still gets
+                // a fresh t every display frame; snap when a new tick
+                // lands, and never drift more than a frame from it.
+                let (last_pub, mut pos, at) = self.tween_pred[i];
+                if (pub_pos - last_pub).abs() > 1e-9 {
+                    pos = pub_pos;
+                } else {
+                    pos = (pos + rate * (now - at))
+                        .clamp(pub_pos - 1.0, pub_pos + 1.0);
+                }
+                self.tween_pred[i] = (pub_pos, pos, now);
+                let pos = pos.clamp(0.0, (cache.len() - 1) as f64);
+                let pair = (pos.floor() as usize).min(cache.len() - 2);
+                let t = (pos - pair as f64) as f32;
+                let (pa, pb) = (&cache[pair], &cache[pair + 1]);
+                let (
+                    crate::media::Pixels::Nv12 { data: da, width, height, .. },
+                    crate::media::Pixels::Nv12 { data: db, .. },
+                ) = (&pa.px, &pb.px)
+                else {
+                    continue;
+                };
+                let (width, height) = (*width, *height);
+                let tween_pair = self.tween_pair[i];
+                let tex = self.tween_view(cx, slot, |cx, view| {
+                    if tween_pair != Some(pair) {
+                        view.set_pair(cx, da, db, width, height);
+                    }
+                    view.set_t(cx, t);
+                    view.output_texture()
+                });
+                self.tween_pair[i] = Some(pair);
+                if let Some(Some(tex)) = tex {
+                    self.slot_tex_borrowed[i] = false;
+                    self.slot_textures[i] = Some(tex);
+                }
+            }
+        }
         self.pump_billboards(cx);
         // Live splat scenes orbit slowly and re-render every frame.
         let now = cx.seconds_since_app_start();
@@ -16782,6 +17043,7 @@ impl AppMain for App {
         crate::mesh_view::script_mod(vm);
         crate::flow_warp::script_mod(vm);
         crate::nv12_view::script_mod(vm);
+        crate::flow_tween::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);

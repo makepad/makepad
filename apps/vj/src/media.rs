@@ -133,14 +133,14 @@ impl Drop for DecoderInput {
     }
 }
 
-struct Frame {
+pub struct Frame {
     /// Pacing timestamp — monotonic for the clock (synthetic in bounce).
-    pts_100ns: i64,
+    pub pts_100ns: i64,
     /// TRUE clip position of this picture, for the position readout: in
     /// bounce the pacing stamps climb forever while the picture runs
     /// backward — the scrub bar follows this, never the pacing stamp.
-    clip_100ns: i64,
-    px: Pixels,
+    pub clip_100ns: i64,
+    pub px: Pixels,
 }
 
 /// A frame's pixel payload. NV12 is the RESIDENT form — 1.5 bytes per
@@ -369,6 +369,13 @@ struct SlotShared {
     /// the button can track the live leg.
     dir_flip: AtomicU64,
     travel_forward: AtomicBool,
+    /// CONTINUOUS CACHE POSITION for the GPU frame tweener: the fractional
+    /// index into the repeat cache the transport is at (f64 bits) and its
+    /// rate in cache-frames per second (signed, f64 bits). Published every
+    /// cache tick; the UI predicts between ticks and warps an in-between
+    /// out of the two neighbouring frames instead of snapping to one.
+    cache_pos_bits: AtomicU64,
+    cache_rate_bits: AtomicU64,
     /// THE EAGER REPEAT CACHE: a dedicated worker decodes the trim window
     /// at full hardware speed the moment a loop-capable mode is on — the
     /// frame-exact transports unlock in a fraction of one play-through
@@ -446,6 +453,8 @@ impl SlotPlayer {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
+            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
@@ -537,6 +546,21 @@ impl SlotPlayer {
     /// The direction the transport is actually serving (true = forward).
     pub fn travel_forward(&self) -> bool {
         self.shared.travel_forward.load(Ordering::Acquire)
+    }
+
+    /// The eager repeat cache, once complete — the tweener reads frame
+    /// pairs straight out of it.
+    pub fn cache_frames(&self) -> Option<Arc<Vec<Frame>>> {
+        self.shared.repeat_cache.lock().unwrap().frames.clone()
+    }
+
+    /// Continuous cache position (fractional frame index) and its rate in
+    /// cache-frames per second — the tweener's clock.
+    pub fn cache_pos(&self) -> (f64, f64) {
+        (
+            f64::from_bits(self.shared.cache_pos_bits.load(Ordering::Acquire)),
+            f64::from_bits(self.shared.cache_rate_bits.load(Ordering::Acquire)),
+        )
     }
 
     /// Drop this slot's audio at the source: no samples reach the mixer
@@ -1641,6 +1665,10 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                 (scratch_pos + srate).clamp(lo as f64, (hi - 1) as f64);
             idx = scratch_pos.round() as usize;
             forward = srate >= 0.0;
+            shared.cache_pos_bits.store(scratch_pos.to_bits(), Ordering::Release);
+            shared
+                .cache_rate_bits
+                .store((srate * 1e7 / delta as f64).to_bits(), Ordering::Release);
             if tl_on() {
                 eprintln!("tl cache scratch idx={idx} srate={srate:+.3} win={lo}..{hi}");
             }
@@ -1733,6 +1761,16 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             sweep_phase = p;
             forward = dir;
             idx = sweep_index(sweep_phase, forward, lo, hi, mode);
+            {
+                // The tweener's clock: the same phase map, unrounded.
+                let span = (hi - lo).max(1) as f64;
+                let u = if forward { sweep_phase } else { 1.0 - sweep_phase };
+                let posf = lo as f64 + u * (span - 1.0).max(0.0);
+                let ratef = (span - 1.0).max(0.0) / (sweep_pts / 1e7).max(1e-6)
+                    * if forward { 1.0 } else { -1.0 };
+                shared.cache_pos_bits.store(posf.to_bits(), Ordering::Release);
+                shared.cache_rate_bits.store(ratef.to_bits(), Ordering::Release);
+            }
             if tl_on() {
                 eprintln!(
                     "tl cache beat mode={mode:?} phase={sweep_phase:.4} step={step:.5} idx={idx} fwd={forward} win={lo}..{hi} sweep_pts={sweep_pts:.0}"
@@ -1751,6 +1789,15 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if tl_on() {
             eprintln!("tl cache free mode={mode:?} idx={idx} fwd={forward} win={lo}..{hi}");
         }
+        // The tweener's clock for the free branches: whole frames at the
+        // clip's own cadence, signed by travel.
+        shared.cache_pos_bits.store((idx as f64).to_bits(), Ordering::Release);
+        shared.cache_rate_bits.store(
+            (1e7 / delta as f64
+                * if matches!(mode, PlayMode::Reverse) || !forward { -1.0 } else { 1.0 })
+            .to_bits(),
+            Ordering::Release,
+        );
         if mode == PlayMode::Loop {
             forward = true;
             idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
@@ -3897,6 +3944,8 @@ mod tests {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
+            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
@@ -4006,6 +4055,8 @@ mod tests {
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
             dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
+            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
+            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
