@@ -502,17 +502,23 @@ impl Wal {
             self.file.read_exact(&mut buf)?;
             db.seek(SeekFrom::Start((*pgno as u64 - 1) * self.page_size as u64))?;
             db.write_all(&buf)?;
+            // Crash-injection step: a fold interrupted here leaves a torn
+            // database file UNDER an intact log, and recovery replays the
+            // same frames over it (see the checkpoint crash sweep).
+            crate::pager::journal_write_step();
         }
         if self.db_size_pages > 0 {
             db.set_len(self.db_size_pages as u64 * self.page_size as u64)?;
         }
         crate::sync::sync(db)?;
+        crate::pager::journal_write_step();
         let moved = pages.len() as u32;
         // Reset: a new generation so any stale frame fails the salt check.
         self.checkpoint_seq = self.checkpoint_seq.wrapping_add(1);
         self.salt.0 = self.salt.0.wrapping_add(1);
         self.salt.1 = self.salt.1.wrapping_mul(2_654_435_761).wrapping_add(1);
         self.file.set_len(0)?;
+        crate::pager::journal_write_step();
         self.write_header()?;
         Ok(moved)
     }

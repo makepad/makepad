@@ -885,6 +885,20 @@ impl<'a> Search<'a> {
         ann: &AssetAnnotation,
         now_ms: u64,
     ) -> ServerResult<()> {
+        self.db
+            .tx(|db| self.set_annotation_in_tx(db, asset_id, ann, now_ms))
+    }
+
+    /// The body of [`Self::set_annotation`] inside the caller's open
+    /// transaction, so a composite operation (batch publish) can land its
+    /// annotations atomically with the catalog rows they describe.
+    pub(crate) fn set_annotation_in_tx(
+        &self,
+        db: &Db,
+        asset_id: &AssetId,
+        ann: &AssetAnnotation,
+        now_ms: u64,
+    ) -> ServerResult<()> {
         if ann.title.is_empty() {
             return Err(ServerError::InvalidInput { what: "annotation title empty" });
         }
@@ -959,7 +973,7 @@ impl<'a> Search<'a> {
             });
         }
 
-        self.db.tx(|db| {
+        {
             // Namespace comes from the catalog record — the single source of
             // truth an annotation can never contradict.
             let mut s = db.prepare(
@@ -1058,7 +1072,7 @@ impl<'a> Search<'a> {
             // and retire every open cursor.
             rebuild_alias_postings(db, self.budgets, asset_id.as_bytes())?;
             bump_generation(db)
-        })
+        }
     }
 
     /// Remove an asset's annotation and every index row. Idempotent; the

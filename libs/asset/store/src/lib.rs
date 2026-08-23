@@ -90,7 +90,8 @@ pub use search::{
 };
 pub use seed::{stock_asset_id, SeedAsset, SeedReport, StockSeedSource};
 pub use server::{
-    AssetServerCore, BlobRefCommit, RecoverReport, RefRescanPage, SERVER_SCHEMA_VERSION,
+    AssetServerCore, BlobRefCommit, PublishBatchItem, PublishBatchOutcome, RecoverReport,
+    RefRescanPage, SERVER_SCHEMA_VERSION,
 };
 
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.

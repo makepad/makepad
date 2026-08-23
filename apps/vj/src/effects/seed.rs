@@ -6,12 +6,13 @@
 //! alias exists and leaves it alone).
 //!
 //! Flow (idempotent, run on a worker after the store session is up):
-//!   for each bundled preset:
-//!     alias = "vjfx/<name>"
-//!     if client.resolve_alias(alias) succeeds -> skip (present, maybe edited)
-//!     else publish_bundle(kind = VjEffect, files = [Source/Text bytes],
-//!                         thumbnail = procedural placeholder JPEG,
-//!                         rights = generated_cc0, alias, tags)
+//!   ONE alias_status batch answers "present / ours / source current" for
+//!   the whole library; presets owed a publish then land through
+//!   `publish_bundles` in pages — one bulk blob upload + one batch publish
+//!   + ONE catalog transaction per page (kind = VjEffect, files =
+//!   [Source/Text bytes], thumbnail = procedural placeholder JPEG,
+//!   rights = generated_cc0, alias, tags), heads streaming to the bake as
+//!   each page commits.
 //!
 //! Thumbnails are deliberately modest placeholders (a per-preset colored
 //! pattern, never flat black): the VJ replaces them with lazily rendered
@@ -456,11 +457,13 @@ pub struct SeedReport {
 /// under the same alias does not carry it, and is never touched.
 const BUILTIN_TAG: &str = "builtin";
 
-/// How many store connections share the publish work on a store that needs
-/// them. One connection costs ~350ms a publish (round trips + the store's
-/// own commit), which is a minute and a half for a virgin store's 261 —
-/// and the whole animated-thumbnail bake sits behind the last one.
-const SEED_PUBLISH_LANES: usize = 6;
+/// Presets per batched publish page. Each page is TWO round trips — one bulk
+/// blob upload, one batch publish — and ONE catalog transaction, however
+/// many presets it carries; the bake feed receives the page's heads the
+/// moment it commits. Sized so a page's JSON body sits well under the
+/// server's cap and the first tiles exist within the first fraction of a
+/// second on a virgin store.
+const SEED_PUBLISH_PAGE: usize = 32;
 
 /// One publish this seeding pass owes the store.
 struct PublishJob {
@@ -474,7 +477,6 @@ struct PublishJob {
 
 pub fn seed_presets(
     client: &mut AssetClient,
-    connect: &(dyn Fn() -> Option<AssetClient> + Sync),
     heads: &std::sync::mpsc::Sender<Vec<BundleHead>>,
 ) -> SeedReport {
     let presets = bundled_presets();
@@ -506,7 +508,7 @@ pub fn seed_presets(
     // One pass over the snapshot: heads that already match stream out
     // immediately (the warm-store case is ONE round trip and the bake has
     // its whole feed before a single publish happens); everything owed a
-    // publish becomes a job for the lanes below.
+    // publish becomes a job for the batched pages below.
     let mut jobs: Vec<PublishJob> = Vec::new();
     let mut retags: Vec<(&'static str, &'static str, makepad_asset_data::AssetId)> = Vec::new();
     let mut present_heads: Vec<BundleHead> = Vec::new();
@@ -543,42 +545,39 @@ pub fn seed_presets(
     if !present_heads.is_empty() {
         let _ = heads.send(present_heads);
     }
-    // The publishes, spread over up to [`SEED_PUBLISH_LANES`] connections.
-    // Lane 0 is the caller's client; the rest connect their own (a lane
-    // that cannot connect simply leaves its share to the others). Each
-    // publish streams its head the moment it commits, so the thumbnail
-    // bake runs right behind the seeder instead of after it.
-    if !jobs.is_empty() {
-        let lanes = jobs.len().min(SEED_PUBLISH_LANES);
-        // Workers drain with pop() from the tail: reversed, the registry
-        // publishes FRONT first, so on a virgin store the first presets an
-        // operator sees are the first to exist.
-        let jobs = {
-            let mut jobs = jobs;
-            jobs.reverse();
-            std::sync::Mutex::new(jobs)
-        };
-        // (update, alias, error) per failure; (update,) per success.
-        let outcomes = std::sync::Mutex::new(Vec::<(bool, Option<(String, String)>)>::new());
-        std::thread::scope(|s| {
-            let mut extra = Vec::new();
-            for _ in 1..lanes {
-                extra.push(s.spawn(|| {
-                    let Some(mut own) = connect() else { return };
-                    seed_publish_lane(&mut own, &jobs, &outcomes, heads);
-                }));
+    // The publishes, in registry order, in pages of [`SEED_PUBLISH_PAGE`]:
+    // one bulk blob upload + one batch publish per page, ONE catalog
+    // transaction each — the whole virgin library is a handful of round
+    // trips instead of ten per preset. Each page streams its heads to the
+    // bake the moment it commits, so the thumbnail bake runs right behind
+    // the seeder instead of after it. A failed page fails its presets and
+    // never stops the rest.
+    for page in jobs.chunks(SEED_PUBLISH_PAGE) {
+        let bundles: Vec<PublishBundle> =
+            page.iter().map(|job| seed_bundle(job.name, job.source, &job.alias_str, job.reuse)).collect();
+        match client.publish_bundles(&bundles) {
+            Ok(published) => {
+                let mut batch = Vec::with_capacity(page.len());
+                for (job, done) in page.iter().zip(&published) {
+                    if job.update {
+                        report.updated += 1;
+                    } else {
+                        report.published += 1;
+                    }
+                    batch.push(BundleHead {
+                        name: job.name,
+                        source: job.source,
+                        asset: done.asset_id,
+                        revision: done.revision,
+                    });
+                }
+                let _ = heads.send(batch);
             }
-            seed_publish_lane(client, &jobs, &outcomes, heads);
-            for handle in extra {
-                let _ = handle.join();
-            }
-        });
-        for (update, failure) in outcomes.into_inner().unwrap_or_default() {
-            match (update, failure) {
-                (false, None) => report.published += 1,
-                (true, None) => report.updated += 1,
-                (false, Some((alias, e))) => report.failed.push((alias, e)),
-                (true, Some((alias, e))) => report.failed.push((alias, format!("update: {e}"))),
+            Err(e) => {
+                for job in page {
+                    let what = if job.update { format!("update: {e}") } else { e.to_string() };
+                    report.failed.push((job.alias_str.clone(), what));
+                }
             }
         }
     }
@@ -589,38 +588,6 @@ pub fn seed_presets(
         }
     }
     report
-}
-
-/// One lane of the parallel publish pass: pop jobs until the queue is dry,
-/// stream each success's head to the bake.
-fn seed_publish_lane(
-    client: &mut AssetClient,
-    jobs: &std::sync::Mutex<Vec<PublishJob>>,
-    outcomes: &std::sync::Mutex<Vec<(bool, Option<(String, String)>)>>,
-    heads: &std::sync::mpsc::Sender<Vec<BundleHead>>,
-) {
-    loop {
-        let job = match jobs.lock() {
-            Ok(mut q) => q.pop(),
-            Err(_) => return,
-        };
-        let Some(job) = job else { return };
-        let outcome = match seed_one(client, job.name, job.source, &job.alias_str, job.reuse) {
-            Ok((asset, revision)) => {
-                let _ = heads.send(vec![BundleHead {
-                    name: job.name,
-                    source: job.source,
-                    asset,
-                    revision,
-                }]);
-                (job.update, None)
-            }
-            Err(e) => (job.update, Some((job.alias_str, e))),
-        };
-        if let Ok(mut list) = outcomes.lock() {
-            list.push(outcome);
-        }
-    }
 }
 
 /// One bundled preset whose head in the store IS the compiled-in bytes —
@@ -678,16 +645,15 @@ fn put_preset_annotation(
     client.put_annotation(asset_id, &ann).map_err(|e| e.to_string())
 }
 
-/// Publish one bundled preset. `reuse` republishes as a new revision of an
-/// EXISTING asset (the self-healing update path); `None` mints a fresh one.
-/// Returns the published head, which is the bake feed's whole interest.
-fn seed_one(
-    client: &mut AssetClient,
+/// The complete publication one bundled preset owes the store. `reuse`
+/// republishes as a new revision of an EXISTING asset (the self-healing
+/// update path); `None` lets the batch mint a fresh identity.
+fn seed_bundle(
     name: &str,
     source: &str,
     alias_str: &str,
     reuse: Option<makepad_asset_data::AssetId>,
-) -> Result<(makepad_asset_data::AssetId, makepad_asset_data::AssetRevisionId), String> {
+) -> PublishBundle {
     let title = title_of(source, name);
     let description = description_of(source);
     let (jpeg, w, h) = placeholder_thumbnail(name);
@@ -713,10 +679,7 @@ fn seed_one(
     bundle.tags = preset_tags(name);
     bundle.generator = "makepad-vj effects".to_string();
     bundle.provenance = "bundled preset library (apps/vj/resources/effects)".to_string();
-    client
-        .publish_bundle(&bundle)
-        .map(|p| (p.asset_id, p.revision))
-        .map_err(|e| e.to_string())
+    bundle
 }
 
 /// `name:` from the document (first occurrence), else the file stem.
