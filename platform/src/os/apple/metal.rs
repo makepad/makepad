@@ -2018,7 +2018,15 @@ impl Cx {
             let () = msg_send![blit, endEncoding];
             let () = msg_send![command_buffer, commit];
             let () = msg_send![command_buffer, waitUntilCompleted];
-            let mut bytes = vec![0u8; width * height * 4];
+            // Bytes per pixel from the ALLOCATED format — this reader
+            // serves float debug targets too, not just BGRA8.
+            let bpp = match &pixel {
+                crate::texture::TexturePixel::RGBAf32 => 16,
+                crate::texture::TexturePixel::RGBAf16 => 8,
+                crate::texture::TexturePixel::Rf32 => 4,
+                _ => 4,
+            };
+            let mut bytes = vec![0u8; width * height * bpp];
             let region = MTLRegion {
                 origin: MTLOrigin { x: 0, y: 0, z: 0 },
                 size: MTLSize {
@@ -2030,8 +2038,8 @@ impl Cx {
             let () = msg_send![
                 staging,
                 getBytes: bytes.as_mut_ptr()
-                bytesPerRow: width * 4
-                bytesPerImage: width * height * 4
+                bytesPerRow: width * bpp
+                bytesPerImage: width * height * bpp
                 fromRegion: region
                 mipmapLevel: 0
                 slice: 0
