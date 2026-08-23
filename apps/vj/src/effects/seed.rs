@@ -249,6 +249,51 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("215_trans_barn_doors_rotating", include_str!("../../resources/effects/215_trans_barn_doors_rotating.splash")),
     ("216_trans_card_flip", include_str!("../../resources/effects/216_trans_card_flip.splash")),
     ("217_butterfly", include_str!("../../resources/effects/217_butterfly.splash")),
+    // Tiles: the per-tile vertex hooks + luma relief.
+    ("218_extrude", include_str!("../../resources/effects/218_extrude.splash")),
+    ("219_tile_jitter", include_str!("../../resources/effects/219_tile_jitter.splash")),
+    ("220_plane_grid", include_str!("../../resources/effects/220_plane_grid.splash")),
+    ("221_card_grid", include_str!("../../resources/effects/221_card_grid.splash")),
+    // The `hold` stage: one latched frame, indexed by position.
+    ("222_freeze", include_str!("../../resources/effects/222_freeze.splash")),
+    ("223_time_slice", include_str!("../../resources/effects/223_time_slice.splash")),
+    ("224_strip_delay", include_str!("../../resources/effects/224_strip_delay.splash")),
+    // The tunnel wall drape.
+    ("225_video_tunnel", include_str!("../../resources/effects/225_video_tunnel.splash")),
+    ("226_video_torus", include_str!("../../resources/effects/226_video_torus.splash")),
+    ("227_spin_cube", include_str!("../../resources/effects/227_spin_cube.splash")),
+    ("228_inside_cube", include_str!("../../resources/effects/228_inside_cube.splash")),
+    ("229_cube_grid", include_str!("../../resources/effects/229_cube_grid.splash")),
+    ("230_video_box", include_str!("../../resources/effects/230_video_box.splash")),
+    ("231_mirror_ball", include_str!("../../resources/effects/231_mirror_ball.splash")),
+    ("232_video_torus_3d", include_str!("../../resources/effects/232_video_torus_3d.splash")),
+    ("233_star_prism", include_str!("../../resources/effects/233_star_prism.splash")),
+    ("234_octa_star", include_str!("../../resources/effects/234_octa_star.splash")),
+    ("235_octa_ring", include_str!("../../resources/effects/235_octa_ring.splash")),
+    ("236_corridor", include_str!("../../resources/effects/236_corridor.splash")),
+    ("237_maze_run", include_str!("../../resources/effects/237_maze_run.splash")),
+    ("238_blimp", include_str!("../../resources/effects/238_blimp.splash")),
+    ("239_sphere_relief", include_str!("../../resources/effects/239_sphere_relief.splash")),
+    ("240_beam_fan", include_str!("../../resources/effects/240_beam_fan.splash")),
+    ("241_slat_depth", include_str!("../../resources/effects/241_slat_depth.splash")),
+    ("242_trans_ball", include_str!("../../resources/effects/242_trans_ball.splash")),
+    // ---- THE AUDIO VISUALISERS (260-279) ------------------------------
+    // Every one of these reads the live AUDIO PICTURE (effects/audio_tex.rs)
+    // through the shader helpers `audio_fft(f, age)` / `audio_wave(t)` and
+    // the `audio_env` uniform, and every one carries an idle figure so a
+    // silent rig still performs.
+    ("260_spectrum_bar_field", include_str!("../../resources/effects/260_spectrum_bar_field.splash")),
+    ("261_radial_spectrum_bloom", include_str!("../../resources/effects/261_radial_spectrum_bloom.splash")),
+    ("262_oscilloscope_ribbon", include_str!("../../resources/effects/262_oscilloscope_ribbon.splash")),
+    ("263_waveform_tunnel", include_str!("../../resources/effects/263_waveform_tunnel.splash")),
+    ("264_spectrum_sea", include_str!("../../resources/effects/264_spectrum_sea.splash")),
+    ("265_level_pulse_rings", include_str!("../../resources/effects/265_level_pulse_rings.splash")),
+    ("266_spectro_kaleido", include_str!("../../resources/effects/266_spectro_kaleido.splash")),
+    ("267_bass_warp_drape", include_str!("../../resources/effects/267_bass_warp_drape.splash")),
+    ("268_spectrogram_curtain", include_str!("../../resources/effects/268_spectrogram_curtain.splash")),
+    ("269_band_lattice", include_str!("../../resources/effects/269_band_lattice.splash")),
+    ("270_harmonic_petals", include_str!("../../resources/effects/270_harmonic_petals.splash")),
+    ("271_scope_horizon", include_str!("../../resources/effects/271_scope_horizon.splash")),
     ]
 }
 
@@ -354,6 +399,8 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "214_trans_zoom_out",
     "215_trans_barn_doors_rotating",
     "216_trans_card_flip",
+    // The two-deck videomesh art transition (video shell off a sphere).
+    "242_trans_ball",
 ];
 
 pub fn is_transition_preset(name: &str) -> bool {

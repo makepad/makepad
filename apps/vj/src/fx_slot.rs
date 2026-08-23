@@ -537,6 +537,13 @@ impl VjFxSlotHost {
         self.fx.set_signals(audio);
     }
 
+    /// THE AUDIO PICTURE (effects/audio_tex.rs): the live spectrogram +
+    /// waveform texture every engine's shaders sample, plus the four
+    /// binding levels derived from the same analysis.
+    pub fn set_audio(&mut self, binding: Option<crate::effects::audio_tex::AudioBinding>) {
+        self.fx.set_audio(binding);
+    }
+
     pub fn set_speed(&mut self, scale: f32) {
         self.fx.set_speed_scale(scale);
     }

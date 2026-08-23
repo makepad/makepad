@@ -1,0 +1,129 @@
+// EXTRUDE — the picture stands up off the wall: every tile is pushed along
+// the plane normal by its OWN brightness, so the clip becomes a relief that
+// the swaying camera walks around.
+//
+// Pattern taught here: the tiles engine has two vertex hooks now, and both
+// of them may READ THE CLIP. `extrude:` does the base push (and shades each
+// tile by its own height, or a relief flattens out the moment the camera
+// faces it); `fx_tile_spin` then tilts each tile by the LOCAL LUMA GRADIENT
+// — four extra taps of input0 at the neighbouring tile centres — which is
+// what turns a field of steps into a surface. `fx_tile` adds the dial and a
+// slow bar breath on top.
+{
+    name: "Extrude"
+    engine: "tiles"
+    mode: "hook"
+    seed: 17
+
+    grid: 32
+    spread: 8.4
+    aspect: 0.62
+    gap: 0.02
+    // The base relief, in world units of push per unit of luma.
+    extrude: 2.1
+
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.45
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    // DEPTH adds (or removes) relief on top of the baked `extrude`,
+    // TILT scales the gradient tilt, GROUT is the engine's own p2 lever.
+    p0: 0.5  p1: 0.5
+    p2: "0.04 + 0.10 * pulse"
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.5},
+        {name: "TILT", bind: "p1", default: 0.5},
+        {name: "GROUT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05070d
+    color_a: #x9fd4ff
+    color_b: #x2a4a7a
+    color_c: #xdfefff
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.74, strength: 0.75, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the mode highlight drive, attr = (shade, edge, stagger, tumble).
+    // Vertex hooks: fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale),
+    // fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.tile (extrude, -, -, -), self.shape.y = tiles per side,
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTiles {
+        // Extra depth on the DEPTH dial (0 at mid-knob) plus a slow bar
+        // breath, so the relief inhales once a bar instead of sitting dead.
+        fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let gw = max(self.shape.y, 1.0)
+            let cuv = vec2(
+                (uv_window.x + uv_window.z) * 0.5,
+                (uv_window.y + uv_window.w) * 0.5
+            )
+            let lum = clamp(
+                dot(
+                    self.tex0.sample_nearest(cuv, 0.0).xyz,
+                    vec3(0.299, 0.587, 0.114)
+                ),
+                0.0,
+                1.0
+            )
+            let dial = (clamp(self.user.x, 0.0, 1.0) - 0.5) * 2.6
+            let breath = 1.0 + 0.10 * sin(self.sig.x * 6.2831853)
+            return vec4(0.0, 0.0, lum * dial * breath, 1.0)
+        }
+
+        // The surface normal, from four taps of the clip at the
+        // neighbouring tile centres. The image's v runs the other way from
+        // the world's y, which is why the y gradient is (down - up).
+        fx_tile_spin: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let gw = max(self.shape.y, 1.0)
+            let stp = 1.0 / gw
+            let cuv = vec2(
+                (uv_window.x + uv_window.z) * 0.5,
+                (uv_window.y + uv_window.w) * 0.5
+            )
+            let w = vec3(0.299, 0.587, 0.114)
+            let ll = dot(self.tex0.sample_nearest(
+                vec2(clamp(cuv.x - stp, 0.0, 1.0), cuv.y), 0.0).xyz, w)
+            let rr = dot(self.tex0.sample_nearest(
+                vec2(clamp(cuv.x + stp, 0.0, 1.0), cuv.y), 0.0).xyz, w)
+            let dd = dot(self.tex0.sample_nearest(
+                vec2(cuv.x, clamp(cuv.y + stp, 0.0, 1.0)), 0.0).xyz, w)
+            let uu = dot(self.tex0.sample_nearest(
+                vec2(cuv.x, clamp(cuv.y - stp, 0.0, 1.0)), 0.0).xyz, w)
+            let gain = (0.4 + 1.2 * clamp(self.user.y, 0.0, 1.0))
+                * max(self.tile.x, 0.05) * 1.6
+            let g = vec2(rr - ll, dd - uu) * gain
+            let gl = max(length(g), 0.0001)
+            let ang = min(gl * 1.1, 1.0)
+            return vec4(g.y / gl, 0.0 - g.x / gl, 0.0, ang)
+        }
+
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            // attr.x already carries the engine's height shade, so the
+            // relief has its own light before anything else happens here.
+            let lit = content.xyz * (attr.x * (0.30 + 0.70 * border))
+            // A cold sky bounce on the tops keeps the steps legible where
+            // the clip itself goes flat.
+            let sky = self.col_a.xyz * clamp(attr.x - 0.9, 0.0, 0.6) * 0.55
+            let grout = self.col_c.xyz * (1.0 - border)
+                * (t + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + sky + grout) * self.fog.y, 1.0)
+        }
+    }
+}

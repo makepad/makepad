@@ -1,0 +1,53 @@
+// MAZE RUN — the corridor flight through a twisting funhouse: every
+// segment is rolled a hashed quarter-turn about the flight axis, so floor
+// becomes wall becomes ceiling as you rush through, each junction swaying
+// gently. The square cross-section makes every quarter-turn land flush.
+// Pattern taught here: per-segment STATIC rotation from the stream hash —
+// the maze pattern is fixed per seed, only the sway breathes.
+{
+    name: "Maze Run"
+    engine: "videomesh"
+    shape: "corridor"
+    seed: 21
+
+    instances: 20
+    size: 2.1
+    spread: 2.8
+    aspect: 1.0
+    fly: 1.4
+
+    beat_pulse: 0.4
+    input0: "test"
+
+    color_bg: #x070409
+    color_a: #xf0a040
+    color_b: #x8a2a5a
+    color_c: #xffe2c0
+
+    fog: 0.12
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — quarter-turn placement + a wall fragment
+    // tinted per segment (attr.x = the segment's hash).
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.0, 0.0, 1.0)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let q = floor(hash * 4.0) * 1.5707963
+            let sway = 0.16 * sin(t * 0.4 + id * 1.7)
+            return vec4(0.0, 0.0, 0.0, q + sway)
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, attr.x)
+            let lit = content.xyz * (t * (0.55 + 0.45 * attr.z)) + tint * 0.10
+            let seam = self.col_c.xyz * (1.0 - attr.z)
+                * (0.25 + self.time_beat.w * 0.9 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + seam) * self.fog.y, 1.0)
+        }
+    }
+}

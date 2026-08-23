@@ -12,11 +12,33 @@
 //!   * `tiltshift` — pyramid blur mixed back by a screen-Y focus ramp.
 //!   * warp modes (`kaleido`, `chroma`, `glitch`, `radial_blur`, …) — one
 //!     fullscreen warp pass each.
+//!   * `hold` — frame latch: grab the incoming frame on a beat slot or a
+//!     rising trigger and hold it over the live one (freeze, scanline
+//!     delay, strip delay).
 //!
 //! Numeric stage parameters arrive RESOLVED per frame (the binding layer
 //! evaluates them in `view.rs`), so a kaleidoscope can spin on the bar.
 //! Deep mips are only ever tent-upsampled one doubling at a time on the way
 //! back — never bilinear-stretched (the repo's blur law).
+//!
+//! # THE COLD-START LAW (the one cross-document leak this file can have)
+//!
+//! Most stages write every texture they read inside the same frame, so they
+//! are self-contained. Two do not: `feedback` samples the PREVIOUS frame's
+//! output and `hold` samples the frame it latched EARLIER. On the first
+//! frame after [`PostChain::configure`] those textures have never been
+//! written by this chain — and `configure` cannot clear them: it allocates
+//! out of the platform texture pool, which hands back a slot the last owner
+//! left dirty. Sampling them there composites the PREVIOUS DOCUMENT'S
+//! picture into this one, which is exactly the "a document's frame depends
+//! on the document shown before it" bug.
+//!
+//! The fix is structural, not a clear: a stage that samples its own texture
+//! carries a [`ColdStart`], and while it is cold it does not read that
+//! texture AT ALL — feedback binds the live input in its place and runs
+//! with the trail amount forced to zero, hold takes a fresh grab first.
+//! [`ColdStart::new`] is the only constructor and it starts cold, so a
+//! stage added later cannot forget to opt in.
 
 use super::doc::{StageCfg, WarpMode};
 use super::shaders::*;
@@ -28,6 +50,31 @@ const MAX_LEVELS: usize = 4;
 #[derive(Clone, Copy, Default)]
 pub struct ResolvedStage {
     pub p: [f32; 4],
+}
+
+/// Cold-start guard for a stage that samples its OWN texture across frames
+/// (see "THE COLD-START LAW" at the top of this file). Starts cold by
+/// construction — there is no `Default`, and no way to build a warm one —
+/// and [`ColdStart::warm`] may only be called once the stage has written
+/// that texture itself, in this chain, this run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ColdStart(bool);
+
+impl ColdStart {
+    pub(crate) fn new() -> Self {
+        Self(true)
+    }
+
+    /// True while the stage's own texture still holds whatever the texture
+    /// pool left there — a previous document's frames, or noise.
+    pub(crate) fn is_cold(&self) -> bool {
+        self.0
+    }
+
+    /// Call AFTER the stage has written its own texture this frame.
+    pub(crate) fn warm(&mut self) {
+        self.0 = false;
+    }
 }
 
 struct SubPass {
@@ -70,9 +117,24 @@ impl SubPass {
 }
 
 enum StageRt {
-    Feedback { ping: SubPass, pong: SubPass, flip: bool },
+    Feedback { ping: SubPass, pong: SubPass, flip: bool, cold: ColdStart },
     Pyramid { downs: Vec<SubPass>, ups: Vec<SubPass>, mix: Option<SubPass>, kind: PyramidKind },
     Warp { mode: WarpMode, sub: SubPass },
+    Hold {
+        /// The latched frame.
+        latch: SubPass,
+        /// The composite of latch + live.
+        out: SubPass,
+        /// Beats per automatic re-grab (0 = trigger only).
+        beats: f32,
+        /// 0 = rows, 1 = columns (the shader's u_hold.w).
+        axis: f32,
+        /// Last beat slot grabbed, so a slot boundary grabs exactly once.
+        slot: f64,
+        /// Last trigger level, for rising-edge detection.
+        trig: f32,
+        cold: ColdStart,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -97,6 +159,11 @@ impl PostChain {
     }
 
     /// (Re)build the runtime for a document's stage list.
+    ///
+    /// Every self-sampling stage comes back COLD (see the cold-start law at
+    /// the top of this file): the textures allocated here are pool slots
+    /// that may still hold the OUTGOING document's pixels, and nothing in
+    /// this call clears them, so the first run must not read them.
     pub fn configure(&mut self, cx: &mut Cx, stages: &[StageCfg]) {
         self.stages.clear();
         for (i, cfg) in stages.iter().enumerate() {
@@ -105,6 +172,16 @@ impl PostChain {
                     ping: SubPass::new(cx, &format!("vjfx_fb{i}_a")),
                     pong: SubPass::new(cx, &format!("vjfx_fb{i}_b")),
                     flip: false,
+                    cold: ColdStart::new(),
+                }),
+                StageCfg::Hold { beats, vertical, .. } => self.stages.push(StageRt::Hold {
+                    latch: SubPass::new(cx, &format!("vjfx_hold{i}_l")),
+                    out: SubPass::new(cx, &format!("vjfx_hold{i}_o")),
+                    beats: if beats.is_finite() { beats.clamp(0.0, 64.0) } else { 4.0 },
+                    axis: if *vertical { 1.0 } else { 0.0 },
+                    slot: f64::NAN,
+                    trig: 0.0,
+                    cold: ColdStart::new(),
                 }),
                 StageCfg::Bloom { levels, .. } => {
                     self.push_pyramid(cx, i, *levels, PyramidKind::Bloom);
@@ -164,16 +241,31 @@ impl PostChain {
         for (i, stage) in self.stages.iter_mut().enumerate() {
             let p = resolved.get(i).copied().unwrap_or_default().p;
             match stage {
-                StageRt::Feedback { ping, pong, flip } => {
+                StageRt::Feedback { ping, pong, flip, cold } => {
                     let (dst, src) = if *flip { (ping, pong) } else { (pong, ping) };
                     *flip = !*flip;
                     draws.feedback.draw_vars.set_texture(0, &current);
-                    draws.feedback.draw_vars.set_texture(1, &src.texture);
+                    // COLD-START LAW: on the first frame after configure,
+                    // `src` has never been written by this chain. Bind the
+                    // live frame there instead and zero the trail amount —
+                    // the stale slot is never sampled, and the output is
+                    // exactly the fresh frame (which is what a warm chain
+                    // with a black history produces anyway, so a correctly
+                    // pooled texture renders identically either way).
+                    let p = if cold.is_cold() {
+                        draws.feedback.draw_vars.set_texture(1, &current);
+                        [0.0, p[1], p[2], p[3]]
+                    } else {
+                        draws.feedback.draw_vars.set_texture(1, &src.texture);
+                        p
+                    };
                     draws.feedback.draw_vars.set_uniform(cx, live_id!(u_fb), &p);
                     let d = &mut *draws.feedback;
                     dst.run(cx, size, &mut |cx, rect| {
                         d.draw_abs(cx, rect);
                     });
+                    // `dst` is written now; the next frame reads it as src.
+                    cold.warm();
                     current = dst.texture.clone();
                 }
                 StageRt::Pyramid { downs, ups, mix, kind } => {
@@ -266,6 +358,56 @@ impl PostChain {
                     });
                     current = sub.texture.clone();
                 }
+                StageRt::Hold { latch, out, beats, axis, slot, trig, cold } => {
+                    // p = (mix, bands, stagger, trigger level).
+                    let level = if p[3].is_finite() { p[3] } else { 0.0 };
+                    let edge = level >= 0.5 && *trig < 0.5;
+                    *trig = level;
+                    // Beat-slot boundary: floor of the song position over
+                    // the grab period. Compared, never accumulated, so a
+                    // tempo change or a cue jump lands on the next slot
+                    // instead of drifting.
+                    let now = if *beats > 0.0 {
+                        (beat[0] as f64 / *beats as f64).floor()
+                    } else {
+                        f64::NAN
+                    };
+                    let slot_moved = now.is_finite() && *slot != now;
+                    *slot = now;
+                    // COLD-START LAW: a cold latch holds the previous
+                    // document's frame, so the first run ALWAYS grabs.
+                    if cold.is_cold() || edge || slot_moved {
+                        // The grab is this same shader with mix 0 — a copy.
+                        // Both slots take the live frame so the pass can
+                        // never sample the texture it renders into.
+                        draws.hold.draw_vars.set_texture(0, &current);
+                        draws.hold.draw_vars.set_texture(1, &current);
+                        draws.hold.draw_vars.set_uniform(
+                            cx,
+                            live_id!(u_hold),
+                            &[0.0, 1.0, 0.0, *axis],
+                        );
+                        draws.hold.draw_vars.set_uniform(cx, live_id!(u_hbeat), &beat);
+                        let d = &mut *draws.hold;
+                        latch.run(cx, size, &mut |cx, rect| {
+                            d.draw_abs(cx, rect);
+                        });
+                        cold.warm();
+                    }
+                    draws.hold.draw_vars.set_texture(0, &current);
+                    draws.hold.draw_vars.set_texture(1, &latch.texture);
+                    draws.hold.draw_vars.set_uniform(
+                        cx,
+                        live_id!(u_hold),
+                        &[p[0], p[1], p[2], *axis],
+                    );
+                    draws.hold.draw_vars.set_uniform(cx, live_id!(u_hbeat), &beat);
+                    let d = &mut *draws.hold;
+                    out.run(cx, size, &mut |cx, rect| {
+                        d.draw_abs(cx, rect);
+                    });
+                    current = out.texture.clone();
+                }
             }
         }
         current
@@ -280,4 +422,31 @@ pub struct PostDraws<'a> {
     pub bloom_mix: &'a mut DrawVjFxBloomMix,
     pub tilt_mix: &'a mut DrawVjFxTiltMix,
     pub warp: &'a mut DrawVjFxWarp,
+    pub hold: &'a mut DrawVjFxHold,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE COLD-START LAW, pinned where it can be checked without a GPU.
+    ///
+    /// `PostChain::configure` re-allocates its stage textures out of the
+    /// platform pool and cannot clear them, so a self-sampling stage that
+    /// read its own texture on the first frame would composite the
+    /// PREVIOUS document's picture. Every such stage owns a `ColdStart`;
+    /// it exists only in the cold state until the stage has written that
+    /// texture itself. There is deliberately no `Default` and no
+    /// `ColdStart(false)` constructor — a stage added later gets the safe
+    /// state or does not compile.
+    #[test]
+    fn cold_start_begins_cold_and_warms_exactly_once() {
+        let mut c = ColdStart::new();
+        assert!(c.is_cold(), "a freshly configured stage must start COLD");
+        c.warm();
+        assert!(!c.is_cold());
+        c.warm();
+        assert!(!c.is_cold(), "warming twice must stay warm");
+        assert_ne!(ColdStart::new(), ColdStart(false));
+    }
 }
