@@ -63,6 +63,7 @@ mod mesh_view;
 mod midi_learn;
 mod mix;
 mod mixer;
+mod models;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.
 mod music_dsp;
 mod music_view;
@@ -2206,6 +2207,8 @@ struct MusicRefs {
     queue_clear: ButtonRef,
     queue_count: LabelRef,
     xfader: SliderRef,
+    models_state: LabelRef,
+    models_install: ButtonRef,
 }
 
 impl MusicRefs {
@@ -2227,6 +2230,8 @@ impl MusicRefs {
             queue_clear: ui.button(cx, ids!(queue_clear)),
             queue_count: ui.label(cx, ids!(queue_count)),
             xfader: ui.slider(cx, ids!(xfader)),
+            models_state: ui.label(cx, ids!(models_state)),
+            models_install: ui.button(cx, ids!(models_install)),
         }
     }
 
@@ -4708,6 +4713,17 @@ pub struct App {
     music_refs: MusicRefs,
     #[rust]
     music_refs_ready: bool,
+    /// First-use model install (stem splitter + whisper): the one install
+    /// worker while it runs — drain side plus the cancel cord.
+    #[rust]
+    model_install: Option<crate::models::InstallHandle>,
+    /// What the models row currently says once the install flow has spoken;
+    /// empty means the row derives its text from what is missing on disk.
+    #[rust]
+    model_install_note: String,
+    /// One-shot initial sync of the models row once the surface is live.
+    #[rust]
+    models_row_synced: bool,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -9095,6 +9111,7 @@ p2 {}
         self.pump_analysis(cx);
         self.pump_stems(cx);
         self.pump_lyrics(cx);
+        self.pump_model_install(cx);
         self.pump_side_channel_writeback();
         self.observe_decks();
         self.sync_mesh_liveness(cx);
@@ -12044,6 +12061,135 @@ p2 {}
         });
     }
 
+    // ---- first-use model install (stem splitter + whisper) ----
+
+    /// INSTALL MODELS opens the what-will-download dialog; while a download
+    /// runs the same button reads CANCEL and pulls the cord instead.
+    fn models_install_clicked(&mut self, cx: &mut Cx) {
+        if let Some(install) = &self.model_install {
+            install.cancel();
+            self.model_install_note = "models: cancelling…".to_string();
+            self.refresh_models_row(cx);
+            return;
+        }
+        if models::missing().is_empty() {
+            self.refresh_models_row(cx);
+            return;
+        }
+        self.ui.modal(cx, ids!(models_license_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn models_download_confirmed(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(models_license_modal)).close(cx);
+        self.start_model_install(cx);
+    }
+
+    fn start_model_install(&mut self, cx: &mut Cx) {
+        let missing = models::missing();
+        if missing.is_empty() {
+            self.refresh_models_row(cx);
+            return;
+        }
+        self.model_install_note = "models: starting download…".to_string();
+        self.model_install = Some(models::start_install(missing));
+        self.refresh_models_row(cx);
+    }
+
+    /// The models row under the explorer: hidden on a provisioned machine,
+    /// the missing-models invitation otherwise, and the live progress line
+    /// while the install worker runs.
+    fn refresh_models_row(&mut self, cx: &mut Cx) {
+        if !self.ensure_music_refs(cx) {
+            return;
+        }
+        let installing = self.model_install.is_some();
+        let missing = models::missing();
+        let text = if !self.model_install_note.is_empty() {
+            self.model_install_note.clone()
+        } else if missing.is_empty() {
+            String::new()
+        } else {
+            let names = missing
+                .iter()
+                .map(|model| model.short)
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let bytes: u64 = missing.iter().map(|model| model.bytes).sum();
+            format!(
+                "{names} models not installed — {:.1} GB download for the stem mix and word-timed karaoke",
+                bytes as f64 / 1.0e9
+            )
+        };
+        let show = installing || !missing.is_empty() || !text.is_empty();
+        let row = self.ui.view(cx, ids!(models_row));
+        if row.visible() != show {
+            row.set_visible(cx, show);
+        }
+        let button = &self.music_refs.models_install;
+        button.set_visible(cx, installing || !missing.is_empty());
+        button.set_text(cx, if installing { "CANCEL" } else { "INSTALL MODELS" });
+        self.music_refs.models_state.set_text(cx, &text);
+    }
+
+    /// Drain the install worker: progress onto the row, and when the last
+    /// model lands, separate whatever the decks are holding — the stems
+    /// worker re-probes the checkpoint per job, so no restart is needed.
+    fn pump_model_install(&mut self, cx: &mut Cx) {
+        if !self.models_row_synced && self.ensure_music_refs(cx) {
+            self.models_row_synced = true;
+            self.refresh_models_row(cx);
+        }
+        let mut messages = Vec::new();
+        if let Some(install) = &self.model_install {
+            while let Ok(message) = install.rx.try_recv() {
+                messages.push(message);
+            }
+        }
+        if messages.is_empty() {
+            return;
+        }
+        let mut finished = false;
+        for message in messages {
+            match message {
+                models::InstallMsg::Progress { short, done, total } => {
+                    self.model_install_note = format!(
+                        "models: downloading {short} — {}% · {} / {} MB",
+                        done * 100 / total.max(1),
+                        done / 1_000_000,
+                        total / 1_000_000
+                    );
+                }
+                models::InstallMsg::Done { short } => {
+                    self.model_install_note = format!("models: {short} installed");
+                }
+                models::InstallMsg::Failed { short, error } => {
+                    log!("models: {short} install failed: {error}");
+                    self.model_install_note = format!("models: {short} failed — {error}");
+                }
+                models::InstallMsg::Cancelled => {
+                    // Back to the invitation; the `.part` on disk makes the
+                    // next INSTALL MODELS a resume, not a restart.
+                    self.model_install_note = String::new();
+                }
+                models::InstallMsg::Finished => finished = true,
+            }
+        }
+        if finished {
+            self.model_install = None;
+            if models::missing().is_empty() {
+                // Fully provisioned: the row and its button disappear; the
+                // decks' own status lines take over from here.
+                self.model_install_note = String::new();
+                for deck in [DeckId::A, DeckId::B] {
+                    let gen = self.decks.deck(deck).load_gen;
+                    self.fall_back_to_separation(deck, gen);
+                }
+            }
+        }
+        self.refresh_models_row(cx);
+    }
+
     /// Take separated chunks: install them for playback, and fold their
     /// energy into the waveform's colour so the operator can SEE the
     /// separation arrive.
@@ -13667,6 +13813,12 @@ p2 {}
     fn handle_music_rows(&mut self, cx: &mut Cx, actions: &Actions) {
         if !self.ensure_music_refs(cx) {
             return;
+        }
+        if self.music_refs.models_install.clicked(actions) {
+            self.models_install_clicked(cx);
+        }
+        if self.ui.button(cx, ids!(models_download)).clicked(actions) {
+            self.models_download_confirmed(cx);
         }
         if self.music_refs.music_local.clicked(actions) {
             self.music_local = !self.music_local;
