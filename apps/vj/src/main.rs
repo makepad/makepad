@@ -39,6 +39,7 @@ mod flow;
 // FLOW-WARP PLAYBACK: GPU warp pre-pass over the mkfl motion fields — also
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
+mod nv12_view;
 // EFFECT SLOTS: the vjeffect content category's home in the mixer — three
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
 // clicking FX tiles in the browse grid (see fx_slot.rs).
@@ -578,6 +579,11 @@ script_mod! {
                             // its texture replaces the slot's decoder texture.
                             slot_flow_a := FlowWarpView{}
                             slot_flow_b := FlowWarpView{}
+                            // NV12 present passes (see nv12_view.rs): the
+                            // players' resident NV12 frames become the RGBA
+                            // slot textures here, on the GPU.
+                            slot_nv12_a := Nv12View{}
+                            slot_nv12_b := Nv12View{}
                             // Offscreen vjeffect thumbnail renderer: one
                             // hidden slot-mode effect pass at a time, its
                             // sheets fed back through the thumb decode lane.
@@ -1248,7 +1254,7 @@ script_mod! {
                                                         // button shows the
                                                         // NEXT action.
                                                         deck_a_play_learn := Learn{
-                                                            deck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                            vdeck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                         }
                                                         // INSTANT REVERSE: a
                                                         // live direction flip,
@@ -1299,7 +1305,7 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_a_rate := VjBeatsDrop{width: 34}
                                                         }
-                                                        deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         // THE JOG WHEEL: the
                                                         // sprung scratch hand
                                                         // (push right forward,
@@ -1712,7 +1718,7 @@ script_mod! {
                                                         width: Fill height: Fill flow: Right spacing: 4
                                                         align: Align{x: 0.0, y: 0.5}
                                                         deck_b_play_learn := Learn{
-                                                            deck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                            vdeck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                         }
                                                         Tip{ text: "Reverse: flip play direction now"
                                                             deck_b_rev_learn := Learn{
@@ -1755,7 +1761,7 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_b_rate := VjBeatsDrop{width: 34}
                                                         }
-                                                        deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
                                                             deck_b_wheel_learn := Learn{
                                                                 deck_b_wheel := VjSlowmoWheel{}
@@ -5690,15 +5696,20 @@ impl App {
 
     fn deck_mute_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
-            SlotId::A => ids!(deck_a_mute),
-            SlotId::B => ids!(deck_b_mute),
+            SlotId::A => ids!(vdeck_a_mute),
+            SlotId::B => ids!(vdeck_b_mute),
         }
     }
 
     fn deck_play_path(slot: SlotId) -> &'static [LiveId] {
+        // vdeck_*: the VIDEO console's transports. The DJ page's music
+        // decks own the bare deck_a_play/deck_a_mute names (they had them
+        // first) — when both pages defined the same id the global lookup
+        // resolved to whichever drew first and the OTHER page's button
+        // went dead (the "DJ play does nothing" report).
         match slot {
-            SlotId::A => ids!(deck_a_play),
-            SlotId::B => ids!(deck_b_play),
+            SlotId::A => ids!(vdeck_a_play),
+            SlotId::B => ids!(vdeck_b_play),
         }
     }
 
@@ -7018,6 +7029,22 @@ p2 {}
         Some(f(cx, &mut view))
     }
 
+    /// Run `f` on a slot's NV12 present pass (no-op without the widget).
+    fn nv12_view<R>(
+        &self,
+        cx: &mut Cx,
+        slot: SlotId,
+        f: impl FnOnce(&mut Cx, &mut nv12_view::Nv12View) -> R,
+    ) -> Option<R> {
+        let path: &[LiveId] = match slot {
+            SlotId::A => ids!(slot_nv12_a),
+            SlotId::B => ids!(slot_nv12_b),
+        };
+        let widget = self.ui.widget(cx, path);
+        let mut view = widget.borrow_mut::<nv12_view::Nv12View>()?;
+        Some(f(cx, &mut view))
+    }
+
     /// Drop a slot's flow cache and transport (load superseded / slot closed).
     fn clear_slot_flow(&mut self, cx: &mut Cx, slot: SlotId) {
         let i = slot.index();
@@ -7425,6 +7452,7 @@ p2 {}
         self.players[i] = None;
         self.slot_textures[i] = None;
         self.clear_slot_flow(cx, slot);
+        self.nv12_view(cx, slot, |cx, view| view.clear(cx));
         self.light_samples[i] = None;
         self.light_analyzers[i].reset();
         self.clear_slot_mesh(cx, slot);
@@ -14550,8 +14578,48 @@ p2 {}
         }
         for index in 0..2 {
             let Some(player) = self.players[index].as_mut() else { continue };
-            if let Some(frame) = player.take_due_frame() {
+            if let Some(px) = player.take_due_frame() {
+                if let crate::media::Pixels::Nv12 { data, width, height } = px {
+                    // THE NV12 LANE: planes go straight to the GPU pass;
+                    // the CPU touches only a small proxy for the
+                    // point-sampling analyzers.
+                    let (w, h) = (width as usize, height as usize);
+                    let proxy = crate::media::nv12_proxy_bgra(&data, w, h, 160, 90);
+                    self.light_samples[index] = Some(
+                        self.light_analyzers[index].push_bgra_frame(&proxy, 160, 90),
+                    );
+                    if let (Some(revision), Some(tx)) =
+                        (self.slot_scan[index], self.loop_tx.as_ref())
+                    {
+                        let sig = build_frame_signature(
+                            &proxy,
+                            160,
+                            90,
+                            &mut self.sig_states[index],
+                        );
+                        let _ = tx.send(LoopScanCtl::Sig {
+                            slot: index,
+                            revision,
+                            position_secs: player.position_secs(),
+                            sig,
+                        });
+                    }
+                    let slot = SlotId::from_index(index);
+                    let tex = self
+                        .nv12_view(cx, slot, |cx, view| {
+                            view.set_frame(cx, &data, width, height);
+                            view.output_texture()
+                        })
+                        .flatten();
+                    if let Some(tex) = tex {
+                        self.slot_tex_borrowed[index] = false;
+                        self.slot_textures[index] = Some(tex);
+                    }
+                    self.set_deck_busy(cx, SlotId::from_index(index), false);
+                    continue;
+                }
                 let (w, h) = (player.width as usize, player.height as usize);
+                let frame = px.to_bgra();
                 self.light_samples[index] = Some(
                     self.light_analyzers[index].push_bgra_frame(&frame, w, h),
                 );
@@ -16713,6 +16781,7 @@ impl AppMain for App {
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::flow_warp::script_mod(vm);
+        crate::nv12_view::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);

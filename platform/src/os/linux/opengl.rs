@@ -331,10 +331,13 @@ impl Cx {
             (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
             (gl.glDeleteFramebuffers)(1, &fbo);
         }
-        // GL origin is bottom-left; thumbnail encode expects top-left BGRA.
+        // Row order: a Y-inverted offscreen pass already stored top-left
+        // rows; a custom-camera target is classic GL bottom-up and gets
+        // swapped into the top-left BGRA the thumbnail encode expects.
+        let top_left = self.textures[texture.texture_id()].os.rendered_top_left;
         let mut bgra = vec![0u8; rgba.len()];
         for y in 0..height {
-            let src = (height - 1 - y) * width * 4;
+            let src = (if top_left { y } else { height - 1 - y }) * width * 4;
             let dst = y * width * 4;
             for x in 0..width {
                 let i = src + x * 4;
@@ -827,7 +830,11 @@ impl Cx {
         }
     }
 
-    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Option<(Vec2d, f64)> {
+    pub fn setup_render_pass(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        to_texture: bool,
+    ) -> Option<(Vec2d, f64)> {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let pass = &mut self.passes[draw_pass_id];
@@ -840,6 +847,20 @@ impl Cx {
 
         if !pass.keep_camera_matrix {
             pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            if to_texture {
+                // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
+                // are stored bottom-up, so inverting the projection's Y
+                // lands the texels in the same top-left order Metal/D3D
+                // produce. Every consumer then plain-samples — nobody
+                // flips a V coordinate in a pixel shader (the web backend
+                // has rendered offscreen this way all along; desktop GL
+                // used to compensate per-sample with sample_rt instead).
+                let m = &mut pass.pass_uniforms.camera_projection.v;
+                m[1] = -m[1];
+                m[5] = -m[5];
+                m[9] = -m[9];
+                m[13] = -m[13];
+            }
         }
         pass.set_dpi_factor(dpi_factor);
 
@@ -857,11 +878,16 @@ impl Cx {
     ) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(draw_pass_id) {
+        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(draw_pass_id, true) {
             pz
         } else {
             return;
         };
+        // Whether this pass rendered with the inverted projection above:
+        // its color targets then hold TOP-LEFT rows (readback must not
+        // row-swap them). Custom-camera passes (XR, 3D) keep their own
+        // matrices and the classic GL bottom-up storage.
+        let rows_top_left = !self.passes[draw_pass_id].keep_camera_matrix;
 
         let mut clear_color = Vec4f::default();
         let mut clear_depth = 1.0;
@@ -914,6 +940,8 @@ impl Cx {
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
+            self.textures[color_texture.texture.texture_id()].os.rendered_top_left =
+                rows_top_left;
             if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()]
                 .os
                 .gl_texture
@@ -2149,7 +2177,6 @@ impl CxOsDrawShader {
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
             vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
@@ -2363,6 +2390,11 @@ pub const OES_ST_IDENTITY: [f32; 16] = [
 #[derive(Clone)]
 pub struct CxOsTexture {
     pub gl_texture: Option<u32>,
+    /// This texture was last rendered by a Y-inverted offscreen pass, so
+    /// its rows are stored TOP-LEFT (Metal/D3D order) — readback must not
+    /// row-swap it. False for custom-camera (XR/3D) targets, which keep
+    /// classic GL bottom-up storage.
+    pub rendered_top_left: bool,
     /// True when Makepad owns the GL texture object and must delete it.
     pub gl_texture_owned: bool,
     pub gl_renderbuffer: Option<u32>,
@@ -2389,6 +2421,7 @@ impl Default for CxOsTexture {
     fn default() -> Self {
         Self {
             gl_texture: None,
+            rendered_top_left: false,
             gl_texture_owned: true,
             gl_renderbuffer: None,
             gl_cap_width: 0,
