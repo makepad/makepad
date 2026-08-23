@@ -25,7 +25,7 @@
             let y1 = center + half
             let inside = step(y0, uv.y) * step(uv.y, y1)
             let speed = 0.14 * (0.2 + 1.6 * self.user.y)
-            let scrolled = fract(uv.x + self.time_beat.x * speed)
+            let scrolled = fract(uv.x + fract(self.time_beat.x * speed))
             let wx = mix(uv.x, scrolled, inside)
             let tex = self.tex0.sample_as_bgra(vec2(wx, uv.y))
             return vec4(tex.xyz, 1.0)

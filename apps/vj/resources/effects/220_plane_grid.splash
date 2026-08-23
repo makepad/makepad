@@ -61,7 +61,7 @@
         // Each plane drifts toward and away from the camera on its own slow
         // wrapped phase, so the wall never reads as one flat sheet.
         fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
-            let ph = fract(t * 0.031 + self.hash1(id * 3.17 + 9.0))
+            let ph = fract(fract(t * 0.031) + self.hash1(id * 3.17 + 9.0))
             let depth = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
                 * self.shape.z * 0.055
             let z = sin(ph * 6.2831853) * depth
@@ -78,7 +78,7 @@
             let al = max(length(a), 0.05)
             let rate = (0.02 + 0.10 * self.hash1(id * 11.3 + 4.0))
                 * (0.2 + 1.6 * clamp(self.user.x, 0.0, 1.0))
-            let ang = fract(t * rate + self.hash1(id * 13.9 + 5.0)) * 6.2831853
+            let ang = fract(fract(t * rate) + self.hash1(id * 13.9 + 5.0)) * 6.2831853
             return vec4(a.x / al, a.y / al, a.z / al, ang)
         }
 

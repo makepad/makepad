@@ -230,22 +230,27 @@ impl PlayMode {
 /// Decoded-frame cache ceiling for ping-pong/reverse (BGRA bytes). A clip
 /// under this ceiling gets frame-exact bidirectional playback from memory;
 /// over it, reverse degrades to the seek-bounce tier (correct but decode-
-/// heavy). Like the flow endpoint ceiling it is sized for the performance
-/// machine: 4 GB bounces ~8 s of 1920×1080 or ~45 s of 1280×704 from
-/// memory. Bigger clips fall through to the seek-bounce tier below.
-const MAX_PINGPONG_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+/// heavy). Sized on the operator's ruling that RAM is the cheap resource
+/// here — at most TWO videos ever play at once, so two of these ceilings
+/// is the true worst case. 16 GB holds ~9 s of a Retina screen capture
+/// (3034×1882, 22.8 MB/frame), ~30 s of 1920×1080, minutes of 1280×704.
+/// Bigger clips fall through to the seek-bounce tier below.
+const MAX_PINGPONG_CACHE_BYTES: usize = 16 * 1024 * 1024 * 1024;
 
 /// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
 /// is a typical GOP, so most of what the in-seek discard walk decodes is
 /// the window itself.
 const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 
-/// Byte cap on one collected reverse window. When 2 s of frames exceed it
-/// (large formats), the window keeps its NEWEST frames and the next hop
+/// Byte cap on one collected reverse window. When the window's frames
+/// exceed it (giant formats), it keeps its NEWEST frames and the next hop
 /// re-decodes the trimmed head — reverse stays correct, just costs more
-/// decode. 96 MB holds a full 2 s window up to ~1 MB/frame (e.g. 640×352
-/// and 720p), and ~26 frames of 1280×704.
-const REVERSE_WINDOW_MAX_BYTES: usize = 96 * 1024 * 1024;
+/// decode. Sized for the performance machine, because an undersized cap is
+/// catastrophic, not degraded: a Retina screen capture (3034×1882, 22.8 MB
+/// a frame, ~57-frame GOP ≈ 1.3 GB decoded) used to hit the old 96 MB cap
+/// after FOUR frames, so every 1.6 s GOP decode served 4 frames and reverse
+/// ran at 1/25 speed. 4 GB holds several such GOPs — and ~2 s of 4K60.
+const REVERSE_WINDOW_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// `VJ_TL=1` turns on the TIMELINE TRACE (stderr): every transport decision
 /// on every playback path — the flow warp clock, the cache sweep, the
@@ -693,6 +698,13 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
     let mut pingpong_cache_bytes: usize = 0;
     let mut pingpong_cache_complete = false;
     let mut pingpong_over_budget = false;
+    // STICKY twin of the latch above: once THIS clip has ever blown the
+    // cache budget, the seek-tier handover gates stay open for the rest of
+    // the player's life. The per-pass latch resets on every wrap (a trim
+    // shrink may make the next pass fit), which used to close the REV /
+    // scratch handover for the first seconds of every pass — the operator
+    // pressed reverse mid-loop and nothing happened.
+    let mut clip_over_budget = false;
     // Frames decoded this pass: a cache that started mid-pass (the mode
     // flipped on partway through) covers only the TAIL and must never be
     // declared complete — it bounces again from the next full pass.
@@ -963,6 +975,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         pingpong_cache.clear();
                         pingpong_cache_bytes = 0;
                         pingpong_over_budget = true;
+                        clip_over_budget = true;
                         eprintln!("vj-slot {slot:?}: clip exceeds the ping-pong cache budget; bouncing falls back to loop");
                     } else {
                         pingpong_cache.push(cached);
@@ -974,6 +987,67 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     shared
                         .preroll_status
                         .store(PrerollStatus::Ready as u8, Ordering::Release);
+                }
+                // LIVE handover mid-pass: the operator flipped into a
+                // bounce/reverse (or grabbed the scratch wheel) on an
+                // over-budget clip. Waiting for this pass's EOS — the old
+                // shape — meant the button did NOTHING for up to a whole
+                // clip length. Hand over to the seek tier now.
+                let live_mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
+                let wants_tier3 = matches!(
+                    live_mode,
+                    PlayMode::PingPong | PlayMode::Reverse
+                ) || shared.scratch_active.load(Ordering::Acquire);
+                if clip_over_budget
+                    && wants_tier3
+                    && !seek_bounce_broken
+                    && info.duration_100ns > 0
+                    && repeat_is_silent(
+                        info.has_audio,
+                        shared.muted.load(Ordering::Acquire),
+                        live_mode,
+                    )
+                {
+                    // The partial cache belongs to the abandoned pass.
+                    pingpong_cache.clear();
+                    pingpong_cache_bytes = 0;
+                    pingpong_cache_partial = false;
+                    pass_frames = 0;
+                    match seek_bounce_playback(&mut decoder, &shared, &info) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            seek_bounce_broken = true;
+                            eprintln!(
+                                "vj-slot {slot:?}: decoder cannot seek; over-budget bounce falls back to loop"
+                            );
+                        }
+                        Err(e) => {
+                            *shared.failure.lock().unwrap() = Some(e);
+                            return;
+                        }
+                    }
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    // Hand back like an EOS wrap; a pending seek (the
+                    // scratch release path leaves one) is serviced by the
+                    // normal loop machinery right after.
+                    let trim_in = shared.trim_in_100ns.load(Ordering::Acquire).max(0);
+                    if decoder.seek(trim_in).is_ok() {
+                        audio_eos = !info.has_audio;
+                        continue;
+                    }
+                    match VideoFileDecoder::open(&path) {
+                        Ok(d) => {
+                            decoder = d;
+                            audio_eos = !info.has_audio;
+                            continue;
+                        }
+                        Err(e) => {
+                            *shared.failure.lock().unwrap() = Some(e.to_string());
+                            return;
+                        }
+                    }
                 }
             }
             Ok(Some(_)) | Ok(None) => {
@@ -1013,8 +1087,10 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // loop lit.)
                     cache_playback(&shared, &pingpong_cache);
                 }
-                if matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
-                    && pingpong_over_budget
+                if (matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
+                    || shared.scratch_active.load(Ordering::Acquire))
+                    && clip_over_budget
+                    && !pingpong_cache_complete
                     && silent
                     && !seek_bounce_broken
                     && info.duration_100ns > 0
@@ -1135,15 +1211,10 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
 /// Decoded NV12 → the ring's BGRA frame (no queueing).
 fn convert_frame(
     frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
-    rgb_scratch: &mut Vec<u8>,
+    _rgb_scratch: &mut Vec<u8>,
 ) -> Frame {
-    nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, rgb_scratch);
-    let mut bgra = Vec::with_capacity((frame.width * frame.height) as usize);
-    for px in rgb_scratch.chunks_exact(3) {
-        bgra.push(
-            0xff00_0000 | ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32,
-        );
-    }
+    let mut bgra = Vec::new();
+    nv12::nv12_to_bgra_u32(&frame.nv12, frame.width, frame.height, &mut bgra);
     Frame { pts_100ns: frame.pts_100ns, clip_100ns: frame.pts_100ns, bgra }
 }
 
@@ -1574,15 +1645,17 @@ fn seek_bounce_playback(
     info: &VideoFileInfo,
 ) -> Result<bool, String> {
     /// Anything that hands control back to the normal decode loop —
-    /// including a trim change (the bounce bounds moved under us).
+    /// including a trim change (the bounce bounds moved under us). A live
+    /// SCRATCH keeps the machine alive whatever the mode: the hand entered
+    /// through this tier and must keep being served by it.
     fn must_exit(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         shared.stop.load(Ordering::Acquire)
             || shared.seek_100ns.load(Ordering::Acquire) >= 0
             || shared.trim_epoch.load(Ordering::Acquire) != epoch0
-            || !matches!(
+            || (!matches!(
                 PlayMode::from_u8(shared.mode.load(Ordering::Acquire)),
                 PlayMode::PingPong | PlayMode::Reverse
-            )
+            ) && !shared.scratch_active.load(Ordering::Acquire))
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
@@ -1639,65 +1712,232 @@ fn seek_bounce_playback(
             .push_back(Frame { pts_100ns: *synth_pts, clip_100ns, bgra });
         shared.video_ready.store(true, Ordering::Release);
     };
+    // A reverse window mid-collection: frames decoded so far (oldest
+    // first), their byte total, and the span it covers.
+    struct Collecting {
+        frames: VecDeque<Frame>,
+        bytes: usize,
+        lo: i64,
+        hi: i64,
+        done: bool,
+        t0: Instant,
+        /// Microseconds inside decoder.next_frame() / convert_frame().
+        dec_us: u64,
+        cvt_us: u64,
+    }
     loop {
-        // ---- reverse leg: OUT → IN, in seek-batched windows.
+        // ---- reverse leg: OUT → IN, PIPELINED windows, plus the SCRATCH
+        // SERVICE. The old shape (collect a window, then serve it, then
+        // collect the next) stalled for a whole GOP decode between windows
+        // — on a big-GOP clip that read as a hiccup every second. This is
+        // a one-thread interleave instead: every iteration serves ONE due
+        // frame from the resident window when the ring has room, otherwise
+        // decodes ONE frame of the window below it — the ring's
+        // backpressure idle time IS the decode-ahead time, and reverse
+        // runs continuously whenever the decoder is at least realtime.
+        //
+        // The resident window is served BY INDEX, walking down; a served
+        // frame's buffer moves out (`ceiling` marks the highest intact
+        // index). That indexed residency is what makes SCRATCH possible on
+        // a streaming clip at all: while the hand is down, the index walks
+        // by the hand's rate instead — both directions, clamped to the
+        // intact span — and release resumes reverse from wherever the
+        // hand left the picture. A scratch that began in a non-bounce
+        // mode hands back through a seek to the hand's position, so the
+        // forward stream resumes there, not at IN.
         shared.travel_forward.store(false, Ordering::Release);
         let mut hi = t_out;
-        while hi > t_in {
-            if wait_ring(shared, has_audio, epoch0) {
+        let mut current: VecDeque<Frame> = VecDeque::new();
+        // serve_idx: the NEXT index to serve (fractional while the hand
+        // owns it). ceiling: highest index whose buffer is still intact.
+        let mut serve_idx: f64 = -1.0;
+        let mut ceiling: f64 = -1.0;
+        let mut collecting: Option<Collecting> = None;
+        let mut last_clip = t_out;
+        let mut scratching = false;
+        // When the resident window drained with the collector still busy:
+        // the visible stall the pipeline exists to prevent.
+        let mut drained_at: Option<Instant> = None;
+        loop {
+            if must_exit(shared, has_audio, epoch0) {
                 return Ok(true);
             }
-            let lo = (hi - REVERSE_WINDOW_100NS).max(t_in);
-            let hop_t0 = Instant::now();
-            if decoder.seek(lo).is_err() {
-                return Ok(false);
-            }
-            let mut window: VecDeque<Frame> = VecDeque::new();
-            let mut bytes = 0usize;
-            loop {
-                if shared.stop.load(Ordering::Acquire) {
+            let scratch_on = shared.scratch_active.load(Ordering::Acquire);
+            if scratching && !scratch_on {
+                // Release. In a bounce/reverse the leg resumes from the
+                // hand's position by itself; from any other mode the
+                // machine exits, seeking the stream to the hand.
+                scratching = false;
+                shared.travel_forward.store(false, Ordering::Release);
+                if !matches!(
+                    PlayMode::from_u8(shared.mode.load(Ordering::Acquire)),
+                    PlayMode::PingPong | PlayMode::Reverse
+                ) {
+                    shared.seek_100ns.store(last_clip.max(0), Ordering::Release);
                     return Ok(true);
                 }
-                match decoder.next_frame() {
+            }
+            scratching = scratch_on;
+            if shared.paused.load(Ordering::Acquire) && !scratching {
+                std::thread::sleep(Duration::from_millis(8));
+                continue;
+            }
+            // 1) A due frame out of the resident window.
+            let ring_full = shared.frames.lock().unwrap().len() >= RING_FRAMES;
+            if !ring_full && serve_idx >= 0.0 && !current.is_empty() {
+                if scratching {
+                    // THE HAND: walk the index by the shuttle rate, both
+                    // directions, inside the intact span. Buffers are
+                    // CLONED (not moved) so the hand can revisit.
+                    let srate = f64::from_bits(
+                        shared.scratch_rate_bits.load(Ordering::Acquire),
+                    )
+                    .clamp(-8.0, 8.0);
+                    serve_idx = (serve_idx + srate).clamp(0.0, ceiling.max(0.0));
+                    let idx = (serve_idx.round() as usize).min(current.len() - 1);
+                    let frame = &current[idx];
+                    last_clip = frame.clip_100ns;
+                    shared.travel_forward.store(srate >= 0.0, Ordering::Release);
+                    if tl_on() {
+                        eprintln!(
+                            "tl hop scratch idx={idx} srate={srate:+.3} clip={:.3}s",
+                            last_clip as f64 / 1e7
+                        );
+                    }
+                    serve(shared, frame.bgra.clone(), frame.clip_100ns, &mut synth_pts);
+                    continue;
+                }
+                let idx = (serve_idx.floor() as usize).min(current.len() - 1);
+                let bgra = std::mem::take(&mut current[idx].bgra);
+                last_clip = current[idx].clip_100ns;
+                serve_idx = idx as f64 - 1.0;
+                ceiling = serve_idx;
+                if serve_idx < 0.0 {
+                    drained_at = Some(Instant::now());
+                }
+                serve(shared, bgra, last_clip, &mut synth_pts);
+                continue;
+            }
+            // 2) Arm the collector for the window below `hi`.
+            if collecting.is_none() {
+                if hi > t_in {
+                    let lo = (hi - REVERSE_WINDOW_100NS).max(t_in);
+                    if decoder.seek(lo).is_err() {
+                        return Ok(false);
+                    }
+                    collecting = Some(Collecting {
+                        frames: VecDeque::new(),
+                        bytes: 0,
+                        lo,
+                        hi,
+                        done: false,
+                        t0: Instant::now(),
+                        dec_us: 0,
+                        cvt_us: 0,
+                    });
+                } else if PlayMode::from_u8(shared.mode.load(Ordering::Acquire))
+                    == PlayMode::Reverse
+                    && !scratching
+                {
+                    // REVERSE wraps IN → OUT. Re-arming here — while the
+                    // bottom window is still serving — is what kills the
+                    // old freeze at the loop point: the top window decodes
+                    // in the serve slack instead of after it.
+                    hi = t_out;
+                    continue;
+                } else if serve_idx < 0.0 || current.is_empty() {
+                    // Ping-pong: the leg ends when the last resident
+                    // frame has been served; a pinned scratch just holds.
+                    if scratching {
+                        std::thread::sleep(Duration::from_millis(4));
+                        continue;
+                    }
+                    break;
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+            }
+            let Some(c) = collecting.as_mut() else { continue };
+            // 3) One decode step of the pending window.
+            if !c.done {
+                let dec_t0 = Instant::now();
+                let step = decoder.next_frame();
+                c.dec_us += dec_t0.elapsed().as_micros() as u64;
+                match step {
                     // A window seek lands on the prior keyframe: frames
                     // before IN never enter the window.
-                    Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => continue,
-                    Ok(Some(f)) if f.pts_100ns < hi => {
+                    Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => {}
+                    Ok(Some(f)) if f.pts_100ns < c.hi => {
+                        let cvt_t0 = Instant::now();
                         let frame = convert_frame(f, &mut rgb_scratch);
-                        bytes += frame.bgra.len() * 4;
-                        window.push_back(frame);
-                        while bytes > REVERSE_WINDOW_MAX_BYTES && window.len() > 1 {
-                            let dropped = window.pop_front().unwrap();
-                            bytes -= dropped.bgra.len() * 4;
+                        c.cvt_us += cvt_t0.elapsed().as_micros() as u64;
+                        c.bytes += frame.bgra.len() * 4;
+                        c.frames.push_back(frame);
+                        while c.bytes > REVERSE_WINDOW_MAX_BYTES && c.frames.len() > 1 {
+                            let dropped = c.frames.pop_front().unwrap();
+                            c.bytes -= dropped.bgra.len() * 4;
                         }
                     }
-                    Ok(Some(_)) | Ok(None) => break,
+                    Ok(Some(_)) | Ok(None) => {
+                        c.done = true;
+                        if tl_on() {
+                            eprintln!(
+                                "tl hop window {:.3}s..{:.3}s kept={} bytes={}MB collect={}ms decode={}ms convert={}ms",
+                                c.lo as f64 / 1e7,
+                                c.hi as f64 / 1e7,
+                                c.frames.len(),
+                                c.bytes >> 20,
+                                c.t0.elapsed().as_millis(),
+                                c.dec_us / 1000,
+                                c.cvt_us / 1000
+                            );
+                        }
+                    }
                     Err(e) => return Err(e.to_string()),
                 }
-            }
-            let Some(first_kept) = window.front().map(|f| f.pts_100ns) else {
-                // Dead air (no frames in the window): keep walking down.
-                hi = lo;
                 continue;
-            };
-            if tl_on() {
-                eprintln!(
-                    "tl hop window {:.3}s..{:.3}s kept={} bytes={}MB collect={}ms",
-                    lo as f64 / 1e7,
-                    hi as f64 / 1e7,
-                    window.len(),
-                    bytes >> 20,
-                    hop_t0.elapsed().as_millis()
-                );
             }
-            while let Some(frame) = window.pop_back() {
-                if wait_ring(shared, has_audio, epoch0) {
-                    return Ok(true);
+            // 4) Collected and waiting: promote once the resident window
+            // has drained (never earlier — serve order is strictly
+            // newest-first across windows). A held scratch only promotes
+            // into the window ADJACENT below it — never across a reverse
+            // wrap, which would teleport the hand to the clip's end.
+            let drained = serve_idx < 0.0 || current.is_empty();
+            let hand_at_floor = scratching && serve_idx <= 0.0;
+            let adjacent = current
+                .front()
+                .map(|f| c.hi <= f.pts_100ns)
+                .unwrap_or(true);
+            if (drained && !scratching) || (hand_at_floor && adjacent) {
+                let c = collecting.take().unwrap();
+                if tl_on() {
+                    let stall = drained_at
+                        .take()
+                        .map(|at| at.elapsed().as_millis())
+                        .unwrap_or(0);
+                    eprintln!(
+                        "tl hop promote kept={} stall={}ms (window was ready {})",
+                        c.frames.len(),
+                        stall,
+                        if stall == 0 { "in time" } else { "LATE" }
+                    );
                 }
-                serve(shared, frame.bgra, frame.clip_100ns, &mut synth_pts);
+                match c.frames.front().map(|f| f.pts_100ns) {
+                    // Strictly decreasing: every kept frame had pts < hi.
+                    Some(first_kept) => {
+                        hi = first_kept;
+                        serve_idx = c.frames.len() as f64 - 1.0;
+                        ceiling = serve_idx;
+                        current = c.frames;
+                    }
+                    // Dead air (no frames in the window): keep walking.
+                    None => hi = c.lo,
+                }
+            } else {
+                // Ring full, window decoded, resident still serving.
+                std::thread::sleep(Duration::from_millis(2));
             }
-            // Strictly decreasing: every kept frame had pts < hi.
-            hi = first_kept;
         }
         // REVERSE mode loops the reverse leg only — the forward pass
         // belongs to ping-pong's bounce. Read LIVE so a picker switch

@@ -124,7 +124,7 @@
             // THE BODY: a hairline of the untouched frame standing on the
             // hinge line, so the two wings read as joined.
             let body = 1.0 - smoothstep(0.004, 0.011, abs(uv.x - 0.5))
-            rgb = mix(rgb, content.xyz * 0.75 + self.col_c.xyz * 0.12, body)
+            rgb = mix(rgb, content.xyz + self.col_c.xyz * 0.12, body)
             // Without real content (cmix 0) the fallback pattern is all
             // there is, so lift it a little to keep the frame alive.
             let lift = 1.0 + (1.0 - clamp(cmix, 0.0, 1.0)) * 0.18

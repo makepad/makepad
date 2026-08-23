@@ -440,7 +440,7 @@ script_mod! {
             let per = max(self.shape.x, 0.05)
             let cyc = max(self.shape.z, 2.0) + self.flow.y
             // Front in dominoes; p0 nudges it in beats (scratch the run).
-            let fr0 = (self.time_beat.y + self.user.x) * per
+            let fr0 = modf((self.time_beat.y + self.user.x) * per, 2.0 * cyc)
             let m2 = modf(fr0, 2.0 * cyc)
             let tri_front = cyc - abs(m2 - cyc)
             let saw_front = modf(fr0, cyc)
