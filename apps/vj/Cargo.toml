@@ -30,6 +30,10 @@ makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
 makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }
 makepad-asset-widgets = { path = "../../libs/asset/widgets" }
 makepad-asset-client = { path = "../../libs/asset/client" }
+# First-use model install (stem splitter + whisper): the asset-ai service's
+# resumable, sha256-verified downloader. Featureless — the same slice the
+# asset UI links — so none of the model backends come along.
+makepad-asset-ai = { path = "../../libs/asset/ai", default-features = false }
 # The chat pane itself — ONE component, shared with the asset UI and the
 # game sandbox: the session on the server's chat broker, the worker thread,
 # the transcript with tool chips and the rate meter.
