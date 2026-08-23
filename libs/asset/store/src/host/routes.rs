@@ -59,6 +59,13 @@ pub struct RouteCtx {
     /// them. In memory and leased: a room is a process on somebody's desk,
     /// not a catalog entry.
     pub rooms: std::sync::Arc<super::rooms::RoomRegistry>,
+    /// Direct CAS handle for data-plane bulk writes: pure path/budget config
+    /// over the same `<root>/cas` the core owns, so connection threads can
+    /// hash, fsync and rename object files WITHOUT occupying the state
+    /// thread. Catalog rows for those objects still commit on the state
+    /// thread, after the bytes are durable — the admission ordering law is
+    /// unchanged.
+    pub cas: std::sync::Arc<crate::cas::Cas>,
 }
 
 /// Serve one parsed request head to completion.

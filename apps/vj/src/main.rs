@@ -4024,7 +4024,11 @@ fn start_loop_worker() -> (
 /// on unified-memory machines — scrolling a lane must never visibly
 /// re-decode what was just on screen. Eviction is purely LRU by this
 /// budget; nothing about a filter change drops textures by itself.
-const THUMB_CACHE_BYTES: usize = 2048 * 1024 * 1024;
+// 4GB: the effect lane alone is ~190 sheets x ~11.4MB ≈ 2.2GB — the budget
+// must hold the WHOLE library (~3GB) or scrolling a lane end to end cycles
+// eviction forever. A VJ rig has the unified memory; re-decode mid-set does
+// not have the time.
+const THUMB_CACHE_BYTES: usize = 4096 * 1024 * 1024;
 /// One thumb texture's resident bytes (128x80 BGRA).
 // Derived from the bake's actual cell size — hardcoded 128x80 undercounted
 // residency 9.2x once cells grew to the measured-4K spec, letting ~3GB of
@@ -4842,6 +4846,9 @@ pub struct App {
     /// One-shot initial sync of the models row once the surface is live.
     #[rust]
     models_row_synced: bool,
+    /// Thumb-load profile: (boot instant, last print, decoded at last print).
+    #[rust]
+    thumb_prof: Option<(std::time::Instant, std::time::Instant, u64)>,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -9529,10 +9536,8 @@ p2 {}
                             };
                             match connect() {
                                 Ok(mut client) => {
-                                    let extra = || connect().ok();
                                     let report = crate::effects::seed::seed_presets(
                                         &mut client,
-                                        &extra,
                                         &bundle_tx,
                                     );
                                     log!(
@@ -10959,9 +10964,21 @@ p2 {}
         if total <= budget {
             return;
         }
+        // The LIVE visible window is untouchable regardless of stamps: in a
+        // static view no rebuild runs, so visible tiles' last-wanted stamps
+        // go stale while background bakes keep landing — and the evictor
+        // was eating exactly what the operator was looking at.
+        let on_screen: HashSet<AssetRevisionId> = self
+            .video_pad_assets
+            .iter()
+            .flatten()
+            .filter_map(|asset| self.video_model.tile(asset))
+            .filter_map(|t| t.revision)
+            .collect();
         let mut by_age: Vec<(u64, AssetRevisionId)> = self
             .thumbs
             .keys()
+            .filter(|r| !on_screen.contains(r))
             .map(|r| (self.thumb_used.get(r).copied().unwrap_or(0), *r))
             .collect();
         by_age.sort_unstable();
@@ -11105,6 +11122,34 @@ p2 {}
     /// fetch path the moment its tile resolves. A cached sheet decodes
     /// straight from disk instead of rendering.
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
+        // THUMB LOAD PROFILE: one line a second from boot until the load
+        // settles — which counter stalls IS the diagnosis (heads = the seed
+        // stream, sub = cache decodes dispatched, done = decoder output,
+        // backlog = decoded-but-not-yet-uploaded, out = jobs in flight).
+        {
+            let t = std::time::Instant::now();
+            let t0 = *self.thumb_prof.get_or_insert((t, t, 0));
+            let busy = self.thumb_decodes_out > 0
+                || !self.decode_backlog.is_empty()
+                || self.thumb_stats.decoded != t0.2;
+            if busy && t.duration_since(t0.1).as_secs_f64() >= 1.0 {
+                if let Some(prof) = self.thumb_prof.as_mut() {
+                    prof.1 = t;
+                    prof.2 = self.thumb_stats.decoded;
+                }
+                log!(
+                    "thumbprof +{:.1}s heads={} sub={} fetch={} done={} out={} backlog={} resident={}MB",
+                    t.duration_since(t0.0).as_secs_f64(),
+                    self.fx_heads.len(),
+                    self.thumb_stats.fx_cache_submitted,
+                    self.thumb_stats.fetch_submitted,
+                    self.thumb_stats.decoded,
+                    self.thumb_decodes_out,
+                    self.decode_backlog.len(),
+                    self.thumb_stats.resident_bytes / 1_000_000
+                );
+            }
+        }
         if self.up.is_none() {
             return;
         }

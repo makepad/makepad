@@ -2748,6 +2748,10 @@ mod tests {
                     gen_tokens: 40,
                     lanes_active: Some(2),
                     slots_total: Some(4),
+                    prefix_ingested: None,
+                    prefix_resumed: None,
+                    think_tokens: None,
+                    visible_tokens: None,
                 }),
             }
         );

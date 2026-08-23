@@ -275,6 +275,18 @@ pub struct AnnotationUpload {
     pub private: bool,
 }
 
+/// One asset of a wire-level batch publication: canonical manifest bytes
+/// (carrying asset id and blob refs), the searchable annotation, and an
+/// optional alias head. See [`Api::publish_batch`].
+#[derive(Clone, Debug)]
+pub struct PublishBatchWireItem {
+    pub namespace: String,
+    /// Canonical manifest bytes; the revision identity is their SHA-256.
+    pub manifest: Vec<u8>,
+    pub alias: Option<AssetAlias>,
+    pub annotation: AnnotationUpload,
+}
+
 impl AnnotationUpload {
     fn validate(&self) -> ClientResult<()> {
         if self.title.is_empty() || self.title.len() > wire::MAX_TITLE_BYTES {
@@ -1689,6 +1701,147 @@ impl Api {
             });
         }
         Ok(local)
+    }
+
+    /// Admit MANY blobs in ONE request: the server hashes and fsyncs every
+    /// object off its state thread, then records the whole set in ONE
+    /// catalog transaction. Every echoed digest is verified against the
+    /// locally computed one before it is trusted. Order is preserved.
+    pub fn upload_blob_batch(&self, ns: &str, blobs: &[&[u8]]) -> ClientResult<Vec<BlobId>> {
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "upload namespace" });
+        }
+        if blobs.is_empty() || blobs.len() > wire::MAX_UPLOAD_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "upload batch size" });
+        }
+        let mut local: Vec<BlobId> = Vec::with_capacity(blobs.len());
+        let mut body: Vec<u8> = Vec::with_capacity(
+            blobs.iter().map(|b| b.len() + 8).sum::<usize>(),
+        );
+        for bytes in blobs {
+            if bytes.is_empty() {
+                return Err(ClientError::InvalidInput { what: "upload empty blob" });
+            }
+            local.push(BlobId::hash_of(bytes));
+            body.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            body.extend_from_slice(bytes);
+        }
+        let path = wire::path_blob_upload_batch(ns);
+        let mut req = Request::post(&path, &body);
+        req.body_content_type = "application/octet-stream";
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.data, req, &[200, 201])?;
+        let rows = v
+            .get("blobs")
+            .and_then(Value::as_arr)
+            .ok_or(ClientError::Protocol { what: "upload batch blobs" })?;
+        if rows.len() != blobs.len() {
+            return Err(ClientError::Protocol { what: "upload batch count" });
+        }
+        for (row, expect) in rows.iter().zip(&local) {
+            let got = row
+                .get("blob_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<BlobId>().ok())
+                .ok_or(ClientError::Protocol { what: "upload batch blob_id" })?;
+            if got != *expect {
+                return Err(ClientError::DigestMismatch {
+                    what: "uploaded blob identity",
+                    expected: *expect.as_bytes(),
+                    found: *got.as_bytes(),
+                });
+            }
+        }
+        Ok(local)
+    }
+
+    /// Publish N complete assets in ONE request — one state-thread visit,
+    /// one catalog transaction server-side. Blobs must be admitted first
+    /// (see [`Self::upload_blob_batch`]); the response is per-item
+    /// `(asset_id, revision, already_published)` in request order, each
+    /// verified against the locally computed identity.
+    pub fn publish_batch(
+        &self,
+        items: &[PublishBatchWireItem],
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        if items.is_empty() || items.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "publish batch size" });
+        }
+        let labels =
+            |v: &[String]| Value::Arr(v.iter().map(|s| json::s(s.clone())).collect());
+        let mut rows: Vec<Value> = Vec::with_capacity(items.len());
+        for item in items {
+            item.annotation.validate()?;
+            let ann = &item.annotation;
+            let mut ann_pairs: Vec<(&str, Value)> = vec![
+                ("title", json::s(ann.title.clone())),
+                ("description", json::s(ann.description.clone())),
+                ("categories", labels(&ann.categories)),
+                ("tags", labels(&ann.tags)),
+                ("creator", json::s(ann.creator.clone())),
+                ("generator", json::s(ann.generator.clone())),
+                ("backend", json::s(ann.backend.clone())),
+                ("model", json::s(ann.model.clone())),
+                ("prompt", json::s(ann.prompt.clone())),
+                ("provenance", json::s(ann.provenance.clone())),
+                (
+                    "visibility",
+                    json::s(if ann.private { "private" } else { "public" }),
+                ),
+            ];
+            if let Some(kind) = ann.kind {
+                ann_pairs.push(("kind", json::s(dto::kind_name(kind))));
+            }
+            let mut pairs: Vec<(&str, Value)> = vec![
+                ("namespace", json::s(item.namespace.clone())),
+                ("manifest", json::s(crate::util::to_hex(&item.manifest))),
+                ("annotation", json::obj(ann_pairs)),
+            ];
+            if let Some(alias) = &item.alias {
+                pairs.push(("alias", json::s(alias.as_str().to_string())));
+            }
+            rows.push(json::obj(pairs));
+        }
+        let body = json::obj(vec![("items", Value::Arr(rows))])
+            .to_json()
+            .into_bytes();
+        let path = wire::path_publish_batch();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let rows = v
+            .get("items")
+            .and_then(Value::as_arr)
+            .ok_or(ClientError::Protocol { what: "publish batch items" })?;
+        if rows.len() != items.len() {
+            return Err(ClientError::Protocol { what: "publish batch count" });
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for (row, item) in rows.iter().zip(items) {
+            let asset = row
+                .get("asset_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<AssetId>().ok())
+                .ok_or(ClientError::Protocol { what: "publish batch asset_id" })?;
+            let revision = row
+                .get("revision")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<AssetRevisionId>().ok())
+                .ok_or(ClientError::Protocol { what: "publish batch revision" })?;
+            // The identities are computable locally; a divergent echo means
+            // the answer describes something else.
+            let mut hasher = Sha256::new();
+            hasher.update(&item.manifest);
+            if revision != AssetRevisionId::from_bytes(hasher.finalize()) {
+                return Err(ClientError::Protocol { what: "publish batch revision mismatch" });
+            }
+            let already = row
+                .get("already_published")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            out.push((asset, revision, already));
+        }
+        Ok(out)
     }
 
     /// Admit a file the SERVER can see, by reference: the store hashes it in

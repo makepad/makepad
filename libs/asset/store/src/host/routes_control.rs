@@ -135,6 +135,8 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         // The literal batch route MUST precede the alias catch-all below, or
         // `status` is parsed as a (perfectly legal) one-segment alias — the
         // same ordering hazard `blob_batch` guards on the data plane.
+        ["v1", "publish", "batch"] if m == Method::Post => publish_batch(conn, head, rc),
+
         ["v1", "aliases", "status"] if m == Method::Post => alias_status_batch(conn, head, rc),
         ["v1", "aliases", rest @ ..] if !rest.is_empty() => {
             let alias = asset_alias_of(rest)?;
@@ -1186,6 +1188,248 @@ fn alias_get(head: &Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Outco
             ("asset_id", s(target.asset_id.to_string())),
             ("head_revision", s(target.revision.to_string())),
         ]),
+    )))
+}
+
+/// Largest publish batch one request may carry. Sized with the JSON body cap
+/// in mind: each item is a hex manifest (a few KB) plus its annotation.
+const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
+
+/// BATCH PUBLISH — N complete assets in ONE request, ONE state-thread visit,
+/// ONE catalog transaction (one WAL fsync for the lot).
+///
+/// Request: `{"items": [{"namespace", "manifest": "<hex canonical bytes>",
+/// "alias"?, "annotation": {…}}, …]}` — the annotation object carries the
+/// same fields `PUT /v1/assets/{id}/annotation` takes. Every blob the
+/// manifests reference must already be admitted (`POST /v1/blobs/batch`);
+/// the stage step refuses otherwise, so the bytes-before-rows law holds for
+/// the whole batch.
+///
+/// All-or-nothing: either every item is published (with annotation and alias
+/// landed atomically alongside) or nothing is. Replaying a landed page is
+/// idempotent — already-published revisions refresh their annotation/alias
+/// and report `already_published`.
+///
+/// Why it exists: publishing one bundle costs ~10 round trips, each with its
+/// own state-thread visit and commit. Bulk publication (seeding a bundled
+/// preset library into a virgin store) paid that ceremony hundreds of times;
+/// this route pays it once per page.
+fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let items = body
+        .get("items")
+        .and_then(Value::as_arr)
+        .ok_or(Fail::Http(400, "missing items array"))?;
+    if items.is_empty() {
+        return Err(Fail::Http(400, "empty batch"));
+    }
+    if items.len() > MAX_PUBLISH_BATCH_ITEMS {
+        return Err(Fail::Http(400, "batch too large"));
+    }
+    // Parse everything before touching the store.
+    struct Parsed {
+        namespace: String,
+        manifest_bytes: Vec<u8>,
+        alias: Option<AssetAlias>,
+        title: String,
+        description: String,
+        kind: Option<AssetKind>,
+        categories: Vec<String>,
+        tags: Vec<String>,
+        creator: String,
+        generator: String,
+        backend: String,
+        model: String,
+        prompt: String,
+        provenance: String,
+        visibility: Visibility,
+    }
+    let max_manifest = rc.cfg.budgets.max_manifest_bytes as usize;
+    let mut parsed: Vec<Parsed> = Vec::with_capacity(items.len());
+    for item in items {
+        let namespace = item
+            .get("namespace")
+            .and_then(Value::as_str)
+            .ok_or(Fail::Http(400, "missing namespace"))?
+            .to_string();
+        let manifest_bytes = item
+            .get("manifest")
+            .and_then(Value::as_str)
+            .and_then(|t| from_hex_bounded(t, max_manifest))
+            .ok_or(Fail::Http(400, "malformed manifest hex"))?;
+        let alias = match item.get("alias").and_then(Value::as_str) {
+            None => None,
+            Some(t) => Some(
+                AssetAlias::new(t.to_string()).map_err(|_| Fail::Http(400, "malformed alias"))?,
+            ),
+        };
+        let ann = item
+            .get("annotation")
+            .ok_or(Fail::Http(400, "missing annotation"))?;
+        let kind = match ann.get("kind") {
+            None => None,
+            Some(v) => Some(parse_kind(
+                v.as_str().ok_or(Fail::Http(400, "malformed annotation field"))?,
+            )?),
+        };
+        let visibility = match ann.get("visibility").and_then(Value::as_str) {
+            None | Some("public") => Visibility::Public,
+            Some("private") => Visibility::Private,
+            Some(_) => return Err(Fail::Http(400, "malformed visibility")),
+        };
+        parsed.push(Parsed {
+            namespace,
+            manifest_bytes,
+            alias,
+            title: body_str(ann, "title")?.to_string(),
+            description: opt_str(ann, "description")?,
+            kind,
+            categories: body_labels(ann, "categories")?,
+            tags: body_labels(ann, "tags")?,
+            creator: opt_str(ann, "creator")?,
+            generator: opt_str(ann, "generator")?,
+            backend: opt_str(ann, "backend")?,
+            model: opt_str(ann, "model")?,
+            prompt: opt_str(ann, "prompt")?,
+            provenance: opt_str(ann, "provenance")?,
+            visibility,
+        });
+    }
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let outcomes = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        // Publishing a complete asset takes the same three capabilities the
+        // split flow takes, once per distinct namespace in the batch.
+        let mut checked: Vec<&str> = Vec::new();
+        for item in &parsed {
+            if checked.contains(&item.namespace.as_str()) {
+                continue;
+            }
+            require_cap(ctx, &p, Capability::AssetRegister, &item.namespace)?;
+            require_cap(ctx, &p, Capability::AssetPublish, &item.namespace)?;
+            if parsed
+                .iter()
+                .any(|i| i.alias.is_some() && i.namespace == item.namespace)
+            {
+                require_cap(ctx, &p, Capability::AliasWrite, &item.namespace)?;
+            }
+            checked.push(item.namespace.as_str());
+        }
+        let mut batch = Vec::with_capacity(parsed.len());
+        for item in &parsed {
+            let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
+            // An existing owned annotation may only be replaced by its owner
+            // (or root) — the same law the single annotation route enforces.
+            if let Some(prev) = ctx.core.search().annotation(&manifest.asset_id)? {
+                if let Some(owner) = prev.owner {
+                    if owner != p && !ctx.is_root(&p)? {
+                        return Err(ServerError::Denied { capability: "annotation_owner" });
+                    }
+                }
+            }
+            batch.push(crate::PublishBatchItem {
+                namespace: item.namespace.clone(),
+                manifest_bytes: item.manifest_bytes.clone(),
+                annotation: AssetAnnotation {
+                    title: item.title.clone(),
+                    description: item.description.clone(),
+                    kind: item.kind,
+                    categories: item.categories.clone(),
+                    tags: item.tags.clone(),
+                    creator: item.creator.clone(),
+                    owner: Some(p),
+                    generator: item.generator.clone(),
+                    backend: item.backend.clone(),
+                    model: item.model.clone(),
+                    prompt: item.prompt.clone(),
+                    provenance: item.provenance.clone(),
+                    visibility: item.visibility,
+                },
+                alias: item.alias.clone(),
+            });
+        }
+        let outcomes = ctx.core.publish_batch(&batch, now)?;
+        // Transport mirror for the browse listing, one transaction.
+        ctx.tdb.tx(|_| {
+            for (item, outcome) in parsed.iter().zip(&outcomes) {
+                ctx.asset_index_insert(outcome.asset_id.as_bytes(), &item.namespace, now)?;
+            }
+            Ok(())
+        })?;
+        // Events after commit, in commit order, mirroring the split flow:
+        // annotation_set, asset_published, alias_set per item.
+        for (item, outcome) in parsed.iter().zip(&outcomes) {
+            let content_kind = item.kind.map(kind_name);
+            hub.publish(
+                EventBody::asset(
+                    events::KIND_ANNOTATION_SET,
+                    &item.namespace,
+                    outcome.asset_id.to_string(),
+                    now,
+                )
+                .with_content_kind(content_kind),
+            );
+            if !outcome.already_published {
+                hub.publish(
+                    EventBody::asset(
+                        events::KIND_ASSET_PUBLISHED,
+                        &item.namespace,
+                        outcome.asset_id.to_string(),
+                        now,
+                    )
+                    .with_revision(outcome.revision.to_string())
+                    .with_content_kind(content_kind),
+                );
+            }
+            if let Some(alias) = &item.alias {
+                hub.publish(
+                    EventBody::asset(
+                        events::KIND_ALIAS_SET,
+                        alias.namespace(),
+                        outcome.asset_id.to_string(),
+                        now,
+                    )
+                    .with_revision(outcome.revision.to_string())
+                    .with_alias(alias.as_str().to_string())
+                    .with_content_kind(content_kind),
+                );
+            }
+        }
+        Ok(outcomes
+            .iter()
+            .zip(&parsed)
+            .map(|(o, item)| {
+                (
+                    o.asset_id,
+                    o.revision,
+                    o.already_published,
+                    item.alias.as_ref().map(|a| a.as_str().to_string()),
+                )
+            })
+            .collect::<Vec<_>>())
+    })?;
+    let rows: Vec<Value> = outcomes
+        .into_iter()
+        .map(|(asset, revision, already, alias)| {
+            obj(vec![
+                ("asset_id", s(asset.to_string())),
+                ("revision", s(revision.to_string())),
+                ("already_published", Value::Bool(already)),
+                (
+                    "alias",
+                    match alias {
+                        Some(a) => s(a),
+                        None => Value::Null,
+                    },
+                ),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("items", Value::Arr(rows))]),
     )))
 }
 
