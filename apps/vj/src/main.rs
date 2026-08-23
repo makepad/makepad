@@ -107,6 +107,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
+use crate::effects::audio_tex::AudioTexBus;
 use crate::fx_slot::{
     FxSlotKind, FxSlotTileAction, FxSlotTileState, FxSlots, PremixJob, VjFxSlotHost, VjFxSlotTile,
 };
@@ -3128,6 +3129,30 @@ impl CaptureFeed {
     }
 }
 
+impl CaptureFeed {
+    /// THE READ-ONLY AUDIO-TEXTURE TAP: copy every sample the producer has
+    /// written since `cursor` into `out` and return `(new_cursor, rate)`.
+    ///
+    /// NEVER advances the ring's `tail`: the beat-sync worker remains the
+    /// single consumer of record, and a slow visualiser can never starve or
+    /// backpressure the detector. If we fell more than a whole ring behind,
+    /// the cursor jumps to the oldest still-valid sample (dropping history
+    /// is the honest outcome; blocking the detector is not).
+    fn peek_since(&self, cursor: usize, out: &mut Vec<f32>) -> (usize, u32) {
+        let head = self.head.load(Ordering::Acquire);
+        let size = CAPTURE_RING;
+        let mut from = cursor;
+        if head.wrapping_sub(from) > size {
+            from = head.wrapping_sub(size);
+        }
+        while from != head {
+            out.push(f32::from_bits(self.ring[from & (size - 1)].load(Ordering::Relaxed)));
+            from = from.wrapping_add(1);
+        }
+        (head, self.sample_rate.load(Ordering::Relaxed))
+    }
+}
+
 impl Default for CaptureFeed {
     fn default() -> Self {
         Self::new()
@@ -4554,6 +4579,11 @@ pub struct App {
     capture: Option<Arc<CaptureFeed>>,
     #[rust]
     sync_worker: Option<SyncWorker>,
+    /// THE AUDIO PICTURE for the effect system: a per-frame spectrogram +
+    /// waveform texture analysed off the SAME capture ring the beat-sync
+    /// worker listens to (effects/audio_tex.rs owns the read-only tap).
+    #[rust]
+    audio_tex: AudioTexBus,
     #[rust]
     loopback_selected: bool,
     #[rust]
@@ -5483,6 +5513,7 @@ impl App {
             .filter(|_| self.beat_clock.running())
             .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
             .filter(|(_, bpm)| *bpm > 0.0);
+        let audio = self.audio_tex.binding();
         for slot in [SlotId::A, SlotId::B] {
             // Standby decks stay HOT (the standby law): held only means
             // off-program, never paused.
@@ -5495,6 +5526,7 @@ impl App {
                 if let Some((pos, bpm)) = beat {
                     host.set_beat(pos, bpm);
                 }
+                host.set_audio(audio.clone());
             }
         }
     }
@@ -5793,6 +5825,7 @@ impl App {
             .filter(|_| self.beat_clock.running())
             .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
             .filter(|(_, bpm)| *bpm > 0.0);
+        let audio = self.audio_tex.binding();
         let mut a = a;
         let mut b = b;
         for (kind, chan) in [(FxSlotKind::EffectA, &mut a), (FxSlotKind::EffectB, &mut b)] {
@@ -5807,6 +5840,7 @@ impl App {
             if let Some((pos, bpm)) = beat {
                 host.set_beat(pos, bpm);
             }
+            host.set_audio(audio.clone());
             host.set_speed(FxSlots::speed_scale(slot.speed));
             // The three fixed dials drive p0..p2 directly; an untouched
             // knob leaves the doc's binding alone. (A touched knob on an
@@ -5854,6 +5888,7 @@ impl App {
                 if let Some((pos, bpm)) = beat {
                     host.set_beat(pos, bpm);
                 }
+                host.set_audio(audio.clone());
                 host.set_speed(FxSlots::speed_scale(slot.speed));
                 if host.wants_deck_inputs() {
                     // TWO-DECK transition (`engine: "transition"`): the doc
@@ -13212,6 +13247,21 @@ p2 {}
         // texture for that slot; everything downstream is untouched.
         let flow_a = self.slot_flow_source(cx, SlotId::A);
         let flow_b = self.slot_flow_source(cx, SlotId::B);
+        // THE AUDIO PICTURE: analyse whatever the beat-sync capture ring
+        // gained since the last frame and republish the texture every
+        // effect shader samples (effects/audio_tex.rs). The ring tap lives
+        // HERE — the bus itself is source-agnostic.
+        {
+            let mut scratch = self.audio_tex.take_scratch();
+            let mut rate = 0.0f32;
+            if let Some(feed) = self.capture.as_deref() {
+                let (head, r) = feed.peek_since(self.audio_tex.tap_cursor(), &mut scratch);
+                self.audio_tex.set_tap_cursor(head);
+                rate = r as f32;
+            }
+            self.audio_tex.pump(cx, &scratch, rate);
+            self.audio_tex.return_scratch(scratch);
+        }
         // Content-mode effects: run their clocks, then read their pictures
         // exactly like the mesh/splat offscreen slots.
         self.pump_fx_content(cx);

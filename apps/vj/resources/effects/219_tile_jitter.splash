@@ -1,0 +1,104 @@
+// TILE JITTER — the picture holds together but will not sit still: every
+// tile jumps to a new hashed offset ON THE BEAT and settles back before the
+// next one, spinning a little as it goes.
+//
+// Pattern taught here: BEAT-QUANTISED HASHES. The jump seed is
+// `floor(bar * 4)` — which beat of the bar we are on — so it steps four
+// times a bar and repeats forever; nothing accumulates, and cueing the deck
+// anywhere lands mid-pattern instead of mid-drift. The settle is
+// `1 - beat phase`, a plain 1..0 saw, so every jump decays exactly on time
+// whatever the tempo.
+{
+    name: "Tile Jitter"
+    engine: "tiles"
+    mode: "hook"
+    seed: 23
+
+    grid: 26
+    spread: 8.6
+    aspect: 0.66
+    gap: 0.05
+
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5
+    p2: "0.06 + 0.22 * pulse"
+    dials: [
+        {name: "THROW", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "GROUT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x0a0610
+    color_a: #xff5fa8
+    color_b: #x40206a
+    color_c: #xffd9f0
+
+    fog: 0.0
+    glow: 1.05
+
+    stages: [
+        {kind: "chroma", p1: "(0.05 + 0.12 * pulse)", p2: 0.25},
+        {kind: "bloom", threshold: 0.66, strength: 0.95, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the mode highlight drive, attr = (shade, edge, stagger, tumble).
+    // Vertex hooks: fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale),
+    // fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTiles {
+        fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            // Which beat of the bar: 0..3, stepping, bounded forever.
+            let slot = floor(clamp(self.sig.x, 0.0, 0.9999) * 4.0)
+            let seed = id * 1.371 + slot * 37.19
+            let jx = self.hash1(seed + 1.0) - 0.5
+            let jy = self.hash1(seed + 2.0) - 0.5
+            let jz = self.hash1(seed + 3.0) - 0.5
+            // Snap on the beat, settle across it.
+            let settle = 1.0 - clamp(self.time_beat.z, 0.0, 1.0)
+            let ease = settle * settle
+            let throw = (0.25 + 1.5 * clamp(self.user.x, 0.0, 1.0))
+                * self.shape.w * 0.85
+            let pop = 1.0 + 0.18 * ease
+            return vec4(jx * throw, jy * throw, jz * throw * 0.5, pop)
+        }
+
+        fx_tile_spin: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let slot = floor(clamp(self.sig.x, 0.0, 0.9999) * 4.0)
+            let seed = id * 2.113 + slot * 53.71
+            let ax = self.hash1(seed + 5.0) - 0.5
+            let ay = self.hash1(seed + 6.0) - 0.5
+            let az = self.hash1(seed + 7.0) - 0.5 + 0.05
+            let a = vec3(ax, ay, az)
+            let al = max(length(a), 0.05)
+            let settle = 1.0 - clamp(self.time_beat.z, 0.0, 1.0)
+            let ease = settle * settle
+            let spin = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0)) * 0.32
+            return vec4(a.x / al, a.y / al, a.z / al, ease * spin)
+        }
+
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            let lit = content.xyz * (attr.x * (0.35 + 0.65 * border))
+            // The grout flares while the tiles are still moving.
+            let heat = 1.0 - clamp(self.time_beat.z, 0.0, 1.0)
+            let glowline = self.col_c.xyz.mix(self.col_a.xyz, heat)
+                * (1.0 - border)
+                * (t + clamp(self.user.z, 0.0, 4.0) + heat * 0.35)
+            return vec4((lit + glowline) * self.fog.y, 1.0)
+        }
+    }
+}

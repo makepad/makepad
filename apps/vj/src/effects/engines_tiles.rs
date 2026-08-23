@@ -33,16 +33,26 @@
 //!               flash in sequence on the beat
 //!   spiral   3 — differential whirlpool: inner tiles orbit faster and sink
 //!               into a beat-breathing funnel
+//!   hook     4 — THE ENGINE CONTRIBUTES NO MOTION: every tile sits at its
+//!               rest centre and the document's `fx_tile` / `fx_tile_spin`
+//!               vertex hooks own the whole choreography
 //!
 //! # Document keys (`engine: "tiles"`)
 //! `grid` (24, 4..64 tiles per side), `spread` (7 plane width),
 //! `aspect` (1.0 plane height = spread*aspect), `gap` (0.06 grout),
 //! `amp` (0.5 wave/lift amplitude), `freq` (1.0 — wave frequency, conveyor
 //! speed, spiral angular speed), `spin` (1.0 shatter tumble), `scatter`
-//! (1.2 shatter flight distance, in spreads). Camera: the engine flies its
+//! (1.2 shatter flight distance, in spreads), `extrude` (0.0 — per-tile
+//! LUMA RELIEF: the tile's centre texel pushes the tile along the plane
+//! normal by this many world units and shades it with its own height, so
+//! the picture stands up off the wall). Camera: the engine flies its
 //! own gently swaying front-on rig (doc cam keys are ignored, like tunnel).
 //! Bindings: `p0` ADDS shatter drive (strobe the explosion), `p1` scales
-//! wave amplitude, `p2` adds grout glow. Hook: `fx_color(t, attr, content, cmix)`.
+//! wave amplitude, `p2` adds grout glow.
+//! Hooks: `fx_color(t, attr, content, cmix)` (pixel — the look), plus the
+//! per-tile MOTION pair, applied on top of whatever the mode did:
+//! `fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale)` and
+//! `fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle)`.
 
 use super::engines::{CamPose, EngineUniforms};
 use super::mesh::{FxMesh, FxRng};
@@ -54,6 +64,9 @@ pub enum TilesMode {
     Shatter = 1,
     Conveyor = 2,
     Spiral = 3,
+    /// No engine motion at all — the document's `fx_tile` /
+    /// `fx_tile_spin` vertex hooks are the whole choreography.
+    Hook = 4,
 }
 
 impl TilesMode {
@@ -63,6 +76,7 @@ impl TilesMode {
             "shatter" => Self::Shatter,
             "conveyor" | "belt" => Self::Conveyor,
             "spiral" | "whirl" => Self::Spiral,
+            "hook" | "plane" => Self::Hook,
             _ => return None,
         })
     }
@@ -86,6 +100,10 @@ pub struct TilesConfig {
     pub spin: f32,
     /// Shatter flight distance in spreads.
     pub scatter: f32,
+    /// LUMA RELIEF along the plane normal, in world units (0 = flat wall).
+    /// The vertex stage fetches the tile's centre texel and pushes the
+    /// whole tile out by `luma * extrude` — the picture becomes a relief.
+    pub extrude: f32,
     pub seed: u64,
 }
 
@@ -101,6 +119,7 @@ impl Default for TilesConfig {
             freq: 1.0,
             spin: 1.0,
             scatter: 1.2,
+            extrude: 0.0,
             seed: 9,
         }
     }
@@ -197,6 +216,15 @@ impl TilesEngine {
         }
     }
 
+    /// The tiles-only instance block (`self.tile` in the shader), carried
+    /// beside the shared `shape`/`flow` pair because both of those are
+    /// already full: (extrude, 0, 0, 0). The three free lanes are reserved
+    /// for the next tiles-only key — the layout is a contract, so a new
+    /// value takes a free lane, never `.x`.
+    pub fn extra(&self) -> Vec4f {
+        vec4(Self::san(self.cfg.extrude, 0.0).clamp(0.0, 12.0), 0.0, 0.0, 0.0)
+    }
+
     /// Front-on rig with a gentle parallax sway — a flat picture plane must
     /// never be orbited edge-on, so the engine owns its camera (tunnel law).
     pub fn camera(&self, time: f32) -> CamPose {
@@ -236,6 +264,53 @@ script_mod! {
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         tex0: texture_2d(float)
         has_content: uniform(0.0)
+
+        // THE AUDIO PICTURE (effects/audio_tex.rs) — the live show's sound,
+        // sampleable. One float texture rewritten every frame from exactly
+        // the stream the beat-sync analysis listens to:
+        //   y 0 .. spec_rows-1   SPECTROGRAM ring, x = log-spaced bin
+        //                        (30 Hz .. 16 kHz), value 0..1 magnitude
+        //                        (0 = -72 dBFS, 1 = 0 dBFS), one row per hop
+        //   y spec_rows ..       WAVEFORM ring, x = time inside the row,
+        //                        value = the SIGNED sample, -1..1 (0 = silence,
+        //                        which is also what an unbound slot reads)
+        // audio_dim  = (bins, spec_rows, spec_cursor, wave_cursor)
+        // audio_meta = (tex_w, tex_h, wave_rows, hop_secs)
+        // audio_env  = (bass, mid, high, rms), smoothed 0..1 — no texture
+        //              read needed for a plain level.
+        // Each `*_cursor` names the NEWEST row of its ring: that is the
+        // unwrap key. Use the two helpers, never a raw uv — and remember a
+        // silent rig reads 0 everywhere, so give every look an idle floor.
+        audio_tex: texture_2d(float)
+        audio_dim: uniform(vec4(256.0, 256.0, 0.0, 0.0))
+        audio_meta: uniform(vec4(256.0, 320.0, 64.0, 0.0213))
+        audio_env: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        // Spectrum magnitude 0..1. `f` 0..1 = log frequency (0 = 30 Hz,
+        // 1 = 16 kHz); `age` 0..1 = how far back (0 = now, 1 = the oldest
+        // row kept, about 5.5 s). Silence reads 0.
+        audio_fft: fn(f: float, age: float) -> float {
+            let rows = max(self.audio_dim.y, 1.0)
+            let x = (clamp(f, 0.0, 1.0) * (self.audio_dim.x - 1.0) + 0.5) / self.audio_meta.x
+            let back = clamp(age, 0.0, 1.0) * (rows - 1.0)
+            let row = modf(self.audio_dim.z - back + rows * 2.0, rows)
+            return self.audio_tex.sample_nearest(vec2(x, (row + 0.5) / self.audio_meta.y), 0.0).x
+        }
+
+        // Waveform sample -1..1. `t` 0..1 across the stored window
+        // (1 = the newest sample, about 1.4 s deep). Silence reads 0.
+        audio_wave: fn(t: float) -> float {
+            let bins = max(self.audio_dim.x, 1.0)
+            let wrows = max(self.audio_meta.z, 1.0)
+            let back = (1.0 - clamp(t, 0.0, 1.0)) * (bins * wrows - 1.0)
+            let pos = (bins - 1.0) - back
+            let ro = floor(pos / bins)
+            let col = pos - ro * bins
+            let row = modf(self.audio_dim.w + ro + wrows * 4.0, wrows)
+            let y = (self.audio_dim.y + row + 0.5) / self.audio_meta.y
+            let uv = vec2((col + 0.5) / self.audio_meta.x, y)
+            return self.audio_tex.sample_nearest(uv, 0.0).x
+        }
         backface_culling: false
         alpha_blend: false
         depth_write: true
@@ -280,6 +355,30 @@ script_mod! {
             let glowline = self.col_c.xyz * (1.0 - border)
                 * (t + clamp(self.user.z, 0.0, 4.0))
             return vec4((lit + glowline) * self.fog.y, 1.0)
+        }
+
+        // THE MOTION — per-tile placement, VERTEX stage, doc-replaceable.
+        // Runs for EVERY mode, on top of whatever the mode already did, so
+        // a document can dust the stock wave with jitter or (with
+        // `mode: "hook"`, which contributes nothing) own the choreography
+        // outright.
+        //   id        = tile index, row-major from the bottom-left
+        //   grid      = this tile's (gx, gy); tiles per side = self.shape.y
+        //   uv_window = the tile's window into input0, (u0, v0, u1, v1)
+        //   t         = document time (self.time_beat.x)
+        // Returns (dx, dy, dz, scale): a world-space offset from the tile's
+        // animated centre plus a size multiplier (1.0 = the engine's tile).
+        fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 0.0, 1.0)
+        }
+
+        // THE ORIENTATION — `fx_tile`'s companion, VERTEX stage.
+        // Returns (axis.xyz, angle): an EXTRA rotation of the tile's frame,
+        // composed after the mode's own. Angle 0 (the default) leaves the
+        // mode's rotation exactly as it was — which is why every tiles
+        // document written before this hook existed still renders the same.
+        fx_tile_spin: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 1.0, 0.0)
         }
 
         vertex: fn() {
@@ -343,6 +442,10 @@ script_mod! {
                 ang = drive * self.flow.z * (attr.w * 2.0 - 1.0) * 5.0
                 flash = drive * 0.5
                 shade = shade * (1.0 - drive * 0.22)
+            } else { if mode > 3.5 {
+                // ---- HOOK: the engine stands still. `fx_tile` /
+                // `fx_tile_spin` below are the entire motion program.
+                ctr = rest
             } else { if mode < 2.5 {
                 // ---- CONVEYOR: alternate rows stream, wrap over the lip --
                 let dirn = 1.0 - 2.0 * modf(gy, 2.0)
@@ -377,13 +480,47 @@ script_mod! {
                 axis = vec3(0.0, 0.0, 1.0)
                 ang = da
                 flash = self.time_beat.w * 0.25 * (1.0 - min(rad01, 1.0))
-            }}}
+            }}}}
+            // ---- EXTRUDE: the tile's own texel lifts it off the wall ----
+            // Gated on the key so a document that never asks for relief is
+            // bit-identical to before (and pays for no fetch). The vertex
+            // stage's legal sampler is sample_nearest with an explicit lod.
+            let ext = self.tile.x
+            if ext > 0.0001 {
+                let cuv = vec2((gx + 0.5) / gw, 1.0 - (gy + 0.5) / gw)
+                let texel = self.tex0.sample_nearest(cuv, 0.0)
+                let lum = clamp(dot(texel.xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
+                ctr = ctr + vec3(0.0, 0.0, lum * ext)
+                // Height shading: without it a relief reads as a flat
+                // picture again the moment the camera faces it head-on.
+                shade = shade * (0.62 + 0.62 * lum)
+            }
+            // ---- DOC-AUTHORED PER-TILE MOTION (fx_tile / fx_tile_spin) ---
+            let gv = vec2(gx, gy)
+            let uvw = vec4(
+                gx / gw,
+                1.0 - (gy + 1.0) / gw,
+                (gx + 1.0) / gw,
+                1.0 - gy / gw
+            )
+            let mv = self.fx_tile(id, gv, uvw, t)
+            ctr = ctr + mv.xyz
+            let tile_scale = clamp(mv.w, 0.0, 8.0)
             let c = cos(ang)
             let s = sin(ang)
-            let p = self.rodr(vec3(1.0, 0.0, 0.0), axis, c, s)
-            let q = self.rodr(vec3(0.0, 1.0, 0.0), axis, c, s)
-            let ox = (corner.x - 0.5) * self.shape.w
-            let oy = (corner.y - 0.5) * self.flow.w
+            let mut p = self.rodr(vec3(1.0, 0.0, 0.0), axis, c, s)
+            let mut q = self.rodr(vec3(0.0, 1.0, 0.0), axis, c, s)
+            let sp = self.fx_tile_spin(id, gv, uvw, t)
+            let sl = length(sp.xyz)
+            if sl > 0.0001 {
+                let sax = sp.xyz / sl
+                let sc2 = cos(sp.w)
+                let ss2 = sin(sp.w)
+                p = self.rodr(p, sax, sc2, ss2)
+                q = self.rodr(q, sax, sc2, ss2)
+            }
+            let ox = (corner.x - 0.5) * self.shape.w * tile_scale
+            let oy = (corner.y - 0.5) * self.flow.w * tile_scale
             let wpos = ctr + p * ox + q * oy
             let world = self.draw_list.view_transform
                 * vec4(wpos.x, wpos.y, wpos.z, 1.0)
@@ -453,6 +590,10 @@ pub struct DrawVjFxTiles {
     /// (fog density, emissive gain, tex mix, unused).
     #[live(vec4(0.05, 1.0, 0.0, 0.0))]
     pub fog: Vec4f,
+    /// TILES-ONLY instance block — `shape`/`flow` are both full.
+    /// (extrude world units, reserved, reserved, reserved).
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub tile: Vec4f,
 }
 
 #[cfg(test)]
@@ -528,5 +669,35 @@ mod tests {
         assert!(u.shape.w > 0.0 && u.flow.w > 0.0, "tile size must stay positive");
         let cam = e.camera(3.7);
         assert!(cam.eye.z.is_finite() && cam.eye.z > 0.0);
+    }
+
+    #[test]
+    fn extrude_defaults_off_and_stays_sane() {
+        // Default = a flat wall: the vertex stage's `ext > 0.0001` gate is
+        // what makes every tiles document written before the relief
+        // existed render bit-identically, so the default must be zero.
+        let e = TilesEngine::new(TilesConfig::default());
+        assert_eq!(e.extra().x, 0.0);
+        for bad in [f32::NAN, f32::INFINITY, -5.0, 1e9] {
+            let e = TilesEngine::new(TilesConfig { extrude: bad, ..Default::default() });
+            let x = e.extra();
+            assert!(x.x.is_finite() && (0.0..=12.0).contains(&x.x), "extrude {bad} leaked");
+        }
+        let e = TilesEngine::new(TilesConfig { extrude: 1.5, ..Default::default() });
+        assert_eq!(e.extra().x, 1.5);
+        // The three reserved lanes are part of the contract.
+        let x = e.extra();
+        assert_eq!((x.y, x.z, x.w), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn hook_mode_parses_and_carries_its_own_slot() {
+        assert!(matches!(TilesMode::parse("hook"), Some(TilesMode::Hook)));
+        assert!(matches!(TilesMode::parse("plane"), Some(TilesMode::Hook)));
+        assert!(TilesMode::parse("nope").is_none());
+        // The shader branches on `mode > 3.5`, so the slot must be 4.
+        assert_eq!(TilesMode::Hook as i32, 4);
+        let e = TilesEngine::new(TilesConfig { mode: TilesMode::Hook, ..Default::default() });
+        assert_eq!(e.uniforms().shape.x, 4.0);
     }
 }

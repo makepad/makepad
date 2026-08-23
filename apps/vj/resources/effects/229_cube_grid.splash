@@ -1,0 +1,68 @@
+// CUBE GRID — a 6x6 wall of small cubes, each carrying its own cell of the
+// video (`uv_split: "cells"`), reassembling the whole picture face-on. Once
+// a bar the wall runs a staggered flip wave: every cube half-turns on an
+// alternating axis and returns, the picture shattering into motion and
+// snapping whole again. Pattern taught here: a CONTINUOUS bar-phase flip —
+// the angle is a triangle of the bar phase with a per-cube hash delay, so
+// there is no accumulator and no pop at the bar wrap.
+{
+    name: "Cube Grid"
+    engine: "videomesh"
+    shape: "box"
+    seed: 11
+
+    instances: 36
+    uv_split: "cells"
+    size: 1.05
+    // The 6x6 wall spans ~7 units; spread is the orbit camera's reach
+    // lever (the grid placement below ignores it).
+    spread: 3.2
+    fly: 0.35
+    alt: 0.6
+
+    beat_pulse: 0.35
+    input0: "test"
+
+    color_bg: #x060810
+    color_a: #x3fd8c8
+    color_b: #x2a5f9a
+    color_c: #xd6f6f0
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.75, strength: 0.6, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — placement + fragment. fx_place lays the 36
+    // cubes out as the 6x6 picture (row 0 = the TOP band of the image,
+    // so cell row maps to world +y down) and runs the bar flip; fx_axis
+    // alternates the flip axis checkerwise; fx_color is the lit cell
+    // with a thin grout line.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            let p = modf(modf(id, 6.0) + floor(id / 6.0), 2.0)
+            return vec3(1.0 - p, p, 0.001)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let gx = modf(id, 6.0)
+            let gy = floor(id / 6.0)
+            let x = (gx - 2.5) * 1.16
+            let y = (2.5 - gy) * 1.16
+            let ph = fract(self.sig.x - hash * 0.3 + 1.0)
+            let fl = 1.0 - abs(2.0 * ph - 1.0)
+            let ang = 3.14159 * smoothstep(0.15, 0.85, fl)
+            return vec4(x, y, 0.0, ang)
+        }
+        fx_scale: fn(id: float, hash: float, t: float) -> float {
+            return 1.0 + self.time_beat.w * 0.08
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let lit = content.xyz * (t * (0.5 + 0.5 * attr.z))
+            let grout = self.col_a.xyz * (1.0 - attr.z)
+                * (0.25 + self.time_beat.w * 0.8 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + grout) * self.fog.y, 1.0)
+        }
+    }
+}

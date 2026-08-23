@@ -1,0 +1,44 @@
+// FREEZE — the frame stops dead and re-grabs itself every two beats: the
+// clip lurches forward in stills instead of running. The oldest VJ trick
+// there is, and it still owns a breakdown.
+//
+// Pattern taught here: the `hold` STAGE. It latches the incoming frame and
+// shows it back; WHEN it re-latches is a beat slot (`beats:`) or the rising
+// edge of a bound expression (`trigger:`). Both are read off the song
+// clock, never off a wall-clock timer, so the stills land on the music at
+// any tempo. `mix` fades the held frame against the live one, so the knob
+// can dissolve the freeze away instead of switching it off.
+//
+// GRAB is a gesture, not a level: push the knob past the middle and the
+// rising edge steals a fresh frame right there. Ride it for stutters.
+{
+    name: "Freeze"
+    engine: "screen"
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.7
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.0  p2: 0.5
+    dials: [
+        {name: "HOLD", bind: "p0", default: 0.5},
+        {name: "GRAB", bind: "p1", default: 0.0},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x04050a
+
+    stages: [
+        {
+            kind: "hold"
+            beats: 2
+            trigger: "step(0.55, p1)"
+            mix: "clamp(p0 * 2.0, 0.0, 1.0)"
+            bands: 1
+        },
+        {kind: "bloom", threshold: 0.62, strength: "0.5 + 1.4*p2", levels: 3}
+    ]
+}

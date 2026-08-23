@@ -1,0 +1,66 @@
+// SLAT DEPTH — the picture sliced into sixteen horizontal slats stacked
+// back into a whole frame, each slat carrying its own band of the clip
+// (`uv_split: "bands_y"`) and swimming in DEPTH on a travelling sine: the
+// image stays readable while a wave of parallax rolls through it, and PUMP
+// (p1) deepens the swim. Pattern taught here: band windows + a placement
+// that reassembles the picture — slat pitch equals the slat's world height,
+// row 0 at the top.
+{
+    name: "Slat Depth"
+    engine: "videomesh"
+    shape: "grid"
+    seed: 14
+
+    instances: 16
+    uv_split: "bands_y"
+    size: 2.4
+    aspect: 0.045
+    spread: 0.4
+    fly: 0.3
+    alt: 0.2
+
+    beat_pulse: 0.35
+    p1: "0.3 + 0.5*env(phase)"
+    input0: "test"
+
+    dials: [
+        {name: "SPIN", bind: "p0", default: 0.0},
+        {name: "PUMP", bind: "p1", default: 0.4},
+        {name: "EDGE", bind: "p2", default: 0.2}
+    ]
+
+    color_bg: #x060810
+    color_a: #x3fd8c8
+    color_b: #x2a5f9a
+    color_c: #xd6f6f0
+
+    fog: 0.03
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.78, strength: 0.5, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — the stacked-slat placement (y from the band
+    // row, z from the travelling wave) and the slat fragment.
+    shader: draw.DrawVjFxVideomesh {
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let n = max(self.shape.y, 2.0)
+            let h = 0.1944
+            let y = ((n - 1.0) * 0.5 - id) * h
+            let deep = 0.55 + 1.4 * clamp(self.user.y, 0.0, 2.0)
+            let z = sin(t * 0.7 + id * 0.42) * deep
+            return vec4(0.0, y, z, 0.0)
+        }
+        fx_scale: fn(id: float, hash: float, t: float) -> float {
+            return 1.0
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let shade = 0.9 + 0.2 * attr.x
+            let lit = content.xyz * (t * shade)
+            let gap = self.col_a.xyz * (1.0 - attr.z)
+                * (0.15 + self.time_beat.w * 0.5 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + gap) * self.fog.y, 1.0)
+        }
+    }
+}
