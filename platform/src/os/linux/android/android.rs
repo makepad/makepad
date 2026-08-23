@@ -2270,7 +2270,7 @@ impl Cx {
 
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         // keep repainting in a loop
         self.passes[draw_pass_id].paint_dirty = false;

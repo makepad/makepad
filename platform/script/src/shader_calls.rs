@@ -1567,14 +1567,14 @@ impl ShaderFnCompiler {
                 );
             }
             id!(sample) | id!(sample_as_bgra) | id!(sample_lod) | id!(sample_nearest)
-            | id!(sample_repeat) | id!(sample_as_bgra_repeat)
-            | id!(sample_rt) => {
+            | id!(sample_repeat) | id!(sample_as_bgra_repeat) => {
                 // sample(coord) samples the texture at normalized coordinates.
                 // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
                 // applies a BGRA->RGBA swizzle in the sampler helper.
-                // sample_rt(coord) is for offscreen render targets: on GL-family
-                // backends the FBO is stored bottom-up, so it flips V (1.0 - y); on
-                // Metal/D3D/WGSL/Rust render targets are top-left origin so it's plain sample.
+                // There is deliberately NO render-target variant: every
+                // backend stores offscreen targets in top-left row order
+                // (GL renders them through a Y-inverted projection), so a
+                // render texture samples exactly like any other.
                 let method_name = if method_id == id!(sample_as_bgra)
                     || method_id == id!(sample_as_bgra_repeat)
                 {
@@ -1583,8 +1583,6 @@ impl ShaderFnCompiler {
                     "sample_nearest"
                 } else if method_id == id!(sample_lod) {
                     "sample_lod"
-                } else if method_id == id!(sample_rt) {
-                    "sample_rt"
                 } else {
                     "sample"
                 };
@@ -1793,9 +1791,6 @@ impl ShaderFnCompiler {
                                     {
                                         write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
                                             .ok();
-                                    } else if method_id == id!(sample_rt) {
-                                        write!(s, "sample2d_rt({}, {})", texture_expr, coord)
-                                            .ok();
                                     } else {
                                         write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                                     }
@@ -1908,7 +1903,6 @@ impl ShaderFnCompiler {
                             id!(sample_repeat),
                             id!(sample_as_bgra_repeat),
                             id!(sample_lod),
-                            id!(sample_rt),
                             id!(sample_video),
                             id!(size)
                         ]

@@ -632,6 +632,10 @@ impl Image {
             let (width, height) = image_texture
                 .get_format(cx)
                 .vec_width_height()
+                // A FIXED-size render target (e.g. a video convert pass)
+                // has real dimensions too — without this it sized as
+                // min_* (usually zero) and the picture silently vanished.
+                .or_else(|| image_texture.get_format(cx).render_fixed_width_height())
                 .unwrap_or((self.min_width as usize, self.min_height as usize));
             if let Some(animation) = image_texture.animation(cx) {
                 let (w, h) = (animation.width as f64, animation.height as f64);
@@ -642,10 +646,10 @@ impl Image {
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
                 (w, h)
             } else if image_texture.get_format(cx).is_render() {
-                // GL render target textures use Y-up (bottom-left origin) convention.
-                // Flip Y so the image displays correctly in Makepad's Y-down coordinate system.
-                self.draw_bg.image_scale = vec2(1.0, -1.0);
-                self.draw_bg.image_pan = vec2(0.0, 1.0);
+                // Render targets are stored top-left on EVERY backend now
+                // (GL renders offscreen through a Y-inverted projection),
+                // so they sample exactly like any other texture — the old
+                // unconditional flip here showed them upside down.
                 (width as f64 * self.width_scale, height as f64)
             } else {
                 (width as f64 * self.width_scale, height as f64)

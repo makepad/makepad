@@ -310,7 +310,7 @@ impl Cx {
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         self.passes[draw_pass_id].paint_dirty = false;
 
