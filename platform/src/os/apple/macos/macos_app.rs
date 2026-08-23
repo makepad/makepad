@@ -1114,7 +1114,9 @@ fn run_select_folder_panel(title: &str, location: &str) -> Option<std::path::Pat
         if panel == nil {
             return None;
         }
-        let () = msg_send![panel, setCanChooseFiles: NO];
+        // Files AND folders: one panel serves both "import this clip" and
+        // "import this library" — the consumer's scan handles either.
+        let () = msg_send![panel, setCanChooseFiles: YES];
         let () = msg_send![panel, setCanChooseDirectories: YES];
         let () = msg_send![panel, setAllowsMultipleSelection: NO];
         let () = msg_send![panel, setCanCreateDirectories: NO];

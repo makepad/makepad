@@ -123,6 +123,10 @@ fn classify(ext: &str) -> Option<(MediaClass, MediaType)> {
         "mp4" | "mov" | "m4v" => (MediaClass::Video, MediaType::Mp4),
         "png" => (MediaClass::Image, MediaType::Png),
         "jpg" | "jpeg" => (MediaClass::Image, MediaType::Jpeg),
+        // Decoded on import (libs/webp) and published as OWNED png bytes:
+        // the catalog has no webp media type and the draw path no webp
+        // decode, so the conversion happens once, here.
+        "webp" => (MediaClass::Image, MediaType::Png),
         "wav" | "wave" => (MediaClass::Audio, MediaType::Wav),
         "mp3" => (MediaClass::Audio, MediaType::Mp3),
         "ogg" | "oga" => (MediaClass::Audio, MediaType::Ogg),
@@ -130,11 +134,43 @@ fn classify(ext: &str) -> Option<(MediaClass, MediaType)> {
     })
 }
 
+/// Decode a webp file into png bytes (RGB and RGBA both; animation takes
+/// the first frame). One decode, at import — nothing downstream speaks webp.
+fn webp_to_png(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
+    let mut decoder = makepad_webp::WebPDecoder::new(std::io::BufReader::new(
+        std::io::Cursor::new(&bytes),
+    ))
+    .map_err(|e| format!("{e}"))?;
+    let (w, h) = decoder.dimensions();
+    let size = decoder.output_buffer_size().ok_or("size overflow")?;
+    let mut decoded = vec![0u8; size];
+    decoder.read_image(&mut decoded).map_err(|e| format!("{e}"))?;
+    let pixels = (w as usize).checked_mul(h as usize).ok_or("dimension overflow")?;
+    if pixels == 0 {
+        return Err("zero-sized image".to_string());
+    }
+    let rgba: Vec<u8> = match decoded.len() / pixels {
+        4 => decoded,
+        3 => {
+            let mut out = Vec::with_capacity(pixels * 4);
+            for px in decoded.chunks_exact(3) {
+                out.extend_from_slice(px);
+                out.push(0xff);
+            }
+            out
+        }
+        n => return Err(format!("unsupported channel count {n}")),
+    };
+    makepad_asset_importer::classic_import::encode_png_rgba(&rgba, w, h)
+        .map_err(|e| format!("png encode: {e}"))
+}
+
 /// Extensions a user will reasonably expect to work and that we cannot
 /// publish yet. Naming them is the difference between a bug report and an
 /// informed choice about transcoding.
 const KNOWN_UNSUPPORTED: &[&str] = &[
-    "mkv", "avi", "webm", "wmv", "flv", "mpg", "mpeg", "m2ts", "ts", "gif", "webp", "bmp",
+    "mkv", "avi", "webm", "wmv", "flv", "mpg", "mpeg", "m2ts", "ts", "gif", "bmp",
     "tif", "tiff", "heic", "flac", "m4a", "aac", "aiff", "aif", "wma", "opus",
 ];
 
@@ -471,6 +507,23 @@ pub fn import_file(
         Err(error) => return FileOutcome::Failed(format!("absolute path: {error}")),
     };
 
+    // ---- webp: decode once, publish owned png bytes ---------------------
+    // The catalog has no webp media type and nothing downstream decodes
+    // webp at draw time, so the conversion is the import.
+    let webp_png: Option<Vec<u8>> = if file
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("webp"))
+    {
+        match webp_to_png(&abs) {
+            Ok(png) => Some(png),
+            Err(why) => return FileOutcome::Failed(format!("webp decode: {why}")),
+        }
+    } else {
+        None
+    };
+
     // ---- the conversion route (videos only, and only when asked) --------
     let mut note: Option<String> = None;
     let mut converted: Option<(Scratch, String)> = None;
@@ -492,16 +545,42 @@ pub fn import_file(
         .as_ref()
         .map(|(scratch, _)| scratch.0.clone())
         .unwrap_or_else(|| abs.clone());
-    let (thumbnail, media_millis) = match thumbnail_of(file, &payload_path) {
-        Ok(v) => v,
-        Err(error) => return FileOutcome::Failed(error),
+    let (thumbnail, media_millis) = match &webp_png {
+        // The converted picture IS the payload: thumbnail from those bytes,
+        // never a second decode of the original.
+        Some(png) => match makepad_asset_importer::import::usable_image_thumb(png) {
+            Some((thumb, media, w, h)) => (PublishThumbnail::plain(thumb, media, w, h), 0),
+            None => match thumbs::encode_jpeg_bgra(
+                &thumbs::placeholder_bgra_512(),
+                thumbs::THUMB_DIM,
+                thumbs::THUMB_DIM,
+            ) {
+                Ok(jpeg) => (
+                    PublishThumbnail::plain(
+                        jpeg,
+                        ThumbnailMedia::Jpeg,
+                        thumbs::THUMB_DIM as u32,
+                        thumbs::THUMB_DIM as u32,
+                    ),
+                    0,
+                ),
+                Err(error) => return FileOutcome::Failed(error),
+            },
+        },
+        None => match thumbnail_of(file, &payload_path) {
+            Ok(v) => v,
+            Err(error) => return FileOutcome::Failed(error),
+        },
     };
     // Images declare their pixel dims in the manifest; other media must not.
     let dims = if matches!(file.class, MediaClass::Image) {
-        match std::fs::read(&file.path)
-            .ok()
-            .and_then(|b| thumbs::png_dims(&b).or_else(|| thumbs::jpeg_dims(&b)))
-        {
+        let header = match &webp_png {
+            Some(png) => thumbs::png_dims(png),
+            None => std::fs::read(&file.path)
+                .ok()
+                .and_then(|b| thumbs::png_dims(&b).or_else(|| thumbs::jpeg_dims(&b))),
+        };
+        match header {
             Some(d) => Some(d),
             None => return FileOutcome::Failed("unreadable image header".to_string()),
         }
@@ -509,7 +588,15 @@ pub fn import_file(
         None
     };
 
-    let (files, provenance) = match &converted {
+    let (files, provenance) = if let Some(png) = webp_png {
+        // Owned converted bytes, like a converted clip: the png exists
+        // nowhere on disk, so a reference would dangle.
+        (
+            vec![PublishBundleFile::bytes(role_of(file.class), MediaType::Png, png, dims)],
+            format!("decoded from webp at {}", abs.display()),
+        )
+    } else {
+        match &converted {
         // The converted clip is the store's OWN blob: these bytes exist
         // nowhere else, so referencing a temp file that is about to be
         // deleted would be a dangling library entry.
@@ -536,6 +623,7 @@ pub fn import_file(
             )],
             format!("referenced in place from {}", abs.display()),
         ),
+        }
     };
 
     let mut bundle = PublishBundle::new(

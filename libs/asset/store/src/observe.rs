@@ -71,7 +71,13 @@ pub const TRANSITION_TAG: &str = "transition";
 /// Engines whose whole job is SHAPING the incoming program picture rather
 /// than drawing an unrelated scene — which is exactly what makes a document
 /// usable in the transition slot.
-pub const TRANSITION_ENGINES: &[&str] = &["transition", "screen", "tiles"];
+// ONLY the transition engine is definitively a transition. `screen` and
+// `tiles` were listed here once and that mis-tagged fifty pure effects
+// (distorts, colour looks, the audio visualizers) into the TRANSITION
+// lane on any observer republish — a screen-engine doc that IS a
+// transition declares `transition: true` in the document, and the art
+// transitions on other engines ride the embedder's stem list.
+pub const TRANSITION_ENGINES: &[&str] = &["transition"];
 
 /// Bundled transition-suited docs whose ENGINE alone cannot say so (the
 /// raymarch and videomesh art transitions). The VJ passes its full
@@ -711,8 +717,10 @@ mod tests {
     #[test]
     fn transition_is_declared_by_the_document_its_engine_or_the_embedder() {
         assert!(declares_transition("{ engine: \"transition\" }", "x", &[]));
-        assert!(declares_transition("{ engine: \"screen\" }", "x", &[]));
-        assert!(declares_transition("{ engine: \"tiles\" }", "x", &[]));
+        // screen/tiles are EFFECT families: a mirror or a colour look must
+        // never land in the transition lane off its engine alone.
+        assert!(!declares_transition("{ engine: \"screen\" }", "x", &[]));
+        assert!(!declares_transition("{ engine: \"tiles\" }", "x", &[]));
         assert!(declares_transition("{ transition: true }", "x", &[]));
         assert!(!declares_transition("{ engine: \"particles\" }", "x", &[]));
         // A real document's shape, and a comment that must not count.

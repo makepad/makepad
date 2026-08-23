@@ -36,7 +36,9 @@ script_mod! {
         // MASTER FADEOUT: the final composite multiplies by 1-fadeout
         // right here in the existing pass — a clean blackout with zero
         // extra render-to-texture, on every path (plain mix, transition
-        // engaged, all of it).
+        // engaged, all of it). (Corner rounding is NOT done here: the
+        // program draws a plain cheap quad and the console lays
+        // VjCornerCaps over the monitor wells — see DrawCornerCap.)
         fragment: fn(){
             let c = self.pixel()
             let keep = 1.0 - clamp(self.fadeout, 0.0, 1.0)
@@ -369,6 +371,26 @@ script_mod! {
         }
     }
 
+    // NEGATIVE ROUNDED CORNERS for big content quads: the content draws a
+    // PLAIN cheap quad, and four tiny cap quads draw over its corners —
+    // cap color outside a quarter-circle, transparent inside. SDF math
+    // runs only on those few-hundred-pixel patches instead of megapixels
+    // of video. Cap color = whatever chrome sits behind the content.
+    set_type_default() do #(DrawCornerCap::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let p = self.pos * self.rect_size
+            let d = length(p - vec2(self.center.x, self.center.y))
+            let a = smoothstep(self.arc_r - 0.7, self.arc_r + 0.7, d)
+            return Pal.premul(vec4(self.cap_color.xyz, self.cap_color.w * a))
+        }
+    }
+    mod.widgets.VjCornerCapsBase = #(VjCornerCaps::register_widget(vm))
+    mod.widgets.VjCornerCaps = set_type_default() do mod.widgets.VjCornerCapsBase{
+        width: Fill
+        height: Fill
+    }
+
     mod.widgets.VideoProgramBase = #(VideoProgram::register_widget(vm))
     mod.widgets.VideoProgram = set_type_default() do mod.widgets.VideoProgramBase{
         width: Fill
@@ -459,9 +481,9 @@ script_mod! {
                 let bar = step(0.0001, self.fill)
                 return vec4(c.xyz * framed.z, c.w * mix(framed.z, 1.0, bar))
             }
-            // Subtle top/bottom vignette so the pad number (PadCell's top
-            // row) and the title (both cells' bottom row) still read over
-            // a full-bleed FILL photo. Scaled by `fill` so it never
+            // Subtle top/bottom vignette so TileCell's top-row state label
+            // and the title (both cells' bottom row) still read over a
+            // full-bleed FILL photo. Scaled by `fill` so it never
             // touches FIT sprite icons; TileCell's own opaque label
             // backdrop (`#x000000b8`) already covers its bottom row, so
             // this is redundant-but-harmless there and only load-bearing
@@ -474,10 +496,35 @@ script_mod! {
                 let bottom = smoothstep(0.62, 1.0, y)
                 return max(top, bottom) * 0.45 * self.fill
             }
+            // ONE-PASS TILE FRAME (the tile wall's law): with `radius` set
+            // the SAME shader that samples the thumbnail also rounds the
+            // corners and strokes the outline — inside the rounded rect
+            // it is the image, at the rim the border color, outside
+            // transparent. Every pixel of a tile is touched exactly ONCE
+            // (the card behind skips its fill — see PadCell.has_thumb).
+            // radius 0 = the plain full-quad image every other host gets.
+            radius: instance(0.0)
+            border_size: instance(1.0)
+            border_color: instance(#xffffff2e)
+            border_color_selected: instance(#xff5c39)
+            selected: instance(0.0)
             pixel: fn() {
                 let color = mix(self.get_color(), #3, self.async_load)
                 let dim = 1.0 - self.edge_scrim(self.pos.y)
-                return Pal.premul(vec4(color.xyz * dim, color.w * self.opacity))
+                let img = Pal.premul(vec4(color.xyz * dim, color.w * self.opacity))
+                if self.radius < 0.5 {
+                    return img
+                }
+                let r = self.radius
+                let h = vec2(self.rect_size.x * 0.5, self.rect_size.y * 0.5)
+                let q = abs(self.pos * self.rect_size - h) - h + vec2(r + 1.0, r + 1.0)
+                let d = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r
+                let bs = self.border_size + self.selected
+                let covered = 1.0 - smoothstep(-0.7, 0.7, d)
+                let inside = 1.0 - smoothstep(-bs - 0.7, -bs + 0.7, d)
+                let rim = max(covered - inside, 0.0)
+                let stroke = self.border_color.mix(self.border_color_selected, self.selected)
+                return img * inside + Pal.premul(stroke) * rim
             }
         }
     }
@@ -571,11 +618,6 @@ script_mod! {
                     spacing: 4
                     padding: Inset{left: 6.0 right: 6.0 top: 5.0 bottom: 0.0}
                     align: Align{x: 0.0, y: 0.5}
-                    grid_pad := Label{
-                        text: ""
-                        draw_text.color: #xff5c39
-                        draw_text.text_style: theme.font_bold{font_size: 8}
-                    }
                     View{width: Fill height: 1}
                     grid_state := Label{
                         text: ""
@@ -589,7 +631,18 @@ script_mod! {
                     height: Fit
                     flow: Down
                     padding: Inset{left: 6.0 right: 6.0 top: 8.0 bottom: 5.0}
-                    draw_bg.color: #x000000b8
+                    draw_bg +: {
+                        color: #x000000b8
+                        // The label backdrop follows the card's bottom
+                        // radius — a square band over rounded corners is
+                        // exactly the mismatch the tile law bans.
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box_y(1.0, 0.0, self.rect_size.x - 2.0, self.rect_size.y - 1.0, 0.0, 6.0)
+                            sdf.fill(self.color)
+                            return sdf.result
+                        }
+                    }
                     grid_title := Label{
                         width: Fill
                         text: ""
@@ -696,14 +749,14 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Down
-            spacing: 6
+            spacing: 4
             // VJ law: a drag belongs to a control, never to a view.
             drag_scrolling: false
             Row := View{
                 width: Fill
                 height: Fit
                 flow: Right
-                spacing: 8
+                spacing: 4
                 c1 := TileCell{}
                 c2 := TileCell{}
                 c3 := TileCell{}
@@ -738,11 +791,19 @@ script_mod! {
             empty: instance(0.0)
             border_size: 1.0
             border_radius: 5.0
+            has_thumb: instance(0.0)
             // One state, one mark: the tile last clicked wears a green
             // ring, every other tile is a plain outline. Anything else the
             // grid used to paint (LIVE / CUE, dim second-place rings) read
             // as noise across forty pads.
+            // SINGLE-FILL LAW: with a thumbnail bound, the IMAGE shader
+            // draws the whole tile (picture + corners + outline) in one
+            // pass — this card paints NOTHING under it, so no pixel on
+            // the tile wall fills twice.
             pixel: fn() {
+                if self.has_thumb > 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.border_radius)
                 // Empty pads fade to a faint outline.
@@ -762,26 +823,26 @@ script_mod! {
             View{
                 width: Fill
                 height: Fill
-                padding: 3
+                // FULL-BLEED: the thumb shader draws the whole tile in one
+                // pass — picture, rounded corners AND outline (radius +
+                // border instances below); the card skips its fill under
+                // it (has_thumb). The shader's own 1px inset aligns its
+                // frame with the card's.
                 align: Align{x: 0.5 y: 0.5}
-                grid_thumb := SpriteTileImage{}
+                grid_thumb := SpriteTileImage{
+                    draw_bg +: {
+                        radius: 10.0
+                        border_size: 1.0
+                        border_color: #xffffff2e
+                        border_color_selected: #xff5c39
+                    }
+                }
             }
             View{
                 width: Fill
                 height: Fill
                 flow: Down
                 padding: 3
-                View{
-                    width: Fill
-                    height: Fit
-                    flow: Right
-                    grid_pad := Label{
-                        text: ""
-                        draw_text.color: #xff5c39cc
-                        draw_text.text_style: theme.font_bold{font_size: 7}
-                    }
-                    View{width: Fill height: 1}
-                }
                 View{width: Fill height: Fill}
                 // Small name so a pad is readable before its thumbnail lands.
                 grid_title := Label{
@@ -927,35 +988,6 @@ script_mod! {
         height: 22
     }
 
-    // SCRATCH SHUTTLE: a jog well with a sprung knob. `pos` -1..1 drawn
-    // from the uniform alone; the widget springs it home on release.
-    set_type_default() do #(DrawVjShuttle::script_shader(vm)){
-        ..mod.draw.DrawQuad
-        shuttle: uniform(0.0)
-        active: uniform(0.0)
-        color_well: uniform(#x1d222a)
-        color_rim: uniform(#xffffff26)
-        color_detent: uniform(#x39404a)
-        color_knob: uniform(#xe8eef4)
-        color_hot: uniform(#xff5c39)
-        pixel: fn() {
-            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            let w = self.rect_size.x
-            let h = self.rect_size.y
-            sdf.box(0.5, 2.0, w - 1.0, h - 4.0, 5.0)
-            sdf.fill(self.color_well)
-            sdf.stroke(self.color_rim, 1.0)
-            // centre detent tick
-            sdf.box(w * 0.5 - 0.75, 4.5, 1.5, h - 9.0, 0.75)
-            sdf.fill(self.color_detent)
-            // sprung knob: centre at the shuttle position
-            let half = w * 0.5 - 7.0
-            let kx = w * 0.5 + self.shuttle * half
-            sdf.box(kx - 3.0, 3.5, 6.0, h - 7.0, 3.0)
-            sdf.fill(self.color_knob.mix(self.color_hot, self.active))
-            return sdf.result
-        }
-    }
     // BEATS-PER-SWEEP DROPDOWN: a chip that opens a compact list
     // (1/2/4/8/16 beats, — = free) in an overlay under itself.
     set_type_default() do #(DrawVjBeatsChip::script_shader(vm)){
@@ -968,7 +1000,7 @@ script_mod! {
         border_color: uniform(#xffffff26)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0)
+            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
             sdf.fill(self.color.mix(self.color_hover, max(self.hover, self.open)))
             sdf.stroke(self.border_color, 1.0)
             // tiny drop arrow at the right edge
@@ -995,7 +1027,7 @@ script_mod! {
             border_color: #xffffff2e
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
                 sdf.fill(self.color)
                 sdf.stroke(self.border_color, 1.0)
                 return sdf.result
@@ -1006,9 +1038,56 @@ script_mod! {
         }
     }
 
-    mod.widgets.VjShuttleBase = #(VjShuttle::register_widget(vm))
-    mod.widgets.VjShuttle = set_type_default() do mod.widgets.VjShuttleBase{
-        width: 72
+    // JOG WHEEL: a horizontal drum seen side-on — vertical ridges spaced
+    // tighter toward the edges (a cylinder's foreshortening, via asin),
+    // brightness falling off with the curvature. The ridges roll with
+    // the MEDIA CLOCK the host pushes, so the drum is the live direction
+    // + speed readout (forward = rightward flow, reverse = leftward,
+    // paused = still). The WHITE MARKER is the sprung hand: it deflects
+    // with the drag (push right = shove forward, pull left = reverse)
+    // and springs home on release.
+    set_type_default() do #(DrawVjWheel::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        shuttle: uniform(0.0)
+        phase: uniform(0.0)
+        hover: uniform(0.0)
+        inert: uniform(0.0)
+        color_well: uniform(#x1d222a)
+        color_rim: uniform(#xffffff26)
+        color_ridge: uniform(#x8b96a3)
+        color_marker: uniform(#xe8eef4)
+        color_hot: uniform(#xff5c39)
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            sdf.box(0.5, 2.0, w - 1.0, h - 4.0, 2.5)
+            sdf.fill(self.color_well)
+            sdf.stroke(self.color_rim, 1.0)
+            // Cylinder maths: screen x -> drum angle; ridges even in angle
+            // read tighter at the rim, and shade off with the curvature.
+            let x = clamp(self.pos.x * 2.0 - 1.0, -0.985, 0.985)
+            let theta = asin(x)
+            let curve = cos(theta)
+            let s = theta * 7.0 - self.phase * 6.2831853
+            let ridge = smoothstep(0.62, 0.95, cos(s * 4.0))
+            let inside = step(2.5, self.pos.y * h) * step(self.pos.y * h, h - 2.5)
+            let lit = ridge * curve * inside * (0.30 + 0.30 * self.hover)
+            let mut out = sdf.result + vec4(self.color_ridge.xyz * lit, 0.0)
+            // The sprung white marker, deflected by the hand.
+            let half = w * 0.5 - 5.0
+            let mx = w * 0.5 + self.shuttle * half
+            let p = self.pos * self.rect_size
+            let mark = (1.0 - smoothstep(0.9, 1.8, abs(p.x - mx))) * inside
+            let hot = min(abs(self.shuttle) * 3.0, 1.0)
+            let mcol = self.color_marker.mix(self.color_hot, hot)
+            out = out.mix(vec4(mcol.xyz, 1.0), mark)
+            return out * (1.0 - self.inert * 0.6)
+        }
+    }
+    mod.widgets.VjSlowmoWheelBase = #(VjSlowmoWheel::register_widget(vm))
+    mod.widgets.VjSlowmoWheel = set_type_default() do mod.widgets.VjSlowmoWheelBase{
+        width: 110
         height: 22
     }
 
@@ -1022,7 +1101,7 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Right
-            spacing: 6
+            spacing: 4
             View{
                 width: Fill
                 height: Fill
@@ -1146,6 +1225,81 @@ pub struct DrawProgram {
     /// (the crossfader cluster's FADEOUT knob).
     #[live]
     pub fadeout: f32,
+}
+
+/// One corner-cap quad: painted `cap_color` outside a quarter-circle of
+/// radius `arc_r` around `center` (patch-local px), transparent inside.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawCornerCap {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live]
+    pub center: Vec2f,
+    #[live(9.0)]
+    pub arc_r: f32,
+    #[live(vec4(0.078, 0.09, 0.11, 1.0))]
+    pub cap_color: Vec4f,
+}
+
+/// Four tiny inverse-corner caps over a plain content quad (the cheap way
+/// to round a video well: the megapixel quad stays flat, only 4 r×r
+/// patches run any per-pixel math). Fill it over the content in an
+/// Overlay; `radius` is the visual corner radius, `draw_cap.cap_color`
+/// the chrome behind the content. Draws only — never claims a hit.
+#[derive(Script, ScriptHook, Widget)]
+pub struct VjCornerCaps {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_cap: DrawCornerCap,
+    #[live(9.0)]
+    radius: f64,
+    #[rust]
+    area: Area,
+}
+
+impl Widget for VjCornerCaps {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+        let r = self.radius.max(0.0);
+        if r > 0.5 && rect.size.x > r * 2.0 && rect.size.y > r * 2.0 {
+            let s = dvec2(r, r);
+            let rf = r as f32;
+            self.draw_cap.arc_r = rf;
+            // Each patch's arc center is its INNER corner.
+            self.draw_cap.center = vec2f(rf, rf);
+            self.draw_cap.draw_abs(cx, Rect { pos: rect.pos, size: s });
+            self.draw_cap.center = vec2f(0.0, rf);
+            self.draw_cap.draw_abs(
+                cx,
+                Rect { pos: dvec2(rect.pos.x + rect.size.x - r, rect.pos.y), size: s },
+            );
+            self.draw_cap.center = vec2f(rf, 0.0);
+            self.draw_cap.draw_abs(
+                cx,
+                Rect { pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - r), size: s },
+            );
+            self.draw_cap.center = vec2f(0.0, 0.0);
+            self.draw_cap.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + rect.size.x - r, rect.pos.y + rect.size.y - r),
+                    size: s,
+                },
+            );
+        }
+        DrawStep::done()
+    }
 }
 
 /// One frame of karaoke, as the program should draw it: the line being sung,
@@ -1642,7 +1796,6 @@ pub struct GridEntry {
     pub title: String,
     pub sub: String,
     pub state: String,
-    pub pad: String,
     pub texture: Option<Texture>,
     pub frames: Vec<Texture>,
     pub fps: f32,
@@ -1839,7 +1992,6 @@ mod tile_fit_tests {
             title: String::new(),
             sub: String::new(),
             state: String::new(),
-            pad: String::new(),
             texture: None,
             frames: Vec::new(),
             fps: 0.0,
@@ -2207,6 +2359,14 @@ impl Widget for VjBeatsDrop {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.draw_bg.draw_abs(cx, rect);
+        // INERT = the empty-deck ghost: the chip shader dims the well, and
+        // the face text dims WITH it — a bright "1" on a dead deck reads
+        // as a live control.
+        self.draw_text.color = if self.inert {
+            Vec4f::from_u32(0x39404a88)
+        } else {
+            Vec4f::from_u32(0xf4f7faff)
+        };
         // centre the face text, biased left of the drop arrow
         let face = self.face();
         self.draw_text.draw_abs(
@@ -2348,16 +2508,20 @@ pub enum VjShuttleAction {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawVjShuttle {
+pub struct DrawVjWheel {
     #[deref]
     draw_super: DrawQuad,
 }
 
-/// SCRATCH / SHUTTLE: centre = neutral, drag right = forward (faster with
-/// distance), drag left = reverse, and the knob SPRINGS home on release —
-/// a performance jog, never a latched rate.
+/// JOG WHEEL: the sprung scratch hand in drum clothing. Dragging deflects
+/// the white marker and emits [`VjShuttleAction::Scratch`] exactly like
+/// the classic shuttle (push right = shove forward, pull left = reverse);
+/// release EASES the marker home, riding the same spring the shuttle
+/// used, and the host re-engages normal transport at 0. The drum ridges
+/// roll with the media clock the host pushes via [`Self::set_motion`], so
+/// the wheel doubles as the always-on direction/speed readout.
 #[derive(Script, ScriptHook, Widget)]
-pub struct VjShuttle {
+pub struct VjSlowmoWheel {
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -2368,11 +2532,15 @@ pub struct VjShuttle {
     layout: Layout,
     #[redraw]
     #[live]
-    draw_bg: DrawVjShuttle,
+    draw_bg: DrawVjWheel,
     #[rust]
     area: Area,
     #[rust]
     pos: f32,
+    #[rust]
+    motion: f32,
+    #[rust]
+    inert: bool,
     #[rust]
     dragging: bool,
     #[rust]
@@ -2381,36 +2549,52 @@ pub struct VjShuttle {
     next_frame: NextFrame,
 }
 
-impl VjShuttle {
+impl VjSlowmoWheel {
+    pub fn set_inert(&mut self, cx: &mut Cx, inert: bool) {
+        if self.inert != inert {
+            self.inert = inert;
+            self.dragging = false;
+            self.draw_bg
+                .set_uniform(cx, id!(inert), &[if inert { 1.0 } else { 0.0 }]);
+            self.area.redraw(cx);
+        }
+    }
+
+    /// The transport clock, seconds: position advances (or reverses, or
+    /// holds) exactly as the picture does — the drum mirrors it 1:1.
+    pub fn set_motion(&mut self, cx: &mut Cx, secs: f32) {
+        if (secs - self.motion).abs() > 1e-3 {
+            self.motion = secs;
+            self.draw_bg.set_uniform(cx, id!(phase), &[self.motion * 0.5]);
+            self.area.redraw(cx);
+        }
+    }
+
     fn set_pos(&mut self, cx: &mut Cx, uid: WidgetUid, pos: f32) {
         let pos = pos.clamp(-1.0, 1.0);
         if (pos - self.pos).abs() > f32::EPSILON {
             self.pos = pos;
             cx.widget_action(uid, VjShuttleAction::Scratch(pos));
+            self.draw_bg.set_uniform(cx, id!(shuttle), &[pos]);
             self.area.redraw(cx);
         }
     }
 
     fn pos_at(&self, cx: &mut Cx, x: f64) -> f32 {
         let rect = self.area.rect(cx);
-        if rect.size.x <= 14.0 {
+        if rect.size.x <= 12.0 {
             return 0.0;
         }
-        let half = rect.size.x * 0.5 - 7.0;
+        let half = rect.size.x * 0.5 - 5.0;
         (((x - rect.pos.x) - rect.size.x * 0.5) / half) as f32
     }
 }
 
-impl Widget for VjShuttle {
+impl Widget for VjSlowmoWheel {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.draw_bg.set_uniform(cx, id!(shuttle), &[self.pos]);
-        self.draw_bg.set_uniform(
-            cx,
-            id!(active),
-            &[if self.dragging || self.pos.abs() > 0.01 { 1.0 } else { 0.0 }],
-        );
         self.draw_bg.draw_abs(cx, rect);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
@@ -2418,10 +2602,9 @@ impl Widget for VjShuttle {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
-        // The spring: ease home after release, one action per step so the
-        // host rides the whole return (beat transport re-engages at 0).
-        // NEVER while a finger holds the knob — a stale NextFrame from a
-        // previous spring cycle once fired a phantom mid-hold release.
+        // The eased spring home (the shuttle's law): never while a finger
+        // holds the wheel, one action per step so the host rides the whole
+        // deceleration back to natural speed.
         if self.next_frame.is_event(event).is_some() && self.springing && !self.dragging {
             let pos = self.pos * 0.55;
             let pos = if pos.abs() < 0.02 { 0.0 } else { pos };
@@ -2433,14 +2616,21 @@ impl Widget for VjShuttle {
             }
         }
         match event.hits(cx, self.area) {
-            Hit::FingerDown(fe) => {
+            Hit::FingerHoverIn(_) if !self.inert => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerDown(fe) if !self.inert => {
                 self.dragging = true;
                 self.springing = false;
                 let pos = self.pos_at(cx, fe.abs.x);
                 self.set_pos(cx, uid, pos);
             }
             Hit::FingerMove(fe) if self.dragging => {
-                // A held finger owns the knob outright.
                 self.springing = false;
                 let pos = self.pos_at(cx, fe.abs.x);
                 self.set_pos(cx, uid, pos);
@@ -2799,7 +2989,6 @@ impl Widget for VjTileGrid {
                     let mut cell = item.view(cx, *path);
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
                     cell.label(cx, ids!(grid_sub)).set_text(cx, &entry.sub);
-                    cell.label(cx, ids!(grid_pad)).set_text(cx, &entry.pad);
                     let state = if entry.active {
                         format!("LIVE {}", entry.state)
                     } else {
@@ -2963,12 +3152,12 @@ pub struct VjPadMatrix {
     /// Last (selected, empty) pushed into each pad's shader: a script
     /// evaluation per cell per draw was the app's biggest per-frame cost.
     #[rust]
-    cell_state: Vec<(f32, f32)>,
+    cell_state: Vec<(f32, f32, f32)>,
     /// Last (fill, img_aspect) pushed into each pad's thumbnail shader —
     /// same rationale as `cell_state`: skip the script evaluation whenever
     /// the bound texture's mode/aspect hasn't actually changed.
     #[rust]
-    thumb_state: Vec<(f32, f32)>,
+    thumb_state: Vec<(f32, f32, f32)>,
     #[rust]
     scroll_area: Area,
     /// Grab offset INSIDE the thumb while dragging (so the thumb does not
@@ -3121,15 +3310,17 @@ impl VjPadMatrix {
             for (slot, path) in slots.iter().enumerate() {
                 let pad = row * PAD_COLS + slot;
                 let mut cell = row_view.view(cx, *path);
-                let (selected, empty, fill, aspect) = if let Some(entry) = self.paint_at(pad) {
-                    cell.label(cx, ids!(grid_pad)).set_text(cx, &format!("{:02}", pad + 1));
+                let (selected, empty, has_thumb, fill, aspect) = if let Some(entry) = self.paint_at(pad) {
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
                     let now = cx.seconds_since_app_start();
                     let frame = entry_frame(entry, now, pad);
                     let aspect = thumb_aspect(cx, frame.as_ref());
                     let fill = thumb_fill(entry);
                     // No thumbnail yet = no image at all (an empty Image
-                    // paints a black square).
+                    // paints a black square). With a thumb the IMAGE
+                    // shader owns the whole tile (single-fill law) and
+                    // the card skips its own paint — `has_thumb` below.
+                    let has_thumb = f32::from(u8::from(frame.is_some()));
                     let image = cell.image(cx, ids!(grid_thumb));
                     image.set_visible(cx, frame.is_some());
                     image.set_texture(cx, frame);
@@ -3152,34 +3343,33 @@ impl VjPadMatrix {
                             draw_bg +: { spin: #(spin) failed: #(failed) }
                         });
                     }
-                    (selected, 0.0, fill, aspect)
+                    (selected, 0.0, has_thumb, fill, aspect)
                 } else {
                     // No content: a quiet, greyed placeholder, not a black pad.
-                    cell.label(cx, ids!(grid_pad)).set_text(cx, "");
                     cell.label(cx, ids!(grid_title)).set_text(cx, "");
                     let image = cell.image(cx, ids!(grid_thumb));
                     image.set_visible(cx, false);
                     image.set_texture(cx, None);
                     cell.view(cx, ids!(grid_busy)).set_visible(cx, false);
-                    (0.0, 1.0, 1.0, 1.0)
+                    (0.0, 1.0, 0.0, 1.0, 1.0)
                 };
                 if self.cell_state.len() <= pad {
-                    self.cell_state.resize(pad + 1, (-1.0, -1.0));
+                    self.cell_state.resize(pad + 1, (-1.0, -1.0, -1.0));
                 }
-                if self.cell_state[pad] != (selected, empty) {
-                    self.cell_state[pad] = (selected, empty);
+                if self.cell_state[pad] != (selected, empty, has_thumb) {
+                    self.cell_state[pad] = (selected, empty, has_thumb);
                     script_apply_eval!(cx, cell, {
-                        draw_bg +: { selected: #(selected) empty: #(empty) }
+                        draw_bg +: { selected: #(selected) empty: #(empty) has_thumb: #(has_thumb) }
                     });
                 }
                 if self.thumb_state.len() <= pad {
-                    self.thumb_state.resize(pad + 1, (-1.0, -1.0));
+                    self.thumb_state.resize(pad + 1, (-1.0, -1.0, -1.0));
                 }
-                if self.thumb_state[pad] != (fill, aspect) {
-                    self.thumb_state[pad] = (fill, aspect);
+                if self.thumb_state[pad] != (fill, aspect, selected) {
+                    self.thumb_state[pad] = (fill, aspect, selected);
                     let mut thumb = cell.image(cx, ids!(grid_thumb));
                     script_apply_eval!(cx, thumb, {
-                        draw_bg +: { fill: #(fill) img_aspect: #(aspect) }
+                        draw_bg +: { fill: #(fill) img_aspect: #(aspect) selected: #(selected) }
                     });
                 }
             }
