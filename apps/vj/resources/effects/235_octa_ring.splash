@@ -40,7 +40,7 @@
         }
         fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
             let tint = self.col_a.xyz.mix(self.col_b.xyz, attr.x)
-            let lit = content.xyz * (t * 0.9) + tint * 0.14
+            let lit = content.xyz * t + tint * 0.14
             let rim = self.col_c.xyz * (1.0 - attr.z)
                 * (0.4 + self.time_beat.w * 1.0 + clamp(self.user.z, 0.0, 4.0))
             return vec4((lit + rim) * self.fog.y, 1.0)

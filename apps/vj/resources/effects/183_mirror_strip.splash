@@ -19,7 +19,7 @@
     shader: draw.DrawVjFxScreen {
         fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
             let bandw = mix(0.04, 0.22, self.user.x)
-            let scroll = self.time_beat.x * 0.04 * (0.2 + 1.6 * self.user.y)
+            let scroll = modf(self.time_beat.x * 0.04 * (0.2 + 1.6 * self.user.y), bandw)
             let bx = uv.x + scroll
             let idx = floor(bx / bandw)
             let local = fract(bx / bandw)

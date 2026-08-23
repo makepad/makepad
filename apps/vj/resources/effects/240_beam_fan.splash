@@ -48,7 +48,7 @@
             return vec4(0.0, 0.0, id * 0.03 - n * 0.015, ang)
         }
         fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
-            let lit = content.xyz * (t * 0.95)
+            let lit = content.xyz * t
             let ray = self.col_a.xyz.mix(self.col_b.xyz, attr.w / max(self.shape.y, 1.0))
                 * (1.0 - attr.z)
                 * (0.35 + self.time_beat.w * 1.2 + clamp(self.user.z, 0.0, 4.0))

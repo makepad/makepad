@@ -618,7 +618,11 @@ script_mod! {
                 // Same NEGATIVE sign as `height_at`: grid, drape and land
                 // must travel together, toward the camera (see the scroll
                 // sign note there — the range used to fly backwards).
-                let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
+                // BOUNDED SCROLL: the grid is periodic in whole uv units
+                // (cells is a whole number), so the wrap is the same
+                // picture taken on a small number.
+                let scroll = vec2(0.0,
+                    0.0 - modf(self.time_beat.x * self.flow.x * 0.06, 1.0))
                 let g = fract((self.v_uv + scroll) * self.shape.x)
                 let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
                 let line = 1.0 - smoothstep(0.0, 0.11, dg)
@@ -646,7 +650,7 @@ script_mod! {
                         // so the picture is continuous between the lines.
                         let wl = self.col_a.xyz.mix(ttx.xyz * 1.15, clamp(cm * 1.2, 0.0, 1.0))
                         let fill = self.col_a.xyz * 0.035
-                            + ttx.xyz * (cm * 0.62 * (0.35 + 0.65 * lit))
+                            + ttx.xyz * (cm * (0.35 + 0.65 * lit))
                         rgb = (fill + wl * line * beat_glow
                             + self.col_b.xyz * (line * h * 1.3)) * gain
                     } else {
@@ -663,7 +667,7 @@ script_mod! {
                             0.0, 1.0
                         )
                         let gv = floor(self.v_uv * 331.0)
-                            + vec2(fract(self.time_beat.x * 17.0), 0.0)
+                            + vec2(fract(modf(self.time_beat.x, 1.0) * 17.0), 0.0)
                         let grain = fract(sin(dot(gv, vec2(157.31, 113.97))) * 41739.613) * 0.10
                         rgb = self.col_a.xyz * ((lum + grain) * beat_glow) * gain
                     }
@@ -716,7 +720,9 @@ script_mod! {
             // fog weight — the range fades into the sky, the jet barely
             // does, the burner never does.
             let fam = self.v_misc.x
-            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
+            // BOUNDED SCROLL: the drape is periodic in whole uv units.
+            let scroll = vec2(0.0,
+                0.0 - modf(self.time_beat.x * self.flow.x * 0.06, 1.0))
             let ttx = self.tex0.sample_as_bgra(fract(self.v_uv + scroll))
             let c = self.fx_color(self.v_misc.y, self.v_misc, ttx, self.fog.z)
             let fogf = exp(0.0 - self.v_misc.w * self.fog.x)

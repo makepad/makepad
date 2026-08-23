@@ -20,7 +20,7 @@
         fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
             let reps = mix(1.0, 7.0, self.user.x) + 1.0
             let zoom = 0.2 + 1.6 * self.user.y
-            let shift = self.time_beat.x * 0.06 * (0.2 + 1.6 * self.user.z)
+            let shift = modf(self.time_beat.x * 0.06 * (0.2 + 1.6 * self.user.z), 5.0)
             let w = fract(uv * reps / zoom + vec2(shift, shift * 0.6))
             let tex = self.tex0.sample_as_bgra(w)
             return vec4(tex.xyz, 1.0)

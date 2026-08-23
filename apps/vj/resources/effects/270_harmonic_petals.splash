@@ -52,7 +52,7 @@
             let aspect = 16.0 / 9.0
             let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
             let r = length(p)
-            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5 + self.time_beat.x * 0.035
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5 + modf(self.time_beat.x * 0.035, 1.0)
 
             let petals = floor(4.0 + 10.0 * clamp(self.user.x, 0.0, 1.0))
             let open = 0.16 + 0.42 * clamp(self.user.y, 0.0, 1.0)

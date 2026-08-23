@@ -24,7 +24,7 @@
     beat_pulse: 0.7
     p0: "0.5 + 0.5 * sin(bar * tau)"   // braid breathes over the bar
     p1: "0.5 * pulse"                  // width slams on the beat
-    p3: "beat * 0.02"                  // slow hue spin
+    p3: "fract(beat * 0.02)"           // slow hue spin, wrapped 0..1
 
     // PERFORMANCE DIALS — the engine's own p-levers; touching DETUNE or
     // WIDTH overrides its music binding above with a held value.

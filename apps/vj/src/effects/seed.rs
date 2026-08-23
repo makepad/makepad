@@ -930,6 +930,16 @@ mod registry_tests {
     /// the two seconds a gallery capture ever runs and a BLACK FRAME on
     /// the deck, and that is what this list exists to stop repeating.
     ///
+    /// BOUNDING THE OUTPUT IS ONLY HALF OF IT. `fract(uv + time * k)` is
+    /// bounded and still wrong: the huge term is formed FIRST, so the uv
+    /// it is added to loses every bit the exponent has moved past, and the
+    /// picture bands and shimmers hours in even though nothing ever left
+    /// 0..1. Wrap the CLOCK TERM at the consuming expression's own period
+    /// before it meets anything spatial — `fract(uv + fract(time * k))`,
+    /// `modf(time * k, period)` — which is the same phase, taken on a
+    /// small number. A dial multiplied straight into the raw beat count is
+    /// the same bug wearing a knob (158_pixel_walls shipped that way).
+    ///
     /// Sound analysis of "is this use bounded?" needs dataflow we do not
     /// have here, so this is a REVIEW GATE, not a checker: a preset that
     /// reaches for the beat count must be named here, and naming it means
@@ -943,20 +953,20 @@ mod registry_tests {
         const REVIEWED: &[(&str, &str)] = &[
             ("15_acid_bloom", "sine phase — the term only ever enters sin()"),
             ("86_fractal_descent", "two slow sines + clamp into the live band"),
-            ("87_molten_glass", "fract() — a material band index"),
+            ("87_molten_glass", "fract()-wrapped term into a material band index"),
             // The 2026-08-23 batch, swept at t = 0/600/3600 via the gallery
             // capture — no flat/black frames, means 30-163, sd 48-62.
-            ("158_pixel_walls", "sine phase into the wall spring"),
+            ("158_pixel_walls", "modf(beat*rate, 8) — one wrapped cosine period"),
             ("162_pixel_jitter", "floor()-quantised hash seed"),
             ("163_pixel_hop", "floor()-quantised hop seed"),
             ("181_shuffle_h", "floor()-quantised per-strip shuffle seed"),
             ("182_shuffle_v", "floor()-quantised per-strip shuffle seed"),
             ("185_mirror_rotate_b", "sine phase on the mirror axis"),
             ("187_wave", "sine phase on the displacement"),
-            ("191_zigzag_twirl", "slow sine phase on the twirl"),
+            ("191_zigzag_twirl", "fract()-wrapped term into the zigzag ramp"),
             ("196_rays", "slow sine phase on the ray origin"),
-            ("197_petal_fold", "slow sine phase on the fold"),
-            ("198_disc", "slow sine phase on the annulus"),
+            ("197_petal_fold", "modf() into the sector fold — one wrapped sector"),
+            ("198_disc", "modf(.., 1) into the annulus angle — one wrapped turn"),
             ("200_maze", "beat-quantised maze re-roll via fract()"),
             ("205_strobe", "floor()-quantised gate hash + pulse envelope"),
         ];

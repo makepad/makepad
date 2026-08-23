@@ -40,7 +40,7 @@
         fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
             let d = abs(fract(self.v_uv.x - self.time_beat.z + 0.5) - 0.5) * 2.0
             let chase = 1.0 - smoothstep(0.0, 0.16, d)
-            let lit = content.xyz * (t * 0.95)
+            let lit = content.xyz * t
             let hot = self.col_a.xyz * chase
                 * (0.5 + self.time_beat.w * 1.2 + clamp(self.user.z, 0.0, 4.0))
             return vec4((lit + hot) * self.fog.y, 1.0)

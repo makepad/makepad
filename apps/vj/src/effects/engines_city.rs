@@ -550,7 +550,7 @@ script_mod! {
             let mut front = 0.0
             if class > 2.5 {
                 let tb = max(self.flow.z, 1.0)
-                front = fract((self.time_beat.y + self.user.y) / tb + r1)
+                front = fract(modf(self.time_beat.y + self.user.y, tb) / tb + r1)
                 let vis = step(self.geom.geom_uv.x, front)
                 pos = vec3(pos.x, 0.02 + (pos.y - 0.02) * vis, pos.z)
             }
@@ -602,7 +602,7 @@ script_mod! {
                 // CONTENT: the wall carries the channel video unrolled
                 // along its arc (three copies, drifting slowly).
                 let ttx = self.tex0.sample_as_bgra(
-                    vec2(fract(self.v_uv.x * 1.5 + self.time_beat.x * 0.03), 1.0 - self.v_uv.y)
+                    vec2(fract(self.v_uv.x * 1.5 + fract(self.time_beat.x * 0.03)), 1.0 - self.v_uv.y)
                 )
                 let wall = self.col_a.mix(self.col_b, hue).xyz
                     .mix(ttx.xyz * 1.5, clamp(self.fog.z * 1.2, 0.0, 1.0))

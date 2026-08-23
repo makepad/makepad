@@ -24,7 +24,7 @@
             let ang = atan2(d.y, d.x)
             let leaves = floor(3.0 + 9.0 * self.user.x)
             let sector = 6.2831853 / leaves
-            let spin = self.time_beat.y * 0.02 * (0.2 + 1.6 * self.user.z)
+            let spin = modf(self.time_beat.y * 0.02 * (0.2 + 1.6 * self.user.z), sector)
             let raw = modf(ang + 3.14159265 + spin, sector)
             let mirrored = mix(raw, sector - raw, clamp(self.user.y, 0.0, 1.0))
             let w = center + vec2(cos(mirrored), sin(mirrored)) * r

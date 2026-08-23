@@ -53,7 +53,7 @@
             let angle = self.user.x * 6.2831853
             let speed = 0.12 + 0.9 * self.user.y
             let span = spread * (0.5 + 1.1 * self.user.z)
-            let drift_t = fract(self.time_beat.x * speed + r0) - 0.5
+            let drift_t = fract(fract(self.time_beat.x * speed) + r0) - 0.5
             let stream = vec3(cos(angle), sin(angle), 0.0) * (drift_t * span)
             return home + stream
         }
