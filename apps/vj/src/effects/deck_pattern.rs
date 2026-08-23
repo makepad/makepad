@@ -49,9 +49,17 @@ pub fn texel(u: f32, v: f32, m: f32, drift: (f32, f32), bar: f32) -> (f32, f32, 
     let d = (ddx * ddx + ddy * ddy).sqrt();
     let disc = smoothstep(0.30, 0.10, d);
     let lift = 0.22 * disc;
-    let ar = (0.20 + 0.62 * wash + lift) * PEAK;
-    let ag = (0.14 + 0.42 * wash + lift * 0.8) * PEAK;
-    let ab = (0.11 + 0.20 * wash + lift * 0.5) * PEAK;
+    // The house accent (#ff5c39) darkened, not an anonymous brown: the
+    // channel ratios track the key colour's hue (~1 : 0.36 : 0.22) so a
+    // wall of transition thumbs reads as THIS app's embers. And a SLIGHT
+    // PATTERN rather than a bare smudge: fine 45-degree hairlines woven
+    // through the wash — structure a wipe or a warp can visibly bite into,
+    // with the drifting glow breathing underneath.
+    let weave_fold = fold((u * W as f32 + v * H as f32) / 14.0);
+    let weave = (1.0 - (weave_fold * 7.0).min(1.0)) * 0.26;
+    let ar = (0.24 + 0.58 * wash + weave + lift) * PEAK;
+    let ag = (0.09 + 0.23 * wash + weave * 0.42 + lift * 0.55) * PEAK;
+    let ab = (0.06 + 0.14 * wash + weave * 0.26 + lift * 0.40) * PEAK;
 
     // ---- B: a dim COOL slate, ruled by a grid + a travelling bar --------
     let gx = fold(u * (W as f32 / 24.0));

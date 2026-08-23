@@ -404,6 +404,11 @@ struct SimFieldRt {
     steps: Vec<StepPass>,
     /// Fluid only: the pretty pass output (lazy, display-sized BGRA).
     view: Option<SimPass>,
+    /// The LAST step pass the most recent [`SimFields::update`] encoded for
+    /// this field — the producer of the state a consumer samples this
+    /// frame. [`SimFields::link_consumer`] parents it under the consuming
+    /// pass so execution order follows the graph.
+    final_pass: Option<DrawPassId>,
 }
 
 /// The per-widget sim runtime: owns every declared field's targets and runs
@@ -459,7 +464,14 @@ impl SimFields {
             let steps = (0..step_count)
                 .map(|k| StepPass::new(cx, &format!("vjsim_{n}_{k}")))
                 .collect();
-            self.fields.push(SimFieldRt { cfg: cfg.clone(), state, dye, steps, view: None });
+            self.fields.push(SimFieldRt {
+                cfg: cfg.clone(),
+                state,
+                dye,
+                steps,
+                view: None,
+                final_pass: None,
+            });
         }
     }
 
@@ -515,6 +527,10 @@ impl SimFields {
                 0.2 + 0.6 * hash1(bi * 1.7 + sd * 13.1),
                 0.2 + 0.6 * hash1(bi * 2.3 + sd * 7.7),
             );
+            // Every step pass this frame encodes for this field, in encode
+            // order — which IS the data-dependency order (each step reads
+            // the ping-pong state the previous one wrote).
+            let mut ran: Vec<DrawPassId> = Vec::new();
             let state_pp = &mut f.state;
             let dye_pp = &mut f.dye;
             let mut steps = f.steps.iter_mut();
@@ -531,6 +547,7 @@ impl SimFields {
                     d.draw_vars.set_uniform(cx, live_id!(u_aux), &[ox, oy, bi, sd]);
                     if let Some(sp) = steps.next() {
                         sp.run(cx, size, &state_pp.back(), &mut |cx, rect| d.draw_abs(cx, rect));
+                        ran.push(sp.pass.draw_pass_id());
                         state_pp.flip();
                     }
                 }
@@ -561,6 +578,7 @@ impl SimFields {
                     );
                     if let Some(sp) = steps.next() {
                         sp.run(cx, size, &state_pp.back(), &mut |cx, rect| d.draw_abs(cx, rect));
+                        ran.push(sp.pass.draw_pass_id());
                         state_pp.flip();
                     }
                 }
@@ -594,6 +612,7 @@ impl SimFields {
                             sp.run(cx, size, &state_pp.back(), &mut |cx, rect| {
                                 d.draw_abs(cx, rect)
                             });
+                            ran.push(sp.pass.draw_pass_id());
                             state_pp.flip();
                         }
                     }
@@ -606,6 +625,7 @@ impl SimFields {
                             sp.run(cx, size, &state_pp.back(), &mut |cx, rect| {
                                 d.draw_abs(cx, rect)
                             });
+                            ran.push(sp.pass.draw_pass_id());
                             state_pp.flip();
                         }
                     }
@@ -618,6 +638,7 @@ impl SimFields {
                             sp.run(cx, size, &state_pp.back(), &mut |cx, rect| {
                                 d.draw_abs(cx, rect)
                             });
+                            ran.push(sp.pass.draw_pass_id());
                             state_pp.flip();
                         }
                     }
@@ -630,6 +651,7 @@ impl SimFields {
                             sp.run(cx, size, &state_pp.back(), &mut |cx, rect| {
                                 d.draw_abs(cx, rect)
                             });
+                            ran.push(sp.pass.draw_pass_id());
                             state_pp.flip();
                         }
                     }
@@ -649,13 +671,44 @@ impl SimFields {
                             .set_uniform(cx, live_id!(u_dye_col), &[col.x, col.y, col.z, 1.0]);
                         if let Some(sp) = steps.next() {
                             sp.run(cx, size, &dye.back(), &mut |cx, rect| d.draw_abs(cx, rect));
+                            ran.push(sp.pass.draw_pass_id());
                             dye.flip();
                         }
                     }
                 }
             }
+            // PRODUCER→CONSUMER, stated as pass parents: each step encoded
+            // this frame feeds the one after it (advect → divergence →
+            // jacobi… → project → dye), so it becomes that step's CHILD —
+            // children execute before parents, whatever the pass-pool ids
+            // say. Without this the steps were siblings ordered by recycled
+            // pool ids (which `configure`'s reallocation scrambles), and a
+            // jacobi could run before its advect: corrupted state, black
+            // fluid bakes. The FINAL step keeps the enclosing parent until
+            // [`SimFields::link_consumer`] re-parents it under the pass
+            // that samples the state this frame.
+            for pair in ran.windows(2) {
+                cx.passes[pair[0]].parent = CxDrawPassParent::DrawPass(pair[1]);
+            }
+            f.final_pass = ran.last().copied();
         }
         self.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// Parent every field's FINAL update pass of this frame under the pass
+    /// that samples its state (the engine scene pass, or the fluid view
+    /// pass), so the sim provably executes before its consumer within the
+    /// same paint — the graph decides, never pass-pool id order. Call after
+    /// the consumer pass exists for this frame; a field that encoded no
+    /// steps this frame is a no-op.
+    pub fn link_consumer(&self, cx: &mut Cx, consumer: DrawPassId) {
+        for f in &self.fields {
+            if let Some(final_pass) = f.final_pass {
+                if final_pass != consumer {
+                    cx.passes[final_pass].parent = CxDrawPassParent::DrawPass(consumer);
+                }
+            }
+        }
     }
 
     /// Render a fluid field's pretty view (dye through the palette, over an
@@ -679,9 +732,18 @@ impl SimFields {
         let dye = f.dye.as_ref()?.front();
         let flow = f.state.front();
         let res = f.cfg.res as f32;
+        let final_pass = f.final_pass;
         let view = f
             .view
             .get_or_insert_with(|| SimPass::new_bgra(cx.cx, &format!("vjsim_{name}_view")));
+        // This view pass CONSUMES the field's freshly written state: parent
+        // the field's final update pass under it so the sim runs first.
+        if let Some(final_pass) = final_pass {
+            if final_pass != view.pass.draw_pass_id() {
+                cx.passes[final_pass].parent =
+                    CxDrawPassParent::DrawPass(view.pass.draw_pass_id());
+            }
+        }
         draw.draw_vars.set_texture(0, &dye);
         draw.draw_vars.set_texture(1, &flow);
         draw.draw_vars.set_texture(2, input0);

@@ -2356,6 +2356,14 @@ fn decode_thumb_full(
         return Err(format!("thumbnail over byte budget: {}", meta.len()));
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    // VJ-effect sheets cache as tiny mp4s (fx_thumbs.rs): the file is
+    // hardware-decoded ONCE here — on the same decode lane every thumbnail
+    // rides — into the frames-in-a-sheet pixels the atlas path already
+    // animates by frame index, and the decoder session is torn down.
+    // Storage format only: zero codec work ever happens at draw time.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return decode_thumb_video(path, sheet);
+    }
     let image = if bytes.starts_with(&[0xff, 0xd8]) {
         makepad_widgets::ImageBuffer::from_jpg(&bytes)
     } else {
@@ -2399,6 +2407,232 @@ fn decode_thumb_full(
         fps: 0.0,
         bgra: data,
     })
+}
+
+/// A video-cached animated thumbnail (the VJ-effect sheets): every frame
+/// of the stream is one cell, decoded through the platform's hardware
+/// path (makepad-video: VideoToolbox / Media Foundation / GStreamer) into
+/// exactly the `ThumbPixels::frames` sequence a cut PNG sheet produced.
+/// The declared layout caps the frame count and carries the playback fps;
+/// a stream with no declaration plays at its own fps.
+fn decode_thumb_video(
+    path: &PathBuf,
+    sheet: Option<(ThumbnailCells, f32)>,
+) -> Result<ThumbPixels, String> {
+    use makepad_widgets::makepad_platform::video_file::VideoFileDecoder;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| format!("non-utf8 thumbnail path: {}", path.display()))?;
+    let mut decoder =
+        VideoFileDecoder::open(path_str).map_err(|e| format!("thumb video open: {e}"))?;
+    let info = decoder.info().clone();
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h == 0 || w > MAX_THUMB_DIM || h > MAX_THUMB_DIM {
+        return Err(format!("thumb video dimensions out of bounds: {w}x{h}"));
+    }
+    let (cap, fps) = match sheet {
+        Some((cells, fps)) => (cells.count.clamp(1, 512) as usize, fps),
+        None => (
+            512,
+            if info.fps_den > 0 { info.fps_num as f32 / info.fps_den as f32 } else { 0.0 },
+        ),
+    };
+    let declared = sheet.is_some();
+    let mut frames: Vec<(i64, Vec<u32>)> = Vec::new();
+    // One NV12→RGB scratch reused across every frame of the pull: this
+    // decode sits on the SCROLL HOT PATH (the atlas LRU re-decodes evicted
+    // sheets), so the conversion must not allocate 30 fresh buffers per
+    // sheet.
+    let mut rgb_scratch: Vec<u8> = Vec::new();
+    while frames.len() < cap {
+        let frame = match decoder.next_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(e) => return Err(format!("thumb video decode: {e}")),
+        };
+        let (fw, fh) = (frame.width as usize, frame.height as usize);
+        if fw != w || fh != h {
+            return Err(format!("thumb video frame size drifted: {fw}x{fh} vs {w}x{h}"));
+        }
+        nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, &mut rgb_scratch);
+        if rgb_scratch.len() < w * h * 3 {
+            return Err("thumb video frame underrun".to_string());
+        }
+        let mut px = vec![0u32; w * h];
+        for (i, c) in rgb_scratch.chunks_exact(3).take(w * h).enumerate() {
+            px[i] = 0xff00_0000 | ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+        }
+        frames.push((frame.pts_100ns, px));
+    }
+    // THE CACHE-FORMAT LAW (any mp4 whose stamped layout DECLARES its frame
+    // count — the fx_thumbs sheets): the declared count is a contract, and
+    // the stream must end cleanly right behind it. Probe once past the last
+    // accepted frame while the session is still open: a frame there means
+    // the stream carries more than it declared.
+    if declared && frames.len() >= cap {
+        match decoder.next_frame() {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                return Err(format!(
+                    "thumb video: stream continues past the {cap} declared frames"
+                ));
+            }
+            Err(e) => return Err(format!("thumb video decode at declared EOF: {e}")),
+        }
+    }
+    // The decoder session ends here — the frames live on as sheet pixels.
+    drop(decoder);
+    // A FRAME LANDS WHERE ITS TIMESTAMP SAYS — never where the decoder's
+    // emission happened to put it. Hardware decoders may emit in decode
+    // order (B-frame reordering differs per platform and per session
+    // mode), so the cell index derives from the frame's OWN pts:
+    // `round((pts - first_pts) * fps / 1e7)`, bounds-checked — never a
+    // running counter. (The bake writes all-intra streams, which cannot
+    // reorder — this is the decode-side half of the same law.)
+    //
+    // DECLARED sheets are strict: exactly `cap` frames, one per unique pts
+    // slot, or the whole decode is an ERROR — which is what fires the
+    // app's cache-removal/rebake path. The old gap-hold leniency let a
+    // partial sheet (one rendered cell, twenty-nine holds) pass the
+    // whole-sheet-black gate and cache forever.
+    if declared {
+        let placed = place_declared_video_frames(frames, cap, fps)?;
+        let mut frames: Vec<(Vec<u32>, usize, usize)> =
+            placed.into_iter().map(|px| (px, w, h)).collect();
+        return match frames.len() {
+            0 => Err("thumb video decoded no frames".to_string()),
+            1 => {
+                let (bgra, w, h) = frames.remove(0);
+                Ok(ThumbPixels { bgra, width: w, height: h, frames: Vec::new(), fps: 0.0 })
+            }
+            _ => Ok(ThumbPixels {
+                bgra: frames[0].0.clone(),
+                width: w,
+                height: h,
+                frames,
+                fps,
+            }),
+        };
+    }
+    // UNDECLARED streams (no stamped layout) keep the forgiving path: a
+    // gap holds the previous picture rather than shifting every later
+    // cell; frames past the cap drop.
+    let count = frames.len();
+    let base_pts = frames.iter().map(|(pts, _)| *pts).min().unwrap_or(0);
+    let fps_f = if fps > 1.0 { fps as f64 } else { 30.0 };
+    let slot_count = cap.max(count).max(1);
+    let idx_of = |pts: i64| -> Option<usize> {
+        let idx = (((pts - base_pts) as f64) * fps_f / 10_000_000.0).round() as i64;
+        if idx >= 0 && (idx as usize) < slot_count {
+            Some(idx as usize)
+        } else {
+            None
+        }
+    };
+    let mut seen = vec![false; slot_count];
+    let mut placed = 0usize;
+    for (pts, _) in &frames {
+        if let Some(i) = idx_of(*pts) {
+            if !seen[i] {
+                seen[i] = true;
+                placed += 1;
+            }
+        }
+    }
+    let mut frames: Vec<(Vec<u32>, usize, usize)> = if placed * 2 > count {
+        let mut slots: Vec<Option<Vec<u32>>> = Vec::new();
+        slots.resize_with(slot_count, || None);
+        for (pts, px) in frames {
+            if let Some(i) = idx_of(pts) {
+                // A pts collision keeps the later emission (the decoder's
+                // own correction wins).
+                slots[i] = Some(px);
+            }
+        }
+        // Fill any gap by holding the previous picture (a leading gap
+        // takes the first real one), and trim trailing emptiness.
+        let last = slots.iter().rposition(|s| s.is_some()).unwrap_or(0);
+        slots.truncate(last + 1);
+        let mut held = slots.iter().flatten().next().cloned().unwrap_or_default();
+        slots
+            .into_iter()
+            .map(|s| {
+                if let Some(px) = s {
+                    held = px.clone();
+                    (px, w, h)
+                } else {
+                    (held.clone(), w, h)
+                }
+            })
+            .collect()
+    } else {
+        // Degenerate timestamps (all-equal or junk): pts-sorted emission
+        // order is the best remaining truth.
+        frames.sort_by_key(|(pts, _)| *pts);
+        frames.into_iter().map(|(_, px)| (px, w, h)).collect()
+    };
+    match frames.len() {
+        0 => Err("thumb video decoded no frames".to_string()),
+        1 => {
+            let (bgra, w, h) = frames.remove(0);
+            Ok(ThumbPixels { bgra, width: w, height: h, frames: Vec::new(), fps: 0.0 })
+        }
+        _ => Ok(ThumbPixels {
+            bgra: frames[0].0.clone(),
+            width: w,
+            height: h,
+            frames,
+            fps,
+        }),
+    }
+}
+
+/// THE STRICT PLACEMENT for a DECLARED-count video sheet, pure so the
+/// tests can pin it: exactly `count` frames, each landing on its own
+/// unique pts slot (`round((pts - first_pts) * fps / 1e7)`), no slot
+/// empty, no slot doubled — anything else is an error. `count` frames
+/// placed uniquely in `count` slots fills every slot by pigeonhole, so a
+/// success IS a complete sheet in slot order.
+fn place_declared_video_frames(
+    frames: Vec<(i64, Vec<u32>)>,
+    count: usize,
+    fps: f32,
+) -> Result<Vec<Vec<u32>>, String> {
+    if frames.len() != count {
+        return Err(format!(
+            "thumb video: {} frames decoded, {count} declared",
+            frames.len()
+        ));
+    }
+    let base_pts = frames.iter().map(|(pts, _)| *pts).min().unwrap_or(0);
+    let fps_f = if fps > 1.0 { fps as f64 } else { 30.0 };
+    let mut slots: Vec<Option<Vec<u32>>> = Vec::new();
+    slots.resize_with(count, || None);
+    for (pts, px) in frames {
+        let idx = (((pts - base_pts) as f64) * fps_f / 10_000_000.0).round() as i64;
+        if idx < 0 || idx as usize >= count {
+            return Err(format!(
+                "thumb video: frame pts {pts} lands outside the {count} declared slots"
+            ));
+        }
+        let slot = &mut slots[idx as usize];
+        if slot.is_some() {
+            return Err(format!(
+                "thumb video: two frames land in pts slot {idx} of {count}"
+            ));
+        }
+        *slot = Some(px);
+    }
+    let mut out = Vec::with_capacity(count);
+    for slot in slots {
+        match slot {
+            Some(px) => out.push(px),
+            // Unreachable by pigeonhole; stated as an error rather than a
+            // panic (this runs on the decode workers).
+            None => return Err("thumb video: pts slot accounting hole".to_string()),
+        }
+    }
+    Ok(out)
 }
 
 /// What a DECLARED cell layout means for a decoded picture, once its cells
@@ -3465,6 +3699,144 @@ mod tests {
         assert!(mesh_gate(1_000, MAX_MESH_JOINTS + 1, 1, 1).is_err());
         assert!(mesh_gate(1_000, 1, MAX_MESH_VERTICES + 1, 1).is_err());
         assert!(mesh_gate(1_000, 1, 1, MAX_MESH_CLIPS + 1).is_err());
+    }
+
+    /// THE SCROLL-HOT-PATH COST INSTRUMENT: one vjfx cache artifact
+    /// (384x240, 30 all-intra H.264 frames, stamped layout — exactly what
+    /// `fx_thumbs::encode_and_write` produces) decoded through the exact
+    /// production entry (`decode_thumb`, the thumb-lane worker's call),
+    /// timed. The atlas LRU re-decodes evicted sheets on scroll, so this
+    /// number sizes the budget; run with `--nocapture` to read it. The
+    /// assert is a sanity ceiling, not a benchmark gate.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vjfx_sheet_decode_wall_time_is_sane_and_reported() {
+        use makepad_asset_importer::anim_icon;
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+        let dir = test_dir("vjfx-decode-timing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sheet.mp4");
+        let (w, h, n) = (384usize, 240usize, 30usize);
+        let mut enc = VideoFileEncoder::new(
+            path.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width: w as u32,
+                height: h as u32,
+                fps_num: 30,
+                fps_den: 1,
+                video_bitrate_bps: 2_000_000,
+                audio: None,
+                keyframe_only: true,
+            },
+        )
+        .expect("hardware encoder");
+        let mut rgba = vec![0u8; w * h * 4];
+        for k in 0..n {
+            for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+                let (x, y) = (i % w, i / w);
+                px[0] = (x * 255 / w) as u8;
+                px[1] = (y * 255 / h) as u8;
+                px[2] = (k * 8) as u8;
+                px[3] = 255;
+            }
+            enc.push_frame_rgba8(&rgba, None).unwrap();
+        }
+        enc.finish().unwrap();
+        let cells = ThumbnailCells {
+            cols: 6,
+            cell_w: w as u32,
+            cell_h: h as u32,
+            first: 0,
+            count: n as u32,
+        };
+        let bytes = std::fs::read(&path).unwrap();
+        let bytes = anim_icon::stamp_layout_mp4(&bytes, cells, 30.0);
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Warm once (first decoder session pays codec setup differently),
+        // then time the steady-state cost a scroll re-decode pays.
+        let warm = decode_thumb(&path, Some((cells, 30.0)), false).expect("decodes");
+        assert_eq!(warm.frames.len(), n, "the full declared sheet");
+        let runs = 5;
+        let t0 = std::time::Instant::now();
+        for _ in 0..runs {
+            let p = decode_thumb(&path, Some((cells, 30.0)), false).unwrap();
+            assert_eq!(p.frames.len(), n);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        println!("vjfx sheet decode (384x240x30 all-intra, hw pull, thumb-lane path): {ms:.1} ms/sheet");
+        // The split, so the LRU budget can be sized against the part that
+        // scales: session open (codec setup, fixed) vs frame pull (hw
+        // decode) vs conversion+placement (CPU, ours).
+        let t_open = std::time::Instant::now();
+        for _ in 0..runs {
+            let d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
+            drop(d);
+        }
+        let open_ms = t_open.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        let t_pull = std::time::Instant::now();
+        for _ in 0..runs {
+            let mut d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
+            let mut got = 0;
+            while let Ok(Some(_frame)) = d.next_frame() {
+                got += 1;
+            }
+            assert_eq!(got, n);
+        }
+        let pull_ms = t_pull.elapsed().as_secs_f64() * 1000.0 / runs as f64 - open_ms;
+        println!(
+            "vjfx sheet decode split: open {open_ms:.1} ms, pull {pull_ms:.1} ms, convert+place {:.1} ms",
+            (ms - open_ms - pull_ms).max(0.0)
+        );
+        assert!(ms < 2000.0, "pathological sheet decode time: {ms:.1}ms");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE DECLARED-COUNT LAW for video sheets (the fx_thumbs cache
+    /// format): exactly `count` frames on `count` unique pts slots, or the
+    /// decode is an ERROR — which is what fires the app's cache-removal /
+    /// rebake path. A sheet with one rendered cell and twenty-nine holds
+    /// used to pass the whole-sheet-black gate and cache forever.
+    #[test]
+    fn declared_video_sheets_demand_every_frame_on_its_own_pts_slot() {
+        // 100ns pts steps at 30 fps.
+        let step = 10_000_000i64 / 30;
+        let frame = |i: i64| (i * step, vec![i as u32; 4]);
+        // The complete sheet places, in slot order, even when the decoder
+        // emitted it shuffled.
+        let mut frames: Vec<(i64, Vec<u32>)> = (0..30).map(frame).collect();
+        frames.swap(3, 27);
+        frames.swap(0, 15);
+        let placed = place_declared_video_frames(frames, 30, 30.0).expect("complete sheet");
+        assert_eq!(placed.len(), 30);
+        for (i, px) in placed.iter().enumerate() {
+            assert_eq!(px[0], i as u32, "cell {i} must hold the frame its pts declares");
+        }
+        // Fewer frames than declared: ERROR, never a gap-hold.
+        let partial: Vec<_> = (0..29).map(frame).collect();
+        let err = place_declared_video_frames(partial, 30, 30.0).unwrap_err();
+        assert!(err.contains("29 frames decoded, 30 declared"), "{err}");
+        // One frame, twenty-nine missing — the exact half-black corruption
+        // shape — is an error too.
+        let one: Vec<_> = vec![frame(0)];
+        assert!(place_declared_video_frames(one, 30, 30.0).is_err());
+        // Two frames colliding on one slot: ERROR (a silent overwrite hid
+        // a missing cell before).
+        let mut collide: Vec<_> = (0..30).map(frame).collect();
+        collide[5].0 = collide[4].0;
+        let err = place_declared_video_frames(collide, 30, 30.0).unwrap_err();
+        assert!(err.contains("two frames land in pts slot"), "{err}");
+        // A frame whose pts lands past the declared range: ERROR.
+        let mut outside: Vec<_> = (0..30).map(frame).collect();
+        outside[29].0 = 40 * step;
+        let err = place_declared_video_frames(outside, 30, 30.0).unwrap_err();
+        assert!(err.contains("outside the 30 declared slots"), "{err}");
+        // A one-cell declaration still works (single-frame still).
+        let placed = place_declared_video_frames(vec![frame(0)], 1, 30.0).unwrap();
+        assert_eq!(placed.len(), 1);
     }
 
     #[test]
