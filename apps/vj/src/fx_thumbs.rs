@@ -23,12 +23,27 @@
 //!     view with its own passes, so a document's shader compile overlaps the
 //!     next one's capture instead of serializing behind it.
 //!
+//! SCHEDULING (one mechanism, event-driven):
+//! - [`VjFxThumbs::enqueue`] admits ALWAYS — the pending set is deep (the
+//!   whole library fits) and nothing is ever refused or retried on a clock.
+//! - a free lane pulls by STRICT PRIORITY CLASS, decided at the pull
+//!   against the live viewport the app hands over every tick
+//!   ([`VjFxThumbs::set_priority`]): (1) tiles visible on screen right
+//!   now, in pad order; (2) the rest of the currently open tab (EFFECT
+//!   vs TRANSITION — the job's own `transition` flag); (3) other tabs,
+//!   only when 1 and 2 are fully served. Never one mixed queue: an
+//!   invisible tab's doc cannot hold a lane while anything visible is
+//!   unbaked, a scroll or tab switch reclassifies instantly (newly
+//!   visible tiles jump everything), and in-flight renders finish.
+//! - failure is TERMINAL PER REVISION and loud: a doc whose load/render
+//!   fails is marked failed for this session, painted as failed on its
+//!   tile, and only a NEW REVISION (a content change, which is a new cache
+//!   key and a new enqueue) bakes again. No retry timers, no backoff.
+//!
 //! Budget discipline (the VJ may be performing while this runs):
 //! - the work is spread over MANY responsive frames, never gulped: at most
 //!   [`LOADS_PER_FRAME`] document loads (splash eval + shader compile) and
 //!   [`READBACKS_PER_FRAME`] sheet readbacks per UI frame,
-//! - the lane count follows the frame clock ([`PACE_BAD`]): if the app's
-//!   frames get long, lanes are given back until they are short again,
 //! - a live set (output window up, a deck playing) drops the bank to a
 //!   single lane — see [`VjFxThumbs::set_full_speed`],
 //! - the offscreen passes are thumbnail-sized ([`SLOT_W`]x[`SLOT_H`]), not
@@ -45,9 +60,10 @@
 //!
 //! Fallback honesty: a document that fails to parse, a readback the
 //! platform cannot do, or a capture that comes back black logs loudly,
-//! marks the revision failed for this session, and the tile keeps its
-//! seeded placeholder. Nothing on this path unwraps document data — a panic
-//! in the frame path kills the whole app on macOS.
+//! marks the revision failed for this session (terminal — see above), and
+//! the tile paints the failure over its seeded placeholder. Nothing on this
+//! path unwraps document data — a panic in the frame path kills the whole
+//! app on macOS.
 
 use crate::effects::shaders::DrawVjFxPresent;
 use crate::effects::VjFxView;
@@ -55,7 +71,7 @@ use makepad_asset_data::{AssetId, AssetRevisionId, ThumbnailCells};
 use makepad_asset_importer::anim_icon;
 use makepad_asset_importer::classic_import::encode_png_rgba;
 use makepad_widgets::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -177,11 +193,6 @@ const LOADS_PER_FRAME: usize = 1;
 /// Sheet readbacks per UI frame. A readback blocks the UI thread on the GPU
 /// (~3ms), so two is the ceiling and the rest wait a frame.
 const READBACKS_PER_FRAME: usize = 2;
-/// Frame period under which the bank may take another lane.
-const PACE_GOOD: f64 = 0.020;
-/// Frame period over which the bank gives a lane back — the app must stay
-/// draggable, scrollable and playable while the library regenerates.
-const PACE_BAD: f64 = 0.030;
 
 /// A render job: everything needed with no further lookups.
 pub struct FxThumbJob {
@@ -206,18 +217,46 @@ pub struct FxThumbSheet {
     pub fps: f32,
 }
 
+/// THE BAKE RECIPE, versioned.
+///
+/// The cache is keyed by REVISION — the document's content digest — which
+/// answers "did the effect change" and nothing else. A change to how a sheet
+/// is RENDERED (frame count, preroll, supersampling, the pictures a
+/// transition is previewed against) produces a different picture from the
+/// same revision, so without this the whole library would keep serving
+/// yesterday's bake forever. These numbers are the missing half of the
+/// identity: bump one and exactly the sheets it describes re-bake, once.
+///
+/// `0` means "the original recipe" and adds nothing to the name, so
+/// introducing the lever orphaned no existing file.
+// 1: screen-engine docs bake against the structured stand-in instead of
+//    the fallback blob — every sheet's picture changed.
+pub const RECIPE: u32 = 1;
+
+/// The same lever for the TWO-DECK STAND-INS alone
+/// ([`crate::effects::deck_pattern`]). A transition sheet is a picture OF
+/// those; a generator's sheet has never seen them. Splitting the levers is
+/// what lets calming the stand-ins re-bake seventy transition tiles without
+/// throwing away a hundred and ninety perfectly good ones.
+///
+/// `1` = the quiet slates (the first pass' full-saturation primaries blew
+/// out the rest of the UI).
+pub const DECK_RECIPE: u32 = 1;
+
 /// The cache file for one revision. Transition previews render differently
 /// (two-input sweep), so they key their own file — a static sheet cached
 /// before the sweep existed is simply ignored, never shown. `-t2`: the
 /// first two-input sweep shipped with sheets rendered before input1
 /// actually landed on some docs; bumping the key retired every one.
 pub fn cache_path(dir: &Path, revision: &AssetRevisionId, transition: bool) -> PathBuf {
+    let recipe = if RECIPE == 0 { String::new() } else { format!("-r{RECIPE}") };
     if transition {
         // -t3: the sweep became frame-indexed (the whole transition edge
         // to edge in one sheet); -t2 retired the shader-collision sheets.
-        dir.join(format!("{revision}-t3.png"))
+        let deck = if DECK_RECIPE == 0 { String::new() } else { format!("-d{DECK_RECIPE}") };
+        dir.join(format!("{revision}-t3{deck}{recipe}.png"))
     } else {
-        dir.join(format!("{revision}.png"))
+        dir.join(format!("{revision}{recipe}.png"))
     }
 }
 
@@ -334,6 +373,10 @@ struct ActiveJob {
     job: FxThumbJob,
     phase: Phase,
     encoder: Option<std::thread::JoinHandle<Result<FxThumbSheet, String>>>,
+    /// LIVECODING: the log position this document's load started at, so a
+    /// draw-shader failure raised while the lane rendered can be attributed
+    /// to it (see `crate::livecode`).
+    mark: u64,
     // Honest numbers for the report line.
     started: Instant,
     frames: u32,
@@ -419,16 +462,34 @@ pub struct VjFxThumbs {
     next_frame: NextFrame,
     #[rust]
     cache_dir: Option<PathBuf>,
+    /// THE PENDING SET — one deep store (the whole library fits), pulled
+    /// by [`Self::take_next`]'s strict classes. Order within the vec is
+    /// enqueue order; the classes decide between entries at the pull, so
+    /// membership can never go stale. Nothing in here expires.
     #[rust]
-    queue: VecDeque<FxThumbJob>,
+    pending: Vec<FxThumbJob>,
+    /// CLASS 1: the revisions on screen this very tick, in pad order.
+    #[rust]
+    visible_now: Vec<AssetRevisionId>,
+    /// CLASS 2: which effect tab is open — `Some(true)` TRANSITION,
+    /// `Some(false)` EFFECT, `None` no effect tab (classes 2 and 3 merge).
+    /// Matches [`FxThumbJob::transition`], which is the same split the two
+    /// tabs draw.
+    #[rust]
+    open_tab: Option<bool>,
     #[rust]
     lanes: Vec<Lane>,
     #[rust]
     results: Vec<FxThumbSheet>,
-    /// Revisions that failed to render this session — never retried, their
-    /// tiles keep the seeded placeholder.
+    /// Revisions that failed to load or render — TERMINAL for this session:
+    /// the pipeline is deterministic, so the same revision would fail the
+    /// same way again. Only a new revision (a content change, hence a new
+    /// key) bakes again. The tile paints the failure (see `take_failures`).
     #[rust]
     failed: HashMap<AssetRevisionId, String>,
+    /// Failures not yet handed to the app (it mirrors them onto the tiles).
+    #[rust]
+    new_failures: Vec<AssetRevisionId>,
     /// Set once the platform proves it cannot read a render target back
     /// (web/headless); rendering is pointless then, cache decode still works.
     #[rust]
@@ -444,12 +505,6 @@ pub struct VjFxThumbs {
     /// bank at one lane.
     #[rust(true)]
     full_speed: bool,
-    /// Lanes the pacing guard currently allows — ramps up from one so a
-    /// cold boot never opens with six compiles in a frame.
-    #[rust(1usize)]
-    allowed: usize,
-    #[rust]
-    last_frame_at: Option<Instant>,
     // Session totals for the report line.
     #[rust]
     done_count: usize,
@@ -468,19 +523,9 @@ impl VjFxThumbs {
         self.cache_dir.as_deref()
     }
 
-    /// Nothing loaded, nothing queued: everything handed over is finished.
+    /// Nothing loaded, nothing pending: everything handed over is finished.
     pub fn is_idle(&self) -> bool {
-        self.queue.is_empty() && self.lanes.iter().all(|l| l.job.is_none())
-    }
-
-    /// How many more documents the bank can take right now — the app keeps
-    /// it fed instead of waiting for it to fall idle between documents.
-    pub fn free_lanes(&self) -> usize {
-        if self.disabled.is_some() {
-            return 0;
-        }
-        let busy = self.lanes.iter().filter(|l| l.job.is_some()).count() + self.queue.len();
-        self.lane_budget().saturating_sub(busy)
+        self.pending.is_empty() && self.lanes.iter().all(|l| l.job.is_none())
     }
 
     /// A live set is running: keep the bank to one lane. At boot, idle, or a
@@ -491,22 +536,53 @@ impl VjFxThumbs {
 
     fn lane_budget(&self) -> usize {
         if self.full_speed {
-            self.allowed.clamp(1, LANES)
+            // Nobody is performing: the bank owns the GPU.
+            LANES
         } else {
             1
         }
     }
 
+    /// THE PRIORITY FEED, one call per tick: what is on screen right now
+    /// (in pad order) and which effect tab is open. [`Self::take_next`]
+    /// classifies against exactly this, at the moment a lane frees — a
+    /// scroll or tab switch reclassifies the whole pending set instantly,
+    /// with no re-sorting to go stale. In-flight lanes are never touched.
+    pub fn set_priority(&mut self, visible: &[AssetRevisionId], open_tab: Option<bool>) {
+        self.visible_now.clear();
+        self.visible_now.extend_from_slice(visible);
+        self.open_tab = open_tab;
+    }
+
+    /// The next job a free lane renders, by STRICT CLASS — the user's law:
+    /// "only generate icons for invisible things if the visible ones are
+    /// done."
+    fn take_next(&mut self) -> Option<FxThumbJob> {
+        take_next_job(&mut self.pending, &self.visible_now, self.open_tab)
+    }
+
+    /// Terminal for this session: only a new revision renders again.
     pub fn is_failed(&self, revision: &AssetRevisionId) -> bool {
         self.failed.contains_key(revision)
     }
 
-    /// Already rendering or queued here. With several lanes in flight the
+    /// Failures the app has not painted yet — the tile wears the failure
+    /// (red ring + FAILED) instead of spinning forever.
+    pub fn take_failures(&mut self) -> Vec<AssetRevisionId> {
+        std::mem::take(&mut self.new_failures)
+    }
+
+    fn mark_failed(&mut self, revision: AssetRevisionId, error: String) {
+        self.failed.insert(revision, error);
+        self.new_failures.push(revision);
+    }
+
+    /// Already rendering or pending here. With several lanes in flight the
     /// app can reach a tile again while its document is still on a lane —
     /// without this it would fetch the source and render the same sheet
     /// twice.
     pub fn holds(&self, revision: &AssetRevisionId) -> bool {
-        self.queue.iter().any(|j| &j.revision == revision)
+        self.pending.iter().any(|j| &j.revision == revision)
             || self
                 .lanes
                 .iter()
@@ -521,22 +597,21 @@ impl VjFxThumbs {
         std::mem::take(&mut self.results)
     }
 
+    /// Admission NEVER collapses: a job is refused only when the platform
+    /// cannot render at all, its revision already failed (terminal), or the
+    /// same revision is already pending/rendering. A REVISION CHANGE is an
+    /// event: a job for the same asset under a new revision replaces the
+    /// stale pending one (an in-flight render of the old revision finishes
+    /// harmlessly — the cache is keyed by revision).
     pub fn enqueue(&mut self, cx: &mut Cx, job: FxThumbJob) {
-        if self.disabled.is_some() || self.failed.contains_key(&job.revision) {
+        if self.disabled.is_some() || self.is_failed(&job.revision) || self.holds(&job.revision) {
             return;
         }
-        let busy = self
-            .lanes
-            .iter()
-            .any(|l| l.job.as_ref().is_some_and(|a| a.job.revision == job.revision))
-            || self.queue.iter().any(|j| j.revision == job.revision);
-        if busy {
-            return;
-        }
+        self.pending.retain(|j| j.asset != job.asset);
         if self.batch_started.is_none() {
             self.batch_started = Some(Instant::now());
         }
-        self.queue.push_back(job);
+        self.pending.push(job);
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
     }
@@ -564,22 +639,29 @@ impl VjFxThumbs {
     fn fail_lane(&mut self, cx: &mut Cx, index: usize, error: String) {
         if let Some(active) = self.lanes[index].job.take() {
             log!(
-                "fx thumb: {} FAILED — {} (placeholder kept)",
+                "fx thumb: {} FAILED — {} (marked failed for this revision)",
                 active.job.title,
                 error
             );
-            self.failed.insert(active.job.revision, error);
+            self.mark_failed(active.job.revision, error);
         }
         self.view(index).clear_effect(cx);
     }
 
-    /// Hand queued documents to free lanes, at most [`LOADS_PER_FRAME`] a
-    /// frame so a compile never lands on top of another one.
+    /// Pull pending documents onto free lanes, strictly by class
+    /// ([`Self::take_next`]). At most [`LOADS_PER_FRAME`] a frame so a
+    /// compile never lands on top of another one.
     fn start_jobs(&mut self, cx: &mut Cx) {
+        // A platform that proved it cannot read back must stop PULLING:
+        // without this the deep pending set kept rendering after disable
+        // and marked the rest of the library failed.
+        if self.disabled.is_some() {
+            return;
+        }
         let budget = self.lane_budget();
         let mut loads = 0;
         for index in 0..LANES {
-            if loads >= LOADS_PER_FRAME || self.queue.is_empty() {
+            if loads >= LOADS_PER_FRAME || self.pending.is_empty() {
                 return;
             }
             if index >= budget || self.lanes[index].job.is_some() {
@@ -589,7 +671,7 @@ impl VjFxThumbs {
             if running >= budget {
                 return;
             }
-            let Some(job) = self.queue.pop_front() else { return };
+            let Some(job) = self.take_next() else { return };
             loads += 1;
             let prepared = self.lanes[index].prepared;
             let t0 = Instant::now();
@@ -605,6 +687,7 @@ impl VjFxThumbs {
             view.set_input_texture(0, None);
             view.set_input_texture(1, None);
             view.set_user_override([None; 4]);
+            let mark = crate::livecode::mark();
             let loaded = view.set_effect_source(cx, "vjfx_thumb", &job.source);
             self.lanes[index].prepared = true;
             match loaded {
@@ -613,6 +696,7 @@ impl VjFxThumbs {
                         job,
                         phase: Phase::Warmup(0),
                         encoder: None,
+                        mark,
                         started: t0,
                         frames: 0,
                         load_ms: t0.elapsed().as_secs_f32() * 1000.0,
@@ -624,7 +708,14 @@ impl VjFxThumbs {
                         "fx thumb: {} document failed to load — {error} (placeholder kept)",
                         job.title
                     );
-                    self.failed.insert(job.revision, error);
+                    // A parse failure is DEFINITE: report it as the answer
+                    // rather than waiting to see what the shader does.
+                    crate::livecode::report(
+                        &job.revision.to_string(),
+                        mark,
+                        Err(error.clone()),
+                    );
+                    self.mark_failed(job.revision, error);
                 }
             }
         }
@@ -642,6 +733,13 @@ impl VjFxThumbs {
             let Some(mut active) = self.lanes[index].job.take() else { continue };
             let Some(handle) = active.encoder.take() else { continue };
             let total_ms = active.started.elapsed().as_secs_f32() * 1000.0;
+            // LIVECODING: the document parsed and a full sheet was DRAWN, so
+            // whatever the shader had to say has been said by now. A black
+            // sheet is not itself a verdict — an input-shaping transition
+            // doc renders black with no program behind it — so the answer
+            // is whatever the compiler actually reported, and nothing means
+            // it compiled.
+            crate::livecode::report(&active.job.revision.to_string(), active.mark, Ok(()));
             match handle.join() {
                 Ok(Ok(sheet)) => {
                     self.done_count += 1;
@@ -665,14 +763,16 @@ impl VjFxThumbs {
                 }
                 Ok(Err(error)) => {
                     log!(
-                        "fx thumb: {} FAILED — {error} (placeholder kept)",
+                        "fx thumb: {} FAILED — {error} (marked failed for this revision)",
                         active.job.title
                     );
-                    self.failed.insert(active.job.revision, error);
+                    self.mark_failed(active.job.revision, error);
                 }
                 Err(_) => {
-                    self.failed
-                        .insert(active.job.revision, "encode worker panicked".to_string());
+                    self.mark_failed(
+                        active.job.revision,
+                        "encode worker panicked".to_string(),
+                    );
                 }
             }
         }
@@ -730,6 +830,16 @@ impl VjFxThumbs {
                 let tri = 1.0 - (2.0 * m - 1.0).abs();
                 view.set_user_override([None, None, None, Some(tri)]);
             }
+        } else if view.is_screen_engine() {
+            // A screen doc is a remap OF ITS CONTENT: baked against the
+            // engine's featureless fallback blob, a mirror looks blank and
+            // a tile looks like mud. Give it the structured stand-in (a
+            // fixed A/B blend so both the disc and the grid features are in
+            // frame) — the warp itself becomes the picture.
+            let k = capture.unwrap_or(0);
+            let time = (PREROLL_SECS + k as f64 * FRAME_STEP) as f32;
+            let tex = transition_input(cx.cx, scratch, &mut lane.trans_tex[0], 0.35, time);
+            view.set_input_texture(0, Some(tex));
         }
 
         // The sheet pass. The effect's own passes are begun inside it, so
@@ -829,35 +939,79 @@ impl VjFxThumbs {
         self.view(index).clear_effect(cx);
     }
 
-    /// Follow the frame clock: hand a lane back when frames get long, take
-    /// one when they are short again. This is what keeps a full-speed regen
-    /// from ever feeling like a hang.
-    fn pace(&mut self) {
-        let now = Instant::now();
-        let last = self.last_frame_at.replace(now);
-        let Some(last) = last else { return };
-        let period = now.duration_since(last).as_secs_f64();
-        // A long gap is the app being idle between bursts, not a slow
-        // frame; only judge frames that follow one another.
-        if period > 0.25 {
+    /// TEMPORARY: env-gated view of the bank's real occupancy.
+    fn debug_bank(&mut self) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TICK: AtomicU32 = AtomicU32::new(0);
+        if std::env::var("VJ_FX_BANK_DEBUG").is_err() {
             return;
         }
-        if period > PACE_BAD {
-            self.allowed = self.allowed.saturating_sub(1).max(1);
-        } else if period < PACE_GOOD && self.allowed < LANES {
-            self.allowed += 1;
+        let n = TICK.fetch_add(1, Ordering::Relaxed);
+        if n % 20 != 0 {
+            return;
         }
+        let phases: String = self
+            .lanes
+            .iter()
+            .map(|l| match l.job.as_ref().map(|a| a.phase) {
+                None => '.',
+                Some(Phase::Warmup(_)) => 'w',
+                Some(Phase::Preroll { .. }) => 'p',
+                Some(Phase::Capture(_)) => 'c',
+                Some(Phase::Readback) => 'r',
+                Some(Phase::Encoding) => 'e',
+            })
+            .collect();
+        log!(
+            "fx bank: budget={} full_speed={} pending={} lanes=[{}]",
+            self.lane_budget(),
+            self.full_speed,
+            self.pending.len(),
+            phases
+        );
     }
 }
 
-const TRANS_W: usize = 192;
-const TRANS_H: usize = 120;
+/// THE CLASS PULL, standalone so the tests can pin it. Classes are decided
+/// HERE, at the pull, against the live `visible`/`open_tab` — never baked
+/// into the queue's order, which is what let the old FIFO go stale:
+///
+/// 1. visible on screen right now, in pad order;
+/// 2. the rest of the open tab (`FxThumbJob::transition == open_tab`),
+///    most recently enqueued first;
+/// 3. other tabs, most recently enqueued first — touched only when
+///    classes 1 and 2 are empty.
+fn take_next_job(
+    pending: &mut Vec<FxThumbJob>,
+    visible: &[AssetRevisionId],
+    open_tab: Option<bool>,
+) -> Option<FxThumbJob> {
+    for revision in visible {
+        if let Some(at) = pending.iter().position(|j| &j.revision == revision) {
+            return Some(pending.remove(at));
+        }
+    }
+    if let Some(transition_tab) = open_tab {
+        if let Some(at) = pending.iter().rposition(|j| j.transition == transition_tab) {
+            return Some(pending.remove(at));
+        }
+    }
+    pending.pop()
+}
 
-/// The transition preview's input: TWO visibly different test patterns — a
-/// warm gradient with a drifting disc, and a cool grid with a
-/// counter-drifting bar — dissolved by `m` (the thumbnail's sweeping
-/// crossfade), exactly the slot runtime's premix-as-input0 contract.
-/// `m = 0` is pure pattern A, `m = 1` pure pattern B.
+const TRANS_W: usize = crate::effects::deck_pattern::W;
+const TRANS_H: usize = crate::effects::deck_pattern::H;
+
+/// The transition preview's input: TWO visibly different deck stand-ins —
+/// a dim warm slate with a drifting disc, and a dim cool slate ruled by a
+/// grid and a counter-drifting bar — dissolved by `m` (the thumbnail's
+/// sweeping crossfade), exactly the slot runtime's premix-as-input0
+/// contract. `m = 0` is pure pattern A, `m = 1` pure pattern B.
+///
+/// The pixel math lives in [`crate::effects::deck_pattern`] so the gallery's
+/// static preview cannot drift from what the tiles are actually baked with,
+/// and so the "keep it quiet" ceiling is stated once. Change the look there
+/// and bump [`RECIPE`] — the cache key carries it.
 fn transition_input(
     cx: &mut Cx,
     data: &mut Vec<u32>,
@@ -865,51 +1019,17 @@ fn transition_input(
     m: f32,
     time: f32,
 ) -> Texture {
+    use crate::effects::deck_pattern;
     const W: usize = TRANS_W;
     const H: usize = TRANS_H;
     data.resize(W * H, 0);
-    let m = m.clamp(0.0, 1.0);
-    let (dx, dy) = ((time * 0.7).cos() * 0.25, (time * 0.53).sin() * 0.2);
+    let drift = ((time * 0.7).cos() * 0.25, (time * 0.53).sin() * 0.2);
     let bar = (time * 0.4).fract();
     for y in 0..H {
         let v = y as f32 / H as f32;
         for x in 0..W {
             let u = x as f32 / W as f32;
-            // A: warm diagonal gradient + travelling disc.
-            let mut ar = 0.85 - 0.5 * v;
-            let mut ag = 0.45 + 0.3 * u;
-            let mut ab = 0.15 + 0.2 * (1.0 - u);
-            let ddx = u - 0.5 - dx;
-            let ddy = v - 0.5 - dy;
-            if ddx * ddx + ddy * ddy < 0.02 {
-                ar = 1.0;
-                ag = 0.95;
-                ab = 0.7;
-            }
-            // B: cool grid + counter-drifting vertical bar.
-            let gx = x % 24 < 2 || y % 24 < 2;
-            let mut br = 0.08;
-            let mut bg = 0.25 + 0.35 * v;
-            let mut bb = 0.7 + 0.3 * (1.0 - v);
-            if gx {
-                br = 0.4;
-                bg = 0.9;
-                bb = 1.0;
-            }
-            if ((u + 1.0 - bar).fract() - 0.5).abs() < 0.03 {
-                br = 0.9;
-                bg = 1.0;
-                bb = 1.0;
-            }
-            let r = ar + (br - ar) * m;
-            let g = ag + (bg - ag) * m;
-            let b = ab + (bb - ab) * m;
-            let (r8, g8, b8) = (
-                (r.clamp(0.0, 1.0) * 255.0) as u32,
-                (g.clamp(0.0, 1.0) * 255.0) as u32,
-                (b.clamp(0.0, 1.0) * 255.0) as u32,
-            );
-            data[y * W + x] = 0xff00_0000 | (r8 << 16) | (g8 << 8) | b8;
+            data[y * W + x] = deck_pattern::texel_bgra(u, v, m, drift, bar);
         }
     }
     match slot {
@@ -968,9 +1088,9 @@ impl Widget for VjFxThumbs {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.ensure_lanes();
-        self.pace();
         self.poll_encoders();
         self.start_jobs(cx.cx);
+        self.debug_bank();
 
         let mut ready: Vec<usize> = Vec::new();
         let mut last_sheet: Option<Texture> = None;
@@ -1074,6 +1194,45 @@ mod tests {
         assert_eq!(junk.len(), SHEET_W * SHEET_H * 4);
         let zero = sheet_rgba_from_bgra(&[], 0, 0);
         assert_eq!(zero.len(), SHEET_W * SHEET_H * 4);
+    }
+
+    /// THE QUEUE LAW: "only generate icons for invisible things if the
+    /// visible ones are done." Three strict classes, decided at the pull —
+    /// this test is the regression tripwire against the one-mixed-queue
+    /// failure (visible tiles waiting behind an invisible tab's work).
+    #[test]
+    fn lanes_pull_visible_first_then_open_tab_then_the_rest() {
+        let rev = |n: u8| AssetRevisionId::from_bytes([n; 32]);
+        let job = |n: u8, transition: bool| FxThumbJob {
+            asset: AssetId::from_bytes([n; 16]),
+            revision: rev(n),
+            title: format!("doc {n}"),
+            source: String::new(),
+            transition,
+        };
+        // Enqueue order: transition docs first, then effect docs — the
+        // WRONG order for an open EFFECT tab, so only the classes can fix
+        // it. Doc 5 (effect) and doc 2 (transition) are on screen.
+        let mut pending = vec![job(1, true), job(2, true), job(3, false), job(4, false), job(5, false)];
+        let visible = [rev(5), rev(2)];
+        let effect_tab = Some(false);
+        let order: Vec<u8> = std::iter::from_fn(|| {
+            take_next_job(&mut pending, &visible, effect_tab).map(|j| j.revision.as_bytes()[0])
+        })
+        .collect();
+        // Class 1 in pad order (5 then 2 — even though 2 is the other
+        // tab's doc, VISIBLE wins over everything), then class 2 (the open
+        // EFFECT tab: 4, 3 — most recent first), then class 3 (1).
+        assert_eq!(order, vec![5, 2, 4, 3, 1], "strict class order broke");
+        // A tab switch reclassifies instantly: same pending, TRANSITION
+        // tab open, nothing visible — the transition doc leads.
+        let mut pending = vec![job(1, true), job(3, false)];
+        let first = take_next_job(&mut pending, &[], Some(true)).unwrap();
+        assert!(first.transition, "open tab must outrank other tabs");
+        // No effect tab open: pure recency.
+        let mut pending = vec![job(1, true), job(3, false)];
+        let first = take_next_job(&mut pending, &[], None).unwrap();
+        assert_eq!(first.revision, rev(3));
     }
 
     #[test]

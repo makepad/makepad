@@ -314,13 +314,16 @@ impl App {
     }
 }
 
-/// Two visibly different deck stand-ins, dissolved by `m`: a warm gradient
-/// with a bright disc (m = 0, "deck A") and a cool grid with a vertical bar
-/// (m = 1, "deck B") — the same visual contract as the thumbnail renderer's
-/// transition inputs, static so capture sweeps stay deterministic.
+/// Two visibly different deck stand-ins, dissolved by `m`: a dim warm slate
+/// with a soft disc (m = 0, "deck A") and a dim cool slate ruled by a grid
+/// and a bar (m = 1, "deck B"). The pixel math is the SHARED one
+/// (`effects::deck_pattern`), so what the gallery previews is exactly what
+/// the thumbnail bank bakes; only the drift is dropped, so capture sweeps
+/// stay deterministic.
 fn gallery_deck_pattern(cx: &mut Cx, slot: &mut Option<Texture>, m: f32) -> Texture {
-    const W: usize = 192;
-    const H: usize = 120;
+    use effects::deck_pattern;
+    const W: usize = deck_pattern::W;
+    const H: usize = deck_pattern::H;
     if let Some(tex) = slot {
         return tex.clone();
     }
@@ -329,33 +332,8 @@ fn gallery_deck_pattern(cx: &mut Cx, slot: &mut Option<Texture>, m: f32) -> Text
         let v = y as f32 / H as f32;
         for x in 0..W {
             let u = x as f32 / W as f32;
-            let mut ar = 0.85 - 0.5 * v;
-            let mut ag = 0.45 + 0.3 * u;
-            let mut ab = 0.15 + 0.2 * (1.0 - u);
-            let (ddx, ddy) = (u - 0.62, v - 0.4);
-            if ddx * ddx + ddy * ddy < 0.02 {
-                ar = 1.0;
-                ag = 0.95;
-                ab = 0.7;
-            }
-            let grid = x % 24 < 2 || y % 24 < 2;
-            let mut br = 0.08;
-            let mut bg = 0.25 + 0.35 * v;
-            let mut bb = 0.7 + 0.3 * (1.0 - v);
-            if grid {
-                br = 0.4;
-                bg = 0.9;
-                bb = 1.0;
-            }
-            if (u - 0.3).abs() < 0.03 {
-                br = 0.9;
-                bg = 1.0;
-                bb = 1.0;
-            }
-            let r = ((ar + (br - ar) * m).clamp(0.0, 1.0) * 255.0) as u32;
-            let g = ((ag + (bg - ag) * m).clamp(0.0, 1.0) * 255.0) as u32;
-            let b = ((ab + (bb - ab) * m).clamp(0.0, 1.0) * 255.0) as u32;
-            data[y * W + x] = 0xff00_0000 | (r << 16) | (g << 8) | b;
+            // Frozen drift/bar: a still frame of the same two pictures.
+            data[y * W + x] = deck_pattern::texel_bgra(u, v, m, (0.12, -0.10), 0.30);
         }
     }
     let tex = Texture::new_with_format(

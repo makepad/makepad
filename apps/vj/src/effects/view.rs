@@ -700,6 +700,12 @@ impl VjFxView {
         }
     }
 
+    /// A screen-engine doc: its whole look is a function of the content on
+    /// input 0, so a preview bake must feed it a structured picture.
+    pub fn is_screen_engine(&self) -> bool {
+        matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Screen))
+    }
+
     /// True when the doc declared `engage: "ramp"` — an overlay/key
     /// transition that stays fully applied at the fader's B end instead of
     /// handing back the plain deck (see [`super::doc::EngageProfile`]).

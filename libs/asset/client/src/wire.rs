@@ -105,6 +105,19 @@ pub fn path_alias(alias: &AssetAlias) -> String {
     format!("/v1/aliases/{alias}")
 }
 
+/// Batch alias status in ONE request (see the server's
+/// `alias_status_batch`): what the store already holds under a list of
+/// aliases, whether each head's Source blob is the one the caller has, and
+/// which of a requested tag set each carries. Absent on older servers, which
+/// answer 404 — callers fall back to per-alias resolves.
+pub fn path_alias_status() -> String {
+    "/v1/aliases/status".to_string()
+}
+
+/// Most entries this client will put in one alias-status request. The server
+/// enforces its own ceiling; this is the one we promise not to exceed.
+pub const MAX_ALIAS_STATUS_ITEMS: usize = 512;
+
 pub fn path_revision(rev: &AssetRevisionId) -> String {
     format!("/v1/revisions/{rev}")
 }
