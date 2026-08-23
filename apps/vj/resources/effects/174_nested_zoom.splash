@@ -1,0 +1,41 @@
+// NESTED ZOOM — the frame recurses into itself: each level is a smaller,
+// rotated copy inset inside the one before it, LEVELS deep.
+{
+    name: "Nested Zoom"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ZOOM", bind: "p0", default: 0.5},
+        {name: "LEVELS", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let z = 1.3 + 1.0 * self.user.x
+            let levels = floor(mix(2.0, 5.0, self.user.y) + 0.5)
+            let ang = 0.12 * (0.2 + 1.6 * self.user.z)
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let mut p = uv - vec2(0.5, 0.5)
+            let mut i = 0.0
+            loop {
+                if i > levels - 0.5 {
+                    break
+                }
+                p = vec2(p.x * cs - p.y * sn, p.x * sn + p.y * cs) * z
+                p = vec2(fract(p.x + 0.5) - 0.5, fract(p.y + 0.5) - 0.5)
+                i = i + 1.0
+            }
+            let w = p + vec2(0.5, 0.5)
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

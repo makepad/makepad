@@ -1,0 +1,43 @@
+// REFRACTION — a procedural glass bump field builds a fake normal from its
+// own gradient; EDGE decides whether the bend applies everywhere or only
+// where the bump gradient is steep, like frosted glass over a picture.
+{
+    name: "Refraction"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.5},
+        {name: "SCALE", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        bump: fn(p: vec2) -> float {
+            let freq = 8.0 + 30.0 * self.user.y
+            let ph = self.time_beat.x * 0.12
+            return sin(p.x * freq + ph) * cos(p.y * freq * 1.3 - ph) + 0.5 * sin((p.x + p.y) * freq * 2.1 + ph * 1.6)
+        }
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let eps = 0.0025
+            let h0 = self.bump(uv)
+            let hx = self.bump(uv + vec2(eps, 0.0))
+            let hy = self.bump(uv + vec2(0.0, eps))
+            let gx = (hx - h0) / eps
+            let gy = (hy - h0) / eps
+            let gmag = length(vec2(gx, gy))
+            let edge_gain = mix(1.0, clamp(gmag * 0.6, 0.0, 1.0), clamp(self.user.z, 0.0, 1.0))
+            let strength = (0.01 + 0.05 * self.user.x) * edge_gain * (0.6 + 0.4 * self.time_beat.w)
+            let w = uv + vec2(gx, gy) * strength
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let glint = clamp(gmag * 0.4, 0.0, 1.0) * 0.15
+            let out = tex.xyz + vec3(glint, glint, glint)
+            return vec4(out, 1.0)
+        }
+    }
+}

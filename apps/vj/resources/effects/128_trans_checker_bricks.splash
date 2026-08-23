@@ -1,0 +1,30 @@
+// CHECKER BRICKS — Checker Tiles' two-phase flip laid over an offset
+// brick grid instead of a square one, so the checker pattern reads as
+// masonry rather than a grid.
+{
+    name: "Checker Bricks"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.2},
+        {name: "CELLS", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let cols = 5.0 + floor(self.user.y * 9.0)
+            let rows = max(2.0, cols * 0.5)
+            let row = floor(uv.y * rows)
+            let offset = modf(row, 2.0) * 0.5
+            let col = floor(uv.x * cols - offset)
+            let parity = modf(col + row, 2.0)
+            let field = 0.15 + parity * 0.55
+            let soft = 0.02 + self.user.x * 0.25
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

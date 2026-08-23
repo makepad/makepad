@@ -1,0 +1,34 @@
+// STRIP — one band across the frame scrolls independently while the
+// rest stays put; the band's position slowly drifts up and down.
+{
+    name: "Strip"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIDTH", bind: "p0", default: 0.5},
+        {name: "SPEED", bind: "p1", default: 0.5},
+        {name: "DRIFT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let tau = 6.2831853
+            let center = 0.5 + 0.30 * sin(self.sig.x * tau * 0.15) * (0.2 + 1.6 * self.user.z)
+            let half = 0.05 + 0.20 * self.user.x
+            let y0 = center - half
+            let y1 = center + half
+            let inside = step(y0, uv.y) * step(uv.y, y1)
+            let speed = 0.14 * (0.2 + 1.6 * self.user.y)
+            let scrolled = fract(uv.x + self.time_beat.x * speed)
+            let wx = mix(uv.x, scrolled, inside)
+            let tex = self.tex0.sample_as_bgra(vec2(wx, uv.y))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}
