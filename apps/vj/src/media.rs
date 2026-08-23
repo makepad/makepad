@@ -208,6 +208,12 @@ pub enum PlayMode {
     /// clip exceeds the cache budget. Ping-pong plays no audio — reversed
     /// sound is not a thing a pad wants.
     PingPong = 2,
+    /// Backwards looping, riding exactly the tiers ping-pong rides: the
+    /// decoded-frame cache when the clip fits, the GOP-batch seek-hop
+    /// reverse when it does not. Like ping-pong it is silent, and like
+    /// ping-pong the very first decode pass plays forward while the cache
+    /// fills — the honest price of reverse on a forward codec.
+    Reverse = 3,
 }
 
 impl PlayMode {
@@ -215,19 +221,19 @@ impl PlayMode {
         match v {
             1 => PlayMode::Loop,
             2 => PlayMode::PingPong,
+            3 => PlayMode::Reverse,
             _ => PlayMode::Once,
         }
     }
 }
 
-/// Decoded-frame cache ceiling for ping-pong (BGRA bytes). Sized so the
-/// enhance service's 1280×704 outputs bounce from memory: 281 frames at
-/// 3.6 MB is ~1.01 GB — but an enhanced clip normally carries a flow map
-/// and bounces through the WARP path from its 508 MB endpoint cache
-/// instead, so this ceiling serves plain clips: a 5.9 s 640×352 loop is
-/// 127 MB, a 1280×704 clip fits up to ~7 s (177 frames at 24 fps). Bigger
-/// clips fall through to the seek-bounce tier below.
-const MAX_PINGPONG_CACHE_BYTES: usize = 640 * 1024 * 1024;
+/// Decoded-frame cache ceiling for ping-pong/reverse (BGRA bytes). A clip
+/// under this ceiling gets frame-exact bidirectional playback from memory;
+/// over it, reverse degrades to the seek-bounce tier (correct but decode-
+/// heavy). Like the flow endpoint ceiling it is sized for the performance
+/// machine: 4 GB bounces ~8 s of 1920×1080 or ~45 s of 1280×704 from
+/// memory. Bigger clips fall through to the seek-bounce tier below.
+const MAX_PINGPONG_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
 /// is a typical GOP, so most of what the in-seek discard walk decodes is
@@ -240,6 +246,16 @@ const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 /// decode. 96 MB holds a full 2 s window up to ~1 MB/frame (e.g. 640×352
 /// and 720p), and ~26 frames of 1280×704.
 const REVERSE_WINDOW_MAX_BYTES: usize = 96 * 1024 * 1024;
+
+/// `VJ_TL=1` turns on the TIMELINE TRACE (stderr): every transport decision
+/// on every playback path — the flow warp clock, the cache sweep, the
+/// seek-bounce reverse legs — logs its position/rate/mode as it happens, so
+/// a jank report reads straight off the log instead of needing a repro
+/// under a debugger. Off, it costs one relaxed bool load per frame.
+pub fn tl_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_TL").is_some())
+}
 
 struct SlotShared {
     stop: AtomicBool,
@@ -275,6 +291,13 @@ struct SlotShared {
     /// sweep disengages; sign and magnitude are natural-rate units.
     scratch_active: AtomicBool,
     scratch_rate_bits: AtomicU64,
+    /// LIVE DIRECTION FLIP (the REV button inside a bounce): a bumped
+    /// counter asks the cache tier to invert its travel NOW — the beat
+    /// sweep re-engages from the on-screen position, never a teleport.
+    /// `travel_forward` publishes the direction actually being served so
+    /// the button can track the live leg.
+    dir_flip: AtomicU64,
+    travel_forward: AtomicBool,
     /// The last PACING pts pushed to the ring, whatever stamped it — the
     /// law-paced first pass and the sweep tiers hand the presentation
     /// clock across seamlessly by continuing from here.
@@ -344,6 +367,8 @@ impl SlotPlayer {
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            dir_flip: AtomicU64::new(0),
+            travel_forward: AtomicBool::new(true),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(0),
@@ -420,6 +445,20 @@ impl SlotPlayer {
 
     pub fn set_mode(&mut self, mode: PlayMode) {
         self.shared.mode.store(mode as u8, Ordering::Release);
+    }
+
+    /// The REV button inside a bounce: flip the CURRENT travel direction.
+    /// Loop/Reverse switch modes instead; a ping-pong keeps its mode and
+    /// inverts the leg in flight. The cache tier honors it on its next
+    /// frame; the first-pass forward decode and the seek-hop tier cannot
+    /// (a forward codec mid-decode has no leg to mirror).
+    pub fn flip_direction(&mut self) {
+        self.shared.dir_flip.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The direction the transport is actually serving (true = forward).
+    pub fn travel_forward(&self) -> bool {
+        self.shared.travel_forward.load(Ordering::Acquire)
     }
 
     /// Drop this slot's audio at the source: no samples reach the mixer
@@ -974,14 +1013,14 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // loop lit.)
                     cache_playback(&shared, &pingpong_cache);
                 }
-                if mode == PlayMode::PingPong
+                if matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
                     && pingpong_over_budget
                     && silent
                     && !seek_bounce_broken
                     && info.duration_100ns > 0
                 {
-                    // TIER 3: too big for the frame cache, but a bounce was
-                    // asked for — GOP-batch reverse via decoder seeks. Falls
+                    // TIER 3: too big for the frame cache, but a bounce (or
+                    // a reverse) was asked for — GOP-batch reverse via decoder seeks. Falls
                     // through to the reopen below when it hands back control
                     // (mode change / seek / a decoder that cannot seek).
                     match seek_bounce_playback(&mut decoder, &shared, &info) {
@@ -1155,7 +1194,7 @@ fn push_frame_paced(
 /// clip unmuted — this is what made the bounce button "do nothing" on any
 /// clip with a soundtrack.
 fn repeat_is_silent(has_audio: bool, muted: bool, mode: PlayMode) -> bool {
-    !has_audio || muted || mode == PlayMode::PingPong
+    !has_audio || muted || matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
 }
 
 /// Whether the LIVE trim range asks for anything outside the range the
@@ -1189,11 +1228,11 @@ fn cache_range_outgrown(built: (i64, i64), live: (i64, i64)) -> bool {
 /// wrap restarts each step from IN.
 fn sweep_index(phase: f64, forward: bool, lo: usize, hi: usize, mode: PlayMode) -> usize {
     let span = hi.max(lo + 1) - lo;
-    let u = if mode == PlayMode::PingPong && !forward {
-        1.0 - phase
-    } else {
-        phase
-    };
+    // Reverse is the always-mirrored map: every sweep runs OUT → IN and
+    // each beat step restarts from OUT (the wrap law, played backwards).
+    let mirrored =
+        mode == PlayMode::Reverse || (mode == PlayMode::PingPong && !forward);
+    let u = if mirrored { 1.0 - phase } else { phase };
     lo + ((u.clamp(0.0, 1.0)) * (span as f64 - 1.0)).round() as usize
 }
 
@@ -1252,6 +1291,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let n = cache.len();
     let mut idx = n - 1;
     let mut forward = false;
+    let mut last_mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
     let mut last_pulse = shared.beat_pulse.load(Ordering::Acquire);
     // Sweep-law transport state: the 0→1 phase of the current beat step,
     // the pulse-learned beat period in presentation pts, and whether the
@@ -1263,6 +1303,7 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let mut transport_was_on = false;
     let mut scratch_was_on = false;
     let mut scratch_pos = 0f64;
+    let mut seen_flip = shared.dir_flip.load(Ordering::Acquire);
     // Trim changes do NOT bounce control back here: the IN/OUT bounds are
     // read LIVE each frame below, so a shrinking range just tightens the
     // space the repeat moves in — playback never resets. Control only goes
@@ -1293,6 +1334,28 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if mode == PlayMode::Once {
             return;
         }
+        if mode != last_mode {
+            // A LIVE mode switch (the deck's picker) re-engages the beat
+            // sweep from the on-screen position instead of remapping the
+            // phase under the new mode's map — which would teleport.
+            last_mode = mode;
+            transport_was_on = false;
+        }
+        {
+            // REV inside a bounce: invert the travel in flight. The beat
+            // sweep re-engages from the on-screen position (same law as a
+            // mode switch), so the picture turns around where it is.
+            let flip = shared.dir_flip.load(Ordering::Acquire);
+            if flip != seen_flip {
+                seen_flip = flip;
+                forward = !forward;
+                transport_was_on = false;
+                if tl_on() {
+                    eprintln!("tl cache dirflip fwd={forward}");
+                }
+            }
+        }
+        shared.travel_forward.store(forward, Ordering::Release);
         if shared.paused.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(8));
             continue;
@@ -1324,6 +1387,9 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                 (scratch_pos + srate).clamp(lo as f64, (hi - 1) as f64);
             idx = scratch_pos.round() as usize;
             forward = srate >= 0.0;
+            if tl_on() {
+                eprintln!("tl cache scratch idx={idx} srate={srate:+.3} win={lo}..{hi}");
+            }
             transport_was_on = false;
             synth_pts += delta;
             shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
@@ -1348,7 +1414,9 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
                 } else {
                     0.0
                 };
-                sweep_phase = if mode == PlayMode::PingPong && !forward {
+                sweep_phase = if (mode == PlayMode::PingPong && !forward)
+                    || mode == PlayMode::Reverse
+                {
                     1.0 - u
                 } else {
                     u
@@ -1411,6 +1479,11 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             sweep_phase = p;
             forward = dir;
             idx = sweep_index(sweep_phase, forward, lo, hi, mode);
+            if tl_on() {
+                eprintln!(
+                    "tl cache beat mode={mode:?} phase={sweep_phase:.4} step={step:.5} idx={idx} fwd={forward} win={lo}..{hi} sweep_pts={sweep_pts:.0}"
+                );
+            }
             synth_pts += delta;
             shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
             shared.frames.lock().unwrap().push_back(Frame {
@@ -1421,6 +1494,9 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             continue;
         }
         transport_was_on = false;
+        if tl_on() {
+            eprintln!("tl cache free mode={mode:?} idx={idx} fwd={forward} win={lo}..{hi}");
+        }
         if mode == PlayMode::Loop {
             forward = true;
             idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
@@ -1431,6 +1507,19 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             // pacer only knew to WAIT out (at a slow chip that wait
             // doubled: the "0.5 stops dead" report). Source position
             // lives solely in clip_100ns.
+            synth_pts += delta;
+            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
+            shared.frames.lock().unwrap().push_back(Frame {
+                pts_100ns: synth_pts,
+                clip_100ns: cache[idx].pts_100ns,
+                bgra: cache[idx].bgra.clone(),
+            });
+            continue;
+        } else if mode == PlayMode::Reverse {
+            // The free-running mirror of Loop: OUT → IN, wrapping to the
+            // range's last frame at IN.
+            forward = false;
+            idx = if idx <= lo || idx > hi - 1 { hi - 1 } else { idx - 1 };
             synth_pts += delta;
             shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
             shared.frames.lock().unwrap().push_back(Frame {
@@ -1490,7 +1579,10 @@ fn seek_bounce_playback(
         shared.stop.load(Ordering::Acquire)
             || shared.seek_100ns.load(Ordering::Acquire) >= 0
             || shared.trim_epoch.load(Ordering::Acquire) != epoch0
-            || PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::PingPong
+            || !matches!(
+                PlayMode::from_u8(shared.mode.load(Ordering::Acquire)),
+                PlayMode::PingPong | PlayMode::Reverse
+            )
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
@@ -1533,6 +1625,13 @@ fn seek_bounce_playback(
         .max(shared.position_100ns.load(Ordering::Acquire));
     let serve = |shared: &SlotShared, bgra: Vec<u32>, clip_100ns: i64, synth_pts: &mut i64| {
         *synth_pts += delta;
+        if tl_on() {
+            eprintln!(
+                "tl hop frame clip={:.3}s synth={:.3}s",
+                clip_100ns as f64 / 1e7,
+                *synth_pts as f64 / 1e7
+            );
+        }
         shared
             .frames
             .lock()
@@ -1542,12 +1641,14 @@ fn seek_bounce_playback(
     };
     loop {
         // ---- reverse leg: OUT → IN, in seek-batched windows.
+        shared.travel_forward.store(false, Ordering::Release);
         let mut hi = t_out;
         while hi > t_in {
             if wait_ring(shared, has_audio, epoch0) {
                 return Ok(true);
             }
             let lo = (hi - REVERSE_WINDOW_100NS).max(t_in);
+            let hop_t0 = Instant::now();
             if decoder.seek(lo).is_err() {
                 return Ok(false);
             }
@@ -1579,6 +1680,16 @@ fn seek_bounce_playback(
                 hi = lo;
                 continue;
             };
+            if tl_on() {
+                eprintln!(
+                    "tl hop window {:.3}s..{:.3}s kept={} bytes={}MB collect={}ms",
+                    lo as f64 / 1e7,
+                    hi as f64 / 1e7,
+                    window.len(),
+                    bytes >> 20,
+                    hop_t0.elapsed().as_millis()
+                );
+            }
             while let Some(frame) = window.pop_back() {
                 if wait_ring(shared, has_audio, epoch0) {
                     return Ok(true);
@@ -1588,7 +1699,14 @@ fn seek_bounce_playback(
             // Strictly decreasing: every kept frame had pts < hi.
             hi = first_kept;
         }
+        // REVERSE mode loops the reverse leg only — the forward pass
+        // belongs to ping-pong's bounce. Read LIVE so a picker switch
+        // between the two mid-play changes the very next leg.
+        if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Reverse {
+            continue;
+        }
         // ---- forward leg: IN → OUT, a plain decode pass.
+        shared.travel_forward.store(true, Ordering::Release);
         if decoder.seek(t_in).is_err() {
             return Ok(false);
         }
@@ -3355,6 +3473,8 @@ mod tests {
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            dir_flip: AtomicU64::new(0),
+            travel_forward: AtomicBool::new(true),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
             position_100ns: AtomicI64::new(info.duration_100ns),
@@ -3461,6 +3581,8 @@ mod tests {
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
+            dir_flip: AtomicU64::new(0),
+            travel_forward: AtomicBool::new(true),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
                 position_100ns: AtomicI64::new(0),

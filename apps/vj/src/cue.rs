@@ -276,6 +276,19 @@ impl CueEngine {
         }
     }
 
+    /// The slot a cue is preloading INTO right now (decoder opening /
+    /// pre-rolling) — the deck whose source card wears the busy ring. An
+    /// armed cue is ready (waiting only for its beat) and a fetch has no
+    /// slot yet, so neither counts: the ring shows only a genuine load,
+    /// and clears on ready AND on failure because both drop this state.
+    pub fn preloading_slot(&self) -> Option<SlotId> {
+        let pending = self.pending.as_ref()?;
+        match pending.state {
+            PendingState::Preloading { slot } => Some(slot),
+            _ => None,
+        }
+    }
+
     pub fn armed(&self) -> Option<(CueGen, CueScheduleId, SlotId)> {
         let pending = self.pending.as_ref()?;
         let PendingState::Armed { slot, schedule } = pending.state else { return None };

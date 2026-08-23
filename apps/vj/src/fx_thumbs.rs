@@ -275,7 +275,7 @@ pub struct FxThumbSheet {
 //    producing GPU queue. An r4 artifact could be a racy partial bake
 //    (one lit cell + twenty-nine black ones passes the whole-sheet-black
 //    gate and decodes clean), so every r4 file retires and re-proves.
-pub const RECIPE: u32 = 5;
+pub const RECIPE: u32 = 6;
 
 /// The same lever for the TWO-DECK STAND-INS alone
 /// ([`crate::effects::deck_pattern`]). A transition sheet is a picture OF
@@ -975,11 +975,12 @@ impl VjFxThumbs {
         } else if view.is_screen_engine() {
             // A screen doc is a remap OF ITS CONTENT: baked against the
             // engine's featureless fallback blob, a mirror looks blank and
-            // a tile looks like mud. Give it the structured stand-in (a
-            // fixed A/B blend so both the disc and the grid features are in
-            // frame) — the warp itself becomes the picture.
+            // a tile looks like mud — and baked against the deliberately
+            // MUTED deck stand-in the whole family reads as a brown-gray
+            // smudge at tile size. It gets the vivid test card instead:
+            // the warp itself becomes the picture, in full color.
             let time = (PREROLL_SECS + k as f64 * FRAME_STEP) as f32;
-            let tex = transition_input(cx, scratch, &mut lane_trans[0], 0.35, time);
+            let tex = screen_input(cx, scratch, &mut lane_trans[0], time);
             view.set_input_texture(0, Some(tex));
         }
     }
@@ -1470,6 +1471,87 @@ const TRANS_H: usize = crate::effects::deck_pattern::H;
 /// static preview cannot drift from what the tiles are actually baked with,
 /// and so the "keep it quiet" ceiling is stated once. Change the look there
 /// and bump [`RECIPE`] — the cache key carries it.
+/// The SCREEN-ENGINE bake input: a VIVID test card. A screen doc is a
+/// remap of its content, and against the deliberately muted two-deck
+/// stand-in ([`crate::effects::deck_pattern`], peak 0.52 by law) every
+/// rotozoom/stretch/crop tile read as the same brown-gray smudge. This
+/// card is built to survive remapping instead: a saturated hue field (any
+/// crop keeps color), a dark rule grid (any stretch or rotation shows its
+/// geometry), and a drifting white ring (direction and scale read at a
+/// glance). Live decks never see it — it exists only under the bake.
+fn screen_input(
+    cx: &mut Cx,
+    data: &mut Vec<u32>,
+    slot: &mut Option<Texture>,
+    time: f32,
+) -> Texture {
+    const W: usize = TRANS_W;
+    const H: usize = TRANS_H;
+    data.resize(W * H, 0);
+    let center = (0.5 + (time * 0.7).cos() * 0.22, 0.5 + (time * 0.53).sin() * 0.18);
+    let aspect = W as f32 / H as f32;
+    for y in 0..H {
+        let v = y as f32 / H as f32;
+        for x in 0..W {
+            let u = x as f32 / W as f32;
+            let hue = (u * 0.8 + v * 0.4 + time * 0.03).fract();
+            let (mut r, mut g, mut b) = hue_rgb(hue);
+            // Rule grid: dark lines so warped geometry stays legible.
+            if (u * 8.0).fract() < 0.045 || (v * 4.5).fract() < 0.08 {
+                r *= 0.22;
+                g *= 0.22;
+                b *= 0.22;
+            }
+            // Drifting white ring: direction and scale cue.
+            let dx = (u - center.0) * aspect;
+            let dy = v - center.1;
+            let d = (dx * dx + dy * dy).sqrt();
+            let ring = (1.0 - (d - 0.16).abs() * 28.0).clamp(0.0, 1.0);
+            r += (1.0 - r) * ring;
+            g += (1.0 - g) * ring;
+            b += (1.0 - b) * ring;
+            data[y * W + x] = 0xff00_0000
+                | (((r * 255.0) as u32) << 16)
+                | (((g * 255.0) as u32) << 8)
+                | ((b * 255.0) as u32);
+        }
+    }
+    match slot {
+        Some(tex) => {
+            tex.set_data_u32(cx, W, H, data.clone());
+            tex.clone()
+        }
+        None => {
+            let tex = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: W,
+                    height: H,
+                    data: Some(data.clone()),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            *slot = Some(tex.clone());
+            tex
+        }
+    }
+}
+
+/// Bright six-segment hue wheel (S=1, V=1) — the test card wants
+/// saturation, not colorimetric fidelity.
+fn hue_rgb(h: f32) -> (f32, f32, f32) {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let x = 1.0 - (h.rem_euclid(2.0) - 1.0).abs();
+    match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    }
+}
+
 fn transition_input(
     cx: &mut Cx,
     data: &mut Vec<u32>,
