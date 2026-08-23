@@ -73,8 +73,8 @@
                 1.0 - abs(uv.y * 2.0 - 1.0)
             )
             let texel = self.tex0.sample_as_bgra(mu)
-            let gain = (0.30 + 0.95 * clamp(self.user.y, 0.0, 1.0))
-                * (0.50 + 0.22 * self.time_beat.w)
+            let gain = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
+                * (1.0 + 0.22 * self.time_beat.w)
             let lum = clamp(dot(texel.xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
             // A soft seam glow at every tile boundary ties the copies
             // together instead of letting them look like a torn strip.

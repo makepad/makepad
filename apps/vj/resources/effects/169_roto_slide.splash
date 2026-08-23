@@ -22,7 +22,7 @@
             let cs = cos(ang)
             let sn = sin(ang)
             let zoom = 0.2 + 1.6 * self.user.z
-            let slide = self.time_beat.x * 0.12 * (0.2 + 1.6 * self.user.y)
+            let slide = modf(self.time_beat.x * 0.12 * (0.2 + 1.6 * self.user.y), 1.0)
             let c = uv - vec2(0.5, 0.5)
             let r = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs) / zoom
             let w = fract(r + vec2(0.5 + slide, 0.5))

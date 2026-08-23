@@ -67,6 +67,39 @@ pub fn rgba8_to_nv12(rgba: &[u8], width: u32, height: u32, out: &mut Vec<u8>) {
 
 /// Convert tightly packed NV12 to tightly packed RGB8 (BT.709). `out` is
 /// resized to `width*height*3`.
+/// NV12 → packed BGRA u32 (`0xAARRGGBB`, i.e. b,g,r,a in memory), ONE
+/// pass, no intermediate RGB plane. The VJ's reverse/scratch tier converts
+/// hundreds of megabytes a second on giant screen-capture frames; the
+/// two-pass rgb8-then-repack shape it used before doubled the memory
+/// traffic and cost roughly half of its per-frame budget.
+pub fn nv12_to_bgra_u32(nv12: &[u8], width: u32, height: u32, out: &mut Vec<u32>) {
+    let w = width as usize;
+    let h = height as usize;
+    debug_assert!(w % 2 == 0 && h % 2 == 0);
+    debug_assert!(nv12.len() >= nv12_frame_size(width, height));
+    out.clear();
+    out.resize(w * h, 0);
+    let (y_plane, uv_plane) = nv12.split_at(w * h);
+    for y in 0..h {
+        let uv_row = &uv_plane[(y / 2) * w..(y / 2) * w + w];
+        let y_row = &y_plane[y * w..y * w + w];
+        let out_row = &mut out[y * w..y * w + w];
+        for x in 0..w {
+            let c = y_row[x] as i32 - 16;
+            let d = uv_row[(x / 2) * 2] as i32 - 128;
+            let e = uv_row[(x / 2) * 2 + 1] as i32 - 128;
+            // BT.709 limited range (the same math as nv12_to_rgb8).
+            let r = (298 * c + 459 * e + 128) >> 8;
+            let g = (298 * c - 55 * d - 136 * e + 128) >> 8;
+            let b = (298 * c + 541 * d + 128) >> 8;
+            out_row[x] = 0xff00_0000
+                | ((clamp_u8(r) as u32) << 16)
+                | ((clamp_u8(g) as u32) << 8)
+                | clamp_u8(b) as u32;
+        }
+    }
+}
+
 pub fn nv12_to_rgb8(nv12: &[u8], width: u32, height: u32, out: &mut Vec<u8>) {
     let w = width as usize;
     let h = height as usize;

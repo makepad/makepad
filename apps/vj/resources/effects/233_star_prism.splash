@@ -47,7 +47,7 @@
                     * (0.5 + self.time_beat.w * 1.0 + clamp(self.user.z, 0.0, 4.0))
                     * (0.4 + 0.6 * t)
             } else {
-                out = content.xyz * (t * 0.95)
+                out = content.xyz * t
                     + self.col_c.xyz * (1.0 - attr.z) * 0.25
             }
             return vec4(out * self.fog.y, 1.0)

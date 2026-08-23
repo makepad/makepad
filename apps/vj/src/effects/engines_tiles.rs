@@ -450,7 +450,7 @@ script_mod! {
                 // ---- CONVEYOR: alternate rows stream, wrap over the lip --
                 let dirn = 1.0 - 2.0 * modf(gy, 2.0)
                 let sp = self.flow.y * (0.7 + 0.6 * fract(gy * 0.371)) * span * 0.14
-                let a = rest.x + dirn * t * sp + span * 0.5
+                let a = rest.x + dirn * modf(t * sp, span) + span * 0.5
                 let x = modf(modf(a, span) + span, span) - span * 0.5
                 let edge = smoothstep(0.72, 1.0, abs(x) / (span * 0.5))
                 let bob = sin(t * 1.7 + gy * 1.3) * self.flow.x * 0.10
@@ -458,7 +458,7 @@ script_mod! {
                 axis = vec3(0.0, 1.0, 0.0)
                 ang = edge * 1.2 * (step(0.0, x) * 2.0 - 1.0)
                 // Lanes flash in golden-ratio sequence on the beat.
-                let sel = fract(gy * 0.618034 + floor(self.time_beat.y) * 0.381966)
+                let sel = fract(gy * 0.618034 + fract(floor(self.time_beat.y) * 0.381966))
                 flash = self.time_beat.w * (1.0 - smoothstep(0.0, 0.14, sel)) * 0.6
                 shade = shade * (1.0 - edge * 0.35)
             } else {

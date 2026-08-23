@@ -1299,7 +1299,7 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_a_rate := VjBeatsDrop{width: 34}
                                                         }
-                                                        deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                        deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         // THE JOG WHEEL: the
                                                         // sprung scratch hand
                                                         // (push right forward,
@@ -1755,7 +1755,7 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_b_rate := VjBeatsDrop{width: 34}
                                                         }
-                                                        deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                                                        deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
                                                             deck_b_wheel_learn := Learn{
                                                                 deck_b_wheel := VjSlowmoWheel{}
@@ -7746,15 +7746,18 @@ p2 {}
                     .set_visible(cx, !tracks.is_empty());
                 if is_video {
                     // This runs at cue time too, so a fresh clip shows its
-                    // real latches at once: MUTE lit (cues default muted),
-                    // transport buttons live chrome — never an innocent
-                    // dark icon over an active state, and never a live
-                    // control still wearing the empty deck's ghost.
+                    // real latches at once — never an innocent dark icon
+                    // over an active state, and never a live control still
+                    // wearing the empty deck's ghost. The AUDIO button is
+                    // lit while the deck's sound is LIVE (a lit red mute is
+                    // backwards for a VJ deck — silent is the resting
+                    // state, sound is the event); cues default muted, so a
+                    // fresh clip starts dark.
                     self.paint_icon_button(cx, Self::deck_play_path(slot), playing);
                     self.paint_icon_button(cx, Self::deck_pause_path(slot), playing);
                     self.paint_icon_button(cx, Self::deck_rev_path(slot), shape.flip);
                     self.paint_icon_button(cx, Self::deck_rw_path(slot), false);
-                    self.paint_icon_button(cx, Self::deck_mute_path(slot), self.slot_video_muted[i]);
+                    self.paint_icon_button(cx, Self::deck_mute_path(slot), !self.slot_video_muted[i]);
                     if let Some(mut wheel) = self
                         .ui
                         .widget(cx, Self::deck_wheel_path(slot))
@@ -16176,10 +16179,11 @@ impl MatchEvent for App {
             }
             if self.ui.button(cx, Self::deck_mute_path(slot)).clicked(actions) {
                 self.slot_video_muted[i] = !self.slot_video_muted[i];
+                // Lit = audio LIVE (see sync_slot_controls_ui).
                 if let Some(player) = self.players[i].as_mut() {
                     player.set_muted(self.slot_video_muted[i]);
                 }
-                self.paint_icon_button(cx, Self::deck_mute_path(slot), self.slot_video_muted[i]);
+                self.paint_icon_button(cx, Self::deck_mute_path(slot), !self.slot_video_muted[i]);
                 self.save_clip_profile(slot);
             }
         }

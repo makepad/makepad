@@ -46,7 +46,8 @@
             let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
             let r = length(p)
             let spin = (clamp(self.user.y, 0.0, 1.0) - 0.5) * 0.9
-            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5 + self.time_beat.x * spin
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * spin, 1.0)
             let gain = 0.6 + 1.2 * clamp(self.user.x, 0.0, 1.0)
 
             // The inner disc breathes on the broadband level; the petals

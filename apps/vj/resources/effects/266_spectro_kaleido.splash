@@ -40,7 +40,8 @@
             let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
             let r = length(p)
             let turn = (clamp(self.user.z, 0.0, 1.0) - 0.5) * 0.7
-            let raw = atan2(p.y, p.x) / 6.2831853 + 0.5 + self.time_beat.x * turn
+            let raw = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * turn, 1.0)
 
             // Fold the circle into WEDGES, then mirror inside each one.
             let wedges = floor(3.0 + 9.0 * clamp(self.user.x, 0.0, 1.0))

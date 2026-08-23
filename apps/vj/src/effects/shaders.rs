@@ -370,7 +370,13 @@ script_mod! {
             let hh = h * corridor
             // VERTEX-stage fetch: sample_nearest with an explicit lod is the
             // vertex-legal sampler (see the GPU-skinned palette fetch).
-            let tex = self.tex0.sample_nearest(fract(uv + scroll), 0.0)
+            // The drape is periodic in whole uv units, so it reads a
+            // WRAPPED scroll — an hours-old clock must not eat the uv's
+            // precision. The fbm domain above cannot wrap (the land would
+            // jump), so it keeps the raw scroll.
+            let wrap = vec2(0.0,
+                0.0 - modf(self.time_beat.x * self.flow.x * 0.06, 1.0))
+            let tex = self.tex0.sample_nearest(fract(uv + wrap), 0.0)
             let lum = dot(tex.xyz, vec3(0.299, 0.587, 0.114))
             return mix(hh, lum, self.flow.y)
         }
@@ -432,7 +438,10 @@ script_mod! {
             // Same NEGATIVE sign as `height_at`: grid, drape and land must
             // travel together, toward the camera.
             let cells = 40.0
-            let scroll = vec2(0.0, 0.0 - self.time_beat.x * self.flow.x * 0.06)
+            // BOUNDED SCROLL: grid and drape are both periodic in whole uv
+            // units, so the wrap is the same picture on a small number.
+            let scroll = vec2(0.0,
+                0.0 - modf(self.time_beat.x * self.flow.x * 0.06, 1.0))
             let g = fract((self.v_uv + scroll) * cells)
             let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
             let line = 1.0 - smoothstep(0.0, 0.11, dg)
@@ -729,7 +738,7 @@ script_mod! {
             if vcmix > 0.001 {
                 let vuv = vec2(
                     self.geom.geom_uv.x,
-                    fract(self.geom.geom_uv.y * 3.0 + self.time_beat.x * 0.05)
+                    fract(self.geom.geom_uv.y * 3.0 + fract(self.time_beat.x * 0.05))
                 )
                 vtex = self.tex0.sample_nearest(vuv, 0.0)
             }
@@ -750,7 +759,7 @@ script_mod! {
             let along = self.v_uv.y
             let around = self.v_uv.x
             // Rings sweeping along the tube ON THE BEAT + longitudinal rails.
-            let ring_ph = fract(along * self.shape.x - self.time_beat.y * 0.25)
+            let ring_ph = fract(along * self.shape.x - fract(self.time_beat.y * 0.25))
             let ring = pow(1.0 - min(ring_ph, 1.0 - ring_ph) * 2.0, 8.0)
             let rail_ph = fract(around * 12.0)
             let rail = pow(1.0 - min(rail_ph, 1.0 - rail_ph) * 2.0, 10.0) * 0.6
@@ -776,7 +785,7 @@ script_mod! {
                 // and every ring shows a single smeared row — three copies
                 // is roughly square once the circumference is unrolled, and
                 // that is the difference between a texture and a picture.
-                let cuv = vec2(around, fract(along * 3.0 + self.time_beat.x * 0.05))
+                let cuv = vec2(around, fract(along * 3.0 + fract(self.time_beat.x * 0.05)))
                 let texel = self.tex0.sample_as_bgra(cuv)
                 // Wall level stays UNDER 1 in the stock drape: this family
                 // usually runs a bloom stage, and a bore papered at full
@@ -966,7 +975,7 @@ script_mod! {
                     (self.hash1(cl * 7.3 + 5.0) - 0.2) * spread * 0.5,
                     (self.hash1(cl * 9.7 + 8.0) - 0.5) * spread * 1.6
                 )
-                let wind = vec3(self.time_beat.x * swirl * 0.25, 0.0, 0.0)
+                let wind = vec3(modf(self.time_beat.x * swirl * 0.25, spread * 4.0), 0.0, 0.0)
                 let puff = dir * (spread * (0.14 + 0.30 * r0))
                     * (0.9 + 0.1 * sin(self.time_beat.x * 0.6 + r1 * tau))
                 let x = modf(ctr.x + wind.x + spread * 2.0, spread * 4.0) - spread * 2.0
@@ -1006,12 +1015,20 @@ script_mod! {
             let dir = self.geom.geom_normal
             let phase = self.geom.geom_pad
             let rate = self.flow.x
-            let cycles = self.time_beat.x * rate + phase
+            // BOUNDED LIFE CLOCK. `phase` is this particle's own 0..1 slot
+            // in the cycle; added straight onto a clock hours old it loses
+            // every bit it owns and the whole field collapses onto a
+            // handful of shared phases. Split the clock into whole cycles
+            // (a seed — precision irrelevant) and the fraction (the part
+            // `phase` has to survive): same t01, same cyc, no aliasing.
+            let tc = self.time_beat.x * rate
+            let cycles = fract(tc) + phase
             let t01 = fract(cycles)
-            let cyc = floor(cycles)
-            // Re-seed per respawn so a particle's next life differs.
-            let r0 = fract(self.geom.geom_tail_pad_0 + cyc * 0.6180339)
-            let r1 = fract(self.geom.geom_tail_pad_1 + cyc * 0.7548776)
+            let cyc = floor(cycles) + floor(tc)
+            // Re-seed per respawn so a particle's next life differs — same
+            // rule, the per-particle seed must survive the cycle index.
+            let r0 = fract(self.geom.geom_tail_pad_0 + fract(cyc * 0.6180339))
+            let r1 = fract(self.geom.geom_tail_pad_1 + fract(cyc * 0.7548776))
             let center = self.fx_center(mode, id, dir, t01, cyc, r0, r1)
 
             let world = self.draw_list.view_transform
@@ -1064,7 +1081,7 @@ script_mod! {
                 let w = self.shape.w
                 let uv = vec2(modf(id, w) / w, floor(id / w) / w)
                 let texel = self.tex0.sample_nearest(uv, 0.0)
-                tint = vec4(texel.xyz * (0.9 + self.time_beat.w * 0.5), 1.0)
+                tint = vec4(texel.xyz * (1.0 + self.time_beat.w * 0.5), 1.0)
             }
             self.v_color = tint
             self.v_uv = self.geom.geom_uv

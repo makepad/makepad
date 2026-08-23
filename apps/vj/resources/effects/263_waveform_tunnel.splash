@@ -39,14 +39,20 @@
             let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
             let r = max(length(p), 0.0015)
             let spin = (clamp(self.user.z, 0.0, 1.0) - 0.5) * 1.6
-            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5 + self.time_beat.x * spin
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * spin, 1.0)
 
             // Tunnel coordinate: 1/r puts the far end at the centre. The
             // scroll is the tunnel flying past.
-            let depth = 0.16 / r + self.time_beat.x * 0.5
             let rings = 4.0 + 16.0 * clamp(self.user.y, 0.0, 1.0)
-            let band = fract(depth * rings * 0.25)
-            let ringid = floor(depth * rings * 0.25)
+            // BOUNDED SCROLL. The ring INDEX only ever seeds hashes, so it
+            // keeps counting; the position INSIDE the ring comes off the
+            // wrapped scroll, or an hours-old clock swallows the 1/r
+            // perspective term and the rings band.
+            let scroll = self.time_beat.x * 0.5 * rings * 0.25
+            let dz = 0.16 / r * rings * 0.25 + fract(scroll)
+            let band = fract(dz)
+            let ringid = floor(dz) + floor(scroll)
 
             // Age of THIS ring: the further down the tunnel, the older the
             // audio it is made of. Wrapped so the tunnel never runs out.
