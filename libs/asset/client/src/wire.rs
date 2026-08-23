@@ -175,6 +175,25 @@ pub fn path_blob_upload(ns: &str) -> String {
     format!("/v1/blobs?ns={ns}")
 }
 
+/// Bulk blob admission: many blobs in one request, one catalog transaction
+/// (see the server's `blob_upload_batch`). Body framing is
+/// `length(8, big-endian) | bytes` per item.
+pub fn path_blob_upload_batch(ns: &str) -> String {
+    format!("/v1/blobs/batch?ns={ns}")
+}
+
+/// Batch publication: N complete assets in one request, one state-thread
+/// visit, one catalog transaction.
+pub fn path_publish_batch() -> String {
+    "/v1/publish/batch".to_string()
+}
+
+/// Most blobs one upload batch may carry (mirrors the server cap).
+pub const MAX_UPLOAD_BATCH_ITEMS: usize = 64;
+
+/// Most items one publish batch may carry (mirrors the server cap).
+pub const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
+
 /// Admit a SERVER-LOCAL file by reference: the store hashes it where it lies
 /// and catalogues it without copying (see the server's `blob_ref_admit`).
 ///
