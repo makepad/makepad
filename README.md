@@ -36,12 +36,15 @@ separation (BS-RoFormer splits a track into vocals/drums/bass/other,
 which drives the stem mutes and the karaoke word timing). The app runs
 fine without it — those features just stay off.
 
-**The separation model is not auto-downloaded.** Fetch the checkpoint
-`model_bs_roformer_ep_17_sdr_9.6568.ckpt` (527 MB, MIT-licensed) from
-https://github.com/ZFTurbo/Music-Source-Separation-Training and place it
-at `local/stems_ref/ckpt/` in the checkout (or point `VJ_STEMS_CKPT` at
-the file). Until then the VJ reports "stems: model not installed" and
-carries on.
+**Model files install from inside the app.** The music decks use two
+MIT-licensed model files: the BS-RoFormer stem splitter (527 MB) and the
+Whisper large-v3-turbo transcriber (1.6 GB, karaoke word timing). On a
+machine that lacks them the music page shows an **INSTALL MODELS** row
+under the track explorer — accept the licenses and the app downloads both
+(resumable, sha256-verified) into `local/` in the checkout. Until then the
+VJ reports "stems: model not installed" and carries on. Existing copies
+are found via `VJ_STEMS_CKPT` / `MAKEPAD_VOICE_MODEL` or the standard
+`local/` paths.
 
 ## What Makepad Is
 
