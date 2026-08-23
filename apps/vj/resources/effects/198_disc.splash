@@ -1,0 +1,36 @@
+// DISC — the whole frame is unrolled onto a polar annulus: angle reads
+// across the source horizontally, radius reads down it, a spinning donut.
+{
+    name: "Disc"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPIN", bind: "p0", default: 0.5},
+        {name: "THICK", bind: "p1", default: 0.5},
+        {name: "ZOOM", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let center = vec2(0.5, 0.5)
+            let d = uv - center
+            let r = length(d)
+            let ang = atan2(d.y, d.x)
+            let inner = 0.05 + 0.25 * self.user.y
+            let outer = 0.5
+            let rn = clamp((r - inner) / (outer - inner), 0.0, 1.0)
+            let spin = self.time_beat.y * 0.015 * (0.2 + 1.6 * self.user.x)
+            let an = fract((ang + 3.14159265) / 6.2831853 + spin)
+            let zoom = 0.5 + 1.5 * self.user.z
+            let w = vec2(an, clamp(rn * zoom, 0.0, 1.0))
+            let tex = self.tex0.sample_as_bgra(w)
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

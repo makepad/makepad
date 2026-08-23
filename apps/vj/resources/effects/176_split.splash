@@ -1,0 +1,37 @@
+// SPLIT — the frame parts along a tilted seam; the two halves slide
+// apart in opposite directions along the seam, in and out with the bar.
+{
+    name: "Split"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ANGLE", bind: "p0", default: 0.5},
+        {name: "SLIDE", bind: "p1", default: 0.5},
+        {name: "GAP", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let tau = 6.2831853
+            let pi = 3.14159265
+            let ang = (self.user.x - 0.5) * pi
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let c = uv - vec2(0.5, 0.5)
+            let side = c.x * cs + c.y * sn
+            let dir = vec2(-sn, cs)
+            let slide_amt = (0.10 + 0.30 * self.user.y) * sin(self.sig.x * tau * 0.5)
+            let sg = step(0.0, side) * 2.0 - 1.0
+            let w = uv + dir * slide_amt * sg
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let seam = smoothstep(0.0, 0.006 + 0.02 * self.user.z, abs(side))
+            return vec4(tex.xyz * seam, 1.0)
+        }
+    }
+}

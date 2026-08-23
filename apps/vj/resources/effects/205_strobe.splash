@@ -1,0 +1,57 @@
+// STROBE — a gated flash bound to the beat clock: some beats fire, some
+// don't (BALANCE picks the odds), the fired ones flash hot right on the
+// beat and decay through it (SMOOTH), tinted between white and a doc
+// colour (COLOUR). Every choice is a hash of floor(beat), never the
+// running clock, so the gate is exactly reproducible beat to beat.
+{
+    name: "Strobe"
+    engine: "screen"
+    seed: 205
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SMOOTH", bind: "p0", default: 0.5},
+        {name: "BALANCE", bind: "p1", default: 0.5},
+        {name: "COLOUR", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03040a
+    color_a: #xffffff
+    color_b: #xff3a86
+    color_c: #xfff0d0
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: the whole frame is this function. The gate is
+    // a hash of floor(self.time_beat.y) — a fresh coin flip per beat,
+    // never the raw clock — and the flash envelope rides
+    // self.time_beat.z, the already-wrapped beat phase.
+    // Inputs: uv, content = input0 at uv, cmix = pre-gated content
+    // strength. Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let bar = floor(self.time_beat.y)
+            let gatehash = fract(sin(bar * 12.9898 + 4.0) * 43758.5453)
+            let balance = 0.15 + 0.7 * clamp(self.user.y, 0.0, 1.0)
+            let armed = step(1.0 - balance, gatehash)
+            let phase = self.time_beat.z
+            let smooth = 0.02 + 0.5 * clamp(self.user.x, 0.0, 1.0)
+            let flash = pow(1.0 - clamp(phase / max(smooth, 0.001), 0.0, 1.0), 3.0)
+            let hot = clamp(flash * armed, 0.0, 1.0)
+            let flashcol = vec3(1.0, 1.0, 1.0).mix(self.col_b.xyz, clamp(self.user.z, 0.0, 1.0))
+            let rgb = content.xyz.mix(flashcol, hot)
+            return vec4(rgb, 1.0)
+        }
+    }
+}

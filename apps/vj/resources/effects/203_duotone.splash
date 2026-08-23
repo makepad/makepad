@@ -1,0 +1,52 @@
+// DUOTONE — the picture's luma splits at a movable balance point into two
+// flat colour families, shadow and highlight, each with its own amount so
+// one side can dominate the other.
+{
+    name: "Duotone"
+    engine: "screen"
+    seed: 203
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.4
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BALANCE", bind: "p0", default: 0.5},
+        {name: "SHADOW", bind: "p1", default: 0.5},
+        {name: "HIGH", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03040a
+    color_a: #x2222aa
+    color_b: #xffaa22
+    color_c: #xfff0d0
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: the whole frame is this function. Luma splits
+    // at BALANCE into col_a (shadow) and col_b (highlight); SHADOW/HIGH
+    // scale each side's own amount independently.
+    // Inputs: uv, content = input0 at uv, cmix = pre-gated content
+    // strength. Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let luma = dot(content.xyz, vec3(0.299, 0.587, 0.114))
+            let mid = 0.1 + 0.8 * self.user.x
+            let t = smoothstep(mid - 0.25, mid + 0.25, luma)
+            let sh_amt = 0.2 + 1.6 * self.user.y
+            let hi_amt = 0.2 + 1.6 * self.user.z
+            let shadow = self.col_a.xyz * luma * sh_amt
+            let high = self.col_b.xyz * luma * hi_amt
+            let duo = shadow.mix(high, t)
+            return vec4(clamp(duo, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), 1.0)
+        }
+    }
+}

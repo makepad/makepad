@@ -1,0 +1,40 @@
+// FRESNEL — the frame reads through concentric fresnel-lens steps: radius
+// is quantised into rings, each ring bends its sample and carries a seam.
+{
+    name: "Fresnel"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "RINGS", bind: "p0", default: 0.5},
+        {name: "DEPTH", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let center = vec2(0.5, 0.5)
+            let d = uv - center
+            let r = length(d)
+            let ang = atan2(d.y, d.x)
+            let rings = 6.0 + 28.0 * self.user.x
+            let stepr = floor(r * rings) / rings
+            let fracr = fract(r * rings)
+            let depth = 0.01 + 0.05 * self.user.y
+            let bend = (fracr - 0.5) * depth * (0.7 + 0.3 * self.time_beat.w)
+            let newr = clamp(stepr + bend, 0.0, 0.75)
+            let swirl = (1.0 - stepr) * self.user.z * 1.2 * (0.5 + 0.5 * self.time_beat.w)
+            let newang = ang + swirl
+            let w = center + vec2(cos(newang), sin(newang)) * newr
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let seam = 1.0 - smoothstep(0.0, 0.05, min(fracr, 1.0 - fracr))
+            let out = tex.xyz + vec3(1.0, 1.0, 1.0) * seam * 0.14
+            return vec4(out, 1.0)
+        }
+    }
+}

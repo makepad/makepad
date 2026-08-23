@@ -1,0 +1,92 @@
+// TURN AWAY — deck A is a card standing in front of the camera; as the
+// fader travels it TURNS on its vertical axis and drifts back, and deck B
+// is simply there behind it, whole, the moment the card stops covering it.
+// No blend anywhere: every pixel is one deck or the other.
+//
+// Pattern taught: the plane-in-3D helper (`plane_uv` below, the family's
+// shared block — see the reference copy in the Perspective doc). Camera at
+// the origin looking down -z, one ray per fragment, the plane hinged at a
+// world point; the RAY and the EYE are pushed into the plane's frame by
+// the transposed rotation, where the plane is z = 0 and one divide gives
+// the hit. Flat, centred, at unit distance it returns `uv` exactly — which
+// is why t = 0 is deck A to the pixel.
+//
+// The card's BACK needs no flip: past edge-on the intersection already
+// reverses the u axis, so the mirrored picture comes for free and is only
+// dimmed — a turn reads as a card turning over, not a texture flip.
+{
+    name: "Turn Away"
+    engine: "transition"
+    p0: 0.5
+    dials: [
+        {name: "SWING", bind: "p0", default: 0.5},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        // ---- THE SHARED HELPER: one ray, one rotated video plane --------
+        // The plane is the rectangle of half-extents (aspect, 1) * 0.5/f
+        // whose HINGE sits at world (piv.x, piv.y, -d), spun about that
+        // hinge by the Euler angles `ang` (Rz then Ry then Rx, radians).
+        // Returns (plane u, plane v, on-quad 0/1, front-facing 0/1).
+        plane_uv: fn(uv: vec2, ang: vec3, piv: vec2, d: float, f: float) -> vec4 {
+            let a = self.aspect()
+            let c0 = cos(ang.x)
+            let s0 = sin(ang.x)
+            let c1 = cos(ang.y)
+            let s1 = sin(ang.y)
+            let c2 = cos(ang.z)
+            let s2 = sin(ang.z)
+            // The ray through this fragment (y up) and the eye, both
+            // measured from the hinge.
+            let rd = vec3((uv.x - 0.5) * a, 0.5 - uv.y, 0.0 - f)
+            let ro = vec3(0.0 - piv.x, 0.0 - piv.y, d)
+            let r1 = vec3(rd.x * c2 + rd.y * s2, rd.y * c2 - rd.x * s2, rd.z)
+            let o1 = vec3(ro.x * c2 + ro.y * s2, ro.y * c2 - ro.x * s2, ro.z)
+            let r2 = vec3(r1.x * c1 - r1.z * s1, r1.y, r1.x * s1 + r1.z * c1)
+            let o2 = vec3(o1.x * c1 - o1.z * s1, o1.y, o1.x * s1 + o1.z * c1)
+            let r3 = vec3(r2.x, r2.y * c0 + r2.z * s0, r2.z * c0 - r2.y * s0)
+            let o3 = vec3(o2.x, o2.y * c0 + o2.z * s0, o2.z * c0 - o2.y * s0)
+            // Intersect z = 0. A ray running parallel to the plane is
+            // NUDGED, never divided by zero — it lands far off the quad.
+            let den = r3.z + (1.0 - step(0.0001, abs(r3.z))) * 0.001
+            let k = 0.0 - o3.z / den
+            let hx = o3.x + k * r3.x + piv.x
+            let hy = o3.y + k * r3.y + piv.y
+            let pu = hx * f / a + 0.5
+            let pv = 0.5 - hy * f
+            let onq = step(0.0, pu) * step(pu, 1.0) * step(0.0, pv) * step(pv, 1.0)
+                * step(0.001, k)
+            return vec4(pu, pv, onq, step(0.0, o3.z))
+        }
+
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let tc = clamp(t, 0.0, 1.0)
+            // Leaves slowly, clears fast — the turn is the whole story.
+            let e = pow(tc, 1.25)
+            // FLIP picks the shoulder it turns over.
+            let dir = mix(1.0, -1.0, step(0.5, self.user.y))
+            // SWING: 0.9..2.6 rad of yaw, well past edge-on at the top.
+            let swing = 0.9 + 1.7 * clamp(self.user.x, 0.0, 1.0)
+            let an = vec3(0.0 - e * 0.16, e * swing * dir, e * 0.10 * dir)
+            // …and it drifts back while it turns, so it leaves the frame
+            // instead of just going thin.
+            let d = 1.0 + e * 1.15
+            let p = self.plane_uv(uv, an, vec2(0.0, 0.0), d, 1.12)
+            // Guarantee the far end: the last of the card is gone by t = 1.
+            let vis = p.z * (1.0 - smoothstep(0.86, 1.0, tc))
+            let ca = self.deck_a(vec2(p.x, p.y))
+            // Back of the card: already mirrored by the intersection, so
+            // only dimmed.
+            let card = ca.xyz * mix(0.34, 1.0, p.w)
+            // A hairline rim so the edge reads against deck B.
+            let ed = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y))
+            let rim = (1.0 - smoothstep(0.0, 0.006, ed)) * vis
+            let mut c = mix(self.deck_b(uv).xyz, card, vis)
+            c = c + vec3(1.0, 1.0, 1.0) * (rim * 0.35)
+            // DIP: duck through black mid-turn (0 = off, the stock look).
+            let dim = 1.0 - 4.0 * tc * (1.0 - tc) * self.user.z * 0.9
+            return vec4(c * dim, 1.0)
+        }
+    }
+}

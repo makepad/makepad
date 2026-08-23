@@ -1,0 +1,30 @@
+// MULTIPLY INVERT — deck B's NEGATIVE darkens deck A: result = a*(1-b),
+// so B's HIGHLIGHTS darken A and B's shadows leave A untouched — the
+// inverted logic of the plain multiply at 145. GAIN pushes the darken
+// hotter, CURVE bends the fader response, KEY narrows it to B's own
+// highlights only.
+{
+    name: "Multiply Invert"
+    engine: "transition"
+    engage: "ramp"
+    p1: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "CURVE", bind: "p1", default: 0.5},
+        {name: "KEY", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let gain = 0.5 + self.user.x * 1.5
+            let tt = pow(clamp(t, 0.0, 1.0), pow(4.0, self.user.y * 2.0 - 1.0))
+            let inv = vec3(1.0, 1.0, 1.0) - b.xyz
+            let mult = a.xyz * clamp(inv * gain, 0.0, 1.0)
+            let luma = dot(b.xyz, vec3(0.2126, 0.7152, 0.0722))
+            let gate = mix(1.0, smoothstep(0.25, 0.75, luma), self.user.z)
+            let composite = a.xyz.mix(mult, tt * gate)
+            return vec4(composite.x, composite.y, composite.z, 1.0)
+        }
+    }
+}
