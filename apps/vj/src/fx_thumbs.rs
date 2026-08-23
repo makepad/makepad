@@ -203,7 +203,13 @@ pub const LANES: usize = 6;
 const BAKE_STEPS: usize = 12;
 /// Bake steps (scene encodes + chain runs) all lanes may spend in one UI
 /// frame at full speed. The polite budget is 1 — the old cadence exactly.
-const STEP_BUDGET: usize = 48;
+///
+/// 16, not 48: the bake shares the UI's render thread, and the cold burst
+/// stacks first-use pipeline compiles on top of the steps — at 48 the
+/// opening paints fused into a MULTI-SECOND freeze of the whole app. At 16
+/// a paint stays interactive and the library still bakes in ~half a
+/// minute; the difference disappears into the decode overlap.
+const STEP_BUDGET: usize = 16;
 /// Documents that may START in one UI frame. A load is a splash eval plus
 /// a script shader apply — staggering them is what keeps regen from ever
 /// reading as a stall. Two per frame: with batching, starts — not steps —

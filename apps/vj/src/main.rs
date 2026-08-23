@@ -4849,6 +4849,9 @@ pub struct App {
     /// Thumb-load profile: (boot instant, last print, decoded at last print).
     #[rust]
     thumb_prof: Option<(std::time::Instant, std::time::Instant, u64)>,
+    /// Frame-loop hang detector: the previous pump's instant.
+    #[rust]
+    frame_watch: Option<std::time::Instant>,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -9319,6 +9322,20 @@ p2 {}
         self.retry_lighting_if_due();
         // Refresh the worker watchdog and, only while the physical button is
         // held, its shorter hazardous-output heartbeat.
+        // FRAME-LOOP HANG DETECTOR: the pump runs every UI frame, so a gap
+        // between pumps IS a frozen app — a paint that blocked, a stalled
+        // pipeline compile, a synchronous readback. Log the gap and let the
+        // thumbprof timeline say what was in flight when it happened.
+        {
+            let t = std::time::Instant::now();
+            if let Some(last) = self.frame_watch {
+                let gap = t.duration_since(last).as_secs_f64() * 1e3;
+                if gap > 200.0 {
+                    log!("framehang: {gap:.0}ms between frames");
+                }
+            }
+            self.frame_watch = Some(t);
+        }
         self.publish_lighting_controls();
         self.pump_apc40(cx);
         self.pump_session(cx);
