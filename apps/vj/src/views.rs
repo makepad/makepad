@@ -512,8 +512,11 @@ script_mod! {
                 // A comet head that fades round the circle reads as motion
                 // from one frame alone; a FAILED load lights the whole ring
                 // instead, so a stopped spinner can never be mistaken for a
-                // slow one.
-                let sweep = fract((atan2(p.y, p.x) - self.spin) / tau)
+                // slow one. Sweep runs spin-minus-angle so the BRIGHT head
+                // LEADS in the direction of rotation and the tail fades out
+                // behind it — the other way round it read as spinning
+                // backwards.
+                let sweep = fract((self.spin - atan2(p.y, p.x)) / tau)
                 let comet = (1.0 - sweep) * (1.0 - sweep)
                 let mask = ring * mix(comet, 1.0, self.failed)
                 let tint = self.color_ring.mix(self.color_fail, self.failed)
@@ -1692,8 +1695,15 @@ fn busy_spin(time: f64) -> f32 {
     (time * 2.8).rem_euclid(TAU) as f32
 }
 
-fn entry_frame(entry: &GridEntry, time: f64) -> Option<Texture> {
+/// `pad` staggers a tile's play position by a HASH of its grid slot: forty
+/// one-second sheets on one clock pulse like a metronome, and a diagonal
+/// wave is still one readable rhythm pulling the eye — decorrelated random
+/// phases make the wall shimmer with no pattern to follow at all.
+fn entry_frame(entry: &GridEntry, time: f64, pad: usize) -> Option<Texture> {
     if entry.frames.len() > 1 {
+        let hash = (pad as u32).wrapping_mul(2654435761) >> 8;
+        let phase = (hash & 0xffff) as f64 / 65536.0;
+        let time = time + phase;
         let fps = entry.fps.max(1.0) as f64;
         let i = ((time * fps).floor() as usize) % entry.frames.len();
         return Some(entry.frames[i].clone());
@@ -2798,7 +2808,7 @@ impl Widget for VjTileGrid {
                     cell.label(cx, ids!(grid_state)).set_text(cx, &state);
                     // Recycled rows lose their texture: rebind every pass.
                     let now = cx.seconds_since_app_start();
-                    let frame = entry_frame(entry, now);
+                    let frame = entry_frame(entry, now, index);
                     let aspect = thumb_aspect(cx, frame.as_ref());
                     let fill = thumb_fill(entry);
                     let mut thumb = cell.image(cx, ids!(grid_thumb));
@@ -3115,7 +3125,7 @@ impl VjPadMatrix {
                     cell.label(cx, ids!(grid_pad)).set_text(cx, &format!("{:02}", pad + 1));
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
                     let now = cx.seconds_since_app_start();
-                    let frame = entry_frame(entry, now);
+                    let frame = entry_frame(entry, now, pad);
                     let aspect = thumb_aspect(cx, frame.as_ref());
                     let fill = thumb_fill(entry);
                     // No thumbnail yet = no image at all (an empty Image

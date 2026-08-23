@@ -88,34 +88,46 @@ impl Cx {
             }
         }
 
+        // EXECUTION ORDER IS THE DEPENDENCY TREE, deepest first. A pass's
+        // parent is its CONSUMER — the pass that samples the texture it
+        // renders — so every dirty pass must execute before its parent.
+        // Distance-to-root gives exactly that: sort deepest first; the
+        // stable sort keeps pool-id order between passes at equal depth
+        // (siblings), which is the order this function always produced for
+        // them. The old scan inserted a child directly before its parent
+        // only when the parent was ALREADY in the list, so with three or
+        // more levels of texture passes and adverse (recycled) pool ids a
+        // grandchild could land AFTER the pass that consumes its output,
+        // which then read a stale texture (the VJ's post/sim pass chains
+        // hit exactly this). Parentless passes keep their old "run first"
+        // contract via the depth bias.
+        const ROOT_NONE_BIAS: u64 = 1 << 32;
         for draw_pass_id in self.passes.id_iter() {
             if self.passes[draw_pass_id].paint_dirty {
-                let mut inserted = false;
-                match self.passes[draw_pass_id].parent {
-                    CxDrawPassParent::Window(_) | CxDrawPassParent::Xr => {}
-                    CxDrawPassParent::DrawPass(dep_of_pass_id) => {
-                        if draw_pass_id == dep_of_pass_id {
-                            panic!()
-                        }
-                        for insert_before in 0..passes_todo.len() {
-                            if passes_todo[insert_before] == dep_of_pass_id {
-                                passes_todo.insert(insert_before, draw_pass_id);
-                                inserted = true;
-                                break;
-                            }
-                        }
-                    }
-                    CxDrawPassParent::None => {
-                        // we need to be first
-                        passes_todo.insert(0, draw_pass_id);
-                        inserted = true;
-                    }
-                }
-                if !inserted {
-                    passes_todo.push(draw_pass_id);
-                }
+                passes_todo.push(draw_pass_id);
             }
         }
+        let slot_cap = self.passes.id_iter().count();
+        let depth_of = |start: DrawPassId| -> u64 {
+            let mut depth = 0u64;
+            let mut walk = start;
+            loop {
+                match self.passes[walk].parent {
+                    CxDrawPassParent::DrawPass(parent_id) => {
+                        depth += 1;
+                        walk = parent_id;
+                        if depth as usize > slot_cap {
+                            // A cycle in stale parent links (recycled pass
+                            // slots): stop counting rather than hang.
+                            return depth;
+                        }
+                    }
+                    CxDrawPassParent::None => return depth + ROOT_NONE_BIAS,
+                    _ => return depth,
+                }
+            }
+        };
+        passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
         self.demo_time_repaint = false;
     }
 

@@ -238,6 +238,11 @@ impl PostChain {
         draws: &mut PostDraws,
     ) -> Texture {
         let mut current = input;
+        // Every sub-pass this run executes, in the order it was encoded —
+        // which IS the producer→consumer order of the chain (each pass
+        // feeds the next directly, or transitively into a later mix). The
+        // links are stated as pass parents after the loop.
+        let mut ran: Vec<DrawPassId> = Vec::new();
         for (i, stage) in self.stages.iter_mut().enumerate() {
             let p = resolved.get(i).copied().unwrap_or_default().p;
             match stage {
@@ -264,6 +269,7 @@ impl PostChain {
                     dst.run(cx, size, &mut |cx, rect| {
                         d.draw_abs(cx, rect);
                     });
+                    ran.push(dst.pass.draw_pass_id());
                     // `dst` is written now; the next frame reads it as src.
                     cold.warm();
                     current = dst.texture.clone();
@@ -287,6 +293,7 @@ impl PostChain {
                         sub.run(cx, Self::level_size(size, l), &mut |cx, rect| {
                             d.draw_abs(cx, rect);
                         });
+                        ran.push(sub.pass.draw_pass_id());
                         src = sub.texture.clone();
                     }
                     // Back up one doubling at a time to full size.
@@ -302,6 +309,7 @@ impl PostChain {
                         sub.run(cx, up_size, &mut |cx, rect| {
                             d.draw_abs(cx, rect);
                         });
+                        ran.push(sub.pass.draw_pass_id());
                         src = sub.texture.clone();
                     }
                     match kind {
@@ -321,6 +329,7 @@ impl PostChain {
                             mix.run(cx, size, &mut |cx, rect| {
                                 d.draw_abs(cx, rect);
                             });
+                            ran.push(mix.pass.draw_pass_id());
                             current = mix.texture.clone();
                         }
                         PyramidKind::Tiltshift => {
@@ -336,6 +345,7 @@ impl PostChain {
                             mix.run(cx, size, &mut |cx, rect| {
                                 d.draw_abs(cx, rect);
                             });
+                            ran.push(mix.pass.draw_pass_id());
                             current = mix.texture.clone();
                         }
                     }
@@ -356,6 +366,7 @@ impl PostChain {
                     sub.run(cx, size, &mut |cx, rect| {
                         d.draw_abs(cx, rect);
                     });
+                    ran.push(sub.pass.draw_pass_id());
                     current = sub.texture.clone();
                 }
                 StageRt::Hold { latch, out, beats, axis, slot, trig, cold } => {
@@ -392,6 +403,7 @@ impl PostChain {
                         latch.run(cx, size, &mut |cx, rect| {
                             d.draw_abs(cx, rect);
                         });
+                        ran.push(latch.pass.draw_pass_id());
                         cold.warm();
                     }
                     draws.hold.draw_vars.set_texture(0, &current);
@@ -406,9 +418,22 @@ impl PostChain {
                     out.run(cx, size, &mut |cx, rect| {
                         d.draw_abs(cx, rect);
                     });
+                    ran.push(out.pass.draw_pass_id());
                     current = out.texture.clone();
                 }
             }
+        }
+        // THE DEPENDENCY GRAPH, stated outright: each pass in this run is a
+        // PRODUCER for the pass encoded after it, so it becomes that pass's
+        // CHILD — children execute before parents, whatever the pass-pool
+        // ids say. Without this, sibling execution order followed recycled
+        // pool ids and a freshly configured chain could run its mix before
+        // its down/up producers (stale pyramid textures — intermittent
+        // misordered or black stages). The LAST pass keeps the parent
+        // `make_child_pass` gave it: the enclosing pass, which samples this
+        // chain's output.
+        for pair in ran.windows(2) {
+            cx.passes[pair[0]].parent = CxDrawPassParent::DrawPass(pair[1]);
         }
         current
     }
