@@ -1107,17 +1107,29 @@ script_mod! {
                     flow: Right
                     spacing: 6
                     align: Align{x: 0.0, y: 0.5}
-                    music_search := TextInput{
+                    // Catalog-only controls: the local listing is neither
+                    // searched nor paginated, so these fold away with it.
+                    music_catalog := View{
                         width: Fill
-                        empty_text: "search music…"
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0, y: 0.5}
+                        music_search := TextInput{
+                            width: Fill
+                            empty_text: "search music…"
+                        }
+                        music_category := TextInput{
+                            width: 96
+                            empty_text: "category"
+                        }
+                        music_go := MusicButton{width: 60 height: 22 text: "Search"}
+                        music_more := MusicButton{width: 52 height: 22 text: "More"}
                     }
-                    music_category := TextInput{
-                        width: 96
-                        empty_text: "category"
-                    }
-                    music_go := MusicButton{width: 60 height: 22 text: "Search"}
-                    music_more := MusicButton{width: 52 height: 22 text: "More"}
                     music_local := MusicButton{width: 84 height: 22 text: "LOCAL FILES"}
+                    // The same IMPORT CONTENT flow the VJ page has: pick a
+                    // folder, and its media publishes into the store no-copy.
+                    music_import := MusicButton{width: 64 height: 22 text: "IMPORT"}
                     music_count := MusicLabel{width: 90 text: ""}
                     MusicLabel{text: "load"}
                     deck_target := DropDown{labels: ["Auto" "Deck A" "Deck B"]}
