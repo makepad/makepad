@@ -56,7 +56,9 @@ script_mod! {
             let p = self.pos * self.rect_size
             let sdf = Sdf2d.viewport(p)
             let acc = vec3(0.243, 0.878, 0.690)
-            let r = 7.0
+            // ONE RADIUS: the mode dropdown's corner (theme 2.5) is the
+            // app's canonical small-chrome rounding.
+            let r = 2.5
             sdf.box(1.0, 1.0, w - 2.0, h - 2.0, r)
             // Loaded: the live picture, dimmed under bypass, with a darkened
             // band at the bottom so the name always reads.

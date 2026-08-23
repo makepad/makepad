@@ -998,6 +998,32 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.end_live_resize();
     }
 
+    /// Decode %XX escapes into their bytes; the result is the UTF-8 path the
+    /// filesystem actually knows. Invalid escapes pass through untouched.
+    fn percent_decode_path(encoded: &str) -> String {
+        let bytes = encoded.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).unwrap_or_else(|_| encoded.to_string())
+    }
+
     fn get_drag_items_from_pasteboard(
         this: &Object,
         sender: ObjcId,
@@ -1052,7 +1078,11 @@ pub fn define_cocoa_view_class() -> *const Class {
                         path: if path == "makepad_internal_empty" {
                             "".to_string()
                         } else {
-                            path
+                            // `absoluteString` is percent-ENCODED — a Finder
+                            // drop of "My File.png" arrived as My%20File.png
+                            // and every consumer then failed to find it. A
+                            // FilePath item carries a filesystem path.
+                            percent_decode_path(&path)
                         },
                     });
                 }

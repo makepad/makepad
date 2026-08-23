@@ -34,7 +34,7 @@ use std::path::Path;
 /// The flow-warp endpoint cache budget in the VJ player
 /// (`apps/vj/src/flow_warp.rs`). Kept here as the converter's default target
 /// so a clip is produced at a size that actually warps.
-pub const DEFAULT_FIT_CACHE_BYTES: usize = 640 * 1024 * 1024;
+pub const DEFAULT_FIT_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Largest mp4 the player will lift into memory to scan for the box.
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
