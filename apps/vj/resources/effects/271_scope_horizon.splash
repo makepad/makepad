@@ -1,0 +1,112 @@
+// SCOPE HORIZON — the waveform as a coastline. The trace is the skyline;
+// below it the same trace comes back as a reflection on water, blurred by
+// distance and rippled by the mids; above it a night sky with a low-end
+// moon. Slow, wide, and legible on a big wall.
+//
+// The trailing copies below the waterline are the SAME window read a
+// little further back — reflections here are texture reads, not a second
+// render pass.
+{
+    name: "Scope Horizon"
+    engine: "screen"
+    seed: 19
+
+    speed: 1.0
+    beat_pulse: 0.4
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "RELIEF", bind: "p0", default: 0.5},
+        {name: "SPAN", bind: "p1", default: 0.5},
+        {name: "TIDE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x030512
+    color_a: #x1de0c0
+    color_b: #x6a4bff
+    color_c: #xffe6a8
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // Skyline height at screen x, for a window ending `lag` back.
+        ridge: fn(x: float, lag: float, relief: float) -> float {
+            let span = 0.12 + 0.80 * clamp(self.user.y, 0.0, 1.0)
+            let t = clamp(1.0 - lag - span * (1.0 - clamp(x, 0.0, 1.0)), 0.0, 1.0)
+            let w = self.audio_wave(t)
+            // Rectify: a coastline is |signal|, not the signal.
+            let idle = 0.05 + 0.035 * sin(x * 13.0 - self.time_beat.x * 0.6)
+            return max(abs(w) * relief, idle)
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let sea = 0.62
+            let relief = 0.25 + 1.1 * clamp(self.user.x, 0.0, 1.0)
+            let tide = clamp(self.user.z, 0.0, 1.0)
+
+            let h = self.ridge(uv.x, 0.0, relief)
+            let sky_y = sea - h * 0.45
+
+            // ---- above the coastline ------------------------------------
+            if uv.y < sky_y {
+                let up = clamp((sky_y - uv.y) / max(sky_y, 0.001), 0.0, 1.0)
+                let mut s = self.col_bg.xyz.mix(self.col_b.xyz * 0.30, up)
+                // The moon: the low end, parked high and left of centre.
+                let d = length(vec2((uv.x - 0.32) * (16.0 / 9.0), uv.y - 0.20))
+                s = s + self.col_c.xyz
+                    * (exp(0.0 - d * 12.0) * (0.20 + 0.75 * self.audio_env.x))
+                // Highs as stars, so a bright mix sparkles the sky.
+                let star = fract(sin(floor(uv.x * 520.0) * 12.9898
+                    + floor(uv.y * 520.0) * 78.233) * 43758.5453)
+                s = s + vec3(1.0, 1.0, 1.0)
+                    * (step(0.9975, star) * up * (0.35 + 0.9 * self.audio_env.z))
+                return vec4(s * self.fog.y, 1.0)
+            }
+
+            // ---- the coastline edge itself ------------------------------
+            let mut rgb = vec3(0.0, 0.0, 0.0)
+            let edge = exp(0.0 - abs(uv.y - sky_y) * 260.0)
+
+            if uv.y < sea {
+                // The land: a solid mass under the trace, banded by the
+                // spectrum so the silhouette has strata.
+                let depth = clamp((uv.y - sky_y) / max(sea - sky_y, 0.001), 0.0, 1.0)
+                let band = self.audio_fft(clamp(depth, 0.0, 1.0), 0.02)
+                rgb = self.col_bg.xyz * 0.55
+                rgb = rgb + self.col_a.xyz * (0.06 + 0.35 * band * (1.0 - depth))
+                rgb = rgb + self.col_c.xyz * (edge * 1.2)
+                return vec4(rgb * self.fog.y, 1.0)
+            }
+
+            // ---- the water ----------------------------------------------
+            // Mirror the screen row back over the waterline, and read the
+            // trace a little further back the further out we look.
+            let down = uv.y - sea
+            let mir = sea - down
+            let lag = 0.02 + 0.28 * tide * clamp(down * 3.2, 0.0, 1.0)
+            // TIDE ripples the reflection horizontally with the mids.
+            let rip = (0.004 + 0.05 * tide)
+                * sin(down * 90.0 - self.time_beat.x * 2.4)
+                * (0.3 + self.audio_env.y)
+            let rh = self.ridge(clamp(uv.x + rip, 0.0, 1.0), lag, relief)
+            let rsky = sea - rh * 0.45
+            let refl = exp(0.0 - abs(mir - rsky) * (150.0 - 110.0 * clamp(down * 3.0, 0.0, 1.0)))
+
+            let fade = 1.0 - clamp(down * 2.2, 0.0, 1.0)
+            rgb = self.col_bg.xyz.mix(self.col_b.xyz * 0.22, clamp(down * 2.0, 0.0, 1.0))
+            rgb = rgb + self.col_a.xyz * (refl * 0.75 * fade)
+            rgb = rgb + self.col_c.xyz * (edge * 1.2)
+            // A specular path from the moon down the water.
+            let path = exp(0.0 - abs(uv.x - 0.32) * 16.0)
+            rgb = rgb + self.col_c.xyz
+                * (path * fade * (0.05 + 0.35 * self.audio_env.x)
+                   * (0.6 + 0.4 * sin(down * 120.0 - self.time_beat.x * 2.0)))
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

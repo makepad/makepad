@@ -25,6 +25,7 @@
 //! energies; without a host the widget free-runs at [`VjFxView::set_bpm`]
 //! (default 120) so effects always pulse.
 
+use super::audio_tex::{bind_audio, AudioBinding};
 use super::doc::{EffectDoc, GrowMode, StageCfg};
 use super::engines::{CamPose, EmitterInst, Engine, ShaderKind};
 use super::engines_charts::DrawVjFxCharts;
@@ -40,6 +41,7 @@ use super::engines_jet::DrawVjFxJet;
 use super::engines_pipes::DrawVjFxPipes;
 use super::engines_raymarch::DrawVjFxRaymarch;
 use super::engines_tiles::DrawVjFxTiles;
+use super::engines_videomesh::DrawVjFxVideomesh;
 use super::expr::Signals;
 use super::mesh::FxMesh;
 use super::post::{PostChain, PostDraws, ResolvedStage};
@@ -106,6 +108,8 @@ pub struct VjFxView {
     #[live]
     draw_tiles: DrawVjFxTiles,
     #[live]
+    draw_videomesh: DrawVjFxVideomesh,
+    #[live]
     draw_flock: DrawVjFxFlock,
     #[live]
     draw_raymarch: DrawVjFxRaymarch,
@@ -162,6 +166,8 @@ pub struct VjFxView {
     draw_tilt_mix: DrawVjFxTiltMix,
     #[live]
     draw_warp: DrawVjFxWarp,
+    #[live]
+    draw_hold: DrawVjFxHold,
     #[live]
     draw_present: DrawVjFxPresent,
 
@@ -233,6 +239,12 @@ pub struct VjFxView {
     /// something feeds them (the contract exists ahead of the wiring).
     #[rust]
     audio: [f32; 4],
+    /// THE AUDIO PICTURE the whole engines layer samples (`audio_tex.rs`):
+    /// the live spectrogram/waveform texture plus its layout uniforms, fed
+    /// by the host every frame. `None` = no analysis running; every shader
+    /// helper still returns a legal silent reading.
+    #[rust]
+    audio_bind: Option<AudioBinding>,
 
     /// Host overrides for the document's `p0..p3` user params (the effect
     /// slots' general knobs). `None` leaves the document's own — possibly
@@ -397,6 +409,7 @@ impl VjFxView {
                         ShaderKind::Forge => live_id!(DrawVjFxForge),
                         ShaderKind::Copper => live_id!(DrawVjFxCopper),
                         ShaderKind::Tiles => live_id!(DrawVjFxTiles),
+                        ShaderKind::VideoMesh => live_id!(DrawVjFxVideomesh),
                         ShaderKind::Flock => live_id!(DrawVjFxFlock),
                         ShaderKind::Raymarch => live_id!(DrawVjFxRaymarch),
                         ShaderKind::Duo => live_id!(DrawVjFxDuo),
@@ -456,6 +469,9 @@ impl VjFxView {
                 }
                 ShaderKind::Tiles => {
                     self.draw_tiles.script_apply(vm, &Apply::Eval, &mut scope, value)
+                }
+                ShaderKind::VideoMesh => {
+                    self.draw_videomesh.script_apply(vm, &Apply::Eval, &mut scope, value)
                 }
                 ShaderKind::Flock => {
                     self.draw_flock.script_apply(vm, &Apply::Eval, &mut scope, value)
@@ -542,6 +558,7 @@ impl VjFxView {
             | ShaderKind::City
             | ShaderKind::Raymarch
             | ShaderKind::Tiles
+            | ShaderKind::VideoMesh
             | ShaderKind::Flock
             | ShaderKind::Charts
             | ShaderKind::Duo
@@ -650,6 +667,17 @@ impl VjFxView {
         self.audio = audio;
     }
 
+    /// THE AUDIO PICTURE (see `audio_tex.rs`): the live spectrogram +
+    /// waveform texture, its layout uniforms, and the same analysis as the
+    /// four binding levels. One call feeds both the shader side and the
+    /// document-binding side, so a host can never wire up half of it.
+    pub fn set_audio(&mut self, binding: Option<AudioBinding>) {
+        if let Some(b) = &binding {
+            self.audio = b.levels;
+        }
+        self.audio_bind = binding;
+    }
+
     /// Texture input 0 (the "extra slot" — a still, or the channel's main
     /// content in effect-pass mode).
     pub fn set_input_texture(&mut self, index: usize, texture: Option<Texture>) {
@@ -660,11 +688,16 @@ impl VjFxView {
         }
     }
 
-    /// True when the loaded document is the two-deck transition engine —
-    /// the host should feed deck A into input 0 and deck B into input 1,
-    /// and drive `p3` with the crossfader position (not the triangle).
+    /// True when the loaded document is a two-deck transition — the host
+    /// should feed deck A into input 0 and deck B into input 1, and drive
+    /// `p3` with the crossfader position (not the triangle). The duo engine
+    /// always is; a videomesh doc opts in with `decks: 2`.
     pub fn wants_deck_inputs(&self) -> bool {
-        matches!(self.doc.as_ref().map(|d| &d.engine), Some(Engine::Duo(_)))
+        match self.doc.as_ref().map(|d| &d.engine) {
+            Some(Engine::Duo(_)) => true,
+            Some(Engine::VideoMesh(e)) => e.cfg.decks == 2,
+            _ => false,
+        }
     }
 
     /// True when the doc declared `engage: "ramp"` — an overlay/key
@@ -740,19 +773,19 @@ impl VjFxView {
 
     /// True when the picture depends on the ITERATION HISTORY of the frames
     /// before it — sim fields carry GPU state, feedback stages re-project
-    /// their own last output, emitters accumulate what the frame tick
-    /// spawned. A host stepping a span of document time must feed those in
-    /// small steps; everything else is a pure function of the clock and can
-    /// be jumped straight to the moment it wants.
+    /// their own last output, hold stages latch a frame and show it back,
+    /// emitters accumulate what the frame tick spawned. A host stepping a
+    /// span of document time must feed those in small steps; everything
+    /// else is a pure function of the clock and can be jumped straight to
+    /// the moment it wants.
     pub fn needs_stepped_time(&self) -> bool {
         self.doc.as_ref().is_some_and(|doc| {
             !doc.fields.is_empty()
                 || doc.frame_fn.is_some()
                 || matches!(doc.engine, Engine::Emitters(_))
-                || doc
-                    .stages
-                    .iter()
-                    .any(|s| matches!(s, StageCfg::Feedback { .. }))
+                || doc.stages.iter().any(|s| {
+                    matches!(s, StageCfg::Feedback { .. } | StageCfg::Hold { .. })
+                })
         })
     }
 
@@ -1148,6 +1181,14 @@ impl VjFxView {
                     StageCfg::Warp { p1, p2, .. } => {
                         [p1.value(sig), p2.value(sig), 0.0, 0.0]
                     }
+                    // (mix, bands, stagger, trigger level) — post.rs reads
+                    // the trigger as a rising edge, the rest as uniforms.
+                    StageCfg::Hold { mix, bands, stagger, trigger, .. } => [
+                        mix.value(sig).clamp(0.0, 1.0),
+                        bands.value(sig).clamp(1.0, 256.0),
+                        stagger.value(sig).clamp(0.0, 1.0),
+                        trigger.value(sig),
+                    ],
                 };
                 ResolvedStage { p }
             })
@@ -1213,7 +1254,12 @@ impl VjFxView {
         cx3d.cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform =
             Mat4f::identity();
         let has_content = self.input0.is_some();
+        let audio_bind = self.audio_bind.clone();
         let d = &mut self.draw_screen;
+        // Same audio binding as every mesh engine gets (audio_tex.rs).
+        if let Some(ab) = &audio_bind {
+            bind_audio(cx3d.cx, &mut d.draw_vars, ab);
+        }
         d.time_beat = vec4(
             sig.0[Signals::TIME],
             sig.0[Signals::BEAT],
@@ -1394,6 +1440,10 @@ impl VjFxView {
                 self.draw_swarm.draw_vars.set_texture(0, &tex);
             }
         }
+        // Lifted out of `self` before the draw calls borrow their own
+        // fields: the macro below cannot re-borrow `self` while it holds
+        // `&mut self.draw_<family>`.
+        let audio_bind = self.audio_bind.clone();
         let doc = self.doc.as_ref().unwrap();
         let cx3d = &mut Cx3d::new(cx.cx);
         self.draw_list.begin_always(cx3d);
@@ -1420,6 +1470,14 @@ impl VjFxView {
             }};
             (@common $d:expr) => {{
                 let d = $d;
+                // THE AUDIO PICTURE, bound BY NAME on every engine (see
+                // audio_tex.rs): whichever slot the family declared
+                // `audio_tex` in gets the texture, and the three layout
+                // uniforms ride along. A family that declares none is a
+                // no-op — that is what keeps this one line uniform.
+                if let Some(ab) = &audio_bind {
+                    bind_audio(cx3d.cx, &mut d.draw_vars, ab);
+                }
                 d.time_beat = time_beat;
                 d.sig = sig_v;
                 d.user = user;
@@ -1506,7 +1564,24 @@ impl VjFxView {
                 }
                 draw_engine!(&mut self.draw_domino)
             }
-            ShaderKind::Tiles => draw_engine!(&mut self.draw_tiles),
+            ShaderKind::Tiles => {
+                // The tiles-only instance block (`extrude` today): both of
+                // the shared engine uniform lanes are already full.
+                if let Engine::Tiles(e) = &doc.engine {
+                    self.draw_tiles.tile = e.extra();
+                }
+                draw_engine!(&mut self.draw_tiles)
+            }
+            ShaderKind::VideoMesh => {
+                // tex1 = deck B for the two-deck transition variant; an
+                // unbound deck samples empty, never the animated fallback
+                // (input0 still rides the default macro arm on slot 0).
+                match &self.input1 {
+                    Some(tex) => self.draw_videomesh.draw_vars.set_texture(1, tex),
+                    None => self.draw_videomesh.draw_vars.empty_texture(1),
+                }
+                draw_engine!(&mut self.draw_videomesh)
+            }
             ShaderKind::Flock => draw_engine!(&mut self.draw_flock),
             ShaderKind::Raymarch => {
                 // The marcher builds its rays in-shader; it needs only the
@@ -1537,6 +1612,9 @@ impl VjFxView {
             ShaderKind::Emitters => {
                 if let Engine::Emitters(e) = &doc.engine {
                     let d = &mut self.draw_emitter;
+                    if let Some(ab) = &audio_bind {
+                        bind_audio(cx3d.cx, &mut d.draw_vars, ab);
+                    }
                     d.time_beat = time_beat;
                     d.sig = sig_v;
                     d.fog = fog;
@@ -1725,6 +1803,12 @@ impl Widget for VjFxView {
                 let texmix = self.user_value(1, &sig).clamp(0.0, 1.0).max(content);
                 (name, [glow, warp, texmix, 0.0], doc.palette)
             };
+            // The fluid family's view pass is its own encode, so it takes
+            // the same audio binding here rather than through the engines
+            // macro (audio_tex.rs).
+            if let Some(ab) = self.audio_bind.clone() {
+                bind_audio(cx, &mut self.draw_fluid_view.draw_vars, &ab);
+            }
             match self.sim.fluid_view(
                 cx,
                 &name,
@@ -1782,6 +1866,7 @@ impl Widget for VjFxView {
                     bloom_mix: &mut self.draw_bloom_mix,
                     tilt_mix: &mut self.draw_tilt_mix,
                     warp: &mut self.draw_warp,
+                    hold: &mut self.draw_hold,
                 },
             )
         };

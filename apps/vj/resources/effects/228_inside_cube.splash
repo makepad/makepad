@@ -1,0 +1,45 @@
+// INSIDE CUBE — the camera stands INSIDE a huge box whose six walls all
+// play the live video: a video room, panned around by the engine's interior
+// rig while the wall seams glow in tempo. Pattern taught here: `cam:
+// "inside"` puts the eye at the shape's centre; fx_place returns identity
+// so the room holds still and only the gaze moves.
+{
+    name: "Inside Cube"
+    engine: "videomesh"
+    shape: "box"
+    seed: 5
+
+    size: 10.0
+    cam: "inside"
+    fly: 0.8
+
+    beat_pulse: 0.4
+    input0: "test"
+
+    color_bg: #x04060c
+    color_a: #x38b6e8
+    color_b: #xe84f9a
+    color_c: #xbfe8ff
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — the wall fragment. attr = (hash, face,
+    // edge, id): edge is 0 on the wall seams, 1 mid-wall, so the seams
+    // become beat-lit neon joints between six copies of the clip.
+    shader: draw.DrawVjFxVideomesh {
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 0.0, 0.0)
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let lit = content.xyz * (0.55 + 0.45 * attr.z)
+            let seam = self.col_a.xyz * (1.0 - attr.z)
+                * (0.5 + self.time_beat.w * 1.6 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + seam) * self.fog.y, 1.0)
+        }
+    }
+}

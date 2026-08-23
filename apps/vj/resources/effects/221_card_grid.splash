@@ -1,0 +1,106 @@
+// CARD GRID — the picture is a rack of cards, and once a bar a wave of
+// flips runs across it: each card turns a half-turn on its vertical edge,
+// lifting off the wall as it goes and dropping back flush.
+//
+// Pattern taught here: A STAGGERED MOVE THAT ALWAYS FINISHES. The stagger
+// is a per-card delay taken out of the BAR PHASE, and the flip window is
+// what is left over, so the last card to start still lands before the bar
+// ends — the rack is guaranteed flat again on every downbeat, at any tempo.
+// A stagger scaled off wall time instead would slide out of the bar the
+// moment the BPM moved.
+{
+    name: "Card Grid"
+    engine: "tiles"
+    mode: "hook"
+    seed: 53
+
+    grid: 10
+    spread: 8.8
+    aspect: 0.62
+    gap: 0.10
+
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.7
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5
+    p2: "0.05 + 0.16 * pulse"
+    dials: [
+        {name: "WAVE", bind: "p0", default: 0.5},
+        {name: "LIFT", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x0c0806
+    color_a: #xffc25a
+    color_b: #x8a3a12
+    color_c: #xfff0d2
+
+    fog: 0.0
+    glow: 1.05
+
+    stages: [
+        {kind: "bloom", threshold: 0.68, strength: 1.0, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the mode highlight drive, attr = (shade, edge, stagger, tumble).
+    // Vertex hooks: fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale),
+    // fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.shape.y = tiles per side, self.col_a/b/c/bg,
+    // self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTiles {
+        // The card lifts toward the camera while it is edge-on and drops
+        // back flush at both ends of its flip.
+        fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let gw = max(self.shape.y, 1.0)
+            // Delay ramps left-to-right and down the rack, plus a hash so
+            // the wave frays instead of marching in ranks.
+            let sweep = clamp(self.user.x, 0.0, 1.0)
+            let lead = (grid.x / gw) * 0.38 + (1.0 - grid.y / gw) * 0.14
+                + self.hash1(id * 3.31 + 2.0) * 0.30
+            let stag = clamp(lead * (0.25 + 1.1 * sweep), 0.0, 0.74)
+            let span = max(1.0 - stag, 0.20)
+            let f = clamp((clamp(self.sig.x, 0.0, 1.0) - stag) / span, 0.0, 1.0)
+            let turn = smoothstep(0.0, 1.0, f)
+            // sin(pi*turn): zero flush, one edge-on, zero flush again.
+            let lift = sin(turn * 3.1415927)
+            let amt = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
+                * self.shape.z * 0.09
+            return vec4(0.0, 0.0, lift * amt, 1.0)
+        }
+
+        // Half a turn per bar about the card's own vertical edge.
+        fx_tile_spin: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let gw = max(self.shape.y, 1.0)
+            let sweep = clamp(self.user.x, 0.0, 1.0)
+            let lead = (grid.x / gw) * 0.38 + (1.0 - grid.y / gw) * 0.14
+                + self.hash1(id * 3.31 + 2.0) * 0.30
+            let stag = clamp(lead * (0.25 + 1.1 * sweep), 0.0, 0.74)
+            let span = max(1.0 - stag, 0.20)
+            let f = clamp((clamp(self.sig.x, 0.0, 1.0) - stag) / span, 0.0, 1.0)
+            let turn = smoothstep(0.0, 1.0, f)
+            return vec4(0.0, 1.0, 0.0, turn * 3.1415927)
+        }
+
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            let lit = content.xyz * (attr.x * (0.40 + 0.60 * border))
+            // Warm card edge, hot while the wave is passing.
+            let edge = 1.0 - border
+            let glowline = self.col_c.xyz.mix(self.col_a.xyz, self.time_beat.w)
+                * edge * (t + clamp(self.user.z, 0.0, 4.0) + 0.10)
+            return vec4((lit + glowline) * self.fog.y, 1.0)
+        }
+    }
+}

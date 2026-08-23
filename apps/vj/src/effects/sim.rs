@@ -1135,9 +1135,41 @@ script_mod! {
         tex_dye: texture_2d(float)
         tex_flow: texture_2d(float)
         tex_in: texture_2d(float)
+        // THE AUDIO PICTURE — same contract as every other family
+        // (effects/audio_tex.rs); see any engine shader for the full row
+        // layout. Helpers below.
+        audio_tex: texture_2d(float)
+        audio_dim: uniform(vec4(256.0, 256.0, 0.0, 0.0))
+        audio_meta: uniform(vec4(256.0, 320.0, 64.0, 0.0213))
+        audio_env: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         u_grid: uniform(vec4(128.0, 128.0, 0.0078125, 0.0078125))
         u_view: uniform(vec4(1.0, 0.0, 0.0, 0.0))
         u_bg: uniform(vec4(0.01, 0.012, 0.03, 1.0))
+
+        // Spectrum magnitude 0..1: `f` = log frequency 0..1, `age` = how
+        // far back 0..1. Silence reads 0.
+        audio_fft: fn(f: float, age: float) -> float {
+            let rows = max(self.audio_dim.y, 1.0)
+            let x = (clamp(f, 0.0, 1.0) * (self.audio_dim.x - 1.0) + 0.5) / self.audio_meta.x
+            let back = clamp(age, 0.0, 1.0) * (rows - 1.0)
+            let row = modf(self.audio_dim.z - back + rows * 2.0, rows)
+            return self.audio_tex.sample_nearest(vec2(x, (row + 0.5) / self.audio_meta.y), 0.0).x
+        }
+
+        // Waveform sample -1..1: `t` 0..1 across the stored window
+        // (1 = newest). Silence reads 0.
+        audio_wave: fn(t: float) -> float {
+            let bins = max(self.audio_dim.x, 1.0)
+            let wrows = max(self.audio_meta.z, 1.0)
+            let back = (1.0 - clamp(t, 0.0, 1.0)) * (bins * wrows - 1.0)
+            let pos = (bins - 1.0) - back
+            let ro = floor(pos / bins)
+            let col = pos - ro * bins
+            let row = modf(self.audio_dim.w + ro + wrows * 4.0, wrows)
+            let y = (self.audio_dim.y + row + 0.5) / self.audio_meta.y
+            let uv = vec2((col + 0.5) / self.audio_meta.x, y)
+            return self.audio_tex.sample_nearest(uv, 0.0).x
+        }
 
         bil_dye: fn(uv: vec2) -> vec4 {
             let g = self.u_grid
@@ -1214,6 +1246,53 @@ script_mod! {
         // Content coupling: state_tex owns slot 0, so input0 rides slot 1.
         tex0: texture_2d(float)
         has_content: uniform(0.0)
+
+        // THE AUDIO PICTURE (effects/audio_tex.rs) — the live show's sound,
+        // sampleable. One float texture rewritten every frame from exactly
+        // the stream the beat-sync analysis listens to:
+        //   y 0 .. spec_rows-1   SPECTROGRAM ring, x = log-spaced bin
+        //                        (30 Hz .. 16 kHz), value 0..1 magnitude
+        //                        (0 = -72 dBFS, 1 = 0 dBFS), one row per hop
+        //   y spec_rows ..       WAVEFORM ring, x = time inside the row,
+        //                        value = the SIGNED sample, -1..1 (0 = silence,
+        //                        which is also what an unbound slot reads)
+        // audio_dim  = (bins, spec_rows, spec_cursor, wave_cursor)
+        // audio_meta = (tex_w, tex_h, wave_rows, hop_secs)
+        // audio_env  = (bass, mid, high, rms), smoothed 0..1 — no texture
+        //              read needed for a plain level.
+        // Each `*_cursor` names the NEWEST row of its ring: that is the
+        // unwrap key. Use the two helpers, never a raw uv — and remember a
+        // silent rig reads 0 everywhere, so give every look an idle floor.
+        audio_tex: texture_2d(float)
+        audio_dim: uniform(vec4(256.0, 256.0, 0.0, 0.0))
+        audio_meta: uniform(vec4(256.0, 320.0, 64.0, 0.0213))
+        audio_env: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        // Spectrum magnitude 0..1. `f` 0..1 = log frequency (0 = 30 Hz,
+        // 1 = 16 kHz); `age` 0..1 = how far back (0 = now, 1 = the oldest
+        // row kept, about 5.5 s). Silence reads 0.
+        audio_fft: fn(f: float, age: float) -> float {
+            let rows = max(self.audio_dim.y, 1.0)
+            let x = (clamp(f, 0.0, 1.0) * (self.audio_dim.x - 1.0) + 0.5) / self.audio_meta.x
+            let back = clamp(age, 0.0, 1.0) * (rows - 1.0)
+            let row = modf(self.audio_dim.z - back + rows * 2.0, rows)
+            return self.audio_tex.sample_nearest(vec2(x, (row + 0.5) / self.audio_meta.y), 0.0).x
+        }
+
+        // Waveform sample -1..1. `t` 0..1 across the stored window
+        // (1 = the newest sample, about 1.4 s deep). Silence reads 0.
+        audio_wave: fn(t: float) -> float {
+            let bins = max(self.audio_dim.x, 1.0)
+            let wrows = max(self.audio_meta.z, 1.0)
+            let back = (1.0 - clamp(t, 0.0, 1.0)) * (bins * wrows - 1.0)
+            let pos = (bins - 1.0) - back
+            let ro = floor(pos / bins)
+            let col = pos - ro * bins
+            let row = modf(self.audio_dim.w + ro + wrows * 4.0, wrows)
+            let y = (self.audio_dim.y + row + 0.5) / self.audio_meta.y
+            let uv = vec2((col + 0.5) / self.audio_meta.x, y)
+            return self.audio_tex.sample_nearest(uv, 0.0).x
+        }
         backface_culling: false
         alpha_blend: true
         depth_write: false
@@ -1323,6 +1402,53 @@ script_mod! {
         // Content coupling: wind_tex owns slot 0, so input0 rides slot 1.
         tex0: texture_2d(float)
         has_content: uniform(0.0)
+
+        // THE AUDIO PICTURE (effects/audio_tex.rs) — the live show's sound,
+        // sampleable. One float texture rewritten every frame from exactly
+        // the stream the beat-sync analysis listens to:
+        //   y 0 .. spec_rows-1   SPECTROGRAM ring, x = log-spaced bin
+        //                        (30 Hz .. 16 kHz), value 0..1 magnitude
+        //                        (0 = -72 dBFS, 1 = 0 dBFS), one row per hop
+        //   y spec_rows ..       WAVEFORM ring, x = time inside the row,
+        //                        value = the SIGNED sample, -1..1 (0 = silence,
+        //                        which is also what an unbound slot reads)
+        // audio_dim  = (bins, spec_rows, spec_cursor, wave_cursor)
+        // audio_meta = (tex_w, tex_h, wave_rows, hop_secs)
+        // audio_env  = (bass, mid, high, rms), smoothed 0..1 — no texture
+        //              read needed for a plain level.
+        // Each `*_cursor` names the NEWEST row of its ring: that is the
+        // unwrap key. Use the two helpers, never a raw uv — and remember a
+        // silent rig reads 0 everywhere, so give every look an idle floor.
+        audio_tex: texture_2d(float)
+        audio_dim: uniform(vec4(256.0, 256.0, 0.0, 0.0))
+        audio_meta: uniform(vec4(256.0, 320.0, 64.0, 0.0213))
+        audio_env: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        // Spectrum magnitude 0..1. `f` 0..1 = log frequency (0 = 30 Hz,
+        // 1 = 16 kHz); `age` 0..1 = how far back (0 = now, 1 = the oldest
+        // row kept, about 5.5 s). Silence reads 0.
+        audio_fft: fn(f: float, age: float) -> float {
+            let rows = max(self.audio_dim.y, 1.0)
+            let x = (clamp(f, 0.0, 1.0) * (self.audio_dim.x - 1.0) + 0.5) / self.audio_meta.x
+            let back = clamp(age, 0.0, 1.0) * (rows - 1.0)
+            let row = modf(self.audio_dim.z - back + rows * 2.0, rows)
+            return self.audio_tex.sample_nearest(vec2(x, (row + 0.5) / self.audio_meta.y), 0.0).x
+        }
+
+        // Waveform sample -1..1. `t` 0..1 across the stored window
+        // (1 = the newest sample, about 1.4 s deep). Silence reads 0.
+        audio_wave: fn(t: float) -> float {
+            let bins = max(self.audio_dim.x, 1.0)
+            let wrows = max(self.audio_meta.z, 1.0)
+            let back = (1.0 - clamp(t, 0.0, 1.0)) * (bins * wrows - 1.0)
+            let pos = (bins - 1.0) - back
+            let ro = floor(pos / bins)
+            let col = pos - ro * bins
+            let row = modf(self.audio_dim.w + ro + wrows * 4.0, wrows)
+            let y = (self.audio_dim.y + row + 0.5) / self.audio_meta.y
+            let uv = vec2((col + 0.5) / self.audio_meta.x, y)
+            return self.audio_tex.sample_nearest(uv, 0.0).x
+        }
         u_wind: uniform(vec4(0.0416, 1.0, 1.6, 0.0))
         backface_culling: false
         alpha_blend: false

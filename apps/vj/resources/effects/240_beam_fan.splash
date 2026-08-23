@@ -1,0 +1,58 @@
+// BEAM FAN — twelve thin video beams pivoting through one centre like a
+// folding hand of cards: each slat carries its own horizontal band of the
+// clip (`uv_split: "bands_y"`), the fan opens and closes on slow sines and
+// the whole hand swings, so the picture keeps almost assembling and then
+// shearing into rays of light. Pattern taught here: thin `grid` slats +
+// band windows + a rotation-only fx_place with per-slat z offsets to keep
+// the crossing beams from fighting.
+{
+    name: "Beam Fan"
+    engine: "videomesh"
+    shape: "grid"
+    seed: 12
+
+    instances: 12
+    uv_split: "bands_y"
+    size: 2.6
+    aspect: 0.085
+    spread: 0.6
+    fly: 0.4
+    alt: 0.3
+
+    beat_pulse: 0.45
+    input0: "test"
+
+    color_bg: #x05040c
+    color_a: #x40c8f0
+    color_b: #xb04ff0
+    color_c: #xe8f4ff
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE — the fan placement (angle per slat, breathing
+    // spread, swinging root) and the beam fragment.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.0, 0.0, 1.0)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let n = max(self.shape.y, 2.0)
+            let open = 1.15 + 0.35 * sin(t * 0.33)
+            let swing = 0.25 * sin(t * 0.21)
+            let ang = (id / (n - 1.0) - 0.5) * open + swing
+            return vec4(0.0, 0.0, id * 0.03 - n * 0.015, ang)
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let lit = content.xyz * (t * 0.95)
+            let ray = self.col_a.xyz.mix(self.col_b.xyz, attr.w / max(self.shape.y, 1.0))
+                * (1.0 - attr.z)
+                * (0.35 + self.time_beat.w * 1.2 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + ray) * self.fog.y, 1.0)
+        }
+    }
+}

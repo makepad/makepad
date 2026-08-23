@@ -1,0 +1,78 @@
+// BAND LATTICE — a wall of little meters. Each cell owns one slice of the
+// spectrum and one moment in time, so the grid reads across as frequency
+// and down as history: a rack of level lamps that plays the last few
+// seconds back at you.
+//
+// Pattern taught: cell coordinates. Quantising uv into a lattice and using
+// the CELL index (not the pixel) to address the audio texture is what
+// turns a smooth reading into hardware — and it costs one sample.
+{
+    name: "Band Lattice"
+    engine: "screen"
+    seed: 41
+
+    speed: 1.0
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "CELLS", bind: "p0", default: 0.5},
+        {name: "DEPTH", bind: "p1", default: 0.5},
+        {name: "BLEED", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05060d
+    color_a: #x2bff9e
+    color_b: #xffc21f
+    color_c: #xff3b3b
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let cols = floor(10.0 + 34.0 * clamp(self.user.x, 0.0, 1.0))
+            let rows = floor(6.0 + 20.0 * clamp(self.user.x, 0.0, 1.0))
+            let cx = floor(uv.x * cols)
+            let cy = floor(uv.y * rows)
+            let ix = fract(uv.x * cols)
+            let iy = fract(uv.y * rows)
+
+            let f = (cx + 0.5) / cols
+            let depth = 0.10 + 0.80 * clamp(self.user.y, 0.0, 1.0)
+            let age = ((cy + 0.5) / rows) * depth
+            let v = self.audio_fft(f, age)
+            // Idle: a lamp test pattern that crawls, so an unfed wall still
+            // looks like working hardware.
+            let idle = 0.06 + 0.07 * (0.5 + 0.5
+                * sin(cx * 0.9 + cy * 0.6 - self.time_beat.x * 2.0))
+            let m = clamp(max(v, idle), 0.0, 1.0)
+
+            // The lamp: a rounded pad inside its cell, lit by level.
+            let pad = smoothstep(0.0, 0.14, ix) * smoothstep(0.0, 0.14, 1.0 - ix)
+                * smoothstep(0.0, 0.18, iy) * smoothstep(0.0, 0.18, 1.0 - iy)
+            // Meter colour law: green, amber, red as it climbs.
+            let mut lamp = self.col_a.xyz.mix(self.col_b.xyz, smoothstep(0.30, 0.70, m))
+            lamp = lamp.mix(self.col_c.xyz, smoothstep(0.68, 0.95, m))
+
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + lamp * (pad * (0.10 + 1.35 * m * m))
+            // BLEED: neighbouring cells glow into each other, so a loud
+            // band lights its whole column instead of one pixel row.
+            let bleed = clamp(self.user.z, 0.0, 1.0)
+            let colhot = self.audio_fft(f, 0.0)
+            rgb = rgb + lamp * (bleed * colhot * colhot * 0.28 * (1.0 - age))
+            // Rack furniture: a dark grid so the lamps sit in something.
+            let grille = (1.0 - pad) * 0.10
+            rgb = rgb.mix(vec3(0.0, 0.0, 0.0), grille)
+            // The newest row across the top gets a highlight rail.
+            rgb = rgb + self.col_b.xyz
+                * (exp(0.0 - uv.y * 26.0) * (0.05 + 0.5 * self.audio_env.w))
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

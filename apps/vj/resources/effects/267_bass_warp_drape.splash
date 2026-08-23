@@ -1,0 +1,101 @@
+// BASS WARP DRAPE — the CONTENT preset of this set: the channel's live
+// video, hung on the sound. The low end pumps a radial push-and-pull, the
+// mids ripple the surface horizontally, and the last seconds of spectrum
+// hang down the right edge as a strip you can read the track from.
+//
+// This is the one to copy when an author wants audio to SHAPE the clip
+// rather than replace it. `content` is the pre-gated strength: it is 0
+// whenever the runtime's animated stand-in is bound instead of real deck
+// video, so the look reads the fallback and lifts it instead of pretending.
+{
+    name: "Bass Warp Drape"
+    engine: "screen"
+    seed: 29
+
+    input0: "test"
+    content: 1.0
+
+    speed: 1.0
+    beat_pulse: 0.7
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "RIPPLE", bind: "p1", default: 0.5},
+        {name: "STRIP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x04040a
+    color_a: #x39e6ff
+    color_b: #xff4f6e
+    color_c: #xfff0cc
+
+    stages: [
+        {kind: "bloom", threshold: 0.65, strength: 0.9, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = length(p)
+
+            // PUMP: the low end squeezes the frame in and out about centre.
+            let bass = self.audio_env.x
+            let pump = (0.02 + 0.18 * clamp(self.user.x, 0.0, 1.0))
+                * (bass - 0.25 + 0.35 * self.time_beat.w)
+            // RIPPLE: mids as travelling horizontal waves, their phase from
+            // the waveform so the ripple is the actual signal, not a sine.
+            let rip = (0.004 + 0.030 * clamp(self.user.y, 0.0, 1.0))
+                * self.audio_wave(clamp(uv.y * 0.5 + 0.5, 0.0, 1.0))
+                * (0.35 + self.audio_env.y)
+
+            let dir = p / max(r, 0.0006)
+            let warped = clamp(
+                vec2(uv.x - dir.x * pump * 0.6 + rip, uv.y - dir.y * pump),
+                vec2(0.0, 0.0),
+                vec2(1.0, 1.0)
+            )
+            // Highs split the channels a hair — a cheap sparkle that only
+            // shows when there is actually top end in the room.
+            let sp = 0.006 * self.audio_env.z
+            let cr = self.tex0.sample_as_bgra(clamp(warped + vec2(sp, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let cg = self.tex0.sample_as_bgra(warped)
+            let cb = self.tex0.sample_as_bgra(clamp(warped - vec2(sp, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let mut rgb = vec3(cr.x, cg.y, cb.z)
+
+            // Without real content the stand-in is all there is: lift it so
+            // the gallery tile still reads (the dead-air law).
+            let lift = 1.0 + (1.0 - clamp(cmix, 0.0, 1.0)) * 0.30
+            rgb = rgb * lift
+
+            // A spectrum wash over the picture: warm where the band that
+            // owns this screen height is loud.
+            let f = clamp(1.0 - uv.y, 0.0, 1.0)
+            let band = self.audio_fft(f, 0.0)
+            rgb = rgb + self.col_a.xyz * (band * 0.16)
+
+            // THE STRIP: the last seconds of spectrum standing on the right
+            // edge — x inside the strip is time, y is frequency.
+            let sw = 0.03 + 0.16 * clamp(self.user.z, 0.0, 1.0)
+            if uv.x > 1.0 - sw {
+                let age = clamp((1.0 - uv.x) / max(sw, 0.001), 0.0, 1.0)
+                let v = self.audio_fft(clamp(1.0 - uv.y, 0.0, 1.0), age)
+                let idle = 0.05 + 0.04 * sin(uv.y * 30.0 - self.time_beat.x * 1.6)
+                let m = max(v, idle)
+                let tint = self.col_a.xyz.mix(self.col_b.xyz, m)
+                rgb = rgb.mix(self.col_bg.xyz, 0.55)
+                rgb = rgb + tint * (m * 1.4)
+            }
+            // The seam: a hot line where the strip meets the picture.
+            rgb = rgb + self.col_c.xyz
+                * (exp(0.0 - abs(uv.x - (1.0 - sw)) * 420.0) * (0.25 + 0.6 * self.audio_env.w))
+            // A beat vignette that grips the frame on the downbeat.
+            let vig = 1.0 - (0.18 + 0.22 * self.time_beat.w) * smoothstep(0.3, 0.95, r)
+            return vec4(rgb * vig * self.fog.y, 1.0)
+        }
+    }
+}
