@@ -194,32 +194,53 @@ mod imp {
     // startup
     // ------------------------------------------------------------------
 
-    /// `--remote`, `--remote=PORT`, `--remote PORT`, or `MAKEPAD_REMOTE=1|PORT`.
-    fn requested_port() -> Option<u16> {
+    /// `--remote`, `--remote=PORT`, `--remote PORT`, `--remote=HOST:PORT`,
+    /// `--remote HOST:PORT`, or `MAKEPAD_REMOTE=1|PORT|HOST:PORT`.
+    ///
+    /// The default host is loopback. Naming a host (`0.0.0.0:8399`,
+    /// `10.0.0.5:8399`) binds that interface instead so another machine can
+    /// drive this app — the fleet-box case, where the controlling agent sits
+    /// on a different computer. Only do that on a trusted network: this
+    /// surface injects real mouse/keyboard input and serves screen grabs.
+    /// IPv4 or hostname only.
+    fn requested_bind() -> Option<(String, u16)> {
+        fn parse(value: &str) -> (String, u16) {
+            let value = value.trim();
+            if let Some((host, port)) = value.rsplit_once(':') {
+                if let Ok(port) = port.parse::<u16>() {
+                    if !host.is_empty() {
+                        return (host.to_string(), port);
+                    }
+                }
+            }
+            ("127.0.0.1".to_string(), value.parse::<u16>().unwrap_or(0))
+        }
         let mut args = std::env::args();
         while let Some(arg) = args.next() {
             if arg == "--remote" {
-                // an immediately following bare number is the port
+                // an immediately following bare port or host:port is the bind
                 if let Some(next) = args.next() {
-                    if let Ok(port) = next.parse::<u16>() {
-                        return Some(port);
+                    let next = next.trim().to_string();
+                    if next.parse::<u16>().is_ok() || next.contains(':') {
+                        return Some(parse(&next));
                     }
                 }
-                return Some(0);
+                return Some(("127.0.0.1".to_string(), 0));
             }
             if let Some(value) = arg.strip_prefix("--remote=") {
-                return Some(value.trim().parse::<u16>().unwrap_or(0));
+                return Some(parse(value));
             }
         }
         match std::env::var("MAKEPAD_REMOTE") {
             Ok(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                if v.is_empty() || v == "0" || v == "off" || v == "false" || v == "no" {
+                let v = v.trim().to_string();
+                let lower = v.to_ascii_lowercase();
+                if lower.is_empty() || lower == "0" || lower == "off" || lower == "false" || lower == "no" {
                     None
-                } else if let Ok(port) = v.parse::<u16>() {
-                    Some(port)
+                } else if v.parse::<u16>().is_ok() || v.contains(':') {
+                    Some(parse(&v))
                 } else {
-                    Some(0)
+                    Some(("127.0.0.1".to_string(), 0))
                 }
             }
             Err(_) => None,
@@ -270,19 +291,20 @@ mod imp {
             .to_string()
     }
 
-    /// Bind the localhost control port and start the accept loop. Prints
-    /// `[makepad-remote] listening on 127.0.0.1:PORT grabs=DIR` and flushes.
+    /// Bind the control port and start the accept loop. Prints
+    /// `[makepad-remote] listening on HOST:PORT grabs=DIR` and flushes
+    /// (HOST is `127.0.0.1` unless the bind named another interface).
     pub fn start_if_requested() {
-        let Some(port) = requested_port() else {
+        let Some((host, port)) = requested_bind() else {
             return;
         };
         if ACTIVE.load(Ordering::Relaxed) {
             return;
         }
-        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        let listener = match TcpListener::bind((host.as_str(), port)) {
             Ok(l) => l,
             Err(err) => {
-                println!("[makepad-remote] bind 127.0.0.1:{port} failed: {err}");
+                println!("[makepad-remote] bind {host}:{port} failed: {err}");
                 let _ = std::io::stdout().flush();
                 return;
             }
@@ -307,7 +329,7 @@ mod imp {
         // One line, everything an agent needs to drive and clean up this
         // instance: port, pid, app, and where grabs land.
         println!(
-            "[makepad-remote] listening on 127.0.0.1:{bound} pid={pid} app={app} grabs={}",
+            "[makepad-remote] listening on {host}:{bound} pid={pid} app={app} grabs={}",
             dir.display()
         );
         let _ = std::io::stdout().flush();

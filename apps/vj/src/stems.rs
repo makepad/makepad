@@ -721,10 +721,6 @@ impl StemsPool {
             .name("vj-stems".into())
             .spawn(move || {
                 let mut model: Option<StemsModel> = None;
-                // The checkpoint is not on this machine — a standing fact, so
-                // it is answered from here rather than by probing every job.
-                // A load FAILURE is a different animal (see below).
-                let mut no_checkpoint = false;
                 // The track most recently opened per deck: whatever is on a
                 // deck is pinned against the budget, so a set in progress is
                 // never evicted out from under the needle.
@@ -788,18 +784,12 @@ impl StemsPool {
                         coverage(&cache, &out);
                         continue;
                     };
-                    if no_checkpoint {
-                        let _ = out.send(StemsMsg::Status {
-                            deck: job.deck,
-                            gen: job.gen,
-                            text: "stems: model not installed".to_string(),
-                            working: false,
-                        });
-                        continue;
-                    }
                     if model.is_none() {
+                        // Probed per job, never latched: the INSTALL MODELS
+                        // flow can put the checkpoint on disk mid-session,
+                        // and the next separation must pick it up. One stat
+                        // per track load is free.
                         if !checkpoint.is_file() {
-                            no_checkpoint = true;
                             let _ = out.send(StemsMsg::Status {
                                 deck: job.deck,
                                 gen: job.gen,
