@@ -11,14 +11,13 @@ It also has a large set of AI backends integrated for embedding llms or generati
 
 This repository contains the core engine, widgets, tools, and examples.
 
-## Building (quick start)
+## Building the VJ example app
 
 Rust stable is the toolchain everywhere: https://rustup.rs
 
 **macOS** — install Rust and the Xcode command line tools, then:
 
 ```bash
-git checkout work
 cargo run -p makepad-vj --release
 ```
 
