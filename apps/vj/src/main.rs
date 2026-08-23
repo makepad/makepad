@@ -50,6 +50,9 @@ mod fx_thumbs;
 mod import_ui;
 mod gen;
 mod lanes;
+// LIVECODING: the observed effect-document origins, and the compile answer
+// a coding agent polls after saving one. See apps/vj/LIVECODING.md.
+mod livecode;
 mod loop_detect;
 // Karaoke: whisper over the separated vocals stem, cached beside the stems.
 mod lyrics;
@@ -2611,6 +2614,21 @@ impl Default for GridLane {
     }
 }
 
+/// Prefab effect art size. A pad is ~164x104 layout points and the art is a
+/// soft diagonal weave, so this upscales invisibly while keeping the whole
+/// compiled-in library under three megabytes of texture.
+const PREFAB_W: usize = 128;
+const PREFAB_H: usize = 80;
+
+impl GridLane {
+    /// A lane whose contents are COMPILED INTO THE BINARY, so it can be
+    /// drawn whole before any store has answered (see
+    /// `App::effect_lane_entries`).
+    fn is_effect_lane(self) -> bool {
+        matches!(self, GridLane::Kind(AssetKind::VjEffect) | GridLane::Transition)
+    }
+}
+
 /// The VJ-relevant content lanes, one chip each, in column order. The
 /// exotic authoring kinds (char/prop/material/…) live behind the search
 /// box — a VJ set never browses them by chip.
@@ -2760,6 +2778,19 @@ enum CatPurpose {
     /// (fx_slot.rs). `title` rides along so the tile can wear the catalog
     /// name even when the document's own name differs.
     FxSlotSource { slot: FxSlotKind, revision: AssetRevisionId, title: String },
+    /// HOT RELOAD, hop 1: the asset running in `slot` was republished —
+    /// which revision is its head now?
+    FxSlotReload { slot: FxSlotKind, asset: AssetId },
+    /// A RESTORED slot's manifest, asked for one fact: which asset it is.
+    /// The persisted slot state carries a revision (its tile picture), and
+    /// hot reload needs the asset behind it.
+    FxSlotIdentify { slot: FxSlotKind },
+    /// HOT RELOAD, hop 2: that head's manifest, for its Source blob.
+    FxSlotReloadManifest {
+        slot: FxSlotKind,
+        asset: AssetId,
+        revision: AssetRevisionId,
+    },
     JobProfiles,
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
@@ -4284,6 +4315,15 @@ pub struct App {
     /// APC40 pad colour (palette velocity) ≈ the thumbnail's colour.
     #[rust]
     thumb_leds: HashMap<AssetRevisionId, u8>,
+    /// PREFAB EFFECT ART, by bundled preset name: the same procedural weave
+    /// [`crate::effects::seed`] publishes as each preset's thumbnail,
+    /// generated locally so the effect grid is COMPLETE in the first frame
+    /// (see `App::effect_lane_entries`). Built once, at boot, off no
+    /// network at all. Small on purpose — a tile is ~164x104 points and the
+    /// art is a soft weave, so [`PREFAB_W`]x[`PREFAB_H`] upscales
+    /// invisibly and the whole library costs a couple of megabytes.
+    #[rust]
+    fx_prefab: HashMap<String, Texture>,
     #[rust(BrowseModel::visual())]
     video_model: BrowseModel,
     // The deck explorer lists EVERY audio asset in the store, whatever its
@@ -4346,9 +4386,27 @@ pub struct App {
     #[rust]
     thumb_inflight: HashSet<AssetRevisionId>,
     /// Effect-source fetches in flight for the vjeffect thumbnail renderer
-    /// (at most one — the renderer is strictly serial).
+    /// (dedupe only — the bank's pending set is deep, so nothing meters
+    /// these beyond one per revision).
     #[rust]
     fx_source_inflight: HashSet<AssetRevisionId>,
+    /// The bundled effect library's head revisions, streamed by the seed
+    /// worker — the up-front feed for the animated thumbnail bake (no
+    /// catalog paging in the way).
+    #[rust]
+    fx_bundle_rx: Option<std::sync::mpsc::Receiver<Vec<crate::effects::seed::BundleHead>>>,
+    /// alias -> (head revision, transition), retained from that feed. This
+    /// is what unhooks the WARM path from catalog resolution: a cached
+    /// sheet decodes against the head revision and the boot grid's prefab
+    /// tile paints it BY ALIAS, seconds before the tile's catalog row has
+    /// resolved (the store's control plane is busy at boot — the observer
+    /// reconcile — and a visible grid must not wait behind it).
+    #[rust]
+    fx_heads: HashMap<String, (AssetRevisionId, bool)>,
+    /// Revisions whose thumbnail bake FAILED — terminal per revision,
+    /// mirrored from the render bank so the tile paints the failure.
+    #[rust]
+    fx_thumb_failed: HashSet<AssetRevisionId>,
     /// Sheet decodes handed to the thumb lane for rendered/cached effect
     /// thumbnails, by submit time — a decode the epoch guard dropped is
     /// simply asked again a few seconds later (the cache file is idempotent).
@@ -4361,6 +4419,22 @@ pub struct App {
     /// Source fetches in flight for slot loads, per slot (latest wins).
     #[rust]
     fx_slot_inflight: [Option<AssetRevisionId>; 3],
+    /// HOT RELOAD: which ASSET each slot is running, so a catalog republish
+    /// of that asset (a livecoded document saved on disk) can re-fetch the
+    /// new head and re-load the SAME slot key in place. Kept beside the
+    /// slot model rather than in it because it is a session fact about the
+    /// store, not part of the persisted slot state.
+    #[rust]
+    fx_slot_asset: [Option<AssetId>; 3],
+    /// A slot reload already on its way, per slot — a burst of saves must
+    /// not become a burst of overlapping three-hop reloads.
+    #[rust]
+    fx_slot_reloading: [bool; 3],
+    /// A republish that arrived while a reload was already in flight: the
+    /// LATEST head still owes this slot a reload once the current chain
+    /// settles — dropping it left a save burst on the older revision.
+    #[rust]
+    fx_slot_reload_queued: [Option<AssetId>; 3],
     /// This frame's transition engagement (envelope × triangle) and the
     /// quantized value last pushed to the tile UI.
     #[rust]
@@ -5607,6 +5681,7 @@ impl App {
             return;
         }
         let title = tile.title.clone();
+        let alias = tile.alias.clone();
         let Some(up) = self.up.as_mut() else { return };
         if let Ok(id) = up.catalog.submit_with(
             ClientRequest::FetchBlob {
@@ -5618,6 +5693,10 @@ impl App {
         ) {
             self.cat_reqs
                 .insert(id, CatPurpose::FxSlotSource { slot: kind, revision, title });
+            livecode::remember(&revision.to_string(), alias.as_deref());
+            // HOT RELOAD: which ASSET is in this slot, so a republish of it
+            // can re-fetch and re-load the same slot in place.
+            self.fx_slot_asset[kind.index()] = Some(asset);
             self.fx_slot_inflight[kind.index()] = Some(revision);
             self.fx_slots.slot_mut(kind).note = Some("loading…".to_string());
             // ONE-SHOT ARM: the accepted click consumes it. A latched arm
@@ -5627,6 +5706,56 @@ impl App {
             self.fx_slots.consume_armed(kind);
             self.sync_fx_slots_ui(cx);
             self.grids_dirty = true;
+        }
+    }
+
+    /// A relaunch restores slots from a persisted revision id, which is not
+    /// enough to notice a republish. One manifest fetch per restored slot
+    /// turns each revision into the asset behind it, and from then on a
+    /// saved document reaches the running slot exactly as it does after a
+    /// click.
+    fn identify_fx_slots(&mut self) {
+        for kind in FxSlotKind::ALL {
+            if self.fx_slot_asset[kind.index()].is_some() {
+                continue;
+            }
+            let Some(rev) = self.fx_slots.slot(kind).rev.clone() else { continue };
+            let Ok(rev) = rev.parse::<AssetRevisionId>() else { continue };
+            let Some(up) = self.up.as_mut() else { return };
+            if let Ok(id) = up
+                .catalog
+                .submit(ClientRequest::FetchAssetManifest { rev })
+            {
+                self.cat_reqs.insert(id, CatPurpose::FxSlotIdentify { slot: kind });
+            }
+        }
+    }
+
+    /// HOT RELOAD: this asset was published again and a slot is running it.
+    ///
+    /// Re-resolve it from the STORE rather than from the grid — the grid
+    /// only re-resolves tiles it is currently showing, and the whole point
+    /// of livecoding is that the effect keeps running while the operator is
+    /// looking at something else. Three bounded hops: head revision,
+    /// manifest, Source blob; the last one lands in the same
+    /// `FxSlotSource` path a click takes, so the slot reloads under the
+    /// SAME key and the running effect recompiles in place.
+    fn reload_fx_slot_from_store(&mut self, kind: FxSlotKind, asset: AssetId) {
+        let index = kind.index();
+        if self.fx_slot_reloading[index] {
+            // Not dropped: re-run against the latest head once the current
+            // chain settles (see `pump_fx_slot_reloads`).
+            self.fx_slot_reload_queued[index] = Some(asset);
+            return;
+        }
+        let Some(up) = self.up.as_mut() else { return };
+        if let Ok(id) = up.catalog.submit_with(
+            ClientRequest::AssetDetail { id: asset },
+            makepad_asset_client::SubmitOptions::newest_first(),
+        ) {
+            self.cat_reqs
+                .insert(id, CatPurpose::FxSlotReload { slot: kind, asset });
+            self.fx_slot_reloading[index] = true;
         }
     }
 
@@ -5643,9 +5772,23 @@ impl App {
         persist: bool,
     ) {
         let widget = self.ui.widget(cx, Self::fx_slot_host_path(kind));
+        // LIVECODING: everything the app logs from here to the settle
+        // window belongs to THIS document's load — including the draw
+        // shader that compiles a frame later.
+        let mark = livecode::mark();
         let result = widget
             .borrow_mut::<VjFxSlotHost>()
             .map(|mut host| host.load(cx, &format!("vjfx_slot_{}", kind.key()), source));
+        if let Some(revision) = revision.as_ref() {
+            livecode::report(
+                &revision.to_string(),
+                mark,
+                match &result {
+                    Some(Err(error)) => Err(error.clone()),
+                    _ => Ok(()),
+                },
+            );
+        }
         match result {
             Some(Ok(name)) => {
                 let title = if title.is_empty() { name } else { title.to_string() };
@@ -5698,6 +5841,8 @@ impl App {
             host.clear(cx);
         }
         self.fx_slots.clear(kind);
+        self.fx_slot_asset[kind.index()] = None;
+        self.fx_slot_reloading[kind.index()] = false;
         let _ = std::fs::remove_file(Self::fx_slot_source_path(kind));
         self.save_fx_slots();
         self.sync_fx_slot_knobs(cx, kind);
@@ -9147,6 +9292,7 @@ p2 {}
         self.pump_stems(cx);
         self.pump_lyrics(cx);
         self.pump_model_install(cx);
+        self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
         self.sync_mesh_liveness(cx);
@@ -9326,15 +9472,33 @@ p2 {}
                         let cache = service::session_config_from_env()
                             .cache_parent
                             .join("cache-vjfx-seed");
+                        // LIVECODING: only the process that HOSTS the store
+                        // may observe local directories for it — reference
+                        // admission is loopback-scoped privilege, not
+                        // something to hand a store on somebody else's box.
+                        let observe = self.local_store.is_some();
+                        // The bake feed: seeding STREAMS every bundled
+                        // head over this channel as it learns it — the
+                        // whole present library in one batch, then each
+                        // fresh publish as it commits.
+                        let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
+                        self.fx_bundle_rx = Some(bundle_rx);
                         std::thread::spawn(move || {
                             let _ = std::fs::create_dir_all(&cache);
-                            let mut cfg = makepad_asset_client::ClientConfig::new(cache);
-                            cfg.token = token;
-                            match makepad_asset_client::AssetClient::connect(cfg, endpoints, None)
-                            {
+                            let connect = || {
+                                let mut cfg =
+                                    makepad_asset_client::ClientConfig::new(cache.clone());
+                                cfg.token = token.clone();
+                                makepad_asset_client::AssetClient::connect(cfg, endpoints, None)
+                            };
+                            match connect() {
                                 Ok(mut client) => {
-                                    let report =
-                                        crate::effects::seed::seed_presets(&mut client);
+                                    let extra = || connect().ok();
+                                    let report = crate::effects::seed::seed_presets(
+                                        &mut client,
+                                        &extra,
+                                        &bundle_tx,
+                                    );
                                     log!(
                                         "vjfx preset seeding: {} present, {} published, {} updated, {} retagged, {} failed{}",
                                         report.present,
@@ -9364,6 +9528,26 @@ p2 {}
                                             log!("vjfx library check unavailable: {error}");
                                         }
                                     }
+                                    // The channel closes here: the pump
+                                    // drops its receiver once the last
+                                    // head is drained.
+                                    drop(bundle_tx);
+                                    // LIVECODING, after seeding and on this
+                                    // same worker: watch the origin
+                                    // directories forever. Started second so
+                                    // a file edited while the app was off
+                                    // wins over the compiled-in bytes
+                                    // without racing the seed pass for it.
+                                    if observe {
+                                        // Runs for the life of the process:
+                                        // the store it publishes into is
+                                        // this process's own, so there is
+                                        // no shutdown between them to
+                                        // sequence.
+                                        static RUN_FOREVER: std::sync::atomic::AtomicBool =
+                                            std::sync::atomic::AtomicBool::new(false);
+                                        livecode::run_observer(&mut client, &RUN_FOREVER);
+                                    }
                                 }
                                 Err(error) => {
                                     log!("vjfx preset seeding skipped: {error}");
@@ -9371,6 +9555,9 @@ p2 {}
                             }
                         });
                     }
+                    // Restored slots learn which ASSET they are running, so
+                    // a livecoded document saved on disk reaches them.
+                    self.identify_fx_slots();
                     if !self.gen_panel_loaded {
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);
@@ -9503,6 +9690,15 @@ p2 {}
                                         self.run_cat_cmds(surface, cmds);
                                     }
                                 }
+                                // LIVECODING: a slot RUNNING this asset
+                                // re-fetches its new head and reloads in
+                                // place — the edit reaches the picture on
+                                // the screen, not only the grid tile.
+                                for kind in FxSlotKind::ALL {
+                                    if self.fx_slot_asset[kind.index()] == Some(asset) {
+                                        self.reload_fx_slot_from_store(kind, asset);
+                                    }
+                                }
                                 self.gen.catalog_published(asset);
                             }
                         }
@@ -9579,6 +9775,15 @@ p2 {}
                                 Some("fetch failed".to_string());
                             self.sync_fx_slots_ui(cx);
                             log!("fx slot {:?}: source fetch FAILED {revision}: {error}", slot);
+                        }
+                        CatPurpose::FxSlotIdentify { .. } => {}
+                        CatPurpose::FxSlotReload { slot, .. }
+                        | CatPurpose::FxSlotReloadManifest { slot, .. } => {
+                            // The running effect keeps running: a failed
+                            // reload leaves the slot exactly as it was, and
+                            // the next save republishes and tries again.
+                            self.fx_slot_reloading[slot.index()] = false;
+                            log!("fx slot {slot:?}: hot reload failed: {error}");
                         }
                         CatPurpose::JobProfiles => {
                             self.gen.profiles_failed(error.to_string());
@@ -9747,21 +9952,107 @@ p2 {}
                         if let Some(mut thumbs) =
                             widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
                         {
-                            thumbs.enqueue(
-                                cx,
-                                fx_thumbs::FxThumbJob {
-                                    asset,
-                                    revision,
-                                    title,
-                                    source,
-                                    transition,
-                                },
-                            );
+                            // The bundled feed may have raced this fetch and
+                            // already baked the revision — a cache hit means
+                            // the sheet exists and a re-render would only
+                            // repaint the same file.
+                            let cached = thumbs.cache_dir().is_some_and(|dir| {
+                                fx_thumbs::cache_path(dir, &revision, transition).exists()
+                            });
+                            if !cached {
+                                thumbs.enqueue(
+                                    cx,
+                                    fx_thumbs::FxThumbJob {
+                                        asset,
+                                        revision,
+                                        title,
+                                        source,
+                                        transition,
+                                    },
+                                );
+                            }
                         };
                     }
                     Err(error) => {
                         log!("fx thumb: {title} source unreadable: {error}");
                     }
+                }
+            }
+            (CatPurpose::FxSlotIdentify { slot }, ClientOutput::AssetManifest(manifest)) => {
+                if self.fx_slot_asset[slot.index()].is_none() {
+                    self.fx_slot_asset[slot.index()] = Some(manifest.asset_id);
+                }
+            }
+            (CatPurpose::FxSlotReload { slot, asset }, ClientOutput::AssetDetail(detail)) => {
+                // The operator may have clicked another effect into this
+                // slot while the reload chain was in flight — a stale chain
+                // must never overwrite the newer choice.
+                if self.fx_slot_asset[slot.index()] != Some(asset) {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                }
+                let Some(revision) = detail.latest_published().map(|c| c.revision) else {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                };
+                // Already running exactly this: an event we caused, or one
+                // whose content did not change. Nothing to reload.
+                if self.fx_slots.slot(slot).rev.as_deref() == Some(revision.to_string().as_str())
+                {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                }
+                let Some(up) = self.up.as_mut() else {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                };
+                match up.catalog.submit_with(
+                    ClientRequest::FetchAssetManifest { rev: revision },
+                    makepad_asset_client::SubmitOptions::newest_first(),
+                ) {
+                    Ok(id) => {
+                        self.cat_reqs.insert(
+                            id,
+                            CatPurpose::FxSlotReloadManifest { slot, asset, revision },
+                        );
+                    }
+                    Err(_) => self.fx_slot_reloading[slot.index()] = false,
+                }
+            }
+            (
+                CatPurpose::FxSlotReloadManifest { slot, asset, revision },
+                ClientOutput::AssetManifest(manifest),
+            ) => {
+                self.fx_slot_reloading[slot.index()] = false;
+                // Same stale-chain guard as the detail arm: the slot moved
+                // on, this manifest is history.
+                if self.fx_slot_asset[slot.index()] != Some(asset) {
+                    return;
+                }
+                let Some(media) = select_vjfx_source(&manifest) else {
+                    log!("fx slot {slot:?}: reloaded head has no effect document");
+                    return;
+                };
+                let title = self
+                    .video_model
+                    .tile(&asset)
+                    .map(|t| t.title.clone())
+                    .or_else(|| self.fx_slots.slot(slot).title.clone())
+                    .unwrap_or_default();
+                let alias = self.video_model.tile(&asset).and_then(|t| t.alias.clone());
+                let Some(up) = self.up.as_mut() else { return };
+                if let Ok(id) = up.catalog.submit_with(
+                    ClientRequest::FetchBlob {
+                        blob: media.blob,
+                        expected_len: Some(media.len),
+                        pin: false,
+                    },
+                    makepad_asset_client::SubmitOptions::newest_first(),
+                ) {
+                    self.cat_reqs
+                        .insert(id, CatPurpose::FxSlotSource { slot, revision, title });
+                    livecode::remember(&revision.to_string(), alias.as_deref());
+                    self.fx_slot_inflight[slot.index()] = Some(revision);
                 }
             }
             (
@@ -10548,10 +10839,17 @@ p2 {}
                         // rebuild. Only `refresh_thumbs` moves the clock.
                         self.thumb_used.insert(revision, self.thumb_clock);
                         self.thumb_inflight.remove(&revision);
-                        self.fx_decode_pending.remove(&revision);
+                        let fx_sheet = self.fx_decode_pending.remove(&revision).is_some();
                         if frames.len() > 1 {
                             self.thumb_anims
                                 .insert(revision, (frames.clone(), thumb.fps));
+                        }
+                        // An effect sheet may belong to a tile whose catalog
+                        // row has not resolved (the alias-keyed pickup in
+                        // `effect_lane_entries`): `apply_thumb` below cannot
+                        // reach it, only a rebuild can.
+                        if fx_sheet {
+                            self.grids_dirty = true;
                         }
                         if self.trace_thumbs {
                             log!("thumb: decoded {revision} ({} cached)", self.thumbs.len());
@@ -10761,11 +11059,15 @@ p2 {}
     ///
     /// Each pump tick: land any freshly rendered sheet in the thumb decode
     /// lane (the same lane store thumbnails ride, so the grid needs no new
-    /// path), then — only while the renderer is idle — pick the next effect
-    /// tile still wearing its seeded placeholder, VISIBLE PADS FIRST. A
-    /// cached sheet decodes straight from disk; only a cache miss costs a
-    /// source fetch and an offscreen render, and never more than one at a
-    /// time.
+    /// path), mirror new TERMINAL failures onto their tiles, hand the
+    /// render bank the LIVE viewport (fx_thumbs.rs owns the ordering:
+    /// visible bakes first, most recent visibility wins), and keep its deep
+    /// pending set filled. The feed has two sources: the BUNDLED library
+    /// arrives as complete (revision, source) pairs in ONE batch message
+    /// after seeding — no catalog paging in the way — and everything else
+    /// (livecoded heads, imported or generated docs) bakes via the store
+    /// fetch path the moment its tile resolves. A cached sheet decodes
+    /// straight from disk instead of rendering.
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
         if self.up.is_none() {
             return;
@@ -10781,7 +11083,7 @@ p2 {}
         // resolves, and the thumbnail decode lane.
         self.sync_fill_politeness(performing);
         let widget = self.ui.widget(cx, ids!(fx_thumbs));
-        let (results, free_lanes, render_disabled, cache_dir) = {
+        let (results, failures, render_disabled, cache_dir) = {
             let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
                 return;
             };
@@ -10796,13 +11098,17 @@ p2 {}
             thumbs.set_full_speed(!performing);
             (
                 thumbs.take_results(),
-                thumbs.free_lanes(),
+                thumbs.take_failures(),
                 thumbs.disabled_reason().is_some(),
                 cache_dir,
             )
         };
-        // Sources already on the way count against the free lanes.
-        let mut fetches = free_lanes.saturating_sub(self.fx_source_inflight.len());
+        // A failed bake is TERMINAL for its revision and the tile says so
+        // (red ring + FAILED) — a spinner that never stops is a lie.
+        if !failures.is_empty() {
+            self.fx_thumb_failed.extend(failures);
+            self.grids_dirty = true;
+        }
         for sheet in results {
             self.fx_decode_pending.insert(sheet.revision, now);
             self.decode.submit(DecodeJob::Thumb {
@@ -10815,18 +11121,177 @@ p2 {}
             self.thumb_decodes_out += 1;
             self.grids_dirty = true;
         }
+        // THE BUNDLED FEED: seeding streams every bundled head whose
+        // source IS the compiled-in bytes — the already-present library
+        // as one batch (a warm store's whole feed, one round trip), then
+        // each fresh publish the moment it commits. Everything enqueues
+        // directly into the bank's deep pending set: no catalog paging,
+        // no per-tile manifest trickle. Edited heads are never streamed
+        // and bake via the store fetch path below.
+        if let Some(rx) = self.fx_bundle_rx.take() {
+            let mut fed = 0usize;
+            let mut open = true;
+            if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+                loop {
+                    let heads = match rx.try_recv() {
+                        Ok(heads) => heads,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            open = false;
+                            break;
+                        }
+                    };
+                    // Reversed: within a class the bank pulls most
+                    // recently enqueued first, so pushing a batch
+                    // backwards makes each tab bake in its own grid order.
+                    for head in heads.into_iter().rev() {
+                        let alias = crate::effects::seed::preset_alias(head.name);
+                        let transition = Self::alias_is_transition(Some(&alias));
+                        self.fx_heads
+                            .insert(alias, (head.revision, transition));
+                        if fx_thumbs::cache_path(&cache_dir, &head.revision, transition)
+                            .exists()
+                        {
+                            continue;
+                        }
+                        thumbs.enqueue(
+                            cx,
+                            fx_thumbs::FxThumbJob {
+                                asset: head.asset,
+                                revision: head.revision,
+                                title: crate::effects::seed::preset_title(
+                                    head.name, head.source,
+                                ),
+                                source: head.source.to_string(),
+                                transition,
+                            },
+                        );
+                        fed += 1;
+                    }
+                }
+            }
+            if fed >= 8 {
+                // The big batches announce themselves; per-publish singles
+                // already log as they render.
+                log!("fx thumb: bundled feed — {fed} documents pending up front");
+            }
+            if open {
+                self.fx_bundle_rx = Some(rx);
+            }
+        }
+        // THE LIVE PRIORITY, every tick: what is on the visible pads right
+        // now (in pad order) and which effect tab is open. The bank pulls
+        // by strict class against exactly this — these two facts are the
+        // whole priority mechanism.
+        let visible: Vec<AssetRevisionId> = self
+            .video_pad_assets
+            .iter()
+            .flatten()
+            .filter_map(|asset| self.video_model.tile(asset))
+            .filter(|t| t.kind == Some(AssetKind::VjEffect))
+            .filter_map(|t| t.revision)
+            .collect();
+        let open_tab = if self.grid_lane.is_effect_lane() {
+            Some(self.grid_lane == GridLane::Transition)
+        } else {
+            None
+        };
+        if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+            thumbs.set_priority(&visible, open_tab);
+        }
         // Cached sheets are a DISK READ AND A DECODE, not a render: on a
         // warm relaunch there is no reason to meter them out six a tick.
         // The lane's own width is the throttle, and the politeness verdict
         // already narrowed that; here the only budget is the UI thread's,
         // and reading a sheet's header costs ~0.1ms.
         let cache_budget = if performing { 6 } else { MAX_FX_CACHE_DECODES_PER_TICK };
+        let mut cache_decodes = 0usize;
+        // THE FEED-DRIVEN WARM PASS, before the catalog is even asked:
+        // every bundled head whose sheet is on disk decodes straight off
+        // the alias -> revision map, visible pads first — the effect grid
+        // paints from prefab + cache alone, seconds before the store's
+        // busy boot (the observer reconcile) lets a single tile resolve.
+        if !self.fx_heads.is_empty() {
+            let visible_aliases: Vec<String> = {
+                let grid = self.ui.widget(cx, ids!(video_grid));
+                let pads = grid.borrow::<VjPadMatrix>();
+                pads.map(|pads| {
+                    (0..40)
+                        .filter_map(|pad| pads.visible_at(pad).map(|e| e.sub.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+            };
+            let mut feed: Vec<(AssetRevisionId, bool)> = Vec::new();
+            let mut in_feed: HashSet<AssetRevisionId> = HashSet::new();
+            for alias in &visible_aliases {
+                if let Some(&(revision, transition)) = self.fx_heads.get(alias) {
+                    if in_feed.insert(revision) {
+                        feed.push((revision, transition));
+                    }
+                }
+            }
+            for (revision, transition) in self.fx_heads.values() {
+                if in_feed.insert(*revision) {
+                    feed.push((*revision, *transition));
+                }
+            }
+            for (revision, transition) in feed {
+                if cache_decodes >= cache_budget {
+                    break;
+                }
+                if self.thumb_anims.contains_key(&revision) {
+                    continue;
+                }
+                if self
+                    .fx_decode_pending
+                    .get(&revision)
+                    .is_some_and(|at| now - at < 3.0)
+                {
+                    continue;
+                }
+                let held = widget
+                    .borrow::<fx_thumbs::VjFxThumbs>()
+                    .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
+                if held {
+                    continue;
+                }
+                let cache = fx_thumbs::cache_path(&cache_dir, &revision, transition);
+                if !cache.exists() {
+                    continue;
+                }
+                let t_read = std::time::Instant::now();
+                let layout = std::fs::read(&cache)
+                    .ok()
+                    .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
+                self.thumb_stats.fx_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
+                match layout {
+                    Some((cells, fps)) => {
+                        self.thumb_stats.fx_cache_submitted += 1;
+                        self.fx_decode_pending.insert(revision, now);
+                        self.decode.submit(DecodeJob::Thumb {
+                            revision,
+                            path: cache,
+                            sheet: Some((cells, fps)),
+                            legacy_may_be_sheet: false,
+                            epoch: self.view_epoch,
+                        });
+                        self.thumb_decodes_out += 1;
+                        cache_decodes += 1;
+                    }
+                    None => {
+                        // Unreadable/unstamped cache file: drop it and let
+                        // the render path write a fresh one.
+                        let _ = std::fs::remove_file(&cache);
+                    }
+                }
+            }
+        }
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
         let mut seen: HashSet<AssetId> = HashSet::new();
-        let mut cache_decodes = 0usize;
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -10851,9 +11316,8 @@ p2 {}
             {
                 continue;
             }
-            // Failed this session, or already on a lane / in the bank's
-            // queue (several documents render at once, so "busy" is no
-            // longer the same as "not idle").
+            // Failed this session (terminal per revision), or already
+            // pending / on a lane in the bank.
             let held = widget
                 .borrow::<fx_thumbs::VjFxThumbs>()
                 .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
@@ -10900,15 +11364,17 @@ p2 {}
                 }
                 continue;
             }
-            // Cache miss: keep the render bank fed — one source fetch per
-            // free lane, no more (the bank itself staggers the loads).
-            if render_disabled || fetches == 0 {
+            // Cache miss: fetch the source and enqueue on arrival. The
+            // bank's pending set is deep by design, so ADMISSION NEVER
+            // WAITS on lanes — the only guard is the in-flight dedupe.
+            if render_disabled {
                 continue;
             }
             if self.fx_source_inflight.contains(&revision) {
                 continue;
             }
             let Some(media) = tile.media.clone() else { continue };
+            let alias = tile.alias.clone();
             if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
                 continue;
             }
@@ -10923,8 +11389,10 @@ p2 {}
             ) {
                 self.cat_reqs
                     .insert(id, CatPurpose::FxSource { asset, revision });
+                // LIVECODING: which FILE this revision is, so the render
+                // outcome can be written under the stem an agent edits.
+                livecode::remember(&revision.to_string(), alias.as_deref());
                 self.fx_source_inflight.insert(revision);
-                fetches -= 1;
             }
         }
     }
@@ -10982,6 +11450,16 @@ p2 {}
     }
 
     fn handle_output_window_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Closing the MAIN window is closing the app: the render/output
+        // window must not survive it and keep the event loop alive — that
+        // left a headless output window on screen blocking shutdown.
+        if let Event::WindowClosed(ev) = event {
+            if Some(ev.window_id) == self.ui.window(cx, ids!(main_window)).window_id() {
+                self.close_output_window(cx);
+                cx.quit();
+                return;
+            }
+        }
         let Some(output_id) = self.ui.window(cx, ids!(output_window)).window_id() else {
             return;
         };
@@ -11225,7 +11703,15 @@ p2 {}
         };
         // Page on demand: the window reached the loaded tail, so ask the
         // server for the next page instead of having fetched everything.
-        if at_tail && self.video_model.has_more() && !self.video_model.is_loading() {
+        //
+        // EXCEPT on an effect lane, which pages to the END regardless of
+        // where the window sits. The grid already draws every bundled
+        // preset, so "the operator scrolled far enough" is no longer the
+        // signal that more rows are wanted — and without this the lane
+        // stopped at page one, which is why only the first forty-odd tiles
+        // ever got their animated bake.
+        let want_all = self.grid_lane.is_effect_lane();
+        if (at_tail || want_all) && self.video_model.has_more() && !self.video_model.is_loading() {
             let cmds = self.video_model.load_more();
             self.run_cat_cmds(Surface::Video, cmds);
         }
@@ -11302,6 +11788,18 @@ p2 {}
             Surface::Sfx => &self.sfx_model,
             Surface::Mesh => &self.mesh_model,
         };
+        // THE EFFECT LANES BOOT COMPLETE. Their contents are compiled into
+        // this binary, so they never wait on a listing — see
+        // [`Self::effect_lane_entries`]. A typed filter takes the QUERY
+        // path instead: the whole point of the box is to narrow the wall
+        // down to the match, not to leave it buried at its bundled
+        // position among two hundred prefabs.
+        if surface == Surface::Video
+            && self.grid_lane.is_effect_lane()
+            && self.video_model.text.trim().is_empty()
+        {
+            return self.effect_lane_entries(self.grid_lane);
+        }
         // The program strip is drawn in DISPLAY order — the PENDING head
         // column (reserved to a full column height, so filling it never
         // moves the body) and then the settled body. Every other surface is
@@ -11350,8 +11848,19 @@ p2 {}
                         failed: false,
                         active: false,
                         placeholder: true,
+                        pending: false,
+                        fx: false,
                     };
                 };
+                self.tile_entry(tile, index, surface)
+            }));
+        entries
+    }
+
+    /// One resolved catalog row as a grid cell.
+    fn tile_entry(&self, tile: &catalog::Tile, index: usize, surface: Surface) -> GridEntry {
+        {
+            {
                 let texture = tile.revision.and_then(|rev| self.thumbs.get(&rev).cloned());
                 let state = match (&tile.state, surface) {
                     (catalog::TileState::Ready, Surface::Sfx) => {
@@ -11408,7 +11917,7 @@ p2 {}
                 // cue being prepared for the program grid, the pad loader
                 // for the SFX bank. An ARMED cue is ready — it is only
                 // waiting for its beat — so it stops spinning.
-                let (loading, failed) = match surface {
+                let (loading, mut failed) = match surface {
                     Surface::Sfx => match self.pads.pad(&tile.asset).map(|p| p.load.clone()) {
                         Some(pads::PadLoad::Loading { .. }) => (true, false),
                         Some(pads::PadLoad::Failed { .. }) => (false, true),
@@ -11419,6 +11928,16 @@ p2 {}
                         self.cue.failed_asset() == Some(tile.asset),
                     ),
                 };
+                // An effect whose thumbnail bake failed wears the failure:
+                // the bake is deterministic, so a doc that cannot compile
+                // or render is a bug in the doc, and a red ring is how it
+                // gets seen (terminal per revision — a republished fix is
+                // a new revision and clears it).
+                if tile.kind == Some(AssetKind::VjEffect)
+                    && tile.revision.is_some_and(|r| self.fx_thumb_failed.contains(&r))
+                {
+                    failed = true;
+                }
                 // The tile says it in words too — a spinner over a dark
                 // thumbnail is easy to miss on a 56px pad.
                 let state = if loading {
@@ -11442,9 +11961,154 @@ p2 {}
                     failed,
                     active,
                     placeholder: false,
+                    pending: false,
+                    // Geometry-stable paint for every effect tile (see
+                    // `GridEntry::fx`) — by kind once resolved, by alias
+                    // before that.
+                    fx: tile.kind == Some(AssetKind::VjEffect)
+                        || tile.alias.as_deref().is_some_and(|a| a.starts_with("vjfx/")),
                 }
-            }));
+            }
+        }
+    }
+
+    /// THE BOOT GRID.
+    ///
+    /// The effect library is not a catalog the app discovers — it is one
+    /// directory of documents COMPILED INTO THIS BINARY. So the grid has no
+    /// business waiting on a store to be told what is in it: it draws the
+    /// whole lane in the first frame, in lane order, every tile carrying the
+    /// same procedural art the store holds for it, and the catalog rows then
+    /// replace those prefabs IN PLACE as they resolve (matched by alias, so
+    /// nothing moves and no cell is ever empty). The animated bake is the
+    /// only thing the operator ever sees change.
+    ///
+    /// Ordering is the BUNDLED order, not newest-first: a seeding burst
+    /// stamps two hundred publishes within a second of each other, and
+    /// sorting those by stamp is a shuffle — one that re-shuffles again on
+    /// the next launch. The lane reads the same every night.
+    ///
+    /// Rows the bundle does not name (imported or AI-generated effects) keep
+    /// the model's own order and follow the bundled block.
+    fn effect_lane_entries(&self, lane: GridLane) -> Vec<GridEntry> {
+        let model = &self.video_model;
+        // The bundled names this lane shows, in the order it shows them.
+        let bundled: Vec<&'static str> = match lane {
+            GridLane::Transition => crate::effects::seed::TRANSITION_PRESETS.to_vec(),
+            _ => crate::effects::seed::bundled_presets()
+                .iter()
+                .map(|(name, _)| *name)
+                .filter(|name| !crate::effects::seed::is_transition_preset(name))
+                .collect(),
+        };
+        // Alias -> the resolved row, when the store has answered for it.
+        let by_alias: HashMap<&str, &catalog::Tile> = model
+            .tiles()
+            .iter()
+            .filter_map(|tile| Some((tile.alias.as_deref()?, tile)))
+            .collect();
+        let bundled_aliases: std::collections::HashSet<String> =
+            bundled.iter().map(|n| crate::effects::seed::preset_alias(n)).collect();
+        let mut entries: Vec<GridEntry> = Vec::with_capacity(bundled.len() + 16);
+        for name in &bundled {
+            let alias = crate::effects::seed::preset_alias(name);
+            let index = entries.len();
+            let mut entry = match by_alias.get(alias.as_str()) {
+                Some(tile) => {
+                    let mut entry = self.tile_entry(tile, index, Surface::Video);
+                    // THE PREFAB IS THE FLOOR, not just the first paint. A
+                    // resolved row whose thumbnail blob has not been fetched
+                    // and decoded yet has no texture at all, and a tile with
+                    // no texture is a GREY hole — so the sequence a whole
+                    // page of tiles used to walk was prefab, grey, the
+                    // store's placeholder (the same picture again), and only
+                    // then the animated sheet. Three states, two of them
+                    // noise. Keeping the local art underneath collapses it
+                    // to ONE swap: the bake, when the bake exists.
+                    if entry.texture.is_none() && entry.frames.is_empty() {
+                        entry.texture = self.fx_prefab.get(*name).cloned();
+                    }
+                    entry
+                }
+                None => self.prefab_entry(name, index),
+            };
+            // THE ALIAS-KEYED BAKE PICKUP: a decoded sheet paints the
+            // moment it exists, keyed by the bundled feed's head revision —
+            // even on a tile whose catalog row has not resolved yet (the
+            // store's control plane is busy at boot). Without this, a fully
+            // baked, fully cached library still trickled onto the grid at
+            // catalog-resolve pace.
+            if entry.frames.is_empty() {
+                if let Some((revision, _)) = self.fx_heads.get(&alias) {
+                    if let Some((frames, fps)) = self.thumb_anims.get(revision) {
+                        entry.frames = frames.clone();
+                        entry.fps = *fps;
+                    }
+                }
+            }
+            entries.push(entry);
+        }
+        // Everything else the lane lists (imported / generated effects), in
+        // the model's own display order, behind the bundled block.
+        for asset in model.display_order().into_iter().flatten() {
+            let Some(tile) = model.tile(&asset) else { continue };
+            if tile.alias.as_deref().is_some_and(|a| bundled_aliases.contains(a)) {
+                continue;
+            }
+            let index = entries.len();
+            entries.push(self.tile_entry(tile, index, Surface::Video));
+        }
         entries
+    }
+
+    /// Generate the prefab art for every bundled preset, once, at startup.
+    ///
+    /// One pass over the compiled-in registry; no store, no socket, no
+    /// decode pool. Measured at a couple of hundred milliseconds for the
+    /// whole library at [`PREFAB_W`]x[`PREFAB_H`] — paid once, before the
+    /// window is up, and it is what makes the first painted frame of the
+    /// effect grid a COMPLETE one.
+    fn build_fx_prefab_art(&mut self, cx: &mut Cx) {
+        for (name, _) in crate::effects::seed::bundled_presets() {
+            let data =
+                crate::effects::seed::placeholder_bgra(name, PREFAB_W, PREFAB_H);
+            let texture = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: PREFAB_W,
+                    height: PREFAB_H,
+                    data: Some(data),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            self.fx_prefab.insert(name.to_string(), texture);
+        }
+    }
+
+    /// A prefab cell for a bundled preset the store has not answered for.
+    fn prefab_entry(&self, name: &str, index: usize) -> GridEntry {
+        let title = crate::effects::seed::bundled_presets()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(n, src)| crate::effects::seed::preset_title(n, src))
+            .unwrap_or_else(|| name.to_string());
+        GridEntry {
+            asset: AssetId::from_bytes([0; 16]),
+            title,
+            sub: crate::effects::seed::preset_alias(name),
+            state: "FX".to_string(),
+            pad: format!("{:02}", index + 1),
+            texture: self.fx_prefab.get(name).cloned(),
+            frames: Vec::new(),
+            fps: 0.0,
+            cells: false,
+            loading: false,
+            failed: false,
+            active: false,
+            placeholder: false,
+            pending: true,
+            fx: true,
+        }
     }
 
     fn rebuild_grids(&mut self, cx: &mut Cx) {
@@ -11460,8 +12124,12 @@ p2 {}
             // title in the middle of the list. Subtract what has actually
             // been dropped so far: exact over the loaded prefix, and it can
             // only get more accurate as more pages land.
+            // …and never SHORTER than what is actually on screen: an effect
+            // lane draws its whole compiled-in library from the first frame,
+            // long before the catalog has reported a total for it.
             let hidden = self.video_model.tiles().len().saturating_sub(video_entries.len());
-            pads.set_total(cx, (self.video_model.total as usize).saturating_sub(hidden));
+            let listed = (self.video_model.total as usize).saturating_sub(hidden);
+            pads.set_total(cx, listed.max(video_entries.len()));
             pads.set_entries(cx, video_entries);
             pads.set_offset(cx, self.apc.bank);
             self.apc.bank = pads.bank;
@@ -12097,6 +12765,20 @@ p2 {}
     }
 
     // ---- first-use model install (stem splitter + whisper) ----
+
+    /// A queued hot-reload fires the moment its slot's previous chain
+    /// settles — a save burst always ends on the newest revision.
+    fn pump_fx_slot_reloads(&mut self) {
+        for kind in [FxSlotKind::EffectA, FxSlotKind::Transition, FxSlotKind::EffectB] {
+            let index = kind.index();
+            if self.fx_slot_reloading[index] {
+                continue;
+            }
+            if let Some(asset) = self.fx_slot_reload_queued[index].take() {
+                self.reload_fx_slot_from_store(kind, asset);
+            }
+        }
+    }
 
     /// INSTALL MODELS opens the what-will-download dialog; while a download
     /// runs the same button reads CANCEL and pulls the cord instead.
@@ -13584,7 +14266,12 @@ p2 {}
     fn alias_is_transition(alias: Option<&str>) -> bool {
         alias
             .and_then(|alias| alias.strip_prefix("vjfx/"))
-            .is_some_and(crate::effects::seed::is_transition_preset)
+            .is_some_and(|stem| {
+                crate::effects::seed::is_transition_preset(stem)
+                    // A LIVECODED document declares its own family, and the
+                    // file that declares it is right there on disk.
+                    || livecode::observed_is_transition(stem)
+            })
     }
 
     /// A wrong-type click while a slot is armed: flash the slot with the
@@ -13996,11 +14683,21 @@ p2 {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.status_text = "starting…".to_string();
+        // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
+        // compiled in, so its art is generated here — ahead of any store,
+        // any socket, any listing.
+        self.build_fx_prefab_art(cx);
         self.midi_status = "APC40: scanning…".to_string();
         self.midi_input = cx.midi_input();
         self.midi_output = cx.midi_output();
         self.start_lighting();
         self.sync_lighting_controls_ui(cx);
+        // LIVECODING: tap the app's own error reporting before anything can
+        // load a document, so a shader that fails to compile reaches
+        // whoever just saved the file. Installed whether or not THIS
+        // process observes the origins — the answers are written by
+        // whichever process actually renders the document.
+        livecode::install();
         // STANDALONE BY DEFAULT. The VJ hosts its own Asset Server on
         // loopback unless an external one is reachable (or pinned) — see
         // `local_store::resolve`. Either way everything above this line is a

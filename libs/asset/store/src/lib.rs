@@ -57,6 +57,7 @@ pub mod error;
 pub mod gc;
 pub mod imports;
 pub mod jobs;
+pub mod observe;
 pub mod operations;
 pub mod search;
 pub mod seed;
@@ -73,6 +74,7 @@ pub use error::{ServerError, ServerResult};
 pub use gc::{Gc, GcConfig, GcPhase, GcStatus};
 pub use imports::{ImportEntryRow, ImportReport, Imports};
 pub use jobs::{AttemptRow, ClaimedJob, JobId, JobState, Jobs, NewJob};
+pub use observe::{ObserveConfig, Outcome as ObserveOutcome};
 pub use operations::{
     AliasExpect, ArmedJob, OperationAvailability, OperationCreateOutcome,
     OperationCreateRequest, OperationDef, OperationEventRow, OperationId, OperationInputBinding,

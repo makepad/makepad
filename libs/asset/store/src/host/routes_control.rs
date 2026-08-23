@@ -51,8 +51,8 @@ use crate::{
     SERVER_SCHEMA_VERSION,
 };
 use makepad_asset_data::{
-    AssetAlias, AssetId, AssetKind, AssetManifest, AssetRevisionId, AssetRevisionRef, GameAlias,
-    GameId, GameRevisionId, GameRevisionManifest,
+    AssetAlias, AssetId, AssetKind, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
+    FileRole, GameAlias, GameId, GameRevisionId, GameRevisionManifest,
 };
 
 /// Largest worker-supplied result/error document the transport records.
@@ -132,6 +132,10 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         }
 
         // ---- aliases -------------------------------------------------------
+        // The literal batch route MUST precede the alias catch-all below, or
+        // `status` is parsed as a (perfectly legal) one-segment alias — the
+        // same ordering hazard `blob_batch` guards on the data plane.
+        ["v1", "aliases", "status"] if m == Method::Post => alias_status_batch(conn, head, rc),
         ["v1", "aliases", rest @ ..] if !rest.is_empty() => {
             let alias = asset_alias_of(rest)?;
             match m {
@@ -1183,6 +1187,176 @@ fn alias_get(head: &Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Outco
             ("head_revision", s(target.revision.to_string())),
         ]),
     )))
+}
+
+/// Largest alias-status batch the server will answer in one request.
+const MAX_ALIAS_STATUS_ITEMS: usize = 512;
+
+/// BATCH ALIAS STATUS — "what do you already have, and is it what I have?"
+/// for a whole bundled library in ONE round trip.
+///
+/// A client seeding a compiled-in preset library used to ask this alias by
+/// alias: a resolve per name, then a manifest fetch per name to compare the
+/// source blob, then a tag search or two. Two hundred and sixty presets is
+/// then five-hundred-odd sequential requests, and the seed took a minute of
+/// wall clock on LOOPBACK — the round trips were the cost, not the work.
+/// Every one of those questions is answerable from the state thread with
+/// one query and one manifest decode, so this route answers all of them at
+/// once, on ONE consistent snapshot.
+///
+/// Request: `{"tags": ["builtin", …], "entries": [{"alias": "…",
+/// "source": "<blob id>"}, …]}` — `tags` is the set the caller wants
+/// reported back per entry (its own ownership/annotation conventions; the
+/// server has no opinion about what they mean), `source` optional.
+///
+/// Response: `{"entries": [{"alias", "present", "asset_id",
+/// "head_revision", "source", "source_matches", "tags"}]}`, in request
+/// order, each echoing its own alias so nobody has to trust an ordinal.
+///
+/// Read-only: authenticate, no capability — the same rule every other
+/// catalog read follows.
+fn alias_status_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let items = body
+        .get("entries")
+        .and_then(Value::as_arr)
+        .ok_or(Fail::Http(400, "missing entries array"))?;
+    if items.len() > MAX_ALIAS_STATUS_ITEMS {
+        return Err(Fail::Http(400, "batch too large"));
+    }
+    // Deduplicated and capped: the tag list multiplies against every entry
+    // on the single state thread, so an unbounded or repeated list is a
+    // self-inflicted stall wearing a request costume.
+    let mut want_tags: Vec<String> = match body.get("tags").and_then(Value::as_arr) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+    want_tags.sort();
+    want_tags.dedup();
+    if want_tags.len() > 16 {
+        return Err(Fail::Http(400, "too many tags"));
+    }
+    // Parse before touching the store: a malformed list costs nothing.
+    let mut wanted: Vec<(AssetAlias, Option<BlobId>)> = Vec::with_capacity(items.len());
+    for item in items {
+        let alias_s = item
+            .get("alias")
+            .and_then(Value::as_str)
+            .ok_or(Fail::Http(400, "malformed batch item"))?;
+        let alias = AssetAlias::new(alias_s.to_string())
+            .map_err(|_| Fail::Http(400, "malformed alias"))?;
+        let source = match item.get("source").and_then(Value::as_str) {
+            Some(t) => Some(t.parse().map_err(|_| Fail::Http(400, "malformed blob id"))?),
+            None => None,
+        };
+        wanted.push((alias, source));
+    }
+    let now = now_ms();
+    // ONE state-thread visit for the whole list: a concurrent publish can
+    // never split a batch across two views of the catalog.
+    let rows = call_state(&rc.state, move |ctx| {
+        ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let mut out: Vec<AliasStatusRow> = Vec::with_capacity(wanted.len());
+        for (alias, expect) in &wanted {
+            let mut row = AliasStatusRow {
+                alias: alias.as_str().to_string(),
+                target: None,
+                source: None,
+                source_matches: false,
+                tags: Vec::new(),
+            };
+            let Some(target) = ctx.core.catalog().resolve_asset_alias(alias)? else {
+                out.push(row);
+                continue;
+            };
+            // A quarantined head is not something a client may act on, and
+            // `manifest_get` already treats it as absent; say the same here.
+            match ctx
+                .core
+                .catalog()
+                .asset_candidate_state(&target.asset_id, &target.revision)?
+            {
+                Some(CandidateState::Quarantined) | None => {
+                    out.push(row);
+                    continue;
+                }
+                Some(_) => {}
+            }
+            row.target = Some(target);
+            if let Some(bytes) = ctx.core.catalog().asset_revision_manifest(&target.revision)? {
+                if let Ok(manifest) = AssetManifest::from_canonical_bytes(&bytes) {
+                    let blob = manifest
+                        .files
+                        .iter()
+                        .find(|f| f.role == FileRole::Source)
+                        .map(|f| f.blob);
+                    row.source_matches = blob.is_some() && blob == *expect;
+                    row.source = blob;
+                }
+            }
+            if !want_tags.is_empty() {
+                if let Some(ann) = ctx.core.search().annotation(&target.asset_id)? {
+                    row.tags = want_tags
+                        .iter()
+                        .filter(|t| ann.tags.iter().any(|have| have == *t))
+                        .cloned()
+                        .collect();
+                }
+            }
+            out.push(row);
+        }
+        Ok(out)
+    })?;
+    let entries: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            obj(vec![
+                ("alias", s(row.alias)),
+                ("present", Value::Bool(row.target.is_some())),
+                (
+                    "asset_id",
+                    match &row.target {
+                        Some(t) => s(t.asset_id.to_string()),
+                        None => Value::Null,
+                    },
+                ),
+                (
+                    "head_revision",
+                    match &row.target {
+                        Some(t) => s(t.revision.to_string()),
+                        None => Value::Null,
+                    },
+                ),
+                (
+                    "source",
+                    match &row.source {
+                        Some(b) => s(b.to_string()),
+                        None => Value::Null,
+                    },
+                ),
+                ("source_matches", Value::Bool(row.source_matches)),
+                ("tags", Value::Arr(row.tags.into_iter().map(s).collect())),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("entries", Value::Arr(entries))]),
+    )))
+}
+
+/// One answered entry, before it becomes JSON.
+struct AliasStatusRow {
+    alias: String,
+    target: Option<AssetRevisionRef>,
+    source: Option<BlobId>,
+    source_matches: bool,
+    tags: Vec<String>,
 }
 
 fn alias_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Outcome> {

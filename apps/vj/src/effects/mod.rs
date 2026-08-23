@@ -385,6 +385,7 @@
 //! ---------------------------------------------------------------------------
 
 pub mod audio_tex;
+pub mod deck_pattern;
 pub mod doc;
 pub mod engines;
 pub mod engines_charts;

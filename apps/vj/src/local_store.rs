@@ -83,7 +83,10 @@ pub fn default_store_root() -> PathBuf {
     if let Ok(root) = std::env::var("VJ_ASSET_ROOT") {
         return PathBuf::from(root);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/asset-server")
+    // `local/vjassets` (moved from `local/vj/asset-server` 2026-08-23): a
+    // fresh default root, so a build with the new store layout simply seeds
+    // a new store here and never has to migrate an old one.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vjassets")
 }
 
 /// A locally hosted server binds loopback; reach it there. (Kept for the

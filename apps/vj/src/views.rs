@@ -1665,6 +1665,20 @@ pub struct GridEntry {
     /// its full height from the moment it opens so that filling it never
     /// moves a tile the operator is already reaching for.
     pub placeholder: bool,
+    /// A PREFAB cell: a thing the app KNOWS is in the library (a compiled-in
+    /// effect preset) whose catalog row has not come back yet. It draws in
+    /// full — number, title, the same procedural art the store holds — so
+    /// the grid is complete in the first frame and the real row replaces it
+    /// in place, with no pop-in and no hole. It just cannot be CLICKED yet:
+    /// there is no asset id to fire.
+    pub pending: bool,
+    /// An EFFECT tile. Its thumbnail walks three phases (prefab art, the
+    /// store's placeholder, the baked animated sheet) whose textures may
+    /// carry different pixel dims — old stores hold square placeholders —
+    /// so the PAINT is what holds the geometry still: an effect tile
+    /// always draws full-bleed cover at the tile's own aspect, and a phase
+    /// swap can never change the picture's size or framing.
+    pub fx: bool,
 }
 
 /// A tile that has to keep redrawing: a cycling sheet, or a spinner.
@@ -1746,6 +1760,13 @@ fn thumb_aspect(cx: &mut Cx, frame: Option<&Texture>) -> f32 {
 const TILE_CROP: f32 = 0.6;
 
 fn thumb_fill(entry: &GridEntry) -> f32 {
+    if entry.fx {
+        // Effect tiles are geometry-stable BY LAW (see `GridEntry::fx`):
+        // full cover, every phase, whatever texture is bound. The real
+        // texture aspect still feeds `img_aspect`, so a square placeholder
+        // centre-crops to the tile instead of stretching.
+        return 1.0;
+    }
     fill_for_thumb(entry.frames.len(), entry.cells)
 }
 
@@ -1817,6 +1838,8 @@ mod tile_fit_tests {
             failed: false,
             active: false,
             placeholder: false,
+            pending: false,
+            fx: false,
         };
         assert!(!entry_animates(&entry));
         entry.loading = true;
@@ -2784,10 +2807,12 @@ impl Widget for VjTileGrid {
                         draw_bg +: { fill: #(fill) img_aspect: #(aspect) }
                     });
                     // The click's own feedback: spinner while the cue loads,
-                    // a still red ring if it failed.
+                    // a still red ring if it failed — and an effect tile
+                    // still on placeholder art spins too: bake in progress.
+                    let baking = entry.state == "FX" && entry.frames.len() <= 1;
                     let mut busy = cell.view(cx, ids!(grid_busy));
-                    busy.set_visible(cx, entry.loading || entry.failed);
-                    if entry.loading || entry.failed {
+                    busy.set_visible(cx, entry.loading || entry.failed || baking);
+                    if entry.loading || entry.failed || baking {
                         let spin = busy_spin(now);
                         let failed = f32::from(u8::from(entry.failed));
                         script_apply_eval!(cx, busy, {
@@ -3047,7 +3072,14 @@ impl VjPadMatrix {
         self.entries.get(index)
     }
 
+    /// The entry a pad ACTS on: a prefab cell is drawn but not yet clickable
+    /// (see [`GridEntry::pending`]), so it is not one.
     pub fn visible_at(&self, pad: usize) -> Option<&GridEntry> {
+        self.paint_at(pad).filter(|entry| !entry.pending)
+    }
+
+    /// The entry a pad PAINTS — prefabs included.
+    pub fn paint_at(&self, pad: usize) -> Option<&GridEntry> {
         self.entry_at(pad_entry_index(self.bank, pad))
             .filter(|entry| !entry.placeholder)
     }
@@ -3079,7 +3111,7 @@ impl VjPadMatrix {
             for (slot, path) in slots.iter().enumerate() {
                 let pad = row * PAD_COLS + slot;
                 let mut cell = row_view.view(cx, *path);
-                let (selected, empty, fill, aspect) = if let Some(entry) = self.visible_at(pad) {
+                let (selected, empty, fill, aspect) = if let Some(entry) = self.paint_at(pad) {
                     cell.label(cx, ids!(grid_pad)).set_text(cx, &format!("{:02}", pad + 1));
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
                     let now = cx.seconds_since_app_start();
@@ -3096,10 +3128,14 @@ impl VjPadMatrix {
                     // strip's labels, not on forty tiles at once.
                     let selected = f32::from(u8::from(entry.active));
                     // The click's own feedback: spinner while this pad's cue
-                    // loads, a still red ring if it failed.
+                    // loads, a still red ring if it failed. An effect tile
+                    // still on its placeholder art gets the same spinner —
+                    // the bake is in progress, and a tile that visibly moves
+                    // says so (a static placeholder reads as done-and-boring).
+                    let baking = entry.state == "FX" && entry.frames.len() <= 1;
                     let mut busy = cell.view(cx, ids!(grid_busy));
-                    busy.set_visible(cx, entry.loading || entry.failed);
-                    if entry.loading || entry.failed {
+                    busy.set_visible(cx, entry.loading || entry.failed || baking);
+                    if entry.loading || entry.failed || baking {
                         let spin = busy_spin(now);
                         let failed = f32::from(u8::from(entry.failed));
                         script_apply_eval!(cx, busy, {
