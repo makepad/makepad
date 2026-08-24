@@ -40,6 +40,10 @@ mod flow;
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
 mod flow_tween;
+// THE PLATTER: the single-clock video transport (velocity in, position
+// out, one map) and the keyed per-pair product cache the presenters share.
+mod transport;
+mod pair_cache;
 mod nv12_view;
 // EFFECT SLOTS: the vjeffect content category's home in the mixer — three
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
