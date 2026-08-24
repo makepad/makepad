@@ -1311,6 +1311,34 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_a_rate := VjBeatsDrop{width: 34}
                                                         }
+                                                        // FRAME TWEEN: how the
+                                                        // deck fills time between
+                                                        // source frames.
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI neural"
+                                                            deck_a_tween := DropDown{
+                                                                width: 36
+                                                                height: 22
+                                                                labels: ["OFF" "XF" "FL" "AI"]
+                                                                selected_item: 2
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         // THE JOG WHEEL: the
                                                         // sprung scratch hand
@@ -1324,7 +1352,7 @@ script_mod! {
                                                         // picture.
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
                                                             deck_a_wheel_learn := Learn{
-                                                                deck_a_wheel := VjSlowmoWheel{}
+                                                                deck_a_wheel := VjSlowmoWheel{width: 84}
                                                             }
                                                         }
                                                         Tip{ text: "Auto-spin 3D content"
@@ -1767,10 +1795,38 @@ script_mod! {
                                                         Tip{ text: "Beats per sweep"
                                                             deck_b_rate := VjBeatsDrop{width: 34}
                                                         }
+                                                        // FRAME TWEEN: how the
+                                                        // deck fills time between
+                                                        // source frames.
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI neural"
+                                                            deck_b_tween := DropDown{
+                                                                width: 36
+                                                                height: 22
+                                                                labels: ["OFF" "XF" "FL" "AI"]
+                                                                selected_item: 2
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
                                                             deck_b_wheel_learn := Learn{
-                                                                deck_b_wheel := VjSlowmoWheel{}
+                                                                deck_b_wheel := VjSlowmoWheel{width: 84}
                                                             }
                                                         }
                                                         Tip{ text: "Auto-spin 3D content"
@@ -2793,6 +2849,8 @@ struct ClipProfile {
     rate: f32,
     muted: bool,
     sync: bool,
+    /// Frame-tween mode (TWEEN_*).
+    tween: u8,
 }
 
 impl Default for ClipProfile {
@@ -2807,6 +2865,7 @@ impl Default for ClipProfile {
             rate: 4.0,
             muted: true,
             sync: true,
+            tween: TWEEN_FLOW,
         }
     }
 }
@@ -3919,9 +3978,18 @@ fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8>
 }
 
 /// The NEURAL field producer is DEFAULT ON for the eyeball comparison;
-/// VJ_TWEEN_RIFE=0 pins the classical fields (the cheap tier).
+/// Per-deck frame-tween modes, in the deck dropdown's order.
+const TWEEN_NONE: u8 = 0;
+const TWEEN_FADE: u8 = 1;
+const TWEEN_FLOW: u8 = 2;
+const TWEEN_AI: u8 = 3;
+
+/// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
+/// per-deck dropdown's AI entry is the opt-in now.
 fn rife_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Opt-in while the classical tier gets its enhancement pass — the
+    // neural producer's pulse (field handoffs every few pairs) reads
     *ON.get_or_init(|| std::env::var("VJ_TWEEN_RIFE").map(|v| v != "0").unwrap_or(true))
 }
 
@@ -4921,6 +4989,10 @@ pub struct App {
     /// unstarted, 1 = running, 2 = unavailable (stay classical).
     #[rust]
     rife_state: [u8; 2],
+    /// Per-deck frame-tween mode (TWEEN_*): how the deck fills time
+    /// between source frames. Stored with the clip like the trim range.
+    #[rust([TWEEN_FLOW, TWEEN_FLOW])]
+    slot_tween_mode: [u8; 2],
     #[rust]
     rife_service: [Option<flow_tween::RifeService>; 2],
     /// FRAME TWEENER state per slot: the pair index the tween view holds,
@@ -5830,6 +5902,14 @@ impl App {
         }
     }
 
+    /// The frame-tween picker (OFF / XF / FL / AI).
+    fn deck_tween_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_tween),
+            SlotId::B => ids!(deck_b_tween),
+        }
+    }
+
     fn deck_controls_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
             SlotId::A => ids!(deck_a_controls),
@@ -6702,6 +6782,7 @@ trim {:.6} {:.6}
 rate {}
 mute {}
 sync {}
+tween {}
 ",
             u8::from(self.slot_loop[i]),
             u8::from(self.slot_pingpong[i]),
@@ -6711,6 +6792,7 @@ sync {}
             self.slot_beat_rate[i],
             u8::from(self.slot_video_muted[i]),
             u8::from(self.slot_beat_sync[i]),
+            self.slot_tween_mode[i],
         );
         let _ = std::fs::write(path, body);
     }
@@ -6734,6 +6816,9 @@ sync {}
                 }
                 (Some("mute"), Some(v), _) => profile.muted = v == "1",
                 (Some("sync"), Some(v), _) => profile.sync = v == "1",
+                (Some("tween"), Some(v), _) => {
+                    profile.tween = v.parse::<u8>().unwrap_or(TWEEN_FLOW).min(TWEEN_AI);
+                }
                 _ => {}
             }
         }
@@ -7980,6 +8065,9 @@ p2 {}
                     self.ui
                         .drop_down(cx, Self::deck_mode_path(slot))
                         .set_disabled(cx, true);
+                    self.ui
+                        .drop_down(cx, Self::deck_tween_path(slot))
+                        .set_disabled(cx, true);
                     self.paint_deck_source_ghost(cx, slot, true);
                     self.paint_text_face(cx, Self::deck_eject_path(slot), LatchPaint::ghost());
                 }
@@ -8024,6 +8112,12 @@ p2 {}
                         let mode = self.ui.drop_down(cx, Self::deck_mode_path(slot));
                         mode.set_disabled(cx, false);
                         mode.set_selected_item(cx, self.slot_mode_index(i));
+                    }
+                    // The tween chip mirrors the clip's stored mode.
+                    {
+                        let tween = self.ui.drop_down(cx, Self::deck_tween_path(slot));
+                        tween.set_disabled(cx, false);
+                        tween.set_selected_item(cx, self.slot_tween_mode[i] as usize);
                     }
                     // The beats dropdown mirrors the deck: the value when
                     // synced, — when free (a scratch dash is transient,
@@ -9815,6 +9909,7 @@ p2 {}
                                     self.slot_sync_beats[index] = 1;
                                     self.slot_video_muted[index] = profile.muted;
                                     self.slot_trim[index] = profile.trim;
+                                    self.slot_tween_mode[index] = profile.tween;
                                     player.set_mode(self.slot_play_mode(index));
                                     player.set_muted(profile.muted);
                                     player.set_trim(profile.trim.0, profile.trim.1);
@@ -14919,7 +15014,9 @@ p2 {}
             let now = cx.seconds_since_app_start();
             for slot in [SlotId::A, SlotId::B] {
                 let i = slot.index();
-                let eligible = self.slot_media[i] == SlotMedia::Video
+                let mode = self.slot_tween_mode[i];
+                let eligible = mode != TWEEN_NONE
+                    && self.slot_media[i] == SlotMedia::Video
                     && !self.flow_active(i)
                     && self.players[i].is_some();
                 if !eligible {
@@ -14958,11 +15055,18 @@ p2 {}
                 };
                 let (width, height) = (*width, *height);
                 let tween_pair = self.tween_pair[i];
+                // SCENE-CUT GUARD: flow across a hard cut morphs two
+                // unrelated pictures into soup. A sparse luma grid diff
+                // is enough to call it; cut pairs hard-switch at t=0.5.
+                let cut = mode >= TWEEN_FLOW
+                    && tween_pair != Some(pair)
+                    && crate::media::nv12_cut_score(da, db, width as usize, height as usize)
+                        > 28.0;
                 // NEURAL fields: start the producer lazily, retire stale
                 // fields on a pair change, adopt fresh results, and offer
                 // the new pair (a busy worker skips it — the classical
                 // stack below covers every pair regardless).
-                if rife_enabled() && self.rife_state[i] == 0 {
+                if mode == TWEEN_AI && rife_enabled() && self.rife_state[i] == 0 {
                     match flow_tween::RifeService::start(&rife_model_path()) {
                         Ok(service) => {
                             self.rife_service[i] = Some(service);
@@ -14975,16 +15079,27 @@ p2 {}
                         }
                     }
                 }
+                // A busy worker's result is drained even when the deck
+                // left AI mode — never adopted, never left clogging the
+                // channel.
                 let rife_result = self.rife_service[i].as_ref().and_then(|s| s.take());
-                let offer = tween_pair != Some(pair) && self.rife_state[i] == 1;
+                let offer = mode == TWEEN_AI
+                    && tween_pair != Some(pair)
+                    && self.rife_state[i] == 1
+                    && !cut;
                 let tex = self.tween_view(cx, slot, |cx, view| {
+                    view.set_fade(cx, mode == TWEEN_FADE);
+                    if mode != TWEEN_AI {
+                        view.clear_rife_field(cx);
+                    }
                     if tween_pair != Some(pair) {
                         view.set_pair(cx, da, db, width, height);
-                        if view.rife_field_pair() != Some(pair) {
-                            view.clear_rife_field(cx);
+                        view.set_cut(cx, cut);
+                        if mode == TWEEN_AI && view.rife_field_pair() != Some(pair) {
+                            view.age_rife_field(cx, pair);
                         }
                     }
-                    if let Some(field) = rife_result {
+                    if let Some(field) = rife_result.filter(|_| mode == TWEEN_AI) {
                         if field.generation == i as u64 && field.pair == pair {
                             view.set_rife_field(
                                 cx,
@@ -16541,6 +16656,19 @@ impl MatchEvent for App {
                     player.set_mode(mode);
                 }
                 self.sync_slot_controls_ui(cx);
+                self.save_clip_profile(slot);
+                self.video_pump = cx.new_next_frame();
+            }
+            // THE TWEEN PICKER — OFF / XF / FL / AI: how the deck fills
+            // time between source frames, stored with the clip like the
+            // trim range. The pump reads the mode every frame; all this
+            // does is record and persist it.
+            if let Some(index) = self
+                .ui
+                .drop_down(cx, Self::deck_tween_path(slot))
+                .selected(actions)
+            {
+                self.slot_tween_mode[i] = (index as u8).min(TWEEN_AI);
                 self.save_clip_profile(slot);
                 self.video_pump = cx.new_next_frame();
             }
