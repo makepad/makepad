@@ -49,3 +49,9 @@ pub use makepad_ai_llm::{
     GGML_ROPE_TYPE_VISION, GGML_SCALE_FLAG_ALIGN_CORNERS, GGML_SCALE_FLAG_ANTIALIAS,
 };
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
+
+/// Re-export of the macOS RIFE op profiler dump (no-op elsewhere).
+#[cfg(target_os = "macos")]
+pub fn metal_rife_prof_dump() {
+    makepad_ai_metal::rife::prof_dump();
+}
