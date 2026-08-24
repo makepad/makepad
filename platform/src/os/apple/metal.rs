@@ -310,6 +310,12 @@ impl Cx {
                     );
                 }
 
+                // Everything bound below belongs to this command buffer
+                // until it completes (`MetalBuffer::update` checks).
+                geometry.os.vertex_buffer.mark_bound(metal_cx);
+                geometry.os.index_buffer.mark_bound(metal_cx);
+                draw_item.os.instance_buffer.mark_bound(metal_cx);
+
                 if let Some(inner) = geometry.os.vertex_buffer.inner.as_ref() {
                     unsafe {
                         msg_send![
@@ -1656,7 +1662,13 @@ impl Cx {
                     CxDrawKind::DrawCall(draw_call) => {
                         for texture in draw_call.texture_slots.iter().flatten() {
                             let cxtexture = &mut self.textures[texture.texture_id()];
-                            if cxtexture.format.is_vec() {
+                            // A size change always arrives with new data, so
+                            // "nothing pending and already allocated" is the
+                            // whole fast path — no alloc compare per bind.
+                            if cxtexture.format.is_vec()
+                                && (cxtexture.os.texture.is_none()
+                                    || !cxtexture.updated().is_empty())
+                            {
                                 cxtexture.update_vec_texture(metal_cx, &mut enc);
                             }
                         }
@@ -2128,6 +2140,14 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
+    /// Bind-time stamp: until the command buffer being encoded completes,
+    /// the GPU may be reading this buffer.
+    fn mark_bound(&mut self, metal_cx: &MetalCx) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.last_bound_seq = metal_cx.current_cb_seq;
+        }
+    }
+
     fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
@@ -2135,7 +2155,15 @@ impl MetalBuffer {
             return;
         }
         if let Some(inner) = self.inner.as_mut() {
-            if inner.len == len {
+            // Writing in place is only safe once every command buffer that
+            // bound this buffer has completed: the previous frame's draw may
+            // still be reading it (the same law as the Vec textures, and the
+            // audit's fix 2). At UI rates the GPU retired the last frame long
+            // before the next update, so this is the common path; only a
+            // buffer the GPU is still holding gets a fresh allocation.
+            let gpu_done =
+                inner.last_bound_seq <= METAL_CB_COMPLETED.load(Ordering::Acquire);
+            if gpu_done && len <= inner.capacity {
                 let dst = unsafe {
                     let ptr: *mut std::ffi::c_void = msg_send![inner.buffer.as_id(), contents];
                     ptr
@@ -2156,10 +2184,14 @@ impl MetalBuffer {
                         };
                         let _: () = msg_send![inner.buffer.as_id(), didModifyRange: range];
                     }
+                    inner.len = len;
                     return;
                 }
             }
         }
+        // A fresh buffer. The in-flight command buffers keep their own
+        // retain on the old one until they complete, so dropping ours here
+        // never pulls memory out from under the GPU.
         self.inner = Some(MetalBufferInner {
             buffer: RcObjcId::from_owned(
                 NonNull::new(unsafe {
@@ -2173,13 +2205,22 @@ impl MetalBuffer {
                 .unwrap(),
             ),
             len,
+            capacity: len,
+            last_bound_seq: 0,
         });
     }
 }
 
 struct MetalBufferInner {
     buffer: RcObjcId,
+    /// Bytes in use by the last `update`.
+    #[allow(dead_code)]
     len: usize,
+    /// Bytes allocated: a buffer shrinks in place and grows by reallocation.
+    capacity: usize,
+    /// `MetalCx::cb_seq` of the last command buffer this buffer was bound
+    /// in (see `mark_bound`); 0 = never bound.
+    last_bound_seq: u64,
 }
 
 #[derive(Default)]
