@@ -230,6 +230,21 @@ impl ContentBackend for VideoEnhanceBackend {
         }])
     }
 
+    /// This backend HAD a working `unload()` and no `is_resident()`, so the
+    /// trait default answered `false` and `evict_resident` returned before ever
+    /// calling it. A correct teardown that nothing can reach frees exactly as
+    /// much as no teardown at all.
+    fn is_resident(&self) -> bool {
+        #[cfg(all(feature = "upscale-native", feature = "interpolate", feature = "video"))]
+        {
+            return self.upscaler.is_some() || self.rife.is_some();
+        }
+        #[cfg(not(all(feature = "upscale-native", feature = "interpolate", feature = "video")))]
+        {
+            false
+        }
+    }
+
     fn unload(&mut self) -> Result<(), AssetAiError> {
         #[cfg(all(feature = "upscale-native", feature = "interpolate", feature = "video"))]
         {

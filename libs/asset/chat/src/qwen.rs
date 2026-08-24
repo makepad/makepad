@@ -553,19 +553,31 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 events.push(ProviderEvent::Status { note, permille });
             }
         }
-        // The box counts generated tokens in its `decode k/n` stage; the
-        // delta below is a `partial_text` DIFF at this poll's cadence, so
-        // without this the only tok/s a client could compute is a guess
-        // from byte counts. Emitted BEFORE the delta it describes.
-        let generated = status
-            .get("stage")
-            .and_then(Value::as_str)
-            .and_then(parse_decode_tokens);
         // The box's own account of the turn, when it offers one: how much it
         // had to ingest (warmth) and how much of what it generated the user
         // will never see (the think block). Absent from an older service, and
         // then simply not forwarded.
         let serving = status.get("serving");
+        // How many tokens the turn has generated. `serving.gen_tokens` is the
+        // box REPORTING a count; the `decode k/n` stage is a progress LABEL we
+        // scrape when the box is too old to report one.
+        //
+        // Preferring the count matters because the label is only the current
+        // one some of the time: while the stage reads `starting`, `prefill k/n
+        // tok` or `encode`, the scrape yields nothing — and the think/visible
+        // counters keep moving, so `moved` fires anyway and the facts go out
+        // carrying `gen_tokens: 0`. A client meter that trusts that reads an
+        // exact-looking `0 tok/s` for the rest of the turn.
+        let generated = serving
+            .and_then(|s| s.get("gen_tokens"))
+            .and_then(Value::as_u64)
+            .map(|n| n.min(u32::MAX as u64) as u32)
+            .or_else(|| {
+                status
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .and_then(parse_decode_tokens)
+            });
         let field = |key: &str| {
             serving
                 .and_then(|s| s.get(key))
@@ -658,13 +670,24 @@ fn job_status_note(status: &Value) -> Option<(String, u16)> {
         _ => 0.0,
     } as u16;
     let stage_l = stage.to_ascii_lowercase();
+    // Name WHAT is loading. A bare "loading 42%" is the least informative
+    // thing a two-minute wait can say: the person watching it wants to know
+    // that a 17 GB model is being paged onto a GPU, not that some percentage
+    // exists. The job carries the model id, so use it.
+    let what = status
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| format!(" {m}"))
+        .unwrap_or_default();
     let note = match state {
         "queued" => "queued behind another GPU job".to_string(),
         "running" if is_active_download(&stage_l, permille) => {
-            format!("downloading {pct}%", pct = permille / 10)
+            format!("downloading{what} {pct}%", pct = permille / 10)
         }
         "running" if is_active_load(&stage_l, permille) => {
-            format!("loading {pct}%", pct = permille / 10)
+            format!("loading{what} {pct}%", pct = permille / 10)
         }
         _ => return None,
     };
@@ -702,10 +725,18 @@ fn is_active_load(stage: &str, permille: u16) -> bool {
     if stage.contains("download") {
         return false;
     }
+    // The load walks through named phases now — parse, vocab, plan, mmap,
+    // device, cache, reserve k/n, gguf upload, compile k/n — so match the
+    // family rather than one label. A phase this filter does not recognise
+    // shows the user NOTHING while the box is visibly busy, which is the
+    // failure this list exists to prevent; err on the side of recognising.
     let loading = stage.contains("gguf")
         || stage.contains("loading")
         || stage.contains("load llm")
-        || stage.contains("load weights");
+        || stage.contains("load weights")
+        || stage.contains("compile")
+        || stage.contains("reserve")
+        || stage.contains("upload");
     loading && permille < 1000
 }
 

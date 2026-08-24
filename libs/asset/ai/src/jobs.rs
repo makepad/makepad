@@ -426,6 +426,14 @@ impl JobStore {
             .unwrap_or(false)
     }
 
+    /// The model ONE job runs on. `running_models` answers for the whole box
+    /// and so mixes the admission classes together; a worker that needs to
+    /// know what IT is about to run — to remember whose device caches it will
+    /// be filling — must ask about its own job and nothing else.
+    pub fn model_of(&self, id: &str) -> Option<String> {
+        self.jobs.get(id).map(|job| job.model.clone())
+    }
+
     /// Cancels a job. Queued: dropped from the FIFO immediately. Running:
     /// raises the job's shared cancel flag — the backend checks it between
     /// steps/tiles/load components and unwinds within seconds; the worker
@@ -492,6 +500,7 @@ impl JobStore {
                     prefix_resumed: None,
                     think_tokens: None,
                     visible_tokens: None,
+                    gen_tokens: None,
                 },
             );
             update(&mut serving);
