@@ -442,6 +442,8 @@ pub struct SlotPlayer {
     /// The source carries a soundtrack (residency is "under budget AND
     /// silent": an unmuted loop with audio streams).
     has_audio: bool,
+    /// Minted at open from a process counter — see [`Self::generation`].
+    generation: u64,
     shared: Arc<SlotShared>,
     /// Pause-aware presentation clock: media time at `clock_base` was
     /// `base_media_100ns`.
@@ -512,6 +514,10 @@ impl SlotPlayer {
             height: info.height,
             duration_secs: info.duration_100ns.max(0) as f64 / 10_000_000.0,
             has_audio: info.has_audio,
+            generation: {
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            },
             shared,
             clock_base: None,
             base_media_100ns: 0,
@@ -584,6 +590,14 @@ impl SlotPlayer {
     /// preserved) from a new cue (anchored afresh) by it.
     pub fn identity(&self) -> usize {
         Arc::as_ptr(&self.shared) as usize
+    }
+
+    /// THE CLIP GENERATION: a process-monotonic number minted at open.
+    /// Every per-pair product (a RIFE ladder, a cut verdict) is keyed by
+    /// it, so nothing made for a previous cue can ever be adopted by this
+    /// one — an address can be reused, a generation cannot.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// THE RESIDENT TIER'S FRAMES: the complete cache, but only while the
@@ -3738,6 +3752,7 @@ mod tests {
             height: 1,
             duration_secs: 1.0,
             has_audio: false,
+            generation: 0,
             shared: Arc::new(SlotShared {
                 stop: AtomicBool::new(false),
                 paused: AtomicBool::new(paused),
