@@ -26,11 +26,12 @@ use {
         makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
         PngEncoder,
     },
-    std::collections::HashMap,
+    std::cell::RefCell,
+    std::collections::{HashMap, VecDeque},
     std::fmt::Write,
     std::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     std::sync::{Arc, Mutex},
-    std::time::Instant,
+    std::time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -207,6 +208,13 @@ impl Cx {
                     continue;
                 }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
+                {
+                    // Named in the hang diagnostic / GPU trace for this pass.
+                    let mut seen = metal_cx.pass_shaders.borrow_mut();
+                    if !seen.contains(&sh.debug_id) {
+                        seen.push(sh.debug_id);
+                    }
+                }
 
                 if sh.mapping.uses_time {
                     self.demo_time_repaint = true;
@@ -835,6 +843,7 @@ impl Cx {
             // Entering a present-bound pass: commit the batched offscreen
             // work NOW so the GPU pipelines it under this pass's CPU encode.
             if let Some(shared) = metal_cx.frame_command_buffer.take() {
+                metal_cb_committed(shared);
                 let () = unsafe { msg_send![shared, commit] };
                 let () = unsafe { msg_send![shared, release] };
             }
@@ -895,6 +904,7 @@ impl Cx {
             encoder,
             &metal_cx,
         );
+        metal_cx.register_pass(draw_pass_id, &self.passes[draw_pass_id].debug_name);
         let gpu_profile_label = Self::gpu_profile_enabled().then(|| {
             let name = &self.passes[draw_pass_id].debug_name;
             if name.is_empty() {
@@ -1306,6 +1316,7 @@ impl Cx {
                 })
             ]
         };
+        metal_cb_committed(command_buffer);
         let () = unsafe { msg_send![command_buffer, commit] };
     }
 
@@ -1491,6 +1502,15 @@ pub struct MetalCx {
     /// (`VecUploadEncoder`), shared with the completion handlers that hand
     /// buffers back once their blit has executed.
     staging_pool: Arc<Mutex<Vec<StagingBuffer>>>,
+    /// Shaders drawn by the pass being encoded (`render_view` collects
+    /// them, `draw_pass` hands them to the in-flight registry) — what the
+    /// hang diagnostic and `MAKEPAD_GPU_TRACE` name.
+    pass_shaders: RefCell<Vec<LiveId>>,
+    /// The last command-buffer seq of each recent repaint, oldest first —
+    /// the unit of the frame-level GPU backpressure (`frames_in_flight`).
+    repaint_tail_seqs: VecDeque<u64>,
+    /// Repaints skipped by that backpressure (diagnostics).
+    pub(crate) backpressure_skips: u64,
 }
 
 /// Highest `MetalCx::cb_seq` whose command buffer has COMPLETED. One
@@ -1498,6 +1518,176 @@ pub struct MetalCx {
 /// buffer "is executed after any previously enqueued command buffers"), so
 /// completion of N implies completion of everything numbered below it.
 static METAL_CB_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+/// One in-flight command buffer as the hang watchdog and `MAKEPAD_GPU_TRACE`
+/// see it. Entries are born in `new_command_buffer`, filled by `draw_pass`,
+/// stamped at commit, and removed by the buffer's completion handler.
+struct InFlightCb {
+    seq: u64,
+    /// The MTLCommandBuffer, compared only as an address (commit sites find
+    /// their entry by it; Metal retains the object until it completes, so
+    /// the address cannot be reused while the entry lives).
+    buffer: usize,
+    committed_at: Option<Instant>,
+    passes: Vec<InFlightPass>,
+}
+
+struct InFlightPass {
+    pass_id: DrawPassId,
+    name: String,
+    shaders: Vec<LiveId>,
+}
+
+static METAL_IN_FLIGHT: Mutex<VecDeque<InFlightCb>> = Mutex::new(VecDeque::new());
+
+fn metal_in_flight() -> std::sync::MutexGuard<'static, VecDeque<InFlightCb>> {
+    METAL_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn describe_passes(passes: &[InFlightPass]) -> String {
+    if passes.is_empty() {
+        return "(no draw pass recorded)".to_string();
+    }
+    let mut out = String::new();
+    for pass in passes {
+        let shaders: Vec<String> = pass.shaders.iter().map(|id| format!("{:?}", id)).collect();
+        let _ = write!(
+            out,
+            "{:?} \"{}\" shaders [{}]; ",
+            pass.pass_id,
+            if pass.name.is_empty() { "main" } else { &pass.name },
+            shaders.join(", ")
+        );
+    }
+    out
+}
+
+/// Commit-site hook: the watchdog's clock for a buffer starts here. The
+/// OLDEST uncompleted buffer has nothing queued ahead of it, so its age is
+/// what the GPU is actually spending on it.
+pub(crate) fn metal_cb_committed(buffer: ObjcId) {
+    let now = Instant::now();
+    if let Some(entry) = metal_in_flight()
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.buffer == buffer as usize)
+    {
+        entry.committed_at = Some(now);
+    }
+}
+
+/// `MAKEPAD_GPU_MAX_CB_MS`: a command buffer older than this without
+/// completing aborts the process (default 1500; 0 disables the watchdog —
+/// e.g. for a deliberate multi-second bake).
+fn gpu_hang_max_ms() -> u64 {
+    static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("MAKEPAD_GPU_MAX_CB_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(5000)
+    })
+}
+
+/// `MAKEPAD_GPU_TRACE=1` logs every command buffer whose GPU time exceeds
+/// 4 ms (`=N` sets the threshold in ms) with its passes and shaders, plus
+/// every backpressure skip — so an agent can SEE which pass is heavy before
+/// it becomes a hang.
+pub(crate) fn gpu_trace_threshold_ms() -> Option<f64> {
+    static T: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let v = std::env::var("MAKEPAD_GPU_TRACE").ok()?;
+        let v = v.trim();
+        match v.parse::<f64>() {
+            Ok(ms) if ms > 1.0 => Some(ms),
+            _ => Some(4.0),
+        }
+    })
+}
+
+/// GPU-HANG SELF-TERMINATION. A runaway shader keeps its command buffer
+/// from ever completing; macOS's GPU watchdog then resets the DRIVER (the
+/// user's whole desktop, tonight: two freezes and a reboot). This thread
+/// watches the oldest committed-but-uncompleted command buffer and, once it
+/// is older than `MAKEPAD_GPU_MAX_CB_MS`, writes a diagnostic naming the
+/// passes and shaders in that buffer (stderr, and the file named by
+/// `MAKEPAD_GPU_HANG_DUMP` if set) and aborts THIS process — the kernel
+/// tears down our GPU context long before the driver-level watchdog fires.
+/// A thread, not a per-frame check: a hung GPU also stalls the display
+/// link, so the main loop may never get another beat.
+fn metal_hang_watchdog_start() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let max_ms = gpu_hang_max_ms();
+        if max_ms == 0 {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("metal-hang-watchdog".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+                let diagnostic = {
+                    let mut queue = metal_in_flight();
+                    while queue.front().map_or(false, |entry| entry.seq <= completed) {
+                        queue.pop_front();
+                    }
+                    let Some(oldest) = queue.iter().find(|entry| entry.committed_at.is_some())
+                    else {
+                        continue;
+                    };
+                    let age = oldest.committed_at.unwrap().elapsed();
+                    if age.as_millis() as u64 <= max_ms {
+                        continue;
+                    }
+                    format!(
+                        "[metal-hang] command buffer #{} committed {} ms ago has not completed \
+                         (limit MAKEPAD_GPU_MAX_CB_MS={}, {} buffers in flight). A runaway shader \
+                         in one of its passes, or the GPU starved by another process. Passes: {} \
+                         Aborting this process before the OS GPU watchdog resets the driver.",
+                        oldest.seq,
+                        age.as_millis(),
+                        max_ms,
+                        queue.len(),
+                        describe_passes(&oldest.passes),
+                    )
+                };
+                eprintln!("{}", diagnostic);
+                if let Some(path) = std::env::var_os("MAKEPAD_GPU_HANG_DUMP") {
+                    use std::io::Write as _;
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        let _ = writeln!(
+                            file,
+                            "{} pid={} exe={:?}\n{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            std::process::id(),
+                            std::env::current_exe().unwrap_or_default(),
+                            diagnostic
+                        );
+                    }
+                }
+                // Abort is OPT-IN (`MAKEPAD_GPU_HANG_ABORT=1`): a customer-facing
+                // app must never quit itself on a stall it did not cause (a
+                // starved GPU shared with another process looks identical).
+                // Without it the diagnostic is logged and the stall is
+                // re-checked after a pause instead of re-reported every tick.
+                if std::env::var("MAKEPAD_GPU_HANG_ABORT").map(|v| v == "1").unwrap_or(false) {
+                    std::process::abort();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            });
+    });
+}
 
 /// A Shared `MTLBuffer` carrying one Vec-texture upload from the CPU to a
 /// blit. Whoever holds the struct owns the retain.
@@ -1592,19 +1782,88 @@ impl MetalCx {
     /// Every command buffer of a frame is born here so it carries a
     /// sequence id and the completion handler that publishes it.
     fn new_command_buffer(&mut self) -> ObjcId {
+        metal_hang_watchdog_start();
         let buffer: ObjcId = unsafe { msg_send![self.command_queue, commandBuffer] };
         self.cb_seq += 1;
         let seq = self.cb_seq;
         self.current_cb_seq = seq;
+        metal_in_flight().push_back(InFlightCb {
+            seq,
+            buffer: buffer as usize,
+            committed_at: None,
+            passes: Vec::new(),
+        });
         let () = unsafe {
             msg_send![
                 buffer,
-                addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
+                addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                     METAL_CB_COMPLETED.fetch_max(seq, Ordering::AcqRel);
+                    let entry = {
+                        let mut queue = metal_in_flight();
+                        queue
+                            .iter()
+                            .position(|entry| entry.seq == seq)
+                            .and_then(|at| queue.remove(at))
+                    };
+                    if let (Some(threshold), Some(entry)) = (gpu_trace_threshold_ms(), entry) {
+                        let start: f64 = unsafe { msg_send![cb, GPUStartTime] };
+                        let end: f64 = unsafe { msg_send![cb, GPUEndTime] };
+                        let ms = (end - start) * 1000.0;
+                        if ms.is_finite() && ms > threshold {
+                            eprintln!(
+                                "[gpu-trace] command buffer #{} gpu {:.2} ms: {}",
+                                seq,
+                                ms,
+                                describe_passes(&entry.passes)
+                            );
+                        }
+                    }
                 })
             ]
         };
         buffer
+    }
+
+    /// Frame-level GPU backpressure, the twin of the per-window present
+    /// gate for frames that present nothing (hidden windows, offscreen-only
+    /// selftests — which is how those piled up GPU work unboundedly).
+    /// Called at the top of every repaint: records the previous repaint's
+    /// last command buffer, so `frames_in_flight` counts repaints the GPU
+    /// has not finished.
+    pub(crate) fn begin_repaint(&mut self) {
+        if self.cb_seq > 0 && self.repaint_tail_seqs.back() != Some(&self.cb_seq) {
+            self.repaint_tail_seqs.push_back(self.cb_seq);
+            while self.repaint_tail_seqs.len() > 16 {
+                self.repaint_tail_seqs.pop_front();
+            }
+        }
+    }
+
+    /// Repaints whose command buffers have not all completed.
+    pub(crate) fn frames_in_flight(&self) -> usize {
+        let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
+        self.repaint_tail_seqs
+            .iter()
+            .filter(|seq| **seq > completed)
+            .count()
+    }
+
+    /// Record a pass just encoded into the buffer being built, for the hang
+    /// diagnostic and the GPU trace.
+    fn register_pass(&self, pass_id: DrawPassId, name: &str) {
+        let shaders = self.pass_shaders.take();
+        let seq = self.current_cb_seq;
+        if let Some(entry) = metal_in_flight()
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.seq == seq)
+        {
+            entry.passes.push(InFlightPass {
+                pass_id,
+                name: name.to_string(),
+                shaders,
+            });
+        }
     }
 
     /// The smallest pooled staging buffer that fits `len`, or a fresh one.
@@ -1741,6 +2000,9 @@ impl MetalCx {
             cb_seq: 0,
             current_cb_seq: 0,
             staging_pool: Arc::new(Mutex::new(Vec::new())),
+            pass_shaders: RefCell::new(Vec::new()),
+            repaint_tail_seqs: VecDeque::new(),
+            backpressure_skips: 0,
         }
     }
 }
