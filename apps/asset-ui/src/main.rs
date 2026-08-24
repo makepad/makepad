@@ -11765,6 +11765,13 @@ impl App {
     /// icon this session queued has rendered (or the import was cancelled),
     /// let it continue.
     fn maybe_resume_icons_pending(&mut self, cx: &mut Cx) {
+        // Pull every landing the pages have already ingested BEFORE judging
+        // "drained": IconsPending hands its whole library list to the page
+        // in one message, and reading only the batcher's local vec raced it
+        // — with pre-rendered icons (a classic re-import) the gate opened
+        // in the gap, publish's staging cleanup deleted `work/source`, and
+        // every still-queued landing failed its read ("cannot read ...").
+        self.collect_import_landings();
         let drained = self.import_landings.is_empty();
         // Classic packs park in the same handshake (their own per-source
         // gate), so they resume on the same condition.

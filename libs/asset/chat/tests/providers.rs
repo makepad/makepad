@@ -232,6 +232,126 @@ fn qwen_forwards_the_decode_token_count_and_lane_contention() {
     assert!(p.poll().is_empty());
 }
 
+/// The box's own `serving.gen_tokens` beats the `decode k/n` progress LABEL.
+///
+/// The label only exists while it is the current stage; the moment the box
+/// says `prefill 900/900 tok` or `encode`, the scrape yields nothing while the
+/// think/visible counters keep moving — so the facts went out carrying a
+/// generated count of zero and the client's meter read `0 tok/s` for a reply
+/// that was streaming fine. The count is now reported as a count.
+#[test]
+fn qwen_prefers_the_reported_token_count_over_the_stage_label() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-count"))]));
+    let serving = |gen: i64| {
+        json::obj(vec![
+            ("gen_tokens", Value::Int(gen)),
+            ("think_tokens", Value::Int(gen)),
+        ])
+    };
+    // A stage that is NOT `decode k/n` — the old scrape read nothing here.
+    t.on_get(
+        "http://n1:8765/job/j-count",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("prefill 900/900 tok")),
+            ("partial_text", json::s("Hel")),
+            ("serving", serving(41)),
+        ])),
+    );
+    t.on_get(
+        "http://n1:8765/job/j-count",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("encode")),
+            ("partial_text", json::s("Hello")),
+            ("serving", serving(77)),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    let counts = |events: Vec<ProviderEvent>| -> Vec<u32> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                ProviderEvent::Serving(facts) => Some(facts.gen_tokens),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(counts(p.poll()), vec![41], "the reported count, not the label");
+    assert_eq!(counts(p.poll()), vec![77]);
+}
+
+/// An older box that reports no count still works: the `decode k/n` label is
+/// the fallback, exactly as before.
+#[test]
+fn qwen_still_scrapes_the_decode_stage_when_the_box_reports_no_count() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-old"))]));
+    t.on_get(
+        "http://n1:8765/job/j-old",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 12/3072")),
+            ("partial_text", json::s("Hel")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    assert_eq!(
+        p.poll(),
+        vec![
+            ProviderEvent::Serving(ServingFacts { gen_tokens: 12, ..Default::default() }),
+            ProviderEvent::Delta("Hel".into())
+        ]
+    );
+}
+
+/// A wait says WHAT it is waiting for. "loading 42%" makes a person guess;
+/// the job carries the model id, so the note names it.
+#[test]
+fn qwen_load_status_names_the_model() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-load"))]));
+    t.on_get(
+        "http://n1:8765/job/j-load",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("model", json::s("qwen3.8-27b")),
+            ("stage", json::s("load llm compile 0/1 (18s)")),
+            ("progress", Value::F64(0.86)),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    match p.poll().into_iter().next() {
+        Some(ProviderEvent::Status { note, permille }) => {
+            assert_eq!(note, "loading qwen3.8-27b 86%");
+            assert_eq!(permille, 860);
+        }
+        other => panic!("expected a load status: {other:?}"),
+    }
+}
+
 /// A box that advertises no lanes means ONE lane — never "unknown", and
 /// never a fabricated "1/1" on a readout.
 #[test]
