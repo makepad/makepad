@@ -39,6 +39,7 @@ workspace.members = [
     "examples/shader",
     "examples/text_input",
     "examples/text_selection",
+    "examples/text_center",
     "examples/counter",
     "examples/browser",
     "examples/camera",
