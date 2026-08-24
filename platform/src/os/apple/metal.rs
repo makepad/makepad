@@ -1,7 +1,7 @@
 use {
     crate::{
         cx::Cx,
-        draw_list::DrawListId,
+        draw_list::{CxDrawKind, DrawListId},
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId},
         draw_vars::DrawVars,
@@ -16,7 +16,9 @@ use {
             shared_framebuf::PresentableDraw,
         },
         script::vm::*,
-        texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
+        texture::{
+            CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel, TextureUpdated,
+        },
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_studio_protocol::{AppToStudio, GPUSample},
@@ -26,8 +28,8 @@ use {
     },
     std::collections::HashMap,
     std::fmt::Write,
-    std::sync::atomic::{AtomicUsize, Ordering},
-    std::sync::Mutex,
+    std::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    std::sync::{Arc, Mutex},
     std::time::Instant,
 };
 
@@ -446,11 +448,11 @@ impl Cx {
                     if cxtexture.format.is_shared() {
                         #[cfg(target_os = "macos")]
                         cxtexture.update_shared_texture(metal_cx.device);
-                    } else if cxtexture.format.is_vec() {
-                        let texture_bytes = cxtexture.update_vec_texture(metal_cx);
-                        self.os.texture_bytes_uploaded =
-                            self.os.texture_bytes_uploaded.saturating_add(texture_bytes);
                     }
+                    // Vec textures were uploaded (and allocated) by
+                    // `encode_vec_texture_uploads` on this pass's command
+                    // buffer before the render encoder opened; binding here
+                    // never touches their contents.
 
                     if let Some(texture) = cxtexture.os.texture.as_ref() {
                         let () = unsafe {
@@ -833,17 +835,27 @@ impl Cx {
         }
         let command_buffer: ObjcId = if batch_this_pass {
             if let Some(buffer) = metal_cx.frame_command_buffer {
+                metal_cx.current_cb_seq = metal_cx.frame_command_buffer_seq;
                 buffer
             } else {
-                let buffer: ObjcId =
-                    unsafe { msg_send![metal_cx.command_queue, commandBuffer] };
+                let buffer = metal_cx.new_command_buffer();
                 let buffer: ObjcId = unsafe { msg_send![buffer, retain] };
                 metal_cx.frame_command_buffer = Some(buffer);
+                metal_cx.frame_command_buffer_seq = metal_cx.current_cb_seq;
                 buffer
             }
         } else {
-            unsafe { msg_send![metal_cx.command_queue, commandBuffer] }
+            metal_cx.new_command_buffer()
         };
+        // CPU->GPU uploads for the Vec textures this pass samples go on THIS
+        // command buffer, ahead of its render encoder, so the GPU orders them
+        // after every earlier reader and before this pass (`VecUploadEncoder`).
+        let texture_bytes =
+            self.encode_vec_texture_uploads(metal_cx, draw_list_id, command_buffer);
+        self.os.texture_bytes_uploaded = self
+            .os
+            .texture_bytes_uploaded
+            .saturating_add(texture_bytes);
         let encoder: ObjcId = unsafe {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
@@ -1458,6 +1470,203 @@ pub struct MetalCx {
     /// draw_pass); None outside a frame or when MAKEPAD_GPU_PROFILE=1
     /// (profiling keeps per-pass buffers for per-pass GPU spans).
     pub frame_command_buffer: Option<ObjcId>,
+    /// `cb_seq` of `frame_command_buffer`, restored into `current_cb_seq`
+    /// when a batched pass appends to it.
+    frame_command_buffer_seq: u64,
+    /// Monotonic id handed to every command buffer this context creates
+    /// (`new_command_buffer`); 0 = none yet. Each buffer's completion
+    /// handler publishes its id into `METAL_CB_COMPLETED`, which is how a
+    /// CPU-written resource learns "the GPU is done with the last thing
+    /// that read me" without a stall.
+    cb_seq: u64,
+    /// The id of the command buffer the pass being encoded goes into.
+    current_cb_seq: u64,
+    /// Free-list of Shared staging buffers for Vec-texture uploads
+    /// (`VecUploadEncoder`), shared with the completion handlers that hand
+    /// buffers back once their blit has executed.
+    staging_pool: Arc<Mutex<Vec<StagingBuffer>>>,
+}
+
+/// Highest `MetalCx::cb_seq` whose command buffer has COMPLETED. One
+/// command queue executes its buffers in enqueue order (Metal: a committed
+/// buffer "is executed after any previously enqueued command buffers"), so
+/// completion of N implies completion of everything numbered below it.
+static METAL_CB_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+/// A Shared `MTLBuffer` carrying one Vec-texture upload from the CPU to a
+/// blit. Whoever holds the struct owns the retain.
+struct StagingBuffer {
+    buffer: ObjcId,
+    len: usize,
+}
+// It travels main thread -> completion handler -> main thread only through
+// the pool mutex, and Metal objects are safe to use from any thread.
+unsafe impl Send for StagingBuffer {}
+
+/// Past these the pool releases a returning buffer instead of keeping it:
+/// enough for a few frames of NV12 planes + flow fields in flight, not a
+/// place for a one-off 16K upload to live forever.
+const STAGING_POOL_MAX_COUNT: usize = 32;
+const STAGING_POOL_MAX_BYTES: usize = 192 << 20;
+
+fn staging_pool_return(pool: &Mutex<Vec<StagingBuffer>>, used: Vec<StagingBuffer>) {
+    let mut pool = pool.lock().unwrap();
+    let mut bytes: usize = pool.iter().map(|b| b.len).sum();
+    for staging in used {
+        if pool.len() < STAGING_POOL_MAX_COUNT && bytes + staging.len <= STAGING_POOL_MAX_BYTES {
+            bytes += staging.len;
+            pool.push(staging);
+        } else {
+            let () = unsafe { msg_send![staging.buffer, release] };
+        }
+    }
+}
+
+/// One pass's Vec-texture uploads. Every `replaceRegion` the backend used
+/// to do at bind time — on the main thread, while the render encoder was
+/// open, with no knowledge of the in-flight command buffers still sampling
+/// the texture — is now a memcpy into a Shared staging buffer plus a
+/// `copyFromBuffer:toTexture:` blit on the pass's OWN command buffer,
+/// encoded before its render encoder opens. Vec textures are Private, so
+/// hazard tracking orders every earlier reader -> this blit -> this pass's
+/// reads, with zero CPU stalls (the layout the audit's raw `mtlrace --mode
+/// blit` probe proved clean at 3 frames in flight). The blit encoder opens
+/// lazily (most passes upload nothing) and the staging buffers return to
+/// the pool from the command buffer's completion handler.
+struct VecUploadEncoder {
+    command_buffer: ObjcId,
+    blit: Option<ObjcId>,
+    used: Vec<StagingBuffer>,
+    bytes: u64,
+}
+
+impl VecUploadEncoder {
+    fn new(command_buffer: ObjcId) -> Self {
+        Self {
+            command_buffer,
+            blit: None,
+            used: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    fn blit(&mut self) -> ObjcId {
+        let command_buffer = self.command_buffer;
+        *self
+            .blit
+            .get_or_insert_with(|| unsafe { msg_send![command_buffer, blitCommandEncoder] })
+    }
+
+    /// Ends the blit encoder (a render encoder may open after this) and
+    /// arranges for the staging buffers to come back once the GPU has
+    /// consumed them. Returns the bytes uploaded.
+    fn finish(self, metal_cx: &MetalCx) -> u64 {
+        if let Some(blit) = self.blit {
+            let () = unsafe { msg_send![blit, endEncoding] };
+        }
+        if !self.used.is_empty() {
+            let pool = metal_cx.staging_pool.clone();
+            let used = Mutex::new(Some(self.used));
+            let () = unsafe {
+                msg_send![
+                    self.command_buffer,
+                    addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
+                        if let Some(used) = used.lock().unwrap().take() {
+                            staging_pool_return(&pool, used);
+                        }
+                    })
+                ]
+            };
+        }
+        self.bytes
+    }
+}
+
+impl MetalCx {
+    /// Every command buffer of a frame is born here so it carries a
+    /// sequence id and the completion handler that publishes it.
+    fn new_command_buffer(&mut self) -> ObjcId {
+        let buffer: ObjcId = unsafe { msg_send![self.command_queue, commandBuffer] };
+        self.cb_seq += 1;
+        let seq = self.cb_seq;
+        self.current_cb_seq = seq;
+        let () = unsafe {
+            msg_send![
+                buffer,
+                addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
+                    METAL_CB_COMPLETED.fetch_max(seq, Ordering::AcqRel);
+                })
+            ]
+        };
+        buffer
+    }
+
+    /// The smallest pooled staging buffer that fits `len`, or a fresh one.
+    /// Fresh buffers round up to 64 KiB so sizes cluster and a returned
+    /// buffer fits the next upload of the same texture.
+    fn take_staging(&self, len: usize) -> Option<StagingBuffer> {
+        {
+            let mut pool = self.staging_pool.lock().unwrap();
+            let mut best: Option<usize> = None;
+            for (index, staging) in pool.iter().enumerate() {
+                if staging.len >= len && best.map_or(true, |b| pool[b].len > staging.len) {
+                    best = Some(index);
+                }
+            }
+            if let Some(index) = best {
+                return Some(pool.swap_remove(index));
+            }
+        }
+        let alloc = (len + 0xffff) & !0xffff;
+        let buffer: ObjcId = unsafe {
+            msg_send![
+                self.device,
+                newBufferWithLength: alloc as u64
+                options: MTLResourceOptions::StorageModeShared
+            ]
+        };
+        if buffer == nil {
+            return None;
+        }
+        Some(StagingBuffer { buffer, len: alloc })
+    }
+}
+
+impl Cx {
+    /// Walk the draw lists this pass renders and upload every Vec texture
+    /// they bind that has pending data (allocating its Private MTLTexture
+    /// on first sight). Called from `draw_pass` after the command buffer
+    /// exists and before its render encoder opens.
+    fn encode_vec_texture_uploads(
+        &mut self,
+        metal_cx: &MetalCx,
+        draw_list_id: DrawListId,
+        command_buffer: ObjcId,
+    ) -> u64 {
+        let mut enc = VecUploadEncoder::new(command_buffer);
+        let mut stack: Vec<DrawListId> = vec![draw_list_id];
+        while let Some(list_id) = stack.pop() {
+            let draw_list = &self.draw_lists[list_id];
+            for order_index in 0..draw_list.draw_item_order_len() {
+                let Some(item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                    continue;
+                };
+                match &draw_list.draw_items[item_id].kind {
+                    CxDrawKind::SubList(sub_list_id) => stack.push(*sub_list_id),
+                    CxDrawKind::DrawCall(draw_call) => {
+                        for texture in draw_call.texture_slots.iter().flatten() {
+                            let cxtexture = &mut self.textures[texture.texture_id()];
+                            if cxtexture.format.is_vec() {
+                                cxtexture.update_vec_texture(metal_cx, &mut enc);
+                            }
+                        }
+                    }
+                    CxDrawKind::Empty => {}
+                }
+            }
+        }
+        enc.finish(metal_cx)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1516,6 +1725,10 @@ impl MetalCx {
             device,
             fallback_texture,
             frame_command_buffer: None,
+            frame_command_buffer_seq: 0,
+            cb_seq: 0,
+            current_cb_seq: 0,
+            staging_pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -2244,7 +2457,13 @@ impl CxTexture {
         None
     }*/
 
-    fn update_vec_texture(&mut self, metal_cx: &MetalCx) -> u64 {
+    /// Allocate the Private MTLTexture for a Vec texture on first sight (or
+    /// size/format change) and, when the CPU side has pending data, stage
+    /// it and encode the blit(s) on `enc` — partial rects become sub-region
+    /// blits, mip chains one blit per level, cube maps one per face. Never
+    /// touches the texture from the CPU: that is what raced the in-flight
+    /// readers. Returns the bytes uploaded.
+    fn update_vec_texture(&mut self, metal_cx: &MetalCx, enc: &mut VecUploadEncoder) -> u64 {
         if self.alloc_vec() {
             let alloc = self.alloc.as_ref().unwrap();
 
@@ -2257,8 +2476,10 @@ impl CxTexture {
             };
             let _: () = unsafe { msg_send![descriptor.as_id(), setTextureType: texture_type] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
+            // Private: only ever written by blits on the command queue, so
+            // hazard tracking orders those writes against every reader.
             let _: () =
-                unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
+                unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
@@ -2280,298 +2501,238 @@ impl CxTexture {
                 unsafe { msg_send![metal_cx.device, newTextureWithDescriptor: descriptor] };
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
+        let Some(texture) = self.os.texture.as_ref().map(|t| t.as_id()) else {
+            return 0;
+        };
+
+        enum VecLayout {
+            Plain,
+            Mip { max_level: usize },
+            Cube,
+        }
+        fn as_bytes<T: Copy>(data: &[T]) -> &[u8] {
+            // u8/u32/f32 image words: plain old data, no padding.
+            unsafe {
+                std::slice::from_raw_parts(
+                    data.as_ptr() as *const u8,
+                    data.len() * std::mem::size_of::<T>(),
+                )
+            }
+        }
+        // Data still taken (`take_vec_*` without a `put_back` yet): leave the
+        // update pending rather than clearing it against nothing.
+        let has_data = match &self.format {
+            TextureFormat::VecBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. } => data.is_some(),
+            TextureFormat::VecMipRGBAf32 { data, .. }
+            | TextureFormat::VecRGBAf32 { data, .. }
+            | TextureFormat::VecRf32 { data, .. } => data.is_some(),
+            TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
+                data.is_some()
+            }
+            _ => false,
+        };
+        if !has_data {
+            return 0;
+        }
         let update = self.take_updated();
         if update.is_empty() {
             return 0;
         }
-
-        fn update_data(
-            texture: &Option<RcObjcId>,
-            width: usize,
-            height: usize,
-            bpp: u64,
-            data: *const std::ffi::c_void,
-        ) {
-            let region = MTLRegion {
-                origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                size: MTLSize {
-                    width: width as u64,
-                    height: height as u64,
-                    depth: 1,
-                },
-            };
-
-            let () = unsafe {
-                msg_send![
-                    texture.as_ref().unwrap().as_id(),
-                    replaceRegion: region
-                    mipmapLevel: 0
-                    withBytes: data
-                    bytesPerRow: (width as u64) * bpp
-                ]
-            };
-        }
-
-        fn update_mip_data_f32(
-            texture: &Option<RcObjcId>,
-            width: usize,
-            height: usize,
-            max_level: usize,
-            data: &[f32],
-        ) {
-            let mut offset = 0usize;
-            let mut level_width = width.max(1);
-            let mut level_height = height.max(1);
-            for level in 0..=max_level {
-                let level_len = level_width.saturating_mul(level_height).saturating_mul(4);
-                if offset.saturating_add(level_len) > data.len() {
-                    break;
-                }
-                let region = MTLRegion {
-                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                    size: MTLSize {
-                        width: level_width as u64,
-                        height: level_height as u64,
-                        depth: 1,
-                    },
-                };
-                let level_ptr = unsafe { data.as_ptr().add(offset) };
-                let _: () = unsafe {
-                    msg_send![
-                        texture.as_ref().unwrap().as_id(),
-                        replaceRegion: region
-                        mipmapLevel: level as u64
-                        withBytes: level_ptr as *const std::ffi::c_void
-                        bytesPerRow: (level_width as u64) * 16u64
-                    ]
-                };
-                offset = offset.saturating_add(level_len);
-                level_width = (level_width / 2).max(1);
-                level_height = (level_height / 2).max(1);
-            }
-        }
-
-        fn update_mip_data_bgra(
-            texture: &Option<RcObjcId>,
-            width: usize,
-            height: usize,
-            max_level: usize,
-            data: &[u32],
-        ) {
-            // `data` is the concatenated mip chain (level 0 first), one u32 (BGRA) per texel,
-            // matching draw/src/image_cache.rs::generate_bgra_mip_chain.
-            let mut offset = 0usize;
-            let mut level_width = width.max(1);
-            let mut level_height = height.max(1);
-            for level in 0..=max_level {
-                let level_len = level_width.saturating_mul(level_height);
-                if offset.saturating_add(level_len) > data.len() {
-                    break;
-                }
-                let region = MTLRegion {
-                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                    size: MTLSize {
-                        width: level_width as u64,
-                        height: level_height as u64,
-                        depth: 1,
-                    },
-                };
-                let level_ptr = unsafe { data.as_ptr().add(offset) };
-                let _: () = unsafe {
-                    msg_send![
-                        texture.as_ref().unwrap().as_id(),
-                        replaceRegion: region
-                        mipmapLevel: level as u64
-                        withBytes: level_ptr as *const std::ffi::c_void
-                        bytesPerRow: (level_width as u64) * 4u64
-                    ]
-                };
-                offset = offset.saturating_add(level_len);
-                level_width = (level_width / 2).max(1);
-                level_height = (level_height / 2).max(1);
-            }
-        }
-
-        fn update_cube_data(
-            texture: &Option<RcObjcId>,
-            width: usize,
-            height: usize,
-            bpp: u64,
-            data: &[u32],
-        ) {
-            let pixels_per_face = width.saturating_mul(height);
-            let words_per_face = pixels_per_face;
-            if data.len() < words_per_face.saturating_mul(6) {
-                return;
-            }
-            let region = MTLRegion {
-                origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                size: MTLSize {
-                    width: width as u64,
-                    height: height as u64,
-                    depth: 1,
-                },
-            };
-            let face_bytes = words_per_face.saturating_mul(4);
-            for face in 0..6usize {
-                let face_offset_words = face.saturating_mul(words_per_face);
-                let face_ptr = unsafe { data.as_ptr().add(face_offset_words) };
-                let _: () = unsafe {
-                    msg_send![
-                        texture.as_ref().unwrap().as_id(),
-                        replaceRegion: region
-                        mipmapLevel: 0
-                        slice: face as u64
-                        withBytes: face_ptr as *const std::ffi::c_void
-                        bytesPerRow: (width as u64) * bpp
-                        bytesPerImage: face_bytes as u64
-                    ]
-                };
-            }
-        }
-        match &self.format {
-            TextureFormat::VecBGRAu8_32 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                update_data(
-                    &self.os.texture,
+        let (width, height, bpp, layout, bytes): (usize, usize, usize, VecLayout, &[u8]) =
+            match &self.format {
+                TextureFormat::VecBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 4, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                TextureFormat::VecCubeBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 4, VecLayout::Cube, as_bytes(data.as_ref().unwrap())),
+                TextureFormat::VecMipBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    max_level,
+                    ..
+                } => (
                     *width,
                     *height,
                     4,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64)
-                    .saturating_mul(*height as u64)
-                    .saturating_mul(4)
-            }
-            TextureFormat::VecCubeBGRAu8_32 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                if let Some(data) = data.as_ref() {
-                    update_cube_data(&self.os.texture, *width, *height, 4, data);
-                }
-                (*width as u64)
-                    .saturating_mul(*height as u64)
-                    .saturating_mul(4)
-                    .saturating_mul(6)
-            }
-            TextureFormat::VecRGBAf32 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                update_data(
-                    &self.os.texture,
+                    VecLayout::Mip {
+                        max_level: max_level.unwrap_or(0),
+                    },
+                    as_bytes(data.as_ref().unwrap()),
+                ),
+                TextureFormat::VecMipRGBAf32 {
+                    width,
+                    height,
+                    data,
+                    max_level,
+                    ..
+                } => (
                     *width,
                     *height,
                     16,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64)
-                    .saturating_mul(*height as u64)
-                    .saturating_mul(16)
-            }
-            TextureFormat::VecMipRGBAf32 {
-                width,
-                height,
-                data,
-                max_level,
-                ..
-            } => {
-                if let Some(data) = data.as_ref() {
-                    update_mip_data_f32(
-                        &self.os.texture,
-                        *width,
-                        *height,
-                        max_level.unwrap_or(0),
-                        data,
-                    );
-                    (data.len() as u64).saturating_mul(4)
-                } else {
-                    0
-                }
-            }
-            TextureFormat::VecRu8 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                update_data(
-                    &self.os.texture,
-                    *width,
-                    *height,
-                    1,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64).saturating_mul(*height as u64)
-            }
-            TextureFormat::VecRGu8 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                update_data(
-                    &self.os.texture,
-                    *width,
-                    *height,
-                    2,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64)
-                    .saturating_mul(*height as u64)
-                    .saturating_mul(2)
-            }
-            TextureFormat::VecRf32 {
-                width,
-                height,
-                data,
-                ..
-            } => {
-                update_data(
-                    &self.os.texture,
-                    *width,
-                    *height,
-                    4,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64)
-                    .saturating_mul(*height as u64)
-                    .saturating_mul(4)
-            }
-            // Mipmapped images: texture is allocated with the full chain above; upload each level
-            // here. Shader samplers already set mip_filter::linear; world albedo
-            // pairs this with sample_*_repeat so distant tiles trilinear-filter.
-            TextureFormat::VecMipBGRAu8_32 {
-                width,
-                height,
-                data,
-                max_level,
-                ..
-            } => {
-                if let Some(data) = data.as_ref() {
-                    update_mip_data_bgra(
-                        &self.os.texture,
-                        *width,
-                        *height,
-                        max_level.unwrap_or(0),
-                        data,
-                    );
-                    (data.len() as u64).saturating_mul(4)
-                } else {
-                    0
-                }
-            }
-            _ => 0,
+                    VecLayout::Mip {
+                        max_level: max_level.unwrap_or(0),
+                    },
+                    as_bytes(data.as_ref().unwrap()),
+                ),
+                TextureFormat::VecRGBAf32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 16, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                TextureFormat::VecRu8 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 1, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                TextureFormat::VecRGu8 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 2, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                TextureFormat::VecRf32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (*width, *height, 4, VecLayout::Plain, as_bytes(data.as_ref().unwrap())),
+                _ => return 0,
+            };
+        if width == 0 || height == 0 {
+            return 0;
         }
+        let full_len = width.saturating_mul(height).saturating_mul(bpp);
+
+        // The sub-rect worth uploading: 2D textures only; mip chains and
+        // cube maps always go whole (as they always did).
+        let rect = match (update, &layout) {
+            (TextureUpdated::Partial(r), VecLayout::Plain) => {
+                let x0 = r.origin.x.min(width);
+                let y0 = r.origin.y.min(height);
+                let x1 = r.origin.x.saturating_add(r.size.width).min(width);
+                let y1 = r.origin.y.saturating_add(r.size.height).min(height);
+                if x1 <= x0 || y1 <= y0 {
+                    return 0;
+                }
+                if x0 == 0 && y0 == 0 && x1 == width && y1 == height {
+                    None
+                } else {
+                    Some((x0, y0, x1 - x0, y1 - y0))
+                }
+            }
+            _ => None,
+        };
+
+        // How many bytes the staging copy needs, and what the data must hold.
+        let (staging_len, required) = match (&layout, rect) {
+            (VecLayout::Plain, None) => (full_len, full_len),
+            (VecLayout::Plain, Some((_, _, w, h))) => (w * h * bpp, full_len),
+            (VecLayout::Cube, _) => (full_len.saturating_mul(6), full_len.saturating_mul(6)),
+            // Level 0 must be there; the per-level loop stops where the
+            // chain ends, exactly like the old replaceRegion loop.
+            (VecLayout::Mip { .. }, _) => (bytes.len(), full_len),
+        };
+        if bytes.len() < required {
+            crate::error!(
+                "vec texture upload: {} bytes of data for a {}x{} texture needing {}",
+                bytes.len(),
+                width,
+                height,
+                required
+            );
+            return 0;
+        }
+        let Some(staging) = metal_cx.take_staging(staging_len) else {
+            crate::error!("vec texture upload: staging buffer allocation failed");
+            return 0;
+        };
+        let dst: *mut u8 = unsafe { msg_send![staging.buffer, contents] };
+        if dst.is_null() {
+            let () = unsafe { msg_send![staging.buffer, release] };
+            crate::error!("vec texture upload: staging buffer has no contents");
+            return 0;
+        }
+        debug_assert!(staging.len >= staging_len);
+        match rect {
+            None => unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, staging_len);
+            },
+            Some((x, y, w, h)) => {
+                let row_len = w * bpp;
+                for row in 0..h {
+                    let src = ((y + row) * width + x) * bpp;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr().add(src),
+                            dst.add(row * row_len),
+                            row_len,
+                        );
+                    }
+                }
+            }
+        }
+
+        let blit = enc.blit();
+        let copy = |offset: usize, w: usize, h: usize, slice: usize, level: usize, x: usize, y: usize| {
+            let bytes_per_row = (w * bpp) as u64;
+            let () = unsafe {
+                msg_send![
+                    blit,
+                    copyFromBuffer: staging.buffer
+                    sourceOffset: offset as u64
+                    sourceBytesPerRow: bytes_per_row
+                    sourceBytesPerImage: bytes_per_row * (h as u64)
+                    sourceSize: MTLSize { width: w as u64, height: h as u64, depth: 1 }
+                    toTexture: texture
+                    destinationSlice: slice as u64
+                    destinationLevel: level as u64
+                    destinationOrigin: MTLOrigin { x: x as u64, y: y as u64, z: 0 }
+                ]
+            };
+        };
+        match layout {
+            VecLayout::Plain => match rect {
+                None => copy(0, width, height, 0, 0, 0, 0),
+                Some((x, y, w, h)) => copy(0, w, h, 0, 0, x, y),
+            },
+            VecLayout::Cube => {
+                for face in 0..6usize {
+                    copy(face * full_len, width, height, face, 0, 0, 0);
+                }
+            }
+            VecLayout::Mip { max_level } => {
+                // Concatenated chain, level 0 first (draw's
+                // generate_bgra_mip_chain / the f32 twin).
+                let mut offset = 0usize;
+                let mut level_width = width.max(1);
+                let mut level_height = height.max(1);
+                for level in 0..=max_level {
+                    let level_len = level_width.saturating_mul(level_height).saturating_mul(bpp);
+                    if offset.saturating_add(level_len) > staging_len {
+                        break;
+                    }
+                    copy(offset, level_width, level_height, 0, level, 0, 0);
+                    offset += level_len;
+                    level_width = (level_width / 2).max(1);
+                    level_height = (level_height / 2).max(1);
+                }
+            }
+        }
+        enc.used.push(staging);
+        enc.bytes = enc.bytes.saturating_add(staging_len as u64);
+        staging_len as u64
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
