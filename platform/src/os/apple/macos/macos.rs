@@ -648,15 +648,17 @@ impl Cx {
                         }
                     }
                 }
+                // Offscreen passes get the SAME stamp as the window pass
+                // that consumes them (it was wall-now per pass: a child
+                // pass and its consumer could disagree by the encode time
+                // between them, and neither matched NextFrame).
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*draw_pass_id]
-                        .set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.passes[*draw_pass_id].set_time(time_now);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
                 CxDrawPassParent::None => {
-                    self.passes[*draw_pass_id]
-                        .set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.passes[*draw_pass_id].set_time(time_now);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
@@ -1108,7 +1110,20 @@ impl Cx {
                 }
 
                 let has_next_frames = self.new_next_frames.len() != 0;
-                let time_now = with_macos_app(|app| app.time_now());
+                // ONE `now` per beat for everything a redraw consumes: on a
+                // display-link beat it is the flip's TARGET timestamp
+                // (`LinkFire.time`), which until now only reached the pass
+                // uniforms while NextFrame and Draw were stamped wall-now —
+                // so a transport stepping on NextFrame and a shader reading
+                // `draw_pass.time` disagreed by the callback's latency, and
+                // NextFrame deltas jittered with the run loop instead of
+                // ticking at the frame period. Unscoped beats (NSTimer,
+                // hidden windows) keep wall-now. Windows already does this
+                // (`paint_tick(flip_time)`), transport design-v2 §3 / §8 step 0.
+                let time_now = self
+                    .os
+                    .link_flip_time
+                    .unwrap_or_else(|| with_macos_app(|app| app.time_now()));
                 if has_next_frames {
                     self.call_next_frame_event(time_now);
                 }
