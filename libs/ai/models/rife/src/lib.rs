@@ -14,6 +14,7 @@ pub use makepad_ai_common::{
 };
 
 pub mod rife;
+mod device_parity;
 pub mod rife_cpu;
 mod rife_model;
 

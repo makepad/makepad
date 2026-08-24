@@ -3918,6 +3918,28 @@ fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8>
     data
 }
 
+/// The NEURAL field producer is DEFAULT ON for the eyeball comparison;
+/// VJ_TWEEN_RIFE=0 pins the classical fields (the cheap tier).
+fn rife_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VJ_TWEEN_RIFE").map(|v| v != "0").unwrap_or(true))
+}
+
+/// The RIFE checkpoint path: VJ_RIFE_MODEL, or the repo-local default.
+fn rife_model_path() -> std::path::PathBuf {
+    std::env::var_os("VJ_RIFE_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("local/ai_models/rife_v4.26.safetensors"))
+}
+
+/// The proxy resolution RIFE sees: 384 wide, aspect-matched height (the
+/// net pads internally; flow upsamples to the video in the warp).
+fn rife_proxy_dims(w: u32, h: u32) -> (usize, usize) {
+    let pw = 384usize;
+    let ph = ((pw as u64 * h as u64) / w.max(1) as u64).clamp(96, 384) as usize;
+    (pw, ph & !1)
+}
+
 /// Realtime frame tweening is DEFAULT ON; VJ_NO_TWEEN=1 switches it off
 /// (the settings row will replace this).
 fn tween_enabled() -> bool {
@@ -4895,6 +4917,12 @@ pub struct App {
     /// the mode list), and frames waited since the last mode switch.
     #[rust]
     tween_selftest_step: (usize, u32),
+    /// NEURAL tween producer per slot (flow_tween::RifeService): 0 =
+    /// unstarted, 1 = running, 2 = unavailable (stay classical).
+    #[rust]
+    rife_state: [u8; 2],
+    #[rust]
+    rife_service: [Option<flow_tween::RifeService>; 2],
     /// FRAME TWEENER state per slot: the pair index the tween view holds,
     /// and the position predictor (last published pos, predicted pos,
     /// last prediction time in app seconds).
@@ -14930,13 +14958,72 @@ p2 {}
                 };
                 let (width, height) = (*width, *height);
                 let tween_pair = self.tween_pair[i];
+                // NEURAL fields: start the producer lazily, retire stale
+                // fields on a pair change, adopt fresh results, and offer
+                // the new pair (a busy worker skips it — the classical
+                // stack below covers every pair regardless).
+                if rife_enabled() && self.rife_state[i] == 0 {
+                    match flow_tween::RifeService::start(&rife_model_path()) {
+                        Ok(service) => {
+                            self.rife_service[i] = Some(service);
+                            self.rife_state[i] = 1;
+                            log!("tween: RIFE producer up for slot {i}");
+                        }
+                        Err(error) => {
+                            self.rife_state[i] = 2;
+                            log!("tween: RIFE unavailable ({error}); staying classical");
+                        }
+                    }
+                }
+                let rife_result = self.rife_service[i].as_ref().and_then(|s| s.take());
+                let offer = tween_pair != Some(pair) && self.rife_state[i] == 1;
                 let tex = self.tween_view(cx, slot, |cx, view| {
                     if tween_pair != Some(pair) {
                         view.set_pair(cx, da, db, width, height);
+                        if view.rife_field_pair() != Some(pair) {
+                            view.clear_rife_field(cx);
+                        }
+                    }
+                    if let Some(field) = rife_result {
+                        if field.generation == i as u64 && field.pair == pair {
+                            view.set_rife_field(
+                                cx,
+                                field.pair,
+                                field.width,
+                                field.height,
+                                &field.flow,
+                                &field.mask,
+                            );
+                        }
                     }
                     view.set_t(cx, t);
                     view.output_texture()
                 });
+                if offer {
+                    if let Some(service) = self.rife_service[i].as_ref() {
+                        let (pw, ph) = rife_proxy_dims(width, height);
+                        service.offer(flow_tween::RifeJob {
+                            generation: i as u64,
+                            pair,
+                            rgb0: crate::media::nv12_proxy_rgb8(
+                                da,
+                                width as usize,
+                                height as usize,
+                                pw,
+                                ph,
+                            ),
+                            rgb1: crate::media::nv12_proxy_rgb8(
+                                db,
+                                width as usize,
+                                height as usize,
+                                pw,
+                                ph,
+                            ),
+                            width: pw,
+                            height: ph,
+                        });
+                    }
+                }
                 self.tween_pair[i] = Some(pair);
                 if let Some(Some(tex)) = tex {
                     self.slot_tex_borrowed[i] = false;

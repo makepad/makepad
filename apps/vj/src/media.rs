@@ -182,6 +182,32 @@ impl Default for Pixels {
     }
 }
 
+/// Tightly packed RGB8 proxy of an NV12 frame at a reduced resolution —
+/// the RIFE worker's input format. Same nearest-sample BT.709 math as the
+/// BGRA proxy below.
+pub fn nv12_proxy_rgb8(data: &[u8], w: usize, h: usize, pw: usize, ph: usize) -> Vec<u8> {
+    let mut out = vec![0u8; pw * ph * 3];
+    if w == 0 || h == 0 || data.len() < w * h * 3 / 2 {
+        return out;
+    }
+    let (y_plane, uv_plane) = data.split_at(w * h);
+    for py in 0..ph {
+        let sy = ((py * h + h / 2) / ph.max(1)).min(h - 1);
+        let uv_row = &uv_plane[(sy / 2) * w..];
+        for px_i in 0..pw {
+            let sx = ((px_i * w + w / 2) / pw.max(1)).min(w - 1);
+            let c = y_plane[sy * w + sx] as i32 - 16;
+            let d = uv_row[(sx / 2) * 2] as i32 - 128;
+            let e = uv_row[(sx / 2) * 2 + 1] as i32 - 128;
+            let at = (py * pw + px_i) * 3;
+            out[at] = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
+            out[at + 1] = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
+            out[at + 2] = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
+        }
+    }
+    out
+}
+
 /// Small BGRA proxy of an NV12 frame for the POINT-SAMPLING consumers
 /// (light zones, loop signatures): nearest-sampled, BT.709 limited — a
 /// few thousand texels on the CPU, never the full frame.
