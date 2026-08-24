@@ -309,19 +309,26 @@ script_mod! {
         color_format: @Rgba16F
         tex_luma: texture_2d(float)
         tex_prev: texture_2d(float)
+        tex_luma_coarse: texture_2d(float)
         vertex: fn() {
             let clipped = self.geom.pos * self.rect_size + self.rect_pos
             self.pos = self.geom.pos
             self.world = vec4(clipped.x, clipped.y, self.draw_depth, 1.0)
             return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
+        // ZERO-MEAN matching: subtract the NEXT pyramid level's sample —
+        // a free 2x-coarser local mean — so exposure flicker and strobes
+        // (a VJ hall guarantees them) cancel out of the cost instead of
+        // dragging every vector. mean_on = 0 at the top level.
         lu_from: fn(uv: vec2) -> float {
             let s = self.tex_luma.sample_nearest(uv, 0.0)
-            return mix(s.x, s.y, self.dir)
+            let m = self.tex_luma_coarse.sample(uv)
+            return mix(s.x, s.y, self.dir) - mix(m.x, m.y, self.dir) * self.mean_on
         }
         lu_to: fn(uv: vec2) -> float {
             let s = self.tex_luma.sample_nearest(uv, 0.0)
-            return mix(s.y, s.x, self.dir)
+            let m = self.tex_luma_coarse.sample(uv)
+            return mix(s.y, s.x, self.dir) - mix(m.y, m.x, self.dir) * self.mean_on
         }
         prev_at: fn(uv: vec2) -> vec2 {
             // prev_scale doubles coarser-level vectors on the way down.
@@ -345,7 +352,19 @@ script_mod! {
             return sum * 0.04
         }
         // The smoothness charge: L1 disagreement with the previous sweep's
-        // neighbours (the Jacobi read side), lambda luma units per cell.
+        // neighbours (the Jacobi read side), lambda luma units per cell —
+        // EDGE-AWARE: the weight falls off with the local luma gradient,
+        // so flow stops bleeding across object boundaries (the
+        // background-drags-with-the-dancer artifact).
+        edge_weight: fn() -> float {
+            let l = self.tex_luma.sample_nearest(self.pos - vec2(self.inv_size.x, 0.0), 0.0)
+            let r = self.tex_luma.sample_nearest(self.pos + vec2(self.inv_size.x, 0.0), 0.0)
+            let u = self.tex_luma.sample_nearest(self.pos - vec2(0.0, self.inv_size.y), 0.0)
+            let dn = self.tex_luma.sample_nearest(self.pos + vec2(0.0, self.inv_size.y), 0.0)
+            let gx = abs(mix(r.x, r.y, self.dir) - mix(l.x, l.y, self.dir))
+            let gy = abs(mix(dn.x, dn.y, self.dir) - mix(u.x, u.y, self.dir))
+            return 1.0 / (1.0 + (gx + gy) * 0.06)
+        }
         smooth: fn(d: vec2) -> float {
             let l = self.prev_at(self.pos + vec2(-self.inv_size.x, 0.0))
             let r = self.prev_at(self.pos + vec2(self.inv_size.x, 0.0))
@@ -359,7 +378,7 @@ script_mod! {
             return sum * 0.25
         }
         cost: fn(d: vec2) -> float {
-            return self.sad(d) + self.lambda * self.smooth(d)
+            return self.sad(d) + self.lambda * self.edge_weight() * self.smooth(d)
         }
         pixel: fn() {
             let here = self.prev_at(self.pos)
@@ -575,6 +594,14 @@ script_mod! {
         }
         pixel: fn() {
             let t = self.t_pair
+            // FADE mode: a plain crossfade — no fields, no gather. The
+            // honest tier for footage where flow reads as rubber.
+            if self.dbg < 0.5 && self.fade_on > 0.5 {
+                let a = self.nv12_a(self.pos)
+                let b = self.nv12_b(self.pos)
+                let rgb = a * (1.0 - t) + b * t
+                return vec4(clamp(rgb.x, 0.0, 1.0), clamp(rgb.y, 0.0, 1.0), clamp(rgb.z, 0.0, 1.0), 1.0)
+            }
             if self.dbg < 0.5 && self.rife_on > 0.5 {
                 return self.rife_pixel()
             }
@@ -669,6 +696,9 @@ pub struct DrawTweenSweep {
     pub prev_scale: f32,
     #[live(1.5)]
     pub lambda: f32,
+    /// 1.0 = zero-mean matching (tex_luma_coarse bound to level+1).
+    #[live]
+    pub mean_on: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -711,6 +741,9 @@ pub struct DrawTweenWarp {
     /// One RIFE proxy pixel in uv units.
     #[live]
     pub rife_inv: Vec2f,
+    /// 1.0 = plain crossfade (FADE mode) — skips every field entirely.
+    #[live]
+    pub fade_on: f32,
 }
 
 /// One offscreen stage: its pass, its draw list, and (for the flow
@@ -777,6 +810,19 @@ pub struct FlowTweenView {
     /// The flow stack must re-run (the pair changed).
     #[rust]
     flow_dirty: bool,
+    /// A previous pair's FINAL fields exist in field_tex — the next
+    /// pair's coarse level seeds from them instead of the exhaustive
+    /// search (temporal seeding: steadier fields, no per-pair shimmer).
+    #[rust]
+    have_prev_field: bool,
+    /// This pair is a hard SCENE CUT: warp snaps to the nearest endpoint
+    /// instead of morphing two unrelated pictures.
+    #[rust]
+    cut: bool,
+    /// FADE mode: crossfade only — the flow stack never runs (and
+    /// flow_dirty is left standing so switching back to flow re-derives).
+    #[rust]
+    fade: bool,
     #[rust]
     rendered: bool,
     /// Neural fields for the CURRENT pair (flow RGBA32F + mask R8), and
@@ -787,6 +833,12 @@ pub struct FlowTweenView {
     rife_pair: Option<usize>,
     #[rust]
     rife_dims: (usize, usize),
+    /// How many pairs the current field has been REUSED for. Motion is
+    /// temporally coherent, so a slightly stale neural field beats
+    /// flip-flopping to the classical producer — two different flow
+    /// interpretations alternating at source-frame rate reads as wobble.
+    #[rust]
+    rife_age: u32,
 }
 
 impl FlowTweenView {
@@ -806,6 +858,7 @@ impl FlowTweenView {
             return;
         }
         if self.size != (width, height) || self.planes.is_none() {
+            self.have_prev_field = false;
             let mk_y = |cx: &mut Cx| {
                 Texture::new_with_format(
                     cx,
@@ -867,7 +920,32 @@ impl FlowTweenView {
         self.flow_dirty = false;
         self.rendered = false;
         self.rife_pair = None;
+        self.have_prev_field = false;
+        self.cut = false;
         self.area.redraw(cx);
+    }
+
+    /// Mark the current pair as a hard cut (see `cut`).
+    pub fn set_cut(&mut self, cx: &mut Cx, cut: bool) {
+        if self.cut != cut {
+            self.cut = cut;
+            self.area.redraw(cx);
+        }
+    }
+
+    /// FADE mode on/off (see `fade`).
+    pub fn set_fade(&mut self, cx: &mut Cx, fade: bool) {
+        if self.fade != fade {
+            self.fade = fade;
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Drop any standing neural field (the deck left AI mode).
+    pub fn clear_rife_field(&mut self, cx: &mut Cx) {
+        if self.rife_pair.take().is_some() {
+            self.area.redraw(cx);
+        }
     }
 
     /// Adopt a neural field for `pair` (RGBA-interleaved intermediate
@@ -918,6 +996,7 @@ impl FlowTweenView {
             mask_tex.put_back_vec_u8(cx, mb, None);
         }
         self.rife_pair = Some(pair);
+        self.rife_age = 0;
         self.area.redraw(cx);
     }
 
@@ -926,10 +1005,20 @@ impl FlowTweenView {
         self.rife_pair
     }
 
-    /// Drop the neural field (pair changed before a fresh one arrived).
-    pub fn clear_rife_field(&mut self, cx: &mut Cx) {
-        if self.rife_pair.take().is_some() {
+    /// A pair advanced without a fresh neural field: REUSE the standing
+    /// one for a few pairs (consistent producer > perfectly fresh field);
+    /// only after that fall back to the classical fields.
+    pub fn age_rife_field(&mut self, cx: &mut Cx, pair: usize) {
+        const MAX_REUSE_PAIRS: u32 = 4;
+        if self.rife_pair.is_none() {
+            return;
+        }
+        self.rife_age += 1;
+        if self.rife_age > MAX_REUSE_PAIRS {
+            self.rife_pair = None;
             self.area.redraw(cx);
+        } else {
+            self.rife_pair = Some(pair);
         }
     }
 
@@ -1055,11 +1144,14 @@ impl Widget for FlowTweenView {
         // window pass.
         let dbg = self.dbg_override.unwrap_or_else(tween_debug);
         let luma_only = dbg > 3.5;
-        let total = if self.flow_dirty {
+        let seeded = self.have_prev_field;
+        let fade = self.fade;
+        let total = if self.flow_dirty && !fade {
             if luma_only {
                 LEVELS + 1 + 1
             } else {
-                LEVELS + 2 * (1 + LEVELS * (SWEEPS + 1) + 1) + 1
+                let per_dir = if seeded { 0 } else { 1 } + LEVELS * (SWEEPS + 1) + 1;
+                LEVELS + 2 * per_dir + 1
             }
         } else {
             1
@@ -1126,7 +1218,7 @@ impl Widget for FlowTweenView {
                 stage += 1;
             }};
         }
-        if self.flow_dirty {
+        if self.flow_dirty && !fade {
             self.flow_dirty = false;
             // ---- luma pyramid --------------------------------------------
             let (w, h) = (self.size.0 as usize, self.size.1 as usize);
@@ -1166,28 +1258,49 @@ impl Widget for FlowTweenView {
                     break;
                 }
                 let dirf = dir as f32;
-                // Exhaustive seed at the coarsest level.
                 let (tw, th) = self.level_dims(LEVELS - 1);
-                let top_luma = self.luma_tex[LEVELS - 1].clone();
-                self.draw_exhaust.dir = dirf;
-                self.draw_exhaust.inv_size = vec2(1.0 / tw as f32, 1.0 / th as f32);
-                self.draw_exhaust.draw_vars.set_texture(0, &top_luma);
-                let seed = self.scratch[2].clone();
-                let draw_exhaust = &mut self.draw_exhaust;
-                run_stage!(&seed, tw, th, |cx: &mut Cx2d, r| draw_exhaust.draw_abs(cx, r));
-                // Coarse → fine: SWEEPS ping-pong sweeps then a median.
-                let mut prev = self.scratch[2].clone();
-                let mut prev_scale = 1.0f32;
+                // Coarse seed: the PREVIOUS pair's final field when one
+                // exists (temporal seeding — motion is coherent frame to
+                // frame, and re-deriving it from scratch every pair was
+                // the shimmer); the exhaustive search only on the first
+                // pair of a clip.
+                let mut prev;
+                let mut prev_scale;
+                if seeded {
+                    prev = self.field_tex[dir].clone();
+                    prev_scale = tw as f32 / gw.max(1) as f32;
+                } else {
+                    let top_luma = self.luma_tex[LEVELS - 1].clone();
+                    self.draw_exhaust.dir = dirf;
+                    self.draw_exhaust.inv_size = vec2(1.0 / tw as f32, 1.0 / th as f32);
+                    self.draw_exhaust.draw_vars.set_texture(0, &top_luma);
+                    let seed = self.scratch[2].clone();
+                    let draw_exhaust = &mut self.draw_exhaust;
+                    run_stage!(&seed, tw, th, |cx: &mut Cx2d, r| draw_exhaust
+                        .draw_abs(cx, r));
+                    prev = self.scratch[2].clone();
+                    prev_scale = 1.0f32;
+                }
                 for level in (0..LEVELS).rev() {
                     let (lw, lh) = self.level_dims(level);
                     let luma = self.luma_tex[level].clone();
+                    // Zero-mean matching subtracts the next-coarser
+                    // level (a free 2x local mean); the top level has
+                    // none and runs plain SAD.
+                    let (coarse, mean_on) = if level + 1 < LEVELS {
+                        (self.luma_tex[level + 1].clone(), 1.0f32)
+                    } else {
+                        (luma.clone(), 0.0f32)
+                    };
                     for s in 0..SWEEPS {
                         let target = self.scratch[s & 1].clone();
                         self.draw_sweep.dir = dirf;
                         self.draw_sweep.inv_size = vec2(1.0 / lw as f32, 1.0 / lh as f32);
                         self.draw_sweep.prev_scale = prev_scale;
+                        self.draw_sweep.mean_on = mean_on;
                         self.draw_sweep.draw_vars.set_texture(0, &luma);
                         self.draw_sweep.draw_vars.set_texture(1, &prev);
+                        self.draw_sweep.draw_vars.set_texture(2, &coarse);
                         let draw_sweep = &mut self.draw_sweep;
                         run_stage!(&target, lw, lh, |cx: &mut Cx2d, r| draw_sweep
                             .draw_abs(cx, r));
@@ -1216,11 +1329,22 @@ impl Widget for FlowTweenView {
                 let draw_subpel = &mut self.draw_subpel;
                 run_stage!(&field, gw, gh, |cx: &mut Cx2d, r| draw_subpel.draw_abs(cx, r));
             }
+            if !luma_only {
+                self.have_prev_field = true;
+            }
         }
         // ---- the warp, every display frame ------------------------------
         let (w, h) = (self.size.0, self.size.1);
         self.draw_warp.dbg = self.dbg_override.unwrap_or_else(tween_debug);
-        self.draw_warp.t_pair = self.t;
+        // A CUT pair never morphs: snap to the nearest endpoint (t 0/1
+        // samples that frame exactly through either producer's math). A
+        // crossfade across a cut is fine — no snap in FADE mode.
+        self.draw_warp.fade_on = if fade { 1.0 } else { 0.0 };
+        self.draw_warp.t_pair = if self.cut && !fade {
+            if self.t < 0.5 { 0.0 } else { 1.0 }
+        } else {
+            self.t
+        };
         match (&self.rife_tex, self.rife_pair) {
             (Some((flow_tex, mask_tex)), Some(_)) => {
                 self.draw_warp.rife_on = 1.0;
