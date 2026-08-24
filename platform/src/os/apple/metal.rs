@@ -2226,6 +2226,14 @@ struct MetalBufferInner {
 #[derive(Default)]
 pub struct CxOsTexture {
     pub(crate) texture: Option<RcObjcId>,
+    /// `texture` was just (re)created by `update_vec_texture` and holds
+    /// nothing yet, so the next upload goes WHOLE no matter how small the
+    /// pending dirty rect is. The slug glyph atlas grows by appending rows
+    /// and marks only those rows dirty — right for a texture updated in
+    /// place, fatal for a fresh one: every earlier row (every earlier
+    /// glyph) would never reach the GPU while the CPU believed it had.
+    /// Cleared once the full blit is encoded.
+    vec_fresh: bool,
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     iosurface: Option<IOSurfaceRef>,
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
@@ -2541,6 +2549,7 @@ impl CxTexture {
             let texture: ObjcId =
                 unsafe { msg_send![metal_cx.device, newTextureWithDescriptor: descriptor] };
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
+            self.os.vec_fresh = true;
         }
         let Some(texture) = self.os.texture.as_ref().map(|t| t.as_id()) else {
             return 0;
@@ -2578,6 +2587,13 @@ impl CxTexture {
             return 0;
         }
         let update = self.take_updated();
+        // A fresh MTLTexture has no rows worth keeping: whatever the CPU
+        // holds goes up whole, whatever the dirty rect said.
+        let update = if self.os.vec_fresh {
+            TextureUpdated::Full
+        } else {
+            update
+        };
         if update.is_empty() {
             return 0;
         }
@@ -2771,6 +2787,7 @@ impl CxTexture {
                 }
             }
         }
+        self.os.vec_fresh = false;
         enc.used.push(staging);
         enc.bytes = enc.bytes.saturating_add(staging_len as u64);
         staging_len as u64
@@ -3582,5 +3599,115 @@ fn gpu_profile_accumulate(
         }
         crate::log!("{}", out);
         *guard = None;
+    }
+}
+
+#[cfg(test)]
+mod vec_upload_tests {
+    //! The slug glyph atlas grows by appending rows and marks ONLY those rows
+    //! dirty. On Metal a size change means a fresh Private MTLTexture, and a
+    //! fresh texture that only ever receives the dirty rect keeps garbage in
+    //! every earlier row — every glyph cached before the growth vanished for
+    //! the rest of the process (sandbox Doom HUD, model-viewer labels, 2026-08-24).
+    //! This drives `update_vec_texture` through that exact sequence on the
+    //! real device and reads the texture back after every step.
+    use super::*;
+    use crate::makepad_math::{PointUsize, RectUsize, SizeUsize};
+    use crate::texture::{Texture, TextureFormat, TextureUpdated};
+
+    /// Texel (x, y) = [x, y, tag, 1]: a dropped or misplaced row is obvious.
+    fn image(width: usize, height: usize, tag: f32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                out.extend_from_slice(&[x as f32, y as f32, tag, 1.0]);
+            }
+        }
+        out
+    }
+
+    fn set_image(cx: &mut Cx, texture: &Texture, data: Vec<f32>, width: usize, updated: TextureUpdated) {
+        let height = data.len() / (width * 4);
+        cx.textures[texture.texture_id()].format = TextureFormat::VecRGBAf32 {
+            width,
+            height,
+            data: Some(data),
+            updated,
+        };
+    }
+
+    fn upload(cx: &mut Cx, metal_cx: &mut MetalCx, texture: &Texture) -> u64 {
+        let command_buffer = metal_cx.new_command_buffer();
+        let mut enc = VecUploadEncoder::new(command_buffer);
+        let bytes = cx.textures[texture.texture_id()].update_vec_texture(metal_cx, &mut enc);
+        enc.finish(metal_cx);
+        unsafe {
+            let () = msg_send![command_buffer, commit];
+            let () = msg_send![command_buffer, waitUntilCompleted];
+        }
+        bytes
+    }
+
+    fn read_back(cx: &mut Cx, texture: &Texture) -> (usize, usize, Vec<f32>) {
+        let (width, height, bytes) = cx
+            .debug_read_render_texture(texture)
+            .expect("the vec texture should be allocated and readable");
+        let floats = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        (width, height, floats)
+    }
+
+    fn rows(width: usize, dirty_rows: std::ops::Range<usize>) -> TextureUpdated {
+        TextureUpdated::Partial(RectUsize::new(
+            PointUsize::new(0, dirty_rows.start),
+            SizeUsize::new(width, dirty_rows.end - dirty_rows.start),
+        ))
+    }
+
+    #[test]
+    fn a_grown_vec_texture_keeps_every_earlier_row() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut metal_cx = MetalCx::new();
+        let texture = Texture::new_with_format(
+            &mut cx,
+            TextureFormat::VecRGBAf32 {
+                width: 1,
+                height: 1,
+                data: None,
+                updated: TextureUpdated::Empty,
+            },
+        );
+        const W: usize = 8;
+
+        // Frame 1: first sight, one row, marked Full.
+        set_image(&mut cx, &texture, image(W, 1, 7.0), W, TextureUpdated::Full);
+        assert!(upload(&mut cx, &mut metal_cx, &texture) > 0);
+        assert_eq!(read_back(&mut cx, &texture), (W, 1, image(W, 1, 7.0)));
+
+        // Frame 2: the atlas appended a row; only that row is dirty. The
+        // MTLTexture is reallocated — row 0 must come along.
+        set_image(&mut cx, &texture, image(W, 2, 7.0), W, rows(W, 1..2));
+        assert_eq!(upload(&mut cx, &mut metal_cx, &texture), (W * 2 * 16) as u64, "a fresh texture uploads whole");
+        assert_eq!(read_back(&mut cx, &texture), (W, 2, image(W, 2, 7.0)), "row 0 lost on growth");
+
+        // Frame 3: another row, another reallocation; rows 0 and 1 must survive.
+        set_image(&mut cx, &texture, image(W, 3, 7.0), W, rows(W, 2..3));
+        upload(&mut cx, &mut metal_cx, &texture);
+        assert_eq!(read_back(&mut cx, &texture), (W, 3, image(W, 3, 7.0)), "rows 0-1 lost on growth");
+
+        // Frame 4: no growth — an in-place partial rewrite of row 1 touches
+        // exactly row 1 (the sub-region blit path stays a sub-region blit).
+        let mut partial = image(W, 3, 7.0);
+        partial[W * 4..W * 8].copy_from_slice(&image(W, 1, 9.0));
+        let expected = partial.clone();
+        set_image(&mut cx, &texture, partial, W, rows(W, 1..2));
+        assert_eq!(upload(&mut cx, &mut metal_cx, &texture), (W * 16) as u64, "an in-place row goes up as a sub-rect");
+        assert_eq!(read_back(&mut cx, &texture), (W, 3, expected));
+
+        // Frame 5: a stale Partial (data taken and put back the same size)
+        // with nothing pending uploads nothing and changes nothing.
+        assert_eq!(upload(&mut cx, &mut metal_cx, &texture), 0);
     }
 }

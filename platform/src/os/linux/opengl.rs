@@ -2816,6 +2816,15 @@ impl CxTexture {
                 }
                 TextureUpdated::Partial(rect) if allow_partial_texture_updates => {
                     if needs_realloc {
+                        // Fresh storage holds nothing: the dirty rect describes a change
+                        // relative to a GPU copy that no longer exists, so the whole image
+                        // goes up (the same law as the append-atlas branch above and
+                        // Metal's `vec_fresh`); uploading only the rect would leave every
+                        // other texel undefined for as long as the texture lives.
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
                         (gl.glTexImage2D)(
                             gl_sys::TEXTURE_2D,
                             0,
@@ -2825,25 +2834,25 @@ impl CxTexture {
                             0,
                             format,
                             data_type,
-                            0 as *const _,
+                            data,
+                        );
+                    } else {
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
+                        (gl.glTexSubImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            rect.origin.x as i32,
+                            rect.origin.y as i32,
+                            rect.size.width as i32,
+                            rect.size.height as i32,
+                            format,
+                            data_type,
+                            data,
                         );
                     }
-
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
-                    (gl.glTexSubImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        rect.origin.x as i32,
-                        rect.origin.y as i32,
-                        rect.size.width as i32,
-                        rect.size.height as i32,
-                        format,
-                        data_type,
-                        data,
-                    );
                 }
                 // A `Full` update (and any `Partial` when partial updates are disabled, e.g.
                 // ohos_sim) recreates the texture at its exact logical size.
