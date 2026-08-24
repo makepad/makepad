@@ -44,6 +44,8 @@ mod flow_tween;
 // out, one map) and the keyed per-pair product cache the presenters share.
 mod transport;
 mod pair_cache;
+// The platter in the deck: the per-slot Transport fed from deck state.
+mod platter;
 mod nv12_view;
 // EFFECT SLOTS: the vjeffect content category's home in the mixer — three
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
@@ -5006,6 +5008,15 @@ pub struct App {
     tween_pair: [Option<usize>; 2],
     #[rust]
     tween_pred: [(f64, f64, f64); 2],
+    /// THE PLATTER per slot (platter.rs): the presenter's clock for a
+    /// resident clip — velocity in, position out, one map.
+    #[rust]
+    platter: [Option<platter::PlatterSlot>; 2],
+    /// The frame stamp's time base as an Instant (captured once at startup)
+    /// so Instant-based clocks (beat epoch, free anchor) convert to it
+    /// without sampling the wall clock in the pump.
+    #[rust]
+    app_start_instant: Option<Instant>,
     /// What the REV button last painted while TRACKING a bounce's live
     /// travel direction (None = the latch paint owns the button).
     #[rust]
