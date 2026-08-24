@@ -21,6 +21,10 @@ pub enum MacosEvent {
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
     Paint,
+    /// One window's display link fired: paint THAT window at its own flip,
+    /// with the flip's target timestamp (app-time domain). The primary link
+    /// (index 0) also runs the shared logic beat.
+    LinkFire { window: crate::os::apple::apple_sys::ObjcId, time: f64, primary: bool },
 
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),

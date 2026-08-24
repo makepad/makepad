@@ -126,6 +126,13 @@ pub struct MacosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
+    /// CADisplayLink paint pacing (NSView.displayLink, macOS 14+): each
+    /// window's paint beat fires FROM its own panel's refresh callback
+    /// instead of an NSTimer racing it — the real frame-flip clock, per
+    /// window, per display. Empty until a window exists (or unsupported:
+    /// NSTimer pacing stays). Entries are (cocoa window, link).
+    display_links: Vec<(ObjcId, ObjcId)>,
+    display_links_paused: bool,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
     /// Cocoa owns/retains window delegates and views beyond `windowWillClose:`.
@@ -179,6 +186,8 @@ impl MacosApp {
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
                 timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
+                display_links: Vec::new(),
+                display_links_paused: false,
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
@@ -369,7 +378,9 @@ impl MacosApp {
                         my_app,
                         activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
                     ];
-                    let () = msg_send![self.cocoa_windows[0].0, makeKeyAndOrderFront: nil];
+                    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+                        let () = msg_send![self.cocoa_windows[0].0, makeKeyAndOrderFront: nil];
+                    }
                 }
                 //}
             }
@@ -791,6 +802,32 @@ impl MacosApp {
         self.cocoa_windows
             .retain(|(window, _view)| *window != native_window);
         self.retired_cocoa_windows.push(window);
+        // Drop the closing window's link; if the PRIMARY died, beats died
+        // with it — keep a heartbeat alive so the paint loop wakes and
+        // re-anchors (ensure_timer0_started spots the missing link).
+        let had = !self.display_links.is_empty();
+        self.display_links.retain(|(window, link)| {
+            if *window == native_window {
+                unsafe {
+                    let () = msg_send![*link, invalidate];
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if had && self.display_links.is_empty() {
+            self.stop_timer(0);
+            self.start_timer(0, 0.2, true);
+        }
+    }
+
+    /// True when link pacing SHOULD be re-armed: a window exists without
+    /// its own link (fresh window, or the self-heal after a close).
+    pub fn display_link_needs_rearm(&self) -> bool {
+        self.cocoa_windows
+            .iter()
+            .any(|(window, _)| !self.display_links.iter().any(|(w, _)| w == window))
     }
     /*
     pub fn post_signal(signal: Signal) {
@@ -931,6 +968,95 @@ impl MacosApp {
                 }
             }
         }
+    }
+
+    /// Arm (or resume) display-link pacing: one link per window, each from
+    /// that window's own view so it tracks that window's panel. Returns
+    /// false when none can run (no window yet, or the OS lacks
+    /// NSView.displayLink) — the caller falls back to NSTimer pacing.
+    pub fn ensure_display_link(&mut self) -> bool {
+        unsafe {
+            // Prune links whose window is gone.
+            let windows: Vec<ObjcId> = self.cocoa_windows.iter().map(|(w, _)| *w).collect();
+            self.display_links.retain(|(window, link)| {
+                if windows.contains(window) {
+                    true
+                } else {
+                    let () = msg_send![*link, invalidate];
+                    false
+                }
+            });
+            // Create missing ones.
+            for (window, view) in self.cocoa_windows.clone() {
+                if self.display_links.iter().any(|(w, _)| *w == window) {
+                    continue;
+                }
+                let responds: bool = msg_send![
+                    view,
+                    respondsToSelector: sel!(displayLinkWithTarget: selector:)
+                ];
+                if !responds {
+                    return false;
+                }
+                let link: ObjcId = msg_send![
+                    view,
+                    displayLinkWithTarget: self.timer_delegate_instance
+                    selector: sel!(receivedDisplayLink:)
+                ];
+                if link == nil {
+                    continue;
+                }
+                let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
+                let () =
+                    msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
+                if self.display_links_paused {
+                    let () = msg_send![link, setPaused: YES];
+                }
+                self.display_links.push((window, link));
+                crate::log!(
+                    "macos: paint pacing on the display link (frame-flip clock), window {}",
+                    self.display_links.len()
+                );
+            }
+            if self.display_links_paused {
+                for (_w, link) in &self.display_links {
+                    let () = msg_send![*link, setPaused: NO];
+                }
+                self.display_links_paused = false;
+            }
+            !self.display_links.is_empty()
+        }
+    }
+
+    pub fn pause_display_link(&mut self) {
+        unsafe {
+            if !self.display_links_paused {
+                for (_w, link) in &self.display_links {
+                    let () = msg_send![*link, setPaused: YES];
+                }
+                self.display_links_paused = true;
+            }
+        }
+    }
+
+    /// One window's display link fired: dispatch a LinkFire carrying WHICH
+    /// window and the flip's TARGET timestamp mapped into app time — the
+    /// rock-solid per-window clock the paint below samples.
+    pub fn send_display_link_fired(link: ObjcId) {
+        let Some((window, primary)) = with_macos_app(|app| {
+            app.display_links
+                .iter()
+                .position(|(_w, l)| *l == link)
+                .map(|i| (app.display_links[i].0, i == 0))
+        }) else {
+            return;
+        };
+        let (target, media_now): (f64, f64) = unsafe {
+            (msg_send![link, targetTimestamp], CACurrentMediaTime())
+        };
+        let app_now = with_macos_app(|app| app.time_now());
+        let time = app_now + (target - media_now).clamp(0.0, 0.1);
+        MacosApp::do_callback(MacosEvent::LinkFire { window, time, primary });
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
