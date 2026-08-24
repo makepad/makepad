@@ -1183,6 +1183,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// A point named in DOOM map units, placed in the GLB x/z plane the
+    /// emitters write: metres, with Doom north at −Z
+    /// (`doom::doom_to_glb`). Every floor/ceiling probe below names its
+    /// point the way the WAD does and lets this do the conversion, so a
+    /// probe can never drift out of the geometry it is aimed at.
+    fn doom_xz(x: f32, y: f32) -> [f32; 2] {
+        [x * crate::classic_import::doom::DOOM_UNIT, -y * crate::classic_import::doom::DOOM_UNIT]
+    }
+
     fn tmp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1586,14 +1595,14 @@ mod tests {
         emit_sector_grid(&mut pos, &mut uvs, &mut idx, &left, &verts, 1.0 / 64.0, 0.0, slot, false);
         let left_end = idx.len();
         emit_sector_grid(&mut pos, &mut uvs, &mut idx, &right, &verts, 1.0 / 64.0, 0.0, slot, false);
-        // Just right of the shared wall (world x = 80/64).
-        let probe = [80.0 / 64.0 + 0.05, 0.0, 32.0 / 64.0];
+        // Just right of the shared wall (Doom x = 80), mid-room.
+        let probe = doom_xz(80.0 + 0.05 * 64.0, 32.0);
         let mut hits = 0u32;
         for tri in idx.chunks_exact(3) {
             let a = pos[tri[0] as usize];
             let b = pos[tri[1] as usize];
             let c = pos[tri[2] as usize];
-            if point_in_tri([probe[0], probe[2]], [a[0], a[2]], [b[0], b[2]], [c[0], c[2]]) {
+            if point_in_tri(probe, [a[0], a[2]], [b[0], b[2]], [c[0], c[2]]) {
                 hits += 1;
             }
         }
@@ -1749,8 +1758,8 @@ mod tests {
             slot,
             true,
         );
-        let hole = [128.0 / 64.0, 128.0 / 64.0];
-        let ring = [32.0 / 64.0, 32.0 / 64.0];
+        let hole = doom_xz(128.0, 128.0);
+        let ring = doom_xz(32.0, 32.0);
         let mut hole_hits = 0u32;
         let mut ring_hits = 0u32;
         for tri in idx.chunks_exact(3) {
@@ -1812,8 +1821,8 @@ mod tests {
             slot,
             false,
         );
-        let walk = [16.0 / 64.0, 96.0 / 64.0];
-        let island = [96.0 / 64.0, 96.0 / 64.0];
+        let walk = doom_xz(16.0, 96.0);
+        let island = doom_xz(96.0, 96.0);
         let mut walk_hits = 0u32;
         let mut island_hits = 0u32;
         for tri in idx.chunks_exact(3) {
@@ -1858,7 +1867,7 @@ mod tests {
         emit_convex_ring(
             &mut pos, &mut uvs, &mut idx, &pts, 1.0 / 64.0, 0.0, slot, false,
         );
-        let centre = [32.0 / 64.0, 32.0 / 64.0];
+        let centre = doom_xz(32.0, 32.0);
         let mut hits = 0u32;
         for tri in idx.chunks_exact(3) {
             let a = pos[tri[0] as usize];
@@ -1921,7 +1930,7 @@ mod tests {
         emit_convex_ring(
             &mut pos, &mut uvs, &mut idx, &poly, 1.0 / 64.0, 0.0, slot, false,
         );
-        let probe = [inside[0] / 64.0, inside[1] / 64.0];
+        let probe = doom_xz(inside[0], inside[1]);
         let hits = idx.chunks_exact(3).filter(|tri| {
             let a = pos[tri[0] as usize];
             let b = pos[tri[1] as usize];
@@ -2071,9 +2080,9 @@ mod tests {
             slot,
             false,
         );
-        let inside = [40.0 / 64.0, 40.0 / 64.0];
-        let near_cut = [70.0 / 64.0, 20.0 / 64.0];
-        let outside = [90.0 / 64.0, 90.0 / 64.0];
+        let inside = doom_xz(40.0, 40.0);
+        let near_cut = doom_xz(70.0, 20.0);
+        let outside = doom_xz(90.0, 90.0);
         let mut in_hits = 0u32;
         let mut cut_hits = 0u32;
         let mut out_hits = 0u32;
@@ -2133,8 +2142,8 @@ mod tests {
             "L must not explode into slivers: {} indices",
             idx.len()
         );
-        let notch = [96.0 / 64.0, 96.0 / 64.0];
-        let body = [32.0 / 64.0, 32.0 / 64.0];
+        let notch = doom_xz(96.0, 96.0);
+        let body = doom_xz(32.0, 32.0);
         let mut notch_hits = 0u32;
         let mut body_hits = 0u32;
         for tri in idx.chunks_exact(3) {
@@ -2878,9 +2887,10 @@ mesh {
         // Closed on the floor, open at 128 - 4 headroom, at 1/64 scale.
         assert!((door.closed_y - 0.0).abs() < 1e-6, "{door:?}");
         assert!((door.open_y - 124.0 / 64.0).abs() < 1e-6, "{door:?}");
-        // Doorway centre in engine space (x 128..192, y 0..128).
+        // Doorway centre in engine space (Doom x 128..192, y 0..128; north
+        // is −Z, so the doorway's y = 64 lands at z = −1).
         assert!((door.centre[0] - 160.0 / 64.0).abs() < 1e-4, "{door:?}");
-        assert!((door.centre[2] - 64.0 / 64.0).abs() < 1e-4, "{door:?}");
+        assert!((door.centre[2] + 64.0 / 64.0).abs() < 1e-4, "{door:?}");
 
         // The exported GLB carries it as an animating node.
         let json_text = glb_json(&mesh.glb);
@@ -2913,14 +2923,17 @@ mesh {
         // (which is authored in its CLOSED pose).
         let parts = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
         assert_eq!(parts.len(), 2, "level primitive + one door primitive");
+        // Doom (64, 64) -> (256, 64), the corridor's own centre line.
+        let from = doom_xz(64.0, 64.0);
+        let to = doom_xz(256.0, 64.0);
         let walk = |part: &crate::world_preview::Extracted| {
             part.indices.chunks_exact(3).any(|tri| {
                 hits_segment(
                     part.pos[tri[0] as usize],
                     part.pos[tri[1] as usize],
                     part.pos[tri[2] as usize],
-                    [1.0, 0.8, 1.0],
-                    [4.0, 0.8, 1.0],
+                    [from[0], 0.8, from[1]],
+                    [to[0], 0.8, to[1]],
                 )
             })
         };
@@ -3140,11 +3153,30 @@ mesh {
         // strip wraps four times round the compass.
         let east = sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0);
         assert!((east[0] - 1.0).abs() < 1e-4 || east[0].abs() < 1e-4, "{east:?}");
-        let quarter = sky.direction_uv(dir(0.0, 0.0, 1.0), 0, 0.0);
+        let quarter = sky.direction_uv(dir(0.0, 0.0, -1.0), 0, 0.0);
         assert!(
             (quarter[0] - east[0]).abs() > 0.9,
             "a quarter turn moves one whole image: {east:?} -> {quarter:?}"
         );
+        // And it moves the way VANILLA moves it. `R_RenderBSPNode` reads the
+        // column straight off the view angle (`angle >> ANGLETOSKYSHIFT`), so
+        // the column GROWS as the player turns left — anticlockwise from
+        // east, through north — by 4/360 of the image per degree. Doom's
+        // facing `a` is `(cos a, sin a)` in (east, north), and north is GLB
+        // −Z, so the view ray is `(cos a, 0, −sin a)`. A converter that put
+        // north at +Z passes every assertion above and fails this one: same
+        // sky, wound backwards, drifting the wrong way on every turn.
+        for degrees in [22.5f32, 45.0, 67.5] {
+            let (s, c) = degrees.to_radians().sin_cos();
+            let u = sky.direction_uv(dir(c, 0.0, -s), 0, 0.0)[0];
+            let want = east[0] + degrees / 360.0 * sky.repeat;
+            assert!(
+                (u - want).abs() < 1e-3,
+                "turning {degrees} degrees left must advance the strip to \
+                 {want}, got {u} (backwards would be {})",
+                east[0] - degrees / 360.0 * sky.repeat
+            );
+        }
         // The horizon sits in the middle of the picture and the zenith clamps.
         let horizon = sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0);
         assert!((horizon[1] - 0.5).abs() < 1e-4, "{horizon:?}");
@@ -3384,6 +3416,353 @@ mesh {
         (overlaps, over_used)
     }
 
+    /// The renderer's camera basis in the GLB's x/z plane, repeated here so
+    /// the handedness tests below assert against the CONSUMER's formula and
+    /// not against any converter's inverse of it. Forward is
+    /// `makepad_render::level::yaw_forward` = `(sin yaw, 0, −cos yaw)`; right
+    /// is `forward × up` = `(cos yaw, 0, sin yaw)`, the strafe vector
+    /// `level.rs` and `play.rs` both use.
+    fn camera_basis(yaw: f32) -> ([f32; 2], [f32; 2]) {
+        ([yaw.sin(), -yaw.cos()], [yaw.cos(), yaw.sin()])
+    }
+
+    /// Where `to` lies in the frame of a viewer standing at `from` looking
+    /// along `yaw`, as `(ahead, left)` metres. Both inputs are the GLB's
+    /// x/z plane.
+    fn ahead_left(from: [f32; 3], yaw: f32, to: [f32; 3]) -> (f32, f32) {
+        let (f, r) = camera_basis(yaw);
+        let d = [to[0] - from[0], to[2] - from[2]];
+        (d[0] * f[0] + d[1] * f[1], -(d[0] * r[0] + d[1] * r[1]))
+    }
+
+    /// The same, in a SOURCE game's own map plane: `(east, north)` with the
+    /// facing given as degrees counter-clockwise from east, which is how
+    /// Doom's THINGS and Quake's `angle` both store it.
+    fn ahead_left_map(from: [f32; 2], angle_deg: f32, to: [f32; 2]) -> (f32, f32) {
+        let (s, c) = angle_deg.to_radians().sin_cos();
+        let (e, n) = (to[0] - from[0], to[1] - from[1]);
+        (e * c + n * s, -e * s + n * c)
+    }
+
+    /// **The handedness law, stated once for every classic family.**
+    ///
+    /// Each converter takes a source game's map space into the GLB's. Whether
+    /// it does so as a ROTATION or as a REFLECTION is decided by one sign
+    /// nobody looks at, and a reflected level is fully walkable: the walls
+    /// meet, the doors open, the walker's own formulas agree with themselves.
+    /// It is simply the mirror of the level the original engine draws.
+    ///
+    /// The test is the cross product. Take each game's own (east, north, up)
+    /// — east and north being any two ground directions with up completing a
+    /// RIGHT-handed frame, which every one of these engines uses — push them
+    /// through that game's conversion, and require
+    /// `east × north = up` to still hold in the GLB. Determinant −1 fails it,
+    /// and there is nothing else it can fail on.
+    ///
+    /// Quake 1 has no single conversion function to name here; its guard is
+    /// [`quake_e1m1_keeps_its_bearings_too`], on the real BSP.
+    #[test]
+    fn every_classic_converter_maps_a_right_handed_world_to_a_right_handed_one() {
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let unit = |v: [f32; 3]| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            assert!(l > 0.0, "a basis vector collapsed");
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        // (family, east, north, up) in that game's OWN map space, and the
+        // conversion under test. Doom is 2-D + a height, so its function
+        // takes (east, up, north) and the basis is written to match.
+        let doom = |v: [f32; 3]| {
+            crate::classic_import::doom::doom_to_glb(v[0], v[1], v[2])
+        };
+        let duke = |v: [f32; 3]| crate::duke_import::build_to_glb(v[0], v[1], v[2]);
+        let families: [(&str, [[f32; 3]; 3], &dyn Fn([f32; 3]) -> [f32; 3]); 5] = [
+            // Doom: (east, up, north) — north is the third argument.
+            ("doom", [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]], &doom),
+            // Quake 1/2/3 and id Tech 4: X east, Y north, Z up.
+            (
+                "quake2",
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                &crate::quake2_import::to_glb,
+            ),
+            (
+                "quake3",
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                &crate::quake3_import::map_to_glb,
+            ),
+            (
+                "doom3",
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                &crate::doom3_import::xform,
+            ),
+            // BUILD: (x, up, y) with x forward at angle 0, y its RIGHT
+            // (`drawrooms` puts screen-right on +y) and z DOWN — so "north",
+            // the left-hand ground axis, is −y, and up is −z, which
+            // `build_to_glb` takes as its middle argument already negated.
+            ("duke", [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]], &duke),
+        ];
+        for (name, [east, north, up], to_glb) in families {
+            let zero = to_glb([0.0, 0.0, 0.0]);
+            let d = |v: [f32; 3]| {
+                let p = to_glb(v);
+                [p[0] - zero[0], p[1] - zero[1], p[2] - zero[2]]
+            };
+            let (e, n, u) = (unit(d(east)), unit(d(north)), unit(d(up)));
+            let c = cross(e, n);
+            let dot = c[0] * u[0] + c[1] * u[1] + c[2] * u[2];
+            assert!(
+                dot > 0.999,
+                "{name}: east x north points {c:?} but up is {u:?} (dot {dot:.3}) \
+                 — a dot of −1 means this converter writes the level's MIRROR"
+            );
+        }
+    }
+
+    /// A facing and a position are ONE contract, and it is the joint that
+    /// breaks: a converter can place a level correctly and still turn its
+    /// spawns to a formula derived for the other convention, which is exactly
+    /// what Doom's markers and Duke's `build_yaw` did.
+    ///
+    /// So: turning to `doom_yaw(a)` must look along the GLB image of Doom's
+    /// own facing `(cos a, sin a)`, for every `a`. `doom_dir_yaw` is the same
+    /// statement for a direction that arrives as a vector (a switch's press
+    /// direction) rather than as an angle.
+    #[test]
+    fn doom_yaw_looks_exactly_where_doom_points() {
+        use crate::classic_import::doom::{doom_dir_yaw, doom_to_glb, doom_yaw};
+        for degrees in [0.0f32, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+            let (s, c) = degrees.to_radians().sin_cos();
+            let want = doom_to_glb(c, 0.0, s);
+            for (label, yaw) in [
+                ("doom_yaw", doom_yaw(degrees)),
+                ("doom_dir_yaw", doom_dir_yaw(c, s)),
+            ] {
+                let (f, _) = camera_basis(yaw);
+                assert!(
+                    (f[0] - want[0]).abs() < 1e-5 && (f[1] - want[2]).abs() < 1e-5,
+                    "{label}({degrees}) looks ({:.4}, {:.4}) but Doom points \
+                     ({:.4}, {:.4})",
+                    f[0],
+                    f[1],
+                    want[0],
+                    want[2]
+                );
+            }
+        }
+    }
+
+    /// **The handedness law, on real shipped data.**
+    ///
+    /// A mirrored converter is not a broken one: the walls still meet, the
+    /// doors still open, the spawn still faces the room, and every walker
+    /// formula stays self-consistent INSIDE the mirror. The only thing that
+    /// gives it away is a player who knows the level — so that is what this
+    /// test is. It stands at E1M1's player-1 start, looks where the start's
+    /// own THINGS angle points, and checks that three landmarks lie the way
+    /// they lie in vanilla Doom.
+    ///
+    /// Vanilla E1M1 (`DOOM1.WAD`, shareware): the start is at (1056, −3616)
+    /// facing angle 90 — due NORTH, up the hangar's long room. From there,
+    /// at 64 map units to the metre:
+    ///
+    /// | landmark | thing | where it is in the real game |
+    /// |---|---|---|
+    /// | green armour, zigzag nukage room | 2018 | 20 m LEFT (west), 6 m ahead |
+    /// | blue armour, courtyard nukage | 2019 | 12 m RIGHT (east), 5.25 m ahead |
+    /// | shotgun, far east hall | 2001 | 34.5 m RIGHT, 5 m BEHIND |
+    ///
+    /// The assertion is stronger than that table, though: for every landmark
+    /// the bearing measured in the GLB (through the exported `.place` data
+    /// and the renderer's camera basis) must EQUAL the bearing measured in
+    /// the WAD's own plane. A mirror flips the left column's sign and
+    /// nothing else, so it cannot survive this even on a map nobody knows.
+    #[test]
+    fn e1m1_lands_where_the_wad_says_and_not_in_its_mirror() {
+        use crate::classic_import::doom::{doom_map_place, lump_by_name_after, parse_wad};
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let things = lump_by_name_after(&wad.lumps, "E1M1", "THINGS").expect("THINGS");
+        let i16_at = |b: &[u8], o: usize| i16::from_le_bytes([b[o], b[o + 1]]) as f32;
+        let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        // ([x, y], angle) of the ONE thing of this type, or a panic naming
+        // the type — every landmark below is unique in E1M1.
+        let thing = |typ: u16| -> ([f32; 2], f32) {
+            let mut found = None;
+            for i in 0..things.len() / 10 {
+                let o = i * 10;
+                if u16_at(things, o + 6) == typ {
+                    assert!(found.is_none(), "thing {typ} is not unique in E1M1");
+                    found = Some((
+                        [i16_at(things, o), i16_at(things, o + 2)],
+                        u16_at(things, o + 4) as f32,
+                    ));
+                }
+            }
+            found.unwrap_or_else(|| panic!("E1M1 has no thing {typ}"))
+        };
+
+        // The WAD says what it says: if this is not the shareware E1M1, the
+        // ground truth below is not about this map and the test must say so
+        // rather than measure something else.
+        let (start_xy, start_angle) = thing(1);
+        assert_eq!(start_xy, [1056.0, -3616.0], "not vanilla E1M1's start");
+        assert_eq!(start_angle, 90.0, "E1M1's start faces north");
+        let green = thing(2018).0;
+        let blue = thing(2019).0;
+        let shotgun = thing(2001).0;
+        assert_eq!(green, [-224.0, -3232.0], "not vanilla E1M1's green armour");
+        assert_eq!(blue, [1824.0, -3280.0], "not vanilla E1M1's blue armour");
+        assert_eq!(shotgun, [3264.0, -3936.0], "not vanilla E1M1's shotgun");
+
+        // What the converter published: the spawn and the actor placements
+        // the game reads, in GLB metres.
+        let place = doom_map_place(&wad.lumps, "E1M1", "doom", "world/e1m1", "doom1");
+        let (spawn_pos, spawn_yaw, _) = place.spawn.expect("E1M1 spawn");
+        let at = |typ: u16| -> [f32; 3] {
+            let key = typ.to_string();
+            let hits: Vec<&crate::world_place::Place> =
+                place.places.iter().filter(|p| p.class == key).collect();
+            assert_eq!(hits.len(), 1, "thing {typ} placed {} times", hits.len());
+            hits[0].pos
+        };
+
+        // Facing north, and north is −Z: the whole reason the mapping has to
+        // send north to −Z rather than +Z.
+        let (f, _) = camera_basis(spawn_yaw);
+        assert!(
+            f[0].abs() < 1e-3 && (f[1] + 1.0).abs() < 1e-3,
+            "E1M1's start faces Doom north, which is GLB −Z: forward {f:?}"
+        );
+
+        // The vanilla table, stated in metres in the player's own frame.
+        for (name, typ, ahead, left) in [
+            ("green armour (zigzag room, WEST)", 2018u16, 6.0f32, 20.0f32),
+            ("blue armour (courtyard, EAST)", 2019, 5.25, -12.0),
+            ("shotgun (east hall, BEHIND)", 2001, -5.0, -34.5),
+        ] {
+            let (got_ahead, got_left) = ahead_left(spawn_pos, spawn_yaw, at(typ));
+            assert!(
+                (got_ahead - ahead).abs() < 0.02 && (got_left - left).abs() < 0.02,
+                "{name}: vanilla puts it {ahead:.2} m ahead / {left:.2} m left, \
+                 the GLB puts it {got_ahead:.2} / {got_left:.2} \
+                 (a sign flip on `left` is the level's MIRROR)"
+            );
+        }
+
+        // And the general law, which needs no memory of the level: the same
+        // bearing, measured in the WAD's own (east, north) plane.
+        for (typ, xy) in [(2018u16, green), (2019, blue), (2001, shotgun)] {
+            let (want_ahead, want_left) = ahead_left_map(start_xy, start_angle, xy);
+            let unit = crate::classic_import::doom::DOOM_UNIT;
+            let (got_ahead, got_left) = ahead_left(spawn_pos, spawn_yaw, at(typ));
+            assert!(
+                (got_ahead - want_ahead * unit).abs() < 0.02
+                    && (got_left - want_left * unit).abs() < 0.02,
+                "thing {typ}: WAD bearing ({:.2}, {:.2}) m, GLB bearing \
+                 ({got_ahead:.2}, {got_left:.2}) m",
+                want_ahead * unit,
+                want_left * unit
+            );
+        }
+    }
+
+    /// The same law on Quake 1's E1M1, when the PAK is on this machine: the
+    /// bearing from the player start to every deathmatch start must be the
+    /// same in the BSP's own plane as in the GLB the converter writes.
+    ///
+    /// No ground truth about the level is needed — the law alone catches a
+    /// mirror, and having a second engine under it is what keeps the five
+    /// classic families on ONE contract instead of five conventions.
+    #[test]
+    fn quake_e1m1_keeps_its_bearings_too() {
+        use crate::classic_import::doom::quake_bsp_nav;
+        let Some(bytes) = pak0_entry("maps/e1m1.bsp") else {
+            eprintln!("no Quake PAK0; skipped");
+            return;
+        };
+        // (classname, origin, angle) straight out of the entity lump.
+        let off = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let text = std::str::from_utf8(&bytes[off..off + len]).expect("entities");
+        let mut ents: Vec<(String, [f32; 3], f32)> = Vec::new();
+        for block in text.split(|c| c == '{' || c == '}') {
+            let (mut class, mut origin, mut angle) = (String::new(), None, 0.0f32);
+            for line in block.lines() {
+                let kv: Vec<&str> = line.split('"').filter(|s| !s.trim().is_empty()).collect();
+                if kv.len() < 2 {
+                    continue;
+                }
+                match kv[0] {
+                    "classname" => class = kv[1].to_string(),
+                    "angle" => angle = kv[1].trim().parse().unwrap_or(0.0),
+                    "origin" => {
+                        let v: Vec<f32> =
+                            kv[1].split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                        if v.len() == 3 {
+                            origin = Some([v[0], v[1], v[2]]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(o) = origin {
+                if !class.is_empty() {
+                    ents.push((class, o, angle));
+                }
+            }
+        }
+        let start = ents
+            .iter()
+            .find(|e| e.0 == "info_player_start")
+            .expect("info_player_start");
+        let dm: Vec<&(String, [f32; 3], f32)> = ents
+            .iter()
+            .filter(|e| e.0 == "info_player_deathmatch")
+            .collect();
+        assert!(dm.len() >= 3, "e1m1 has deathmatch starts: {}", dm.len());
+
+        let nav = quake_bsp_nav(&bytes).expect("nav");
+        let primary = nav.primary().expect("primary start");
+        let published: Vec<&crate::world_nav::NavStart> = nav
+            .starts
+            .iter()
+            .filter(|s| s.name.starts_with(crate::world_nav::DEATHMATCH))
+            .collect();
+        assert_eq!(published.len(), dm.len(), "every deathmatch start published");
+
+        // Quake's map plane is (east, north) = (x, y) with `angle` degrees
+        // counter-clockwise from east — the same convention Doom uses.
+        let unit = crate::classic_import::doom::QUAKE_UNIT;
+        for (src, out) in dm.iter().zip(published) {
+            let (want_ahead, want_left) = ahead_left_map(
+                [start.1[0], start.1[1]],
+                start.2,
+                [src.1[0], src.1[1]],
+            );
+            let (got_ahead, got_left) = ahead_left(primary.pos, primary.yaw, out.pos);
+            assert!(
+                (got_ahead - want_ahead * unit).abs() < 0.02
+                    && (got_left - want_left * unit).abs() < 0.02,
+                "{}: BSP bearing ({:.2}, {:.2}) m, GLB bearing \
+                 ({got_ahead:.2}, {got_left:.2}) m",
+                out.name,
+                want_ahead * unit,
+                want_left * unit
+            );
+        }
+    }
+
     /// Convert the real E1M1 when the shareware WAD is on this machine and
     /// drop the GLB where a GPU capture can pick it up. Skipped otherwise.
     #[test]
@@ -3454,13 +3833,16 @@ mesh {
             if v1 >= vertexes.len() / 4 || v2 >= vertexes.len() / 4 {
                 continue;
             }
+            // The linedef's endpoints in the GLB x/z plane: Doom north is
+            // −Z, so the WAD's y flips sign on the way in (and back out
+            // again in the messages below, which quote map units).
             let a = [
                 i16_at(vertexes, v1 * 4) as f32 * unit,
-                i16_at(vertexes, v1 * 4 + 2) as f32 * unit,
+                -(i16_at(vertexes, v1 * 4 + 2) as f32) * unit,
             ];
             let b = [
                 i16_at(vertexes, v2 * 4) as f32 * unit,
-                i16_at(vertexes, v2 * 4 + 2) as f32 * unit,
+                -(i16_at(vertexes, v2 * 4 + 2) as f32) * unit,
             ];
             let upper = fl.max(bl) * unit;
             let lower = fl.min(bl) * unit;
@@ -3570,9 +3952,9 @@ mesh {
                              ({:.1},{:.1})-({:.1},{:.1}) by {by:.3} map units",
                             y,
                             a[0] * 64.0,
-                            a[1] * 64.0,
+                            -a[1] * 64.0,
                             b[0] * 64.0,
-                            b[1] * 64.0
+                            -b[1] * 64.0
                         );
                     }
                 }
@@ -3582,9 +3964,9 @@ mesh {
                 "step at ({:.1},{:.1})-({:.1},{:.1}): riser tops {:.4}m above the {:.4}m floor \
                  — {:.2} map units of lip",
                 a[0] * 64.0,
-                a[1] * 64.0,
+                -a[1] * 64.0,
                 b[0] * 64.0,
-                b[1] * 64.0,
+                -b[1] * 64.0,
                 top,
                 upper,
                 (top - upper) * 64.0
@@ -4028,11 +4410,13 @@ mesh {
         assert_eq!(mesh.teleporters.len(), 1, "{:?}", mesh.teleporters);
         let t = &mesh.teleporters[0];
         assert_eq!(t.name, "teleport_1");
-        // Destination in metres: (256, floor 0 + eye 41, 64) / 64.
+        // Destination in metres: Doom (256, 64) at floor 0 + eye 41, all
+        // over 64, with north at −Z.
         assert!((t.dst[0] - 4.0).abs() < 1e-4, "{t:?}");
         assert!((t.dst[1] - 41.0 / 64.0).abs() < 1e-4, "{t:?}");
-        assert!((t.dst[2] - 1.0).abs() < 1e-4, "{t:?}");
-        assert!((t.yaw - (std::f32::consts::FRAC_PI_2 + 90f32.to_radians())).abs() < 1e-4);
+        assert!((t.dst[2] + 1.0).abs() < 1e-4, "{t:?}");
+        // Doom angle 90 is north, and north is −Z: yaw 0 looks down −Z.
+        assert!(t.yaw.abs() < 1e-4, "{t:?}");
         // The pad hugs the teleport line (x = 128 units = 2 m), 16 units deep.
         assert!(t.pad_min[0] >= 1.7 && t.pad_max[0] <= 2.3, "{t:?}");
         assert!(
@@ -4119,14 +4503,16 @@ mesh {
         let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
         let nav = doom_map_nav(&wad.lumps, "MAP01").expect("nav");
 
-        // THINGS: type 1 at (64, 64), angle 0. 64 map units = 1 m.
+        // THINGS: type 1 at (64, 64), angle 0. 64 map units = 1 m, and Doom
+        // north is GLB −Z, so y = 64 lands at z = −1.
         assert_eq!(nav.starts.len(), 1);
         let start = &nav.starts[0];
         assert_eq!(start.name, "player_start");
         assert!((start.pos[0] - 1.0).abs() < 1e-6, "{start:?}");
-        assert!((start.pos[2] - 1.0).abs() < 1e-6, "{start:?}");
+        assert!((start.pos[2] + 1.0).abs() < 1e-6, "{start:?}");
         // Sector floor 0 + Doom VIEWHEIGHT 41 units.
         assert!((start.pos[1] - 41.0 / 64.0).abs() < 1e-6, "{start:?}");
+        // Doom angle 0 is east, and east is +X: yaw π/2 looks down +X.
         assert!((start.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert_eq!(nav.floor_y, Some(0.0));
         assert_eq!(nav.eye_height, Some(41.0 / 64.0));
@@ -4214,7 +4600,8 @@ mesh {
             .unwrap();
         assert!((ps.transform.pos.x - 1.0).abs() < 1e-4);
         assert!((ps.transform.pos.y - 41.0 / 64.0).abs() < 1e-4);
-        assert!((ps.transform.pos.z - 1.0).abs() < 1e-4);
+        // Doom north is GLB −Z: the thing at y = 64 lands at z = −1.
+        assert!((ps.transform.pos.z + 1.0).abs() < 1e-4);
         // Y-up metres, exactly what the GLB was exported in.
         assert_eq!(world.coordinate_system.units_per_meter, 1.0);
         assert_eq!(world.coordinate_system.up, makepad_asset_data::Axis::YPos);

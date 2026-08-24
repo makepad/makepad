@@ -908,9 +908,42 @@ fn map_nav(map: &BuildMap, spawn: [f32; 5]) -> crate::world_nav::WorldNav {
     nav
 }
 
+/// BUILD map space is X, Y, Z with **Z pointing DOWN** and **Y pointing to
+/// the player's right at angle 0** — `drawrooms` puts screen-right on +Y, and
+/// `p->ang` grows when the player turns right, which is the same fact twice.
+/// So the frame is (forward, right, −up) = (x, y, z) and, calling forward
+/// "east" the way Doom does, BUILD's +Y is SOUTH and its −Z is up.
+///
+/// The GLB is right-handed with Y up, −Z forward and +X the walker's right
+/// (`level.rs::yaw_forward` = `(sin yaw, 0, −cos yaw)`, strafe
+/// `(cos yaw, 0, sin yaw)`, so `forward × up = right`). Placing BUILD in it
+/// so that right stays right means:
+///
+/// ```text
+///     BUILD (x, y, z)  ->  GLB (x·SCALE, −z·SCALE_Z, y·SCALE)
+/// ```
+///
+/// Check it on the basis: `+x → +X`, `+y → +Z`, `−z → +Y`, and
+/// `+X × +Y = +Z` — forward × up is right, as it must be. Sending BUILD's y
+/// to −Z instead (which is what this converter did until the E1M1 mirror was
+/// found in the Doom path) has determinant −1: a perfectly walkable level
+/// that is the REFLECTION of the one Duke draws, with every wall texture and
+/// every sign reversed.
+#[inline]
+pub(crate) fn build_to_glb(x: f32, up: f32, y: f32) -> [f32; 3] {
+    [x * SCALE, up, y * SCALE]
+}
+
 /// BUILD's 2048-step compass to the engine's yaw about +Y.
+///
+/// A sprite or player at `ang` faces `(cos a, sin a)` in BUILD's own (x, y),
+/// which [`build_to_glb`] puts at `(cos a, 0, sin a)`. The consumer's forward
+/// is `(sin yaw, 0, −cos yaw)`, so `sin yaw = cos a` and `cos yaw = −sin a`:
+/// `yaw = a + π/2`. The π/2 is BUILD's angle 0 being +X (the engine's yaw 0
+/// looks down −Z), and it is not optional — without it every Duke start faced
+/// a quarter turn off its own map.
 fn build_yaw(ang: i16) -> f32 {
-    (ang as f32) * std::f32::consts::PI / 1024.0
+    std::f32::consts::FRAC_PI_2 + (ang as f32) * std::f32::consts::PI / 1024.0
 }
 
 /// A sprite's position as an EYE, like every other start: the floor of the
@@ -923,12 +956,12 @@ fn sprite_eye(map: &BuildMap, s: &Sprite, eye_height: f32) -> [f32; 3] {
         .get(s.sectnum.max(0) as usize)
         .map(|sec| slope_z(sec, map, x, y, false))
         .unwrap_or(-s.z as f32 * SCALE_Z);
-    [x * SCALE, floor + eye_height, -y * SCALE]
+    build_to_glb(x, floor + eye_height, y)
 }
 
 /// A sector's footprint in the GLB's x/z plane — the pad a teleport
-/// effector covers. BUILD y runs the opposite way to the engine's z, so the
-/// bounds swap ends.
+/// effector covers. BUILD y and the engine's z run the same way
+/// ([`build_to_glb`]), so the bounds keep their ends.
 fn sector_pad(map: &BuildMap, sectnum: i16) -> Option<([f32; 2], [f32; 2])> {
     let sec = map.sectors.get(sectnum.max(0) as usize)?;
     let first = sec.wallptr as usize;
@@ -946,8 +979,8 @@ fn sector_pad(map: &BuildMap, sectnum: i16) -> Option<([f32; 2], [f32; 2])> {
         return None;
     }
     Some((
-        [lo[0] * SCALE, -hi[1] * SCALE],
-        [hi[0] * SCALE, -lo[1] * SCALE],
+        [lo[0] * SCALE, lo[1] * SCALE],
+        [hi[0] * SCALE, hi[1] * SCALE],
     ))
 }
 
@@ -1391,7 +1424,7 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
             .map(|s| sector_centre(src, s))
             .unwrap_or([0.0, 0.0]);
         // Geometry is in level space; the anchor is the doorway centre.
-        let pos = [centre[0] * SCALE, closed_y, -centre[1] * SCALE];
+        let pos = build_to_glb(centre[0], closed_y, centre[1]);
         match m.kind {
             MoverKind::Door => {
                 let name = format!("door_{}", door_meta.len() + 1);
@@ -1472,13 +1505,12 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
     // The start is an EYE above the start sector's floor, like every other
     // classic converter's — not the map header's `posz`, which is only where
     // the editor's 3D camera was parked.
-    let spawn = Some([
-        map.start[0] as f32 * SCALE,
+    let start_pos = build_to_glb(
+        map.start[0] as f32,
         start_floor_y(map) + DUKE_VIEW_HEIGHT_Z as f32 * SCALE_Z,
-        -map.start[1] as f32 * SCALE,
-        yaw,
-        -0.08,
-    ]);
+        map.start[1] as f32,
+    );
+    let spawn = Some([start_pos[0], start_pos[1], start_pos[2], yaw, -0.08]);
     let mut sprites = BTreeSet::new();
     for s in &map.sprites {
         if s.picnum >= 0 && (s.cstat as u16) & 0x8000 == 0 {
@@ -2393,12 +2425,12 @@ fn map_to_place(
         } else {
             -s.z as f32 * SCALE_Z + height * 0.5
         };
-        let yaw = s.ang as f32 * std::f32::consts::PI / 1024.0;
+        let yaw = build_yaw(s.ang);
         places.push(crate::world_place::Place {
             id: format!("spr-{i}"),
             kind: "billboard".into(),
             asset: format!("billboards/{source_id}/tile-{}", s.picnum),
-            pos: [s.x as f32 * SCALE, y, -s.y as f32 * SCALE],
+            pos: build_to_glb(s.x as f32, y, s.y as f32),
             yaw,
             class: s.picnum.to_string(),
             width,
@@ -2461,6 +2493,8 @@ fn emit_upright_sprite(
     width: f32,
     height_z: f32,
 ) {
+    // BUILD's own angle, used in BUILD's own (x, y) plane — NOT
+    // `build_yaw`, which is the GLB yaw a camera turns to.
     let rad = s.ang as f32 * std::f32::consts::PI / 1024.0;
     // Width runs along (sin, −cos): the sprite faces `ang`.
     let ax = rad.sin();
@@ -2506,6 +2540,7 @@ fn emit_floor_sprite(
     width: f32,
     depth: f32,
 ) {
+    // BUILD's own angle, in BUILD's own (x, y) plane — see above.
     let rad = s.ang as f32 * std::f32::consts::PI / 1024.0;
     let c = rad.cos();
     let sn = rad.sin();
@@ -2524,7 +2559,7 @@ fn emit_floor_sprite(
     for (i, [lx, ly]) in corners.iter().enumerate() {
         let wx = cx + lx * c - ly * sn;
         let wy = cy + lx * sn + ly * c;
-        pts[i] = [wx * SCALE, y, -wy * SCALE];
+        pts[i] = build_to_glb(wx, y, wy);
     }
     let mut uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
     if s.cstat & 4 != 0 {
@@ -2541,8 +2576,10 @@ fn emit_floor_sprite(
     let i = mesh.positions.len() as u32;
     mesh.positions.extend_from_slice(&pts);
     mesh.uvs.extend_from_slice(&uvs);
+    // BUILD -> GLB is a reflection ([`build_to_glb`]): re-wind so the
+    // face keeps pointing the way it did.
     mesh.indices
-        .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+        .extend_from_slice(&[i, i + 2, i + 1, i, i + 3, i + 2]);
 }
 
 fn emit_quad(
@@ -2558,14 +2595,17 @@ fn emit_quad(
     uv11: [f32; 2],
     uv01: [f32; 2],
 ) {
-    let p0 = [a[0] * SCALE, zf0, -a[1] * SCALE];
-    let p1 = [b[0] * SCALE, zf1, -b[1] * SCALE];
-    let p2 = [b[0] * SCALE, zc1, -b[1] * SCALE];
-    let p3 = [a[0] * SCALE, zc0, -a[1] * SCALE];
+    let p0 = build_to_glb(a[0], zf0, a[1]);
+    let p1 = build_to_glb(b[0], zf1, b[1]);
+    let p2 = build_to_glb(b[0], zc1, b[1]);
+    let p3 = build_to_glb(a[0], zc0, a[1]);
     let i = mesh.positions.len() as u32;
     mesh.positions.extend_from_slice(&[p0, p1, p2, p3]);
     mesh.uvs.extend_from_slice(&[uv00, uv10, uv11, uv01]);
-    mesh.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+    // The reflection in `build_to_glb` turns a triangle inside out: wind the
+    // other way so the quad still faces where BUILD pointed it.
+    mesh.indices
+        .extend_from_slice(&[i, i + 2, i + 1, i, i + 3, i + 2]);
 }
 
 fn emit_tri(
@@ -2579,10 +2619,11 @@ fn emit_tri(
     let i = mesh.positions.len() as u32;
     for p in [a, b, c] {
         mesh.positions
-            .push([p[0] * SCALE, z_at(p[0], p[1]), -p[1] * SCALE]);
+            .push(build_to_glb(p[0], z_at(p[0], p[1]), p[1]));
         mesh.uvs.push(uv_at(p[0], p[1]));
     }
-    mesh.indices.extend_from_slice(&[i, i + 1, i + 2]);
+    // Reflected, so re-wound — see `build_to_glb`.
+    mesh.indices.extend_from_slice(&[i, i + 2, i + 1]);
 }
 
 fn subtract_holes(tri: [[f32; 2]; 3], holes: &[Vec<[f32; 2]>]) -> Vec<[[f32; 2]; 3]> {
@@ -5095,11 +5136,12 @@ enda
         };
         let mut sink = MeshSink::default();
         // tile width is baked into `width`; ang 0 faces +X so the quad
-        // should run along −Y / +Y, not along X.
+        // should run along −Y / +Y, not along X. BUILD y is GLB +z
+        // (`build_to_glb`), so the readback below is a plain divide.
         emit_upright_sprite(&mut sink, &s, 100.0, 80.0);
         let mesh = sink.level.get(&(1, 0)).expect("sprite bucket");
         let xs: Vec<f32> = mesh.positions.iter().map(|p| p[0] / SCALE).collect();
-        let zs: Vec<f32> = mesh.positions.iter().map(|p| -p[2] / SCALE).collect();
+        let zs: Vec<f32> = mesh.positions.iter().map(|p| p[2] / SCALE).collect();
         let x_span = xs.iter().cloned().fold(f32::MIN, f32::max)
             - xs.iter().cloned().fold(f32::MAX, f32::min);
         let y_span = zs.iter().cloned().fold(f32::MIN, f32::max)
@@ -6078,6 +6120,105 @@ enda
         );
         assert!((num(extras.get("repeat").unwrap()) - 1.0).abs() < 1e-6);
         assert_eq!(extras.get("texture").and_then(Value::as_str), Some("tile-1"));
+    }
+
+    /// **The handedness law, BUILD's half.** The sibling of
+    /// `classic_import::tests::e1m1_lands_where_the_wad_says_and_not_in_its_mirror`:
+    /// what a player sees to their LEFT in the source engine must be to their
+    /// left in the GLB. A mirrored converter flips only that one sign, which
+    /// is why nothing else in this suite noticed it for months — every span,
+    /// radius and bounding box is reflection-invariant.
+    ///
+    /// BUILD's own frame, from `drawrooms` and from `p->ang` growing on a
+    /// RIGHT turn: forward is `(cos a, sin a)` and screen-right is that
+    /// turned a quarter the same way, `(−sin a, cos a)` — so LEFT is
+    /// `(sin a, −cos a)`. Note the sign against Doom's left (`(−sin a,
+    /// cos a)`): the two engines wind their compasses opposite ways, and
+    /// [`build_to_glb`] and [`build_yaw`] are where that is absorbed.
+    #[test]
+    fn a_build_level_is_the_level_not_its_mirror() {
+        // Where a point lies for a viewer at `from` facing `ang`, as
+        // (ahead, left), in BUILD's own x/y plane and its own units.
+        let build_ahead_left = |from: [f32; 2], ang: i16, to: [f32; 2]| {
+            let (s, c) = ((ang as f32) * std::f32::consts::PI / 1024.0).sin_cos();
+            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+            (dx * c + dy * s, dx * s - dy * c)
+        };
+        // The same, in the GLB, through the renderer's camera basis:
+        // forward = (sin yaw, 0, −cos yaw), right = (cos yaw, 0, sin yaw)
+        // (`makepad_render::level::yaw_forward` and the strafe vector in
+        // `level.rs` / `play.rs`).
+        let glb_ahead_left = |from: [f32; 3], yaw: f32, to: [f32; 3]| {
+            let (f, r) = ([yaw.sin(), -yaw.cos()], [yaw.cos(), yaw.sin()]);
+            let d = [to[0] - from[0], to[2] - from[2]];
+            (d[0] * f[0] + d[1] * f[1], -(d[0] * r[0] + d[1] * r[1]))
+        };
+
+        let base = Sprite {
+            x: 0,
+            y: 0,
+            z: 0,
+            picnum: 0,
+            cstat: 0,
+            shade: 0,
+            pal: 0,
+            xrepeat: 8,
+            yrepeat: 8,
+            sectnum: 0,
+            ang: 0,
+            lotag: 0,
+            hitag: 0,
+        };
+        // Two landmarks 300 BUILD units off the start, on the two axes, so
+        // one pins "ahead" and the other pins "left" whichever way we look.
+        let key_xy = [812.0f32, 512.0];
+        let exit_xy = [512.0f32, 812.0];
+        // Every quarter turn, so no single angle can pass by symmetry.
+        for start_ang in [0i16, 512, 1024, 1536] {
+            let mut map = door_and_lift_map();
+            map.start = [512, 512, -4096];
+            map.start_ang = start_ang;
+            map.sprites = vec![
+                Sprite {
+                    picnum: TILE_ACCESSCARD,
+                    pal: 21,
+                    x: key_xy[0] as i32,
+                    y: key_xy[1] as i32,
+                    ..base.clone()
+                },
+                Sprite {
+                    picnum: TILE_NUKEBUTTON,
+                    x: exit_xy[0] as i32,
+                    y: exit_xy[1] as i32,
+                    ..base.clone()
+                },
+            ];
+            let world = map_to_world(&map, &one_tile_art()).expect("world");
+            let spawn = world.spawn.expect("spawn");
+            let nav = map_nav(&map, spawn);
+            let start_pos = [spawn[0], spawn[1], spawn[2]];
+            let yaw = spawn[3];
+            let start_xy = [map.start[0] as f32, map.start[1] as f32];
+            for (name, xy) in [("key_red", key_xy), ("exit", exit_xy)] {
+                let m = nav
+                    .markers
+                    .iter()
+                    .find(|m| m.name == name)
+                    .unwrap_or_else(|| panic!("marker {name} at ang {start_ang}"));
+                let (want_ahead, want_left) = build_ahead_left(start_xy, start_ang, xy);
+                let (got_ahead, got_left) = glb_ahead_left(start_pos, yaw, m.pos);
+                assert!(
+                    (got_ahead - want_ahead * SCALE).abs() < 1e-3
+                        && (got_left - want_left * SCALE).abs() < 1e-3,
+                    "ang {start_ang}, {name}: BUILD says ({:.3}, {:.3}) m, \
+                     the GLB says ({got_ahead:.3}, {got_left:.3}) — a flipped \
+                     `left` is the level's MIRROR, a swapped pair is a \
+                     quarter turn",
+                    want_ahead * SCALE,
+                    want_left * SCALE
+                );
+            }
+        }
     }
 
     /// Keycards, the exit and the teleporters are all in the sprite list, and
