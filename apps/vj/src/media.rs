@@ -451,6 +451,9 @@ pub struct SlotPlayer {
     pub width: u32,
     pub height: u32,
     pub duration_secs: f64,
+    /// The source carries a soundtrack (residency is "under budget AND
+    /// silent": an unmuted loop with audio streams).
+    has_audio: bool,
     shared: Arc<SlotShared>,
     /// Pause-aware presentation clock: media time at `clock_base` was
     /// `base_media_100ns`.
@@ -524,6 +527,7 @@ impl SlotPlayer {
             width: info.width,
             height: info.height,
             duration_secs: info.duration_100ns.max(0) as f64 / 10_000_000.0,
+            has_audio: info.has_audio,
             shared,
             clock_base: None,
             base_media_100ns: 0,
@@ -605,6 +609,28 @@ impl SlotPlayer {
     /// preserved) from a new cue (anchored afresh) by it.
     pub fn identity(&self) -> usize {
         Arc::as_ptr(&self.shared) as usize
+    }
+
+    /// THE RESIDENT TIER'S FRAMES: the complete cache, but only while the
+    /// residency law holds — the window fit the budget AND the repeat is
+    /// silent (no soundtrack, muted, or a bounce/reverse, which never
+    /// play audio). An unmuted loop with sound streams instead, so its
+    /// picture stays on the audio's clock.
+    pub fn resident_frames(&self) -> Option<Arc<Vec<Frame>>> {
+        let mode = PlayMode::from_u8(self.shared.mode.load(Ordering::Acquire));
+        let muted = self.shared.muted.load(Ordering::Acquire);
+        if !repeat_is_silent(self.has_audio, muted, mode) {
+            return None;
+        }
+        self.cache_frames()
+    }
+
+    /// The presenter says which source position is on screen (the resident
+    /// tier presents from the cache; nothing else would refresh the
+    /// readout the scrub bar and the loop analyzer follow).
+    pub fn publish_position_secs(&self, secs: f64) {
+        let pts = (secs.max(0.0) * 10_000_000.0) as i64;
+        self.shared.position_100ns.store(pts, Ordering::Release);
     }
 
     /// Continuous cache position (fractional frame index) and its rate in
@@ -4099,6 +4125,7 @@ mod tests {
             width: 1,
             height: 1,
             duration_secs: 1.0,
+            has_audio: false,
             shared: Arc::new(SlotShared {
                 stop: AtomicBool::new(false),
                 paused: AtomicBool::new(paused),
