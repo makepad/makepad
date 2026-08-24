@@ -42,6 +42,7 @@ script_mod! {
         draw_text +: {
             disabled: instance(0.0)
             down: instance(0.0)
+            ink_centered: true
             color: theme.color_label_inner
             color_hover: uniform(theme.color_label_inner_hover)
             color_focus: uniform(theme.color_label_inner_focus)
