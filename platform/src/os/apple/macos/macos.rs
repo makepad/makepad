@@ -469,19 +469,8 @@ impl Cx {
         MacosApp::event_loop();
     }
 
-    /// The window a pass ultimately presents into (through any chain of
-    /// offscreen parents); None for Xr/parentless passes.
-    fn pass_root_window(&self, pass_id: crate::draw_pass::DrawPassId) -> Option<WindowId> {
-        let mut id = pass_id;
-        for _ in 0..64 {
-            match self.passes[id].parent.clone() {
-                CxDrawPassParent::Window(window_id) => return Some(window_id),
-                CxDrawPassParent::DrawPass(parent) => id = parent,
-                _ => return None,
-            }
-        }
-        None
-    }
+    // `pass_root_window` now lives in os/cx_shared.rs — the Windows frame-latency
+    // beat needs the exact same lookup, so it is shared rather than duplicated.
 
     pub(crate) fn handle_repaint(
         &mut self,
