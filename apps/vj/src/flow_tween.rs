@@ -34,7 +34,118 @@
 
 use makepad_widgets::*;
 
-/// VJ_TWEEN_DEBUG=1|2|3 turns the warp into a diagnostic view (flow
+use crate::media::tl_on;
+
+/// THE NEURAL FIELD PRODUCER: one background worker owning the RIFE
+/// runtime. Jobs are (generation, pair, two RGB8 proxies); results are
+/// the net's intermediate flow + occlusion mask. The worker keeps only
+/// the NEWEST job (a busy pair is simply skipped — the classical fields
+/// cover it), so it can never fall behind the transport.
+pub struct RifeService {
+    tx: std::sync::mpsc::SyncSender<RifeJob>,
+    result: std::sync::Arc<std::sync::Mutex<Option<RifeField>>>,
+}
+
+pub struct RifeJob {
+    pub generation: u64,
+    pub pair: usize,
+    pub rgb0: Vec<u8>,
+    pub rgb1: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+}
+
+pub struct RifeField {
+    pub generation: u64,
+    pub pair: usize,
+    pub width: usize,
+    pub height: usize,
+    /// Packed RGBA per proxy pixel: t->frame0 xy, t->frame1 xy (pixels).
+    pub flow: Vec<f32>,
+    /// Post-sigmoid occlusion mask, 0..1.
+    pub mask: Vec<f32>,
+}
+
+impl RifeService {
+    /// Spawn with the checkpoint at `model_path`. Fails soft: a missing
+    /// or bad checkpoint returns Err and the caller stays classical.
+    pub fn start(model_path: &std::path::Path) -> Result<Self, String> {
+        use makepad_ai_rife::rife::{
+            Rife, RifeBackendKind, RifeFramePair, RifeScale, RifeWeights,
+        };
+        if !makepad_ai_rife::rife::rife_device_available() {
+            return Err("rife device backend unavailable".into());
+        }
+        let weights = RifeWeights::load(model_path)
+            .map_err(|e| format!("rife checkpoint: {e:?}"))?;
+        let model = weights
+            .prepare_model(None)
+            .map_err(|e| format!("rife prepare: {e:?}"))?;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<RifeJob>(1);
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let out = result.clone();
+        std::thread::Builder::new()
+            .name("vj-rife".into())
+            .spawn(move || {
+                let rife = Rife::from_model_weights_scaled(
+                    model,
+                    RifeBackendKind::Device,
+                    RifeScale::Half,
+                );
+                while let Ok(job) = rx.recv() {
+                    let Ok(pair) = RifeFramePair::new(
+                        &job.rgb0, &job.rgb1, job.width, job.height,
+                    ) else {
+                        continue;
+                    };
+                    let t0 = std::time::Instant::now();
+                    let Ok(field) = rife.flow_field_rgb8(pair, 0.5, None) else {
+                        continue;
+                    };
+                    // Repack planar [4, plane] + mask into interleaved
+                    // RGBA texels for the warp texture.
+                    let plane = job.width * job.height;
+                    let mut flow = vec![0.0f32; plane * 4];
+                    for i in 0..plane {
+                        flow[i * 4] = field.flow[i];
+                        flow[i * 4 + 1] = field.flow[plane + i];
+                        flow[i * 4 + 2] = field.flow[2 * plane + i];
+                        flow[i * 4 + 3] = field.flow[3 * plane + i];
+                    }
+                    if tl_on() {
+                        eprintln!(
+                            "tl rife pair={} {}x{} in {:.0}ms",
+                            job.pair,
+                            job.width,
+                            job.height,
+                            t0.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    *out.lock().unwrap() = Some(RifeField {
+                        generation: job.generation,
+                        pair: job.pair,
+                        width: job.width,
+                        height: job.height,
+                        flow,
+                        mask: field.mask,
+                    });
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Self { tx, result })
+    }
+
+    /// Offer a pair; a busy worker skips it (classical covers the gap).
+    pub fn offer(&self, job: RifeJob) {
+        let _ = self.tx.try_send(job);
+    }
+
+    pub fn take(&self) -> Option<RifeField> {
+        self.result.lock().unwrap().take()
+    }
+}
+
+/// `VJ_TWEEN_DEBUG=1|2|3` turns the warp into a diagnostic view (flow
 /// field / frame A passthrough / t ramp).
 fn tween_debug() -> f32 {
     static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
@@ -416,6 +527,8 @@ script_mod! {
         tex_uv_b: texture_2d(float)
         tex_fwd: texture_2d(float)
         tex_bwd: texture_2d(float)
+        tex_rife: texture_2d(float)
+        tex_rife_mask: texture_2d(float)
         vertex: fn() {
             let clipped = self.geom.pos * self.rect_size + self.rect_pos
             self.pos = self.geom.pos
@@ -442,8 +555,29 @@ script_mod! {
         // field, weight by (time distance) x (cycle consistency). A cell
         // one frame cannot see leans on the frame that can — the
         // occlusion mask's job in the stored-payload scheme.
+        //
+        // RIFE MODE (rife_on = 1): tex_rife carries the NET's fields —
+        // INTERMEDIATE-defined at t=0.5, RG = t->frame0 xy, BA =
+        // t->frame1 xy, in proxy pixels — plus the learned occlusion mask.
+        // Intermediate-defined flow makes the backward gather EXACT (no
+        // small-motion approximation), which is the whole reason the
+        // neural producer feeds this same pass.
+        rife_pixel: fn() -> vec4 {
+            let t = self.t_pair
+            let f = self.tex_rife.sample(self.pos)
+            let m = self.tex_rife_mask.sample(self.pos).x
+            let a = self.nv12_a(self.pos + f.xy * (t / 0.5) * self.rife_inv)
+            let b = self.nv12_b(self.pos + f.zw * ((1.0 - t) / 0.5) * self.rife_inv)
+            let wa = (1.0 - t) * (0.02 + m)
+            let wb = t * (1.02 - m)
+            let rgb = (a * wa + b * wb) / (wa + wb)
+            return vec4(clamp(rgb.x, 0.0, 1.0), clamp(rgb.y, 0.0, 1.0), clamp(rgb.z, 0.0, 1.0), 1.0)
+        }
         pixel: fn() {
             let t = self.t_pair
+            if self.dbg < 0.5 && self.rife_on > 0.5 {
+                return self.rife_pixel()
+            }
             let fw = self.tex_fwd.sample(self.pos).xy
             let bw = self.tex_bwd.sample(self.pos).xy
             // VJ_TWEEN_DEBUG: 1 = flow field (x red, y green, 0 = mid
@@ -571,6 +705,12 @@ pub struct DrawTweenWarp {
     /// Debug visualization (VJ_TWEEN_DEBUG): 0 off, 1 flow, 2 frame A, 3 t.
     #[live]
     pub dbg: f32,
+    /// 1.0 = warp from the NEURAL fields in tex_rife (see rife_pixel).
+    #[live]
+    pub rife_on: f32,
+    /// One RIFE proxy pixel in uv units.
+    #[live]
+    pub rife_inv: Vec2f,
 }
 
 /// One offscreen stage: its pass, its draw list, and (for the flow
@@ -639,6 +779,14 @@ pub struct FlowTweenView {
     flow_dirty: bool,
     #[rust]
     rendered: bool,
+    /// Neural fields for the CURRENT pair (flow RGBA32F + mask R8), and
+    /// which pair they belong to.
+    #[rust]
+    rife_tex: Option<(Texture, Texture)>,
+    #[rust]
+    rife_pair: Option<usize>,
+    #[rust]
+    rife_dims: (usize, usize),
 }
 
 impl FlowTweenView {
@@ -718,7 +866,71 @@ impl FlowTweenView {
         self.size = (0, 0);
         self.flow_dirty = false;
         self.rendered = false;
+        self.rife_pair = None;
         self.area.redraw(cx);
+    }
+
+    /// Adopt a neural field for `pair` (RGBA-interleaved intermediate
+    /// flow + mask at proxy resolution).
+    pub fn set_rife_field(
+        &mut self,
+        cx: &mut Cx,
+        pair: usize,
+        width: usize,
+        height: usize,
+        flow: &[f32],
+        mask: &[f32],
+    ) {
+        if flow.len() < width * height * 4 || mask.len() < width * height {
+            return;
+        }
+        if self.rife_tex.is_none() || self.rife_dims != (width, height) {
+            self.rife_tex = Some((
+                Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecRGBAf32 {
+                        width,
+                        height,
+                        data: Some(flow.to_vec()),
+                        updated: TextureUpdated::Full,
+                    },
+                ),
+                Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecRu8 {
+                        width,
+                        height,
+                        data: Some(mask.iter().map(|m| (m * 255.0) as u8).collect()),
+                        unpack_row_length: None,
+                        updated: TextureUpdated::Full,
+                    },
+                ),
+            ));
+            self.rife_dims = (width, height);
+        } else if let Some((flow_tex, mask_tex)) = &self.rife_tex {
+            let mut buf = flow_tex.take_vec_f32(cx);
+            buf.clear();
+            buf.extend_from_slice(&flow[..width * height * 4]);
+            flow_tex.put_back_vec_f32(cx, buf, None);
+            let mut mb = mask_tex.take_vec_u8(cx);
+            mb.clear();
+            mb.extend(mask.iter().map(|m| (m * 255.0) as u8));
+            mask_tex.put_back_vec_u8(cx, mb, None);
+        }
+        self.rife_pair = Some(pair);
+        self.area.redraw(cx);
+    }
+
+    /// The pair the tween view is currently showing (for job scheduling).
+    pub fn rife_field_pair(&self) -> Option<usize> {
+        self.rife_pair
+    }
+
+    /// Drop the neural field (pair changed before a fresh one arrived).
+    pub fn clear_rife_field(&mut self, cx: &mut Cx) {
+        if self.rife_pair.take().is_some() {
+            self.area.redraw(cx);
+        }
     }
 
     pub fn has_pair(&self) -> bool {
@@ -1009,6 +1221,24 @@ impl Widget for FlowTweenView {
         let (w, h) = (self.size.0, self.size.1);
         self.draw_warp.dbg = self.dbg_override.unwrap_or_else(tween_debug);
         self.draw_warp.t_pair = self.t;
+        match (&self.rife_tex, self.rife_pair) {
+            (Some((flow_tex, mask_tex)), Some(_)) => {
+                self.draw_warp.rife_on = 1.0;
+                self.draw_warp.rife_inv = vec2(
+                    1.0 / self.rife_dims.0.max(1) as f32,
+                    1.0 / self.rife_dims.1.max(1) as f32,
+                );
+                self.draw_warp.draw_vars.set_texture(6, flow_tex);
+                self.draw_warp.draw_vars.set_texture(7, mask_tex);
+            }
+            _ => {
+                self.draw_warp.rife_on = 0.0;
+                // Bind SOMETHING valid in the rife slots (the field
+                // textures double up) so no backend sees an empty slot.
+                self.draw_warp.draw_vars.set_texture(6, &self.field_tex[0]);
+                self.draw_warp.draw_vars.set_texture(7, &self.field_tex[1]);
+            }
+        }
         self.draw_warp.inv_grid = vec2(1.0 / gw as f32, 1.0 / gh as f32);
         self.draw_warp.draw_vars.set_texture(0, &planes[0]);
         self.draw_warp.draw_vars.set_texture(1, &planes[1]);

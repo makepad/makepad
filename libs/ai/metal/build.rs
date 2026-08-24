@@ -34,6 +34,17 @@ use std::process::Command;
 // `include_str!(concat!(env!("MAKEPAD_GGML_METAL_SHADER_DIR"), "/ggml-metal.metal"))`
 // — file contents stay byte-identical, only how the path is found changes.
 fn main() {
+    // Apple BLAS for the RIFE host-path GEMMs (rife.rs): cblas_sgemm off
+    // the Accelerate framework — hundreds of GFLOP/s with zero dispatch
+    // overhead, exactly what fifty small convolutions per frame pair want.
+    #[allow(clippy::needless_return)]
+    {
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if target_os == "macos" || target_os == "ios" {
+            println!("cargo:rustc-link-lib=framework=Accelerate");
+        }
+    }
+
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_METAL_PRECOMPILE");
 
     // shim.rs's non-macos CUDA bounce only compiles when makepad-ai-cuda
