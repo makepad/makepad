@@ -980,6 +980,22 @@ impl Transport {
         Some(if l.t < 0.5 { l.a } else { l.b })
     }
 
+    /// The pair the platter will be serving `k` pairs from now, PREDICTED
+    /// ALONG THE MAP's traversal — a loop wraps through its seam, a bounce
+    /// reflects at its ends — never a numeric ±k. This is what a producer
+    /// prefetches for. `k` may be fractional; the direction is the current
+    /// travel (a paused platter predicts along travel).
+    pub fn locate_ahead(&self, k: f64) -> Option<Locate> {
+        let tl = self.timeline.as_ref()?;
+        let dir = if self.last_omega != 0.0 {
+            self.last_omega.signum()
+        } else {
+            self.travel
+        };
+        let (pos, _) = self.map(self.q + dir * k * tl.tail());
+        self.locate(pos)
+    }
+
     /// On-screen pace in source frames per second for a step: what the
     /// AI-tier gate reads.
     pub fn pace_fps(&self, step: &Step) -> f64 {
