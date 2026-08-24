@@ -367,13 +367,34 @@ impl Downloader {
         if let Some(leases) = &self.leases {
             leases.wait_unleased(dest, LEASE_WAIT)?;
         }
+        // Durability before visibility: the rename makes the artifact LOOK
+        // installed, so the bytes must be durable first. Without this a
+        // machine crash after the rename can leave a full-length file with
+        // torn pages — it passes every stat-based probe and loads broken.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(part)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| {
+                AssetAiError::Download(format!("fsync {}: {e}", part.display()))
+            })?;
         let mut attempt = 0u32;
         loop {
             if dest.exists() {
                 let _ = fs::remove_file(dest);
             }
             match fs::rename(part, dest) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // And the rename itself (best effort — not every
+                    // platform lets a directory be fsynced).
+                    #[cfg(unix)]
+                    if let Some(parent) = dest.parent() {
+                        if let Ok(dir) = fs::File::open(parent) {
+                            let _ = dir.sync_all();
+                        }
+                    }
+                    return Ok(());
+                }
                 Err(e) if attempt < 5 => {
                     attempt += 1;
                     std::thread::sleep(Duration::from_millis(40 * attempt as u64));
