@@ -121,6 +121,12 @@ impl App {
         self.platter[i].as_ref().map(|p| p.transport.screen_forward())
     }
 
+    /// The pair the slot's platter will serve `k` pairs from now — the
+    /// producer's prefetch target, predicted along the map.
+    pub(crate) fn platter_locate_ahead(&self, i: usize, k: f64) -> Option<crate::transport::Locate> {
+        self.platter[i].as_ref().and_then(|p| p.transport.locate_ahead(k))
+    }
+
     /// Step the slot's platter to `now` against its resident cache.
     pub(crate) fn platter_step(
         &mut self,
