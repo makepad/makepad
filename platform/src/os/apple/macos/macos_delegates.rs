@@ -94,6 +94,12 @@ pub fn define_macos_timer_delegate() -> *const Class {
         }));
     }
 
+    extern "C" fn received_display_link(_this: &Object, _: Sel, link: ObjcId) {
+        shielded("display-link", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_display_link_fired(link);
+        }));
+    }
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
 
@@ -106,6 +112,10 @@ pub fn define_macos_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedLiveResize:),
             received_live_resize as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedDisplayLink:),
+            received_display_link as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
 
