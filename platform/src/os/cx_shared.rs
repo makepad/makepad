@@ -57,6 +57,26 @@ impl Cx {
         false
     }
 
+    /// The window a pass ultimately presents into (through any chain of
+    /// offscreen parents); None for Xr/parentless passes.
+    ///
+    /// Shared by the per-window paced backends — the macOS display link and the
+    /// Windows DXGI frame-latency beat — to decide which passes belong to the
+    /// window whose flip is currently being serviced. The 64-step cap is a
+    /// cycle guard: a malformed parent chain must not hang the paint loop.
+    #[allow(dead_code)]
+    pub(crate) fn pass_root_window(&self, pass_id: DrawPassId) -> Option<crate::window::WindowId> {
+        let mut id = pass_id;
+        for _ in 0..64 {
+            match self.passes[id].parent.clone() {
+                CxDrawPassParent::Window(window_id) => return Some(window_id),
+                CxDrawPassParent::DrawPass(parent) => id = parent,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
