@@ -390,13 +390,11 @@ struct SlotShared {
     /// inside it, ONCE holds at OUT.
     trim_in_100ns: AtomicI64,
     trim_out_100ns: AtomicI64,
-    /// BEAT TRANSPORT (the videoloop sync law: "one beat, one play
-    /// direction"): while on, the cache repeat runs at CONSTANT rate and
-    /// each `beat_pulse` tick — the app's beat boundary — wraps a Loop to
-    /// IN / flips a PingPong's direction. A range edge reached before the
-    /// beat HOLDS there; the next pulse launches the next sweep.
+    /// BEAT TRANSPORT: while on, the law-paced FIRST PASS (the streaming
+    /// decode while the cache fills) runs at the sweep rate the beats chip
+    /// and the beat hint derive. The resident tier's beat lock lives in
+    /// the presenter's platter (transport.rs), not here.
     beat_transport: AtomicBool,
-    beat_pulse: AtomicU64,
     /// BEATS PER SWEEP — the rate chip's value, literally (8/4/2/1: 8 =
     /// one sweep stretched across eight beats, 1 = a sweep per beat).
     beats_per_sweep: AtomicU8,
@@ -408,20 +406,10 @@ struct SlotShared {
     /// sweep disengages; sign and magnitude are natural-rate units.
     scratch_active: AtomicBool,
     scratch_rate_bits: AtomicU64,
-    /// LIVE DIRECTION FLIP (the REV button inside a bounce): a bumped
-    /// counter asks the cache tier to invert its travel NOW — the beat
-    /// sweep re-engages from the on-screen position, never a teleport.
-    /// `travel_forward` publishes the direction actually being served so
-    /// the button can track the live leg.
-    dir_flip: AtomicU64,
+    /// The direction the STREAMING tiers are serving (the tier-3 seek
+    /// bounce publishes its leg) so the REV button can track it; a
+    /// resident clip's button reads the platter's map instead.
     travel_forward: AtomicBool,
-    /// CONTINUOUS CACHE POSITION for the GPU frame tweener: the fractional
-    /// index into the repeat cache the transport is at (f64 bits) and its
-    /// rate in cache-frames per second (signed, f64 bits). Published every
-    /// cache tick; the UI predicts between ticks and warps an in-between
-    /// out of the two neighbouring frames instead of snapping to one.
-    cache_pos_bits: AtomicU64,
-    cache_rate_bits: AtomicU64,
     /// THE EAGER REPEAT CACHE: a dedicated worker decodes the trim window
     /// at full hardware speed the moment a loop-capable mode is on — the
     /// frame-exact transports unlock in a fraction of one play-through
@@ -495,15 +483,11 @@ impl SlotPlayer {
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
-            beat_pulse: AtomicU64::new(0),
             beats_per_sweep: AtomicU8::new(4),
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
-            dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
-            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
-            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
@@ -584,16 +568,7 @@ impl SlotPlayer {
         self.shared.mode.store(mode as u8, Ordering::Release);
     }
 
-    /// The REV button inside a bounce: flip the CURRENT travel direction.
-    /// Loop/Reverse switch modes instead; a ping-pong keeps its mode and
-    /// inverts the leg in flight. The cache tier honors it on its next
-    /// frame; the first-pass forward decode and the seek-hop tier cannot
-    /// (a forward codec mid-decode has no leg to mirror).
-    pub fn flip_direction(&mut self) {
-        self.shared.dir_flip.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// The direction the transport is actually serving (true = forward).
+    /// The direction the STREAMING transport is serving (true = forward).
     pub fn travel_forward(&self) -> bool {
         self.shared.travel_forward.load(Ordering::Acquire)
     }
@@ -631,15 +606,6 @@ impl SlotPlayer {
     pub fn publish_position_secs(&self, secs: f64) {
         let pts = (secs.max(0.0) * 10_000_000.0) as i64;
         self.shared.position_100ns.store(pts, Ordering::Release);
-    }
-
-    /// Continuous cache position (fractional frame index) and its rate in
-    /// cache-frames per second — the tweener's clock.
-    pub fn cache_pos(&self) -> (f64, f64) {
-        (
-            f64::from_bits(self.shared.cache_pos_bits.load(Ordering::Acquire)),
-            f64::from_bits(self.shared.cache_rate_bits.load(Ordering::Acquire)),
-        )
     }
 
     /// Drop this slot's audio at the source: no samples reach the mixer
@@ -745,11 +711,6 @@ impl SlotPlayer {
 
     pub fn clear_scratch(&mut self) {
         self.shared.scratch_active.store(false, Ordering::Release);
-    }
-
-    /// One beat boundary: the transport turns/wraps NOW.
-    pub fn beat_pulse(&mut self) {
-        self.shared.beat_pulse.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The current trim bounds as fractions (0..=1).
@@ -1134,7 +1095,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     && (live_mode != PlayMode::Once || scratching)
                     && cache.is_some()
                 {
-                    cache_playback(&shared, cache.as_ref().unwrap());
+                    park_while_resident(&shared, info.has_audio);
                     if shared.stop.load(Ordering::Acquire) {
                         return;
                     }
@@ -1226,7 +1187,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     // re-entered this branch forever — EOS → exit → EOS —
                     // a silent busy-spin that froze the picture with the
                     // loop lit.)
-                    cache_playback(&shared, cache.as_ref().unwrap());
+                    park_while_resident(&shared, info.has_audio);
                 }
                 if (matches!(mode, PlayMode::PingPong | PlayMode::Reverse)
                     || shared.scratch_active.load(Ordering::Acquire))
@@ -1547,132 +1508,26 @@ fn cache_range_outgrown(built: (i64, i64), live: (i64, i64)) -> bool {
     live.0 < built.0 || live.1 > built.1
 }
 
-/// THE VIDEOLOOP SYNC LAW, in its operator-ratified final form: ONE
-/// DIRECTION SWEEP = ONE BEAT STEP. The playback rate is DERIVED FROM
-/// THE RANGE — a sweep of the user's trim (or the whole clip) spans
-/// exactly one beat divided by the rate chip, REGARDLESS of how wide the
-/// range is. A small range plays slow motion, a wide range rushes, and a
-/// turn coincides with a beat boundary BY CONSTRUCTION — there is never
-/// a pause (the edge-hold refinement froze the picture between edge
-/// arrival and the next pulse, and was rejected: "it literally pauses"),
-/// and never an off-beat turn. The chip is cadence: 2x sweeps in half a
-/// beat, 0.5x stretches one sweep across two.
+/// THE RESIDENT PARK. Once a silent, loop-capable clip's window is
+/// resident (the complete cache the presenter's platter serves from —
+/// transport.rs / platter.rs own position from here on), the decode
+/// thread has nothing to add: it idles here, pushing nothing, until the
+/// decoder is needed again — a seek (the presenter cued the stream: the
+/// ring restarts from the target), Once mode (no repeat to serve), the
+/// live trim growing past the window the cache was built under (the
+/// eager fill must fetch the uncovered part), the repeat going audible
+/// (an unmuted loop with a soundtrack streams so its picture stays on the
+/// audio's clock), the cache being dropped (a trim epoch), or stop. The
+/// ring is cleared on entry so nothing decoded under the old regime is
+/// presented after the handover; the presenter anchors at the frame it
+/// last showed, never at a queue tail.
 ///
-/// The transport therefore runs on PHASE, not on frame indices: `phase`
-/// walks 0→1 once per sweep, and [`sweep_index`] maps it into the live
-/// `[lo, hi)` window each tick. That mapping is what makes a LIVE TRIM
-/// rescale instead of teleport: the phase is untouched, so the position
-/// remaps proportionally into the new range and the sweep keeps landing
-/// its turns on the grid. (The original sin — "dialing speeds makes up a
-/// range" — was a WRONG RANGE, never the rate derivation: the range is
-/// the user's trim, exactly, and this mapping cannot invent another.)
-///
-/// A bounce alternates direction each beat step (the mirrored map); a
-/// wrap restarts each step from IN.
-fn sweep_index(phase: f64, forward: bool, lo: usize, hi: usize, mode: PlayMode) -> usize {
-    let span = hi.max(lo + 1) - lo;
-    // Reverse is the always-mirrored map: every sweep runs OUT → IN and
-    // each beat step restarts from OUT (the wrap law, played backwards).
-    let mirrored =
-        mode == PlayMode::Reverse || (mode == PlayMode::PingPong && !forward);
-    let u = if mirrored { 1.0 - phase } else { phase };
-    lo + ((u.clamp(0.0, 1.0)) * (span as f64 - 1.0)).round() as usize
-}
-
-/// One tick of the sweep clock: advance the phase by `step` (the tick's
-/// share of one beat step), wrapping at 1.0 with the OVERSHOOT CARRIED —
-/// the wrap costs zero time, so the long-run cadence is exact and the
-/// motion never hitches at the turn. The wrap flips a bounce and
-/// restarts a wrap-mode loop (the `forward` flag; a loop is always
-/// forward).
-fn advance_sweep(
-    phase: f64,
-    forward: bool,
-    step: f64,
-    mode: PlayMode,
-) -> (f64, bool) {
-    let next = phase + step.max(0.0);
-    if next >= 1.0 {
-        let carried = (next - 1.0).min(1.0 - f64::EPSILON);
-        (carried, if mode == PlayMode::PingPong { !forward } else { true })
-    } else {
-        (next, forward)
-    }
-}
-
-/// The beat lock's only corrective authority: a bounded phase NUDGE.
-/// At each observed pulse the sweep phase should sit on a grid multiple
-/// of `m` = 1/beats-per-sweep — a 4-beat sweep passes a beat at every
-/// quarter of its phase, and each must land on the pulse.
-/// The returned signed nudge walks the phase toward the nearest
-/// multiple, clamped to ±2% of a sweep per pulse: drift from rounding or
-/// a rate flip converges over a few beats, and the correction is far too
-/// small to ever read as a skip. NEVER a snap — a snap is a teleport.
-fn beat_phase_nudge(phase_at_beat: f64, beats_per_sweep: f64) -> f64 {
-    let m = (1.0 / beats_per_sweep.max(1.0)).clamp(0.05, 1.0);
-    let err = (phase_at_beat / m).round() * m - phase_at_beat;
-    err.clamp(-0.02, 0.02)
-}
-
-fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
-    if cache.len() < 2 {
-        return;
-    }
-    // Constant-fps clips: the median delta IS the frame duration.
-    let mut deltas: Vec<i64> = cache.windows(2).map(|w| w[1].pts_100ns - w[0].pts_100ns).collect();
-    deltas.sort_unstable();
-    let delta = deltas[deltas.len() / 2].max(1);
-    // Continue the PACING clock from wherever the ring left it — the
-    // law-paced first pass runs a compressed/stretched pts domain, and
-    // starting from the cache's REAL tail would jump the pacer forward
-    // (a stall exactly as long as the compression saved).
-    let mut synth_pts = {
-        let tail = shared.pace_tail_100ns.load(Ordering::Acquire);
-        let real = cache.last().map(|f| f.pts_100ns).unwrap_or(0);
-        if tail > 0 { tail } else { real }
-    };
-    let n = cache.len();
-    // ENGAGE FROM THE STREAM'S COMMITTED POSITION: with the eager fill,
-    // adoption can happen mid-pass (or right after a scrub) — starting
-    // anywhere else would teleport. The reference is the ring's TAIL (the
-    // newest frame already queued for presentation), not the presented
-    // position, which trails the queue and would splice a backward step
-    // in behind it. At an EOS handover both sit at the end, so this
-    // degenerates to the old n-1.
-    let pos = shared
-        .frames
-        .lock()
-        .unwrap()
-        .back()
-        .map(|f| f.clip_100ns)
-        .unwrap_or_else(|| shared.position_100ns.load(Ordering::Acquire));
-    let mut idx = cache.partition_point(|f| f.clip_100ns < pos).min(n - 1);
-    let mut forward = true;
-    let mut last_mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
-    let mut last_pulse = shared.beat_pulse.load(Ordering::Acquire);
-    // Sweep-law transport state: the 0→1 phase of the current beat step,
-    // the pulse-learned beat period in presentation pts, and whether the
-    // transport was on last tick (to derive the phase from the current
-    // position at engage instead of teleporting to IN).
-    let mut sweep_phase: f64 = 0.0;
-    let mut beat_anchor_pts: Option<i64> = None;
-    let mut beat_media: i64 = 0;
-    let mut transport_was_on = false;
-    let mut scratch_was_on = false;
-    let mut scratch_pos = 0f64;
-    let mut seen_flip = shared.dir_flip.load(Ordering::Acquire);
-    // Trim changes do NOT bounce control back here: the IN/OUT bounds are
-    // read LIVE each frame below, so a shrinking range just tightens the
-    // space the repeat moves in — playback never resets. Control only goes
-    // back when the range GROWS past the bounds this cache was BUILT
-    // under (the decoder must fetch the uncovered part). The build bounds
-    // are simply the bounds at entry: any earlier trim change cleared the
-    // cache via the epoch watch, so a complete cache is always a product
-    // of the current bounds. NEVER compare against frame pts — real MP4s
-    // start at a nonzero pts, and measuring trim 0 against that offset
-    // made every untrimmed clip look "uncovered" (the frozen-loop bug).
-    let built_in = shared.trim_in_100ns.load(Ordering::Acquire);
-    let built_out = shared.trim_out_100ns.load(Ordering::Acquire);
+/// This replaced `cache_playback`, the media thread's own sweep clock
+/// (phase + beat nudge + published pos/rate atomics): two clocks and a
+/// position writer the platter has no room for.
+fn park_while_resident(shared: &Arc<SlotShared>, has_audio: bool) {
+    shared.frames.lock().unwrap().clear();
+    let built = shared.repeat_cache.lock().unwrap().built;
     loop {
         if shared.stop.load(Ordering::Acquire) {
             return;
@@ -1680,263 +1535,24 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
             return;
         }
-        {
-            let t_in = shared.trim_in_100ns.load(Ordering::Acquire);
-            let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
-            if cache_range_outgrown((built_in, built_out), (t_in, t_out)) {
-                return;
-            }
-        }
         let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
         if mode == PlayMode::Once {
             return;
         }
-        if mode != last_mode {
-            // A LIVE mode switch (the deck's picker) re-engages the beat
-            // sweep from the on-screen position instead of remapping the
-            // phase under the new mode's map — which would teleport.
-            last_mode = mode;
-            transport_was_on = false;
+        if !repeat_is_silent(has_audio, shared.muted.load(Ordering::Acquire), mode) {
+            return;
         }
-        {
-            // REV inside a bounce: invert the travel in flight. The beat
-            // sweep re-engages from the on-screen position (same law as a
-            // mode switch), so the picture turns around where it is.
-            let flip = shared.dir_flip.load(Ordering::Acquire);
-            if flip != seen_flip {
-                seen_flip = flip;
-                forward = !forward;
-                transport_was_on = false;
-                if tl_on() {
-                    eprintln!("tl cache dirflip fwd={forward}");
-                }
-            }
-        }
-        shared.travel_forward.store(forward, Ordering::Release);
-        if shared.paused.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(8));
-            continue;
-        }
-        if shared.frames.lock().unwrap().len() >= RING_FRAMES {
-            std::thread::sleep(Duration::from_millis(4));
-            continue;
-        }
-        // Live IN/OUT bounds → the index range [lo, hi) the repeat may
-        // touch (at least one frame wide). Loop wraps to lo, bounce
-        // reflects at both.
-        let t_in = shared.trim_in_100ns.load(Ordering::Acquire);
-        let t_out = shared.trim_out_100ns.load(Ordering::Acquire);
-        let lo = cache.partition_point(|f| f.pts_100ns < t_in).min(n - 1);
-        let hi = cache.partition_point(|f| f.pts_100ns < t_out).clamp(lo + 1, n);
-        if shared.scratch_active.load(Ordering::Acquire) {
-            // SCRATCH: the hand owns the transport. Follow it within the
-            // trim window, clamp at the edges, and mark the sweep
-            // disengaged so release re-engages FROM THIS POSITION.
-            if !scratch_was_on {
-                scratch_was_on = true;
-                scratch_pos = idx.clamp(lo, hi - 1) as f64;
-            }
-            let srate = f64::from_bits(
-                shared.scratch_rate_bits.load(Ordering::Acquire),
-            )
-            .clamp(-8.0, 8.0);
-            scratch_pos =
-                (scratch_pos + srate).clamp(lo as f64, (hi - 1) as f64);
-            idx = scratch_pos.round() as usize;
-            forward = srate >= 0.0;
-            shared.cache_pos_bits.store(scratch_pos.to_bits(), Ordering::Release);
-            shared
-                .cache_rate_bits
-                .store((srate * 1e7 / delta as f64).to_bits(), Ordering::Release);
-            if tl_on() {
-                eprintln!("tl cache scratch idx={idx} srate={srate:+.3} win={lo}..{hi}");
-            }
-            transport_was_on = false;
-            synth_pts += delta;
-            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
-            shared.frames.lock().unwrap().push_back(Frame {
-                pts_100ns: synth_pts,
-                clip_100ns: cache[idx].pts_100ns,
-                px: cache[idx].px.clone(),
-            });
-            continue;
-        }
-        scratch_was_on = false;
-        if shared.beat_transport.load(Ordering::Acquire) {
-            let span = hi - lo;
-            if !transport_was_on {
-                transport_was_on = true;
-                // Engage from WHERE THE PICTURE IS: derive the phase from
-                // the current index so switching sync on (or entering the
-                // cache at the end of the decode pass) continues the
-                // motion instead of teleporting to IN.
-                let u = if span > 1 {
-                    (idx.clamp(lo, hi - 1) - lo) as f64 / (span - 1) as f64
-                } else {
-                    0.0
-                };
-                sweep_phase = if (mode == PlayMode::PingPong && !forward)
-                    || mode == PlayMode::Reverse
-                {
-                    1.0 - u
-                } else {
-                    u
-                };
-                if mode == PlayMode::Loop {
-                    forward = true;
-                }
-            }
-            // THE CHIP IS BEATS: one sweep spans exactly `beats` beat
-            // periods (8/4/2/1). The grid is the pulse-learned period,
-            // seeded by the app's HINT so the law paces from the very
-            // first frame of a cue; only with neither (no clock at all —
-            // impossible in the app) does the sweep fall to natural.
-            let beats =
-                shared.beats_per_sweep.load(Ordering::Acquire).max(1) as f64;
-            let grid = if beat_media > 0 {
-                beat_media as f64
-            } else {
-                shared.beat_hint_100ns.load(Ordering::Acquire) as f64
-            };
-            let sweep_pts = if grid > 0.0 {
-                grid * beats
-            } else {
-                (span.max(2) as f64) * delta as f64
-            };
-            let step = (delta as f64 / sweep_pts).clamp(1e-6, 1.0);
-            // Learn the beat grid from the pulses: pulse-to-pulse spacing
-            // of the push clock IS the period in presentation pts (the
-            // queue lead is the same on both sides and cancels). The
-            // NUDGE, by contrast, wants the phase as PRESENTED at the
-            // pulse — the pacer trails the newest push by the queue
-            // depth, so that lead is backed out before comparing to the
-            // grid. Correction is a bounded walk, never a snap.
-            let pulse = shared.beat_pulse.load(Ordering::Acquire);
-            if pulse != last_pulse {
-                last_pulse = pulse;
-                if let Some(prev) = beat_anchor_pts {
-                    let period = synth_pts - prev;
-                    // A beat spans 0.2s..2s (300..30 BPM); anything else
-                    // is a missed pulse or a stall — keep the estimate.
-                    // And a period ≈ 2x the current one IS a missed pulse
-                    // (coalesced counter), not a tempo halving: adopting
-                    // it would halve the sweep cadence for a beat.
-                    let doubled = beat_media > 0
-                        && (period as f64 / beat_media as f64) > 1.7;
-                    if (2_000_000..20_000_000).contains(&period) && !doubled {
-                        beat_media = period;
-                    }
-                }
-                beat_anchor_pts = Some(synth_pts);
-                if beat_media > 0 {
-                    let qlen = shared.frames.lock().unwrap().len() as f64;
-                    let presented = (sweep_phase - qlen * step).rem_euclid(1.0);
-                    sweep_phase = (sweep_phase
-                        + beat_phase_nudge(presented, beats))
-                    .rem_euclid(1.0);
-                }
-            }
-            let (p, dir) = advance_sweep(sweep_phase, forward, step, mode);
-            sweep_phase = p;
-            forward = dir;
-            idx = sweep_index(sweep_phase, forward, lo, hi, mode);
-            {
-                // The tweener's clock: the same phase map, unrounded — at
-                // the PRESENTED time, not the produced one. This worker
-                // runs the queue ahead of the screen; publishing the
-                // producer phase fed the tween a clock ~queue-length media
-                // frames in the future, arriving in bursts (the normal-
-                // speed judder: predict, stall on the clamp, leap). The
-                // same correction the beat nudge uses.
-                let qlen = shared.frames.lock().unwrap().len() as f64;
-                let presented_phase = (sweep_phase - qlen * step).rem_euclid(1.0);
-                let span = (hi - lo).max(1) as f64;
-                let u = if forward { presented_phase } else { 1.0 - presented_phase };
-                let posf = lo as f64 + u * (span - 1.0).max(0.0);
-                let ratef = (span - 1.0).max(0.0) / (sweep_pts / 1e7).max(1e-6)
-                    * if forward { 1.0 } else { -1.0 };
-                shared.cache_pos_bits.store(posf.to_bits(), Ordering::Release);
-                shared.cache_rate_bits.store(ratef.to_bits(), Ordering::Release);
-            }
-            if tl_on() {
-                eprintln!(
-                    "tl cache beat mode={mode:?} phase={sweep_phase:.4} step={step:.5} idx={idx} fwd={forward} win={lo}..{hi} sweep_pts={sweep_pts:.0}"
-                );
-            }
-            synth_pts += delta;
-            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
-            shared.frames.lock().unwrap().push_back(Frame {
-                pts_100ns: synth_pts,
-                clip_100ns: cache[idx].pts_100ns,
-                px: cache[idx].px.clone(),
-            });
-            continue;
-        }
-        transport_was_on = false;
-        if tl_on() {
-            eprintln!("tl cache free mode={mode:?} idx={idx} fwd={forward} win={lo}..{hi}");
-        }
-        // The tweener's clock for the free branches: whole frames at the
-        // clip's own cadence, signed by travel.
-        shared.cache_pos_bits.store((idx as f64).to_bits(), Ordering::Release);
-        shared.cache_rate_bits.store(
-            (1e7 / delta as f64
-                * if matches!(mode, PlayMode::Reverse) || !forward { -1.0 } else { 1.0 })
-            .to_bits(),
-            Ordering::Release,
+        let live = (
+            shared.trim_in_100ns.load(Ordering::Acquire),
+            shared.trim_out_100ns.load(Ordering::Acquire),
         );
-        if mode == PlayMode::Loop {
-            forward = true;
-            idx = if idx + 1 >= hi || idx + 1 <= lo { lo } else { idx + 1 };
-            // ONE monotonic presentation timeline for every cache mode:
-            // the free loop used to queue REAL clip pts (rebase-on-wrap),
-            // and re-engaging the beat transport then resumed the synth
-            // domain far AHEAD of the pacer's clock — a forward jump the
-            // pacer only knew to WAIT out (at a slow chip that wait
-            // doubled: the "0.5 stops dead" report). Source position
-            // lives solely in clip_100ns.
-            synth_pts += delta;
-            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
-            shared.frames.lock().unwrap().push_back(Frame {
-                pts_100ns: synth_pts,
-                clip_100ns: cache[idx].pts_100ns,
-                px: cache[idx].px.clone(),
-            });
-            continue;
-        } else if mode == PlayMode::Reverse {
-            // The free-running mirror of Loop: OUT → IN, wrapping to the
-            // range's last frame at IN.
-            forward = false;
-            idx = if idx <= lo || idx > hi - 1 { hi - 1 } else { idx - 1 };
-            synth_pts += delta;
-            shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
-            shared.frames.lock().unwrap().push_back(Frame {
-                pts_100ns: synth_pts,
-                clip_100ns: cache[idx].pts_100ns,
-                px: cache[idx].px.clone(),
-            });
-            continue;
-        } else if forward {
-            if idx + 1 >= hi {
-                forward = false;
-                continue;
-            }
-            idx += 1;
-        } else {
-            if idx <= lo {
-                forward = true;
-                continue;
-            }
-            idx -= 1;
+        if cache_range_outgrown(built, live) {
+            return;
         }
-        idx = idx.clamp(lo, hi - 1);
-        synth_pts += delta;
-        shared.pace_tail_100ns.store(synth_pts, Ordering::Release);
-        shared.frames.lock().unwrap().push_back(Frame {
-            pts_100ns: synth_pts,
-            clip_100ns: cache[idx].pts_100ns,
-            px: cache[idx].px.clone(),
-        });
+        if shared.repeat_cache.lock().unwrap().frames.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(8));
     }
 }
 
@@ -4024,15 +3640,11 @@ mod tests {
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
-            beat_pulse: AtomicU64::new(0),
             beats_per_sweep: AtomicU8::new(4),
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
-            dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
-            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
-            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
@@ -4136,15 +3748,11 @@ mod tests {
             trim_in_100ns: AtomicI64::new(0),
             trim_out_100ns: AtomicI64::new(i64::MAX),
             beat_transport: AtomicBool::new(false),
-            beat_pulse: AtomicU64::new(0),
             beats_per_sweep: AtomicU8::new(4),
             beat_hint_100ns: AtomicI64::new(0),
             scratch_active: AtomicBool::new(false),
             scratch_rate_bits: AtomicU64::new(0f64.to_bits()),
-            dir_flip: AtomicU64::new(0),
             travel_forward: AtomicBool::new(true),
-            cache_pos_bits: AtomicU64::new(0f64.to_bits()),
-            cache_rate_bits: AtomicU64::new(0f64.to_bits()),
             repeat_cache: Mutex::new(RepeatCacheSlot::default()),
             pace_tail_100ns: AtomicI64::new(0),
             trim_epoch: AtomicU64::new(0),
@@ -5081,65 +4689,21 @@ mod mode_flip_tests {
         std::env::temp_dir().join(format!("vj-media-{label}-{}", std::process::id()))
     }
 
-    /// THE LOOP/BOUNCE LAW, end to end through the real SlotPlayer: a
-    /// muted looping clip wraps to frame 0 at the end (a clean jump cut,
-    /// never a tail oscillation), a mid-play flip to PING-PONG visibly
-    /// REVERSES the frame sequence, and flipping back restores the wrap.
-    #[test]
-    fn loop_wraps_clean_and_a_midplay_bounce_flip_reverses() {
+    /// A 32-frame keyframe-only clip whose frames carry their index as a
+    /// 5-bit bar pattern (robust through the codec), plus the reader.
+    fn encode_identity_clip(dir: &PathBuf) -> PathBuf {
         use makepad_widgets::makepad_platform::video_file::{
             VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
         };
-        const W: u32 = 128;
-        const H: u32 = 64;
-        const FPS: u32 = 24;
-        const FRAMES: usize = 24;
-        const BITS: usize = 5;
-        const BLOCK_W: usize = W as usize / BITS;
-        fn frame_rgb8(index: usize) -> Vec<u8> {
-            let mut out = vec![40u8; W as usize * H as usize * 3];
-            for y in 0..H as usize / 2 {
-                for x in 0..W as usize {
-                    let bit = (x / BLOCK_W).min(BITS - 1);
-                    let luma = if index >> bit & 1 == 1 { 235 } else { 16 };
-                    let at = (y * W as usize + x) * 3;
-                    out[at] = luma;
-                    out[at + 1] = luma;
-                    out[at + 2] = luma;
-                }
-            }
-            out
-        }
-        fn identity_of(bgra: &[u32]) -> usize {
-            let mut index = 0;
-            for bit in 0..BITS {
-                let x0 = bit * BLOCK_W + BLOCK_W / 4;
-                let x1 = bit * BLOCK_W + BLOCK_W * 3 / 4;
-                let mut sum = 0u32;
-                let mut count = 0u32;
-                for y in 4..H as usize / 4 {
-                    for x in x0..x1 {
-                        sum += (bgra[y * W as usize + x] >> 16) & 0xff;
-                        count += 1;
-                    }
-                }
-                if sum / count.max(1) > 128 {
-                    index |= 1 << bit;
-                }
-            }
-            index
-        }
-
-        let dir = test_dir("mode-flip");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("loop.mp4");
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("clip.mp4");
         let mut encoder = VideoFileEncoder::new(
             path.to_str().unwrap(),
             VideoFileEncoderOptions {
                 codec: VideoFileCodec::H264,
-                width: W,
-                height: H,
-                fps_num: FPS,
+                width: ID_W,
+                height: ID_H,
+                fps_num: ID_FPS,
                 fps_den: 1,
                 video_bitrate_bps: 4_000_000,
                 audio: None,
@@ -5147,11 +4711,93 @@ mod mode_flip_tests {
             },
         )
         .expect("encoder");
-        for index in 0..FRAMES {
-            encoder.push_frame_rgb8(&frame_rgb8(index), None).expect("push");
+        for index in 0..ID_FRAMES {
+            encoder.push_frame_rgb8(&identity_frame_rgb8(index), None).expect("push");
         }
         encoder.finish().expect("finish");
+        path
+    }
 
+    const ID_W: u32 = 128;
+    const ID_H: u32 = 64;
+    const ID_FPS: u32 = 24;
+    const ID_FRAMES: usize = 32;
+    const ID_BITS: usize = 5;
+    const ID_BLOCK_W: usize = ID_W as usize / ID_BITS;
+
+    fn identity_frame_rgb8(index: usize) -> Vec<u8> {
+        let mut out = vec![40u8; ID_W as usize * ID_H as usize * 3];
+        for y in 0..ID_H as usize / 2 {
+            for x in 0..ID_W as usize {
+                let bit = (x / ID_BLOCK_W).min(ID_BITS - 1);
+                let luma = if index >> bit & 1 == 1 { 235 } else { 16 };
+                let at = (y * ID_W as usize + x) * 3;
+                out[at] = luma;
+                out[at + 1] = luma;
+                out[at + 2] = luma;
+            }
+        }
+        out
+    }
+
+    fn identity_of(bgra: &[u32]) -> usize {
+        let mut index = 0;
+        for bit in 0..ID_BITS {
+            let x0 = bit * ID_BLOCK_W + ID_BLOCK_W / 4;
+            let x1 = bit * ID_BLOCK_W + ID_BLOCK_W * 3 / 4;
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for y in 4..ID_H as usize / 4 {
+                for x in x0..x1 {
+                    sum += (bgra[y * ID_W as usize + x] >> 16) & 0xff;
+                    count += 1;
+                }
+            }
+            if sum / count.max(1) > 128 {
+                index |= 1 << bit;
+            }
+        }
+        index
+    }
+
+    /// Poll the ring for `dur`, returning every presented identity.
+    fn presented_for(player: &mut SlotPlayer, dur: Duration) -> Vec<usize> {
+        let mut ids = Vec::new();
+        let deadline = Instant::now() + dur;
+        while Instant::now() < deadline {
+            if let Some(px) = player.take_due_frame() {
+                ids.push(identity_of(&px.to_bgra()));
+            }
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        ids
+    }
+
+    /// Wait until the window is resident (or give up after `dur`).
+    fn wait_resident(player: &mut SlotPlayer, dur: Duration) -> Option<Arc<Vec<Frame>>> {
+        let deadline = Instant::now() + dur;
+        while Instant::now() < deadline {
+            if let Some(frames) = player.resident_frames() {
+                return Some(frames);
+            }
+            let _ = player.take_due_frame();
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        None
+    }
+
+    /// THE RESIDENT LAWS, end to end through the real SlotPlayer. A muted
+    /// looping clip becomes RESIDENT (its whole window cached, served by
+    /// the presenter's platter — transport.rs) and the decode thread
+    /// PARKS: the ring goes quiet and stays quiet across mode flips and a
+    /// seek. A TRIM is a new window: the cache is dropped, the decoder
+    /// streams the new window — every frame inside it — until it is
+    /// resident again. Unmuting a clip without a soundtrack changes
+    /// nothing; ONCE has no repeat, so the decoder un-parks and plays out.
+    #[test]
+    fn a_muted_loop_goes_resident_and_parks_the_decoder() {
+        let dir = test_dir("resident-park");
+        let path = encode_identity_clip(&dir);
         let mixer = Mixer::new();
         let mut player = SlotPlayer::open(
             SlotId::A,
@@ -5164,602 +4810,81 @@ mod mode_flip_tests {
         .expect("open");
         player.set_muted(true);
 
-        // Collect presented identities for ~3 clip lengths.
-        let mut ids: Vec<usize> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline && ids.len() < FRAMES * 3 {
-            if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra.to_bgra()));
-            }
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        assert!(ids.len() >= FRAMES * 2, "loop starved: {} frames", ids.len());
-        // Law 1: LOOP only ever steps forward or wraps to 0 — a backward
-        // step that is not a wrap is the tail oscillation bug.
-        let mut wraps = 0;
-        for pair in ids.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            if b < a {
-                assert_eq!(b, 0, "loop went BACKWARD {a}->{b} (tail oscillation)");
-                wraps += 1;
-            }
-        }
-        assert!(wraps >= 1, "never wrapped: {ids:?}");
+        // Resident: the whole window, in order.
+        let frames = wait_resident(&mut player, Duration::from_secs(4)).expect("went resident");
+        assert_eq!(frames.len(), ID_FRAMES, "the cache is the whole window");
+        assert!(frames.windows(2).all(|w| w[1].pts_100ns > w[0].pts_100ns));
+        // Parked: whatever the first pass queued drains, then nothing.
+        let _ = presented_for(&mut player, Duration::from_millis(600));
+        let quiet = presented_for(&mut player, Duration::from_millis(800));
+        assert!(quiet.is_empty(), "the ring kept flowing while resident: {quiet:?}");
+        assert!(player.needs_frame_pump(), "a parked resident clip still wants the display pump");
 
-        // Law 2: flip to PING-PONG mid-play — the sequence must REVERSE.
-        player.set_mode(PlayMode::PingPong);
-        let mut ids: Vec<usize> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline && ids.len() < FRAMES * 3 {
-            if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra.to_bgra()));
-            }
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        let mut descending_run = 0;
-        let mut best_run = 0;
-        for pair in ids.windows(2) {
-            if pair[1] < pair[0] {
-                descending_run += 1;
-                best_run = best_run.max(descending_run);
-            } else if pair[1] > pair[0] {
-                descending_run = 0;
-            }
-        }
-        assert!(
-            best_run >= FRAMES / 3,
-            "ping-pong never reversed (best descending run {best_run}): {ids:?}"
-        );
-
-        // Law 3: back to LOOP — forward-or-wrap again.
-        player.set_mode(PlayMode::Loop);
-        // Let the mode change propagate through a bounce leg.
-        std::thread::sleep(Duration::from_millis(400));
-        let mut ids: Vec<usize> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline && ids.len() < FRAMES * 2 {
-            if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra.to_bgra()));
-            }
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        // Skip the first leg (the in-flight bounce direction drains first).
-        let tail = &ids[ids.len().min(FRAMES / 2)..];
-        for pair in tail.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            if b < a && b != 0 {
-                // One residual backward step right at the changeover is the
-                // buffered bounce leg; a repeated pattern is the bug.
-                assert!(
-                    a - b <= 1,
-                    "loop after flip still bouncing: {a}->{b} in {tail:?}"
-                );
-            }
+        // Mode flips: still resident, still parked (the map is the platter's).
+        for mode in [PlayMode::PingPong, PlayMode::Reverse, PlayMode::Loop] {
+            player.set_mode(mode);
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(player.resident_frames().is_some(), "{mode:?} dropped the cache");
+            let leak = presented_for(&mut player, Duration::from_millis(400));
+            assert!(leak.is_empty(), "{mode:?} un-parked the ring: {leak:?}");
         }
 
-        // Law 4: IN/OUT TRIM — the scrub bar's range handles confine the
-        // loop: every presented frame inside [in, out), wraps land on IN
-        // (never zero).
-        player.set_trim(0.25, 0.75);
-        // Drain the in-flight ring (frames decoded under the old bounds).
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let _ = player.take_due_frame();
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        let mut ids: Vec<usize> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline && ids.len() < FRAMES * 2 {
-            if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra.to_bgra()));
-            }
-            std::thread::sleep(Duration::from_millis(4));
-        }
-        assert!(ids.len() >= FRAMES, "trimmed loop starved: {}", ids.len());
-        let lo = *ids.iter().min().unwrap();
-        let hi = *ids.iter().max().unwrap();
-        assert!(
-            lo + 1 >= FRAMES / 4 && hi < FRAMES * 3 / 4,
-            "trimmed loop escaped [{}..{}): frames {lo}..{hi} in {ids:?}",
-            FRAMES / 4,
-            FRAMES * 3 / 4
-        );
-        let mut wraps = 0;
-        for pair in ids.windows(2) {
-            if pair[1] < pair[0] {
-                wraps += 1;
-                assert!(
-                    pair[1] <= FRAMES / 4 + 1,
-                    "trimmed wrap landed at {} not IN: {ids:?}",
-                    pair[1]
-                );
-            }
-        }
-        assert!(wraps >= 1, "trimmed loop never wrapped: {ids:?}");
-    }
-}
+        // A seek: the readout moves, the cache stays whole (never a
+        // tail-only cache built from the scrub target), the ring settles.
+        player.seek_fraction(0.6);
+        assert!((player.position_secs() - 0.6 * player.duration_secs).abs() < 0.05);
+        std::thread::sleep(Duration::from_millis(600));
+        let _ = presented_for(&mut player, Duration::from_millis(400));
+        let after = player.resident_frames().expect("a seek does not drop the cache");
+        assert_eq!(after.len(), ID_FRAMES);
+        assert!(after[0].pts_100ns < 10_000_000 / ID_FPS as i64, "cache lost its head");
+        let leak = presented_for(&mut player, Duration::from_millis(400));
+        assert!(leak.is_empty(), "the ring kept flowing after a seek: {leak:?}");
 
-#[cfg(test)]
-mod beat_transport_tests {
-    use super::*;
-
-    const D: i64 = 416_667; // one 24fps frame in 100ns units
-
-    /// Run the sweep clock for `ticks`, returning (phase, forward, idx)
-    /// after each tick.
-    fn run(
-        mode: PlayMode,
-        window: (usize, usize),
-        start: (f64, bool),
-        step: f64,
-        ticks: usize,
-    ) -> Vec<(f64, bool, usize)> {
-        let (lo, hi) = window;
-        let (mut phase, mut fwd) = start;
-        let mut out = Vec::with_capacity(ticks);
-        for _ in 0..ticks {
-            let (p, d) = advance_sweep(phase, fwd, step, mode);
-            phase = p;
-            fwd = d;
-            out.push((phase, fwd, sweep_index(phase, fwd, lo, hi, mode)));
-        }
-        out
-    }
-
-    fn turn_ticks(trace: &[(f64, bool, usize)]) -> Vec<usize> {
-        let mut turns = Vec::new();
-        for (t, pair) in trace.windows(2).enumerate() {
-            let wrapped = pair[1].0 < pair[0].0;
-            if wrapped || pair[1].1 != pair[0].1 {
-                turns.push(t + 1);
-            }
-        }
-        turns
-    }
-
-    /// THE SWEEP LAW: one direction sweep = one beat step, at ANY range
-    /// width — the tick count between turns depends only on the step
-    /// (beat ÷ chip), never on the window.
-    #[test]
-    fn one_sweep_is_one_beat_step_at_any_range_width() {
-        let step = D as f64 / 5_000_000.0; // 0.5s beat at 24fps -> 12 ticks
-        for mode in [PlayMode::Loop, PlayMode::PingPong] {
-            let narrow = turn_ticks(&run(mode, (10, 14), (0.0, true), step, 600));
-            let wide = turn_ticks(&run(mode, (0, 400), (0.0, true), step, 600));
-            assert_eq!(narrow.len(), wide.len(), "{mode:?}: range width changed the cadence");
-            for (a, b) in narrow.iter().zip(wide.iter()) {
-                assert_eq!(a, b, "{mode:?}: turns drifted between widths");
-            }
-            // And the cadence is the beat step: 12 ticks per sweep.
-            for pair in narrow.windows(2) {
-                assert_eq!(pair[1] - pair[0], 12, "{mode:?}: sweep != one beat step");
-            }
-        }
-    }
-
-    /// The overshoot is CARRIED at the turn — the wrap costs zero time,
-    /// so the long-run cadence is exact even when the beat step is not a
-    /// whole number of ticks (the accumulate-and-jump failure mode).
-    #[test]
-    fn fractional_beat_steps_keep_exact_long_run_cadence() {
-        let step = 0.093; // 10.75 ticks per sweep — nothing divides
-        let trace = run(PlayMode::PingPong, (0, 60), (0.0, true), step, 10_000);
-        let turns = turn_ticks(&trace);
-        let first = turns[0] as f64;
-        let last = *turns.last().unwrap() as f64;
-        let measured = (last - first) / (turns.len() - 1) as f64;
-        let expect = 1.0 / step;
-        assert!(
-            (measured - expect).abs() < 0.02,
-            "cadence drifted: measured {measured:.3} ticks/sweep, law says {expect:.3}"
-        );
-    }
-
-    /// The chip is CADENCE: doubling the rate halves the ticks per sweep
-    /// (2x sweeps in half a beat), the mapping itself untouched.
-    #[test]
-    fn chip_changes_cadence_only() {
-        let beat = 5_000_000.0;
-        for (rate, want) in [(0.5f64, 24usize), (1.0, 12), (2.0, 6), (4.0, 3)] {
-            let step = D as f64 / (beat / rate);
-            let turns = turn_ticks(&run(PlayMode::Loop, (0, 100), (0.0, true), step, 200));
-            for pair in turns.windows(2) {
-                assert_eq!(
-                    pair[1] - pair[0],
-                    want,
-                    "chip {rate} should sweep in {want} ticks"
-                );
-            }
-        }
-    }
-
-    /// A LIVE TRIM RESCALES, never teleports: the phase is the state, so
-    /// the position remaps proportionally into the new window and the
-    /// motion carries on.
-    #[test]
-    fn trim_rescales_the_sweep_without_teleport() {
-        // Mid-sweep, phase 0.5: the position is the middle of ANY window.
-        assert_eq!(sweep_index(0.5, true, 0, 101, PlayMode::Loop), 50);
-        assert_eq!(sweep_index(0.5, true, 20, 41, PlayMode::Loop), 30);
-        assert_eq!(sweep_index(0.5, true, 10, 12, PlayMode::Loop), 11);
-        // The mirrored bounce leg remaps the same way.
-        assert_eq!(sweep_index(0.25, false, 0, 101, PlayMode::PingPong), 75);
-        assert_eq!(sweep_index(0.25, false, 20, 41, PlayMode::PingPong), 35);
-        // Degenerate windows never escape or panic.
-        assert_eq!(sweep_index(0.7, true, 5, 6, PlayMode::PingPong), 5);
-        assert_eq!(sweep_index(1.0, true, 3, 9, PlayMode::Loop), 8);
-    }
-
-    /// Bounce alternates direction each beat step; wrap restarts forward
-    /// — and the apex never dwells beyond the natural per-frame hold.
-    #[test]
-    fn bounce_alternates_and_never_pauses_at_the_apex() {
-        let step = D as f64 / 5_000_000.0;
-        let trace = run(PlayMode::PingPong, (0, 48), (0.0, true), step, 480);
-        let dirs: Vec<bool> = turn_ticks(&trace)
-            .iter()
-            .map(|t| trace[*t].1)
-            .collect();
-        for pair in dirs.windows(2) {
-            assert_ne!(pair[0], pair[1], "bounce failed to alternate");
-        }
-        // No pause: the index never repeats for longer than the natural
-        // dwell (ticks-per-sweep / span, +1 for the apex rounding).
-        let natural = (12.0f64 / 47.0).ceil() as usize + 1;
-        let mut dwell = 1;
-        let mut worst = 1;
-        for pair in trace.windows(2) {
-            if pair[1].2 == pair[0].2 {
-                dwell += 1;
-                worst = worst.max(dwell);
-            } else {
-                dwell = 1;
-            }
-        }
-        assert!(
-            worst <= natural,
-            "the sweep dwelt {worst} ticks on one frame (natural dwell {natural}) — a pause"
-        );
-        // Loop mode: always forward.
-        let wrap = run(PlayMode::Loop, (0, 48), (0.9, true), step, 480);
-        assert!(wrap.iter().all(|(_, f, _)| *f), "a wrap-mode sweep ran backward");
-    }
-
-    /// The nudge is the beat lock's ONLY corrective authority: bounded to
-    /// ±2% of a sweep per pulse, zero when aligned, and it converges an
-    /// engage-offset onto the grid over a few beats — never a snap.
-    #[test]
-    fn nudge_is_bounded_zero_when_aligned_and_convergent() {
-        for beats in [1.0f64, 2.0, 4.0, 8.0] {
-            assert_eq!(beat_phase_nudge(0.0, beats), 0.0);
-            for phase in [0.01f64, 0.13, 0.35, 0.49, 0.5, 0.77, 0.99] {
-                let nudge = beat_phase_nudge(phase, beats);
-                assert!(nudge.abs() <= 0.02 + 1e-12, "nudge {nudge} out of authority");
-            }
-        }
-        // Convergence on a 1-beat sweep: an 8%-off engage walks onto the
-        // grid over a few pulses.
-        let mut phase = 0.08f64;
-        for _ in 0..8 {
-            phase += beat_phase_nudge(phase, 1.0);
-        }
-        assert!(phase.abs() < 1e-9, "phase failed to converge: {phase}");
-        // A 4-beat sweep passes a beat at every quarter of its phase:
-        // 0.25 IS the grid — no correction; 0.30 pulls back toward it.
-        assert_eq!(beat_phase_nudge(0.25, 4.0), 0.0);
-        assert!(beat_phase_nudge(0.30, 4.0) < 0.0);
-    }
-
-    /// THE LAW END TO END through decode → cache → pacer, INSTRUMENTED:
-    /// with the transport on and pulses at beat cadence, a bounce turns
-    /// continuously — no pause at the edges (max inter-presentation gap
-    /// stays frame-scale, nowhere near beat-scale), the full range keeps
-    /// getting swept, and direction reversals track the beat count.
-    #[test]
-    fn transport_sweeps_on_the_beat_without_pausing() {
-        use makepad_widgets::makepad_platform::video_file::{
-            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
-        };
-        const W: u32 = 64;
-        const H: u32 = 32;
-        const FPS: u32 = 24;
-        const FRAMES: usize = 12;
-        const BEAT: Duration = Duration::from_millis(400);
-        fn frame_rgb8(index: usize) -> Vec<u8> {
-            vec![(index * 16 + 8) as u8; W as usize * H as usize * 3]
-        }
-        fn identity_of(bgra: &[u32]) -> usize {
-            let mid = bgra[(H as usize / 2) * W as usize + W as usize / 2];
-            (((mid >> 16) & 0xff) as usize) / 16
-        }
-
-        let dir = std::env::temp_dir()
-            .join(format!("vj-media-sweep-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sweep.mp4");
-        let mut encoder = VideoFileEncoder::new(
-            path.to_str().unwrap(),
-            VideoFileEncoderOptions {
-                codec: VideoFileCodec::H264,
-                width: W,
-                height: H,
-                fps_num: FPS,
-                fps_den: 1,
-                video_bitrate_bps: 2_000_000,
-                audio: None,
-                keyframe_only: true,
-            },
-        )
-        .expect("encoder");
-        for index in 0..FRAMES {
-            encoder.push_frame_rgb8(&frame_rgb8(index), None).expect("push");
-        }
-        encoder.finish().expect("finish");
-
-        let mixer = Mixer::new();
-        let mut player = SlotPlayer::open(
-            SlotId::A,
-            path.to_str().unwrap(),
-            MediaType::Mp4,
-            mixer,
-            true,
-            false,
-        )
-        .expect("open");
+        // Unmute without a soundtrack: silent by law, nothing changes.
+        player.set_muted(false);
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(player.resident_frames().is_some());
         player.set_muted(true);
-        player.set_mode(PlayMode::PingPong);
-        // Chip 1 = a sweep per beat; the HINT seeds the grid so the law
-        // paces from the first frame (no natural-rate first pass).
-        player.set_beats_per_sweep(1);
-        player.set_beat_hint((BEAT.as_secs_f64() * 1e7) as i64);
-        player.set_beat_transport(true);
 
-        // Present for ~14 beats, pulsing on the beat, recording identity
-        // and wall instant of every presented frame.
-        let mut seen: Vec<(Instant, usize)> = Vec::new();
-        let start = Instant::now();
-        let mut next_pulse = start + BEAT;
-        let deadline = start + Duration::from_millis(5_600);
+        // TRIM to [8, 24): a new window. The old cache goes, the decoder
+        // streams the window until it is resident again.
+        player.set_trim(0.25, 0.75);
+        let mut streamed: Vec<usize> = Vec::new();
+        let mut rebuilt = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            let now = Instant::now();
-            if now >= next_pulse {
-                player.beat_pulse();
-                next_pulse += BEAT;
+            if let Some(px) = player.take_due_frame() {
+                streamed.push(identity_of(&px.to_bgra()));
             }
-            if let Some(bgra) = player.take_due_frame() {
-                seen.push((Instant::now(), identity_of(&bgra.to_bgra())));
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(seen.len() > 60, "starved: {} frames", seen.len());
-
-        // Skip the natural-speed first pass + the first learned beats;
-        // judge the locked regime.
-        let judge_from = start + Duration::from_millis(2_000);
-        let locked: Vec<&(Instant, usize)> =
-            seen.iter().filter(|(at, _)| *at >= judge_from).collect();
-        assert!(locked.len() > 30, "no locked regime captured");
-
-        // NO PAUSE: the largest gap between presented frames stays frame-
-        // scale. A beat-scale gap is the rejected freeze. The printed
-        // stats are the instrument (run with --nocapture).
-        let mut gaps: Vec<Duration> = locked
-            .windows(2)
-            .map(|pair| pair[1].0.duration_since(pair[0].0))
-            .collect();
-        gaps.sort_unstable();
-        let worst_gap = *gaps.last().unwrap();
-        println!(
-            "sweep-transport presentation gaps: n={} p50={:?} p95={:?} max={:?}",
-            gaps.len(),
-            gaps[gaps.len() / 2],
-            gaps[gaps.len() * 95 / 100],
-            worst_gap
-        );
-        assert!(
-            worst_gap < Duration::from_millis(160),
-            "presentation stalled {worst_gap:?} — a visible pause"
-        );
-
-        // The FULL range keeps being swept (no invented sub-range).
-        let ids: Vec<usize> = locked.iter().map(|(_, id)| *id).collect();
-        assert!(ids.iter().copied().min().unwrap() <= 1, "IN never reached: {ids:?}");
-        assert!(
-            ids.iter().copied().max().unwrap() + 2 >= FRAMES,
-            "OUT never reached: {ids:?}"
-        );
-
-        // Bounce reversals happen and track the beat count (one turn per
-        // beat; wide tolerance — this is a threaded pipeline, the pure
-        // cadence law is pinned above).
-        let mut turns = 0;
-        let mut dir_up = true;
-        for pair in ids.windows(2) {
-            if pair[1] != pair[0] {
-                let up = pair[1] > pair[0];
-                if up != dir_up {
-                    turns += 1;
-                    dir_up = up;
+            if let Some(frames) = player.resident_frames() {
+                if frames.len() < ID_FRAMES {
+                    rebuilt = Some(frames);
+                    break;
                 }
             }
-        }
-        let beats = 9; // ~3.6s of locked regime at 400ms
-        assert!(
-            turns >= beats / 2 && turns <= beats * 2,
-            "{turns} turns over ~{beats} beats — the sweep is not on the beat grid"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// THE TAIL-ONLY CACHE LIE, pinned: a mid-clip SCRUB rebuilds the
-    /// decoder from its target — that pass may NEVER declare a complete
-    /// cache (it covers target→OUT, not the window). The wrap after it
-    /// rebuilds from live IN, and the sweep must span the WHOLE range
-    /// again — not loop the tail the scrub left behind.
-    #[test]
-    fn a_scrub_never_leaves_a_tail_only_sweep() {
-        use makepad_widgets::makepad_platform::video_file::{
-            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
-        };
-        const W: u32 = 64;
-        const H: u32 = 32;
-        const FRAMES: usize = 12;
-        fn identity_of(bgra: &[u32]) -> usize {
-            let mid = bgra[(H as usize / 2) * W as usize + W as usize / 2];
-            (((mid >> 16) & 0xff) as usize) / 16
-        }
-        let dir = std::env::temp_dir()
-            .join(format!("vj-media-scrubtail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("scrub.mp4");
-        let mut encoder = VideoFileEncoder::new(
-            path.to_str().unwrap(),
-            VideoFileEncoderOptions {
-                codec: VideoFileCodec::H264,
-                width: W,
-                height: H,
-                fps_num: 24,
-                fps_den: 1,
-                video_bitrate_bps: 2_000_000,
-                audio: None,
-                keyframe_only: true,
-            },
-        )
-        .expect("encoder");
-        for index in 0..FRAMES {
-            encoder
-                .push_frame_rgb8(
-                    &vec![(index * 16 + 8) as u8; W as usize * H as usize * 3],
-                    None,
-                )
-                .expect("push");
-        }
-        encoder.finish().expect("finish");
-        let mixer = Mixer::new();
-        let mut player = SlotPlayer::open(
-            SlotId::A,
-            path.to_str().unwrap(),
-            MediaType::Mp4,
-            mixer,
-            true,
-            false,
-        )
-        .expect("open");
-        player.set_muted(true);
-        player.set_beats_per_sweep(1);
-        player.set_beat_hint(4_000_000);
-        player.set_beat_transport(true);
-        // Let the first window cache complete and the sweep run…
-        let warm = Instant::now() + Duration::from_millis(1_500);
-        while Instant::now() < warm {
-            let _ = player.take_due_frame();
             std::thread::sleep(Duration::from_millis(3));
         }
-        // …then SCRUB to 60% and pulse the clock like the app would.
-        player.seek_fraction(0.6);
-        let mut ids: Vec<usize> = Vec::new();
-        let mut next_pulse = Instant::now() + Duration::from_millis(400);
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline {
-            if Instant::now() >= next_pulse {
-                player.beat_pulse();
-                next_pulse += Duration::from_millis(400);
-            }
-            if let Some(bgra) = player.take_due_frame() {
-                ids.push(identity_of(&bgra.to_bgra()));
-            }
-            std::thread::sleep(Duration::from_millis(3));
+        let rebuilt = rebuilt.expect("the trimmed window never went resident");
+        assert!(
+            (15..=17).contains(&rebuilt.len()),
+            "trimmed cache holds {} frames, expected ~16",
+            rebuilt.len()
+        );
+        let lo = ID_FRAMES / 4;
+        let hi = ID_FRAMES * 3 / 4;
+        for id in &streamed {
+            assert!(
+                *id + 1 >= lo && *id < hi + 1,
+                "a streamed frame escaped the trim window: {id} not in [{lo}, {hi}) — {streamed:?}"
+            );
         }
-        // The sweep must reach the head again — a tail-only cache never
-        // shows anything below the scrub target (frame 7).
-        assert!(
-            ids.iter().copied().min().unwrap_or(99) <= 1,
-            "sweep never returned to the head after a scrub: {ids:?}"
-        );
-        assert!(
-            ids.iter().copied().max().unwrap_or(0) + 2 >= FRAMES,
-            "sweep lost the tail after a scrub: {ids:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    /// The FREE path's wrap, measured for comparison (printed with
-    /// --nocapture): the classic loop pushes REAL pts and re-bases the
-    /// pacer clock at the wrap, which costs a frame-scale dwell at the
-    /// seam — the number that used to read as the loop "hiccup". Sanity
-    /// bound only; the synced transport above is the product lane.
-    #[test]
-    fn free_loop_wrap_gap_measured() {
-        use makepad_widgets::makepad_platform::video_file::{
-            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
-        };
-        const W: u32 = 64;
-        const H: u32 = 32;
-        let dir = std::env::temp_dir()
-            .join(format!("vj-media-freegap-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("free.mp4");
-        let mut encoder = VideoFileEncoder::new(
-            path.to_str().unwrap(),
-            VideoFileEncoderOptions {
-                codec: VideoFileCodec::H264,
-                width: W,
-                height: H,
-                fps_num: 24,
-                fps_den: 1,
-                video_bitrate_bps: 2_000_000,
-                audio: None,
-                keyframe_only: true,
-            },
-        )
-        .expect("encoder");
-        for index in 0..12usize {
-            encoder
-                .push_frame_rgb8(
-                    &vec![(index * 16 + 8) as u8; W as usize * H as usize * 3],
-                    None,
-                )
-                .expect("push");
-        }
-        encoder.finish().expect("finish");
-        let mixer = Mixer::new();
-        let mut player = SlotPlayer::open(
-            SlotId::A,
-            path.to_str().unwrap(),
-            MediaType::Mp4,
-            mixer,
-            true,
-            false,
-        )
-        .expect("open");
-        player.set_muted(true);
-        let mut stamps: Vec<Instant> = Vec::new();
-        let deadline = Instant::now() + Duration::from_millis(4_000);
-        while Instant::now() < deadline {
-            if player.take_due_frame().is_some() {
-                stamps.push(Instant::now());
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(stamps.len() > 40, "starved: {}", stamps.len());
-        let mut gaps: Vec<Duration> = stamps
-            .windows(2)
-            .map(|pair| pair[1].duration_since(pair[0]))
-            .collect();
-        gaps.sort_unstable();
-        println!(
-            "free-loop presentation gaps: n={} p50={:?} p95={:?} max={:?}",
-            gaps.len(),
-            gaps[gaps.len() / 2],
-            gaps[gaps.len() * 95 / 100],
-            *gaps.last().unwrap()
-        );
-        // Three frame-times: the wrap must cost nothing visible. (Before
-        // the frame-scale WRAP_MARGIN this clip raced at poll speed —
-        // p50 five milliseconds — because a sub-500ms loop never re-based
-        // the pacer.)
-        assert!(*gaps.last().unwrap() < Duration::from_millis(125));
+        // ONCE: no repeat to serve; the decoder un-parks and plays out.
+        player.set_mode(PlayMode::Once);
+        player.seek_fraction(0.3);
+        let played = presented_for(&mut player, Duration::from_secs(2));
+        assert!(!played.is_empty(), "Once never streamed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
