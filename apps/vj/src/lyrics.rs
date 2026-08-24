@@ -142,14 +142,24 @@ pub fn whisper_model_path() -> Option<PathBuf> {
         }
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let canonical = root.join("local/models").join(WHISPER_MODEL_FILE);
     [
         PathBuf::from(WHISPER_MODEL_FILE),
         root.join(WHISPER_MODEL_FILE),
         root.join("local").join(WHISPER_MODEL_FILE),
-        root.join("local/models").join(WHISPER_MODEL_FILE),
+        canonical.clone(),
     ]
     .into_iter()
-    .find(|path| path.is_file())
+    .find(|path| {
+        if !path.is_file() {
+            return false;
+        }
+        // The managed install (where INSTALL MODELS commits) must be the
+        // pinned artifact exactly — a truncated file there reads as
+        // not-installed, never as a model. Operator-placed copies on the
+        // other probe paths are trusted as-is.
+        *path != canonical || crate::models::dest_is_installed(&crate::models::WHISPER)
+    })
 }
 
 // ---------------------------------------------------------------------------

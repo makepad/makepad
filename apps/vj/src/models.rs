@@ -83,12 +83,31 @@ fn cache_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local")
 }
 
+/// A managed install only counts when the bytes on disk are exactly the
+/// pinned artifact — `is_file()` alone let a truncated or hand-copied file
+/// read as provisioned, and then load broken. One stat, no hashing (the
+/// downloader's fsync-then-rename commit means a file of the right length
+/// at the dest went through the sha check).
+pub fn dest_is_installed(model: &VjModel) -> bool {
+    file_is_pinned_size(&model.spec().dest_path(&cache_root()), model.bytes)
+}
+
+fn file_is_pinned_size(path: &std::path::Path, bytes: u64) -> bool {
+    std::fs::metadata(path).map(|meta| meta.len() == bytes).unwrap_or(false)
+}
+
 /// The models this machine still lacks, judged by the same resolution the
 /// consumers use — env overrides and every alternate probe path count as
-/// installed.
+/// installed (the operator's own hands are trusted); the managed dest
+/// itself must match its pinned size.
 pub fn missing() -> Vec<&'static VjModel> {
     let mut out = Vec::new();
-    if !crate::stems::checkpoint_path().is_file() {
+    let stems_installed = if std::env::var("VJ_STEMS_CKPT").is_ok() {
+        crate::stems::checkpoint_path().is_file()
+    } else {
+        dest_is_installed(&STEMS)
+    };
+    if !stems_installed {
         out.push(&STEMS);
     }
     if crate::lyrics::whisper_model_path().is_none() {
@@ -211,6 +230,19 @@ mod tests {
         if std::env::var("VJ_STEMS_CKPT").is_err() {
             assert_eq!(dest, crate::stems::checkpoint_path());
         }
+    }
+
+    #[test]
+    fn a_partial_file_never_reads_as_installed() {
+        let dir = std::env::temp_dir().join(format!("vj-models-gate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("model.bin");
+        assert!(!file_is_pinned_size(&path, 8), "absent file counted as installed");
+        std::fs::write(&path, b"1234").unwrap();
+        assert!(!file_is_pinned_size(&path, 8), "truncated file counted as installed");
+        std::fs::write(&path, b"12345678").unwrap();
+        assert!(file_is_pinned_size(&path, 8));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
