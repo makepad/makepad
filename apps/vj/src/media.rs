@@ -600,6 +600,13 @@ impl SlotPlayer {
         self.shared.repeat_cache.lock().unwrap().frames.clone()
     }
 
+    /// A stable identity for this player (this cue of this clip): the
+    /// presenter's platter tells a rebuilt cache of the same clip (phase
+    /// preserved) from a new cue (anchored afresh) by it.
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.shared) as usize
+    }
+
     /// Continuous cache position (fractional frame index) and its rate in
     /// cache-frames per second — the tweener's clock.
     pub fn cache_pos(&self) -> (f64, f64) {
