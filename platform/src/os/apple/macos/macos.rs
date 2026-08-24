@@ -415,6 +415,9 @@ impl Cx {
             let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
             with_macos_app(|app| {
                 for (window, _view) in &app.cocoa_windows {
+                    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+                        continue;
+                    }
                     let () = msg_send![*window, orderFrontRegardless];
                 }
             });
@@ -466,6 +469,20 @@ impl Cx {
         MacosApp::event_loop();
     }
 
+    /// The window a pass ultimately presents into (through any chain of
+    /// offscreen parents); None for Xr/parentless passes.
+    fn pass_root_window(&self, pass_id: crate::draw_pass::DrawPassId) -> Option<WindowId> {
+        let mut id = pass_id;
+        for _ in 0..64 {
+            match self.passes[id].parent.clone() {
+                CxDrawPassParent::Window(window_id) => return Some(window_id),
+                CxDrawPassParent::DrawPass(parent) => id = parent,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub(crate) fn handle_repaint(
         &mut self,
         metal_windows: &mut Vec<MetalWindow>,
@@ -481,8 +498,28 @@ impl Cx {
             let () = unsafe { msg_send![shared, commit] };
             let () = unsafe { msg_send![shared, release] };
         }
-        let time_now = with_macos_app(|app| app.time_now() as f32);
+        let time_now = self
+            .os
+            .link_flip_time
+            .map(|t| t as f32)
+            .unwrap_or_else(|| with_macos_app(|app| app.time_now() as f32));
+        let scope = self.os.link_scope;
         for draw_pass_id in &passes_todo {
+            // Per-window pacing: during a LinkFire beat only the firing
+            // window's pass tree paints; everything else stays dirty for
+            // its OWN flip.
+            if let Some(scope) = scope {
+                if let Some(window_id) = self.pass_root_window(*draw_pass_id) {
+                    let matches = metal_windows.iter().any(|mw| {
+                        mw.window_id == window_id
+                            && mw.cocoa_window.window as usize == scope
+                    });
+                    if !matches {
+                        self.repaint_pass(*draw_pass_id);
+                        continue;
+                    }
+                }
+            }
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -570,7 +607,22 @@ impl Cx {
                         let () = unsafe {
                             msg_send![
                                 drawable,
-                                addPresentedHandler: &objc_block!(move | _drawable: ObjcId | {
+                                addPresentedHandler: &objc_block!(move | drawable_: ObjcId | {
+                                    // RIG (MAKEPAD_PRESENT_TRACE=1): actual
+                                    // GLASS times — the CPU trace's blind
+                                    // spot where dropped/slipped frames live.
+                                    if std::env::var_os("MAKEPAD_PRESENT_TRACE").is_some() {
+                                        let t: f64 = unsafe { msg_send![drawable_, presentedTime] };
+                                        static LAST: std::sync::atomic::AtomicU64 =
+                                            std::sync::atomic::AtomicU64::new(0);
+                                        let prev = f64::from_bits(LAST.swap(
+                                            t.to_bits(),
+                                            std::sync::atomic::Ordering::AcqRel,
+                                        ));
+                                        if prev > 0.0 && t > prev {
+                                            eprintln!("presenttrace {:.2}ms", (t - prev) * 1000.0);
+                                        }
+                                    }
                                     // No-op if a watchdog reset happened since this present.
                                     let _ = in_flight.fetch_update(
                                         std::sync::atomic::Ordering::AcqRel,
@@ -647,8 +699,33 @@ impl Cx {
     }
 
     fn ensure_timer0_started(&mut self) {
+        // FRAME-FLIP pacing: the display link IS the refresh — one beat per
+        // actual flip, phase-locked, tracking the window's own panel. The
+        // NSTimer stays as the fallback (no window yet, pre-macOS-14) and
+        // as the idle heartbeat. MAKEPAD_DISPLAY_LINK=0 forces timer pacing.
+        static WANT_LINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let want_link = *WANT_LINK.get_or_init(|| {
+            // NSView.displayLink never fires for a window that is not on
+            // screen — hidden eval/test runs (MAKEPAD_HIDE_WINDOWS) must
+            // pace on the timer or they freeze.
+            std::env::var("MAKEPAD_DISPLAY_LINK").map(|v| v != "0").unwrap_or(true)
+                && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none()
+        });
+        // Self-heal: a window close invalidated the link while the beat
+        // thought itself armed — re-anchor on a surviving window.
+        if self.os.timer0_armed
+            && want_link
+            && with_macos_app(|app| app.display_link_needs_rearm())
+        {
+            self.os.timer0_armed = false;
+        }
         if !self.os.timer0_armed {
             with_macos_app(|app| app.stop_timer(0));
+            if want_link && with_macos_app(|app| app.ensure_display_link()) {
+                self.os.timer0_armed = true;
+                self.os.timer0_idle_since = None;
+                return;
+            }
             // Pace the paint clock to the fastest attached display. The old
             // fixed 8ms beat against an 8.33ms (120Hz) refresh: presents
             // outran vsync, the drawable pool drifted full and nextDrawable
@@ -675,8 +752,11 @@ impl Cx {
 
     fn ensure_timer0_stopped(&mut self) {
         if self.os.timer0_armed {
-            with_macos_app(|app| app.stop_timer(0));
-            with_macos_app(|app| app.start_timer(0, 0.2, true));
+            with_macos_app(|app| {
+                app.pause_display_link();
+                app.stop_timer(0);
+                app.start_timer(0, 0.2, true);
+            });
             self.os.timer0_armed = false;
         }
     }
@@ -935,6 +1015,28 @@ impl Cx {
                         self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit;
                     }
+                }
+            }
+            MacosEvent::LinkFire { window, time, primary } => {
+                self.os.link_scope = Some(window as usize);
+                self.os.link_flip_time = Some(time);
+                let flow = if primary {
+                    // The primary link drives the WHOLE beat — identical to
+                    // the timer-0 path (signals, actions, next-frames, then
+                    // paint), just clocked by the flip.
+                    self.cocoa_event_callback(
+                        MacosEvent::Timer(crate::event::TimerEvent { time: Some(time), timer_id: 0 }),
+                        metal_cx,
+                        metal_windows,
+                    )
+                } else {
+                    // A secondary window's flip: paint that window only.
+                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows)
+                };
+                self.os.link_scope = None;
+                self.os.link_flip_time = None;
+                if let EventFlow::Exit = flow {
+                    return EventFlow::Exit;
                 }
             }
             MacosEvent::Paint => {
@@ -2032,6 +2134,12 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     /// For how long to keep the timer alive when the app is idle
     pub(crate) keep_alive_counter: usize,
+    /// While a LinkFire beat runs: paint ONLY passes rooted in this cocoa
+    /// window (as usize), and stamp them with `link_flip_time` — the flip's
+    /// target timestamp in app time. None = the NSTimer/idle beat: paint
+    /// everything, stamp wall-now.
+    pub(crate) link_scope: Option<usize>,
+    pub(crate) link_flip_time: Option<f64>,
     /// Indicates wether the main timer is armed
     pub(crate) timer0_armed: bool,
     /// Start time of the current idle stretch while timer0 is armed.
