@@ -20,7 +20,8 @@ use {
             //core::IntoParam,
             Win32::{
                 Foundation::{
-                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK, WPARAM,
+                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HANDLE, HWND, S_OK,
+                    WPARAM,
                 },
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
@@ -73,6 +74,16 @@ thread_local! {
 
 pub fn with_win32_app<R>(f: impl FnOnce(&mut Win32App) -> R) -> R {
     WIN32_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
+}
+
+/// Like `with_win32_app`, but returns `None` instead of panicking when there is
+/// no app yet (or the thread-local is already torn down). Needed on teardown
+/// paths — `Drop for D3d11Window` can run while the process is exiting.
+pub fn try_with_win32_app<R>(f: impl FnOnce(&mut Win32App) -> R) -> Option<R> {
+    WIN32_APP
+        .try_with(|app| app.borrow_mut().as_mut().map(f))
+        .ok()
+        .flatten()
 }
 
 pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) {
@@ -179,6 +190,67 @@ unsafe fn coalesce_mouse_wheel(mut msg: MSG) -> MSG {
     msg
 }
 
+/// `MsgWaitForMultipleObjectsEx`, `QS_ALLINPUT` and `MWMO_INPUTAVAILABLE` are not
+/// in the vendored windows bindings; declare what we need (same pattern as the
+/// `CreateIcon` link below).
+const QS_ALLINPUT: u32 = 0x04FF;
+const MWMO_INPUTAVAILABLE: u32 = 0x0004;
+const WAIT_FAILED_U32: u32 = 0xFFFF_FFFF;
+
+/// Wait until either one of `handles` is signaled (a window's DXGI frame-latency
+/// waitable, i.e. "the compositor is ready for that window's next frame") or the
+/// thread has queued input. Returns `WAIT_OBJECT_0 + k` for handle `k`,
+/// `WAIT_OBJECT_0 + handles.len()` for input, `WAIT_TIMEOUT_U32` on timeout.
+///
+/// `MWMO_INPUTAVAILABLE` matters: without it the call only wakes on input that
+/// arrived *after* the wait started, so a message already sitting in the queue
+/// (we peek without removing while coalescing) would be ignored until the next
+/// one arrived.
+unsafe fn msg_wait_for_beat_or_input(handles: &[HANDLE], timeout_ms: u32) -> u32 {
+    windows_core::link!("user32.dll" "system" fn MsgWaitForMultipleObjectsEx(
+        n_count: u32,
+        p_handles: *const HANDLE,
+        dw_milliseconds: u32,
+        dw_wake_mask: u32,
+        dw_flags: u32
+    ) -> u32);
+    unsafe {
+        MsgWaitForMultipleObjectsEx(
+            handles.len() as u32,
+            handles.as_ptr(),
+            timeout_ms,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        )
+    }
+}
+
+/// Drain queued win32 messages (adjacent mouse-moves and wheels coalesced) up to
+/// a small count/time budget, so a flood of high-rate input can never starve the
+/// paint beat. Returns false if a dispatched message asked the app to exit.
+unsafe fn drain_messages() -> bool {
+    let drain_start = std::time::Instant::now();
+    let mut drain_budget = 32;
+    loop {
+        let mut msg = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE) == FALSE {
+            break;
+        }
+        let msg = coalesce_mouse_move(msg.assume_init());
+        let msg = coalesce_mouse_wheel(msg);
+        let _ = TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+        drain_budget -= 1;
+        if drain_budget == 0
+            || drain_start.elapsed() >= std::time::Duration::from_millis(2)
+            || matches!(with_win32_app(|app| app.event_flow.clone()), EventFlow::Exit)
+        {
+            break;
+        }
+    }
+    !matches!(with_win32_app(|app| app.event_flow.clone()), EventFlow::Exit)
+}
+
 pub struct Win32App {
     event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow>>,
     /// Events queued by re-entrant `do_callback` calls; drained FIFO by the outer
@@ -195,7 +267,47 @@ pub struct Win32App {
     pub currently_clicked_window_id: Option<WindowId>,
     pub start_dragging_items: Option<Vec<DragItem>>,
     pub is_dragging_internal: Cell<bool>,
+    /// The paint beat: one DXGI frame-latency waitable per vsync-paced window,
+    /// in registration order — index 0 is the *primary* window, whose beat drives
+    /// the whole app tick (the macOS backend picks its primary display link the
+    /// same way). Registered by `D3d11Window::new`, dropped on window teardown
+    /// and while a window is in a live resize (which presents unpaced).
+    pub beat_handles: Vec<BeatSource>,
+    /// How long the beat wait may block before falling back to an unpaced tick.
+    /// The waitable is a credit semaphore refilled by *retired presents*, so a
+    /// stretch of ticks that present nothing (a NextFrame listener that dirties
+    /// no pass, a video player polling between decoded frames) drains it and
+    /// nothing would wake us; the paint tick shortens the timeout in that case
+    /// so such work keeps its old ~8 ms cadence instead of stalling to 33 ms.
+    pub beat_timeout_ms: u32,
 }
+
+/// One window's frame clock.
+pub struct BeatSource {
+    pub window_id: WindowId,
+    /// The swap chain's frame-latency waitable — a semaphore whose count is the
+    /// number of frames the compositor is ready to accept.
+    pub handle: HANDLE,
+    /// A credit taken from that semaphore and not yet spent on a `Present`.
+    ///
+    /// DXGI refills the semaphore ONLY when a present retires, and the handle it
+    /// hands back is read-only — `ReleaseSemaphore` on it fails with
+    /// ACCESS_DENIED (verified on a real box), so a credit taken can never be
+    /// given back. Every wait must therefore be paired with a present, or the
+    /// window's clock winds down to zero and it stops beating for good. A beat
+    /// that finds nothing to paint keeps its credit and simply drops out of the
+    /// wait until a frame is presented: the compositor is already ready for that
+    /// window, so there is nothing left to wait for.
+    pub credit_held: bool,
+}
+
+/// Beat timeout after a tick that actually presented: ~2 refresh intervals at
+/// 60 Hz. Only reached when the compositor stops retiring presents (occluded,
+/// minimized, a stalled DWM), in which case an unpaced heartbeat tick is right.
+pub const BEAT_TIMEOUT_PRESENTED_MS: u32 = 33;
+/// Beat timeout after a tick that presented nothing; matches the signal-poll
+/// timer's 8 ms so non-presenting work is paced exactly like before.
+pub const BEAT_TIMEOUT_IDLE_MS: u32 = 8;
 
 #[derive(Clone)]
 pub enum Win32Timer {
@@ -242,6 +354,13 @@ impl Win32Time {
             (time_now - self.time_start) as f64 / self.time_freq as f64
         }
     }
+
+    /// Map a raw `QueryPerformanceCounter` timestamp into app time. DXGI frame
+    /// statistics report `SyncQPCTime` in exactly this domain, so a vblank
+    /// timestamp from the driver lands on the same clock as `time_now()`.
+    pub fn qpc_to_time(&self, qpc: i64) -> f64 {
+        (qpc - self.time_start) as f64 / self.time_freq as f64
+    }
 }
 
 impl Win32App {
@@ -283,6 +402,8 @@ impl Win32App {
             current_cursor: None,
             currently_clicked_window_id: None,
             is_dragging_internal: Cell::new(false),
+            beat_handles: Vec::new(),
+            beat_timeout_ms: BEAT_TIMEOUT_PRESENTED_MS,
         };
         win32_app.dpi_functions.become_dpi_aware();
 
@@ -398,54 +519,83 @@ impl Win32App {
                         }
                     }
                     EventFlow::Poll => {
-                        // Drain pending messages (mouse-moves and wheels coalesced) up to a small
-                        // budget, then ALWAYS paint once per loop pass.
+                        // THE BEAT. One wait covers both clocks the loop cares about: each
+                        // vsync-paced window's DXGI frame-latency waitable ("the compositor
+                        // retired a present of this window, send the next one") and the thread's
+                        // input queue. Whichever fires first decides what this pass does.
                         //
-                        // The animation frame-advance (`call_next_frame_event`, e.g. a momentum
-                        // fling) AND the vsync-blocking `Present` both live in the Paint callback.
-                        // A NextFrame is internal Cx state, not a win32 message, so it can only be
-                        // serviced by reaching this Paint. A moving mouse injects WM_MOUSEMOVE at
-                        // 500–1000 Hz, so the queue almost never empties during a fling; painting
-                        // only when it does starves the fling step and its Present, freezing the
-                        // scroll until the mouse pauses, then jumping. That is the "judder when
-                        // moving the mouse during deceleration" bug, and it is a pure scheduling
-                        // effect (independent of per-move CPU cost, which is why coalescing alone
-                        // didn't fix it). Hence the budget: it bounds the time spent dispatching so
-                        // the Paint is never starved, while draining more than one message per pass
-                        // keeps high-rate input (wheel spins, touchpad pans, posted signals) from
-                        // backlogging behind the ~one-per-refresh paint rate and replaying late.
+                        // This is the same shape as the macOS backend's display link: the frame
+                        // clock lives ABOVE the app tick, so a beat knows WHICH window flipped and
+                        // WHEN, and the paint below can stamp every pass with that one flip time
+                        // instead of sampling a fresh wall-clock per pass. Previously the wait sat
+                        // inside `draw_pass_to_window`, below the tick, with no window identity and
+                        // no timestamp, so multi-window apps paced each other and the app tick could
+                        // not see the frame boundary at all.
                         //
-                        // Painting once per pass advances the animation and presents every loop
-                        // iteration; `Present(1,..)` (vsync) still paces us to the display refresh,
-                        // and we only stay in Poll while there is animation/dirty work (otherwise the
-                        // callback returns `Wait` and we sleep in `GetMessageW`), so this does not
-                        // busy-loop.
-                        let drain_start = std::time::Instant::now();
-                        let mut drain_budget = 32;
-                        loop {
-                            let mut msg = std::mem::MaybeUninit::uninit();
-                            if PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE) == FALSE {
-                                break;
+                        // Input drains (adjacent mouse-moves and wheels coalesced, on a small
+                        // budget) without painting: a moving mouse injects WM_MOUSEMOVE at
+                        // 500–1000 Hz and must never outvote the frame clock, but neither may it
+                        // starve — hence the budget, and hence the loop coming straight back here.
+                        let beats: Vec<(WindowId, HANDLE, bool)> =
+                            with_win32_app(|app| app.beat_wait_list());
+                        if beats.is_empty() {
+                            // Nothing to wait for: popup-only, a live resize (which presents
+                            // unpaced and unregisters its beat), no window at all — or every
+                            // paced window is already holding a credit, meaning the compositor
+                            // is ready for all of them and there is nothing left to wait on.
+                            // Fall back to the old drain-then-paint pass; the SetTimer
+                            // heartbeats (resize / drag-drop / 8 ms signal poll) and the paint
+                            // tick's own idle sleep keep it from spinning, exactly as the
+                            // NSTimer fallback survives on macOS.
+                            if drain_messages() {
+                                Win32App::do_callback(Win32Event::Paint);
                             }
-                            let msg = coalesce_mouse_move(msg.assume_init());
-                            let msg = coalesce_mouse_wheel(msg);
-                            let _ = TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
-                            drain_budget -= 1;
-                            if drain_budget == 0
-                                || drain_start.elapsed() >= std::time::Duration::from_millis(2)
-                                || matches!(
+                        } else {
+                            let handles: Vec<HANDLE> = beats.iter().map(|(_, h, _)| *h).collect();
+                            let timeout = with_win32_app(|app| app.beat_timeout_ms).max(1);
+                            let count = handles.len() as u32;
+                            let ret = msg_wait_for_beat_or_input(&handles, timeout);
+                            if ret < count {
+                                let (window_id, _, primary) = beats[ret as usize];
+                                // The wait consumed one of that swap chain's credits. Record
+                                // it: it can only be given back by presenting a frame.
+                                let time = with_win32_app(|app| {
+                                    app.take_beat_credit(window_id);
+                                    app.time_now()
+                                });
+                                Win32App::do_callback(Win32Event::Beat {
+                                    window_id,
+                                    time,
+                                    primary,
+                                });
+                            } else if ret == count {
+                                let _ = drain_messages();
+                            } else {
+                                // WAIT_TIMEOUT: no window is being retired by the compositor
+                                // (occluded, minimized, or DWM stalled). Keep the app alive with
+                                // an unscoped heartbeat tick — the per-window wait inside
+                                // `draw_pass_to_window` decides whether to actually present.
+                                if ret == WAIT_FAILED_U32 {
+                                    // A bad handle would otherwise spin this loop at full speed.
+                                    static LOGGED: std::sync::atomic::AtomicBool =
+                                        std::sync::atomic::AtomicBool::new(false);
+                                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                        error!("MsgWaitForMultipleObjectsEx failed; falling back to timed paint beats");
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(4));
+                                }
+                                // Anything else (only WAIT_TIMEOUT, 258, is expected
+                                // here — a semaphore is never abandoned) is treated
+                                // as a timeout: an unpaced tick is always safe.
+                                // Skip the paint only if something asked us to exit, so we don't
+                                // run an extra callback (double shutdown) on the way out.
+                                if !matches!(
                                     with_win32_app(|app| app.event_flow.clone()),
                                     EventFlow::Exit
-                                )
-                            {
-                                break;
+                                ) {
+                                    Win32App::do_callback(Win32Event::Paint);
+                                }
                             }
-                        }
-                        // Skip the paint only if a dispatched message asked us to exit, so we
-                        // don't run an extra callback (double shutdown) on the way out.
-                        if !matches!(with_win32_app(|app| app.event_flow.clone()), EventFlow::Exit) {
-                            Win32App::do_callback(Win32Event::Paint);
                         }
                     }
                     EventFlow::Exit => panic!(),
@@ -596,18 +746,88 @@ impl Win32App {
 
     pub fn stop_timer(&mut self, which_timer_id: u64) {
         for slot in 0..self.timers.len() {
-            if let Win32Timer::Timer {
-                win32_id, timer_id, ..
-            } = self.timers[slot]
-            {
-                if timer_id == which_timer_id {
-                    self.timers[slot] = Win32Timer::Free;
-                    unsafe {
-                        KillTimer(None, win32_id).unwrap();
-                    }
-                }
+            let win32_id = match self.timers[slot] {
+                Win32Timer::Timer {
+                    win32_id, timer_id, ..
+                } if timer_id == which_timer_id => win32_id,
+                // `start_timer(0, ..)` installs a SignalPoll timer rather than a
+                // Timer, so stopping id 0 has to be able to kill that shape too —
+                // otherwise the slot leaks and its 8 ms wakeup runs forever.
+                Win32Timer::SignalPoll { win32_id } if which_timer_id == 0 => win32_id,
+                _ => continue,
+            };
+            self.timers[slot] = Win32Timer::Free;
+            unsafe {
+                let _ = KillTimer(None, win32_id);
             }
         }
+    }
+
+    /// Register a window's DXGI frame-latency waitable as a beat source. The
+    /// first window registered becomes the primary: its beat runs the full app
+    /// tick. Re-registering the same window replaces its handle in place, so a
+    /// resize round-trip keeps the primary slot it had.
+    pub fn register_beat_handle(&mut self, window_id: WindowId, handle: HANDLE, credit_held: bool) {
+        if let Some(entry) = self
+            .beat_handles
+            .iter_mut()
+            .find(|b| b.window_id == window_id)
+        {
+            entry.handle = handle;
+            entry.credit_held = credit_held;
+            return;
+        }
+        self.beat_handles.push(BeatSource {
+            window_id,
+            handle,
+            credit_held,
+        });
+    }
+
+    pub fn unregister_beat_handle(&mut self, window_id: WindowId) {
+        self.beat_handles.retain(|b| b.window_id != window_id);
+    }
+
+    /// The windows to wait on this pass: everything registered that is not
+    /// already holding an unspent credit, tagged with whether it is the primary.
+    fn beat_wait_list(&self) -> Vec<(WindowId, HANDLE, bool)> {
+        self.beat_handles
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.credit_held)
+            .map(|(i, b)| (b.window_id, b.handle, i == 0))
+            .collect()
+    }
+
+    /// A wait on this window's waitable succeeded: we now hold one credit.
+    pub fn take_beat_credit(&mut self, window_id: WindowId) {
+        if let Some(b) = self
+            .beat_handles
+            .iter_mut()
+            .find(|b| b.window_id == window_id)
+        {
+            b.credit_held = true;
+        }
+    }
+
+    /// A frame was handed to `Present`: the credit is spent and the compositor
+    /// will refill the semaphore when that frame retires.
+    pub fn spend_beat_credit(&mut self, window_id: WindowId) {
+        if let Some(b) = self
+            .beat_handles
+            .iter_mut()
+            .find(|b| b.window_id == window_id)
+        {
+            b.credit_held = false;
+        }
+    }
+
+    /// Whether a credit is already in hand for this window — if so, the paint
+    /// must NOT wait again (that would take a second credit and cost a refresh).
+    pub fn has_beat_credit(&self, window_id: WindowId) -> bool {
+        self.beat_handles
+            .iter()
+            .any(|b| b.window_id == window_id && b.credit_held)
     }
 
     pub fn start_resize(&mut self) {
