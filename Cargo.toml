@@ -38,6 +38,7 @@ workspace.members = [
     "examples/pdf",
     "examples/shader",
     "examples/text_input",
+    "examples/text_atlas_stress",
     "examples/text_selection",
     "examples/text_center",
     "examples/counter",

@@ -409,6 +409,15 @@ impl PartialEq for TextureCategory {
     }
 }
 
+/// What of a Vec texture's CPU image still has to reach the GPU.
+///
+/// `Partial` describes the change RELATIVE TO WHAT THE GPU ALREADY HOLDS: a
+/// backend that updates its GPU storage in place may upload just that rect,
+/// but one that (re)allocates the storage — first sight, a size change (the
+/// slug glyph atlas grows by appending rows and marks only those dirty) —
+/// has nothing to keep and must upload the whole image regardless of the
+/// rect. Every backend honors that (GL `glTexImage2D`, D3D11's realloc path,
+/// the headless mirror rebuild, Metal's `vec_fresh`).
 #[derive(Clone, Copy, Debug)]
 pub enum TextureUpdated {
     Empty,
