@@ -212,10 +212,11 @@ mod tests {
 
     #[test]
     fn the_jog_law_is_the_old_one() {
-        assert!((hand_velocity(0.0) - 0.02).abs() < 1e-12, "floored creep");
-        assert!((hand_velocity(0.7) - 1.0).abs() < 1e-12, "1x at 0.7");
-        assert!((hand_velocity(1.0) - 2.0).abs() < 1e-12, "2x at the rim");
-        assert!((hand_velocity(-0.7) + 1.0).abs() < 1e-12, "signed");
+        // The wheel reports f32 (0.7f32 is 0.69999999): a 1e-6 tolerance.
+        assert!((hand_velocity(0.0) - 0.02).abs() < 1e-6, "floored creep");
+        assert!((hand_velocity(0.7) - 1.0).abs() < 1e-6, "1x at 0.7");
+        assert!((hand_velocity(1.0) - 2.0).abs() < 1e-6, "2x at the rim");
+        assert!((hand_velocity(-0.7) + 1.0).abs() < 1e-6, "signed");
         assert!(hand_velocity(0.35) < hand_velocity(0.5) && hand_velocity(0.5) < 1.0);
     }
 
