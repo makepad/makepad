@@ -2067,6 +2067,102 @@ mod tests {
         assert_eq!(t.timeline().unwrap().window(0.5, 0.6), (5, 6));
     }
 
+    /// TWO DECKS, ONE LAW (design-v2 §8 step 7): two transports fed the
+    /// identical input sequence — the same stamps, the same beat clock,
+    /// the same churn — produce BIT-IDENTICAL state series. There is no
+    /// hidden per-deck state, no wall clock, no allocation ordering: a
+    /// deck cannot perturb its neighbour because nothing they touch is
+    /// shared.
+    #[test]
+    fn two_decks_with_identical_inputs_are_bit_identical() {
+        let mut rng = Rng::new(0xD0C5);
+        let build = || {
+            let mut t = Transport::new();
+            t.bind(cfr(72, 12.0), 0, 72);
+            t
+        };
+        let (mut a, mut b) = (build(), build());
+        let mut clock = BeatClock::new();
+        clock.start(0.0, BeatTarget::phase_only(0.0, 0.5));
+        let mut now = 0.0;
+        for step in 0..8000 {
+            // The same churn to both, decided once.
+            if rng.chance(0.01) {
+                let m = [Mode::Loop, Mode::Bounce, Mode::Once][rng.below(3)];
+                a.set_mode(m);
+                b.set_mode(m);
+            }
+            if rng.chance(0.008) {
+                let s = if rng.chance(0.7) { Some(4.0) } else { None };
+                a.set_sync(s);
+                b.set_sync(s);
+            }
+            if rng.chance(0.005) {
+                a.flip();
+                b.flip();
+            }
+            if rng.chance(0.01) {
+                let v = rng.range(-2.0, 2.0);
+                a.hand_hold(v);
+                b.hand_hold(v);
+            } else if rng.chance(0.01) {
+                a.hand_release();
+                b.hand_release();
+            }
+            if rng.chance(0.003) {
+                let p = rng.range(0.0, 5.9);
+                a.seek(p);
+                b.seek(p);
+            }
+            now += 1.0 / 60.0 + rng.range(-0.001, 0.001);
+            clock.advance_to(now);
+            let bi = BeatInput {
+                bpm: clock.bpm(),
+                beats: clock.position_at(now),
+                epoch: clock.epoch(),
+            };
+            let sa = a.advance(now, Some(bi));
+            let sb = b.advance(now, Some(bi));
+            assert!(
+                sa == sb && a.q().to_bits() == b.q().to_bits(),
+                "step {step}: decks diverged: {sa:?} vs {sb:?}"
+            );
+        }
+    }
+
+    /// Prefetch prediction follows the MAP: through a loop's seam (the
+    /// wrap pair, then the head), reflected at a bounce apex, and along
+    /// the current travel when reversed.
+    #[test]
+    fn locate_ahead_follows_the_traversal() {
+        // Loop, forward, standing in the second-to-last pair.
+        let mut t = platter(10, 10.0, Mode::Loop);
+        t.seek(0.85); // pair 8
+        t.advance(0.0, None);
+        t.advance(1.0 / 60.0, None);
+        assert_eq!(t.locate(t.pos()).unwrap().a, 8);
+        assert_eq!(t.locate_ahead(1.0).unwrap().a, 9, "into the wrap pair");
+        assert_eq!(t.locate_ahead(2.0).unwrap().a, 0, "through the seam");
+        assert_eq!(t.locate_ahead(3.0).unwrap().a, 1);
+        // Reverse (travel −1): ahead means the OTHER way.
+        let mut t = platter(10, 10.0, Mode::Loop);
+        t.set_travel(false);
+        t.seek(0.15); // pair 1
+        t.advance(0.0, None);
+        t.advance(1.0 / 60.0, None);
+        assert_eq!(t.locate_ahead(1.0).unwrap().a, 0);
+        assert_eq!(t.locate_ahead(2.0).unwrap().a, 9, "backward through the seam");
+        // Bounce, forward, near the apex: reflected, never past the end.
+        let mut t = platter(10, 10.0, Mode::Bounce);
+        t.seek(0.75); // pair 7 of 0..=8
+        t.advance(0.0, None);
+        t.advance(1.0 / 60.0, None);
+        assert_eq!(t.locate_ahead(1.0).unwrap().a, 8);
+        let back = t.locate_ahead(3.0).unwrap();
+        assert_eq!(back.a, 7, "reflected at the apex");
+        assert!(t.locate_ahead(9.0).unwrap().a <= 8);
+    }
+
     #[test]
     fn a_grab_is_a_slew_not_a_step() {
         let mut t = platter(48, 24.0, Mode::Loop);
