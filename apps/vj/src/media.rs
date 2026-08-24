@@ -182,6 +182,26 @@ impl Default for Pixels {
     }
 }
 
+/// Sparse mean-abs luma difference between two NV12 frames (0..255): the
+/// scene-cut score. A 24x14 grid is plenty — a hard cut moves most of the
+/// picture, a pan moves edges.
+pub fn nv12_cut_score(a: &[u8], b: &[u8], w: usize, h: usize) -> f32 {
+    if w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
+        return 0.0;
+    }
+    let (gw, gh) = (24usize, 14usize);
+    let mut sum = 0.0f32;
+    for gy in 0..gh {
+        let y = (gy * h + h / 2) / gh;
+        for gx in 0..gw {
+            let x = (gx * w + w / 2) / gw;
+            let at = y.min(h - 1) * w + x.min(w - 1);
+            sum += (a[at] as f32 - b[at] as f32).abs();
+        }
+    }
+    sum / (gw * gh) as f32
+}
+
 /// Tightly packed RGB8 proxy of an NV12 frame at a reduced resolution —
 /// the RIFE worker's input format. Same nearest-sample BT.709 math as the
 /// BGRA proxy below.
