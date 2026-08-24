@@ -3989,6 +3989,13 @@ const TWEEN_NONE: u8 = 0;
 const TWEEN_FADE: u8 = 1;
 const TWEEN_FLOW: u8 = 2;
 const TWEEN_AI: u8 = 3;
+/// Pair-cache namespace for the luma cut verdict (separate from producers).
+const TWEEN_CUT_TIER: u8 = u8::MAX;
+/// Per-deck neural ladder budget. Exact pair keys make eviction harmless.
+const TWEEN_RIFE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
+/// Measured sustainable AI production rate, shared by the active AI decks.
+const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
 
 /// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
 /// per-deck dropdown's AI entry is the opt-in now.
@@ -5001,17 +5008,25 @@ pub struct App {
     slot_tween_mode: [u8; 2],
     #[rust]
     rife_service: [Option<flow_tween::RifeService>; 2],
-    /// FRAME TWEENER state per slot: the pair index the tween view holds,
-    /// and the position predictor (last published pos, predicted pos,
-    /// last prediction time in app seconds).
+    /// FRAME TWEENER state per slot: the exact keyed pair the view holds.
     #[rust]
-    tween_pair: [Option<usize>; 2],
+    tween_pair: [Option<pair_cache::PairKey>; 2],
+    /// Products are parked under the pair that made them. A result can
+    /// never change the current lease; it is adopted at a later boundary.
     #[rust]
-    tween_pred: [(f64, f64, f64); 2],
+    rife_cache: [Option<pair_cache::PairCache<Arc<flow_tween::RifeField>>>; 2],
+    #[rust]
+    tween_cut_cache: [Option<pair_cache::PairCache<bool>>; 2],
     /// THE PLATTER per slot (platter.rs): the presenter's clock for a
     /// resident clip — velocity in, position out, one map.
     #[rust]
     platter: [Option<platter::PlatterSlot>; 2],
+    /// Last resident frame sampled by the CPU consumers, and last OFF-tier
+    /// frame uploaded. Both are clip-generation keyed.
+    #[rust]
+    platter_sample: [Option<(u64, usize)>; 2],
+    #[rust]
+    platter_off_frame: [Option<(u64, usize)>; 2],
     /// The frame stamp's time base as an Instant (captured once at startup)
     /// so Instant-based clocks (beat epoch, free anchor) convert to it
     /// without sampling the wall clock in the pump.
@@ -5050,9 +5065,6 @@ pub struct App {
     beat_clock: BeatClock,
     #[rust]
     clock_epoch: Option<Instant>,
-    /// The next beat boundary the pump will pulse the deck transports at.
-    #[rust]
-    beat_edge: Option<Instant>,
     /// The FREE-RUNNING FLOOR of the clock ladder: there is NO clockless
     /// state. From process start this ticks at 120 BPM; every real source
     /// (tap, typed BPM, deck, detector) steers the ladder above it, and
@@ -7772,7 +7784,9 @@ p2 {}
         self.nv12_view(cx, slot, |cx, view| view.clear(cx));
         self.tween_view(cx, slot, |cx, view| view.clear(cx));
         self.tween_pair[i] = None;
-        self.tween_pred[i] = (0.0, 0.0, 0.0);
+        self.platter[i] = None;
+        self.platter_sample[i] = None;
+        self.platter_off_frame[i] = None;
         self.light_samples[i] = None;
         self.light_analyzers[i].reset();
         self.clear_slot_mesh(cx, slot);
@@ -14894,7 +14908,99 @@ p2 {}
 
     // ---- video frame pump ---------------------------------------------------
 
-    fn pump_video(&mut self, cx: &mut Cx) {
+    /// Feed the point-sampled consumers exactly once for each resident
+    /// source frame the platter presents. The full frame never leaves its
+    /// NV12 lane.
+    fn sample_platter_frame(
+        &mut self,
+        index: usize,
+        frame: &crate::media::Frame,
+        width: usize,
+        height: usize,
+        position_secs: f64,
+    ) {
+        let proxy = match &frame.px {
+            crate::media::Pixels::Nv12 { data, width, height } => {
+                crate::media::nv12_proxy_bgra(
+                    data,
+                    *width as usize,
+                    *height as usize,
+                    160,
+                    90,
+                )
+            }
+            crate::media::Pixels::Bgra(frame) => {
+                let mut proxy = Vec::with_capacity(160 * 90);
+                for y in 0..90 {
+                    let sy = (y * height / 90).min(height.saturating_sub(1));
+                    for x in 0..160 {
+                        let sx = (x * width / 160).min(width.saturating_sub(1));
+                        proxy.push(frame.get(sy * width + sx).copied().unwrap_or(0));
+                    }
+                }
+                proxy
+            }
+        };
+        self.light_samples[index] = Some(
+            self.light_analyzers[index].push_bgra_frame(&proxy, 160, 90),
+        );
+        if let (Some(revision), Some(tx)) = (self.slot_scan[index], self.loop_tx.as_ref()) {
+            let sig = build_frame_signature(&proxy, 160, 90, &mut self.sig_states[index]);
+            let _ = tx.send(LoopScanCtl::Sig {
+                slot: index,
+                revision,
+                position_secs,
+                sig,
+            });
+        }
+    }
+
+    /// OFF is a presenter too: upload the platter's nearest resident frame,
+    /// but only when that exact frame changes.
+    fn present_platter_off(
+        &mut self,
+        cx: &mut Cx,
+        slot: SlotId,
+        frame: &crate::media::Frame,
+        width: usize,
+        height: usize,
+    ) {
+        let index = slot.index();
+        match &frame.px {
+            crate::media::Pixels::Nv12 { data, width, height } => {
+                let tex = self
+                    .nv12_view(cx, slot, |cx, view| {
+                        view.set_frame(cx, data, *width, *height);
+                        view.output_texture()
+                    })
+                    .flatten();
+                if let Some(tex) = tex {
+                    self.slot_tex_borrowed[index] = false;
+                    self.slot_textures[index] = Some(tex);
+                }
+            }
+            crate::media::Pixels::Bgra(frame) => {
+                match (&self.slot_textures[index], self.slot_tex_borrowed[index]) {
+                    (Some(tex), false) => tex.set_data_u32(cx, width, height, frame.clone()),
+                    _ => {
+                        self.slot_tex_borrowed[index] = false;
+                        self.slot_textures[index] = Some(Texture::new_with_format(
+                            cx,
+                            TextureFormat::VecBGRAu8_32 {
+                                width,
+                                height,
+                                data: Some(frame.clone()),
+                                updated: TextureUpdated::Full,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        self.set_deck_busy(cx, slot, false);
+    }
+
+    fn pump_video(&mut self, cx: &mut Cx, now: f64) {
         // Device-clock transition confirmations run at display-frame rate
         // for tight picture starts (the 20 Hz poll is only a fallback).
         self.pump_transitions(cx);
@@ -14908,7 +15014,13 @@ p2 {}
         }
         for index in 0..2 {
             let Some(player) = self.players[index].as_mut() else { continue };
+            let resident = player.resident_frames().is_some();
             if let Some(px) = player.take_due_frame() {
+                // A resident clip is presented exclusively by the platter
+                // below. Drain any handover tail, but never show it.
+                if resident {
+                    continue;
+                }
                 if let crate::media::Pixels::Nv12 { data, width, height } = px {
                     // THE NV12 LANE: planes go straight to the GPU pass;
                     // the CPU touches only a small proxy for the
@@ -14989,30 +15101,6 @@ p2 {}
                 self.set_deck_busy(cx, SlotId::from_index(index), false);
             }
         }
-        // REV TRACKS THE LIVE LEG in a bounce: the button lights while the
-        // picture travels backwards — however it got there (a REV press,
-        // or the bounce's own reflection). Every other mode keeps the
-        // latch paint (lit while flipped).
-        for slot in [SlotId::A, SlotId::B] {
-            let i = slot.index();
-            if self.slot_media[i] != SlotMedia::Video || !self.slot_pingpong[i] {
-                if self.slot_rev_lit[i].take().is_some() {
-                    self.paint_icon_button(cx, Self::deck_rev_path(slot), self.slot_flip[i]);
-                }
-                continue;
-            }
-            let lit = if self.flow_active(i) {
-                self.flow_view(cx, slot, |_cx, view| !view.travel_forward()).unwrap_or(false)
-            } else if let Some(player) = self.players[i].as_ref() {
-                !player.travel_forward()
-            } else {
-                false
-            };
-            if self.slot_rev_lit[i] != Some(lit) {
-                self.slot_rev_lit[i] = Some(lit);
-                self.paint_icon_button(cx, Self::deck_rev_path(slot), lit);
-            }
-        }
         // REALTIME FRAME TWEENING (flow_tween.rs): with a resident repeat
         // cache, the presented picture becomes a GPU-warped in-between at
         // the transport's fractional position — silky slow-mo and scratch,
@@ -15025,63 +15113,184 @@ p2 {}
         if tween_selftest() {
             self.pump_tween_selftest(cx);
         }
-        if tween_enabled() {
-            let now = cx.seconds_since_app_start();
-            for slot in [SlotId::A, SlotId::B] {
-                let i = slot.index();
-                let mode = self.slot_tween_mode[i];
-                let eligible = mode != TWEEN_NONE
+        let tween_on = tween_enabled();
+        let ai_decks = (0..2)
+            .filter(|&i| {
+                tween_on
+                    && self.slot_tween_mode[i] == TWEEN_AI
                     && self.slot_media[i] == SlotMedia::Video
-                    && !self.flow_active(i)
-                    && self.players[i].is_some();
-                if !eligible {
-                    if self.tween_pair[i].take().is_some() {
-                        self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                    && self.players[i].is_some()
+            })
+            .count()
+            .max(1);
+        let ai_ceiling = TWEEN_RIFE_CAPACITY_FPS / ai_decks as f64;
+        for slot in [SlotId::A, SlotId::B] {
+            let i = slot.index();
+
+            // Land a finished producer result in its exact cache. It can
+            // only be leased at a later pair boundary.
+            if let Some(field) = self.rife_service[i].as_ref().and_then(|s| s.take()) {
+                let key = pair_cache::PairKey::new(
+                    field.generation,
+                    field.a,
+                    field.b,
+                    TWEEN_AI,
+                );
+                let bytes = field.byte_len();
+                self.rife_cache[i]
+                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_RIFE_CACHE_BYTES))
+                    .insert(key, Arc::new(field), bytes, 100);
+            }
+
+            let resident = if self.slot_media[i] == SlotMedia::Video && !self.flow_active(i) {
+                self.players[i].as_ref().and_then(|player| {
+                    player.resident_frames().map(|frames| {
+                        (frames, player.generation(), player.width as usize, player.height as usize)
+                    })
+                })
+            } else {
+                None
+            };
+            let Some((cache, generation, player_width, player_height)) = resident else {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                self.platter_sample[i] = None;
+                self.platter_off_frame[i] = None;
+                continue;
+            };
+            let Some(step) = self.platter_step(i, now, &cache) else { continue };
+            if let Some(player) = self.players[i].as_ref() {
+                player.publish_position_secs(step.pos_secs);
+            }
+
+            let sample = (generation, step.nearest);
+            if self.platter_sample[i] != Some(sample) {
+                self.platter_sample[i] = Some(sample);
+                self.sample_platter_frame(
+                    i,
+                    &cache[step.nearest],
+                    player_width,
+                    player_height,
+                    step.pos_secs,
+                );
+            }
+
+            let mode = if tween_on { self.slot_tween_mode[i] } else { TWEEN_NONE };
+            if mode == TWEEN_NONE {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                if self.platter_off_frame[i] != Some(sample) {
+                    self.platter_off_frame[i] = Some(sample);
+                    self.present_platter_off(
+                        cx,
+                        slot,
+                        &cache[step.nearest],
+                        player_width,
+                        player_height,
+                    );
+                }
+                continue;
+            }
+            self.platter_off_frame[i] = None;
+            let (pa, pb) = (&cache[step.pair], &cache[step.ib]);
+            let (
+                crate::media::Pixels::Nv12 { data: da, width, height, .. },
+                crate::media::Pixels::Nv12 { data: db, .. },
+            ) = (&pa.px, &pb.px)
+            else {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                if self.platter_off_frame[i] != Some(sample) {
+                    self.platter_off_frame[i] = Some(sample);
+                    self.present_platter_off(
+                        cx,
+                        slot,
+                        &cache[step.nearest],
+                        player_width,
+                        player_height,
+                    );
+                }
+                continue;
+            };
+            let (width, height) = (*width, *height);
+            let pair = pair_cache::PairKey::new(generation, step.pair, step.ib, mode);
+            let pair_changed = self.tween_pair[i] != Some(pair);
+
+            // One luma verdict per exact seam and clip generation.
+            let cut_key = pair_cache::PairKey::new(
+                generation,
+                step.pair,
+                step.ib,
+                TWEEN_CUT_TIER,
+            );
+            let known_cut = self.tween_cut_cache[i]
+                .as_mut()
+                .and_then(|products| products.get(&cut_key).copied());
+            let cut_verdict = known_cut.unwrap_or_else(|| {
+                let verdict = crate::media::nv12_cut_score(
+                    da,
+                    db,
+                    width as usize,
+                    height as usize,
+                ) > 28.0;
+                self.tween_cut_cache[i]
+                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_CUT_CACHE_BYTES))
+                    .insert(cut_key, verdict, std::mem::size_of::<bool>(), 1);
+                verdict
+            });
+            let cut = mode >= TWEEN_FLOW && cut_verdict;
+            // Freeze the producer choice at the pair boundary. Late output
+            // stays cached for a later traversal of this exact pair.
+            let rife_field = if mode == TWEEN_AI && pair_changed {
+                self.rife_cache[i]
+                    .as_mut()
+                    .and_then(|products| products.get(&pair).cloned())
+            } else {
+                None
+            };
+            let tex = self.tween_view(cx, slot, |cx, view| {
+                view.set_fade(cx, mode == TWEEN_FADE);
+                if pair_changed {
+                    view.set_pair(cx, da, db, width, height);
+                    view.set_cut(cx, cut);
+                    if let Some(field) = rife_field.as_deref() {
+                        view.set_rife_field(
+                            cx,
+                            field.a,
+                            field.width,
+                            field.height,
+                            &field.flow,
+                            &field.mask,
+                        );
+                    } else {
+                        view.clear_rife_field(cx);
                     }
-                    continue;
+                } else if mode != TWEEN_AI {
+                    view.clear_rife_field(cx);
                 }
-                let player = self.players[i].as_ref().unwrap();
-                let Some(cache) = player.cache_frames() else { continue };
-                if cache.len() < 2 {
-                    continue;
-                }
-                let (pub_pos, rate) = player.cache_pos();
-                // Predict between media ticks so a 25 fps clip still gets
-                // a fresh t every display frame; snap when a new tick
-                // lands, and never drift more than a frame from it.
-                let (last_pub, mut pos, at) = self.tween_pred[i];
-                if (pub_pos - last_pub).abs() > 1e-9 {
-                    pos = pub_pos;
-                } else {
-                    pos = (pos + rate * (now - at))
-                        .clamp(pub_pos - 1.0, pub_pos + 1.0);
-                }
-                self.tween_pred[i] = (pub_pos, pos, now);
-                let pos = pos.clamp(0.0, (cache.len() - 1) as f64);
-                let pair = (pos.floor() as usize).min(cache.len() - 2);
-                let t = (pos - pair as f64) as f32;
-                let (pa, pb) = (&cache[pair], &cache[pair + 1]);
-                let (
-                    crate::media::Pixels::Nv12 { data: da, width, height, .. },
-                    crate::media::Pixels::Nv12 { data: db, .. },
-                ) = (&pa.px, &pb.px)
-                else {
-                    continue;
-                };
-                let (width, height) = (*width, *height);
-                let tween_pair = self.tween_pair[i];
-                // SCENE-CUT GUARD: flow across a hard cut morphs two
-                // unrelated pictures into soup. A sparse luma grid diff
-                // is enough to call it; cut pairs hard-switch at t=0.5.
-                let cut = mode >= TWEEN_FLOW
-                    && tween_pair != Some(pair)
-                    && crate::media::nv12_cut_score(da, db, width as usize, height as usize)
-                        > 28.0;
-                // NEURAL fields: start the producer lazily, retire stale
-                // fields on a pair change, adopt fresh results, and offer
-                // the new pair (a busy worker skips it — the classical
-                // stack below covers every pair regardless).
-                if mode == TWEEN_AI && rife_enabled() && self.rife_state[i] == 0 {
+                view.set_t(cx, step.t);
+                view.output_texture()
+            });
+            self.tween_pair[i] = Some(pair);
+            if let Some(Some(tex)) = tex {
+                self.slot_tex_borrowed[i] = false;
+                self.slot_textures[i] = Some(tex);
+                self.set_deck_busy(cx, slot, false);
+            }
+
+            // Prefetch along the map, never by numeric pair + 1. The shared
+            // capacity law degrades an impossible future pair to classical
+            // before any neural work is queued.
+            if mode == TWEEN_AI
+                && pair_changed
+                && rife_enabled()
+                && step.pace > 0.0
+                && step.pace <= ai_ceiling
+            {
+                if self.rife_state[i] == 0 {
                     match flow_tween::RifeService::start(&rife_model_path()) {
                         Ok(service) => {
                             self.rife_service[i] = Some(service);
@@ -15094,110 +15303,111 @@ p2 {}
                         }
                     }
                 }
-                // A busy worker's result is drained even when the deck
-                // left AI mode — never adopted, never left clogging the
-                // channel.
-                let rife_result = self.rife_service[i].as_ref().and_then(|s| s.take());
-                let offer = mode == TWEEN_AI
-                    && tween_pair != Some(pair)
-                    && self.rife_state[i] == 1
-                    && !cut;
-                let tex = self.tween_view(cx, slot, |cx, view| {
-                    view.set_fade(cx, mode == TWEEN_FADE);
-                    if mode != TWEEN_AI {
-                        view.clear_rife_field(cx);
-                    }
-                    if tween_pair != Some(pair) {
-                        view.set_pair(cx, da, db, width, height);
-                        view.set_cut(cx, cut);
-                        if mode == TWEEN_AI && view.rife_field_pair() != Some(pair) {
-                            view.age_rife_field(cx, pair);
-                        }
-                    }
-                    if let Some(field) = rife_result.filter(|_| mode == TWEEN_AI) {
-                        if field.generation == i as u64 && field.pair == pair {
-                            view.set_rife_field(
-                                cx,
-                                field.pair,
-                                field.width,
-                                field.height,
-                                &field.flow,
-                                &field.mask,
-                            );
-                        }
-                    }
-                    view.set_t(cx, t);
-                    view.output_texture()
-                });
-                if offer {
-                    if let Some(service) = self.rife_service[i].as_ref() {
-                        let (pw, ph) = rife_proxy_dims(width, height);
-                        service.offer(flow_tween::RifeJob {
-                            generation: i as u64,
-                            pair,
-                            rgb0: crate::media::nv12_proxy_rgb8(
-                                da,
-                                width as usize,
-                                height as usize,
-                                pw,
-                                ph,
-                            ),
-                            rgb1: crate::media::nv12_proxy_rgb8(
-                                db,
-                                width as usize,
-                                height as usize,
-                                pw,
-                                ph,
-                            ),
-                            width: pw,
-                            height: ph,
+                if self.rife_state[i] == 1 {
+                    if let Some(ahead) = self.platter_locate_ahead(i, 1.0) {
+                        let ahead_key = pair_cache::PairKey::new(
+                            generation,
+                            ahead.a,
+                            ahead.b,
+                            TWEEN_AI,
+                        );
+                        let already_cached = self.rife_cache[i]
+                            .as_ref()
+                            .is_some_and(|products| products.contains(&ahead_key));
+                        let ahead_cut_key = pair_cache::PairKey::new(
+                            generation,
+                            ahead.a,
+                            ahead.b,
+                            TWEEN_CUT_TIER,
+                        );
+                        let known_ahead_cut = self.tween_cut_cache[i]
+                            .as_mut()
+                            .and_then(|products| products.get(&ahead_cut_key).copied());
+                        let ahead_cut = known_ahead_cut.unwrap_or_else(|| {
+                            let verdict = match (&cache[ahead.a].px, &cache[ahead.b].px) {
+                                (
+                                    crate::media::Pixels::Nv12 {
+                                        data: a,
+                                        width,
+                                        height,
+                                    },
+                                    crate::media::Pixels::Nv12 { data: b, .. },
+                                ) => crate::media::nv12_cut_score(
+                                    a,
+                                    b,
+                                    *width as usize,
+                                    *height as usize,
+                                ) > 28.0,
+                                _ => true,
+                            };
+                            self.tween_cut_cache[i]
+                                .get_or_insert_with(|| {
+                                    pair_cache::PairCache::new(TWEEN_CUT_CACHE_BYTES)
+                                })
+                                .insert(
+                                    ahead_cut_key,
+                                    verdict,
+                                    std::mem::size_of::<bool>(),
+                                    1,
+                                );
+                            verdict
                         });
+                        if !already_cached && !ahead_cut {
+                            if let (Some(service), Some(start)) =
+                                (self.rife_service[i].as_ref(), self.app_start_instant)
+                            {
+                                let (pw, ph) = rife_proxy_dims(width, height);
+                                let deadline = start + std::time::Duration::from_secs_f64(
+                                    (now + 1.0 / step.pace).max(0.0),
+                                );
+                                service.offer(flow_tween::RifeJob {
+                                    generation,
+                                    a: ahead.a,
+                                    b: ahead.b,
+                                    frames: cache.clone(),
+                                    width: pw,
+                                    height: ph,
+                                    deadline,
+                                });
+                            }
+                        }
                     }
                 }
-                self.tween_pair[i] = Some(pair);
-                if let Some(Some(tex)) = tex {
-                    self.slot_tex_borrowed[i] = false;
-                    self.slot_textures[i] = Some(tex);
+            }
+        }
+
+        // REV tracks the live platter leg in a resident bounce; streaming
+        // tiers retain their decoder-published direction.
+        for slot in [SlotId::A, SlotId::B] {
+            let i = slot.index();
+            if self.slot_media[i] != SlotMedia::Video || !self.slot_pingpong[i] {
+                if self.slot_rev_lit[i].take().is_some() {
+                    self.paint_icon_button(cx, Self::deck_rev_path(slot), self.slot_flip[i]);
                 }
+                continue;
+            }
+            let lit = if self.flow_active(i) {
+                self.flow_view(cx, slot, |_cx, view| !view.travel_forward()).unwrap_or(false)
+            } else if let Some(forward) = self.platter_screen_forward(i) {
+                !forward
+            } else if let Some(player) = self.players[i].as_ref() {
+                !player.travel_forward()
+            } else {
+                false
+            };
+            if self.slot_rev_lit[i] != Some(lit) {
+                self.slot_rev_lit[i] = Some(lit);
+                self.paint_icon_button(cx, Self::deck_rev_path(slot), lit);
             }
         }
         self.pump_billboards(cx);
         // Live splat scenes orbit slowly and re-render every frame.
-        let now = cx.seconds_since_app_start();
         let dt = (now - self.last_splat_pump.replace(now).unwrap_or(now)).clamp(0.0, 0.25) as f32;
         for slot in [SlotId::A, SlotId::B] {
             self.pump_splat(cx, slot, dt);
             // Flow-warp transport: the free-running pair-space clock, one
             // step per display frame (parked players cost nothing above).
             self.pump_flow(cx, slot, dt as f64);
-        }
-        // THE BEAT EDGE: one pulse per beat boundary to every synced video
-        // deck — the transport turn/wrap authority of the sync law.
-        {
-            let beat = self.current_beat();
-            if let Some(beat) = beat.as_ref() {
-                let now_i = Instant::now();
-                let fire = match self.beat_edge {
-                    Some(edge) => now_i >= edge,
-                    None => false,
-                };
-                if fire {
-                    for i in 0..2 {
-                        if self.slot_beat_sync[i] && self.external_sync_enabled {
-                            if let Some(player) = self.players[i].as_mut() {
-                                player.beat_pulse();
-                            }
-                        }
-                    }
-                }
-                if fire || self.beat_edge.is_none() {
-                    let mut next = beat.next_beat;
-                    if next <= now_i {
-                        next = now_i + beat.period;
-                    }
-                    self.beat_edge = Some(next);
-                }
-            }
         }
         // The program mix mirrors the device-clock transition exactly: the
         // audio gains and this visual mix advance from one sample counter,
@@ -16695,12 +16905,6 @@ impl MatchEvent for App {
                 let mode = self.slot_play_mode(i);
                 if let Some(player) = self.players[i].as_mut() {
                     player.set_mode(mode);
-                    // In a bounce the MODE has no direction to change —
-                    // REV inverts the leg in flight instead, and from here
-                    // the button tracks the live travel (see pump_video).
-                    if mode == crate::media::PlayMode::PingPong {
-                        player.flip_direction();
-                    }
                 }
                 self.paint_icon_button(cx, Self::deck_rev_path(slot), self.slot_flip[i]);
                 self.video_pump = cx.new_next_frame();
@@ -17504,6 +17708,7 @@ impl AppMain for App {
         if let Event::Startup = event {
             if !self.started {
                 self.started = true;
+                self.app_start_instant = Some(Instant::now());
             }
         }
         if self.poll_timer.is_event(event).is_some() {
@@ -17572,8 +17777,8 @@ impl AppMain for App {
         if self.decode_pump.is_event(event).is_some() {
             self.pump_fill(cx);
         }
-        if self.video_pump.is_event(event).is_some() {
-            self.pump_video(cx);
+        if let Some(ne) = self.video_pump.is_event(event) {
+            self.pump_video(cx, ne.time);
         }
         if self.music_pump.is_event(event).is_some() {
             self.pump_music_frame(cx);

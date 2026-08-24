@@ -34,7 +34,7 @@
 
 use makepad_widgets::*;
 
-use crate::media::tl_on;
+use crate::media::{nv12_proxy_rgb8, tl_on, Frame, Pixels};
 
 /// THE NEURAL FIELD PRODUCER: one background worker owning the RIFE
 /// runtime. Jobs are (generation, pair, two RGB8 proxies); results are
@@ -48,22 +48,32 @@ pub struct RifeService {
 
 pub struct RifeJob {
     pub generation: u64,
-    pub pair: usize,
-    pub rgb0: Vec<u8>,
-    pub rgb1: Vec<u8>,
+    pub a: usize,
+    pub b: usize,
+    pub frames: std::sync::Arc<Vec<Frame>>,
     pub width: usize,
     pub height: usize,
+    /// A prefetched pair that did not finish before its boundary is shed;
+    /// the classical producer owns that traversal from its first frame.
+    pub deadline: std::time::Instant,
 }
 
 pub struct RifeField {
     pub generation: u64,
-    pub pair: usize,
+    pub a: usize,
+    pub b: usize,
     pub width: usize,
     pub height: usize,
     /// Packed RGBA per proxy pixel: t->frame0 xy, t->frame1 xy (pixels).
     pub flow: Vec<f32>,
     /// Post-sigmoid occlusion mask, 0..1.
     pub mask: Vec<f32>,
+}
+
+impl RifeField {
+    pub fn byte_len(&self) -> usize {
+        (self.flow.len() + self.mask.len()) * std::mem::size_of::<f32>()
+    }
 }
 
 impl RifeService {
@@ -93,8 +103,34 @@ impl RifeService {
                     RifeScale::Half,
                 );
                 while let Ok(job) = rx.recv() {
+                    if std::time::Instant::now() >= job.deadline {
+                        continue;
+                    }
+                    let Some(frame0) = job.frames.get(job.a) else { continue };
+                    let Some(frame1) = job.frames.get(job.b) else { continue };
+                    let (
+                        Pixels::Nv12 { data: nv12_0, width, height },
+                        Pixels::Nv12 { data: nv12_1, .. },
+                    ) = (&frame0.px, &frame1.px)
+                    else {
+                        continue;
+                    };
+                    let rgb0 = nv12_proxy_rgb8(
+                        nv12_0,
+                        *width as usize,
+                        *height as usize,
+                        job.width,
+                        job.height,
+                    );
+                    let rgb1 = nv12_proxy_rgb8(
+                        nv12_1,
+                        *width as usize,
+                        *height as usize,
+                        job.width,
+                        job.height,
+                    );
                     let Ok(pair) = RifeFramePair::new(
-                        &job.rgb0, &job.rgb1, job.width, job.height,
+                        &rgb0, &rgb1, job.width, job.height,
                     ) else {
                         continue;
                     };
@@ -115,7 +151,7 @@ impl RifeService {
                     if tl_on() {
                         eprintln!(
                             "tl rife pair={} {}x{} in {:.0}ms",
-                            job.pair,
+                            job.a,
                             job.width,
                             job.height,
                             t0.elapsed().as_secs_f64() * 1000.0
@@ -123,7 +159,8 @@ impl RifeService {
                     }
                     *out.lock().unwrap() = Some(RifeField {
                         generation: job.generation,
-                        pair: job.pair,
+                        a: job.a,
+                        b: job.b,
                         width: job.width,
                         height: job.height,
                         flow,
