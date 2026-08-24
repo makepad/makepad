@@ -1808,9 +1808,17 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             forward = dir;
             idx = sweep_index(sweep_phase, forward, lo, hi, mode);
             {
-                // The tweener's clock: the same phase map, unrounded.
+                // The tweener's clock: the same phase map, unrounded — at
+                // the PRESENTED time, not the produced one. This worker
+                // runs the queue ahead of the screen; publishing the
+                // producer phase fed the tween a clock ~queue-length media
+                // frames in the future, arriving in bursts (the normal-
+                // speed judder: predict, stall on the clamp, leap). The
+                // same correction the beat nudge uses.
+                let qlen = shared.frames.lock().unwrap().len() as f64;
+                let presented_phase = (sweep_phase - qlen * step).rem_euclid(1.0);
                 let span = (hi - lo).max(1) as f64;
-                let u = if forward { sweep_phase } else { 1.0 - sweep_phase };
+                let u = if forward { presented_phase } else { 1.0 - presented_phase };
                 let posf = lo as f64 + u * (span - 1.0).max(0.0);
                 let ratef = (span - 1.0).max(0.0) / (sweep_pts / 1e7).max(1e-6)
                     * if forward { 1.0 } else { -1.0 };
