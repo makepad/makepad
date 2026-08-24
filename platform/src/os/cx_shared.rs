@@ -77,6 +77,47 @@ impl Cx {
         None
     }
 
+    /// Whether the time repaint (`demo_time_repaint`: some shader read
+    /// `draw_pass.time`, so repaint every frame) may re-dirty this pass.
+    ///
+    /// It used to re-dirty EVERY pass with a main draw list — including
+    /// passes their owner did not begin again on the latest redraw, which
+    /// still hold a stale draw list, parent and target. Re-running one of
+    /// those overwrites the fresh output of the pass that took its place:
+    /// the VJ's warp-only beat re-ran the previous beat's whole tween chain
+    /// and its stale warp stage (same depth, higher pool id) clobbered
+    /// `warp_out` with the old t (audit hazard (a); 999/2000 beats in the
+    /// timed alternation probe).
+    ///
+    /// "Begun on the latest redraw" is read off the draw lists: a pass's main
+    /// draw list is rebuilt (`clear_draw_items(redraw_id)`) every time the
+    /// pass is begun, so its `redraw_id` is the draw cycle that last began
+    /// the pass. The reference is the pass's root window's own main list —
+    /// not the global cycle — so a window that did not redraw this cycle
+    /// keeps its time-animated child passes alive (multi-window), while a
+    /// child left behind by a window that DID redraw is stale. Window passes
+    /// are always live; parentless passes compare against the current cycle.
+    /// Explicit `repaint_pass` users are untouched: this gates only the time
+    /// repaint, and dirty propagation to parents is unchanged.
+    fn pass_live_for_time_repaint(&self, pass_id: DrawPassId) -> bool {
+        let pass = &self.passes[pass_id];
+        let Some(list_id) = pass.main_draw_list_id else {
+            return false;
+        };
+        if matches!(pass.parent, CxDrawPassParent::Window(_)) {
+            return true;
+        }
+        let reference = match self.pass_root_window(pass_id) {
+            Some(window_id) if self.windows.is_valid(window_id) => self.windows[window_id]
+                .main_pass_id
+                .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
+                .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
+                .unwrap_or(self.redraw_id),
+            _ => self.redraw_id,
+        };
+        self.draw_lists[list_id].redraw_id >= reference
+    }
+
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
@@ -85,10 +126,8 @@ impl Cx {
             // loop untill we don't propagate anymore
             let mut altered = false;
             for draw_pass_id in self.passes.id_iter() {
-                if self.demo_time_repaint {
-                    if self.passes[draw_pass_id].main_draw_list_id.is_some() {
-                        self.passes[draw_pass_id].paint_dirty = true;
-                    }
+                if self.demo_time_repaint && self.pass_live_for_time_repaint(draw_pass_id) {
+                    self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
                     let other = match self.passes[draw_pass_id].parent {
