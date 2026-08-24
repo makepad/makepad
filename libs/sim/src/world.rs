@@ -90,6 +90,13 @@ pub struct GameWorld {
     pub look_dy: f64,
     /// Vertical field of view (degrees). Racing games widen it with speed.
     pub cam_fov: f32,
+    /// Near clip plane in metres (0 = the renderer's stock 0.15). The
+    /// NORMALIZATION RULE: the near plane's frustum-corner reach
+    /// (near x sqrt(1 + tan^2(fovx/2) + tan^2(fovy/2))) must stay inside
+    /// the walker's wall margin, or a head against a wall sees through
+    /// it. Classic-import maps shrink this to fit their declared body
+    /// (a Doom body's 0.25 m radius needs ~0.10).
+    pub cam_near: f32,
     /// Decaying random camera offset amplitude (game.cam_shake).
     pub cam_shake: f32,
     /// game.save/game.load persistence. NOT cleared on eval — surviving
@@ -346,6 +353,7 @@ impl GameWorld {
         self.cam_pitch_request = None;
         self.cam_yaw_request = None;
         self.cam_fov = 40.0;
+        self.cam_near = 0.15;
         self.cam_shake = 0.0;
         self.rng = 0x9E37_79B9_7F4A_7C15;
         // Fresh box3d world; the mirror rebuilds from entities at the next
