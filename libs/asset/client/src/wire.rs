@@ -191,6 +191,21 @@ pub fn path_publish_batch() -> String {
 /// Most blobs one upload batch may carry (mirrors the server cap).
 pub const MAX_UPLOAD_BATCH_ITEMS: usize = 64;
 
+/// Default byte budget a caller should aim for when SIZING an upload batch
+/// request, chosen to match the store's compiled-in default
+/// (`ServerConfig::new(..).batch_max_bytes`,
+/// libs/asset/store/src/host/config.rs — tied to this constant by
+/// `libs/asset/store/tests/publish_batch_http.rs::
+/// client_batch_budget_never_assumes_more_than_the_servers_default`, which
+/// fails the moment the two drift). Deliberately BELOW
+/// [`MAX_BLOB_BATCH_BYTES`] — that ceiling is what a FETCH batch response is
+/// allowed to weigh, unrelated to how big an upload request should be built.
+/// This is only a target for the common case: a server configured smaller
+/// still is handled by `Api::upload_blob_batch_with_digests` splitting the
+/// batch and retrying on a 413, so undershooting this budget is never a
+/// correctness requirement, only a latency one (fewer round trips).
+pub const UPLOAD_BATCH_SAFE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Most items one publish batch may carry (mirrors the server cap).
 pub const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
 

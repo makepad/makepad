@@ -1674,15 +1674,34 @@ impl Api {
 
     /// Content-addressed upload to the data plane. The response identity
     /// must equal the locally computed digest — a server that answers with
-    /// another identity is refused.
+    /// another identity is refused. Hashes `bytes` once, on this call; a
+    /// caller that already knows (and has verified) the digest — e.g.
+    /// against an upload plan's expected digest — should call
+    /// [`Self::upload_blob_with_digest`] instead to avoid hashing the same
+    /// bytes a second time.
     pub fn upload_blob(&self, ns: &str, bytes: &[u8]) -> ClientResult<BlobId> {
+        let local = BlobId::hash_of(bytes);
+        self.upload_blob_with_digest(ns, bytes, local)
+    }
+
+    /// As [`Self::upload_blob`], but `digest` is supplied by the caller
+    /// instead of being (re)computed here. `digest` MUST be
+    /// `BlobId::hash_of(bytes)` — this only skips a redundant local hash
+    /// pass, it never weakens the identity guarantee: the server's echoed
+    /// blob id is still checked against `digest`, and a disagreement is
+    /// still refused.
+    pub fn upload_blob_with_digest(
+        &self,
+        ns: &str,
+        bytes: &[u8],
+        digest: BlobId,
+    ) -> ClientResult<BlobId> {
         if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
             return Err(ClientError::InvalidInput { what: "upload namespace" });
         }
         if bytes.is_empty() {
             return Err(ClientError::InvalidInput { what: "upload empty blob" });
         }
-        let local = BlobId::hash_of(bytes);
         let path = wire::path_blob_upload(ns);
         let mut req = Request::post(&path, bytes);
         req.body_content_type = "application/octet-stream";
@@ -1693,36 +1712,86 @@ impl Api {
             .and_then(Value::as_str)
             .and_then(|s| s.parse::<BlobId>().ok())
             .ok_or(ClientError::Protocol { what: "upload blob_id" })?;
-        if got != local {
+        if got != digest {
             return Err(ClientError::DigestMismatch {
                 what: "uploaded blob identity",
-                expected: *local.as_bytes(),
+                expected: *digest.as_bytes(),
                 found: *got.as_bytes(),
             });
         }
-        Ok(local)
+        Ok(digest)
     }
 
     /// Admit MANY blobs in ONE request: the server hashes and fsyncs every
     /// object off its state thread, then records the whole set in ONE
     /// catalog transaction. Every echoed digest is verified against the
     /// locally computed one before it is trusted. Order is preserved.
+    /// Hashes every blob once, on this call; a caller that already knows
+    /// (and has verified) each digest should call
+    /// [`Self::upload_blob_batch_with_digests`] instead to avoid hashing the
+    /// same bytes a second time.
     pub fn upload_blob_batch(&self, ns: &str, blobs: &[&[u8]]) -> ClientResult<Vec<BlobId>> {
+        let with_digests: Vec<(BlobId, &[u8])> =
+            blobs.iter().map(|bytes| (BlobId::hash_of(bytes), *bytes)).collect();
+        self.upload_blob_batch_with_digests(ns, &with_digests)
+    }
+
+    /// As [`Self::upload_blob_batch`], but each digest is supplied by the
+    /// caller instead of being (re)computed here — see
+    /// [`Self::upload_blob_with_digest`] for the same trade-off on a single
+    /// blob. Every echoed digest is still verified against the SUPPLIED
+    /// local one before it is trusted; a disagreement is still refused.
+    ///
+    /// This client does not assume the server's batch-byte budget matches
+    /// its own (see [`wire::UPLOAD_BATCH_SAFE_BYTES`]): a 413 ("body too
+    /// large") for the whole request is not fatal here. On a 413 the batch
+    /// is split in half and each half is retried, recursively, until every
+    /// half either fits or is down to one blob — the one shape a 413 there
+    /// cannot be worked around (that single blob alone is over the server's
+    /// per-request budget; see [`Self::upload_blob_with_digest`] for that
+    /// case, which this does not attempt to solve).
+    pub fn upload_blob_batch_with_digests(
+        &self,
+        ns: &str,
+        blobs: &[(BlobId, &[u8])],
+    ) -> ClientResult<Vec<BlobId>> {
         if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
             return Err(ClientError::InvalidInput { what: "upload namespace" });
         }
         if blobs.is_empty() || blobs.len() > wire::MAX_UPLOAD_BATCH_ITEMS {
             return Err(ClientError::InvalidInput { what: "upload batch size" });
         }
-        let mut local: Vec<BlobId> = Vec::with_capacity(blobs.len());
-        let mut body: Vec<u8> = Vec::with_capacity(
-            blobs.iter().map(|b| b.len() + 8).sum::<usize>(),
-        );
-        for bytes in blobs {
+        for (_, bytes) in blobs {
             if bytes.is_empty() {
                 return Err(ClientError::InvalidInput { what: "upload empty blob" });
             }
-            local.push(BlobId::hash_of(bytes));
+        }
+        self.upload_blob_batch_split(ns, blobs)
+    }
+
+    /// One `upload_blob_batch` request for `blobs`; on a 413 for more than
+    /// one blob, split in half and retry each half. Every split at least
+    /// halves the batch, so recursion depth is bounded by
+    /// log2(MAX_UPLOAD_BATCH_ITEMS).
+    fn upload_blob_batch_split(&self, ns: &str, blobs: &[(BlobId, &[u8])]) -> ClientResult<Vec<BlobId>> {
+        match self.upload_blob_batch_once(ns, blobs) {
+            Err(ClientError::Server { status: 413, .. }) if blobs.len() > 1 => {
+                let mid = blobs.len() / 2;
+                let (a, b) = blobs.split_at(mid);
+                let mut out = self.upload_blob_batch_split(ns, a)?;
+                out.extend(self.upload_blob_batch_split(ns, b)?);
+                Ok(out)
+            }
+            other => other,
+        }
+    }
+
+    /// Exactly one wire request for `blobs`, no retry, no splitting.
+    fn upload_blob_batch_once(&self, ns: &str, blobs: &[(BlobId, &[u8])]) -> ClientResult<Vec<BlobId>> {
+        let mut body: Vec<u8> = Vec::with_capacity(
+            blobs.iter().map(|(_, bytes)| bytes.len() + 8).sum::<usize>(),
+        );
+        for (_, bytes) in blobs {
             body.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
             body.extend_from_slice(bytes);
         }
@@ -1738,7 +1807,7 @@ impl Api {
         if rows.len() != blobs.len() {
             return Err(ClientError::Protocol { what: "upload batch count" });
         }
-        for (row, expect) in rows.iter().zip(&local) {
+        for (row, (expect, _)) in rows.iter().zip(blobs) {
             let got = row
                 .get("blob_id")
                 .and_then(Value::as_str)
@@ -1752,7 +1821,7 @@ impl Api {
                 });
             }
         }
-        Ok(local)
+        Ok(blobs.iter().map(|(digest, _)| *digest).collect())
     }
 
     /// Publish N complete assets in ONE request — one state-thread visit,

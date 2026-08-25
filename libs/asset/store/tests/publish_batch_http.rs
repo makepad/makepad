@@ -217,3 +217,71 @@ fn bulk_blob_upload_dedups_and_verifies_identities() {
 
     server.shutdown();
 }
+
+/// Ties `wire::UPLOAD_BATCH_SAFE_BYTES` (the byte budget a caller like the
+/// classic-pack publish path aims for when SIZING an upload batch, see
+/// apps/asset-ui/src/import_classic.rs) to this store's own compiled-in
+/// `batch_max_bytes` default, so the two cannot silently drift apart. If a
+/// change to either constant ever pushes the client's target past what a
+/// DEFAULT-configured server accepts in one request, this fails — the
+/// mismatch is still recoverable at runtime (a 413 there is split and
+/// retried, see the next test), but drift here means every such server pays
+/// an extra round trip for the common case the budget exists to avoid.
+#[test]
+fn client_batch_budget_never_assumes_more_than_the_servers_default() {
+    let cfg = ServerConfig::new(test_root("budget_probe"));
+    assert!(
+        makepad_asset_client::wire::UPLOAD_BATCH_SAFE_BYTES <= cfg.batch_max_bytes,
+        "client upload-batch budget ({}) exceeds the server's default batch_max_bytes ({}); \
+         lower wire::UPLOAD_BATCH_SAFE_BYTES to match",
+        makepad_asset_client::wire::UPLOAD_BATCH_SAFE_BYTES,
+        cfg.batch_max_bytes,
+    );
+}
+
+/// The hostile case behind the Freedoom publish failure: a server configured
+/// with a batch cap SMALLER than one client-built batch must still let the
+/// whole upload succeed. `Api::upload_blob_batch` (via
+/// `upload_blob_batch_with_digests`) is expected to split the batch and
+/// retry on the resulting 413 rather than fail the caller.
+#[test]
+fn upload_batch_splits_and_still_succeeds_when_the_server_cap_is_smaller() {
+    let root = test_root("small_cap");
+    let mut cfg = ServerConfig::new(root.clone());
+    cfg.control_addr = "127.0.0.1:0".parse().unwrap();
+    cfg.data_addr = "127.0.0.1:0".parse().unwrap();
+    cfg.bootstrap_admin = true;
+    cfg.log = false;
+    cfg.gc_janitor_steps = 0;
+    // Smaller than the WHOLE batch below but bigger than any ONE blob in it,
+    // on purpose: the first attempt (and likely the next split too) must be
+    // refused with a 413, but splitting must always bottom out at something
+    // that fits — a single 3MB blob comfortably clears a 4MB cap.
+    cfg.batch_max_bytes = 4 * 1024 * 1024;
+    let mut server = AssetServer::start(cfg).expect("server start");
+    let token = std::fs::read_to_string(root.join("admin-token"))
+        .expect("admin token")
+        .trim()
+        .to_string();
+    let api = api(&server, &token);
+
+    // 8 blobs x 3MB = 24MB, WAY over the 256KB server cap in one request —
+    // big enough that this client's `write_all` of the whole batch body
+    // genuinely blocks on the OS send buffer while the server is still
+    // reading, so the server's 413-then-close (it stops reading once it
+    // decides "too large", it does not drain the rest) reproduces the exact
+    // Freedoom race: the client's own write fails with BrokenPipe /
+    // ConnectionReset before it ever gets to read a response. Each blob
+    // individually still fits comfortably under the server cap.
+    let blobs: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 3 * 1024 * 1024]).collect();
+    let refs: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
+    let ids = api
+        .upload_blob_batch("gen", &refs)
+        .expect("upload must still succeed by splitting on 413, not surface BrokenPipe");
+    assert_eq!(ids.len(), 8);
+    for (id, bytes) in ids.iter().zip(&blobs) {
+        assert_eq!(*id, BlobId::hash_of(bytes));
+    }
+
+    server.shutdown();
+}
