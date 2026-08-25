@@ -566,7 +566,15 @@ impl RenderedPreview {
 
     /// Keep the paint clock alive through the quiet-timer, the first-ring
     /// gate, accumulation, and a track job.
+    ///
+    /// `FAB_TRACE_UNFOCUSED=1` keeps tracing while the window has no
+    /// keyboard focus — the remote-bridge verification path: a gpu-guarded
+    /// session runs with hidden windows, which can never become key, and
+    /// the unfocused gate would otherwise make the traced pane untestable
+    /// from a harness. Inert without the env.
     pub fn set_focused(&mut self, focused: bool) {
+        let focused = focused
+            || std::env::var("FAB_TRACE_UNFOCUSED").map(|v| v != "0").unwrap_or(false);
         self.focused = focused;
         if let Some(t) = self.tracer.as_mut() {
             t.set_paused(self.paused || !focused || !self.active);

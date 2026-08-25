@@ -11,9 +11,8 @@
 //! * Two mappings. A **bounded** field (`show_fill: true`) sweeps its soft
 //!   range across its own width, relative to the press point — the fill bar
 //!   shows the position, and pressing never jumps the value to the cursor.
-//!   An **unbounded** field moves by pixels × step — a fixed number of
-//!   clicks per hundred pixels, never a proportion of a range that means
-//!   nothing.
+//!   An **unbounded** field moves by pixels × step — one arrow-click per
+//!   pixel dragged, never a proportion of a range that means nothing.
 //! * **Clamping shifts the anchor** instead of clipping: overshoot a limit
 //!   and the value leaves it the instant the pointer comes back, with no
 //!   dead zone. Cyclic fields (`wrap: true`) wrap instead — the hour comes
@@ -230,8 +229,17 @@ pub struct DragAnchor {
 pub const DRAG_THRESHOLD: f64 = 3.0;
 
 /// Value change per pixel for the current mapping and modifiers.
-/// Bounded: the range across `width`, ×0.05 fine. Unbounded: a tenth of a
-/// step per pixel — ten pixels per arrow click — ×0.1 fine.
+/// Bounded: the range across `width`, ×0.05 fine. Unbounded: one arrow-step
+/// per pixel — the drag is the coarse gesture, Shift (×0.1) the fine one.
+///
+/// The rate used to be step×0.1 ("ten pixels per arrow click"), which made
+/// every drag ten times finer than a click. On real fields that meant the
+/// scene barely changed across a whole pull — Hour at step 0.06 crawled at
+/// 0.006/px, four thousand pixels to cross one day — and the sun "did not
+/// update" while dragging even though every step re-encoded and repainted.
+/// A drag is the coarse gesture: one step per pixel keeps a 100 px pull
+/// visibly moving the thing the dial controls, and Shift still recovers the
+/// old fine rate exactly.
 pub fn drag_rate(p: &DragParams, width: f64, shift: bool) -> f64 {
     if p.bounded && p.has_range() {
         let rate = p.range() / width.max(1.0);
@@ -241,7 +249,7 @@ pub fn drag_rate(p: &DragParams, width: f64, shift: bool) -> f64 {
             rate
         }
     } else {
-        let rate = p.step * 0.1;
+        let rate = p.step;
         if shift {
             rate * 0.1
         } else {
@@ -916,15 +924,41 @@ mod tests {
     fn an_unbounded_field_moves_by_pixels_times_step() {
         let p = unbounded(1.0);
         let a = DragAnchor { x: 0.0, value: 2000.0 };
-        // Ten pixels per step; a hundred pixels is ten steps.
+        // One step per pixel; a hundred pixels is a hundred steps.
         let (v, _) = drag_map(&p, a, 100.0, 400.0, false, false);
-        assert!((v - 2010.0).abs() < 1e-9, "{v}");
+        assert!((v - 2100.0).abs() < 1e-9, "{v}");
         // Shift is ten times finer.
         let (v, _) = drag_map(&p, a, 100.0, 400.0, true, false);
-        assert!((v - 2001.0).abs() < 1e-9, "{v}");
+        assert!((v - 2010.0).abs() < 1e-9, "{v}");
         // The width of the row is irrelevant to an unbounded mapping.
         let (w, _) = drag_map(&p, a, 100.0, 40.0, false, false);
-        assert!((w - v - 9.0).abs() < 1e-9);
+        assert!((w - v - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_scene_hour_field_sweeps_hours_per_pull_not_minutes() {
+        // The reported defect: the Scene-tab Hour field (min 0, max 24,
+        // step 0.06, no fill) crawled at step×0.1 = 0.006/px — an ordinary
+        // 100 px pull moved the sun by 36 minutes, and the picture "did not
+        // update" during the drag even though every step repainted. The
+        // drag has to move the value at dial speed: hours per pull.
+        let p = DragParams {
+            min: 0.0,
+            max: 24.0,
+            step: 0.06,
+            wrap: false,
+            bounded: false,
+            snap_override: 1.0,
+        };
+        let a = DragAnchor { x: 0.0, value: 14.0 };
+        let (v, _) = drag_map(&p, a, 100.0, 305.0, false, false);
+        assert!(
+            (14.0 - v).abs() >= 4.0,
+            "a 100px pull must sweep hours, got {v}"
+        );
+        // Shift keeps the old fine rate for precision work.
+        let (v, _) = drag_map(&p, a, 100.0, 305.0, true, false);
+        assert!((v - 14.6).abs() < 1e-9, "{v}");
     }
 
     #[test]
@@ -987,17 +1021,17 @@ mod tests {
     #[test]
     fn a_modifier_change_reanchors_instead_of_jumping() {
         let p = unbounded(1.0);
-        // Drag 100 px: value 2010.
+        // Drag 100 px: value 2100.
         let a = DragAnchor { x: 0.0, value: 2000.0 };
         let (v, _) = drag_map(&p, a, 100.0, 400.0, false, false);
-        assert!((v - 2010.0).abs() < 1e-9);
+        assert!((v - 2100.0).abs() < 1e-9);
         // Shift goes down: re-anchor at the pointer, value unchanged...
         let a2 = reanchor(v, 100.0);
         let (v2, _) = drag_map(&p, a2, 100.0, 400.0, true, false);
         assert!((v2 - v).abs() < 1e-9, "no jump on modifier change");
         // ...and further motion is ten times finer.
         let (v3, _) = drag_map(&p, a2, 110.0, 400.0, true, false);
-        assert!((v3 - v - 0.1).abs() < 1e-9, "{v3}");
+        assert!((v3 - v - 1.0).abs() < 1e-9, "{v3}");
     }
 
     #[test]

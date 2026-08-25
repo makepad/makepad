@@ -93,7 +93,7 @@ script_mod! {
         jitter: uniform(vec2f)
         seed: uniform(1.0)
         tile: uniform(vec4f)
-        max_steps: uniform(1024.0)
+        max_steps: uniform(2048.0)
         spp: uniform(1.0)
         use_gbuffer: uniform(1.0)
         n_lights: uniform(0.0)
@@ -247,6 +247,7 @@ script_mod! {
             let sz = 1.0 / dz
             var hit = vec4(tmax, -1.0, 0.0, 0.0)
             var hit_orig = 16777216u
+            var hit_front = 0.0
             var hit_priority = 0u
             var hit_group = 0u
             var i = 0u
@@ -306,6 +307,8 @@ script_mod! {
                             if valid > 0.5 {
                                 let t = (u * sz * az + v * sz * bz + w * sz * cz) / det
                                 let orig = u32(tb.w)
+                                var cand_front = 0.0
+                                if det * sz > 0.0 { cand_front = 1.0 }
                                 let coplanar = self.fetch_attr(ti * 4u + 3u).w
                                 let priority = u32(modf(coplanar, 4096.0))
                                 let group = u32(floor(coplanar / 4096.0))
@@ -316,7 +319,13 @@ script_mod! {
                                     let prioritized = group > 0u && group == hit_group
                                     let tied = abs(t - hit.x) <= self.hit_tie_eps(max(t, hit.x))
                                     if prioritized && tied {
-                                        if priority > hit_priority {
+                                        // Facing outranks priority inside a
+                                        // coplanar tie (CPU twin agrees):
+                                        // the exposed side of a stacked
+                                        // assembly is the one facing the ray.
+                                        if cand_front != hit_front {
+                                            take = cand_front
+                                        } else if priority > hit_priority {
                                             take = 1.0
                                         } else if priority == hit_priority {
                                             if t < hit.x || (t == hit.x && orig < hit_orig) { take = 1.0 }
@@ -328,6 +337,7 @@ script_mod! {
                                 if t > tmin && t <= tmax && take > 0.5 {
                                     hit = vec4(t, f32(ti), v / det, w / det)
                                     hit_orig = orig
+                                    hit_front = cand_front
                                     hit_priority = priority
                                     hit_group = group
                                     if any_hit > 0.5 { return hit }
@@ -529,7 +539,9 @@ script_mod! {
             return h
         }
         shading_correction: fn(ng: vec3, ns: vec3, v: vec3, l: vec3) -> f32 {
-            return abs((dot(v, ns) * dot(l, ng)) / max(dot(v, ng) * dot(l, ns), 0.000001))
+            // Bounded at 4x (CPU twin agrees): the raw ratio is unbounded at
+            // grazing geometry and turns modest NEE samples into fireflies.
+            return min(abs((dot(v, ns) * dot(l, ng)) / max(dot(v, ng) * dot(l, ns), 0.000001)), 4.0)
         }
         finite3: fn(v: vec3) -> f32 {
             if v.x != v.x || v.y != v.y || v.z != v.z { return 0.0 }
@@ -619,6 +631,9 @@ script_mod! {
             return vec4(ld, self.sky_pdf(ld))
         }
         escape: fn(rd: vec3, prev_pdf: f32, delta: f32) -> vec3 {
+            // Brute mode is the BSDF-only oracle: no NEE runs, so nothing
+            // may be suppressed here (CPU twin agrees).
+            if self.brute > 0.5 { return self.sky(rd) + self.visible_sun(rd) }
             var l = self.sky(rd)
             if delta > 0.5 { l = l + self.visible_sun(rd) }
             if delta > 0.5 { return l }
@@ -760,6 +775,29 @@ script_mod! {
                 let mid = u32(self.fetch_tri(u32(hit.y) * 3u).w)
                 return self.fetch_mat(mid * 4u).xyz
             }
+            // Primary parity with the raster pane (CPU twin agrees): the
+            // camera ray passes through one-sided backfaces exactly as
+            // fixed-function backface culling does. Bounce rays keep
+            // flip-shading below.
+            // Single-hop continuations only (CPU twin agrees): the
+            // spurious-neighbour ladder is material-blind and could step
+            // past a paired two-sided glazing backface the raster keeps.
+            // A stack deeper than eight falls through to flip-shading.
+            for ps in 0..8 {
+                if hit.y < 0.0 { break }
+                let skt = u32(hit.y)
+                let sk0 = self.fetch_tri(skt * 3u)
+                let sk1 = self.fetch_tri(skt * 3u + 1u)
+                let sk2 = self.fetch_tri(skt * 3u + 2u)
+                let skn = cross(sk1.xyz - sk0.xyz, sk2.xyz - sk0.xyz)
+                if dot(skn, rd) < 0.0 { break }
+                let skm = self.fetch_mat(u32(sk0.w) * 4u + 2u)
+                if skm.w > 0.5 { break }
+                let skw = 1.0 - hit.z - hit.w
+                let skp = sk0.xyz * skw + sk1.xyz * hit.z + sk2.xyz * hit.w
+                let sko = self.offset_ray(skp, normalize(skn), rd)
+                hit = self.trace(sko, rd, 1000000000.0, 0.0, 0.0, f32(skt))
+            }
             var tp = vec3(1.0, 1.0, 1.0)
             var lsum = vec3(0.0, 0.0, 0.0)
             var prev_pdf = 0.0
@@ -800,7 +838,9 @@ script_mod! {
                 var front = 1.0
                 if dot(ng, rd) >= 0.0 { front = 0.0 }
                 if front < 0.5 {
-                    if m2.w < 0.5 { break }
+                    // One-sided backfaces shade with the flipped normal
+                    // instead of terminating black (CPU twin agrees);
+                    // emission stays front-gated below.
                     ng = -ng
                 }
                 if dot(ns, ng) < 0.0 { ns = -ns }
@@ -1057,9 +1097,27 @@ script_mod! {
             let ns = u32(self.spp)
             for s in 0..8 {
                 if s >= ns { break }
-                let l = self.radiance(px, py, pseed, u32(attempt))
+                var l = self.radiance(px, py, pseed, u32(attempt))
                 attempt = attempt + 1.0
                 if self.finite3(l) > 0.5 {
+                    // Preview-only relative clamp (CPU preview twin agrees):
+                    // once a pixel has a mean, no single sample may exceed
+                    // five times it. The absolute clamp alone leaves a dark
+                    // pixel's late outlier hundreds of times its mean — a
+                    // white dot that takes hundreds of frames to fade (the
+                    // measured non-converging speckle in shadowed areas).
+                    // Commonly-lit pixels relax the limit geometrically and
+                    // converge; a pixel lit ONLY by a rare path (arrival
+                    // probability well under one in five) can settle at the
+                    // clamp floor instead of its true mean — an accepted
+                    // preview bias. F12/final keeps the unbiased estimator
+                    // (preview_clamp off).
+                    if self.preview_clamp > 0.0 && cnt >= 8.0 {
+                        let mean_peak = max(max(acc.x, acc.y), acc.z) / max(cnt, 1.0)
+                        let limit = max(mean_peak * 5.0, 0.05)
+                        let pk = max(max(l.x, l.y), l.z)
+                        if pk > limit { l = l * (limit / pk) }
+                    }
                     cnt = cnt + 1.0
                     acc = acc + l
                 } else {
@@ -1085,6 +1143,94 @@ script_mod! {
         pixel: fn() {
             if self.reset > 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
             return self.src_tex.sample_nearest(self.pos)
+        }
+    }
+
+    // The display's linear memory. Chooses, per native pixel, the current
+    // rung's accumulated linear mean (bilinearly upsampled while coarse) or
+    // last frame's carried linear value, in LINEAR radiance. The tonemap
+    // then exposes the whole frame with ONE metered exposure — held and
+    // fresh pixels alike — so a changing meter can never bake mismatched
+    // brightness into held tiles. (The old design held POST-tonemap sRGB
+    // pixels: during the early frames of a restart the 4x4 meter has too few
+    // valid probes and swings, and every held tile kept the exposure it was
+    // stamped with — the lingering dark/flat blocks after quick successive
+    // restarts.)
+    mod.draw.PtCarry = mod.std.set_type_default() do #(DrawCarry::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_format: @Rgba32F
+        src_tex: texture_2d(float)
+        hold_tex: texture_2d(float)
+        rej_tex: texture_2d(float)
+        inv_res: uniform(vec2f)
+        src_res: uniform(vec2f)
+        coarse: uniform(0.0)
+        hold_on: uniform(0.0)
+        src_is_mean: uniform(0.0)
+        vertex: fn() {
+            let clipped = self.geom.pos * self.rect_size + self.rect_pos
+            self.pos = self.geom.pos
+            self.world = vec4(clipped.x, clipped.y, self.draw_depth, 1.0)
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
+        }
+        // Bilinear over the coarse rung's per-texel means; a texel the sweep
+        // has not reached carries no weight, so holes never bleed black in.
+        coarse_mean: fn(p: vec2) -> vec4 {
+            let f = p * self.src_res - vec2(0.5, 0.5)
+            let i0 = floor(f)
+            let fr = f - i0
+            var sum = vec3(0.0, 0.0, 0.0)
+            var wsum = 0.0
+            var centre_ok = 0.0
+            for j in 0..2 {
+                for i in 0..2 {
+                    let t = clamp(i0 + vec2(f32(i), f32(j)), vec2(0.0, 0.0), self.src_res - vec2(1.0, 1.0))
+                    let c = self.src_tex.sample_nearest((t + vec2(0.5, 0.5)) * self.inv_res)
+                    if c.w >= 0.5 {
+                        let wx = if f32(i) > 0.5 { fr.x } else { 1.0 - fr.x }
+                        let wy = if f32(j) > 0.5 { fr.y } else { 1.0 - fr.y }
+                        let wgt = wx * wy + 0.0001
+                        var linear = c.xyz
+                        if self.src_is_mean < 0.5 { linear = c.xyz / max(c.w, 1.0) }
+                        sum = sum + linear * wgt
+                        wsum = wsum + wgt
+                        centre_ok = 1.0
+                    }
+                }
+            }
+            if centre_ok < 0.5 || wsum <= 0.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            return vec4(sum / wsum, 1.0)
+        }
+        pixel: fn() {
+            if self.coarse > 0.5 {
+                let c = self.coarse_mean(self.pos)
+                if c.w >= 0.5 { return c }
+            } else {
+                let c = self.src_tex.sample_nearest(self.pos)
+                if c.w >= 0.5 {
+                    var linear = c.xyz
+                    if self.src_is_mean < 0.5 { linear = c.xyz / max(c.w, 1.0) }
+                    return vec4(linear, 1.0)
+                }
+            }
+            if self.hold_on > 0.5 {
+                // A native pixel whose every attempted sample was rejected
+                // (NaN or traversal overflow) would otherwise hold stale
+                // coarse content forever; past eight rejected attempts the
+                // hold drops and the raster shows through instead.
+                var chronic = 0.0
+                if self.coarse < 0.5 {
+                    if self.rej_tex.sample_nearest(self.pos).x >= 8.0 {
+                        let cur = self.src_tex.sample_nearest(self.pos)
+                        if cur.w < 0.5 { chronic = 1.0 }
+                    }
+                }
+                if chronic < 0.5 {
+                    let held = self.hold_tex.sample_nearest(self.pos)
+                    if held.w > 0.5 { return held }
+                }
+            }
+            return vec4(0.0, 0.0, 0.0, 0.0)
         }
     }
 
@@ -1353,11 +1499,9 @@ script_mod! {
             for y in 0..4 {
                 for x in 0..4 {
                     let uv = vec2((f32(x) + 0.5) * 0.25, (f32(y) + 0.5) * 0.25)
-                        * (self.src_res * self.inv_res)
-                    let c = self.src_tex.sample_nearest(uv)
+                    let c = self.hold_tex.sample_nearest(uv)
                     if c.w >= 0.5 {
-                        let linear = if self.src_is_mean > 0.5 { c.xyz } else { c.xyz / max(c.w, 1.0) }
-                        let luminance = max(dot(linear, vec3(0.2126, 0.7152, 0.0722)), 0.0001)
+                        let luminance = max(dot(c.xyz, vec3(0.2126, 0.7152, 0.0722)), 0.0001)
                         sum_log = sum_log + log(luminance)
                         valid = valid + 1.0
                     }
@@ -1394,20 +1538,24 @@ script_mod! {
             return vec4(sum / wsum, 1.0)
         }
         pixel: fn() {
-            var c = vec4(0.0, 0.0, 0.0, 0.0)
-            if self.coarse > 0.5 {
-                c = self.coarse_mean(self.pos)
-            } else {
-                c = self.src_tex.sample_nearest(self.pos)
-            }
-            if c.w < 0.5 {
-                // The ladder's memory: last frame's finished display pixel
-                // stays until the current rung replaces it (no flash between
-                // rungs, no flash back to the raster while sharpening).
-                if self.hold_on > 0.5 {
-                    let held = self.hold_tex.sample_nearest(self.pos)
-                    if held.w > 0.5 { return held }
+            if self.view_mode > 0.5 {
+                let duv = self.pos * (self.src_res * self.inv_res)
+                let c = self.src_tex.sample_nearest(duv)
+                if self.view_mode < 1.5 {
+                    let s = clamp(c.w / 256.0, 0.0, 1.0)
+                    return vec4(s, 1.0 - abs(s - 0.5) * 2.0, 1.0 - s, 1.0)
                 }
+                let m = self.mom_tex.sample_nearest(duv)
+                let vr = sqrt(max(m.y - m.x * m.x, 0.0) / max(c.w, 1.0)) / (abs(m.x) + 0.05)
+                let s = clamp(vr * 4.0, 0.0, 1.0)
+                return vec4(s, s, s, 1.0)
+            }
+            // The carried LINEAR display (PtCarry): the current rung where
+            // it has data, last frame's carried value elsewhere. One metered
+            // exposure below applies to all of it alike — held pixels can
+            // never keep a stale exposure.
+            let c = self.hold_tex.sample_nearest(self.pos)
+            if c.w < 0.5 {
                 // Interactive hosts composite the trace OVER their own
                 // realtime frame: an untraced pixel is transparent so the
                 // raster shows until a tile lands. F12/track keep the lit
@@ -1417,17 +1565,7 @@ script_mod! {
                 let m = self.aces(f * self.exposure)
                 return vec4(pow(m, vec3(0.4545454, 0.4545454, 0.4545454)), 1.0)
             }
-            if self.view_mode > 0.5 {
-                if self.view_mode < 1.5 {
-                    let s = clamp(c.w / 256.0, 0.0, 1.0)
-                    return vec4(s, 1.0 - abs(s - 0.5) * 2.0, 1.0 - s, 1.0)
-                }
-                let m = self.mom_tex.sample_nearest(self.pos)
-                let vr = sqrt(max(m.y - m.x * m.x, 0.0) / max(c.w, 1.0)) / (abs(m.x) + 0.05)
-                let s = clamp(vr * 4.0, 0.0, 1.0)
-                return vec4(s, s, s, 1.0)
-            }
-            let linear = if self.src_is_mean > 0.5 { c.xyz } else { c.xyz / max(c.w, 1.0) }
+            let linear = c.xyz
             // The engine sky already owns its display transform. A primary
             // miss therefore passes through unchanged; surfaces retain the
             // tracer's exposure and output curve.
@@ -1478,6 +1616,13 @@ pub struct DrawCopy {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawResolve {
+    #[deref]
+    pub draw_super: DrawQuad,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawCarry {
     #[deref]
     pub draw_super: DrawQuad,
 }
@@ -1785,6 +1930,10 @@ pub struct RayTracer {
     size: (usize, usize),
     target_size: (usize, usize),
     accum: Vec<Texture>,
+    /// Linear display memory (see `PtCarry`): native-res ping-pong of the
+    /// carried linear mean the tonemap exposes.
+    display_linear: Vec<Texture>,
+    display_ping: usize,
     /// Transient trace output; negative alpha marks one rejected sample.
     trace_scratch: Option<Texture>,
     /// Per-pixel rejected-sample counters, ping-ponged with accumulation.
@@ -1803,6 +1952,7 @@ pub struct RayTracer {
     draw_gbuf: DrawGbuf,
     draw_copy: DrawCopy,
     draw_resolve: DrawResolve,
+    draw_carry: DrawCarry,
     draw_reject: DrawReject,
     draw_trace: DrawTrace,
     draw_moments: DrawMoments,
@@ -2016,6 +2166,7 @@ impl RayTracer {
         let draw_gbuf = DrawGbuf::script_new_with_default(vm);
         let draw_copy = DrawCopy::script_new_with_default(vm);
         let draw_resolve = DrawResolve::script_new_with_default(vm);
+        let draw_carry = DrawCarry::script_new_with_default(vm);
         let draw_reject = DrawReject::script_new_with_default(vm);
         let draw_trace = DrawTrace::script_new_with_default(vm);
         let draw_moments = DrawMoments::script_new_with_default(vm);
@@ -2048,6 +2199,8 @@ impl RayTracer {
             size: (0, 0),
             target_size: (0, 0),
             accum: Vec::new(),
+            display_linear: Vec::new(),
+            display_ping: 0,
             trace_scratch: None,
             rejected: Vec::new(),
             moments: Vec::new(),
@@ -2061,6 +2214,7 @@ impl RayTracer {
             draw_gbuf,
             draw_copy,
             draw_resolve,
+            draw_carry,
             draw_reject,
             draw_trace,
             draw_moments,
@@ -2290,6 +2444,8 @@ impl RayTracer {
             )
         };
         self.accum = vec![f32_tex(cx), f32_tex(cx)];
+        self.display_linear = vec![f32_tex(cx), f32_tex(cx)];
+        self.display_ping = 0;
         self.trace_scratch = Some(f32_tex(cx));
         self.rejected = vec![f32_tex(cx), f32_tex(cx)];
         self.moments = vec![f32_tex(cx), f32_tex(cx)];
@@ -2308,8 +2464,9 @@ impl RayTracer {
         };
         self.view = vec![bgra(cx), bgra(cx)];
         self.view_ping = 0;
-        // gbuf + trace + resolve + reject-count + moments + guide + 4 atrous + tonemap
-        const STAGE_NAMES: [&str; 11] = [
+        // gbuf + trace + resolve + reject-count + moments + guide + 4 atrous
+        // + carry + tonemap
+        const STAGE_NAMES: [&str; 12] = [
             "raytrace gbuffer",
             "raytrace trace",
             "raytrace resolve",
@@ -2320,9 +2477,10 @@ impl RayTracer {
             "raytrace atrous 1",
             "raytrace atrous 2",
             "raytrace atrous 3",
+            "raytrace carry",
             "raytrace tonemap",
         ];
-        while self.stages.len() < 11 {
+        while self.stages.len() < 12 {
             let name = STAGE_NAMES[self.stages.len()];
             self.stages.push(Stage {
                 pass: DrawPass::new_with_name(cx, name),
@@ -2609,7 +2767,7 @@ impl RayTracer {
         if !denoise {
             self.capture_pending.retain(|k| *k != CaptureKind::Denoised);
         }
-        let total_stages = 1 + 1 + 2 + 1 + if denoise { 5 } else { 0 } + 1;
+        let total_stages = 1 + 1 + 2 + 1 + if denoise { 5 } else { 0 } + 2;
         let mut stage = 0usize;
 
         macro_rules! run_stage {
@@ -2907,13 +3065,40 @@ impl RayTracer {
             tonemap_src = src;
         }
 
-        // 5. Tonemap → view target (+ capture). The view is ping-ponged: the
-        // previous frame's finished image is this frame's per-pixel hold.
+        // 5. Carry: fold the current rung's linear means over last frame's
+        // carried linear display, in LINEAR radiance (see `PtCarry`). The
+        // hold drops on the restart frame: the previous carry still shows
+        // the OLD camera — untraced pixels must fall through to the raster.
+        let carried = {
+            let display_prev = self.display_ping;
+            let display_cur = display_prev ^ 1;
+            let target = self.display_linear[display_cur].clone();
+            let hold = self.display_linear[display_prev].clone();
+            let dv = &mut self.draw_carry.draw_super.draw_vars;
+            dv.set_texture(0, &tonemap_src);
+            dv.set_texture(1, &hold);
+            dv.set_texture(2, &self.rejected[cur]);
+            dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
+            dv.set_uniform(cx.cx, id!(src_res), &[rw as f32, rh as f32]);
+            dv.set_uniform(cx.cx, id!(coarse), &[if shift > 0 { 1.0 } else { 0.0 }]);
+            dv.set_uniform(
+                cx.cx,
+                id!(hold_on),
+                &[if s.progressive && !first_frame { 1.0 } else { 0.0 }],
+            );
+            dv.set_uniform(cx.cx, id!(src_is_mean), &[if denoise { 1.0 } else { 0.0 }]);
+            let draw_carry = &mut self.draw_carry;
+            run_stage!(&target, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_carry.draw_abs(cx, r));
+            self.display_ping = display_cur;
+            target
+        };
+
+        // 6. Tonemap → view target (+ capture): ONE metered exposure over
+        // the whole carried linear frame — held and fresh pixels alike.
         {
             let view_prev = self.view_ping;
             let view_cur = view_prev ^ 1;
             let view = self.view[view_cur].clone();
-            let hold = self.view[view_prev].clone();
             let dv = &mut self.draw_tonemap.draw_super.draw_vars;
             dv.set_texture(0, &tonemap_src);
             dv.set_texture(1, &self.moments[cur]);
@@ -2921,17 +3106,10 @@ impl RayTracer {
             dv.set_texture(3, &self.tex_attr);
             dv.set_texture(4, &self.tex_tri);
             dv.set_texture(5, &self.tex_mat);
-            dv.set_texture(6, &hold);
+            dv.set_texture(6, &carried);
             dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
             dv.set_uniform(cx.cx, id!(src_res), &[rw as f32, rh as f32]);
             dv.set_uniform(cx.cx, id!(coarse), &[if shift > 0 { 1.0 } else { 0.0 }]);
-            // No hold on the restart frame: the previous view still shows the
-            // OLD camera — untraced pixels must fall through to the raster.
-            dv.set_uniform(
-                cx.cx,
-                id!(hold_on),
-                &[if s.progressive && !first_frame { 1.0 } else { 0.0 }],
-            );
             dv.set_uniform(cx.cx, id!(exposure), &[s.exposure]);
             dv.set_uniform(cx.cx, id!(sky_display), &[if sky.uniform_value <= 0.0 && sky.sky_strength > 0.0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(view_mode), &[s.view_mode as f32]);
