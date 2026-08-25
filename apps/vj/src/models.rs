@@ -92,7 +92,7 @@ pub fn dest_is_installed(model: &VjModel) -> bool {
     file_is_pinned_size(&model.spec().dest_path(&cache_root()), model.bytes)
 }
 
-fn file_is_pinned_size(path: &std::path::Path, bytes: u64) -> bool {
+pub fn file_is_pinned_size(path: &std::path::Path, bytes: u64) -> bool {
     std::fs::metadata(path).map(|meta| meta.len() == bytes).unwrap_or(false)
 }
 
@@ -103,7 +103,9 @@ fn file_is_pinned_size(path: &std::path::Path, bytes: u64) -> bool {
 pub fn missing() -> Vec<&'static VjModel> {
     let mut out = Vec::new();
     let stems_installed = if std::env::var("VJ_STEMS_CKPT").is_ok() {
-        crate::stems::checkpoint_path().is_file()
+        // Same rule as the managed dest: a checkpoint that is not exactly
+        // the pinned size is an interrupted download, not an install.
+        file_is_pinned_size(&crate::stems::checkpoint_path(), STEMS.bytes)
     } else {
         dest_is_installed(&STEMS)
     };
