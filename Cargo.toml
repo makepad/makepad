@@ -4,6 +4,7 @@ workspace.members = [
     "apps/asset-ui",
     "apps/asset-server",
     "apps/vj",
+    "apps/mixer",
     "libs/asset/importer",
     "libs/texcomp",
     "libs/asset/data",
