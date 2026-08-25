@@ -683,30 +683,33 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn reset_cursor_rects(this: &Object, _sel: Sel) {
-        unsafe {
-            // AppKit calls this re-entrantly from inside our own event
-            // handling (any cursor change invalidates the cursor rects). If
-            // the app is already borrowed, skip this round: the rects are
-            // rebuilt on the next invalidation. A RefCell panic here cannot
-            // unwind through the ObjC frame — it aborts the process.
+        // AppKit fires this from the display cycle (tracking-area update), often
+        // re-entrantly while our own handler holds the app borrow. Two hard rules:
+        // never panic across this ObjC frame (that is a nounwind abort — the
+        // 'crashed when clicking About' report), and never hand AppKit a cursor
+        // object we do not own — the cache holds retained ids for that reason.
+        let call = std::panic::AssertUnwindSafe(|| unsafe {
             let Some(current_cursor) = try_with_macos_app(|app| app.current_cursor.clone()) else { return };
             let Some(cursor_id) = try_with_macos_app(|app| {
-                *app.cursors
-                    .entry(current_cursor.clone())
-                    .or_insert_with(|| load_mouse_cursor(current_cursor.clone()))
+                *app.cursors.entry(current_cursor.clone()).or_insert_with(|| {
+                    let id = load_mouse_cursor(current_cursor.clone());
+                    if !id.is_null() {
+                        let _: ObjcId = msg_send![id, retain];
+                    }
+                    id
+                })
             }) else { return };
+            if cursor_id.is_null() {
+                return;
+            }
             let bounds: NSRect = msg_send![this, bounds];
             if let MouseCursor::Hidden = current_cursor {
-                let _: () = msg_send![
-                    cursor_id,
-                    setHiddenUntilMouseMoves: true
-                ];
+                let _: () = msg_send![cursor_id, setHiddenUntilMouseMoves: true];
             }
-            let _: () = msg_send![
-                this,
-                addCursorRect: bounds
-                cursor: cursor_id
-            ];
+            let _: () = msg_send![this, addCursorRect: bounds cursor: cursor_id];
+        });
+        if std::panic::catch_unwind(call).is_err() {
+            eprintln!("makepad: PANIC contained at the resetCursorRects callback boundary; cursor rects skipped this round");
         }
     }
 
