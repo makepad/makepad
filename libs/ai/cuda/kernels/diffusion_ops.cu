@@ -1804,11 +1804,27 @@ static __device__ __forceinline__ void makepad_cuda_fa_cp_async16(
         void * dst_shared,
         const void * src_global,
         int src_bytes) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     const unsigned dst = static_cast<unsigned>(__cvta_generic_to_shared(dst_shared));
     asm volatile(
         "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
         :
         : "r"(dst), "l"(src_global), "r"(src_bytes));
+#else
+    // cp.async first exists on sm_80: same contract, synchronous. The copy
+    // lands before commit/wait (below) turn into no-ops, so the tile rings
+    // simply lose their prefetch overlap on Turing, not their contents.
+    if (src_bytes >= 16) {
+        *static_cast<uint4 *>(dst_shared) =
+            *static_cast<const uint4 *>(src_global);
+    } else {
+        unsigned char * dst = static_cast<unsigned char *>(dst_shared);
+        const unsigned char * src = static_cast<const unsigned char *>(src_global);
+        for (int i = 0; i < 16; i++) {
+            dst[i] = i < src_bytes ? src[i] : 0;
+        }
+    }
+#endif
 }
 
 // Issue the cp.async copies for one 64x128 f16 tile: 4 threads per row, 64
@@ -1839,12 +1855,16 @@ static __device__ __forceinline__ void makepad_cuda_fa_tile_async(
 // col0..col0+128) into a shared f16 tile; rows past `seq` load as zeros.
 // 4 threads per row, 32 consecutive floats each (vectorized float4 reads).
 static __device__ __forceinline__ void makepad_cuda_fa_cp_commit() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.commit_group;\n");
+#endif
 }
 
 template <int PENDING>
 static __device__ __forceinline__ void makepad_cuda_fa_cp_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.wait_group %0;\n" : : "n"(PENDING));
+#endif
 }
 
 // Synchronous f16 tile load (used once for the Q tile): 4 threads per row,
@@ -2141,22 +2161,34 @@ constexpr int FA2_STAGE = FA2_BC * FA_LDQ; // halves per K/V ring stage
 constexpr size_t FA2_SMEM_TOTAL =
     4 * static_cast<size_t>(FA2_STAGE) * sizeof(__half); // K ring x2 + V ring x2
 
+// The m16n8k16 mma shapes (f16 and bf16 alike) first exist on sm_80, so on
+// older devices these are compiled out and every FA2 kernel is a no-op —
+// which is why their extern "C" launchers refuse pre-sm_80 devices with
+// cudaErrorNotSupported instead of returning a buffer of unwritten zeros.
 static __device__ __forceinline__ void makepad_cuda_fa2_mma(
         float c[4], const uint32_t a[4], const uint32_t b0, const uint32_t b1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
         : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    (void) c; (void) a; (void) b0; (void) b1;
+#endif
 }
 
 static __device__ __forceinline__ void makepad_cuda_fa2_mma_bf16(
         float c[4], const uint32_t a[4], const uint32_t b0, const uint32_t b1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
         : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    (void) c; (void) a; (void) b0; (void) b1;
+#endif
 }
 
 static __device__ __forceinline__ void makepad_cuda_fa2_ldmatrix_x4(
@@ -2448,6 +2480,29 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
     }
 }
 
+// The FA2 family and the bf16 wmma kernel are built from sm_80-only pieces
+// (m16n8k16 mma, bf16 fragments); on an older device those bodies were
+// compiled out above, so launching one would return a buffer the kernel
+// never wrote. Refuse up front with the honest error instead.
+static cudaError_t makepad_cuda_require_sm80() {
+    static int has_sm80 = -1;
+    if (has_sm80 < 0) {
+        int device = 0;
+        cudaError_t err = cudaGetDevice(&device);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        int major = 0;
+        err = cudaDeviceGetAttribute(
+            &major, cudaDevAttrComputeCapabilityMajor, device);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        has_sm80 = major >= 8 ? 1 : 0;
+    }
+    return has_sm80 ? cudaSuccess : cudaErrorNotSupported;
+}
+
 template<bool Causal, bool UseBf16>
 static cudaError_t makepad_cuda_flash_attention2_launch(
         const uint16_t * q,
@@ -2461,6 +2516,10 @@ static cudaError_t makepad_cuda_flash_attention2_launch(
         float scale,
         int32_t window,
         cudaStream_t stream) {
+    const cudaError_t sm80 = makepad_cuda_require_sm80();
+    if (sm80 != cudaSuccess) {
+        return sm80;
+    }
     if (q_len == 0 || head_count == 0) {
         return cudaSuccess;
     }
@@ -2610,6 +2669,9 @@ constexpr size_t FAB_SMEM_S = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(flo
 constexpr size_t FAB_SMEM_P = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(__nv_bfloat16);
 constexpr size_t FAB_SMEM_TOTAL = FAB_SMEM_Q + FAB_SMEM_K + FAB_SMEM_V + FAB_SMEM_S + FAB_SMEM_P;
 
+// Only referenced from the sm_80-guarded kernel body below; guarded with it
+// so the pre-sm_80 pass does not warn about unreferenced helpers.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 static __device__ __forceinline__ void makepad_cuda_fab_tile_async(
         const __nv_bfloat16 * __restrict__ src,
         __nv_bfloat16 * __restrict__ dst,
@@ -2656,6 +2718,7 @@ static __device__ __forceinline__ void makepad_cuda_fab_load_tile(
         }
     }
 }
+#endif
 
 static __global__ void makepad_cuda_flash_attention_bf16_d64_f32_kernel(
         const __nv_bfloat16 * __restrict__ q,
@@ -2666,6 +2729,7 @@ static __global__ void makepad_cuda_flash_attention_bf16_d64_f32_kernel(
         uint32_t kv_len,
         uint32_t hidden,
         float scale) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     extern __shared__ __align__(16) char fab_smem[];
     __nv_bfloat16 * q_sh = reinterpret_cast<__nv_bfloat16 *>(fab_smem);
     __nv_bfloat16 * k_ring = reinterpret_cast<__nv_bfloat16 *>(fab_smem + FAB_SMEM_Q);
@@ -2835,6 +2899,13 @@ static __global__ void makepad_cuda_flash_attention_bf16_d64_f32_kernel(
             *reinterpret_cast<float4 *>(dst + i) = values;
         }
     }
+#else
+    // bf16 wmma fragments do not exist before sm_80 (the type itself is
+    // incomplete at compile time), so this whole kernel is compiled out and
+    // the launcher below refuses pre-sm_80 devices.
+    (void) q; (void) k; (void) v; (void) out;
+    (void) q_len; (void) kv_len; (void) hidden; (void) scale;
+#endif
 }
 
 extern "C" cudaError_t makepad_cuda_flash_attention_bf16_d64_f32(
@@ -2848,6 +2919,10 @@ extern "C" cudaError_t makepad_cuda_flash_attention_bf16_d64_f32(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
+    const cudaError_t sm80 = makepad_cuda_require_sm80();
+    if (sm80 != cudaSuccess) {
+        return sm80;
+    }
     if (q_len == 0 || kv_len == 0 || head_count == 0 || hidden != head_count * FAB_D) {
         return cudaErrorInvalidValue;
     }
@@ -6359,6 +6434,10 @@ extern "C" cudaError_t makepad_cuda_flash_attention2_d64_f32(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
+    const cudaError_t sm80 = makepad_cuda_require_sm80();
+    if (sm80 != cudaSuccess) {
+        return sm80;
+    }
     if (seq == 0 || head_count == 0) {
         return cudaSuccess;
     }
