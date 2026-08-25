@@ -959,6 +959,13 @@ impl Mixer {
         self.state.lock().unwrap().fader.slew(position.clamp(0.0, 1.0), secs.max(SLEW_SECS));
     }
 
+    /// Where the crossfader actually is right now, mid-ramp included. The
+    /// deck surface mirrors this while a timed fade runs, so the on-screen
+    /// fader travels with the audio instead of teleporting to the target.
+    pub fn crossfader_position(&self) -> f32 {
+        self.state.lock().unwrap().fader.current
+    }
+
     pub fn set_curve(&self, curve: FadeCurve) {
         self.state.lock().unwrap().curve = curve;
     }
@@ -1459,6 +1466,35 @@ mod tests {
 
     fn decibels(ratio: f64) -> f64 {
         20.0 * ratio.max(1e-12).log10()
+    }
+
+    /// The "fade to A/B" buttons hand the mixer a duration; the fader must
+    /// take that long to cross, not jump and land.
+    #[test]
+    fn a_timed_crossfade_takes_its_duration() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
+        mixer.install_deck(DeckId::B, tone_pcm(440.0, 48_000, 10.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::B, true);
+        // Let the initial jump to 0.0 settle before the timed move starts.
+        render(&mixer, 48_000.0, 4_096);
+        assert!(mixer.state.lock().unwrap().fader.current < 1e-6);
+
+        mixer.fade_crossfader(1.0, 4.0);
+        // A quarter of the way through a four-second fade.
+        render(&mixer, 48_000.0, 48_000);
+        let quarter = mixer.state.lock().unwrap().fader.current;
+        assert!(
+            quarter > 0.2 && quarter < 0.3,
+            "one second into a 4s fade the fader should be near 0.25: {quarter}"
+        );
+        // And it must actually arrive by the end.
+        render(&mixer, 48_000.0, 48_000 * 4);
+        let done = mixer.state.lock().unwrap().fader.current;
+        assert!((done - 1.0).abs() < 1e-6, "the fade must land on B: {done}");
     }
 
     // A deck's tone chain has to be in the audible path, not just in the

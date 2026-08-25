@@ -5289,6 +5289,11 @@ pub struct App {
     deck_target: DeckTarget,
     #[rust(4.0f32)]
     xfade_secs: f32,
+    /// Where a timed crossfade is heading, while one is running. The fade
+    /// itself lives on the mixer (it has the device clock); this only says
+    /// "keep mirroring it onto the surface until it lands".
+    #[rust]
+    xfade_target: Option<f32>,
 
     // Music mode: whole-track analysis off-thread, and the deck surface it
     // feeds (waveform tiles, beat grids, explorer rows, queue).
@@ -16352,21 +16357,48 @@ p2 {}
         self.handle_wave_input(cx);
     }
 
+    /// Arm the surface to follow a timed crossfade to `target`.
+    fn start_crossfade_tracking(&mut self, cx: &mut Cx, target: f32) {
+        self.xfade_target = Some(target);
+        // A fade with both decks paused still has to animate, and the music
+        // pump only runs for a moving deck — so ask for the first frame here.
+        self.music_pump = cx.new_next_frame();
+    }
+
+    /// Mirror the mixer's real fader onto the deck surface while a timed
+    /// fade runs, and let go once it lands.
+    ///
+    /// The mixer owns the ramp because it rides the audio device clock; the
+    /// surface only reports it. That is what makes the on-screen fader agree
+    /// with what is actually audible, second for second.
+    fn track_crossfade(&mut self, cx: &mut Cx) {
+        let Some(target) = self.xfade_target else { return };
+        let position = self.mixer.crossfader_position();
+        self.decks.crossfader = position;
+        self.ui.slider(cx, ids!(xfader)).set_value(cx, position as f64);
+        if (position - target).abs() <= 1e-4 {
+            self.decks.crossfader = target;
+            self.xfade_target = None;
+        }
+    }
+
     /// One display frame of the deck surface: fresh playheads into the
     /// lanes and nothing else. Scheduled while a deck is playing or a hand
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
         self.push_wave_positions(cx);
+        self.track_crossfade(cx);
         self.schedule_music_frame(cx);
     }
 
     /// Ask for another frame while anything on the surface is moving.
     fn schedule_music_frame(&mut self, cx: &mut Cx) {
-        let moving = [DeckId::A, DeckId::B].iter().any(|deck| {
-            let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
-            playing || scratching
-        });
+        let moving = self.xfade_target.is_some()
+            || [DeckId::A, DeckId::B].iter().any(|deck| {
+                let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
+                playing || scratching
+            });
         if moving {
             self.music_pump = cx.new_next_frame();
             // Karaoke lives on the PROGRAM, which normally only redraws when
@@ -17410,6 +17442,9 @@ impl MatchEvent for App {
         }
         self.handle_deck_controls(cx, actions);
         if let Some(v) = self.ui.slider(cx, ids!(xfader)).slided(actions) {
+            // A hand on the fader outranks a running fade, exactly as it
+            // does for the visual AUTOFADE.
+            self.xfade_target = None;
             let cmds = self.decks.set_crossfader(v as f32);
             self.run_deck_cmds(cx, cmds);
         }
@@ -17696,13 +17731,13 @@ impl MatchEvent for App {
             let secs = self.xfade_secs;
             let cmds = self.decks.fade_to(DeckId::A, secs);
             self.run_deck_cmds(cx, cmds);
-            self.ui.slider(cx, ids!(xfader)).set_value(cx, 0.0);
+            self.start_crossfade_tracking(cx, 0.0);
         }
         if self.ui.button(cx, ids!(fade_to_b)).clicked(actions) {
             let secs = self.xfade_secs;
             let cmds = self.decks.fade_to(DeckId::B, secs);
             self.run_deck_cmds(cx, cmds);
-            self.ui.slider(cx, ids!(xfader)).set_value(cx, 1.0);
+            self.start_crossfade_tracking(cx, 1.0);
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(xcurve)).selected(actions) {
             let curve = if index == 1 { FadeCurve::Linear } else { FadeCurve::EqualPower };
