@@ -456,6 +456,25 @@ fn build_atlas(images: &[Image]) -> (Option<Image>, Vec<Option<[f32; 4]>>) {
                         data[(py + oy) * w + px + ox] = im.data[sy * im.width + sx];
                     }
                 }
+                // The outer top-left gutter corner (rect.xy minus one texel)
+                // carries the image's LINEAR-space mean, sRGB-encoded so the
+                // shader's decode recovers it exactly. Under heavy
+                // minification a nearest fetch is a per-sample texel lottery
+                // (a tiled roof at 760 repeats reads a random texel every
+                // sample and never converges pixel-to-pixel); the shader
+                // blends toward this mean as the pixel footprint grows —
+                // the same value the accumulation would converge to anyway,
+                // reached with zero variance.
+                let mut sum = [0.0f64; 3];
+                for texel in &im.data {
+                    sum[0] += (((texel >> 16) & 255) as f64 / 255.0).powf(2.2);
+                    sum[1] += (((texel >> 8) & 255) as f64 / 255.0).powf(2.2);
+                    sum[2] += ((texel & 255) as f64 / 255.0).powf(2.2);
+                }
+                let n = im.data.len().max(1) as f64;
+                let enc = |v: f64| ((v / n).powf(1.0 / 2.2) * 255.0 + 0.5) as u32;
+                data[py * w + px] =
+                    0xff00_0000 | (enc(sum[0]) << 16) | (enc(sum[1]) << 8) | enc(sum[2]);
                 rects[i] = Some([
                     (px + ATLAS_GUTTER) as f32 / w as f32 + 0.5 / w as f32,
                     (py + ATLAS_GUTTER) as f32 / h as f32 + 0.5 / h as f32,
@@ -545,10 +564,35 @@ mod tests {
             let y = (r[1] * atlas.height as f32).floor() as usize;
             for yy in y - 1..=y + 1 {
                 for xx in x - 1..=x + 1 {
+                    if (xx, yy) == (x - 1, y - 1) {
+                        // The outer corner is the image's mean texel; for a
+                        // one-colour image that IS the colour.
+                        assert_eq!(atlas.data[yy * atlas.width + xx] & 0x00ff_ffff, expected & 0x00ff_ffff);
+                        continue;
+                    }
                     assert_eq!(atlas.data[yy * atlas.width + xx], expected);
                 }
             }
         }
+    }
+
+    #[test]
+    fn atlas_mean_corner_is_the_linear_mean() {
+        // Half black, half white: the linear mean is 0.5, whose sRGB
+        // encoding is (0.5)^(1/2.2) = 186.
+        let images = vec![Image {
+            width: 2,
+            height: 1,
+            data: vec![0xff00_0000, 0xffff_ffff],
+        }];
+        let (atlas, rects) = build_atlas(&images);
+        let atlas = atlas.unwrap();
+        let r = rects[0].unwrap();
+        let x = (r[0] * atlas.width as f32).floor() as usize;
+        let y = (r[1] * atlas.height as f32).floor() as usize;
+        let corner = atlas.data[(y - 1) * atlas.width + x - 1];
+        let g = (corner >> 8) & 255;
+        assert!((g as i32 - 186).abs() <= 1, "mean corner green {g}");
     }
 
     #[test]
