@@ -1102,6 +1102,23 @@ impl StackNavigationRef {
         }
     }
 
+    /// Get the view ID that is showing, or that will be once an in-progress
+    /// transition finishes.
+    ///
+    /// Unlike [`Self::current_view`], which only advances once a transition
+    /// completes, this reports the destination as soon as it is known. Use it to
+    /// address the view that the app considers current, e.g. to update its title.
+    ///
+    /// Returns None if the root view is (or is becoming) the visible one.
+    pub fn destination_view(&self) -> Option<LiveId> {
+        let inner = self.borrow()?;
+        match inner.transition {
+            Some(StackNavigationTransition::Push { incoming, .. }) => Some(incoming),
+            Some(StackNavigationTransition::Pop { incoming, .. }) => incoming,
+            None => inner.current_view,
+        }
+    }
+
     /// Get the view IDs that are currently visible or transitioning.
     pub fn stack_view_ids(&self) -> Vec<LiveId> {
         if let Some(inner) = self.borrow() {
