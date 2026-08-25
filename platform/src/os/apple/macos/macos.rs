@@ -1186,6 +1186,14 @@ impl Cx {
                 if let EventFlow::Exit = flow {
                     return EventFlow::Exit;
                 }
+                // Block till the next flip — the same "block till the next
+                // timer" the timer-0 beat returns. The link is armed by
+                // definition while it fires, so falling through to the gate
+                // below answered Poll, and Poll is nextEvent(distantPast) in
+                // a tight loop: the main thread spun at 100% CPU for the
+                // whole frame between flips, in every link-paced app whose
+                // clock never idled.
+                return EventFlow::Wait;
             }
             MacosEvent::Paint => {
                 // Poll video players for new frames and preparation status
@@ -1461,16 +1469,25 @@ impl Cx {
             }
         }
 
-        // Determine the event flow based on whether we have work to do
-        if self.any_passes_dirty()
+        // Determine the event flow based on whether we have work to do.
+        if self.os.timer0_armed {
+            // The paint clock is armed — display link, its timer fallback,
+            // or the pointer-capture timer — and all three are main-run-loop
+            // sources: they fire INSIDE a blocking nextEvent and run the
+            // beat there. Polling on top of them adds nothing but a
+            // nextEvent(distantPast) spin until the next beat, and since
+            // every input event lands here, that was a full frame of 100%
+            // CPU per mouse move for as long as the clock stayed armed.
+            EventFlow::Wait
+        } else if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
             || self.os.keep_alive_counter > 0
             || self.screenshot_requests.len() > 0
             || self.demo_time_repaint
-            || self.os.timer0_armed
         {
-            // We have work to do or timer is running
+            // Work pending but no clock to deliver it: poll until the 0.2 s
+            // heartbeat re-arms the beat.
             EventFlow::Poll
         } else {
             // No work pending and timer is stopped - we can wait
