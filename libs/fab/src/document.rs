@@ -398,6 +398,20 @@ impl Document {
     pub fn meshes(&self) -> &[Mesh] { &self.state.meshes }
     pub fn materials(&self) -> &[PbrMaterial] { &self.state.materials }
     pub fn textures(&self) -> &[Texture] { &self.state.textures }
+
+    /// Live material edit (colour picker): base colour by materials-list
+    /// index — the same order the runtime scene's material table uses.
+    /// Deliberately not an undo step: the picker's drag publishes dozens of
+    /// values a second and owns its own revert (Escape).
+    pub fn set_material_base_color_by_index(&mut self, index: usize, rgba: [f32; 4]) -> bool {
+        match self.state.materials.get_mut(index) {
+            Some(m) => {
+                m.base_color = rgba;
+                true
+            }
+            None => false,
+        }
+    }
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
 

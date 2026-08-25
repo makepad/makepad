@@ -192,7 +192,7 @@ pub struct SceneStats {
     pub geometry_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Scene {
     /// Canonical editable source when this scene came through a loader.
     pub document: Option<Arc<crate::document::Document>>,
@@ -225,6 +225,10 @@ pub struct Scene {
     pub stats: SceneStats,
     /// Monotonic per process; the renderer re-uploads when it changes.
     pub generation: u64,
+    /// Bumped only when the GEOMETRY was built — a material-only edit bumps
+    /// `generation` but leaves this alone, so the pick-pass geometry, model
+    /// hash and AO bake are not rebuilt per colour-drag step.
+    pub geometry_generation: u64,
     snapshot: OnceLock<Arc<SceneSnapshot>>,
     /// Decoded textures, moved out of `MaterialData` (index == `Material::texture`).
     pub textures: Vec<crate::model::model::TextureData>,
@@ -303,6 +307,7 @@ impl Scene {
             home_camera: None,
             stats: SceneStats::default(),
             generation: 0,
+            geometry_generation: 0,
             snapshot: OnceLock::new(),
             textures: Vec::new(),
             story_rank: Vec::new(),
@@ -985,6 +990,7 @@ impl Scene {
         };
         progress("done", 1.0);
 
+        let build_generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Scene {
             document: None,
             name: model.name,
@@ -1007,7 +1013,8 @@ impl Scene {
             cameras,
             home_camera,
             stats,
-            generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: build_generation,
+            geometry_generation: build_generation,
             snapshot: OnceLock::new(),
             textures,
             story_rank,
@@ -1033,6 +1040,34 @@ impl Scene {
 
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
         self.materials.get(id.index())
+    }
+
+    /// Live edit from the colour picker: set one material's base colour.
+    /// The base colour is folded into the vertex tint at pack time (see
+    /// `viewport/pack.rs`), so this only has to touch the material table and
+    /// bump `generation` — the next `ensure_uploaded` repacks with the new
+    /// colour. The cached snapshot is dropped for the same reason. Alpha is
+    /// stored but batch transparency classes are fixed at build; an alpha
+    /// crossing 1.0 does not re-sort batches.
+    pub fn set_material_base_color(&mut self, id: MaterialId, rgba: [f32; 4]) -> bool {
+        let Some(m) = self.materials.get_mut(id.index()) else {
+            return false;
+        };
+        if m.base_color == rgba {
+            return false;
+        }
+        m.base_color = rgba;
+        // Keep the editable source in step, so a future document save writes
+        // the colour the user is looking at. The scene's material order is
+        // the document's (see `Document::into_model_data`), with one extra
+        // "Default" appended at the end that has no document counterpart.
+        if let Some(doc) = self.document.as_mut() {
+            let doc = Arc::make_mut(doc);
+            doc.set_material_base_color_by_index(id.index(), rgba);
+        }
+        self.snapshot = OnceLock::new();
+        self.generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     /// The authored contour segments of one element: `6 * n` floats,

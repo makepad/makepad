@@ -15,6 +15,7 @@
 //! `FabToursPanel` (G).
 
 pub mod area;
+pub mod colorpick;
 pub mod command_palette;
 pub mod dragnum;
 pub mod dropdown;
@@ -30,6 +31,7 @@ pub mod popover;
 pub mod properties;
 pub mod shell;
 pub mod statusbar;
+pub mod texview;
 pub mod topbar;
 pub mod viewport_area;
 pub mod widgets;
@@ -44,6 +46,8 @@ pub fn script_mod_kit(vm: &mut ScriptVm) {
     icons::script_mod(vm);
     widgets::script_mod(vm);
     dragnum::script_mod(vm);
+    colorpick::script_mod(vm);
+    texview::script_mod(vm);
     dropdown::script_mod(vm);
     popover::script_mod(vm);
     pie::script_mod(vm);
