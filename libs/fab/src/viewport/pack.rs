@@ -147,11 +147,32 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
     let mut max = vec3(f32::MIN, f32::MIN, f32::MIN);
     let mut vi = 0usize;
 
-    let pngs: Vec<Option<Vec<u8>>> = scene
-        .textures
-        .iter()
-        .map(|t| encode_png_rgba(t.width, t.height, &t.rgba))
-        .collect();
+    // PNG-encoding every decoded texture is by far the most expensive step
+    // of a pack, and textures never change on a material edit — only the
+    // tint does. Cache the encodes by pixel-buffer identity so a live
+    // colour drag repacks vertices without re-encoding a single image.
+    let pngs: Vec<Option<Vec<u8>>> = {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static PNG_CACHE: Mutex<Option<HashMap<(usize, usize), Option<Vec<u8>>>>> =
+            Mutex::new(None);
+        let mut guard = PNG_CACHE.lock().unwrap();
+        let cache = guard.get_or_insert_with(HashMap::new);
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        scene
+            .textures
+            .iter()
+            .map(|t| {
+                let key = (t.rgba.as_ptr() as usize, t.rgba.len());
+                cache
+                    .entry(key)
+                    .or_insert_with(|| encode_png_rgba(t.width, t.height, &t.rgba))
+                    .clone()
+            })
+            .collect()
+    };
     let textured = pngs.iter().any(|p| p.is_some());
     let layered = textured
         || (!scene.materials_are_derived

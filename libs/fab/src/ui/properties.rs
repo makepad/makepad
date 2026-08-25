@@ -19,7 +19,9 @@
 //! pinned to while the selection moves on.
 
 use crate::api::*;
+use crate::ui::colorpick::*;
 use crate::ui::dragnum::*;
+use crate::ui::texview::*;
 use crate::ui::widgets::{fold_panel_clicked, set_panel_chevron};
 use crate::model::PropertyValue;
 use makepad_widgets::*;
@@ -37,6 +39,20 @@ script_mod! {
         mod.widgets.FabPropRow{}
     }
     let Num = mod.widgets.FabDragNumber{}
+    // One texture slot of the shown material: label, thumbnail, dimensions.
+    // Hidden entirely when the slot is empty.
+    let TexRow = View{
+        visible: false
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: 6
+        align: Align{x: 0.0 y: 0.5}
+        padding: Inset{left: 8 right: 6 top: 2 bottom: 2}
+        name := mod.widgets.FabLabelDim{ width: fab.prop_label_width text: "" }
+        thumb := mod.widgets.FabTexThumb{}
+        dims := mod.widgets.FabLabelSmall{ text: "" }
+    }
 
     mod.widgets.FabPropertiesBase = #(FabProperties::register_widget(vm))
     mod.widgets.FabProperties = set_type_default() do mod.widgets.FabPropertiesBase{
@@ -198,7 +214,7 @@ script_mod! {
                             padding: Inset{left: 8 right: 6}
                             spacing: 6
                             mod.widgets.FabLabelDim{ width: fab.prop_label_width text: "Base color" }
-                            swatch := mod.widgets.FabSwatch{}
+                            picker := mod.widgets.FabColorPicker{}
                             hex := mod.widgets.FabLabelMono{ margin: Inset{left: 6} text: "" }
                         }
                         row_mat_name := Row{ name +: { text: "Name" } }
@@ -208,6 +224,21 @@ script_mod! {
                         row_trans := Row{ name +: { text: "Transmission" } }
                         row_tex := Row{ name +: { text: "Texture" } }
                         row_matsrc := Row{ name +: { text: "Source" } }
+                    }
+                }
+                tex_panel := mod.widgets.FabPanel{
+                    header +: { hdr +: { title +: { text: "Textures" } } }
+                    body +: {
+                        width: Fill height: Fit flow: Down
+                        padding: Inset{top: 2 bottom: 6}
+                        tex_base := TexRow{ name +: { text: "Base colour" } }
+                        tex_normal := TexRow{ name +: { text: "Normal" } }
+                        tex_mr := TexRow{ name +: { text: "Metal · rough" } }
+                        tex_emissive := TexRow{ name +: { text: "Emissive" } }
+                        tex_none := mod.widgets.FabLabelMuted{
+                            margin: Inset{left: 8 top: 4 bottom: 2}
+                            text: "No textures — flat base colour"
+                        }
                     }
                 }
             }
@@ -356,6 +387,39 @@ script_mod! {
                 }
             }
         }
+        // Enlarged view of a clicked texture thumbnail. Centered modal;
+        // click away or Escape closes it. Zero-sized in the panel's own
+        // flow — a Modal draws through its overlay pass, but its widget walk
+        // would otherwise reserve real height here and clip the pages above.
+        tex_modal := Modal{
+            width: 0
+            height: 0
+            content +: {
+                tex_view := View{
+                    width: Fit
+                    height: Fit
+                    flow: Down
+                    padding: 10
+                    spacing: 6
+                    align: Align{x: 0.5 y: 0.0}
+                    show_bg: true
+                    draw_bg +: {
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, fab.radius_lg)
+                            sdf.fill_keep(fab.color_popover)
+                            sdf.stroke(fab.color_popover_border, 1.0)
+                            return sdf.result
+                        }
+                    }
+                    big := mod.widgets.FabTexThumb{
+                        width: 512
+                        height: 512
+                    }
+                    caption := mod.widgets.FabLabelSmall{ text: "" }
+                }
+            }
+        }
     }
 }
 
@@ -368,12 +432,13 @@ const PAGES: [(&[LiveId], &[LiveId]); 6] = [
     (ids!(body.tabs.tab_render), ids!(body.page_render)),
 ];
 
-const PANELS: [&[LiveId]; 11] = [
+const PANELS: [&[LiveId]; 12] = [
     ids!(body.page_object.object_panel),
     ids!(body.page_object.dims_panel),
     ids!(body.page_object.vis_panel),
     ids!(body.page_element.props_panel),
     ids!(body.page_material.mat_panel),
+    ids!(body.page_material.tex_panel),
     ids!(body.page_scene.scene_panel),
     ids!(body.page_scene.explode_panel),
     ids!(body.page_scene.sun_panel),
@@ -402,6 +467,72 @@ pub struct FabProperties {
     attr_split_avail: f64,
     #[rust]
     qty: Vec<(String, String)>,
+    /// The material whose colour/textures the Material tab currently shows —
+    /// the target of the colour picker's edits.
+    #[rust]
+    shown_material: Option<MaterialId>,
+}
+
+/// One populated texture slot of the shown material, resolved from the
+/// editable document (the only place all slots live; the runtime scene keeps
+/// base colour only).
+struct TexSlotInfo {
+    /// Texture name from the document.
+    tex_name: String,
+    w: u32,
+    h: u32,
+    rgba: std::sync::Arc<[u8]>,
+    /// Stable identity of the decoded image: the allocation pointer of its
+    /// pixel data. The thumbnail uploads once per key, never per frame.
+    key: u64,
+    /// UV repeats per meter, when the source declared one.
+    repeat: Option<[f32; 2]>,
+}
+
+const TEX_ROW_IDS: [&[LiveId]; 4] = [
+    ids!(body.page_material.tex_panel.tex_base),
+    ids!(body.page_material.tex_panel.tex_normal),
+    ids!(body.page_material.tex_panel.tex_mr),
+    ids!(body.page_material.tex_panel.tex_emissive),
+];
+
+/// The populated slots of `mat`, in `TEX_ROW_IDS` order (row index, info).
+fn material_textures(state: &AppState, mat: MaterialId) -> Vec<(usize, TexSlotInfo)> {
+    let Some(doc) = state.scene.document.as_ref() else {
+        return Vec::new();
+    };
+    let Some(m) = doc.materials().get(mat.index()) else {
+        return Vec::new();
+    };
+    let slots = [
+        (0usize, &m.base_color_texture),
+        (1, &m.normal_texture),
+        (2, &m.metallic_roughness_texture),
+        (3, &m.emissive_texture),
+    ];
+    let mut out = Vec::new();
+    for (row, slot) in slots {
+        let Some(slot) = slot.as_ref() else { continue };
+        let Some(tex) = doc.textures().iter().find(|t| t.id == slot.texture) else {
+            continue;
+        };
+        if tex.width == 0 || tex.height == 0 {
+            continue;
+        }
+        let repeat = (slot.scale != [1.0, 1.0]).then_some(slot.scale);
+        out.push((
+            row,
+            TexSlotInfo {
+                tex_name: tex.name.clone(),
+                w: tex.width,
+                h: tex.height,
+                rgba: tex.rgba8.clone(),
+                key: std::sync::Arc::as_ptr(&tex.rgba8) as *const u8 as u64,
+                repeat,
+            },
+        ));
+    }
+    out
 }
 
 fn prop_row_ids() -> [&'static [LiveId]; PROP_ROWS] {
@@ -526,6 +657,16 @@ impl FabProperties {
 impl Widget for FabProperties {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+        // The enlarged-texture modal closes on Escape (no focusable content,
+        // so the Modal's own key path never sees the key).
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::Escape {
+                let modal = self.view.modal(cx, ids!(tex_modal));
+                if modal.is_open() {
+                    modal.close(cx);
+                }
+            }
+        }
         let Event::Actions(actions) = event else {
             return;
         };
@@ -717,6 +858,50 @@ impl Widget for FabProperties {
             }
         }
 
+        // Material colour: the picker publishes live while its wheel or rows
+        // are dragged, so the material follows the hand in both viewports.
+        if let Some(mat) = self.shown_material {
+            let picker = self
+                .view
+                .fab_color_picker(cx, ids!(body.page_material.mat_panel.swatch_row.picker));
+            if let Some(c) = picker.changed(actions).or_else(|| picker.ended(actions)) {
+                cx.action(ShellAction::SetMaterialBaseColor(mat, [c.x, c.y, c.z, c.w]));
+            }
+        }
+
+        // Texture thumbnails: click opens the enlarged view.
+        for (i, row_id) in TEX_ROW_IDS.iter().enumerate() {
+            let thumb = self.view.widget(cx, row_id).fab_tex_thumb(cx, ids!(thumb));
+            if !thumb.clicked(actions) {
+                continue;
+            }
+            let Some(mat) = self.shown_material else { continue };
+            let Some(state) = scope.data.get_mut::<AppState>() else {
+                continue;
+            };
+            let slots = material_textures(state, mat);
+            let mat_name = state
+                .scene
+                .material(mat)
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+            if let Some((_, info)) = slots.into_iter().find(|(r, _)| *r == i) {
+                self.view
+                    .fab_tex_thumb(cx, ids!(tex_modal.big))
+                    .set_image(cx, info.key, info.w, info.h, &info.rgba);
+                let extra = info
+                    .repeat
+                    .map(|r| format!(" · {:.2} × {:.2} rpt/m", r[0], r[1]))
+                    .unwrap_or_default();
+                let cap = format!(
+                    "{mat_name} — {} · {} × {} px{extra}",
+                    info.tex_name, info.w, info.h
+                );
+                self.view.label(cx, ids!(tex_modal.caption)).set_text(cx, &cap);
+                self.view.modal(cx, ids!(tex_modal)).open(cx);
+            }
+        }
+
         // Render.
         let render_now = scope.data.get_mut::<AppState>().map(|s| s.render);
         if let Some(mut r) = render_now {
@@ -892,21 +1077,24 @@ impl Widget for FabProperties {
                         .set_visible(cx, e.properties.is_empty());
 
                     // ---- Material actually used by this element
-                    let mat = e
+                    let mat_id = e
                         .ranges
                         .first()
                         .and_then(|(b, _, _)| state.scene.batches.get(*b as usize))
-                        .map(|b| b.material)
-                        .and_then(|m| state.scene.materials.get(m.index()));
+                        .map(|b| b.material);
+                    let mat = mat_id.and_then(|m| state.scene.materials.get(m.index()));
+                    self.shown_material = mat.map(|m| m.id);
                     match mat {
                         Some(m) => {
                             let c = m.base_color;
-                            let col = vec4(c[0], c[1], c[2], 1.0);
-                            let mut sw =
-                                self.view.view(cx, ids!(body.page_material.mat_panel.swatch_row.swatch));
-                            script_apply_eval!(cx, sw, {
-                                draw_bg +: { swatch: #(col) }
-                            });
+                            let picker = self
+                                .view
+                                .fab_color_picker(cx, ids!(body.page_material.mat_panel.swatch_row.picker));
+                            // Never fight the user's own drag: the picker
+                            // is the writer while its popover is up.
+                            if !picker.is_open() {
+                                picker.set_color(cx, c);
+                            }
                             self.view
                                 .label(cx, ids!(body.page_material.mat_panel.swatch_row.hex))
                                 .set_text(
@@ -940,11 +1128,43 @@ impl Widget for FabProperties {
                                 ids!(body.page_material.mat_panel.row_trans),
                                 &format!("{:.2}", m.transmission),
                             );
+                            // ---- The material's texture slots, from the
+                            // document (the only place all of them live).
+                            let slots = material_textures(state, m.id);
                             self.set_row(
                                 cx,
                                 ids!(body.page_material.mat_panel.row_tex),
-                                if m.texture.is_some() { "yes" } else { "none" },
+                                &if slots.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    slots.len().to_string()
+                                },
                             );
+                            for (i, row_id) in TEX_ROW_IDS.iter().enumerate() {
+                                let row = self.view.widget(cx, row_id);
+                                match slots.iter().find(|(r, _)| *r == i) {
+                                    Some((_, info)) => {
+                                        row.set_visible(cx, true);
+                                        row.fab_tex_thumb(cx, ids!(thumb)).set_image(
+                                            cx, info.key, info.w, info.h, &info.rgba,
+                                        );
+                                        let extra = info
+                                            .repeat
+                                            .map(|r| {
+                                                format!(" · {:.2} × {:.2} rpt/m", r[0], r[1])
+                                            })
+                                            .unwrap_or_default();
+                                        row.label(cx, ids!(dims)).set_text(
+                                            cx,
+                                            &format!("{} × {} px{extra}", info.w, info.h),
+                                        );
+                                    }
+                                    None => row.set_visible(cx, false),
+                                }
+                            }
+                            self.view
+                                .widget(cx, ids!(body.page_material.tex_panel.tex_none))
+                                .set_visible(cx, slots.is_empty());
                         }
                         None => {
                             for r in [
@@ -957,6 +1177,12 @@ impl Widget for FabProperties {
                             ] {
                                 self.set_row(cx, r, "—");
                             }
+                            for row_id in TEX_ROW_IDS.iter() {
+                                self.view.widget(cx, row_id).set_visible(cx, false);
+                            }
+                            self.view
+                                .widget(cx, ids!(body.page_material.tex_panel.tex_none))
+                                .set_visible(cx, true);
                         }
                     }
                     self.qty = e
@@ -985,6 +1211,13 @@ impl Widget for FabProperties {
                         self.set_row(cx, r, "—");
                     }
                     self.view.label(cx, ids!(header.crumb)).set_text(cx, "Nothing selected");
+                    self.shown_material = None;
+                    for row_id in TEX_ROW_IDS.iter() {
+                        self.view.widget(cx, row_id).set_visible(cx, false);
+                    }
+                    self.view
+                        .widget(cx, ids!(body.page_material.tex_panel.tex_none))
+                        .set_visible(cx, true);
                     for id in prop_row_ids() {
                         self.view.widget(cx, id).set_visible(cx, false);
                     }

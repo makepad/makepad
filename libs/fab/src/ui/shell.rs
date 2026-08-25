@@ -113,6 +113,10 @@ script_mod! {
         // Menus and the pie sit under the tooltip layer and over everything
         // else: an overlay draw list floats over every area and splitter, and
         // being last in the tree is what makes them win hover.
+        // The colour-picker popover lives here for the same reason: children
+        // handle events in reverse order, so only a top-of-shell modal wins
+        // the press race against the dock's areas.
+        color_layer := FabColorPickerLayer{}
         menu_layer := FabMenuLayer{}
         pie_layer := FabPieLayer{}
         tip_layer := TipLayer{}

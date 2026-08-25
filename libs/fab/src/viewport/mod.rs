@@ -601,6 +601,8 @@ pub struct FabViewport {
     #[rust]
     batch_geometries: Vec<Geometry>,
     #[rust]
+    uploaded_geometry_generation: u64,
+    #[rust]
     uploaded_generation: u64,
     /// `local/fab/cache` key of the model on the GPU.
     #[rust(0u64)]
@@ -725,8 +727,13 @@ impl FabViewport {
         if self.uploaded_generation == state.scene.generation && want_ao == self.ao_applied() {
             return;
         }
-        let fresh_scene = self.uploaded_generation != state.scene.generation;
+        // A material-only edit bumps `generation` (repack + re-upload the
+        // model: the base colour is baked into the vertex tint) but not
+        // `geometry_generation` — the pick-pass geometry, contours, model
+        // hash and AO are geometry-derived and stay as they are.
+        let fresh_scene = self.uploaded_geometry_generation != state.scene.geometry_generation;
         self.uploaded_generation = state.scene.generation;
+        self.uploaded_geometry_generation = state.scene.geometry_generation;
 
         if fresh_scene {
             self.ao = None;
@@ -1790,8 +1797,8 @@ impl Widget for FabViewport {
                 if let Some(t) = self.rendered.tracer() {
                     let st = &t.stats;
                     log!(
-                        "fab vp{} tracer: dirty {} frames {} spp {:.3} paths {:.0} edge {} tiles/frame {} host {:.1} ms gpu {:.2}/{:.2} ms samples {} done {} size {}x{}",
-                        self.view, was_dirty, st.frames, st.spp, st.samples_total, st.tile_edge,
+                        "fab vp{} tracer: dirty {} frames {} rung 1/{} spp {:.3} paths {:.0} edge {} tiles/frame {} host {:.1} ms gpu {:.2}/{:.2} ms samples {} done {} size {}x{}",
+                        self.view, was_dirty, st.frames, 1u32 << st.rung_shift, st.spp, st.samples_total, st.tile_edge,
                         st.tiles, st.last_frame_ms, st.gpu_time_ms, st.gpu_budget_ms,
                         st.gpu_samples, st.done, st.width, st.height
                     );
@@ -1805,6 +1812,7 @@ impl Widget for FabViewport {
             let max_samples = state.render.max_samples;
             let vs = state.view_at_mut(self.view);
             vs.rendered_samples = frame.samples_done;
+            vs.rendered_stage = frame.stage_shift;
             // RayTracer marks `done` on the following no-trace present pass;
             // expose completion as soon as this pass reaches the limit so
             // the header is correct on that final scheduled redraw.
