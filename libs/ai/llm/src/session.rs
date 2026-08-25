@@ -2251,6 +2251,20 @@ impl LlamaSession {
         self.draft_vocab.is_some()
     }
 
+    /// The driver's name for the device this session decodes on
+    /// (`"NVIDIA RTX PRO 6000 Blackwell Workstation Edition"`,
+    /// `"NVIDIA GeForce RTX 5090"`), or `"metal"`.
+    ///
+    /// The allocator's step-cost curve is a per-card measurement, and the two
+    /// cards in service differ by ~1.8x on the term that decides draft depth;
+    /// this is what lets it pick the curve for the card it is actually on.
+    pub fn device_name(&self) -> String {
+        match self.graphs.shared_runtime.features() {
+            crate::exec::ExecFeatures::Cuda(features) => features.device_name,
+            crate::exec::ExecFeatures::Metal(_) => "metal".to_string(),
+        }
+    }
+
     /// Offset inside slot 0's recurrent block that the session's own
     /// single-sequence state currently lives at.
     ///

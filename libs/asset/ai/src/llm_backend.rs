@@ -1552,6 +1552,19 @@ mod llama_worker {
                 format!("{}s", stall.budget().as_secs())
             },
         );
+        // The batched ladder this box will actually run, priced on its own
+        // card. Printed once so the log proves which calibration the allocator
+        // took and what it decides at each width.
+        let ladder: Vec<String> = makepad_ai_llm::BATCH_WIDTHS
+            .iter()
+            .map(|&width| format!("w{width}:d{}", exec.modelled_depth(width)))
+            .collect();
+        eprintln!(
+            "[llm-worker] batched depth ladder: {} (cost model {} on '{}')",
+            ladder.join(" "),
+            exec.cost_calibration(),
+            exec.session().device_name(),
+        );
 
         loop {
             // Take new work. Block only when there is genuinely nothing to do,

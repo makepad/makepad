@@ -1096,10 +1096,16 @@ impl LaneExecutor {
         // that causes is silent: a reply that runs past its own end-of-turn
         // token into a new one, and a lane that never retires.
         let scheduler = scheduler.with_stop_tokens(session.stop_tokens());
+        // Priced for the card this session is on. The verify curve is the term
+        // that decides whether a deeper batched round pays, and it is a
+        // per-card measurement: the RTX PRO 6000 verifies a column for ~3.2 ms
+        // where the 5090 fit charges 5.7, and an allocator running the 5090
+        // numbers there refuses rounds the box would win.
+        let costs = crate::slots::StepCostModel::for_device(&session.device_name());
         let costs = if session.has_restricted_draft_head() {
-            crate::slots::StepCostModel::measured_5090().with_restricted_draft_head()
+            costs.with_restricted_draft_head()
         } else {
-            crate::slots::StepCostModel::measured_5090()
+            costs
         };
         let forced_depth = std::env::var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH")
             .ok()
@@ -1124,6 +1130,37 @@ impl LaneExecutor {
     /// Batched speculative rounds this executor has run.
     pub fn batched_spec_rounds(&self) -> u64 {
         self.batched_spec_rounds
+    }
+
+    /// Which card's step-cost measurements the depth decision is priced with
+    /// (`"5090"`, `"rtx-pro-6000"`), for the worker's boot line.
+    pub fn cost_calibration(&self) -> &'static str {
+        self.costs.calibration()
+    }
+
+    /// The uniform draft depth the cost model would pick for a batched step
+    /// of `width` lanes, before the per-step context clamp.
+    ///
+    /// The boot line prints the ladder so a box's log shows what its allocator
+    /// will do at every width — a calibration that changes nothing on the
+    /// box it was written for is visible there rather than a week later in a
+    /// throughput report.
+    pub fn modelled_depth(&self, width: usize) -> usize {
+        let allowed = crate::slots::draft_depth_for_budget(
+            width,
+            self.session.speculation_depth(),
+            self.config.column_budget,
+        );
+        if allowed == 0 {
+            return 0;
+        }
+        crate::slots::batched_draft_depth(
+            width,
+            allowed,
+            crate::slots::BATCHED_CHAT_ACCEPTANCE,
+            &self.config,
+            &self.costs,
+        )
     }
 
     /// `(width, uniform draft depth)` of the last batched speculative round, or
