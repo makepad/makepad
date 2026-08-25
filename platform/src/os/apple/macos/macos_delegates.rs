@@ -16,7 +16,7 @@ use {
             },
             cx_native::EventFlow,
             macos::{
-                macos_app::{with_macos_app, MacosApp},
+                macos_app::{try_with_macos_app, with_macos_app, MacosApp},
                 macos_event::MacosEvent,
                 macos_window::get_cocoa_window,
             },
@@ -684,12 +684,17 @@ pub fn define_cocoa_view_class() -> *const Class {
 
     extern "C" fn reset_cursor_rects(this: &Object, _sel: Sel) {
         unsafe {
-            let current_cursor = with_macos_app(|app| app.current_cursor.clone());
-            let cursor_id = with_macos_app(|app| {
+            // AppKit calls this re-entrantly from inside our own event
+            // handling (any cursor change invalidates the cursor rects). If
+            // the app is already borrowed, skip this round: the rects are
+            // rebuilt on the next invalidation. A RefCell panic here cannot
+            // unwind through the ObjC frame — it aborts the process.
+            let Some(current_cursor) = try_with_macos_app(|app| app.current_cursor.clone()) else { return };
+            let Some(cursor_id) = try_with_macos_app(|app| {
                 *app.cursors
                     .entry(current_cursor.clone())
                     .or_insert_with(|| load_mouse_cursor(current_cursor.clone()))
-            });
+            }) else { return };
             let bounds: NSRect = msg_send![this, bounds];
             if let MouseCursor::Hidden = current_cursor {
                 let _: () = msg_send![
