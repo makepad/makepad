@@ -848,6 +848,41 @@ impl AssetClient {
         self.api.upload_blob(ns, bytes)
     }
 
+    /// As [`Self::upload_blob`], but the digest is supplied by the caller
+    /// instead of being (re)computed here — see
+    /// [`crate::api::Api::upload_blob_with_digest`]. For a caller that
+    /// already hashed `bytes` (e.g. to verify it against an upload plan's
+    /// expected digest), this skips hashing the same bytes a second time.
+    /// The server's echoed identity is still checked against `digest`.
+    pub fn upload_blob_with_digest(
+        &self,
+        ns: &str,
+        bytes: &[u8],
+        digest: makepad_asset_data::BlobId,
+    ) -> ClientResult<makepad_asset_data::BlobId> {
+        self.api.upload_blob_with_digest(ns, bytes, digest)
+    }
+
+    /// Admit MANY blobs in ONE request, one catalog transaction — see
+    /// [`crate::api::Api::upload_blob_batch`].
+    pub fn upload_blob_batch(
+        &self,
+        ns: &str,
+        blobs: &[&[u8]],
+    ) -> ClientResult<Vec<makepad_asset_data::BlobId>> {
+        self.api.upload_blob_batch(ns, blobs)
+    }
+
+    /// As [`Self::upload_blob_batch`], with caller-supplied digests — see
+    /// [`crate::api::Api::upload_blob_batch_with_digests`].
+    pub fn upload_blob_batch_with_digests(
+        &self,
+        ns: &str,
+        blobs: &[(makepad_asset_data::BlobId, &[u8])],
+    ) -> ClientResult<Vec<makepad_asset_data::BlobId>> {
+        self.api.upload_blob_batch_with_digests(ns, blobs)
+    }
+
     /// Register and publish-side lifecycle calls for immutable game
     /// revisions. Keeping these on the same verified client used for reads
     /// lets import/bootstrap tools prove the exact bytes they subsequently
