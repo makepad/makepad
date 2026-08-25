@@ -349,13 +349,38 @@ fn report_columns(rows: &[Row], args: &Args) {
 /// times those calls itself (`SpeculativeStats::verify_nanos` over `rounds`),
 /// so a short greedy generation per width is enough. The draft forwards and
 /// the sampling are timed separately and excluded.
+///
+/// **Warm every shape the window can take, or the compile lands in the
+/// window.** A `continue_greedy(n)` drafts `min(spec_draft_max, remaining - 1)`
+/// tokens per round, so its last rounds run NARROWER verify batches — each a
+/// graph of its own, compiled on first use and captured on the second. Left to
+/// the measured window, that compile-and-capture sits inside `verify_nanos`
+/// and inflates the per-round mean by several ms: the 2026-08-25 sweep on
+/// `.165` read 26.1 ms at 4 columns where the live service, running the same
+/// verify at a longer context, reads 21.8. So every tail shape is run twice
+/// before anything is timed, and the wide shape long enough to be replaying.
+/// Two windows are then measured and both printed: the second is the one to
+/// quote, and a first window that disagrees with it is the compile showing.
 fn measure_verify_widths(args: &Args) {
+    let split = std::env::var_os("MAKEPAD_LLAMA_HOST_SPLIT").is_some();
     println!("\nn_outputs=B verify-shape curve  (fill {} tok)", args.fill);
     println!(
-        "{:>5}  {:>10}  {:>12}  {:>10}  {:>8}",
-        "B", "ms/step", "ms/column", "rounds", "accept"
+        "{:>5}  {:>3}  {:>10}  {:>12}  {:>10}  {:>8}  {:>9}  {:>9}  {:>10}{}",
+        "B",
+        "win",
+        "ms/step",
+        "ms/column",
+        "rounds",
+        "accept",
+        "draft/rd",
+        "catch/rd",
+        "wall/rd",
+        if split { "  gpu graph/rd  d2h/rd" } else { "" }
     );
-    println!("{:->5}  {:->10}  {:->12}  {:->10}  {:->8}", "", "", "", "", "");
+    println!(
+        "{:->5}  {:->3}  {:->10}  {:->12}  {:->10}  {:->8}  {:->9}  {:->9}  {:->10}",
+        "", "", "", "", "", "", "", "", ""
+    );
     for &width in &args.verify_widths {
         if width < 2 {
             println!("{width:>5}  (verify batches start at 2 columns; cols=1 is the solo row above)");
@@ -383,55 +408,97 @@ fn measure_verify_widths(args: &Args) {
             eprintln!("  B={width}: prefill failed: {err:?}");
             continue;
         }
-        // One short warm generation so graphs are compiled and captured, then
-        // a measured one; the counters are cumulative, so difference them.
-        match session.continue_greedy(width * 2) {
-            Ok(warm) if warm.stop_reason != LlamaStopReason::MaxNewTokens => {
-                println!("{width:>5}  (warmup stopped: {:?})", warm.stop_reason);
-                continue;
-            }
-            Err(err) => {
-                eprintln!("  B={width}: warmup failed: {err:?}");
-                continue;
-            }
-            Ok(_) => {}
+        // Warm-up, as documented above: every narrower tail shape twice, then
+        // the full-width shape until it replays.
+        let mut warm_ok = true;
+        let mut warm_plan: Vec<usize> = Vec::new();
+        for _ in 0..2 {
+            warm_plan.extend(1..width);
         }
-        let before = session.speculative_stats();
-        let generated = match session.continue_greedy(args.verify_tokens) {
-            Ok(generated) => generated,
-            Err(err) => {
-                eprintln!("  B={width}: generate failed: {err:?}");
-                continue;
+        warm_plan.push(width * 4 + 16);
+        for want in warm_plan {
+            match session.continue_greedy(want) {
+                Ok(warm) if warm.stop_reason != LlamaStopReason::MaxNewTokens => {
+                    println!("{width:>5}  (warmup stopped: {:?})", warm.stop_reason);
+                    warm_ok = false;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("  B={width}: warmup failed: {err:?}");
+                    warm_ok = false;
+                    break;
+                }
+                Ok(_) => {}
             }
-        };
-        let after = session.speculative_stats();
-        let (Some(before), Some(after)) = (before, after) else {
+        }
+        if !warm_ok {
             continue;
-        };
-        let rounds = after.rounds.saturating_sub(before.rounds);
-        let nanos = after.verify_nanos.saturating_sub(before.verify_nanos);
-        let drafted = after.drafted.saturating_sub(before.drafted);
-        let accepted = after.accepted.saturating_sub(before.accepted);
-        if rounds == 0 {
+        }
+        for window in 1..=2 {
+            let before = session.speculative_stats();
+            let split_before = split.then(makepad_ai_llm::cuda_exec::host_split_snapshot);
+            let wall = Instant::now();
+            let generated = match session.continue_greedy(args.verify_tokens) {
+                Ok(generated) => generated,
+                Err(err) => {
+                    eprintln!("  B={width}: generate failed: {err:?}");
+                    break;
+                }
+            };
+            let wall_ms = wall.elapsed().as_secs_f64() * 1e3;
+            let after = session.speculative_stats();
+            let (Some(before), Some(after)) = (before, after) else {
+                break;
+            };
+            let rounds = after.rounds.saturating_sub(before.rounds);
+            let nanos = after.verify_nanos.saturating_sub(before.verify_nanos);
+            let draft_nanos = after.draft_nanos.saturating_sub(before.draft_nanos);
+            let catchup_nanos = after.catchup_nanos.saturating_sub(before.catchup_nanos);
+            let drafted = after.drafted.saturating_sub(before.drafted);
+            let accepted = after.accepted.saturating_sub(before.accepted);
+            if rounds == 0 {
+                println!(
+                    "{width:>5}  (no verify rounds ran: {} tokens, stop {:?})",
+                    generated.token_ids.len(),
+                    generated.stop_reason
+                );
+                break;
+            }
+            let per_round = |nanos: u64| Duration::from_nanos(nanos).as_secs_f64() * 1e3 / rounds as f64;
+            let ms = per_round(nanos);
+            let split_cols = match split_before {
+                Some(before) => {
+                    let now = makepad_ai_llm::cuda_exec::host_split_snapshot();
+                    format!(
+                        "  {:>12.3}  {:>6.3}",
+                        (now.gpu_graph_ms - before.gpu_graph_ms) / rounds as f64,
+                        (now.gpu_d2h_ms - before.gpu_d2h_ms) / rounds as f64,
+                    )
+                }
+                None => String::new(),
+            };
             println!(
-                "{width:>5}  (no verify rounds ran: {} tokens, stop {:?})",
-                generated.token_ids.len(),
-                generated.stop_reason
+                "{:>5}  {:>3}  {:>10.3}  {:>12.3}  {:>10}  {:>8.3}  {:>9.3}  {:>9.3}  {:>10.3}{}",
+                width,
+                window,
+                ms,
+                ms / width as f64,
+                rounds,
+                if drafted == 0 {
+                    0.0
+                } else {
+                    accepted as f64 / drafted as f64
+                },
+                per_round(draft_nanos),
+                per_round(catchup_nanos),
+                wall_ms / rounds as f64,
+                split_cols,
             );
-            continue;
+            if generated.stop_reason != LlamaStopReason::MaxNewTokens {
+                println!("{width:>5}  (window {window} stopped early: {:?})", generated.stop_reason);
+                break;
+            }
         }
-        let ms = Duration::from_nanos(nanos).as_secs_f64() * 1e3 / rounds as f64;
-        println!(
-            "{:>5}  {:>10.3}  {:>12.3}  {:>10}  {:>8.3}",
-            width,
-            ms,
-            ms / width as f64,
-            rounds,
-            if drafted == 0 {
-                0.0
-            } else {
-                accepted as f64 / drafted as f64
-            },
-        );
     }
 }
+
