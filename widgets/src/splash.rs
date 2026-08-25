@@ -190,8 +190,12 @@ impl Splash {
 
         let vm_id = self.vm_id;
         let new_view = cx.with_script_vm_id(vm_id, |vm| {
-            let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
-                vm.eval_with_append_source(script_mod, &code, NIL.into())
+            // Setup, not ongoing work: a body that cannot finish evaluating is
+            // an app that does not exist, and trimming it gives nobody a frame.
+            let value = crate::splash_limits::with_setup_slice(|| {
+                vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+                    vm.eval_with_append_source(script_mod, &code, NIL.into())
+                })
             });
             if !value.is_err() && !value.is_nil() {
                 Some(View::script_from_value(vm, value))
@@ -299,8 +303,12 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
         // Capture instead of logging: mid-eval errors otherwise go straight to
         // the error log (see `ScriptVm::take_errors`) and can't be returned.
         vm.bx.captured_errors = Some(Vec::new());
-        let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
-            vm.eval_with_append_source(script_mod, &code, NIL.into())
+        // Same exemption as eval_body: validation is setup, and a validator
+        // that fails only because the machine was busy validates nothing.
+        let value = crate::splash_limits::with_setup_slice(|| {
+            vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+                vm.eval_with_append_source(script_mod, &code, NIL.into())
+            })
         });
         let mut errors = vm.take_errors();
         if errors.is_empty() {

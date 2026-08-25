@@ -439,6 +439,30 @@ fn record(heap_key: usize, kind: SplashLimitKind, wanted: u64, allowed: u64) {
     });
 }
 
+thread_local! {
+    /// Nesting depth of "this entry is SETUP, not ongoing work".
+    static SETUP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f` with this isolate exempt from contention trimming.
+///
+/// Evaluating a script — booting an app, validating one — is not the kind of
+/// work fairness is about. It happens once, it has to finish or the app simply
+/// does not exist, and trimming it does not give anybody else a frame back: it
+/// just breaks the app, and breaks it exactly when the machine is busy, which
+/// is the worst possible time to lose one. The per-entry ceilings still apply,
+/// so a genuinely runaway body is still cut off.
+pub fn with_setup_slice<R>(f: impl FnOnce() -> R) -> R {
+    SETUP_DEPTH.with(|d| d.set(d.get() + 1));
+    let out = f();
+    SETUP_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    out
+}
+
+fn in_setup() -> bool {
+    SETUP_DEPTH.with(|d| d.get() > 0)
+}
+
 /// Takes every limit crossing since the last call. The host drains this the
 /// same way it drains the service bridge, and decides what to do about it.
 pub fn take_limit_events() -> Vec<SplashLimitEvent> {
@@ -472,7 +496,8 @@ pub(crate) fn cpu_allowance(heap_key: usize) -> Option<Duration> {
             // Frames are fine: nobody is waiting on anything, so trimming an
             // app would slow it down for no one's benefit. This is the case
             // for one app alone on an idle machine, and it is the common one.
-            if !w.contended() {
+            // Setup is exempt for a different reason — see `with_setup_slice`.
+            if in_setup() || !w.contended() {
                 return Some(entry);
             }
             // The launcher is losing its frame. Two things decide the slice:
