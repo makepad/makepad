@@ -25,12 +25,19 @@
 
 use makepad_draw::*;
 
-/// Hard bound on nodes visited per ray, on the GPU and here. A 100k-triangle
-/// BVH is ~20 deep and a real ray visits well under a few hundred nodes; a
-/// ray that reaches this cap is marked invalid rather than silently reported
-/// as a miss. The integrator rejects that sample, so the safety bound cannot
+/// Hard bound on nodes visited per ray, on the GPU and here. A ray that
+/// reaches this cap is marked invalid rather than silently reported as a
+/// miss. The integrator rejects that sample, so the safety bound cannot
 /// introduce missing geometry or light leaks.
-pub const MAX_STEPS: u32 = 1024;
+///
+/// Sized from measurement, not hope: building models stack coincident
+/// construction layers, which the SAH cannot separate, so grazing rays
+/// along a roof line legitimately visit over a thousand nodes (woodside,
+/// 50k tris, default camera: p50 373, p99 1163, max 1729 visited nodes).
+/// At 1024 nearly 3% of primary rays truncated — a permanent black hole in
+/// the valley of the roof and behind every window. 2048 covers the measured
+/// maximum with headroom and stays a bounded, watchdog-safe loop.
+pub const MAX_STEPS: u32 = 2048;
 
 #[derive(Clone, Copy, Debug)]
 struct Aabb {
@@ -191,9 +198,13 @@ impl RayPrep {
     }
 
     /// Woop et al. 2013, "Watertight Ray/Triangle Intersection". Returns
-    /// (t, u, v) or None. Two-sided.
+    /// (t, u, v, front) or None. Two-sided; `front` is true when the
+    /// triangle's geometric normal faces the ray origin (`det * sz > 0`:
+    /// `det` carries the projected winding along the dominant axis and `sz`
+    /// its sign relative to the ray, so the product is the facing — the GPU
+    /// twin computes the identical product).
     #[inline]
-    pub fn intersect(&self, tri: &Tri, tmax: f32) -> Option<(f32, f32, f32)> {
+    pub fn intersect(&self, tri: &Tri, tmax: f32) -> Option<(f32, f32, f32, bool)> {
         let a = tri.v0 - self.ro;
         let b = tri.v1 - self.ro;
         let c = tri.v2 - self.ro;
@@ -218,7 +229,7 @@ impl RayPrep {
         if t <= 0.0 || t > tmax {
             return None;
         }
-        Some((t, v / det, w / det))
+        Some((t, v / det, w / det, det * self.sz > 0.0))
     }
 }
 
@@ -233,10 +244,12 @@ pub fn hit_tie_epsilon(t: f32) -> f32 {
 #[inline]
 fn candidate_wins(
     t: f32,
+    front: bool,
     priority: u16,
     group: u32,
     original: u32,
     hit: &Hit,
+    hit_front: bool,
     hit_priority: u16,
     hit_group: u32,
     hit_original: u32,
@@ -246,6 +259,16 @@ fn candidate_wins(
     }
     let prioritized = group != 0 && group == hit_group;
     if prioritized && (t - hit.t).abs() <= hit_tie_epsilon(t.max(hit.t)) {
+        // Facing outranks priority inside a coplanar tie: stacked
+        // construction layers carry priorities for the EXPOSED side, and a
+        // face turned away from the viewer is never the exposed one.
+        // Measured on the woodside roof: framing boards are front/back pairs
+        // 0.1..0.4 mm apart, and priority-first deterministically picked the
+        // farther back face on alternating pixels — the black stripe of the
+        // pair of stripes the roof drew.
+        if front != hit_front {
+            return front;
+        }
         if priority != hit_priority {
             return priority > hit_priority;
         }
@@ -357,7 +380,7 @@ impl Bvh {
         any_hit: bool,
         skip: i32,
     ) -> Hit {
-        self.trace_from_limit(ro, rd, tmin, tmax, any_hit, MAX_STEPS, skip)
+        self.trace_from_limit(ro, rd, tmin, tmax, any_hit, MAX_STEPS, skip).0
     }
 
     fn trace_from_limit(
@@ -369,15 +392,16 @@ impl Bvh {
         any_hit: bool,
         max_steps: u32,
         skip: i32,
-    ) -> Hit {
+    ) -> (Hit, u32) {
         let mut hit = Hit::miss(tmax);
         let count = self.nodes.len() as u32;
         if count == 0 {
-            return hit;
+            return (hit, 0);
         }
         let ray = RayPrep::new(ro, rd);
         let mut i = 0u32;
         let mut steps = 0u32;
+        let mut hit_front = false;
         let mut hit_priority = 0u16;
         let mut hit_group = 0u32;
         let mut hit_original = u32::MAX;
@@ -419,28 +443,31 @@ impl Bvh {
                         } else {
                             hit.t
                         };
-                        if let Some((t, u, v)) = ray.intersect(&self.tris[k as usize], tri_limit) {
+                        if let Some((t, u, v, front)) = ray.intersect(&self.tris[k as usize], tri_limit) {
                             if t <= tmin || t > tmax {
                                 continue;
                             }
                             let original = self.tri_order[k as usize];
                             if candidate_wins(
                                 t,
+                                front,
                                 priority,
                                 group,
                                 original,
                                 &hit,
+                                hit_front,
                                 hit_priority,
                                 hit_group,
                                 hit_original,
                             ) {
                                 hit = Hit { t, tri: k as i32, u, v, truncated: false };
+                                hit_front = front;
                                 hit_priority = priority;
                                 hit_group = group;
                                 hit_original = original;
                             }
                             if any_hit {
-                                return hit;
+                                return (hit, steps);
                             }
                         }
                     }
@@ -453,13 +480,21 @@ impl Bvh {
         if i < count {
             hit.truncated = true;
         }
-        hit
+        (hit, steps)
+    }
+
+    /// Diagnostics: `trace` with a caller-supplied step cap, reporting the
+    /// nodes actually visited. Lets a harness histogram traversal cost on a
+    /// real model instead of guessing at `MAX_STEPS`.
+    pub fn trace_counted(&self, ro: Vec3f, rd: Vec3f, tmax: f32, max_steps: u32) -> (Hit, u32) {
+        self.trace_from_limit(ro, rd, 0.0, tmax, false, max_steps, -1)
     }
 
     /// Brute force over every triangle (the oracle for the traversal test).
     pub fn trace_brute(&self, ro: Vec3f, rd: Vec3f, tmax: f32) -> Hit {
         let ray = RayPrep::new(ro, rd);
         let mut hit = Hit::miss(tmax);
+        let mut hit_front = false;
         let mut hit_priority = 0u16;
         let mut hit_group = 0u32;
         let mut hit_original = u32::MAX;
@@ -471,19 +506,22 @@ impl Bvh {
             } else {
                 hit.t
             };
-            if let Some((t, u, v)) = ray.intersect(tri, limit) {
+            if let Some((t, u, v, front)) = ray.intersect(tri, limit) {
                 let original = self.tri_order[i];
                 if candidate_wins(
                     t,
+                    front,
                     priority,
                     group,
                     original,
                     &hit,
+                    hit_front,
                     hit_priority,
                     hit_group,
                     hit_original,
                 ) {
                     hit = Hit { t, tri: i as i32, u, v, truncated: false };
+                    hit_front = front;
                     hit_priority = priority;
                     hit_group = group;
                     hit_original = original;
@@ -721,7 +759,7 @@ mod tests {
     #[test]
     fn traversal_limit_is_reported_not_silently_missed() {
         let bvh = Bvh::build(&random_tris(3000, 19));
-        let h = bvh.trace_from_limit(
+        let (h, _steps) = bvh.trace_from_limit(
             vec3f(0.0, 0.0, 20.0),
             vec3f(0.0, 0.0, -1.0),
             0.0,
@@ -792,6 +830,77 @@ mod tests {
         let separated = Bvh::build_with_priorities(&[make(0.0), make(-0.01)], &[1, 9]);
         let h = separated.trace(ray.0, ray.1, 10.0, false);
         assert_eq!(separated.tri_order[h.tri as usize], 0, "nearest geometry wins beyond epsilon");
+    }
+
+    #[test]
+    fn facing_beats_priority_inside_a_tie() {
+        // A backfacing board bottom 0.5 mm CLOSER and with HIGHER priority
+        // still loses to the viewer-facing top inside the coplanar tie: the
+        // exposed side of a stacked assembly is the one facing the ray.
+        let front = Tri {
+            v0: vec3f(-1.0, -1.0, 0.0),
+            v1: vec3f(1.0, -1.0, 0.0),
+            v2: vec3f(0.0, 1.0, 0.0),
+        };
+        let back = Tri {
+            v0: vec3f(-1.0, -1.0, 0.0005),
+            v1: vec3f(0.0, 1.0, 0.0005),
+            v2: vec3f(1.0, -1.0, 0.0005),
+        };
+        let bvh = Bvh::build_with_coplanar(&[front, back], &[1, 9], &[7, 7]);
+        let h = bvh.trace(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, -1.0), 10.0, false);
+        assert_eq!(
+            bvh.tri_order[h.tri as usize],
+            0,
+            "the viewer-facing face must win the tie over a closer, higher-priority backface"
+        );
+        // Seen from BELOW the same pair flips: what faced away now faces the
+        // ray and wins, regardless of priority order.
+        let h = bvh.trace(vec3f(0.0, 0.0, -1.0), vec3f(0.0, 0.0, 1.0), 10.0, false);
+        assert_eq!(bvh.tri_order[h.tri as usize], 1);
+    }
+
+    #[test]
+    fn intersect_facing_matches_geometric_normal_for_all_axes() {
+        // front == (dot(ng, rd) < 0) for every dominant axis and ray sign,
+        // for both windings. This is the CPU statement of the GPU's
+        // det * sz > 0 (the identical product).
+        let tris = [
+            // z-dominant-normal triangle
+            Tri { v0: vec3f(0.0, 0.0, 0.0), v1: vec3f(1.0, 0.0, 0.0), v2: vec3f(0.0, 1.0, 0.0) },
+            // x-dominant
+            Tri { v0: vec3f(0.0, 0.0, 0.0), v1: vec3f(0.0, 1.0, 0.0), v2: vec3f(0.0, 0.0, 1.0) },
+            // y-dominant
+            Tri { v0: vec3f(0.0, 0.0, 0.0), v1: vec3f(0.0, 0.0, 1.0), v2: vec3f(1.0, 0.0, 0.0) },
+        ];
+        let dirs = [
+            vec3f(0.1, 0.2, -1.0),
+            vec3f(0.1, 0.2, 1.0),
+            vec3f(-1.0, 0.1, 0.2),
+            vec3f(1.0, 0.1, 0.2),
+            vec3f(0.2, -1.0, 0.1),
+            vec3f(0.2, 1.0, 0.1),
+        ];
+        for tri in &tris {
+            let flipped = Tri { v0: tri.v0, v1: tri.v2, v2: tri.v1 };
+            for t in [tri, &flipped] {
+                let ng = Vec3f::cross(t.v1 - t.v0, t.v2 - t.v0);
+                let centre = (t.v0 + t.v1 + t.v2) / 3.0;
+                for rd in &dirs {
+                    let rd = rd.normalize();
+                    let ro = centre - rd * 5.0;
+                    let ray = RayPrep::new(ro, rd);
+                    let Some((_, _, _, front)) = ray.intersect(t, 100.0) else {
+                        panic!("ray through the centroid must hit");
+                    };
+                    assert_eq!(
+                        front,
+                        ng.dot(rd) < 0.0,
+                        "facing mismatch for ng {ng:?} rd {rd:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

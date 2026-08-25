@@ -293,13 +293,35 @@ impl PackedScene {
                                 })
                                 .collect();
                             let total = weights.iter().sum::<f32>();
+                            // Defensive mixture: (1-a) guided + a uniform,
+                            // folded into the stored per-bin probability so
+                            // the sampled CDF and the reported pdf stay one
+                            // object and no shader changes. The cell guide is
+                            // built at cell CENTRES: where a shading point's
+                            // visibility disagrees with its cell (a reveal, a
+                            // balcony underside) a purely guided pdf can be
+                            // four orders of magnitude below uniform and one
+                            // lucky sample becomes a firefly that takes
+                            // thousands of frames to fade — the measured
+                            // non-converging speckle in shadowed areas. The
+                            // uniform component floors the solid-angle pdf
+                            // at a/(2*PI) (about 0.008 at a = 0.05 — a 100x
+                            // tighter bound on the worst sample weight) for
+                            // the cost of ~5% of env samples spent probing
+                            // officially-blocked bins. 0.1 measurably slowed
+                            // the sunlit-quad 1/N variance decay; 0.05 keeps
+                            // it (ratio 0.70 against the 1.1 gate).
+                            const DEFENSIVE_UNIFORM: f32 = 0.05;
+                            let uniform_bin = 1.0 / ENV_DIR_BINS as f32;
                             let mut cdf = 0.0f32;
                             for (bin, weight) in weights.into_iter().enumerate() {
-                                let select_pdf = if total > 0.0 {
+                                let guided = if total > 0.0 {
                                     weight / total
                                 } else {
                                     1.0 / ENV_DIR_BINS as f32
                                 };
+                                let select_pdf = (1.0 - DEFENSIVE_UNIFORM) * guided
+                                    + DEFENSIVE_UNIFORM * uniform_bin;
                                 cdf += select_pdf;
                                 light.extend([bin as f32, solid_angle, select_pdf, cdf.min(1.0)]);
                             }
