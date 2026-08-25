@@ -1052,7 +1052,12 @@ impl MacosApp {
                 // class by name keeps the binary loadable before macOS 14.
                 let mut is_metal_link = false;
                 let mut link = nil;
-                if let Some(link_class) = Class::get("CAMetalDisplayLink") {
+                // Opt-in until it paces at the display's rate: measured 11 fps
+                // visible on 2026-08-25 against 62 fps on the CVDisplayLink path.
+                let metal_link_wanted = std::env::var("MAKEPAD_METAL_DISPLAY_LINK")
+                    .map(|v| v != "0")
+                    .unwrap_or(false);
+                if let Some(link_class) = Class::get("CAMetalDisplayLink").filter(|_| metal_link_wanted) {
                     let layer: ObjcId = msg_send![view, layer];
                     if layer != nil {
                         let allocated: ObjcId = msg_send![link_class, alloc];
