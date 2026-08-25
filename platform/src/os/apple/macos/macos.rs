@@ -24,14 +24,17 @@ use {
                 apple_video_player::AppleUnifiedVideoPlayer,
                 apple_webview::MacosSystemBrowser,
                 macos::{
-                    macos_app::{init_macos_app_global, with_macos_app, MacosApp},
+                    macos_app::{
+                        init_macos_app_global, metal_link_trace_drawable_consumed,
+                        metal_link_trace_presented, with_macos_app, MacosApp,
+                    },
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
                 },
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
-            metal::{DrawPassMode, MetalCx},
+            metal::{metal_cb_committed, DrawPassMode, MetalCx},
         },
         permission::Permission,
         shared_framebuf::PollTimers,
@@ -65,6 +68,14 @@ const PRESENT_GATE_IN_FLIGHT: u32 = 3;
 /// stick on "hidden" while the window is really on screen, which used to skip
 /// every beat forever.
 const OCCLUSION_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+fn set_metal_layer_background_color(layer: ObjcId, alpha: f64) {
+    unsafe {
+        let color = CGColorCreateGenericRGB(0.0, 0.0, 0.0, alpha);
+        let () = msg_send![layer, setBackgroundColor: color];
+        CFRelease(color as *const std::ffi::c_void);
+    }
+}
 
 #[derive(Clone)]
 pub struct MetalWindow {
@@ -123,13 +134,15 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
-            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
+            set_metal_layer_background_color(ca_layer, 1.0);
 
             let view = cocoa_window.view;
             let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
             let () = msg_send![view, setWantsLayer: YES];
             let () = msg_send![view, setLayerContentsPlacement: 11];
             let () = msg_send![view, setLayer: ca_layer];
+            // `NSView.layer` owns the layer now; balance CAMetalLayer `new`.
+            let () = msg_send![ca_layer, release];
         }
 
         MetalWindow {
@@ -173,13 +186,15 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
-            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
+            set_metal_layer_background_color(ca_layer, 1.0);
 
             let view = cocoa_window.view;
             let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
             let () = msg_send![view, setWantsLayer: YES];
             let () = msg_send![view, setLayerContentsPlacement: 11];
             let () = msg_send![view, setLayer: ca_layer];
+            // `NSView.layer` owns the layer now; balance CAMetalLayer `new`.
+            let () = msg_send![ca_layer, release];
         }
 
         MetalWindow {
@@ -485,25 +500,42 @@ impl Cx {
     ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
-        self.repaint_id += 1;
         // Safety flush: if a previous repaint batched offscreen passes but
         // no window pass followed (texture-only frame), commit that work
         // now so it is never stranded.
         if let Some(shared) = metal_cx.frame_command_buffer.take() {
+            metal_cb_committed(shared);
             let () = unsafe { msg_send![shared, commit] };
             let () = unsafe { msg_send![shared, release] };
         }
+        // Some(drawable), including Some(nil), means this beat came from a
+        // CAMetalDisplayLinkUpdate. None keeps the legacy CADisplayLink /
+        // NSTimer path on CAMetalLayer.nextDrawable.
+        let link_drawable = self.os.link_drawable;
+        // The per-window present gate below is too late to bound a frame:
+        // dependency order encodes its offscreen passes first. When the gate
+        // skips `nextDrawable`, those passes would otherwise keep queueing on
+        // every display-link beat, retaining all transient Metal allocations
+        // until the GPU eventually catches up. Bound whole repaints by GPU
+        // completion before the first pass allocates or encodes anything.
+        metal_cx.begin_repaint();
+        metal_cx.trace_memory_once_per_second();
+        // A CAMetalDisplayLink-owned drawable must not be dropped here: the
+        // link waits for its consumption before delivering at full rate. Its
+        // preferred frame latency and drawable pool already bound this path.
+        if link_drawable.is_none()
+            && metal_cx.frames_in_flight() >= PRESENT_GATE_IN_FLIGHT as usize
+        {
+            metal_cx.backpressure_skips = metal_cx.backpressure_skips.saturating_add(1);
+            return;
+        }
+        self.repaint_id += 1;
         let time_now = self
             .os
             .link_flip_time
             .map(|t| t as f32)
             .unwrap_or_else(|| with_macos_app(|app| app.time_now() as f32));
         let scope = self.os.link_scope;
-        // Some(drawable), including Some(nil), means this beat came from a
-        // CAMetalDisplayLinkUpdate. None keeps the legacy CADisplayLink /
-        // NSTimer path on CAMetalLayer.nextDrawable.
-        let link_drawable = self.os.link_drawable;
-        let link_target_presentation_time = self.os.link_target_presentation_time;
         for draw_pass_id in &passes_todo {
             // Per-window pacing: during a LinkFire beat only the firing
             // window's pass tree paints; everything else stays dirty for
@@ -621,7 +653,7 @@ impl Cx {
                             (prev >> 32) as u32
                         });
                         let in_flight = metal_window.in_flight_presents.clone();
-                        let frame_target = link_target_presentation_time;
+                        let is_metal_link_drawable = link_drawable.is_some();
                         let () = unsafe {
                             msg_send![
                                 drawable,
@@ -641,16 +673,8 @@ impl Cx {
                                             eprintln!("presenttrace {:.2}ms", (t - prev) * 1000.0);
                                         }
                                     }
-                                    if std::env::var_os("MAKEPAD_FRAME_TRACE").is_some()
-                                        && frame_target > 0.0
-                                    {
-                                        let actual: f64 = unsafe { msg_send![drawable_, presentedTime] };
-                                        eprintln!(
-                                            "[frame-trace] target={:.9} actual={:.9} delta_ms={:+.3}",
-                                            frame_target,
-                                            actual,
-                                            (actual - frame_target) * 1000.0,
-                                        );
+                                    if is_metal_link_drawable {
+                                        metal_link_trace_presented();
                                     }
                                     // No-op if a watchdog reset happened since this present.
                                     if let Some(generation) = generation {
@@ -691,6 +715,9 @@ impl Cx {
                                 DrawPassMode::Drawable(drawable, None),
                             )
                         };
+                        if presented && is_metal_link_drawable {
+                            metal_link_trace_drawable_consumed();
+                        }
                         // The pass bailed before presenting, so its handler never
                         // fires. Give the count back or the gate closes for good.
                         if !presented && generation.is_some() {
@@ -1449,9 +1476,7 @@ impl Cx {
                     let layer_opaque = if visuals.transparent { NO } else { YES };
                     let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
                     let () = unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
-                    let () = unsafe {
-                        msg_send![metal_window.ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, layer_alpha)]
-                    };
+                    set_metal_layer_background_color(metal_window.ca_layer, layer_alpha);
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;
@@ -1588,9 +1613,7 @@ impl Cx {
                         let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
                         let () =
                             unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
-                        let () = unsafe {
-                            msg_send![metal_window.ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, layer_alpha)]
-                        };
+                        set_metal_layer_background_color(metal_window.ca_layer, layer_alpha);
                     }
                 }
                 CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
@@ -2221,8 +2244,7 @@ pub struct CxOs {
     /// deliberately means "this Metal update has no drawable"; None selects
     /// the existing CAMetalLayer.nextDrawable fallback.
     pub(crate) link_drawable: Option<ObjcId>,
-    /// Core Animation / Metal media-time domain; used both for targeted
-    /// presentation and target-vs-actual frame tracing.
+    /// Core Animation / Metal media-time domain for the update's target.
     pub(crate) link_target_presentation_time: f64,
     /// Indicates wether the main timer is armed
     pub(crate) timer0_armed: bool,
