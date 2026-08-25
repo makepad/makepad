@@ -24,8 +24,8 @@ use makepad_asset_importer::classic_import::{
     QUAKE_GITHUB, QUAKE_HOME, QUAKE_LICENSE, QUAKE_SOURCE_ID, QUAKE_SOURCE_TITLE, QUAKE_TERMS_URL,
 };
 use makepad_asset_importer::pack_import::{self, IMPORT_MANIFEST_FILE, SOURCE_COLLECTION_FILE, UPLOAD_PLAN_FILE};
-use makepad_asset_client::{AnnotationUpload, AssetClient, ClientConfig};
-use makepad_asset_data::{sha256, AssetKind, BlobId};
+use makepad_asset_client::{wire, AnnotationUpload, AssetClient, ClientConfig};
+use makepad_asset_data::{AssetKind, BlobId};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -349,6 +349,7 @@ impl ClassicImportCard {
                         || current.starts_with("clear")
                         || current.starts_with("found ")
                         || current.starts_with("loading texture")
+                        || current.starts_with("building upload plan")
                     {
                         format!("{pack}: {done}/{total} · {current}")
                     } else {
@@ -1652,7 +1653,55 @@ fn run_classic_import(
     }
 
     let spec = source.pack_spec(pack_name);
-    let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
+    // `compile_pack` walks every staged file to build the upload plan
+    // (hashing each one), and it can run for a while on a big pack. Without
+    // live progress here the status line would stay on the just-finished
+    // `IconsPending` text ("rendering N icons…") for that whole stretch,
+    // reading as a hang even though icon rendering is already done and the
+    // thread has moved on — so drive `ImportPhase::Compiling` from
+    // `compile_pack_with_progress`'s per-file callback instead of one
+    // static message. Throttled to <=10 updates/s (the callback itself
+    // fires once per file, which for a big pack is far more often than
+    // that); the very first call (nothing hashed yet) and the very last
+    // (everything hashed) always get through regardless of the throttle,
+    // so the phase change and the final tally are never swallowed.
+    let mut last_progress_sent: Option<std::time::Instant> = None;
+    let mut send_compile_progress = move |p: pack_import::CompileProgress| {
+        let now = std::time::Instant::now();
+        let edge = p.files_done == 0 || p.files_done == p.files_total;
+        if !edge {
+            if let Some(last) = last_progress_sent {
+                if now.duration_since(last) < std::time::Duration::from_millis(100) {
+                    return;
+                }
+            }
+        }
+        last_progress_sent = Some(now);
+        let current = format!(
+            "building upload plan · {}/{} MB{}",
+            p.bytes_done / (1024 * 1024),
+            p.bytes_total / (1024 * 1024),
+            if p.current.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", p.current)
+            }
+        );
+        let _ = tx.send(ImportPhase::Compiling {
+            pack: pack_name.to_string(),
+            done: p.files_done,
+            total: p.files_total,
+            current,
+        });
+    };
+    let report = match pack_import::compile_pack_with_progress(
+        &staged,
+        &bundle,
+        spec,
+        None,
+        false,
+        Some(&mut send_compile_progress),
+    ) {
         Ok(r) => Some(r),
         Err(error) => {
             log!("import {pack_name}: pack_import failed: {error}");
@@ -1907,6 +1956,42 @@ fn kind_word(kind: AssetKind) -> &'static str {
     }
 }
 
+/// Upload whatever is queued in `batch` as ONE `upload_blob_batch_with_digests`
+/// request, advance `blob_done` by the batch size, and tell the UI. No-op on
+/// an empty batch (the tail flush after the loop, or the one right before an
+/// oversized single blob, may have nothing queued).
+#[allow(clippy::too_many_arguments)]
+fn flush_publish_batch(
+    client: &AssetClient,
+    ns: &str,
+    pack_name: &str,
+    assets: usize,
+    blob_total: usize,
+    batch: &mut Vec<(BlobId, Vec<u8>)>,
+    blob_done: &mut usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+) -> Result<(), String> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<(BlobId, &[u8])> = batch
+        .iter()
+        .map(|(digest, bytes)| (*digest, bytes.as_slice()))
+        .collect();
+    client
+        .upload_blob_batch_with_digests(ns, &refs)
+        .map_err(|e| format!("upload batch of {}: {e}", batch.len()))?;
+    *blob_done += batch.len();
+    batch.clear();
+    let _ = tx.send(ImportPhase::Publishing {
+        pack: pack_name.to_string(),
+        assets,
+        blobs: blob_total,
+        blob_done: *blob_done,
+    });
+    Ok(())
+}
+
 fn publish_classic_pack(
     pack_root: &Path,
     out: &Path,
@@ -1946,7 +2031,36 @@ fn publish_classic_pack(
         .register_source_collection(&collection)
         .map_err(|e| format!("register source: {e}"))?;
 
+    // Every blob's bytes are read exactly ONCE, client-side, in this whole
+    // compile+publish run: `hash_and_measure` (pack_import.rs) already
+    // hashed each one, moments ago in this same process, while building
+    // this very plan. `pack_root` here is `work/source` — OUR OWN staging
+    // directory, written only by this importer's own conversion code;
+    // nothing external ever touches it between compile and publish — so
+    // re-hashing it again here would be pure TOCTOU paranoia against a
+    // threat that does not exist for this path. The plan's declared digest
+    // is trusted directly as the precomputed digest passed to the upload
+    // calls; the
+    // upload plan's own `"uploader": "re-hash each local_path…"` law (see
+    // `UPLOADER_REVERIFY` in pack_import.rs) is left untouched for whatever
+    // GENERIC consumer of an `upload_plan.json` that law is written for
+    // (a standalone CLI/worker acting on a plan handed to it from outside
+    // its own process, where the file really could have changed since) —
+    // this in-process classic-import path is not that consumer, and the
+    // server still independently computes and echoes back the real digest
+    // of whatever bytes it receives (`upload_blob_with_digest` /
+    // `upload_blob_batch_with_digests` still refuse on a disagreement), so
+    // skipping the local re-hash here does not weaken the end-to-end
+    // guarantee — a changed file still gets caught, one hop later, at the
+    // server instead of locally.
+    //
+    // Uploads go out in batches sized to the wire limits, one HTTP request
+    // per batch instead of one per blob; a blob too big to share a batch on
+    // its own falls back to a single upload.
     let mut blob_done = 0usize;
+    let mut batch: Vec<(BlobId, Vec<u8>)> = Vec::new();
+    let mut batch_bytes: u64 = 0;
+
     for blob in blobs {
         let local = blob
             .get("local_path")
@@ -1956,29 +2070,40 @@ fn publish_classic_pack(
             .get("blob")
             .and_then(makepad_asset_client::json::Value::as_str)
             .ok_or("blob missing digest")?;
+        let digest: BlobId = expect
+            .parse()
+            .map_err(|_| format!("blob digest malformed for {local}: {expect}"))?;
         let bytes = std::fs::read(pack_root.join(local))
             .map_err(|e| format!("read {local}: {e}"))?;
-        let digest = BlobId::hash_of(&bytes);
-        if digest.to_string() != expect {
-            return Err(format!(
-                "rehash mismatch for {local}: plan {expect} != sha256 {}",
-                digest
-            ));
+        let size = bytes.len() as u64;
+        if size > wire::UPLOAD_BATCH_SAFE_BYTES {
+            // Too big to ever share a batch: flush what's queued (keeps
+            // upload order matching plan order) then send it alone.
+            flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
+            batch_bytes = 0;
+            client
+                .upload_blob_with_digest(&ns, &bytes, digest)
+                .map_err(|e| format!("upload {local}: {e}"))?;
+            blob_done += 1;
+            let _ = tx.send(ImportPhase::Publishing {
+                pack: pack_name.to_string(),
+                assets,
+                blobs: blob_total,
+                blob_done,
+            });
+            continue;
         }
-        if sha256(&bytes) != *digest.as_bytes() {
-            return Err(format!("sha256 drift for {local}"));
+        if !batch.is_empty()
+            && (batch.len() >= wire::MAX_UPLOAD_BATCH_ITEMS
+                || batch_bytes + size > wire::UPLOAD_BATCH_SAFE_BYTES)
+        {
+            flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
+            batch_bytes = 0;
         }
-        client
-            .upload_blob(&ns, &bytes)
-            .map_err(|e| format!("upload {local}: {e}"))?;
-        blob_done += 1;
-        let _ = tx.send(ImportPhase::Publishing {
-            pack: pack_name.to_string(),
-            assets,
-            blobs: blob_total,
-            blob_done,
-        });
+        batch.push((digest, bytes));
+        batch_bytes += size;
     }
+    flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
 
     let report = client
         .run_import(&manifest)

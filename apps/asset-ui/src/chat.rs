@@ -37,6 +37,9 @@ use std::sync::{Arc, Mutex};
 /// The transcript and its rate meter are the shared component's; this app
 /// only reads them.
 pub use makepad_asset_chat_ui::{ChatData, ChatRole};
+// Test-only: the module tests below read the shared transcript directly.
+#[cfg(test)]
+use makepad_asset_chat_ui::CHAT;
 
 // ---------------------------------------------------------------------------
 // mutable generation defaults
