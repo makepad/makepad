@@ -16,6 +16,13 @@ pub struct CameraRig {
     pub in_test: bool,
 }
 
+
+/// The world's near plane: a derive-Default 0 means the stock 0.15, and
+/// explicit values clamp to sane metres.
+fn scene_near(cam_near: f32) -> f32 {
+    if cam_near <= 0.0 { 0.15 } else { cam_near.clamp(0.02, 1.0) }
+}
+
 pub fn scene_state(
     world: &GameWorld,
     rect: Rect,
@@ -52,8 +59,12 @@ pub fn scene_state(
             // Near plane 1.0 (Godot's CAM_NEAR): a creature overlapping the
             // lens clips open instead of filling the screen with one giant
             // polygon. FOV is script-tunable (racing games widen with speed).
-            let projection =
-                Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 0.15, 500.0);
+            let projection = Mat4f::perspective(
+                world.cam_fov.clamp(20.0, 120.0),
+                aspect,
+                scene_near(world.cam_near),
+                500.0,
+            );
             return Some(SceneState3D {
                 time,
                 camera_pos,
@@ -89,7 +100,12 @@ pub fn scene_state(
     camera_pos = camera_pos + camera_shake_offset(world, in_test);
     let view = Mat4f::look_at(camera_pos, target, vec3f(0.0, 1.0, 0.0));
     let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-    let projection = Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 0.15, 500.0);
+    let projection = Mat4f::perspective(
+        world.cam_fov.clamp(20.0, 120.0),
+        aspect,
+        scene_near(world.cam_near),
+        500.0,
+    );
     Some(SceneState3D {
         time,
         camera_pos,

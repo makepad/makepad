@@ -436,6 +436,35 @@ pub fn surface_kinds_from_glb(bytes: &[u8], expect_tris: usize) -> Option<Vec<Su
         })
         .collect();
     let has_animations = json.get("animations").map(|a| !a.arr().is_empty()).unwrap_or(false);
+    // Geometry under a SKY node is the sky's, not the level's — the loader
+    // takes it out of the static stream (`StaticModel::sky`), so a walk that
+    // counts it can never reproduce the model's triangle count, and the
+    // whole classification is discarded as drift. Every classic map with an
+    // open-air area publishes one of these, which is exactly the set of maps
+    // that also has a nukage pool to mark.
+    let sky: Vec<bool> = nodes
+        .iter()
+        .map(|n| {
+            let Some(extras) = n.get("extras") else { return false };
+            let marked = extras.get("kind").and_then(Val::str) == Some("sky")
+                || n.get("name").and_then(Val::str) == Some("sky");
+            // Same contract as the loader: a sky node without a projection
+            // it understands stays ordinary geometry.
+            marked && extras.get("projection").and_then(Val::str).is_some()
+        })
+        .collect();
+    let owned_by_sky = |mut i: usize| -> bool {
+        for _ in 0..64 {
+            if sky[i] {
+                return true;
+            }
+            match parents[i] {
+                Some(p) => i = p,
+                None => break,
+            }
+        }
+        false
+    };
     // The node's kind is its own, or the nearest ancestor's that has one:
     // classic importers group a whole nukage sector under one node.
     let kind_of_node = |mut i: usize| -> Option<SurfaceKind> {
@@ -471,6 +500,9 @@ pub fn surface_kinds_from_glb(bytes: &[u8], expect_tris: usize) -> Option<Vec<Su
         for (ni, n) in nodes.iter().enumerate() {
             let Some(mesh_index) = n.get("mesh").and_then(Val::usize) else { continue };
             if skip_parts && owned_by_part(ni) {
+                continue;
+            }
+            if owned_by_sky(ni) {
                 continue;
             }
             let node_kind = kind_of_node(ni);
@@ -3318,6 +3350,61 @@ mod tests {
         assert_eq!(kinds[0], SurfaceKind::Floor);
         assert_eq!(kinds[2], SurfaceKind::Hazard, "NUKAGE damages");
         assert_eq!(kinds[4], SurfaceKind::Liquid, "FWATER is only wet");
+    }
+
+    /// The open-air regression: every classic map with an outdoor area
+    /// publishes a `sky` node, the loader takes that geometry OUT of the
+    /// static stream, and a walk that still counted it could never
+    /// reproduce the model's triangle count — so the whole classification
+    /// was discarded and the map's nukage stopped hurting. (Doom's E1M1:
+    /// 17264 level + 592 hazard triangles loaded, 502 more under `sky`.)
+    #[test]
+    fn sky_geometry_is_left_out_of_the_static_walk() {
+        let doc = r#"{
+            "nodes":[
+              {"name":"floor_0","mesh":0},
+              {"name":"hazard_1","mesh":1,"extras":{"kind":"hazard","damage":5,"flat":"NUKAGE1"}},
+              {"name":"sky","mesh":2,"extras":{"kind":"sky","projection":"cylinder"}}
+            ],
+            "meshes":[
+              {"primitives":[{"attributes":{"POSITION":0},"indices":1}]},
+              {"primitives":[{"attributes":{"POSITION":0},"indices":1}]},
+              {"primitives":[{"attributes":{"POSITION":0},"indices":1}]}
+            ],
+            "accessors":[{"count":4},{"count":6}]
+        }"#;
+        // The loader packs 4 triangles (floor + hazard); the sky's 2 are its
+        // own. Classification must agree, and the hazard must survive.
+        let kinds = surface_kinds_from_glb(&glb(doc), 4).expect("classified without the sky");
+        assert_eq!(
+            kinds,
+            vec![
+                SurfaceKind::Floor,
+                SurfaceKind::Floor,
+                SurfaceKind::Hazard,
+                SurfaceKind::Hazard,
+            ]
+        );
+    }
+
+    /// A node NAMED sky with no projection the engine knows is ordinary
+    /// geometry to the loader, so it must stay ordinary here too.
+    #[test]
+    fn a_sky_node_without_a_projection_is_ordinary_geometry() {
+        let doc = r#"{
+            "nodes":[
+              {"name":"hazard_1","mesh":0,"extras":{"kind":"hazard","damage":5}},
+              {"name":"sky","mesh":1,"extras":{"kind":"sky"}}
+            ],
+            "meshes":[
+              {"primitives":[{"attributes":{"POSITION":0},"indices":1}]},
+              {"primitives":[{"attributes":{"POSITION":0},"indices":1}]}
+            ],
+            "accessors":[{"count":4},{"count":6}]
+        }"#;
+        let kinds = surface_kinds_from_glb(&glb(doc), 4).expect("classified with the sky in");
+        assert_eq!(kinds.len(), 4);
+        assert_eq!(kinds[0], SurfaceKind::Hazard);
     }
 
     #[test]
