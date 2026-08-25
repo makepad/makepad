@@ -357,7 +357,21 @@ impl WidgetNode for Dock {
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx)
+        self.area.redraw(cx);
+        // A redraw of the dock is a redraw of everything it shows. Each
+        // panel's tab content lives behind a RETAINED draw list
+        // (`contents_draw_list`, gated with `is_redrawing()` in draw), so
+        // marking only the dock's own area leaves every tab's content cached:
+        // an app-level `ui.redraw(cx)` would repaint the dock chrome while
+        // the panels inside — viewports included — kept showing stale
+        // pixels. Mark the retained lists and recurse into the items so the
+        // redraw contract (a widget redraws its whole subtree) holds.
+        for (_, tab_bar) in self.tab_bars.iter_mut() {
+            tab_bar.contents_draw_list.redraw(cx);
+        }
+        for (_, (_, item)) in self.items.iter_mut() {
+            item.redraw(cx);
+        }
     }
 }
 
