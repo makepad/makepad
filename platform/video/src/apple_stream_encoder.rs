@@ -44,7 +44,7 @@ struct EncoderShared {
 /// `kCMSampleAttachmentKey_NotSync` — the standard VideoToolbox convention
 /// for "this is a sync sample" (keyframe).
 unsafe fn sample_is_keyframe(sample_buffer: CMSampleBufferRef) -> bool {
-    let attachments = CMSampleBufferGetSampleAttachmentsArray(sample_buffer, false);
+    let attachments = CMSampleBufferGetSampleAttachmentsArray(sample_buffer, 0);
     if attachments.is_null() || CFArrayGetCount(attachments) == 0 {
         return true;
     }
