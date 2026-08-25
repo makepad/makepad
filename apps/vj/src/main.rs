@@ -3997,6 +3997,13 @@ const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
 /// Measured sustainable AI production rate, shared by the active AI decks.
 const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
 
+/// `VJ_TWEEN_PREFETCH=0` keeps the classic boundary derive available as a
+/// diagnostic A/B. The live default pipelines classical fields.
+fn tween_prefetch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VJ_TWEEN_PREFETCH").map(|v| v != "0").unwrap_or(true))
+}
+
 /// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
 /// per-deck dropdown's AI entry is the opt-in now.
 fn rife_enabled() -> bool {
@@ -15124,6 +15131,10 @@ p2 {}
             .count()
             .max(1);
         let ai_ceiling = TWEEN_RIFE_CAPACITY_FPS / ai_decks as f64;
+        // One classical-field capacity shared by both decks. Each slot
+        // records (next-boundary deadline, remaining passes); after both
+        // offers are known, EDF assigns the frame's bounded work.
+        let mut field_wanted = [None; 2];
         for slot in [SlotId::A, SlotId::B] {
             let i = slot.index();
 
@@ -15251,10 +15262,49 @@ p2 {}
             } else {
                 None
             };
+            // The platter predicts ALONG loop/bounce traversal. Adjacent
+            // pairs share exactly one endpoint, so upload only the other
+            // frame into the view's three-frame ring.
+            let field_offer = if mode == TWEEN_FLOW
+                && tween_prefetch_enabled()
+                && step.rate != 0.0
+            {
+                self.platter_locate_ahead(i, 1.0).and_then(|ahead| {
+                    let key = pair_cache::PairKey::new(
+                        generation,
+                        ahead.a,
+                        ahead.b,
+                        TWEEN_FLOW,
+                    );
+                    let new_frame = if pair.b == key.a {
+                        Some((ahead.b, true))
+                    } else if pair.a == key.b {
+                        Some((ahead.a, false))
+                    } else {
+                        None
+                    }?;
+                    match &cache[new_frame.0].px {
+                        crate::media::Pixels::Nv12 { data, width: w, height: h }
+                            if (*w, *h) == (width, height) =>
+                        {
+                            Some((key, data.as_slice(), new_frame.1))
+                        }
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+            let boundary_fraction = if step.screen_forward {
+                1.0 - step.t as f64
+            } else {
+                step.t as f64
+            };
+            let field_deadline = now + boundary_fraction.max(0.0) / step.pace.max(1e-9);
             let tex = self.tween_view(cx, slot, |cx, view| {
                 view.set_fade(cx, mode == TWEEN_FADE);
                 if pair_changed {
-                    view.set_pair(cx, da, db, width, height);
+                    view.set_pair_keyed(cx, pair, da, db, width, height);
                     view.set_cut(cx, cut);
                     if let Some(field) = rife_field.as_deref() {
                         view.set_rife_field(
@@ -15271,14 +15321,25 @@ p2 {}
                 } else if mode != TWEEN_AI {
                     view.clear_rife_field(cx);
                 }
+                let remaining = if let Some((key, frame, forward)) = field_offer {
+                    view.offer_next(cx, key, frame, width, height, forward)
+                } else {
+                    view.cancel_prefetch();
+                    None
+                };
                 view.set_t(cx, step.t);
-                view.output_texture()
+                (view.output_texture(), remaining)
             });
             self.tween_pair[i] = Some(pair);
-            if let Some(Some(tex)) = tex {
-                self.slot_tex_borrowed[i] = false;
-                self.slot_textures[i] = Some(tex);
-                self.set_deck_busy(cx, slot, false);
+            if let Some((tex, remaining)) = tex {
+                if let Some(remaining) = remaining.filter(|n| *n > 0) {
+                    field_wanted[i] = Some((field_deadline, remaining));
+                }
+                if let Some(tex) = tex {
+                    self.slot_tex_borrowed[i] = false;
+                    self.slot_textures[i] = Some(tex);
+                    self.set_deck_busy(cx, slot, false);
+                }
             }
 
             // Prefetch along the map, never by numeric pair + 1. The shared
@@ -15374,6 +15435,12 @@ p2 {}
                     }
                 }
             }
+        }
+
+        let field_budgets = flow_tween::field_prefetch_budgets(field_wanted);
+        for slot in [SlotId::A, SlotId::B] {
+            let budget = field_budgets[slot.index()];
+            self.tween_view(cx, slot, |cx, view| view.set_derive_budget(cx, budget));
         }
 
         // REV tracks the live platter leg in a resident bounce; streaming

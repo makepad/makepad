@@ -35,6 +35,7 @@
 use makepad_widgets::*;
 
 use crate::media::{nv12_proxy_rgb8, tl_on, Frame, Pixels};
+use crate::pair_cache::PairKey;
 
 /// THE NEURAL FIELD PRODUCER: one background worker owning the RIFE
 /// runtime. Jobs are (generation, pair, two RGB8 proxies); results are
@@ -197,6 +198,94 @@ fn tween_debug() -> f32 {
 pub const LEVELS: usize = 4;
 /// Jacobi sweeps per level (the CPU default).
 pub const SWEEPS: usize = 3;
+
+/// Global speculative field-work capacity per display frame. The presenter
+/// assigns this one budget EDF across both decks; a view can never consume
+/// more than the assigned slice.
+pub const FIELD_PREFETCH_OPS_PER_FRAME: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeriveOp {
+    Luma0,
+    Halve { level: usize },
+    LumaField,
+    Exhaust { dir: usize },
+    Sweep { dir: usize, level: usize, sweep: usize },
+    Median { dir: usize, level: usize },
+    Subpel { dir: usize },
+}
+
+/// The old straight-line field derivation, made explicit so speculative
+/// work can stop between any two passes and resume on the next display
+/// frame without inventing new estimator state.
+fn build_derive_ops(seeded: bool, luma_only: bool) -> Vec<DeriveOp> {
+    let mut ops = Vec::with_capacity(2 + LEVELS + 2 * (1 + LEVELS * (SWEEPS + 1) + 1));
+    ops.push(DeriveOp::Luma0);
+    for level in 1..LEVELS {
+        ops.push(DeriveOp::Halve { level });
+    }
+    if luma_only {
+        ops.push(DeriveOp::LumaField);
+        return ops;
+    }
+    for dir in 0..2 {
+        if !seeded {
+            ops.push(DeriveOp::Exhaust { dir });
+        }
+        for level in (0..LEVELS).rev() {
+            for sweep in 0..SWEEPS {
+                ops.push(DeriveOp::Sweep { dir, level, sweep });
+            }
+            ops.push(DeriveOp::Median { dir, level });
+        }
+        ops.push(DeriveOp::Subpel { dir });
+    }
+    ops
+}
+
+#[derive(Clone, Debug)]
+struct FieldPrefetch {
+    key: PairKey,
+    forward: bool,
+    /// Y-plane slots for the predicted pair. UV lives at slot + 1.
+    plane_y: [usize; 2],
+    target_gen: usize,
+    seed_gen: usize,
+    ops: Vec<DeriveOp>,
+    cursor: usize,
+}
+
+impl FieldPrefetch {
+    fn remaining(&self) -> usize {
+        self.ops.len().saturating_sub(self.cursor)
+    }
+
+    fn ready_for(&self, key: PairKey) -> bool {
+        self.key == key && self.cursor == self.ops.len()
+    }
+}
+
+/// Earliest-deadline-first allocation of the ONE per-frame field budget.
+/// The returned slices sum to no more than the capacity law, including when
+/// both decks predict a boundary on the same flip.
+pub(crate) fn field_prefetch_budgets(
+    wanted: [Option<(f64, usize)>; 2],
+) -> [usize; 2] {
+    let mut order = [0usize, 1usize];
+    order.sort_by(|&a, &b| {
+        let da = wanted[a].map(|w| w.0).unwrap_or(f64::INFINITY);
+        let db = wanted[b].map(|w| w.0).unwrap_or(f64::INFINITY);
+        da.total_cmp(&db).then_with(|| a.cmp(&b))
+    });
+    let mut left = FIELD_PREFETCH_OPS_PER_FRAME;
+    let mut out = [0usize; 2];
+    for deck in order {
+        let Some((_, remaining)) = wanted[deck] else { continue };
+        out[deck] = remaining.min(left);
+        left -= out[deck];
+    }
+    out
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -816,9 +905,11 @@ pub struct FlowTweenView {
     draw_warp: DrawTweenWarp,
     #[rust]
     area: Area,
-    /// NV12 planes for the pair: (y, uv) for A then B.
+    /// NV12 plane ring: current A, current B, then the one new frame for
+    /// the predicted adjacent pair. Adoption rotates handles; it uploads
+    /// no pixels on the boundary frame.
     #[rust]
-    planes: Option<[Texture; 4]>,
+    planes: Option<[Texture; 6]>,
     #[rust]
     size: (u32, u32),
     /// Luma pyramid targets (RG in RGBA32F), one per level.
@@ -827,9 +918,12 @@ pub struct FlowTweenView {
     /// Flow scratch: ping, pong, and the per-level median output.
     #[rust]
     scratch: Vec<Texture>,
-    /// Final per-direction fields at level 0.
+    /// Two generations of final per-direction fields at level 0. The warp
+    /// and temporal seed read `field_gen`; speculation writes the other.
     #[rust]
     field_tex: Vec<Texture>,
+    #[rust]
+    field_gen: usize,
     /// The warp output (fixed-size, Image-hostable).
     #[new]
     warp_out: Texture,
@@ -847,6 +941,15 @@ pub struct FlowTweenView {
     /// The flow stack must re-run (the pair changed).
     #[rust]
     flow_dirty: bool,
+    /// Exact active lease and speculative destination. A completed result
+    /// is adoptable only when every PairKey component matches.
+    #[rust]
+    pair_key: Option<PairKey>,
+    #[rust]
+    prefetch: Option<FieldPrefetch>,
+    /// EDF-assigned part of the shared per-frame capacity.
+    #[rust]
+    derive_budget: usize,
     /// A previous pair's FINAL fields exist in field_tex — the next
     /// pair's coarse level seeds from them instead of the exhaustive
     /// search (temporal seeding: steadier fields, no per-pair shimmer).
@@ -879,6 +982,65 @@ pub struct FlowTweenView {
 }
 
 impl FlowTweenView {
+    fn upload_nv12_plane_pair(
+        cx: &mut Cx,
+        planes: &[Texture; 6],
+        y_slot: usize,
+        data: &[u8],
+        w: usize,
+        h: usize,
+    ) {
+        let y_len = w * h;
+        let uv_len = (w / 2) * (h / 2) * 2;
+        for (tex, bytes) in [
+            (&planes[y_slot], &data[..y_len]),
+            (&planes[y_slot + 1], &data[y_len..y_len + uv_len]),
+        ] {
+            let mut buf = tex.take_vec_u8(cx);
+            buf.clear();
+            buf.extend_from_slice(bytes);
+            tex.put_back_vec_u8(cx, buf, None);
+        }
+    }
+
+    fn ensure_plane_ring(&mut self, cx: &mut Cx, width: u32, height: u32) {
+        if self.size == (width, height) && self.planes.is_some() {
+            return;
+        }
+        let (w, h) = (width as usize, height as usize);
+        let mk_y = |cx: &mut Cx| {
+            Texture::new_with_format(
+                cx,
+                TextureFormat::VecRu8 {
+                    width: w,
+                    height: h,
+                    data: Some(vec![0; w * h]),
+                    unpack_row_length: None,
+                    updated: TextureUpdated::Full,
+                },
+            )
+        };
+        let mk_uv = |cx: &mut Cx| {
+            Texture::new_with_format(
+                cx,
+                TextureFormat::VecRGu8 {
+                    width: w / 2,
+                    height: h / 2,
+                    data: Some(vec![0; (w / 2) * (h / 2) * 2]),
+                    unpack_row_length: None,
+                    updated: TextureUpdated::Full,
+                },
+            )
+        };
+        self.planes = Some([
+            mk_y(cx), mk_uv(cx), mk_y(cx), mk_uv(cx), mk_y(cx), mk_uv(cx),
+        ]);
+        self.size = (width, height);
+        self.field_gen = 0;
+        self.have_prev_field = false;
+        self.prefetch = None;
+    }
+
     /// Upload a new PAIR of NV12 frames. The flow stack re-runs on the
     /// next draw; the warp serves every display frame until the pair
     /// changes again.
@@ -890,57 +1052,145 @@ impl FlowTweenView {
         width: u32,
         height: u32,
     ) {
+        self.set_pair_inner(cx, None, a, b, width, height);
+    }
+
+    /// Start or adopt an exact keyed pair. A ready speculative field is
+    /// adopted only for its complete clip/pair/tier key; otherwise this is
+    /// the classic full derive path.
+    pub fn set_pair_keyed(
+        &mut self,
+        cx: &mut Cx,
+        key: PairKey,
+        a: &[u8],
+        b: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        self.set_pair_inner(cx, Some(key), a, b, width, height);
+    }
+
+    fn set_pair_inner(
+        &mut self,
+        cx: &mut Cx,
+        key: Option<PairKey>,
+        a: &[u8],
+        b: &[u8],
+        width: u32,
+        height: u32,
+    ) {
         let (w, h) = (width as usize, height as usize);
         if w < 8 || h < 8 || a.len() < w * h * 3 / 2 || b.len() < w * h * 3 / 2 {
             return;
         }
-        if self.size != (width, height) || self.planes.is_none() {
-            self.have_prev_field = false;
-            let mk_y = |cx: &mut Cx| {
-                Texture::new_with_format(
-                    cx,
-                    TextureFormat::VecRu8 {
-                        width: w,
-                        height: h,
-                        data: Some(vec![0; w * h]),
-                        unpack_row_length: None,
-                        updated: TextureUpdated::Full,
-                    },
-                )
-            };
-            let mk_uv = |cx: &mut Cx| {
-                Texture::new_with_format(
-                    cx,
-                    TextureFormat::VecRGu8 {
-                        width: w / 2,
-                        height: h / 2,
-                        data: Some(vec![0; (w / 2) * (h / 2) * 2]),
-                        unpack_row_length: None,
-                        updated: TextureUpdated::Full,
-                    },
-                )
-            };
-            self.planes = Some([mk_y(cx), mk_uv(cx), mk_y(cx), mk_uv(cx)]);
-            self.size = (width, height);
-        }
-        let planes = self.planes.as_ref().unwrap();
-        for (tex, (data, len)) in [
-            (&planes[0], (a, w * h)),
-            (&planes[1], (a, 0)),
-            (&planes[2], (b, w * h)),
-            (&planes[3], (b, 0)),
-        ] {
-            let mut buf = tex.take_vec_u8(cx);
-            buf.clear();
-            if len > 0 {
-                buf.extend_from_slice(&data[..len]);
+        let same_size = self.size == (width, height) && self.planes.is_some();
+        let adopt = same_size
+            && key.is_some_and(|wanted| {
+                self.prefetch.as_ref().is_some_and(|ahead| ahead.ready_for(wanted))
+            });
+        if adopt {
+            let ahead = self.prefetch.take().unwrap();
+            let old = self.planes.take().unwrap();
+            self.planes = Some(if ahead.forward {
+                [
+                    old[2].clone(), old[3].clone(), old[4].clone(),
+                    old[5].clone(), old[0].clone(), old[1].clone(),
+                ]
             } else {
-                buf.extend_from_slice(&data[w * h..w * h + (w / 2) * (h / 2) * 2]);
+                [
+                    old[4].clone(), old[5].clone(), old[0].clone(),
+                    old[1].clone(), old[2].clone(), old[3].clone(),
+                ]
+            });
+            self.field_gen = ahead.target_gen;
+            self.pair_key = key;
+            self.flow_dirty = false;
+            if tl_on() {
+                eprintln!("tl tween prefetch-adopt {:?}", ahead.key);
             }
-            tex.put_back_vec_u8(cx, buf, None);
+            self.area.redraw(cx);
+            return;
         }
+
+        if tl_on() && self.pair_key.is_some() {
+            eprintln!("tl tween prefetch-miss {:?}", key);
+        }
+        self.prefetch = None;
+        self.ensure_plane_ring(cx, width, height);
+        let planes = self.planes.as_ref().unwrap();
+        Self::upload_nv12_plane_pair(cx, planes, 0, a, w, h);
+        Self::upload_nv12_plane_pair(cx, planes, 2, b, w, h);
+        self.pair_key = key;
         self.flow_dirty = true;
         self.area.redraw(cx);
+    }
+
+    /// Offer the one new frame of the adjacent pair predicted along the
+    /// platter map. The current field remains the warp/seed generation;
+    /// this program writes only the other generation.
+    pub fn offer_next(
+        &mut self,
+        cx: &mut Cx,
+        key: PairKey,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        forward: bool,
+    ) -> Option<usize> {
+        let current = self.pair_key?;
+        let (w, h) = (width as usize, height as usize);
+        let valid_frame = w >= 8 && h >= 8 && frame.len() >= w * h * 3 / 2;
+        let adjacent = if forward {
+            current.b == key.a
+        } else {
+            current.a == key.b
+        };
+        if self.flow_dirty
+            || !self.have_prev_field
+            || self.fade
+            || self.size != (width, height)
+            || !valid_frame
+            || key == current
+            || key.clip != current.clip
+            || key.tier != current.tier
+            || !adjacent
+        {
+            self.prefetch = None;
+            return None;
+        }
+        if let Some(ahead) = self.prefetch.as_ref() {
+            if ahead.key == key && ahead.forward == forward {
+                return Some(ahead.remaining());
+            }
+        }
+        self.prefetch = None;
+        let planes = self.planes.as_ref()?;
+        Self::upload_nv12_plane_pair(cx, planes, 4, frame, w, h);
+        let ops = build_derive_ops(true, false);
+        let remaining = ops.len();
+        self.prefetch = Some(FieldPrefetch {
+            key,
+            forward,
+            plane_y: if forward { [2, 4] } else { [4, 0] },
+            target_gen: 1 - self.field_gen,
+            seed_gen: self.field_gen,
+            ops,
+            cursor: 0,
+        });
+        self.area.redraw(cx);
+        Some(remaining)
+    }
+
+    pub fn cancel_prefetch(&mut self) {
+        self.prefetch = None;
+        self.derive_budget = 0;
+    }
+
+    pub fn set_derive_budget(&mut self, cx: &mut Cx, budget: usize) {
+        self.derive_budget = budget.min(FIELD_PREFETCH_OPS_PER_FRAME);
+        if self.derive_budget > 0 && self.prefetch.as_ref().is_some_and(|p| p.remaining() > 0) {
+            self.area.redraw(cx);
+        }
     }
 
     pub fn set_t(&mut self, cx: &mut Cx, t: f32) {
@@ -955,6 +1205,10 @@ impl FlowTweenView {
         self.planes = None;
         self.size = (0, 0);
         self.flow_dirty = false;
+        self.pair_key = None;
+        self.prefetch = None;
+        self.derive_budget = 0;
+        self.field_gen = 0;
         self.rendered = false;
         self.rife_pair = None;
         self.have_prev_field = false;
@@ -1082,8 +1336,8 @@ impl FlowTweenView {
             "luma2" => self.luma_tex.get(2).cloned(),
             "luma_top" => self.luma_tex.last().cloned(),
             "seed" => self.scratch.get(2).cloned(),
-            "fwd" => self.field_tex.first().cloned(),
-            "bwd" => self.field_tex.get(1).cloned(),
+            "fwd" => self.field_tex.get(self.field_gen * 2).cloned(),
+            "bwd" => self.field_tex.get(self.field_gen * 2 + 1).cloned(),
             _ => None,
         }
     }
@@ -1118,7 +1372,7 @@ impl FlowTweenView {
         };
         self.luma_tex = (0..LEVELS).map(|_| float_tex(cx)).collect();
         self.scratch = (0..3).map(|_| float_tex(cx)).collect();
-        self.field_tex = (0..2).map(|_| float_tex(cx)).collect();
+        self.field_tex = (0..4).map(|_| float_tex(cx)).collect();
         self.warp_out = Texture::new_with_format(
             cx,
             TextureFormat::RenderBGRAu8 {
@@ -1181,18 +1435,34 @@ impl Widget for FlowTweenView {
         // window pass.
         let dbg = self.dbg_override.unwrap_or_else(tween_debug);
         let luma_only = dbg > 3.5;
-        let seeded = self.have_prev_field;
         let fade = self.fade;
-        let total = if self.flow_dirty && !fade {
-            if luma_only {
-                LEVELS + 1 + 1
-            } else {
-                let per_dir = if seeded { 0 } else { 1 } + LEVELS * (SWEEPS + 1) + 1;
-                LEVELS + 2 * per_dir + 1
+        let mut derive_ops = Vec::new();
+        let mut derive_plane_y = [0usize, 2usize];
+        let mut derive_seed_gen = self.field_gen;
+        let mut derive_target_gen = self.field_gen;
+        let mut derive_seeded = self.have_prev_field;
+        let mut full_derive = false;
+        if self.flow_dirty && !fade {
+            full_derive = true;
+            self.flow_dirty = false;
+            self.prefetch = None;
+            derive_seed_gen = self.field_gen;
+            derive_target_gen = 1 - self.field_gen;
+            self.field_gen = derive_target_gen;
+            derive_ops = build_derive_ops(derive_seeded, luma_only);
+        } else if !fade && self.derive_budget > 0 {
+            if let Some(ahead) = self.prefetch.as_mut() {
+                let end = (ahead.cursor + self.derive_budget).min(ahead.ops.len());
+                derive_ops.extend_from_slice(&ahead.ops[ahead.cursor..end]);
+                ahead.cursor = end;
+                derive_plane_y = ahead.plane_y;
+                derive_seed_gen = ahead.seed_gen;
+                derive_target_gen = ahead.target_gen;
+                derive_seeded = true;
             }
-        } else {
-            1
-        };
+        }
+        self.derive_budget = 0;
+        let total = derive_ops.len() + 1;
         // One offscreen stage: bind target, run one full-target quad of
         // `draw`, sized to (w, h) at dpi 1 (the flow-warp recipe: assert
         // the size again after begin_pass or the texture takes the
@@ -1255,120 +1525,102 @@ impl Widget for FlowTweenView {
                 stage += 1;
             }};
         }
-        if self.flow_dirty && !fade {
-            self.flow_dirty = false;
-            // ---- luma pyramid --------------------------------------------
-            let (w, h) = (self.size.0 as usize, self.size.1 as usize);
-            self.draw_luma.inv_grid = vec2(1.0 / w as f32, 1.0 / h as f32);
-            self.draw_luma.draw_vars.set_texture(0, &planes[0]);
-            self.draw_luma.draw_vars.set_texture(1, &planes[2]);
-            let luma0 = self.luma_tex[0].clone();
-            let draw_luma = &mut self.draw_luma;
-            run_stage!(&luma0, gw, gh, |cx: &mut Cx2d, r| draw_luma.draw_abs(cx, r));
-            for level in 1..LEVELS {
-                let (lw, lh) = self.level_dims(level);
-                // Bisect probe: TWEEN_PYR_FROM_L0=1 makes every level
-                // downsample straight from L0 (correctness of each STAGE
-                // isolated from its predecessor's content).
-                let src = if std::env::var_os("TWEEN_PYR_FROM_L0").is_some() {
-                    self.luma_tex[0].clone()
-                } else {
-                    self.luma_tex[level - 1].clone()
-                };
-                let dst = self.luma_tex[level].clone();
-                self.draw_halve.draw_vars.set_texture(0, &src);
-                let draw_halve = &mut self.draw_halve;
-                run_stage!(&dst, lw, lh, |cx: &mut Cx2d, r| draw_halve.draw_abs(cx, r));
-            }
-            if luma_only {
-                // dbg 4: copy luma L0 into the forward-field slot so the
-                // warp's debug branch can show it.
-                let src = self.luma_tex[0].clone();
-                let dst = self.field_tex[0].clone();
-                self.draw_halve.draw_vars.set_texture(0, &src);
-                let draw_halve = &mut self.draw_halve;
-                run_stage!(&dst, gw, gh, |cx: &mut Cx2d, r| draw_halve.draw_abs(cx, r));
-            }
-            // ---- both one-way fields -------------------------------------
-            for dir in 0..2 {
-                if luma_only {
-                    break;
+        for op in derive_ops {
+            match op {
+                DeriveOp::Luma0 => {
+                    let (w, h) = (self.size.0 as usize, self.size.1 as usize);
+                    self.draw_luma.inv_grid = vec2(1.0 / w as f32, 1.0 / h as f32);
+                    self.draw_luma.draw_vars.set_texture(0, &planes[derive_plane_y[0]]);
+                    self.draw_luma.draw_vars.set_texture(1, &planes[derive_plane_y[1]]);
+                    let target = self.luma_tex[0].clone();
+                    let draw = &mut self.draw_luma;
+                    run_stage!(&target, gw, gh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
                 }
-                let dirf = dir as f32;
-                let (tw, th) = self.level_dims(LEVELS - 1);
-                // Coarse seed: the PREVIOUS pair's final field when one
-                // exists (temporal seeding — motion is coherent frame to
-                // frame, and re-deriving it from scratch every pair was
-                // the shimmer); the exhaustive search only on the first
-                // pair of a clip.
-                let mut prev;
-                let mut prev_scale;
-                if seeded {
-                    prev = self.field_tex[dir].clone();
-                    prev_scale = tw as f32 / gw.max(1) as f32;
-                } else {
+                DeriveOp::Halve { level } => {
+                    let (lw, lh) = self.level_dims(level);
+                    let src = if std::env::var_os("TWEEN_PYR_FROM_L0").is_some() {
+                        self.luma_tex[0].clone()
+                    } else {
+                        self.luma_tex[level - 1].clone()
+                    };
+                    let target = self.luma_tex[level].clone();
+                    self.draw_halve.draw_vars.set_texture(0, &src);
+                    let draw = &mut self.draw_halve;
+                    run_stage!(&target, lw, lh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
+                }
+                DeriveOp::LumaField => {
+                    let src = self.luma_tex[0].clone();
+                    let target = self.field_tex[derive_target_gen * 2].clone();
+                    self.draw_halve.draw_vars.set_texture(0, &src);
+                    let draw = &mut self.draw_halve;
+                    run_stage!(&target, gw, gh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
+                }
+                DeriveOp::Exhaust { dir } => {
+                    let (tw, th) = self.level_dims(LEVELS - 1);
                     let top_luma = self.luma_tex[LEVELS - 1].clone();
-                    self.draw_exhaust.dir = dirf;
+                    self.draw_exhaust.dir = dir as f32;
                     self.draw_exhaust.inv_size = vec2(1.0 / tw as f32, 1.0 / th as f32);
                     self.draw_exhaust.draw_vars.set_texture(0, &top_luma);
-                    let seed = self.scratch[2].clone();
-                    let draw_exhaust = &mut self.draw_exhaust;
-                    run_stage!(&seed, tw, th, |cx: &mut Cx2d, r| draw_exhaust
-                        .draw_abs(cx, r));
-                    prev = self.scratch[2].clone();
-                    prev_scale = 1.0f32;
+                    let target = self.scratch[2].clone();
+                    let draw = &mut self.draw_exhaust;
+                    run_stage!(&target, tw, th, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
                 }
-                for level in (0..LEVELS).rev() {
+                DeriveOp::Sweep { dir, level, sweep } => {
                     let (lw, lh) = self.level_dims(level);
+                    let (tw, _) = self.level_dims(LEVELS - 1);
                     let luma = self.luma_tex[level].clone();
-                    // Zero-mean matching subtracts the next-coarser
-                    // level (a free 2x local mean); the top level has
-                    // none and runs plain SAD.
                     let (coarse, mean_on) = if level + 1 < LEVELS {
                         (self.luma_tex[level + 1].clone(), 1.0f32)
                     } else {
                         (luma.clone(), 0.0f32)
                     };
-                    for s in 0..SWEEPS {
-                        let target = self.scratch[s & 1].clone();
-                        self.draw_sweep.dir = dirf;
-                        self.draw_sweep.inv_size = vec2(1.0 / lw as f32, 1.0 / lh as f32);
-                        self.draw_sweep.prev_scale = prev_scale;
-                        self.draw_sweep.mean_on = mean_on;
-                        self.draw_sweep.draw_vars.set_texture(0, &luma);
-                        self.draw_sweep.draw_vars.set_texture(1, &prev);
-                        self.draw_sweep.draw_vars.set_texture(2, &coarse);
-                        let draw_sweep = &mut self.draw_sweep;
-                        run_stage!(&target, lw, lh, |cx: &mut Cx2d, r| draw_sweep
-                            .draw_abs(cx, r));
-                        prev = target;
-                        prev_scale = 1.0;
-                    }
-                    // Median into scratch[2] (or the FINAL field at L0 —
-                    // the subpel pass below reads it from there).
-                    let med_target = self.scratch[2].clone();
+                    let (prev, prev_scale) = if sweep > 0 {
+                        (self.scratch[(sweep - 1) & 1].clone(), 1.0)
+                    } else if level + 1 < LEVELS {
+                        (self.scratch[2].clone(), 2.0)
+                    } else if derive_seeded {
+                        (
+                            self.field_tex[derive_seed_gen * 2 + dir].clone(),
+                            tw as f32 / gw.max(1) as f32,
+                        )
+                    } else {
+                        (self.scratch[2].clone(), 1.0)
+                    };
+                    let target = self.scratch[sweep & 1].clone();
+                    self.draw_sweep.dir = dir as f32;
+                    self.draw_sweep.inv_size = vec2(1.0 / lw as f32, 1.0 / lh as f32);
+                    self.draw_sweep.prev_scale = prev_scale;
+                    self.draw_sweep.mean_on = mean_on;
+                    self.draw_sweep.draw_vars.set_texture(0, &luma);
+                    self.draw_sweep.draw_vars.set_texture(1, &prev);
+                    self.draw_sweep.draw_vars.set_texture(2, &coarse);
+                    let draw = &mut self.draw_sweep;
+                    run_stage!(&target, lw, lh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
+                }
+                DeriveOp::Median { dir: _, level } => {
+                    let (lw, lh) = self.level_dims(level);
+                    let prev = self.scratch[(SWEEPS - 1) & 1].clone();
+                    let target = self.scratch[2].clone();
                     self.draw_median.inv_size = vec2(1.0 / lw as f32, 1.0 / lh as f32);
                     self.draw_median.draw_vars.set_texture(0, &prev);
-                    let draw_median = &mut self.draw_median;
-                    run_stage!(&med_target, lw, lh, |cx: &mut Cx2d, r| draw_median
-                        .draw_abs(cx, r));
-                    prev = med_target;
-                    // The next (finer) level reads this field doubled.
-                    prev_scale = 2.0;
+                    let draw = &mut self.draw_median;
+                    run_stage!(&target, lw, lh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
                 }
-                // Sub-pixel parabola into the final field texture.
-                let field = self.field_tex[dir].clone();
-                let luma0 = self.luma_tex[0].clone();
-                self.draw_subpel.dir = dirf;
-                self.draw_subpel.inv_size = vec2(1.0 / gw as f32, 1.0 / gh as f32);
-                self.draw_subpel.draw_vars.set_texture(0, &luma0);
-                self.draw_subpel.draw_vars.set_texture(1, &prev);
-                let draw_subpel = &mut self.draw_subpel;
-                run_stage!(&field, gw, gh, |cx: &mut Cx2d, r| draw_subpel.draw_abs(cx, r));
+                DeriveOp::Subpel { dir } => {
+                    let luma0 = self.luma_tex[0].clone();
+                    let prev = self.scratch[2].clone();
+                    let target = self.field_tex[derive_target_gen * 2 + dir].clone();
+                    self.draw_subpel.dir = dir as f32;
+                    self.draw_subpel.inv_size = vec2(1.0 / gw as f32, 1.0 / gh as f32);
+                    self.draw_subpel.draw_vars.set_texture(0, &luma0);
+                    self.draw_subpel.draw_vars.set_texture(1, &prev);
+                    let draw = &mut self.draw_subpel;
+                    run_stage!(&target, gw, gh, |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
+                }
             }
-            if !luma_only {
-                self.have_prev_field = true;
-            }
+        }
+        if full_derive {
+            self.have_prev_field = !luma_only;
         }
         // ---- the warp, every display frame ------------------------------
         let (w, h) = (self.size.0, self.size.1);
@@ -1396,8 +1648,12 @@ impl Widget for FlowTweenView {
                 self.draw_warp.rife_on = 0.0;
                 // Bind SOMETHING valid in the rife slots (the field
                 // textures double up) so no backend sees an empty slot.
-                self.draw_warp.draw_vars.set_texture(6, &self.field_tex[0]);
-                self.draw_warp.draw_vars.set_texture(7, &self.field_tex[1]);
+                self.draw_warp
+                    .draw_vars
+                    .set_texture(6, &self.field_tex[self.field_gen * 2]);
+                self.draw_warp
+                    .draw_vars
+                    .set_texture(7, &self.field_tex[self.field_gen * 2 + 1]);
             }
         }
         self.draw_warp.inv_grid = vec2(1.0 / gw as f32, 1.0 / gh as f32);
@@ -1405,12 +1661,234 @@ impl Widget for FlowTweenView {
         self.draw_warp.draw_vars.set_texture(1, &planes[1]);
         self.draw_warp.draw_vars.set_texture(2, &planes[2]);
         self.draw_warp.draw_vars.set_texture(3, &planes[3]);
-        self.draw_warp.draw_vars.set_texture(4, &self.field_tex[0]);
-        self.draw_warp.draw_vars.set_texture(5, &self.field_tex[1]);
+        self.draw_warp
+            .draw_vars
+            .set_texture(4, &self.field_tex[self.field_gen * 2]);
+        self.draw_warp
+            .draw_vars
+            .set_texture(5, &self.field_tex[self.field_gen * 2 + 1]);
         let warp_out = self.warp_out.clone();
         let draw_warp = &mut self.draw_warp;
         run_stage!(&warp_out, w, h, |cx: &mut Cx2d, r| draw_warp.draw_abs(cx, r));
         self.rendered = true;
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{Mode, Timeline, Transport};
+
+    fn percentile(mut values: Vec<usize>, percentile: f64) -> usize {
+        values.sort_unstable();
+        let index = ((values.len() - 1) as f64 * percentile).ceil() as usize;
+        values[index.min(values.len() - 1)]
+    }
+
+    #[test]
+    fn derive_program_is_the_classic_pass_order() {
+        let cold = build_derive_ops(false, false);
+        let seeded = build_derive_ops(true, false);
+        assert_eq!(cold.len(), 40, "4 pyramid + 2 × (exhaust + 16 refine + subpel)");
+        assert_eq!(seeded.len(), 38, "temporal seed removes only the two exhaust passes");
+        assert_eq!(
+            &seeded[..4],
+            &[
+                DeriveOp::Luma0,
+                DeriveOp::Halve { level: 1 },
+                DeriveOp::Halve { level: 2 },
+                DeriveOp::Halve { level: 3 },
+            ]
+        );
+        assert_eq!(seeded.last(), Some(&DeriveOp::Subpel { dir: 1 }));
+        assert_eq!(
+            build_derive_ops(true, true),
+            vec![
+                DeriveOp::Luma0,
+                DeriveOp::Halve { level: 1 },
+                DeriveOp::Halve { level: 2 },
+                DeriveOp::Halve { level: 3 },
+                DeriveOp::LumaField,
+            ]
+        );
+    }
+
+    #[test]
+    fn capacity_is_one_edf_budget_and_keys_are_exact() {
+        let budgets = field_prefetch_budgets([Some((2.0, 38)), Some((1.0, 7))]);
+        assert_eq!(budgets, [9, 7], "earliest deadline is served first");
+        assert_eq!(budgets.iter().sum::<usize>(), FIELD_PREFETCH_OPS_PER_FRAME);
+        let budgets = field_prefetch_budgets([Some((1.0, 3)), Some((2.0, 4))]);
+        assert_eq!(budgets, [3, 4]);
+        assert!(budgets.iter().sum::<usize>() <= FIELD_PREFETCH_OPS_PER_FRAME);
+
+        let key = PairKey::new(7, 4, 5, 2);
+        let mut ahead = FieldPrefetch {
+            key,
+            forward: true,
+            plane_y: [2, 4],
+            target_gen: 1,
+            seed_gen: 0,
+            ops: build_derive_ops(true, false),
+            cursor: 0,
+        };
+        ahead.cursor = ahead.ops.len();
+        assert!(ahead.ready_for(key));
+        assert!(!ahead.ready_for(PairKey::new(8, 4, 5, 2)), "foreign clip");
+        assert!(!ahead.ready_for(PairKey::new(7, 5, 6, 2)), "foreign pair");
+        assert!(!ahead.ready_for(PairKey::new(7, 4, 5, 3)), "foreign ladder");
+    }
+
+    struct HeadlessDeck {
+        transport: Transport,
+        active: Option<PairKey>,
+        ahead: Option<FieldPrefetch>,
+        changes: usize,
+        adopts: usize,
+        misses_after_warmup: usize,
+    }
+
+    impl HeadlessDeck {
+        fn new(source_fps: f64, rate_fps: f64) -> Self {
+            let timeline = Timeline::from_pts(
+                (0..96).map(|frame| frame as f64 / source_fps).collect(),
+            )
+            .unwrap();
+            let mut transport = Transport::new();
+            transport.bind(timeline, 0, 96);
+            transport.set_mode(Mode::Loop);
+            transport.set_speed(rate_fps / source_fps);
+            transport.advance(0.0, None);
+            Self {
+                transport,
+                active: None,
+                ahead: None,
+                changes: 0,
+                adopts: 0,
+                misses_after_warmup: 0,
+            }
+        }
+    }
+
+    /// STEP-8 GATE, headless and deterministic. `Rect Field` is the
+    /// checkout's sine/rect discriminator scene; the timing harness drives
+    /// two identical platters through hundreds of seams at several source
+    /// rates. A boundary may present only an exact completed destination,
+    /// while EDF spends no more than the one shared capacity each beat.
+    #[test]
+    fn sine_rect_pair_change_gap_p99_equals_ordinary_beat() {
+        let scene = include_str!("../resources/effects/136_trans_rect_field.splash");
+        assert!(scene.contains("RECT FIELD") && scene.contains("smoothstep"));
+
+        const DISPLAY_HZ: f64 = 120.0;
+        let seeded_ops = build_derive_ops(true, false);
+        let mut total_changes = 0usize;
+        let mut total_adopts = 0usize;
+        let mut gate_pair_p99 = 0usize;
+        let mut gate_ordinary_p99 = 0usize;
+        for rate_fps in [6.0, 9.0, 12.0, 15.0, 18.0] {
+            let mut decks = [
+                HeadlessDeck::new(24.0, rate_fps),
+                HeadlessDeck::new(24.0, rate_fps),
+            ];
+            let mut pair_gaps = Vec::new();
+            let mut ordinary_gaps = Vec::new();
+            let mut now = 0.0;
+            let mut max_spent = 0usize;
+            for _ in 0..12_000 {
+                now += 1.0 / DISPLAY_HZ;
+                let mut wanted = [None; 2];
+                let mut changed_this_beat = false;
+                for (index, deck) in decks.iter_mut().enumerate() {
+                    let step = deck.transport.advance(now, None);
+                    let loc = deck.transport.locate(step.pos).unwrap();
+                    let key = PairKey::new(1, loc.a, loc.b, 2);
+                    let pair_changed = deck.active != Some(key);
+                    let mut adopted_boundary = false;
+                    if pair_changed {
+                        changed_this_beat = deck.active.is_some() || changed_this_beat;
+                        if deck.active.is_some() {
+                            deck.changes += 1;
+                            let adopted = deck.ahead.as_ref().is_some_and(|p| p.ready_for(key));
+                            if adopted {
+                                adopted_boundary = true;
+                                deck.adopts += 1;
+                                pair_gaps.push(1);
+                            } else if deck.changes > 1 {
+                                deck.misses_after_warmup += 1;
+                                pair_gaps.push(1 + seeded_ops.len().div_ceil(FIELD_PREFETCH_OPS_PER_FRAME));
+                            }
+                        }
+                        deck.active = Some(key);
+                        deck.ahead = None;
+                    }
+
+                    // A miss performs the classic full program on this
+                    // beat; speculation begins on the following one. An
+                    // adoption can immediately pipeline its successor.
+                    if pair_changed && !adopted_boundary {
+                        continue;
+                    }
+                    let ahead_loc = deck.transport.locate_ahead(1.0).unwrap();
+                    let ahead_key = PairKey::new(1, ahead_loc.a, ahead_loc.b, 2);
+                    let current = deck.active.unwrap();
+                    let (forward, plane_y) = if current.b == ahead_key.a {
+                        (true, [2, 4])
+                    } else if current.a == ahead_key.b {
+                        (false, [4, 0])
+                    } else {
+                        deck.ahead = None;
+                        continue;
+                    };
+                    if deck.ahead.as_ref().map(|p| p.key) != Some(ahead_key) {
+                        deck.ahead = Some(FieldPrefetch {
+                            key: ahead_key,
+                            forward,
+                            plane_y,
+                            target_gen: 1,
+                            seed_gen: 0,
+                            ops: seeded_ops.clone(),
+                            cursor: 0,
+                        });
+                    }
+                    let remaining = deck.ahead.as_ref().unwrap().remaining();
+                    if remaining > 0 {
+                        let fraction = if step.screen_vel >= 0.0 { 1.0 - loc.t } else { loc.t };
+                        let pace = deck.transport.pace_fps(&step).max(1e-9);
+                        wanted[index] = Some((now + fraction / pace, remaining));
+                    }
+                }
+                if !changed_this_beat {
+                    ordinary_gaps.push(1);
+                }
+                let budgets = field_prefetch_budgets(wanted);
+                let spent = budgets.iter().sum::<usize>();
+                max_spent = max_spent.max(spent);
+                assert!(spent <= FIELD_PREFETCH_OPS_PER_FRAME);
+                for (deck, budget) in decks.iter_mut().zip(budgets) {
+                    if let Some(ahead) = deck.ahead.as_mut() {
+                        ahead.cursor = (ahead.cursor + budget).min(ahead.ops.len());
+                    }
+                }
+            }
+
+            assert_eq!(decks[0].changes, decks[1].changes, "bit-identical pair series");
+            assert_eq!(decks[0].adopts, decks[1].adopts, "bit-identical boundary leases");
+            assert_eq!(decks[0].misses_after_warmup, 0, "deck A missed at {rate_fps} fps");
+            assert_eq!(decks[1].misses_after_warmup, 0, "deck B missed at {rate_fps} fps");
+            assert!(decks[0].changes > 500, "not enough pair changes at {rate_fps} fps");
+            let pair_p99 = percentile(pair_gaps, 0.99);
+            let ordinary_p99 = percentile(ordinary_gaps, 0.99);
+            assert!(pair_p99.abs_diff(ordinary_p99) <= 1);
+            assert_eq!(max_spent, FIELD_PREFETCH_OPS_PER_FRAME);
+            total_changes += decks.iter().map(|d| d.changes).sum::<usize>();
+            total_adopts += decks.iter().map(|d| d.adopts).sum::<usize>();
+            gate_pair_p99 = gate_pair_p99.max(pair_p99);
+            gate_ordinary_p99 = gate_ordinary_p99.max(ordinary_p99);
+        }
+        eprintln!(
+            "step8 gate: changes={total_changes} adopts={total_adopts} pair_p99={gate_pair_p99} ordinary_p99={gate_ordinary_p99} frame max_ops={FIELD_PREFETCH_OPS_PER_FRAME}"
+        );
     }
 }

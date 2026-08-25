@@ -138,7 +138,8 @@ pub struct MacosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
-    /// CADisplayLink paint pacing (NSView.displayLink, macOS 14+): each
+    /// Per-layer CAMetalDisplayLink paint pacing on macOS 14+, with the
+    /// existing per-view CADisplayLink path as its runtime fallback: each
     /// window's paint beat fires FROM its own panel's refresh callback
     /// instead of an NSTimer racing it — the real frame-flip clock, per
     /// window, per display. Empty until a window exists (or unsupported:
@@ -982,10 +983,11 @@ impl MacosApp {
         }
     }
 
-    /// Arm (or resume) display-link pacing: one link per window, each from
-    /// that window's own view so it tracks that window's panel. Returns
-    /// false when none can run (no window yet, or the OS lacks
-    /// NSView.displayLink) — the caller falls back to NSTimer pacing.
+    /// Arm (or resume) display-link pacing: one link per window. On macOS 14+
+    /// CAMetalDisplayLink is built from that view's CAMetalLayer so its update
+    /// owns both the beat and drawable. Older systems take the existing
+    /// NSView.displayLink path unchanged. Returns false when neither can run,
+    /// so the caller falls back to NSTimer pacing.
     pub fn ensure_display_link(&mut self) -> bool {
         unsafe {
             // Prune links whose window is gone.
@@ -1003,18 +1005,35 @@ impl MacosApp {
                 if self.display_links.iter().any(|(w, _)| *w == window) {
                     continue;
                 }
-                let responds: bool = msg_send![
-                    view,
-                    respondsToSelector: sel!(displayLinkWithTarget: selector:)
-                ];
-                if !responds {
-                    return false;
+                // Runtime availability is the contract here: referring to the
+                // class by name keeps the binary loadable before macOS 14.
+                let mut is_metal_link = false;
+                let mut link = nil;
+                if let Some(link_class) = Class::get("CAMetalDisplayLink") {
+                    let layer: ObjcId = msg_send![view, layer];
+                    if layer != nil {
+                        let allocated: ObjcId = msg_send![link_class, alloc];
+                        link = msg_send![allocated, initWithMetalLayer: layer];
+                        if link != nil {
+                            let () = msg_send![link, setDelegate: self.timer_delegate_instance];
+                            is_metal_link = true;
+                        }
+                    }
                 }
-                let link: ObjcId = msg_send![
-                    view,
-                    displayLinkWithTarget: self.timer_delegate_instance
-                    selector: sel!(receivedDisplayLink:)
-                ];
+                if link == nil {
+                    let responds: bool = msg_send![
+                        view,
+                        respondsToSelector: sel!(displayLinkWithTarget: selector:)
+                    ];
+                    if !responds {
+                        return false;
+                    }
+                    link = msg_send![
+                        view,
+                        displayLinkWithTarget: self.timer_delegate_instance
+                        selector: sel!(receivedDisplayLink:)
+                    ];
+                }
                 if link == nil {
                     continue;
                 }
@@ -1026,7 +1045,8 @@ impl MacosApp {
                 }
                 self.display_links.push((window, link));
                 crate::log!(
-                    "macos: paint pacing on the display link (frame-flip clock), window {}",
+                    "macos: paint pacing on {} (frame-flip clock), window {}",
+                    if is_metal_link { "CAMetalDisplayLink" } else { "CADisplayLink" },
                     self.display_links.len()
                 );
             }
@@ -1055,20 +1075,64 @@ impl MacosApp {
     /// window and the flip's TARGET timestamp mapped into app time — the
     /// rock-solid per-window clock the paint below samples.
     pub fn send_display_link_fired(link: ObjcId) {
-        let Some((window, primary)) = with_macos_app(|app| {
-            app.display_links
-                .iter()
-                .position(|(_w, l)| *l == link)
-                .map(|i| (app.display_links[i].0, i == 0))
-        }) else {
+        let Some((window, primary, app_now)) = try_with_macos_app(|app| {
+            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
+                (app.display_links[i].0, i == 0, app.time_now())
+            })
+        }).flatten() else {
             return;
         };
         let (target, media_now): (f64, f64) = unsafe {
             (msg_send![link, targetTimestamp], CACurrentMediaTime())
         };
-        let app_now = with_macos_app(|app| app.time_now());
         let time = app_now + (target - media_now).clamp(0.0, 0.1);
-        MacosApp::do_callback(MacosEvent::LinkFire { window, time, primary });
+        MacosApp::do_callback(MacosEvent::LinkFire {
+            window,
+            time,
+            primary,
+            drawable: None,
+            target_presentation_time: target,
+        });
+    }
+
+    /// CAMetalDisplayLink's delegate update is the authoritative frame:
+    /// transport time comes from its presentation target, and rendering uses
+    /// the drawable delivered for that same target instead of polling the
+    /// layer. A re-entrant callback simply skips this update rather than
+    /// panicking through the Objective-C delegate frame.
+    pub fn send_metal_display_link_update(link: ObjcId, update: ObjcId) {
+        if update == nil {
+            return;
+        }
+        let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) =
+            unsafe {
+                (
+                    msg_send![update, targetTimestamp],
+                    msg_send![update, targetPresentationTimestamp],
+                    msg_send![update, drawable],
+                    CACurrentMediaTime(),
+                )
+            };
+        let Some((window, primary, app_now)) = try_with_macos_app(|app| {
+            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
+                (app.display_links[i].0, i == 0, app.time_now())
+            })
+        }).flatten() else {
+            return;
+        };
+        let flip_target = if target_presentation > 0.0 {
+            target_presentation
+        } else {
+            target
+        };
+        let time = app_now + (flip_target - media_now).clamp(-0.1, 0.1);
+        MacosApp::do_callback(MacosEvent::LinkFire {
+            window,
+            time,
+            primary,
+            drawable: Some(drawable),
+            target_presentation_time: flip_target,
+        });
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
