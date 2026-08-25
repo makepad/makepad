@@ -913,6 +913,7 @@ impl Cx {
                 name.clone()
             }
         });
+        let gpu_time_query = self.passes[draw_pass_id].gpu_time_query.clone();
         let gpu_counters = GpuSampleCounters {
             draw_calls: self.os.draw_calls_done as u64,
             instances: self.os.instances_done,
@@ -966,6 +967,18 @@ impl Cx {
                         let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                         let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
                         eprintln!("[gpu-pass] {} {:.3}ms", name, (end - start) * 1000.0);
+                    })
+                ]
+            };
+        }
+        if let Some(query) = gpu_time_query {
+            let () = unsafe {
+                msg_send![
+                    command_buffer,
+                    addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
+                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                        query.record_seconds(end - start);
                     })
                 ]
             };
@@ -1049,9 +1062,19 @@ impl Cx {
                     command_buffer,
                 );
             }
-            DrawPassMode::Drawable(drawable) => {
+            DrawPassMode::Drawable(drawable, target_presentation_time) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
+                if let Some(target_presentation_time) = target_presentation_time {
+                    let () = unsafe {
+                        msg_send![
+                            command_buffer,
+                            presentDrawable: drawable
+                            atTime: target_presentation_time
+                        ]
+                    };
+                } else {
+                    let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
+                }
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
@@ -1460,14 +1483,16 @@ pub enum DrawPassMode {
     StdinTexture,
     MTKView(ObjcId),
     StdinMain(PresentableDraw, usize),
-    Drawable(ObjcId),
+    /// Optional Core Animation media time is supplied by
+    /// CAMetalDisplayLinkUpdate.targetPresentationTimestamp.
+    Drawable(ObjcId, Option<f64>),
     Resizing(ObjcId),
 }
 
 impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
-            Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
+            Self::Drawable(obj, _) | Self::Resizing(obj) => Some(*obj),
             Self::StdinMain(_, _) | Self::Texture | Self::StdinTexture | Self::MTKView(_) => None,
         }
     }

@@ -493,6 +493,11 @@ impl Cx {
             .map(|t| t as f32)
             .unwrap_or_else(|| with_macos_app(|app| app.time_now() as f32));
         let scope = self.os.link_scope;
+        // Some(drawable), including Some(nil), means this beat came from a
+        // CAMetalDisplayLinkUpdate. None keeps the legacy CADisplayLink /
+        // NSTimer path on CAMetalLayer.nextDrawable.
+        let link_drawable = self.os.link_drawable;
+        let link_target_presentation_time = self.os.link_target_presentation_time;
         for draw_pass_id in &passes_todo {
             // Per-window pacing: during a LinkFire beat only the firing
             // window's pass tree paints; everything else stays dirty for
@@ -524,8 +529,12 @@ impl Cx {
                         // glass and an exhausted pool would block nextDrawable forever.
                         // Skip and keep the pass dirty, but only for so long, since this
                         // flag can stick on "hidden" while the window is really on screen.
-                        let occlusion: usize = unsafe {
-                            msg_send![metal_window.cocoa_window.window, occlusionState]
+                        let occlusion: usize = if link_drawable.is_none() {
+                            unsafe {
+                                msg_send![metal_window.cocoa_window.window, occlusionState]
+                            }
+                        } else {
+                            NS_WINDOW_OCCLUSION_STATE_VISIBLE
                         };
                         if occlusion & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0 {
                             if in_flight >= PRESENT_GATE_IN_FLIGHT {
@@ -551,7 +560,7 @@ impl Cx {
                         // this beat and keep the pass dirty; the next timer
                         // beat retries with the pool drained and event
                         // handling never stalls behind vsync.
-                        if in_flight >= PRESENT_GATE_IN_FLIGHT {
+                        if link_drawable.is_none() && in_flight >= PRESENT_GATE_IN_FLIGHT {
                             let now = Instant::now();
                             let since =
                                 *metal_window.gate_closed_since.get_or_insert(now);
@@ -577,22 +586,30 @@ impl Cx {
                         // the main thread, so it gets its own channel.
                         self.perf_monitor
                             .frame_boundary(with_macos_app(|app| app.time_now()));
-                        let wait_t0 = std::time::Instant::now();
-                        let drawable: ObjcId =
-                            unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
-                        self.perf_monitor.add(
-                            crate::perf_monitor::PERF_CHANNEL_DRAWABLE_WAIT,
-                            wait_t0.elapsed().as_micros() as u64,
-                        );
+                        let drawable = if let Some(drawable) = link_drawable {
+                            drawable
+                        } else {
+                            let wait_t0 = std::time::Instant::now();
+                            let drawable: ObjcId =
+                                unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
+                            self.perf_monitor.add(
+                                crate::perf_monitor::PERF_CHANNEL_DRAWABLE_WAIT,
+                                wait_t0.elapsed().as_micros() as u64,
+                            );
+                            drawable
+                        };
                         if drawable == nil {
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
-                        let prev = metal_window
-                            .in_flight_presents
-                            .fetch_add(1, Ordering::AcqRel);
-                        let generation = (prev >> 32) as u32;
+                        let generation = link_drawable.is_none().then(|| {
+                            let prev = metal_window
+                                .in_flight_presents
+                                .fetch_add(1, Ordering::AcqRel);
+                            (prev >> 32) as u32
+                        });
                         let in_flight = metal_window.in_flight_presents.clone();
+                        let frame_target = link_target_presentation_time;
                         let () = unsafe {
                             msg_send![
                                 drawable,
@@ -612,18 +629,41 @@ impl Cx {
                                             eprintln!("presenttrace {:.2}ms", (t - prev) * 1000.0);
                                         }
                                     }
+                                    if std::env::var_os("MAKEPAD_FRAME_TRACE").is_some()
+                                        && frame_target > 0.0
+                                    {
+                                        let actual: f64 = unsafe { msg_send![drawable_, presentedTime] };
+                                        eprintln!(
+                                            "[frame-trace] target={:.9} actual={:.9} delta_ms={:+.3}",
+                                            frame_target,
+                                            actual,
+                                            (actual - frame_target) * 1000.0,
+                                        );
+                                    }
                                     // No-op if a watchdog reset happened since this present.
-                                    let _ = in_flight.fetch_update(
-                                        std::sync::atomic::Ordering::AcqRel,
-                                        std::sync::atomic::Ordering::Acquire,
-                                        |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
-                                            .then(|| w - 1),
-                                    );
+                                    if let Some(generation) = generation {
+                                        let _ = in_flight.fetch_update(
+                                            std::sync::atomic::Ordering::AcqRel,
+                                            std::sync::atomic::Ordering::Acquire,
+                                            |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
+                                                .then(|| w - 1),
+                                        );
+                                    }
                                 })
                             ]
                         };
                         self.passes[*draw_pass_id].set_time(time_now);
-                        let presented = if metal_window.is_resizing {
+                        let presented = if link_drawable.is_some() {
+                            self.draw_pass(
+                                *draw_pass_id,
+                                metal_cx,
+                                DrawPassMode::Drawable(
+                                    drawable,
+                                    (link_target_presentation_time > 0.0)
+                                        .then_some(link_target_presentation_time),
+                                ),
+                            )
+                        } else if metal_window.is_resizing {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
@@ -633,12 +673,13 @@ impl Cx {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
-                                DrawPassMode::Drawable(drawable),
+                                DrawPassMode::Drawable(drawable, None),
                             )
                         };
                         // The pass bailed before presenting, so its handler never
                         // fires. Give the count back or the gate closes for good.
-                        if !presented {
+                        if !presented && generation.is_some() {
+                            let generation = generation.unwrap();
                             let _ = metal_window.in_flight_presents.fetch_update(
                                 Ordering::AcqRel,
                                 Ordering::Acquire,
@@ -1008,9 +1049,17 @@ impl Cx {
                     }
                 }
             }
-            MacosEvent::LinkFire { window, time, primary } => {
+            MacosEvent::LinkFire {
+                window,
+                time,
+                primary,
+                drawable,
+                target_presentation_time,
+            } => {
                 self.os.link_scope = Some(window as usize);
                 self.os.link_flip_time = Some(time);
+                self.os.link_drawable = drawable;
+                self.os.link_target_presentation_time = target_presentation_time;
                 let flow = if primary {
                     // The primary link drives the WHOLE beat — identical to
                     // the timer-0 path (signals, actions, next-frames, then
@@ -1026,6 +1075,8 @@ impl Cx {
                 };
                 self.os.link_scope = None;
                 self.os.link_flip_time = None;
+                self.os.link_drawable = None;
+                self.os.link_target_presentation_time = 0.0;
                 if let EventFlow::Exit = flow {
                     return EventFlow::Exit;
                 }
@@ -2144,6 +2195,13 @@ pub struct CxOs {
     /// everything, stamp wall-now.
     pub(crate) link_scope: Option<usize>,
     pub(crate) link_flip_time: Option<f64>,
+    /// Some(drawable) is supplied only by CAMetalDisplayLinkUpdate. Some(nil)
+    /// deliberately means "this Metal update has no drawable"; None selects
+    /// the existing CAMetalLayer.nextDrawable fallback.
+    pub(crate) link_drawable: Option<ObjcId>,
+    /// Core Animation / Metal media-time domain; used both for targeted
+    /// presentation and target-vs-actual frame tracing.
+    pub(crate) link_target_presentation_time: f64,
     /// Indicates wether the main timer is armed
     pub(crate) timer0_armed: bool,
     /// Start time of the current idle stretch while timer0 is armed.
