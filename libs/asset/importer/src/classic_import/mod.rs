@@ -1161,13 +1161,14 @@ fn convert_wav(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    let icon_rel = write_audio_thumb(staged, &key, &bytes);
     let tag = if is_music { "music" } else { "sfx" };
     Ok(ClassicAsset {
         key,
         kind: AssetKind::Audio,
         rel_path,
         tags: tags_for(AssetKind::Audio, &[source.id(), tag, &slug]),
-        icon_rel: None,
+        icon_rel,
     })
 }
 
@@ -3557,6 +3558,202 @@ mesh {
         }
     }
 
+    /// Vanilla's own sprite-rotation pick, in integer BAM, so the test
+    /// argues with `r_things.c` rather than with a paraphrase of it:
+    ///
+    /// ```text
+    ///     ang = R_PointToAngle (thing->x, thing->y);   // viewer -> thing
+    ///     rot = (ang - thing->angle + (unsigned)(ANG45/2)*9) >> 29;
+    /// ```
+    ///
+    /// Returns the sprite-name DIGIT (`rot + 1`), which is what the lumps
+    /// and the manifest are keyed by.
+    fn vanilla_rot_digit(thing_angle_deg: f64, viewer_to_thing_deg: f64) -> u8 {
+        let bam = |deg: f64| {
+            ((deg.rem_euclid(360.0) / 360.0 * 4_294_967_296.0) as u64 & 0xFFFF_FFFF) as u32
+        };
+        const ANG45: u32 = 0x2000_0000;
+        let bias = (ANG45 / 2).wrapping_mul(9);
+        let rot = bam(viewer_to_thing_deg)
+            .wrapping_sub(bam(thing_angle_deg))
+            .wrapping_add(bias)
+            >> 29;
+        rot as u8 + 1
+    }
+
+    /// **The rotation contract, against the corrected world basis.**
+    ///
+    /// The 8-way artwork is not published in any engine's coordinates: a
+    /// rotation digit means "the drawing seen from a camera standing this
+    /// many 45° steps ANTICLOCKWISE of the way the thing faces", measured in
+    /// the source game's own plane. A handedness-preserving converter (which
+    /// is now what every family has) carries that meaning across unchanged —
+    /// but a MIRRORED one reverses it, and any calibration done inside the
+    /// mirror comes out reversed the day the mirror is fixed.
+    ///
+    /// So this stands the thing at the origin at each declared angle, walks
+    /// a camera around it in the CONVERTED world, and demands the sector the
+    /// engine's rule picks be the digit vanilla's shift picks. It also pins
+    /// the boundary the engine converts at: `doom_yaw` publishes a facing in
+    /// the camera convention, and a body's heading is its mirror.
+    #[test]
+    fn sprite_rotations_match_vanilla_in_the_converted_world() {
+        use crate::classic_import::doom::{doom_to_glb, doom_yaw};
+        use crate::stateful_billboard::StatefulBillboard;
+        let wrap = |a: f32| {
+            let mut a = a;
+            while a > std::f32::consts::PI {
+                a -= std::f32::consts::TAU;
+            }
+            while a <= -std::f32::consts::PI {
+                a += std::f32::consts::TAU;
+            }
+            a
+        };
+        let origin = doom_to_glb(0.0, 0.0, 0.0);
+        for angle in [0.0f32, 37.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+            // The way the thing faces, as the converted world sees it —
+            // taken from the geometry, not from the yaw formula, so the two
+            // can be checked against each other.
+            let (s, c) = angle.to_radians().sin_cos();
+            let ahead = doom_to_glb(c, 0.0, s);
+            let facing = (-(ahead[0] - origin[0])).atan2(-(ahead[2] - origin[2]));
+            assert!(
+                wrap(facing + doom_yaw(angle)).abs() < 1e-5,
+                "doom_yaw({angle}) = {} is not the camera-convention mirror of \
+                 the heading {facing} the geometry points along",
+                doom_yaw(angle)
+            );
+            for bearing in (0..360).step_by(15).map(|d| d as f32) {
+                // A camera standing 128 map units off at Doom bearing
+                // `bearing`, converted the same way the level is.
+                let (bs, bc) = bearing.to_radians().sin_cos();
+                let cam = doom_to_glb(128.0 * bc, 0.0, 128.0 * bs);
+                let to_cam =
+                    (-(cam[0] - origin[0])).atan2(-(cam[2] - origin[2]));
+                let got = StatefulBillboard::facing_for_bearing(facing, to_cam, 8);
+                // Vanilla measures viewer -> thing; the camera stands at
+                // `bearing` FROM the thing, so it looks back along +180.
+                let want = vanilla_rot_digit(f64::from(angle), f64::from(bearing) + 180.0);
+                assert_eq!(
+                    got, want,
+                    "thing at angle {angle}, camera at bearing {bearing}: engine \
+                     picks rotation {got}, vanilla picks {want}"
+                );
+            }
+        }
+    }
+
+    /// The same audit for the OTHER family that publishes 8-way artwork.
+    ///
+    /// Duke's `animatesprites` viewtype-5 branch is
+    ///
+    /// ```text
+    ///     k = ((s->ang + 3072 + 128 - getangle(s->x-px, s->y-py)) & 2047) >> 8
+    /// ```
+    ///
+    /// — Doom's rule written in BUILD's CLOCKWISE compass, and
+    /// [`crate::duke_import::build_to_glb`] preserves BUILD's handedness, so
+    /// through the conversion it has to come out as the same anticlockwise
+    /// table the engine applies. If the two families needed different signs
+    /// here, the engine would need a per-game branch — and it has none.
+    #[test]
+    fn duke_sprite_rotations_match_build_in_the_converted_world() {
+        use crate::duke_import::{build_to_glb, build_yaw};
+        use crate::stateful_billboard::StatefulBillboard;
+        let wrap = |a: f32| {
+            let mut a = a;
+            while a > std::f32::consts::PI {
+                a -= std::f32::consts::TAU;
+            }
+            while a <= -std::f32::consts::PI {
+                a += std::f32::consts::TAU;
+            }
+            a
+        };
+        // BUILD's 2048-step compass, in BUILD's own integers.
+        let vanilla = |ang: i32, bearing: i32| -> u8 {
+            // The camera stands at `bearing` from the sprite, so `getangle`
+            // (sprite -> viewer reversed) reads bearing + 1024.
+            let to_sprite = bearing + 1024;
+            ((((ang + 3072 + 128 - to_sprite) & 2047) >> 8) & 7) as u8 + 1
+        };
+        let origin = build_to_glb(0.0, 0.0, 0.0);
+        for ang in (0..2048).step_by(128) {
+            let a = ang as f32 * std::f32::consts::PI / 1024.0;
+            let ahead = build_to_glb(a.cos(), 0.0, a.sin());
+            let facing = (-(ahead[0] - origin[0])).atan2(-(ahead[2] - origin[2]));
+            assert!(
+                wrap(facing + build_yaw(ang as i16)).abs() < 1e-4,
+                "build_yaw({ang}) is not the camera-convention mirror of the \
+                 heading {facing} the geometry points along"
+            );
+            // +32 keeps every sample off the sector BOUNDARY (a difference of
+            // 128 + 256k BUILD units): there the two engines are a coin flip
+            // apart — BUILD's `>>8` truncates a value sitting exactly on the
+            // tie, and a float `floor(x + 0.5)` lands either side of it by a
+            // rounding bit. Half a degree of sprite turn, not a contract.
+            for bearing in (0..2048).step_by(64).map(|b| b + 32) {
+                let b = bearing as f32 * std::f32::consts::PI / 1024.0;
+                let cam = build_to_glb(2048.0 * b.cos(), 0.0, 2048.0 * b.sin());
+                let to_cam = (-(cam[0] - origin[0])).atan2(-(cam[2] - origin[2]));
+                let got = StatefulBillboard::facing_for_bearing(facing, to_cam, 8);
+                let want = vanilla(ang, bearing);
+                assert_eq!(
+                    got, want,
+                    "sprite at ang {ang}, camera at bearing {bearing}: engine \
+                     picks rotation {got}, BUILD picks {want}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the rotation export: WHICH drawing, and whether it
+    /// is mirrored. Vanilla installs `TROOA2A8` as lump[1] unflipped and
+    /// lump[7] flipped; the manifest has to say the same thing, because a
+    /// mirrored pair drawn unmirrored is a monster whose gun changes hands
+    /// (and, on a 5-view sheet, the wrong side entirely).
+    #[test]
+    fn mirrored_rotation_pairs_keep_vanillas_flip() {
+        use crate::stateful_billboard::{assemble, DoomSpriteName};
+        let lump = |pairs: Vec<(char, u8)>, file: &str| {
+            (
+                DoomSpriteName { prefix: "troo".into(), pairs },
+                file.to_string(),
+                40u32,
+                55u32,
+            )
+        };
+        let lumps = vec![
+            lump(vec![('A', 1)], "trooa1.png"),
+            lump(vec![('A', 2), ('A', 8)], "trooa2a8.png"),
+            lump(vec![('A', 3), ('A', 7)], "trooa3a7.png"),
+            lump(vec![('A', 4), ('A', 6)], "trooa4a6.png"),
+            lump(vec![('A', 5)], "trooa5.png"),
+        ];
+        let bb = assemble("troo", &lumps).expect("assembled");
+        let state = bb.states.first().expect("a state").name.clone();
+        // (file, flip) per rotation digit, exactly as `R_InitSpriteDefs`
+        // fills `sprframe->lump[]` / `sprframe->flip[]`.
+        let vanilla = [
+            ("trooa1.png", false),
+            ("trooa2a8.png", false),
+            ("trooa3a7.png", false),
+            ("trooa4a6.png", false),
+            ("trooa5.png", false),
+            ("trooa4a6.png", true),
+            ("trooa3a7.png", true),
+            ("trooa2a8.png", true),
+        ];
+        for (i, (file, flip)) in vanilla.iter().enumerate() {
+            let digit = i as u8 + 1;
+            let faced = bb.frames_for_state_facing(&state, digit);
+            let f = faced.first().unwrap_or_else(|| panic!("rotation {digit} has no frame"));
+            assert_eq!(&f.frame.file, file, "rotation {digit} draws the wrong lump");
+            assert_eq!(f.flip, *flip, "rotation {digit} has the wrong mirror");
+        }
+    }
+
     /// **The handedness law, on real shipped data.**
     ///
     /// A mirrored converter is not a broken one: the walls still meet, the
@@ -3673,6 +3870,113 @@ mesh {
                  ({got_ahead:.2}, {got_left:.2}) m",
                 want_ahead * unit,
                 want_left * unit
+            );
+        }
+    }
+
+    /// Vanilla single-player Doom does not spawn every difficulty's cast at
+    /// once: `P_LoadThings` skips a THING unless its skill bit for the
+    /// active skill is set (and, in single player, unless it is flagged
+    /// multiplayer-only) — except player starts (types 1-4) and the
+    /// deathmatch start (type 11), which it always spawns. The exported
+    /// `.place` cast defaults to skill 3, "Hurt Me Plenty".
+    ///
+    /// This does not hardcode an expected monster count: it derives one
+    /// directly from the WAD's own THINGS flags (the same law the pure
+    /// `doom_hmp_predicate_matches_skill_and_multiplayer_bits` test checks
+    /// in isolation) and asserts the importer's output matches — for E1M1,
+    /// E1M2 and E1M3, whichever are present in this machine's shareware
+    /// `DOOM1.WAD`.
+    #[test]
+    fn doom_e1m1_hmp_cast_matches_thing_flags() {
+        use crate::classic_import::doom::{
+            doom_map_place, doom_thing_spawns_on_hmp, lump_by_name_after, parse_wad,
+        };
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+
+        for map in ["E1M1", "E1M2", "E1M3"] {
+            let Some(things) = lump_by_name_after(&wad.lumps, map, "THINGS") else {
+                eprintln!("{map}: no THINGS lump; skipped");
+                continue;
+            };
+            let n = things.len() / 10;
+            let mut monsters_before = 0usize; // every skill combined (the old, unfiltered behaviour)
+            let mut monsters_after = 0usize; // skill 3 (HMP) only, the new default
+            let mut zero_skill_bit_things = 0usize; // non-player/dm things with NO skill bit set at all
+            for i in 0..n {
+                let o = i * 10;
+                let typ = u16_at(things, o + 6);
+                let flags = u16_at(things, o + 8);
+                if !matches!(typ, 1 | 2 | 3 | 4 | 11) && flags & 0x0007 == 0 {
+                    zero_skill_bit_things += 1;
+                }
+                let Some((kind, _)) = crate::world_place::doom_thing_actor(typ) else {
+                    continue;
+                };
+                if kind != "character" {
+                    continue;
+                }
+                monsters_before += 1;
+                if doom_thing_spawns_on_hmp(typ, flags) {
+                    monsters_after += 1;
+                }
+            }
+
+            let place = doom_map_place(&wad.lumps, map, "doom", "world/x", "doom1");
+            let got = place.places.iter().filter(|p| p.kind == "character").count();
+            eprintln!(
+                "{map}: monsters before={monsters_before} after(HMP)={monsters_after}, \
+                 things with no skill bit at all={zero_skill_bit_things}"
+            );
+            assert_eq!(
+                got, monsters_after,
+                "{map}: doom_map_place emitted {got} character placements, \
+                 but the WAD's own flags say {monsters_after} spawn on skill 3 (HMP)"
+            );
+        }
+    }
+
+    /// Pure predicate test, no WAD required: the skill masks Doom actually
+    /// uses (0x0001 skill 1&2, 0x0002 skill 3, 0x0004 skill 4&5, their
+    /// union 0x0007, and 0x0000 meaning "no skill at all") plus the
+    /// multiplayer-only bit 0x0010, checked against `doom_thing_spawns_on_hmp`.
+    #[test]
+    fn doom_hmp_predicate_matches_skill_and_multiplayer_bits() {
+        use crate::classic_import::doom::doom_thing_spawns_on_hmp;
+        // An ordinary monster type (Imp, 3001): not a player/deathmatch
+        // start, so only the skill + multiplayer bits decide.
+        let typ = 3001u16;
+        assert!(doom_thing_spawns_on_hmp(typ, 0x0002), "skill-3-only spawns on HMP");
+        assert!(!doom_thing_spawns_on_hmp(typ, 0x0001), "skill-1/2-only must NOT spawn on HMP");
+        assert!(!doom_thing_spawns_on_hmp(typ, 0x0004), "skill-4/5-only must NOT spawn on HMP");
+        assert!(doom_thing_spawns_on_hmp(typ, 0x0007), "all-skill thing spawns on HMP");
+        assert!(
+            !doom_thing_spawns_on_hmp(typ, 0x0000),
+            "no skill bit set at all: vanilla never spawns it, HMP included"
+        );
+        // Multiplayer-only (0x0010) suppresses single-player spawning even
+        // when the HMP bit is also set.
+        assert!(
+            !doom_thing_spawns_on_hmp(typ, 0x0002 | 0x0010),
+            "multiplayer-only must not spawn in single player, even with the HMP bit set"
+        );
+        // Player starts (1-4) and the deathmatch start (11) ignore flags
+        // entirely — vanilla spawns them regardless.
+        for player_typ in [1u16, 2, 3, 4, 11] {
+            assert!(
+                doom_thing_spawns_on_hmp(player_typ, 0x0000),
+                "player/deathmatch start {player_typ} spawns even with no skill bits set"
+            );
+            assert!(
+                doom_thing_spawns_on_hmp(player_typ, 0x0010),
+                "player/deathmatch start {player_typ} spawns even when flagged multiplayer-only"
             );
         }
     }
