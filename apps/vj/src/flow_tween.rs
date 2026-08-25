@@ -44,13 +44,23 @@ use crate::pair_cache::PairKey;
 /// cover it), so it can never fall behind the transport.
 pub struct RifeService {
     tx: std::sync::mpsc::SyncSender<RifeJob>,
-    result: std::sync::Arc<std::sync::Mutex<Option<RifeField>>>,
+    result: std::sync::Arc<std::sync::Mutex<Option<RifeProduct>>>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    latency: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(usize, usize), f64>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RifeProductKind {
+    Field,
+    Midpoint,
+    Subdivision { depth: u8 },
 }
 
 pub struct RifeJob {
     pub generation: u64,
     pub a: usize,
     pub b: usize,
+    pub kind: RifeProductKind,
     pub frames: std::sync::Arc<Vec<Frame>>,
     pub width: usize,
     pub height: usize,
@@ -71,9 +81,130 @@ pub struct RifeField {
     pub mask: Vec<f32>,
 }
 
-impl RifeField {
+#[derive(Clone)]
+pub struct RifeMidpoint {
+    pub generation: u64,
+    pub a: usize,
+    pub b: usize,
+    pub width: usize,
+    pub height: usize,
+    /// Tightly packed RGB8 at the RIFE proxy resolution. The tween view
+    /// samples it directly as an endpoint, so the network's midpoint is not
+    /// rounded through an RGB -> NV12 -> RGB conversion.
+    pub rgb: Vec<u8>,
+}
+
+/// AI3's progressive eighth-grid. Slot `i` is time `(i + 1) / 8`; a
+/// complete depth therefore occupies slots {3}, {1,3,5}, or {0..6}.
+/// Publishing this after every synthesis makes an interrupted deeper level
+/// degrade to the last shallower complete set without borrowing a frame.
+#[derive(Clone)]
+pub struct RifeSubdivision {
+    pub generation: u64,
+    pub a: usize,
+    pub b: usize,
+    pub requested_depth: u8,
+    pub frames: Vec<Option<RifeMidpoint>>,
+}
+
+impl RifeSubdivision {
+    pub fn complete_depth(&self) -> u8 {
+        ai3_complete_depth(&self.frames)
+    }
+
+    pub fn frame_for(&self, depth: u8, k: usize) -> Option<&RifeMidpoint> {
+        if !(1..=self.complete_depth()).contains(&depth) || k == 0 || k >= 1usize << depth {
+            return None;
+        }
+        let eighth = k << (3 - depth);
+        self.frames.get(eighth - 1)?.as_ref()
+    }
+}
+
+impl RifeMidpoint {
+    pub fn is_valid(&self) -> bool {
+        self.width != 0
+            && self.height != 0
+            && self.rgb.len() == self.width.saturating_mul(self.height).saturating_mul(3)
+    }
+}
+
+pub enum RifeProduct {
+    Field(RifeField),
+    Midpoint(RifeMidpoint),
+    Subdivision(RifeSubdivision),
+}
+
+impl RifeProduct {
+    pub fn kind(&self) -> RifeProductKind {
+        match self {
+            Self::Field(_) => RifeProductKind::Field,
+            Self::Midpoint(_) => RifeProductKind::Midpoint,
+            Self::Subdivision(value) => {
+                RifeProductKind::Subdivision { depth: value.requested_depth }
+            }
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Field(value) => value.generation,
+            Self::Midpoint(value) => value.generation,
+            Self::Subdivision(value) => value.generation,
+        }
+    }
+
+    pub fn a(&self) -> usize {
+        match self {
+            Self::Field(value) => value.a,
+            Self::Midpoint(value) => value.a,
+            Self::Subdivision(value) => value.a,
+        }
+    }
+
+    pub fn b(&self) -> usize {
+        match self {
+            Self::Field(value) => value.b,
+            Self::Midpoint(value) => value.b,
+            Self::Subdivision(value) => value.b,
+        }
+    }
+
+    pub fn field(&self) -> Option<&RifeField> {
+        match self {
+            Self::Field(value) => Some(value),
+            Self::Midpoint(_) | Self::Subdivision(_) => None,
+        }
+    }
+
+    pub fn midpoint(&self) -> Option<&RifeMidpoint> {
+        match self {
+            Self::Field(_) => None,
+            Self::Midpoint(value) => Some(value),
+            Self::Subdivision(_) => None,
+        }
+    }
+
+    pub fn subdivision(&self) -> Option<&RifeSubdivision> {
+        match self {
+            Self::Subdivision(value) => Some(value),
+            Self::Field(_) | Self::Midpoint(_) => None,
+        }
+    }
+
     pub fn byte_len(&self) -> usize {
-        (self.flow.len() + self.mask.len()) * std::mem::size_of::<f32>()
+        match self {
+            Self::Field(value) => {
+                (value.flow.len() + value.mask.len()) * std::mem::size_of::<f32>()
+            }
+            Self::Midpoint(value) => value.rgb.len(),
+            Self::Subdivision(value) => value
+                .frames
+                .iter()
+                .flatten()
+                .map(|frame| frame.rgb.len())
+                .sum(),
+        }
     }
 }
 
@@ -95,6 +226,12 @@ impl RifeService {
         let (tx, rx) = std::sync::mpsc::sync_channel::<RifeJob>(1);
         let result = std::sync::Arc::new(std::sync::Mutex::new(None));
         let out = result.clone();
+        let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_busy = busy.clone();
+        let latency = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<(usize, usize), f64>::new(),
+        ));
+        let worker_latency = latency.clone();
         std::thread::Builder::new()
             .name("vj-rife".into())
             .spawn(move || {
@@ -104,6 +241,13 @@ impl RifeService {
                     RifeScale::Half,
                 );
                 while let Ok(job) = rx.recv() {
+                    struct BusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
+                    impl Drop for BusyGuard<'_> {
+                        fn drop(&mut self) {
+                            self.0.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                    let _busy = BusyGuard(&worker_busy);
                     if std::time::Instant::now() >= job.deadline {
                         continue;
                     }
@@ -130,57 +274,368 @@ impl RifeService {
                         job.width,
                         job.height,
                     );
-                    let Ok(pair) = RifeFramePair::new(
-                        &rgb0, &rgb1, job.width, job.height,
-                    ) else {
-                        continue;
+                    let record_latency = |seconds: f64| {
+                        let mut values = worker_latency.lock().unwrap();
+                        let ema = values.entry((job.width, job.height)).or_insert(seconds);
+                        *ema += (seconds - *ema) * 0.2;
                     };
-                    let t0 = std::time::Instant::now();
-                    let Ok(field) = rife.flow_field_rgb8(pair, 0.5, None) else {
-                        continue;
+                    let synth_elapsed;
+                    let product = match job.kind {
+                        RifeProductKind::Field => {
+                            let Ok(pair) = RifeFramePair::new(
+                                &rgb0, &rgb1, job.width, job.height,
+                            ) else {
+                                continue;
+                            };
+                            let t0 = std::time::Instant::now();
+                            let Ok(field) = rife.flow_field_rgb8(pair, 0.5, None) else {
+                                continue;
+                            };
+                            synth_elapsed = t0.elapsed().as_secs_f64();
+                            record_latency(synth_elapsed);
+                            // AI1 is the shipped path: preserve its exact
+                            // planar-to-interleaved repack and warp inputs.
+                            let plane = job.width * job.height;
+                            let mut flow = vec![0.0f32; plane * 4];
+                            for i in 0..plane {
+                                flow[i * 4] = field.flow[i];
+                                flow[i * 4 + 1] = field.flow[plane + i];
+                                flow[i * 4 + 2] = field.flow[2 * plane + i];
+                                flow[i * 4 + 3] = field.flow[3 * plane + i];
+                            }
+                            RifeProduct::Field(RifeField {
+                                generation: job.generation,
+                                a: job.a,
+                                b: job.b,
+                                width: job.width,
+                                height: job.height,
+                                flow,
+                                mask: field.mask,
+                            })
+                        }
+                        RifeProductKind::Midpoint => {
+                            let Ok(pair) = RifeFramePair::new(
+                                &rgb0, &rgb1, job.width, job.height,
+                            ) else {
+                                continue;
+                            };
+                            let t0 = std::time::Instant::now();
+                            let Ok(rgb) = rife.interpolate_rgb8_controlled(pair, 0.5, None) else {
+                                continue;
+                            };
+                            synth_elapsed = t0.elapsed().as_secs_f64();
+                            record_latency(synth_elapsed);
+                            RifeProduct::Midpoint(RifeMidpoint {
+                                generation: job.generation,
+                                a: job.a,
+                                b: job.b,
+                                width: job.width,
+                                height: job.height,
+                                rgb,
+                            })
+                        }
+                        RifeProductKind::Subdivision { depth } => {
+                            let depth = depth.clamp(1, 3);
+                            let mut grid: Vec<Option<Vec<u8>>> = (0..9).map(|_| None).collect();
+                            grid[0] = Some(rgb0);
+                            grid[8] = Some(rgb1);
+                            let mut ladder = RifeSubdivision {
+                                generation: job.generation,
+                                a: job.a,
+                                b: job.b,
+                                requested_depth: depth,
+                                frames: (0..7).map(|_| None).collect(),
+                            };
+                            'levels: for level in 1..=depth {
+                                let stride = 1usize << (3 - level);
+                                for center in (stride..8).step_by(stride * 2) {
+                                    if std::time::Instant::now() >= job.deadline {
+                                        break 'levels;
+                                    }
+                                    let left = center - stride;
+                                    let right = center + stride;
+                                    let Some(rgb_left) = grid[left].as_ref() else {
+                                        break 'levels;
+                                    };
+                                    let Some(rgb_right) = grid[right].as_ref() else {
+                                        break 'levels;
+                                    };
+                                    let Ok(pair) = RifeFramePair::new(
+                                        rgb_left,
+                                        rgb_right,
+                                        job.width,
+                                        job.height,
+                                    ) else {
+                                        break 'levels;
+                                    };
+                                    let t0 = std::time::Instant::now();
+                                    let Ok(rgb) =
+                                        rife.interpolate_rgb8_controlled(pair, 0.5, None)
+                                    else {
+                                        break 'levels;
+                                    };
+                                    let elapsed = t0.elapsed().as_secs_f64();
+                                    record_latency(elapsed);
+                                    grid[center] = Some(rgb.clone());
+                                    ladder.frames[center - 1] = Some(RifeMidpoint {
+                                        generation: job.generation,
+                                        a: job.a,
+                                        b: job.b,
+                                        width: job.width,
+                                        height: job.height,
+                                        rgb,
+                                    });
+                                    // A keyed partial ladder is useful: its
+                                    // complete-depth test implements 7→3→1→FL.
+                                    *out.lock().unwrap() =
+                                        Some(RifeProduct::Subdivision(ladder.clone()));
+                                    if tl_on() {
+                                        eprintln!(
+                                            "tl rife AI3 pair={} level={} {}/{} {}x{} in {:.0}ms",
+                                            job.a,
+                                            level,
+                                            center,
+                                            8,
+                                            job.width,
+                                            job.height,
+                                            elapsed * 1000.0
+                                        );
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                     };
-                    // Repack planar [4, plane] + mask into interleaved
-                    // RGBA texels for the warp texture.
-                    let plane = job.width * job.height;
-                    let mut flow = vec![0.0f32; plane * 4];
-                    for i in 0..plane {
-                        flow[i * 4] = field.flow[i];
-                        flow[i * 4 + 1] = field.flow[plane + i];
-                        flow[i * 4 + 2] = field.flow[2 * plane + i];
-                        flow[i * 4 + 3] = field.flow[3 * plane + i];
-                    }
                     if tl_on() {
                         eprintln!(
-                            "tl rife pair={} {}x{} in {:.0}ms",
+                            "tl rife {:?} pair={} {}x{} in {:.0}ms",
+                            job.kind,
                             job.a,
                             job.width,
                             job.height,
-                            t0.elapsed().as_secs_f64() * 1000.0
+                            synth_elapsed * 1000.0
                         );
                     }
-                    *out.lock().unwrap() = Some(RifeField {
-                        generation: job.generation,
-                        a: job.a,
-                        b: job.b,
-                        width: job.width,
-                        height: job.height,
-                        flow,
-                        mask: field.mask,
-                    });
+                    *out.lock().unwrap() = Some(product);
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { tx, result })
+        Ok(Self { tx, result, busy, latency })
     }
 
-    /// Offer a pair; a busy worker skips it (classical covers the gap).
-    pub fn offer(&self, job: RifeJob) {
-        let _ = self.tx.try_send(job);
+    /// Offer a pair; a busy worker skips it (classical covers the gap). The
+    /// atomic closes the channel's one-item waiting-room loophole: there is
+    /// at most one accepted pair, never an old queue behind the transport.
+    pub fn offer_next(&self, job: RifeJob) -> bool {
+        use std::sync::atomic::Ordering;
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if self.tx.try_send(job).is_ok() {
+            true
+        } else {
+            self.busy.store(false, Ordering::Release);
+            false
+        }
     }
 
-    pub fn take(&self) -> Option<RifeField> {
+    pub fn take(&self) -> Option<RifeProduct> {
         self.result.lock().unwrap().take()
     }
+
+    pub fn synth_seconds(&self, width: usize, height: usize) -> Option<f64> {
+        self.latency.lock().unwrap().get(&(width, height)).copied()
+    }
+}
+
+/// Which classical pair owns one AI2 presentation beat. This is the exact
+/// eval-rig rule: a fresh midpoint splits the source pair in two; without
+/// one, the original pair remains plain FL for its entire lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ai2Pair {
+    Original,
+    FirstHalf,
+    SecondHalf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ai2FramePlan {
+    pub pair: Ai2Pair,
+    pub t: f32,
+}
+
+pub fn ai2_frame_plan(has_fresh_midpoint: bool, t: f32) -> Ai2FramePlan {
+    let t = t.clamp(0.0, 1.0);
+    if !has_fresh_midpoint {
+        return Ai2FramePlan { pair: Ai2Pair::Original, t };
+    }
+    if t < 0.5 {
+        Ai2FramePlan { pair: Ai2Pair::FirstHalf, t: t * 2.0 }
+    } else {
+        Ai2FramePlan { pair: Ai2Pair::SecondHalf, t: (t - 0.5) * 2.0 }
+    }
+}
+
+pub const AI3_MIN_DEPTH: u8 = 1;
+pub const AI3_MAX_DEPTH: u8 = 3;
+pub const AI3_BOOTSTRAP_SYNTH_SECS: f64 = 0.065;
+const AI3_BUDGET_MARGIN: f64 = 1.20;
+const AI3_UPGRADE_MARGIN: f64 = 1.35;
+const AI3_HOLD_MARGIN: f64 = 1.05;
+
+pub const fn ai3_neural_frames(depth: u8) -> usize {
+    let depth = if depth < AI3_MIN_DEPTH {
+        AI3_MIN_DEPTH
+    } else if depth > AI3_MAX_DEPTH {
+        AI3_MAX_DEPTH
+    } else {
+        depth
+    };
+    (1usize << depth) - 1
+}
+
+fn ai3_depth_with_margin(
+    synth_seconds: f64,
+    pair_budget_seconds: f64,
+    capacity_frames: usize,
+    margin: f64,
+) -> u8 {
+    if !synth_seconds.is_finite()
+        || synth_seconds <= 0.0
+        || !pair_budget_seconds.is_finite()
+        || pair_budget_seconds <= 0.0
+    {
+        return AI3_MIN_DEPTH;
+    }
+    for depth in (AI3_MIN_DEPTH..=AI3_MAX_DEPTH).rev() {
+        let frames = ai3_neural_frames(depth);
+        if frames <= capacity_frames
+            && frames as f64 * synth_seconds * margin <= pair_budget_seconds
+        {
+            return depth;
+        }
+    }
+    // AI3 never invents a d=0 neural tier. If d=1 misses this budget, the
+    // existing AI2 admission rule decides between one midpoint and FL.
+    AI3_MIN_DEPTH
+}
+
+/// Pure capacity-law choice. `pair_budget_seconds` is the platter pair
+/// period after the other admitted neural decks' share has been removed;
+/// `capacity_frames` is the remaining 5-synth/s law expressed for this pair.
+pub fn ai3_budget_depth(
+    synth_seconds: f64,
+    pair_budget_seconds: f64,
+    capacity_frames: usize,
+) -> u8 {
+    ai3_depth_with_margin(
+        synth_seconds,
+        pair_budget_seconds,
+        capacity_frames,
+        AI3_BUDGET_MARGIN,
+    )
+}
+
+/// The per-deck, per-pair depth latch. Upgrades need two consecutive offers
+/// at a stronger margin; an active depth is held through the ordinary margin
+/// boundary and drops only when its smaller exit margin no longer fits.
+#[derive(Clone, Copy, Debug)]
+pub struct Ai3DepthChooser {
+    depth: u8,
+    pending_upgrade: u8,
+    pending_pairs: u8,
+}
+
+impl Default for Ai3DepthChooser {
+    fn default() -> Self {
+        Self { depth: AI3_MIN_DEPTH, pending_upgrade: 0, pending_pairs: 0 }
+    }
+}
+
+impl Ai3DepthChooser {
+    pub fn depth(&self) -> u8 {
+        self.depth
+    }
+
+    pub fn choose(
+        &mut self,
+        synth_seconds: f64,
+        pair_budget_seconds: f64,
+        capacity_frames: usize,
+    ) -> u8 {
+        let raw = ai3_budget_depth(synth_seconds, pair_budget_seconds, capacity_frames);
+        let current_frames = ai3_neural_frames(self.depth);
+        let holds = current_frames <= capacity_frames
+            && current_frames as f64 * synth_seconds * AI3_HOLD_MARGIN
+                <= pair_budget_seconds;
+        if raw < self.depth && !holds {
+            self.depth = raw;
+            self.pending_upgrade = 0;
+            self.pending_pairs = 0;
+            return self.depth;
+        }
+        let upgrade = ai3_depth_with_margin(
+            synth_seconds,
+            pair_budget_seconds,
+            capacity_frames,
+            AI3_UPGRADE_MARGIN,
+        );
+        if upgrade > self.depth {
+            if self.pending_upgrade == upgrade {
+                self.pending_pairs = self.pending_pairs.saturating_add(1);
+            } else {
+                self.pending_upgrade = upgrade;
+                self.pending_pairs = 1;
+            }
+            if self.pending_pairs >= 2 {
+                self.depth = upgrade;
+                self.pending_upgrade = 0;
+                self.pending_pairs = 0;
+            }
+        } else {
+            self.pending_upgrade = 0;
+            self.pending_pairs = 0;
+        }
+        self.depth
+    }
+}
+
+/// Deepest complete set in the fixed eighth-grid: 7 → 3 → 1 → FL (0).
+pub fn ai3_complete_depth<T>(frames: &[Option<T>]) -> u8 {
+    if frames.len() >= 7 && frames[..7].iter().all(Option::is_some) {
+        3
+    } else if frames.len() >= 6 && [1usize, 3, 5].iter().all(|&i| frames[i].is_some()) {
+        2
+    } else if frames.get(3).is_some_and(Option::is_some) {
+        1
+    } else {
+        0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ai3FramePlan {
+    pub interval: usize,
+    pub t: f32,
+}
+
+pub fn ai3_frame_plan(depth: u8, t: f32) -> Ai3FramePlan {
+    let intervals = 1usize << depth.clamp(AI3_MIN_DEPTH, AI3_MAX_DEPTH);
+    let scaled = t.clamp(0.0, 1.0) * intervals as f32;
+    let interval = (scaled.floor() as usize).min(intervals - 1);
+    Ai3FramePlan { interval, t: (scaled - interval as f32).clamp(0.0, 1.0) }
+}
+
+fn rgb8_to_bgra32(rgb: &[u8]) -> Vec<u32> {
+    rgb.chunks_exact(3)
+        .map(|px| {
+            0xff00_0000 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
+        })
+        .collect()
 }
 
 /// `VJ_TWEEN_DEBUG=1|2|3` turns the warp into a diagnostic view (flow
@@ -313,9 +768,22 @@ script_mod! {
             self.world = vec4(clipped.x, clipped.y, self.draw_depth, 1.0)
             return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
-        // 4:1 area reduction of both Y planes via four bilinear taps at
-        // +-1 source texel (linear filtering makes each tap a 2x2 avg, so
-        // the four together cover the 4x4 block).
+        luma_a: fn(uv: vec2) -> float {
+            let s = self.tex_y_a.sample(uv)
+            if self.rgb_a_on > 0.5 {
+                return (16.0 + 219.0 * (s.x * 0.2126 + s.y * 0.7152 + s.z * 0.0722)) / 255.0
+            }
+            return s.x
+        }
+        luma_b: fn(uv: vec2) -> float {
+            let s = self.tex_y_b.sample(uv)
+            if self.rgb_b_on > 0.5 {
+                return (16.0 + 219.0 * (s.x * 0.2126 + s.y * 0.7152 + s.z * 0.0722)) / 255.0
+            }
+            return s.x
+        }
+        // 4:1 area reduction via four bilinear taps. AI2's RIFE midpoint
+        // is RGB; source endpoints remain their zero-copy NV12 Y planes.
         pixel: fn() {
             let o = self.inv_grid
             let mut a = 0.0
@@ -324,10 +792,10 @@ script_mod! {
             let t10 = self.pos + vec2(o.x, -o.y)
             let t01 = self.pos + vec2(-o.x, o.y)
             let t11 = self.pos + vec2(o.x, o.y)
-            a = a + self.tex_y_a.sample(t00).x + self.tex_y_a.sample(t10).x
-            a = a + self.tex_y_a.sample(t01).x + self.tex_y_a.sample(t11).x
-            b = b + self.tex_y_b.sample(t00).x + self.tex_y_b.sample(t10).x
-            b = b + self.tex_y_b.sample(t01).x + self.tex_y_b.sample(t11).x
+            a = a + self.luma_a(t00) + self.luma_a(t10)
+            a = a + self.luma_a(t01) + self.luma_a(t11)
+            b = b + self.luma_b(t00) + self.luma_b(t10)
+            b = b + self.luma_b(t01) + self.luma_b(t11)
             return vec4(a * 63.75, b * 63.75, 0.0, 1.0)
         }
     }
@@ -682,6 +1150,9 @@ script_mod! {
         }
         nv12_a: fn(uv: vec2) -> vec3 {
             let c = clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            if self.rgb_a_on > 0.5 {
+                return self.tex_y_a.sample(c).xyz
+            }
             let y = (self.tex_y_a.sample(c).x * 255.0 - 16.0) / 219.0
             let u2 = self.tex_uv_a.sample(c).xy
             let u = (u2.x * 255.0 - 128.0) / 224.0
@@ -690,6 +1161,9 @@ script_mod! {
         }
         nv12_b: fn(uv: vec2) -> vec3 {
             let c = clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            if self.rgb_b_on > 0.5 {
+                return self.tex_y_b.sample(c).xyz
+            }
             let y = (self.tex_y_b.sample(c).x * 255.0 - 16.0) / 219.0
             let u2 = self.tex_uv_b.sample(c).xy
             let u = (u2.x * 255.0 - 128.0) / 224.0
@@ -786,6 +1260,11 @@ pub struct DrawTweenLuma {
     /// One texel of the SOURCE Y plane in uv units (for the 4:1 box taps).
     #[live]
     pub inv_grid: Vec2f,
+    /// The corresponding endpoint texture is packed RGB rather than Y.
+    #[live]
+    pub rgb_a_on: f32,
+    #[live]
+    pub rgb_b_on: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -870,6 +1349,11 @@ pub struct DrawTweenWarp {
     /// 1.0 = plain crossfade (FADE mode) — skips every field entirely.
     #[live]
     pub fade_on: f32,
+    /// AI2 binds its RGB midpoint in either endpoint slot for one half-pair.
+    #[live]
+    pub rgb_a_on: f32,
+    #[live]
+    pub rgb_b_on: f32,
 }
 
 /// One offscreen stage: its pass, its draw list, and (for the flow
@@ -973,6 +1457,25 @@ pub struct FlowTweenView {
     rife_pair: Option<usize>,
     #[rust]
     rife_dims: (usize, usize),
+    /// AI2's fresh, pair-keyed RIFE midpoint and the half currently leased
+    /// by the presenter. The texture may remain allocated when inactive;
+    /// `ai2_half` alone decides whether it can be sampled.
+    #[rust]
+    ai2_midpoint_tex: Option<Texture>,
+    #[rust]
+    ai2_midpoint_dims: (usize, usize),
+    #[rust]
+    ai2_half: Option<Ai2Pair>,
+    /// AI3's frozen complete set for this source-pair lease. The textures
+    /// are ordered at k/2^depth; `ai3_interval` selects one classical pair.
+    #[rust]
+    ai3_frames_tex: Vec<Texture>,
+    #[rust]
+    ai3_frames_dims: (usize, usize),
+    #[rust]
+    ai3_depth: u8,
+    #[rust]
+    ai3_interval: Option<usize>,
     /// How many pairs the current field has been REUSED for. Motion is
     /// temporally coherent, so a slightly stale neural field beats
     /// flip-flopping to the classical producer — two different flow
@@ -1083,6 +1586,8 @@ impl FlowTweenView {
         if w < 8 || h < 8 || a.len() < w * h * 3 / 2 || b.len() < w * h * 3 / 2 {
             return;
         }
+        self.ai2_half = None;
+        self.ai3_interval = None;
         let same_size = self.size == (width, height) && self.planes.is_some();
         let adopt = same_size
             && key.is_some_and(|wanted| {
@@ -1123,6 +1628,140 @@ impl FlowTweenView {
         self.pair_key = key;
         self.flow_dirty = true;
         self.area.redraw(cx);
+    }
+
+    /// Adopt the exact RIFE midpoint frozen by the source pair's lease.
+    /// It stays RGB and is sampled directly by the luma + warp passes.
+    pub fn set_ai2_midpoint(&mut self, cx: &mut Cx, midpoint: &RifeMidpoint) -> bool {
+        if !midpoint.is_valid() {
+            self.ai2_midpoint_tex = None;
+            self.ai2_midpoint_dims = (0, 0);
+            self.ai2_half = None;
+            return false;
+        }
+        let bgra = rgb8_to_bgra32(&midpoint.rgb);
+        if self.ai2_midpoint_tex.is_none()
+            || self.ai2_midpoint_dims != (midpoint.width, midpoint.height)
+        {
+            self.ai2_midpoint_tex = Some(Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: midpoint.width,
+                    height: midpoint.height,
+                    data: Some(bgra),
+                    updated: TextureUpdated::Full,
+                },
+            ));
+            self.ai2_midpoint_dims = (midpoint.width, midpoint.height);
+        } else if let Some(texture) = &self.ai2_midpoint_tex {
+            let _ = texture.take_vec_u32(cx);
+            texture.put_back_vec_u32(cx, bgra, None);
+        }
+        self.rife_pair = None;
+        self.area.redraw(cx);
+        true
+    }
+
+    /// Select one of the two classical half-pairs. Crossing 0.5 changes the
+    /// estimator's endpoints, so the ordinary FL stack derives that half.
+    pub fn select_ai2_pair(&mut self, cx: &mut Cx, pair: Ai2Pair) {
+        let half = match pair {
+            Ai2Pair::FirstHalf | Ai2Pair::SecondHalf => Some(pair),
+            Ai2Pair::Original => None,
+        };
+        if self.ai2_half != half {
+            self.ai2_half = half;
+            self.flow_dirty = self.planes.is_some();
+            self.area.redraw(cx);
+        }
+    }
+
+    pub fn clear_ai2_midpoint(&mut self, cx: &mut Cx) {
+        if self.ai2_half.take().is_some() {
+            self.flow_dirty = self.planes.is_some();
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Freeze one complete AI3 level for this pair. A finer partial level is
+    /// rejected here; the presenter has already selected its shallower lease.
+    pub fn set_ai3_subdivision(
+        &mut self,
+        cx: &mut Cx,
+        subdivision: &RifeSubdivision,
+        depth: u8,
+    ) -> bool {
+        if !(AI3_MIN_DEPTH..=AI3_MAX_DEPTH).contains(&depth)
+            || subdivision.complete_depth() < depth
+        {
+            self.clear_ai3_subdivision(cx);
+            return false;
+        }
+        let count = ai3_neural_frames(depth);
+        let Some(first) = subdivision.frame_for(depth, 1) else {
+            self.clear_ai3_subdivision(cx);
+            return false;
+        };
+        if !first.is_valid() {
+            self.clear_ai3_subdivision(cx);
+            return false;
+        }
+        let dims = (first.width, first.height);
+        let rebuild = self.ai3_frames_dims != dims || self.ai3_frames_tex.len() != count;
+        if rebuild {
+            self.ai3_frames_tex.clear();
+        }
+        for k in 1..=count {
+            let Some(frame) = subdivision.frame_for(depth, k) else {
+                self.clear_ai3_subdivision(cx);
+                return false;
+            };
+            if !frame.is_valid() || (frame.width, frame.height) != dims {
+                self.clear_ai3_subdivision(cx);
+                return false;
+            }
+            let bgra = rgb8_to_bgra32(&frame.rgb);
+            if rebuild {
+                self.ai3_frames_tex.push(Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width: frame.width,
+                        height: frame.height,
+                        data: Some(bgra),
+                        updated: TextureUpdated::Full,
+                    },
+                ));
+            } else {
+                let texture = &self.ai3_frames_tex[k - 1];
+                let _ = texture.take_vec_u32(cx);
+                texture.put_back_vec_u32(cx, bgra, None);
+            }
+        }
+        self.ai3_frames_dims = dims;
+        self.ai3_depth = depth;
+        self.ai3_interval = None;
+        self.ai2_half = None;
+        self.rife_pair = None;
+        self.area.redraw(cx);
+        true
+    }
+
+    pub fn select_ai3_pair(&mut self, cx: &mut Cx, interval: usize) {
+        let valid = self.ai3_depth > 0 && interval < 1usize << self.ai3_depth;
+        let interval = valid.then_some(interval);
+        if self.ai3_interval != interval {
+            self.ai3_interval = interval;
+            self.flow_dirty = self.planes.is_some();
+            self.area.redraw(cx);
+        }
+    }
+
+    pub fn clear_ai3_subdivision(&mut self, cx: &mut Cx) {
+        if self.ai3_interval.take().is_some() || self.ai3_depth != 0 {
+            self.ai3_depth = 0;
+            self.flow_dirty = self.planes.is_some();
+            self.area.redraw(cx);
+        }
     }
 
     /// Offer the one new frame of the adjacent pair predicted along the
@@ -1211,6 +1850,13 @@ impl FlowTweenView {
         self.field_gen = 0;
         self.rendered = false;
         self.rife_pair = None;
+        self.ai2_half = None;
+        self.ai2_midpoint_tex = None;
+        self.ai2_midpoint_dims = (0, 0);
+        self.ai3_frames_tex.clear();
+        self.ai3_frames_dims = (0, 0);
+        self.ai3_depth = 0;
+        self.ai3_interval = None;
         self.have_prev_field = false;
         self.cut = false;
         self.area.redraw(cx);
@@ -1287,6 +1933,7 @@ impl FlowTweenView {
             mask_tex.put_back_vec_u8(cx, mb, None);
         }
         self.rife_pair = Some(pair);
+        self.ai2_half = None;
         self.rife_age = 0;
         self.area.redraw(cx);
     }
@@ -1422,9 +2069,69 @@ impl Widget for FlowTweenView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.walk_turtle_with_area(&mut self.area, walk);
-        let Some(planes) = self.planes.clone() else {
+        let Some(endpoint_planes) = self.planes.clone() else {
             return DrawStep::done();
         };
+        let ai3_pair = self.ai3_interval.and_then(|interval| {
+            let intervals = 1usize << self.ai3_depth;
+            if interval >= intervals || self.ai3_frames_tex.len() + 1 != intervals {
+                return None;
+            }
+            let (a_y, a_uv, rgb_a_on) = if interval == 0 {
+                (endpoint_planes[0].clone(), endpoint_planes[1].clone(), 0.0)
+            } else {
+                let texture = self.ai3_frames_tex[interval - 1].clone();
+                (texture.clone(), texture, 1.0)
+            };
+            let (b_y, b_uv, rgb_b_on) = if interval + 1 == intervals {
+                (endpoint_planes[2].clone(), endpoint_planes[3].clone(), 0.0)
+            } else {
+                let texture = self.ai3_frames_tex[interval].clone();
+                (texture.clone(), texture, 1.0)
+            };
+            Some((
+                [
+                    a_y,
+                    a_uv,
+                    b_y,
+                    b_uv,
+                    endpoint_planes[4].clone(),
+                    endpoint_planes[5].clone(),
+                ],
+                rgb_a_on,
+                rgb_b_on,
+            ))
+        });
+        let (planes, rgb_a_on, rgb_b_on) = ai3_pair.unwrap_or_else(|| {
+            let midpoint = self.ai2_midpoint_tex.clone();
+            match (self.ai2_half, midpoint) {
+                (Some(Ai2Pair::FirstHalf), Some(midpoint)) => (
+                    [
+                        endpoint_planes[0].clone(),
+                        endpoint_planes[1].clone(),
+                        midpoint.clone(),
+                        midpoint,
+                        endpoint_planes[4].clone(),
+                        endpoint_planes[5].clone(),
+                    ],
+                    0.0,
+                    1.0,
+                ),
+                (Some(Ai2Pair::SecondHalf), Some(midpoint)) => (
+                    [
+                        midpoint.clone(),
+                        midpoint,
+                        endpoint_planes[2].clone(),
+                        endpoint_planes[3].clone(),
+                        endpoint_planes[4].clone(),
+                        endpoint_planes[5].clone(),
+                    ],
+                    1.0,
+                    0.0,
+                ),
+                _ => (endpoint_planes, 0.0, 0.0),
+            }
+        });
         self.ensure_targets(cx.cx);
         let (gw, gh) = self.grid();
         let mut stage = 0usize;
@@ -1530,6 +2237,8 @@ impl Widget for FlowTweenView {
                 DeriveOp::Luma0 => {
                     let (w, h) = (self.size.0 as usize, self.size.1 as usize);
                     self.draw_luma.inv_grid = vec2(1.0 / w as f32, 1.0 / h as f32);
+                    self.draw_luma.rgb_a_on = rgb_a_on;
+                    self.draw_luma.rgb_b_on = rgb_b_on;
                     self.draw_luma.draw_vars.set_texture(0, &planes[derive_plane_y[0]]);
                     self.draw_luma.draw_vars.set_texture(1, &planes[derive_plane_y[1]]);
                     let target = self.luma_tex[0].clone();
@@ -1625,6 +2334,8 @@ impl Widget for FlowTweenView {
         // ---- the warp, every display frame ------------------------------
         let (w, h) = (self.size.0, self.size.1);
         self.draw_warp.dbg = self.dbg_override.unwrap_or_else(tween_debug);
+        self.draw_warp.rgb_a_on = rgb_a_on;
+        self.draw_warp.rgb_b_on = rgb_b_on;
         // A CUT pair never morphs: snap to the nearest endpoint (t 0/1
         // samples that frame exactly through either producer's math). A
         // crossfade across a cut is fine — no snap in FADE mode.
@@ -1672,6 +2383,335 @@ impl Widget for FlowTweenView {
         run_stage!(&warp_out, w, h, |cx: &mut Cx2d, r| draw_warp.draw_abs(cx, r));
         self.rendered = true;
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod ai2_tests {
+    use super::*;
+    use crate::pair_cache::{PairCache, PairKey};
+    use crate::transport::{Mode, Timeline, Transport};
+
+    const W: usize = 96;
+    const H: usize = 54;
+
+    #[derive(Clone)]
+    struct SineRectFrame {
+        x: f32,
+        rgb: Vec<u8>,
+    }
+
+    fn render_rect(x: f32) -> Vec<u8> {
+        let mut rgb = vec![0u8; W * H * 3];
+        for py in 0..H {
+            for px in 0..W {
+                let u = (px as f32 + 0.5) / W as f32;
+                let v = (py as f32 + 0.5) / H as f32;
+                let inside = (u - x).abs() <= 0.12 && (v - 0.5).abs() <= 0.18;
+                let color = if inside { [235, 87, 31] } else { [9, 14, 22] };
+                rgb[(py * W + px) * 3..(py * W + px + 1) * 3]
+                    .copy_from_slice(&color);
+            }
+        }
+        rgb
+    }
+
+    fn sine_rect(phase: f32) -> SineRectFrame {
+        let x = 0.5 + 0.24 * phase.sin();
+        SineRectFrame { x, rgb: render_rect(x) }
+    }
+
+    /// The headless equivalent of FL for this discriminator scene: its one
+    /// moving object follows the field between the two endpoint centres.
+    fn classical_flow(a: &SineRectFrame, b: &SineRectFrame, t: f32) -> Vec<u8> {
+        if t <= 0.0 {
+            return a.rgb.clone();
+        }
+        if t >= 1.0 {
+            return b.rgb.clone();
+        }
+        render_rect(a.x + (b.x - a.x) * t)
+    }
+
+    fn eval_rig_ai2(
+        a: &SineRectFrame,
+        midpoint: &SineRectFrame,
+        b: &SineRectFrame,
+        t: f32,
+    ) -> Vec<u8> {
+        if t < 0.5 {
+            classical_flow(a, midpoint, t * 2.0)
+        } else {
+            classical_flow(midpoint, b, (t - 0.5) * 2.0)
+        }
+    }
+
+    fn production_ai2(
+        a: &SineRectFrame,
+        midpoint: &SineRectFrame,
+        b: &SineRectFrame,
+        fresh: bool,
+        t: f32,
+    ) -> Vec<u8> {
+        let plan = ai2_frame_plan(fresh, t);
+        match plan.pair {
+            Ai2Pair::Original => classical_flow(a, b, plan.t),
+            Ai2Pair::FirstHalf => classical_flow(a, midpoint, plan.t),
+            Ai2Pair::SecondHalf => classical_flow(midpoint, b, plan.t),
+        }
+    }
+
+    fn percentile(mut values: Vec<usize>, p: f64) -> usize {
+        values.sort_unstable();
+        values[((values.len() - 1) as f64 * p).ceil() as usize]
+    }
+
+    #[test]
+    fn sine_rect_ai2_is_byte_identical_to_the_eval_rig_and_degrades_per_pair() {
+        let scene = include_str!("../resources/effects/272_test_sine_rect.splash");
+        assert!(scene.contains("TEST SINE RECT"));
+        assert!(scene.contains("sin(self.time_beat.x)"));
+
+        let a = sine_rect(0.15);
+        let midpoint = sine_rect(0.85);
+        let b = sine_rect(1.55);
+        let neighbour_midpoint = sine_rect(2.25);
+        let mut mismatched_frames = 0usize;
+        let mut differing_bytes = 0usize;
+        let mut compared_bytes = 0usize;
+        let mut degraded_frames = 0usize;
+        let mut neighbour_would_differ = 0usize;
+
+        // The dual-deck harness: both decks see the same endpoints, lease,
+        // and t series. Every presented byte is scored, including t=0.5.
+        for _deck in 0..2 {
+            for tick in 0..=240 {
+                let t = tick as f32 / 240.0;
+                let got = production_ai2(&a, &midpoint, &b, true, t);
+                let want = eval_rig_ai2(&a, &midpoint, &b, t);
+                compared_bytes += want.len();
+                let diff = got.iter().zip(&want).filter(|(x, y)| x != y).count();
+                differing_bytes += diff;
+                mismatched_frames += usize::from(diff != 0);
+
+                let degraded = production_ai2(&a, &neighbour_midpoint, &b, false, t);
+                let plain_fl = classical_flow(&a, &b, t);
+                assert_eq!(degraded, plain_fl, "a missing midpoint must be plain FL");
+                degraded_frames += 1;
+                if degraded != eval_rig_ai2(&a, &neighbour_midpoint, &b, t) {
+                    neighbour_would_differ += 1;
+                }
+            }
+        }
+        assert_eq!(ai2_frame_plan(true, 0.5).pair, Ai2Pair::SecondHalf);
+        assert_eq!(ai2_frame_plan(true, 0.5).t, 0.0);
+        assert_eq!(mismatched_frames, 0);
+        assert_eq!(differing_bytes, 0);
+        assert!(neighbour_would_differ > 0, "the discriminator must catch midpoint reuse");
+
+        // The cache proof uses the same full key as production. A completed
+        // neighbour is invisible to the current pair's boundary lookup.
+        let current = PairKey::new(9, 12, 13, 4);
+        let neighbour = PairKey::new(9, 13, 14, 4);
+        let mut products = PairCache::new(16);
+        products.insert(neighbour, 7u8, 1, 1);
+        assert_eq!(products.get(&current), None);
+        assert_eq!(products.get(&neighbour), Some(&7));
+
+        eprintln!(
+            "ai2 parity: frames={} bytes={} mismatched_frames={} differing_bytes={} degradation_frames={} neighbour_discriminator={}",
+            2 * 241,
+            compared_bytes,
+            mismatched_frames,
+            differing_bytes,
+            degraded_frames,
+            neighbour_would_differ,
+        );
+    }
+
+    #[test]
+    fn ai2_pair_changes_cost_the_same_one_presenter_beat_as_ordinary_frames() {
+        const DISPLAY_HZ: f64 = 120.0;
+        let timeline = Timeline::from_pts((0..96).map(|i| i as f64 / 24.0).collect())
+            .expect("timeline");
+        let mut decks = [Transport::new(), Transport::new()];
+        for deck in &mut decks {
+            deck.bind(timeline.clone(), 0, 96);
+            deck.set_mode(Mode::Loop);
+            deck.set_speed(12.0 / 24.0);
+            deck.advance(0.0, None);
+        }
+
+        let mut last_pairs = [None, None];
+        let mut last_presented = [0usize, 0usize];
+        let mut pair_gaps = Vec::new();
+        let mut ordinary_gaps = Vec::new();
+        let mut pair_changes = 0usize;
+        for beat in 1..=12_000usize {
+            let now = beat as f64 / DISPLAY_HZ;
+            let mut this = [None, None];
+            for (index, deck) in decks.iter_mut().enumerate() {
+                let step = deck.advance(now, None);
+                let loc = deck.locate(step.pos).expect("located");
+                let pair = (loc.a, loc.b);
+                let _plan = ai2_frame_plan(true, loc.t as f32);
+                let gap = beat - last_presented[index];
+                if last_pairs[index].is_some() && last_pairs[index] != Some(pair) {
+                    pair_gaps.push(gap);
+                    pair_changes += 1;
+                } else if last_pairs[index].is_some() {
+                    ordinary_gaps.push(gap);
+                }
+                last_pairs[index] = Some(pair);
+                last_presented[index] = beat;
+                this[index] = Some((pair, loc.t.to_bits(), step.pos.to_bits()));
+            }
+            assert_eq!(this[0], this[1], "dual decks diverged on beat {beat}");
+        }
+        let pair_p99 = percentile(pair_gaps, 0.99);
+        let ordinary_p99 = percentile(ordinary_gaps, 0.99);
+        assert!(pair_changes > 2_000, "not enough pair boundaries: {pair_changes}");
+        assert_eq!(pair_p99, ordinary_p99);
+        assert_eq!(pair_p99, 1);
+        eprintln!(
+            "ai2 beat gate: pair_changes={} pair_p99={} ordinary_p99={} beats",
+            pair_changes, pair_p99, ordinary_p99,
+        );
+    }
+
+    #[test]
+    fn ai3_budget_depth_and_hysteresis_follow_the_capacity_law() {
+        assert_eq!(ai3_budget_depth(0.065, 1.0, 7), 3);
+        assert_eq!(ai3_budget_depth(0.065, 0.30, 7), 2);
+        assert_eq!(ai3_budget_depth(0.065, 1.0, 3), 2);
+        assert_eq!(ai3_budget_depth(0.065, 0.06, 0), 1, "d=1 owns the fallback rule");
+
+        let mut chooser = Ai3DepthChooser::default();
+        assert_eq!(chooser.choose(0.065, 1.0, 7), 1, "upgrade waits one pair");
+        assert_eq!(chooser.choose(0.065, 1.0, 7), 3);
+        for budget in [0.53, 0.55, 0.53, 0.55] {
+            assert_eq!(chooser.choose(0.065, budget, 7), 3, "exit margin stops flap");
+        }
+        assert_eq!(chooser.choose(0.065, 0.45, 7), 2, "unsafe depth drops at once");
+        assert_eq!(chooser.choose(0.065, 0.23, 3), 2, "d=2 holds below its entry edge");
+        assert_eq!(chooser.choose(0.065, 0.19, 3), 1);
+        eprintln!(
+            "ai3 budget gate: synth_ms=65 depths=[3@1.00s/7,2@0.30s/7,2@1.00s/3] hysteresis=stable"
+        );
+    }
+
+    #[test]
+    fn sine_rect_ai3_forced_depth_one_is_byte_identical_to_ai2() {
+        let scene = include_str!("../resources/effects/272_test_sine_rect.splash");
+        assert!(scene.contains("TEST SINE RECT"));
+        let a = sine_rect(0.15);
+        let midpoint = sine_rect(0.85);
+        let b = sine_rect(1.55);
+        let mut compared = 0usize;
+        let mut differing = 0usize;
+        for _deck in 0..2 {
+            for tick in 0..=240 {
+                let t = tick as f32 / 240.0;
+                let ai2 = production_ai2(&a, &midpoint, &b, true, t);
+                let plan = ai3_frame_plan(1, t);
+                let ai3 = match plan.interval {
+                    0 => classical_flow(&a, &midpoint, plan.t),
+                    1 => classical_flow(&midpoint, &b, plan.t),
+                    _ => unreachable!(),
+                };
+                compared += ai2.len();
+                differing += ai2.iter().zip(&ai3).filter(|(x, y)| x != y).count();
+            }
+        }
+        assert_eq!(differing, 0);
+        eprintln!("ai3 d1 parity: frames=482 bytes={compared} differing_bytes={differing}");
+    }
+
+    #[test]
+    fn ai3_degradation_is_seven_to_three_to_one_to_fl() {
+        let mut frames = vec![None; 7];
+        assert_eq!(ai3_complete_depth(&frames), 0);
+        frames[3] = Some(3u8);
+        assert_eq!(ai3_complete_depth(&frames), 1);
+        frames[1] = Some(1);
+        frames[5] = Some(5);
+        assert_eq!(ai3_complete_depth(&frames), 2);
+        for (index, frame) in frames.iter_mut().enumerate() {
+            *frame = Some(index as u8);
+        }
+        assert_eq!(ai3_complete_depth(&frames), 3);
+        frames[0] = None;
+        assert_eq!(ai3_complete_depth(&frames), 2);
+        frames[1] = None;
+        assert_eq!(ai3_complete_depth(&frames), 1);
+        frames[3] = None;
+        assert_eq!(ai3_complete_depth(&frames), 0);
+
+        let current = PairKey::new(21, 8, 9, 5);
+        let neighbour = PairKey::new(21, 9, 10, 5);
+        let mut products = PairCache::new(16);
+        products.insert(neighbour, 7u8, 1, 1);
+        assert_eq!(products.get(&current), None, "FL, never a neighbour's ladder");
+        eprintln!("ai3 degradation gate: 7->3->1->FL exact_pair_only=true");
+    }
+
+    #[test]
+    fn ai3_pair_change_p99_equals_the_ordinary_presenter_beat() {
+        const DISPLAY_HZ: f64 = 120.0;
+        let timeline = Timeline::from_pts((0..96).map(|i| i as f64 / 24.0).collect())
+            .expect("timeline");
+        let mut total_changes = 0usize;
+        let mut pair_gaps = Vec::new();
+        let mut ordinary_gaps = Vec::new();
+        let mut depth_changes = [0usize; 4];
+        for rate_fps in [0.25, 0.75, 2.5] {
+            let mut decks = [Transport::new(), Transport::new()];
+            let mut choosers = [Ai3DepthChooser::default(); 2];
+            for deck in &mut decks {
+                deck.bind(timeline.clone(), 0, 96);
+                deck.set_mode(Mode::Loop);
+                deck.set_speed(rate_fps / 24.0);
+                deck.advance(0.0, None);
+            }
+            let mut last_pairs = [None, None];
+            let mut depths = [1u8; 2];
+            for beat in 1..=48_000usize {
+                let now = beat as f64 / DISPLAY_HZ;
+                let mut presented = [None, None];
+                for index in 0..2 {
+                    let step = decks[index].advance(now, None);
+                    let loc = decks[index].locate(step.pos).expect("located");
+                    let pair = (loc.a, loc.b);
+                    let changed = last_pairs[index].is_some()
+                        && last_pairs[index] != Some(pair);
+                    if changed {
+                        let pair_budget = 1.0 / rate_fps / 2.0;
+                        let capacity = (2.5 / rate_fps).floor() as usize;
+                        depths[index] =
+                            choosers[index].choose(0.065, pair_budget, capacity);
+                        depth_changes[depths[index] as usize] += 1;
+                        pair_gaps.push(1);
+                        total_changes += 1;
+                    } else if last_pairs[index].is_some() {
+                        ordinary_gaps.push(1);
+                    }
+                    let plan = ai3_frame_plan(depths[index], loc.t as f32);
+                    presented[index] = Some((pair, depths[index], plan.interval, plan.t.to_bits()));
+                    last_pairs[index] = Some(pair);
+                }
+                assert_eq!(presented[0], presented[1], "dual-deck lease diverged");
+            }
+        }
+        let pair_p99 = percentile(pair_gaps, 0.99);
+        let ordinary_p99 = percentile(ordinary_gaps, 0.99);
+        assert!(total_changes > 2_000);
+        assert_eq!(pair_p99, ordinary_p99);
+        assert_eq!(pair_p99, 1);
+        assert!(depth_changes[1] > 0 && depth_changes[2] > 0 && depth_changes[3] > 0);
+        eprintln!(
+            "ai3 beat gate: pair_changes={total_changes} pair_p99={pair_p99} ordinary_p99={ordinary_p99} depths={:?}",
+            &depth_changes[1..]
+        );
     }
 }
 

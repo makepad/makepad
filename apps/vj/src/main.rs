@@ -1320,11 +1320,11 @@ script_mod! {
                                                         // FRAME TWEEN: how the
                                                         // deck fills time between
                                                         // source frames.
-                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI neural"
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
                                                             deck_a_tween := DropDown{
-                                                                width: 36
+                                                                width: 40
                                                                 height: 22
-                                                                labels: ["OFF" "XF" "FL" "AI"]
+                                                                labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
                                                                 selected_item: 2
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
@@ -1344,6 +1344,10 @@ script_mod! {
                                                                     }
                                                                 }
                                                             }
+                                                        }
+                                                        deck_a_ai3_status := Label{
+                                                            width: 42 height: 22 text: ""
+                                                            draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
                                                         vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         // THE JOG WHEEL: the
@@ -1804,11 +1808,11 @@ script_mod! {
                                                         // FRAME TWEEN: how the
                                                         // deck fills time between
                                                         // source frames.
-                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI neural"
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
                                                             deck_b_tween := DropDown{
-                                                                width: 36
+                                                                width: 40
                                                                 height: 22
-                                                                labels: ["OFF" "XF" "FL" "AI"]
+                                                                labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
                                                                 selected_item: 2
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
@@ -1828,6 +1832,10 @@ script_mod! {
                                                                     }
                                                                 }
                                                             }
+                                                        }
+                                                        deck_b_ai3_status := Label{
+                                                            width: 42 height: 22 text: ""
+                                                            draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
                                                         vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
@@ -3988,7 +3996,11 @@ fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8>
 const TWEEN_NONE: u8 = 0;
 const TWEEN_FADE: u8 = 1;
 const TWEEN_FLOW: u8 = 2;
+/// Persisted code 3 is the shipped neural-field tier (now labelled AI1).
 const TWEEN_AI: u8 = 3;
+const TWEEN_AI2: u8 = 4;
+/// Persisted AI3 adaptive-subdivision tier. Existing profile codes never move.
+const TWEEN_AI3: u8 = 5;
 /// Pair-cache namespace for the luma cut verdict (separate from producers).
 const TWEEN_CUT_TIER: u8 = u8::MAX;
 /// Per-deck neural ladder budget. Exact pair keys make eviction harmless.
@@ -3996,6 +4008,16 @@ const TWEEN_RIFE_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
 /// Measured sustainable AI production rate, shared by the active AI decks.
 const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
+/// Capacity-law GPU duty left to neural production; presentation owns rest.
+const TWEEN_RIFE_GPU_BUDGET: f64 = 0.60;
+
+fn tween_uses_ai(mode: u8) -> bool {
+    mode == TWEEN_AI || mode == TWEEN_AI2 || mode == TWEEN_AI3
+}
+
+fn parse_tween_mode(value: &str) -> u8 {
+    value.parse::<u8>().unwrap_or(TWEEN_FLOW).min(TWEEN_AI3)
+}
 
 /// `VJ_TWEEN_PREFETCH=0` keeps the classic boundary derive available as a
 /// diagnostic A/B. The live default pipelines classical fields.
@@ -5021,7 +5043,31 @@ pub struct App {
     /// Products are parked under the pair that made them. A result can
     /// never change the current lease; it is adopted at a later boundary.
     #[rust]
-    rife_cache: [Option<pair_cache::PairCache<Arc<flow_tween::RifeField>>>; 2],
+    rife_cache: [Option<pair_cache::PairCache<Arc<flow_tween::RifeProduct>>>; 2],
+    /// AI2 midpoint chosen exactly once at a source-pair boundary. A late
+    /// producer result enters the cache but cannot mutate this lease.
+    #[rust]
+    tween_ai2_lease: [Option<Arc<flow_tween::RifeProduct>>; 2],
+    /// AI3 also freezes its deepest complete level at the source-pair
+    /// boundary. Partial/deeper arrivals remain cache-only until traversal.
+    #[rust]
+    tween_ai3_lease: [Option<Arc<flow_tween::RifeProduct>>; 2],
+    #[rust]
+    tween_ai3_lease_depth: [u8; 2],
+    #[rust]
+    tween_ai3_target_depth: [u8; 2],
+    #[rust]
+    tween_ai3_chooser: [flow_tween::Ai3DepthChooser; 2],
+    #[rust]
+    tween_ai3_dims: [Option<(usize, usize)>; 2],
+    #[rust]
+    tween_ai3_admitted: [bool; 2],
+    /// Last admitted producer obligation, used by the other deck's next
+    /// pair choice. Frames/s enforces the 5-synth law; duty uses measured EMA.
+    #[rust]
+    tween_ai_obligation_fps: [f64; 2],
+    #[rust]
+    tween_ai_obligation_duty: [f64; 2],
     #[rust]
     tween_cut_cache: [Option<pair_cache::PairCache<bool>>; 2],
     /// THE PLATTER per slot (platter.rs): the presenter's clock for a
@@ -5944,6 +5990,13 @@ impl App {
         }
     }
 
+    fn deck_ai3_status_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_ai3_status),
+            SlotId::B => ids!(deck_b_ai3_status),
+        }
+    }
+
     fn deck_controls_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
             SlotId::A => ids!(deck_a_controls),
@@ -6851,7 +6904,7 @@ tween {}
                 (Some("mute"), Some(v), _) => profile.muted = v == "1",
                 (Some("sync"), Some(v), _) => profile.sync = v == "1",
                 (Some("tween"), Some(v), _) => {
-                    profile.tween = v.parse::<u8>().unwrap_or(TWEEN_FLOW).min(TWEEN_AI);
+                    profile.tween = parse_tween_mode(v);
                 }
                 _ => {}
             }
@@ -7791,6 +7844,18 @@ p2 {}
         self.nv12_view(cx, slot, |cx, view| view.clear(cx));
         self.tween_view(cx, slot, |cx, view| view.clear(cx));
         self.tween_pair[i] = None;
+        self.tween_ai2_lease[i] = None;
+        self.tween_ai3_lease[i] = None;
+        self.tween_ai3_lease_depth[i] = 0;
+        self.tween_ai3_target_depth[i] = flow_tween::AI3_MIN_DEPTH;
+        self.tween_ai3_chooser[i] = flow_tween::Ai3DepthChooser::default();
+        self.tween_ai3_dims[i] = None;
+        self.tween_ai3_admitted[i] = false;
+        self.tween_ai_obligation_fps[i] = 0.0;
+        self.tween_ai_obligation_duty[i] = 0.0;
+        self.ui
+            .label(cx, Self::deck_ai3_status_path(slot))
+            .set_text(cx, "");
         self.platter[i] = None;
         self.platter_sample[i] = None;
         self.platter_off_frame[i] = None;
@@ -8104,6 +8169,9 @@ p2 {}
                     self.ui
                         .drop_down(cx, Self::deck_tween_path(slot))
                         .set_disabled(cx, true);
+                    self.ui
+                        .label(cx, Self::deck_ai3_status_path(slot))
+                        .set_text(cx, "");
                     self.paint_deck_source_ghost(cx, slot, true);
                     self.paint_text_face(cx, Self::deck_eject_path(slot), LatchPaint::ghost());
                 }
@@ -8155,6 +8223,19 @@ p2 {}
                         tween.set_disabled(cx, false);
                         tween.set_selected_item(cx, self.slot_tween_mode[i] as usize);
                     }
+                    let ai3_status = if self.slot_tween_mode[i] == TWEEN_AI3 {
+                        let depth = self.tween_ai3_lease_depth[i];
+                        if depth > 0 {
+                            format!("AI3 ×{}", flow_tween::ai3_neural_frames(depth))
+                        } else {
+                            "AI3 FL".to_string()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    self.ui
+                        .label(cx, Self::deck_ai3_status_path(slot))
+                        .set_text(cx, &ai3_status);
                     // The beats dropdown mirrors the deck: the value when
                     // synced, — when free (a scratch dash is transient,
                     // painted by apply_scratch).
@@ -15124,7 +15205,7 @@ p2 {}
         let ai_decks = (0..2)
             .filter(|&i| {
                 tween_on
-                    && self.slot_tween_mode[i] == TWEEN_AI
+                    && tween_uses_ai(self.slot_tween_mode[i])
                     && self.slot_media[i] == SlotMedia::Video
                     && self.players[i].is_some()
             })
@@ -15140,17 +15221,32 @@ p2 {}
 
             // Land a finished producer result in its exact cache. It can
             // only be leased at a later pair boundary.
-            if let Some(field) = self.rife_service[i].as_ref().and_then(|s| s.take()) {
+            if let Some(product) = self.rife_service[i].as_ref().and_then(|s| s.take()) {
+                let tier = match product.kind() {
+                    flow_tween::RifeProductKind::Field => TWEEN_AI,
+                    flow_tween::RifeProductKind::Midpoint => TWEEN_AI2,
+                    flow_tween::RifeProductKind::Subdivision { .. } => TWEEN_AI3,
+                };
                 let key = pair_cache::PairKey::new(
-                    field.generation,
-                    field.a,
-                    field.b,
-                    TWEEN_AI,
+                    product.generation(),
+                    product.a(),
+                    product.b(),
+                    tier,
                 );
-                let bytes = field.byte_len();
-                self.rife_cache[i]
-                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_RIFE_CACHE_BYTES))
-                    .insert(key, Arc::new(field), bytes, 100);
+                let bytes = product.byte_len();
+                let products = self.rife_cache[i]
+                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_RIFE_CACHE_BYTES));
+                let improves_ladder = product.subdivision().is_none_or(|new_ladder| {
+                    products
+                        .peek(&key)
+                        .and_then(|old| old.subdivision())
+                        .is_none_or(|old_ladder| {
+                            new_ladder.complete_depth() >= old_ladder.complete_depth()
+                        })
+                });
+                if improves_ladder {
+                    products.insert(key, Arc::new(product), bytes, 100);
+                }
             }
 
             let resident = if self.slot_media[i] == SlotMedia::Video && !self.flow_active(i) {
@@ -15166,6 +15262,13 @@ p2 {}
                 if self.tween_pair[i].take().is_some() {
                     self.tween_view(cx, slot, |cx, view| view.clear(cx));
                 }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
                 self.platter_sample[i] = None;
                 self.platter_off_frame[i] = None;
                 continue;
@@ -15192,6 +15295,13 @@ p2 {}
                 if self.tween_pair[i].take().is_some() {
                     self.tween_view(cx, slot, |cx, view| view.clear(cx));
                 }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
                 if self.platter_off_frame[i] != Some(sample) {
                     self.platter_off_frame[i] = Some(sample);
                     self.present_platter_off(
@@ -15214,6 +15324,13 @@ p2 {}
                 if self.tween_pair[i].take().is_some() {
                     self.tween_view(cx, slot, |cx, view| view.clear(cx));
                 }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
                 if self.platter_off_frame[i] != Some(sample) {
                     self.platter_off_frame[i] = Some(sample);
                     self.present_platter_off(
@@ -15253,15 +15370,124 @@ p2 {}
                 verdict
             });
             let cut = mode >= TWEEN_FLOW && cut_verdict;
+            let mut ai3_capacity_frames = 0usize;
+            if pair_changed && mode == TWEEN_AI3 {
+                let dims = rife_proxy_dims(width, height);
+                if self.tween_ai3_dims[i] != Some(dims) {
+                    self.tween_ai3_dims[i] = Some(dims);
+                    self.tween_ai3_chooser[i] = flow_tween::Ai3DepthChooser::default();
+                }
+                let synth_seconds = self.rife_service[i]
+                    .as_ref()
+                    .and_then(|service| service.synth_seconds(dims.0, dims.1))
+                    .unwrap_or(flow_tween::AI3_BOOTSTRAP_SYNTH_SECS);
+                let (pair_budget, capacity_frames) = if step.pace > 0.0 {
+                    let pair_period = 1.0 / step.pace;
+                    let other = 1 - i;
+                    let free_duty =
+                        (TWEEN_RIFE_GPU_BUDGET - self.tween_ai_obligation_duty[other])
+                            .max(0.0);
+                    let free_fps =
+                        (TWEEN_RIFE_CAPACITY_FPS - self.tween_ai_obligation_fps[other])
+                            .max(0.0);
+                    (pair_period * free_duty, (pair_period * free_fps).floor() as usize)
+                } else {
+                    (0.0, 0)
+                };
+                ai3_capacity_frames = capacity_frames;
+                self.tween_ai3_admitted[i] = capacity_frames >= 1;
+                self.tween_ai3_target_depth[i] = self.tween_ai3_chooser[i].choose(
+                    synth_seconds,
+                    pair_budget,
+                    capacity_frames,
+                );
+            }
+            if tween_uses_ai(mode)
+                && step.pace > 0.0
+                && rife_enabled()
+                && self.rife_state[i] != 2
+            {
+                let (pw, ph) = rife_proxy_dims(width, height);
+                let synth_seconds = self.rife_service[i]
+                    .as_ref()
+                    .and_then(|service| service.synth_seconds(pw, ph))
+                    .unwrap_or(flow_tween::AI3_BOOTSTRAP_SYNTH_SECS);
+                let frames = if mode == TWEEN_AI3 {
+                    if self.tween_ai3_admitted[i] {
+                        flow_tween::ai3_neural_frames(self.tween_ai3_target_depth[i])
+                    } else {
+                        0
+                    }
+                } else {
+                    1
+                };
+                self.tween_ai_obligation_fps[i] = step.pace * frames as f64;
+                self.tween_ai_obligation_duty[i] =
+                    self.tween_ai_obligation_fps[i] * synth_seconds;
+            } else {
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+            }
             // Freeze the producer choice at the pair boundary. Late output
             // stays cached for a later traversal of this exact pair.
-            let rife_field = if mode == TWEEN_AI && pair_changed {
+            let neural_product = if tween_uses_ai(mode) && pair_changed {
                 self.rife_cache[i]
                     .as_mut()
                     .and_then(|products| products.get(&pair).cloned())
             } else {
                 None
             };
+            if pair_changed {
+                self.tween_ai2_lease[i] = if mode == TWEEN_AI2
+                    && !cut
+                    && neural_product
+                        .as_deref()
+                        .and_then(|product| product.midpoint())
+                        .is_some_and(|midpoint| midpoint.is_valid())
+                {
+                    neural_product.clone()
+                } else {
+                    None
+                };
+                let ai3_depth = if mode == TWEEN_AI3 && !cut {
+                    neural_product
+                        .as_deref()
+                        .and_then(|product| product.subdivision())
+                        .map(|ladder| {
+                            ladder.complete_depth().min(self.tween_ai3_target_depth[i])
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                self.tween_ai3_lease[i] = (ai3_depth > 0)
+                    .then(|| neural_product.clone())
+                    .flatten();
+                self.tween_ai3_lease_depth[i] = ai3_depth;
+                let status = if mode == TWEEN_AI3 {
+                    if ai3_depth > 0 {
+                        format!("AI3 ×{}", flow_tween::ai3_neural_frames(ai3_depth))
+                    } else {
+                        "AI3 FL".to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                self.ui
+                    .label(cx, Self::deck_ai3_status_path(slot))
+                    .set_text(cx, &status);
+            }
+            let ai2_lease = self.tween_ai2_lease[i].clone();
+            let has_ai2_midpoint = mode == TWEEN_AI2
+                && ai2_lease
+                    .as_deref()
+                    .and_then(|product| product.midpoint())
+                    .is_some();
+            let ai2_plan = flow_tween::ai2_frame_plan(has_ai2_midpoint, step.t);
+            let ai3_lease = self.tween_ai3_lease[i].clone();
+            let ai3_depth = self.tween_ai3_lease_depth[i];
+            let ai3_plan = (mode == TWEEN_AI3 && ai3_depth > 0)
+                .then(|| flow_tween::ai3_frame_plan(ai3_depth, step.t));
             // The platter predicts ALONG loop/bounce traversal. Adjacent
             // pairs share exactly one endpoint, so upload only the other
             // frame into the view's three-frame ring.
@@ -15306,17 +15532,57 @@ p2 {}
                 if pair_changed {
                     view.set_pair_keyed(cx, pair, da, db, width, height);
                     view.set_cut(cx, cut);
-                    if let Some(field) = rife_field.as_deref() {
-                        view.set_rife_field(
-                            cx,
-                            field.a,
-                            field.width,
-                            field.height,
-                            &field.flow,
-                            &field.mask,
-                        );
-                    } else {
-                        view.clear_rife_field(cx);
+                    match mode {
+                        TWEEN_AI => {
+                            view.clear_ai2_midpoint(cx);
+                            view.clear_ai3_subdivision(cx);
+                            if let Some(field) =
+                                neural_product.as_deref().and_then(|product| product.field())
+                            {
+                                view.set_rife_field(
+                                    cx,
+                                    field.a,
+                                    field.width,
+                                    field.height,
+                                    &field.flow,
+                                    &field.mask,
+                                );
+                            } else {
+                                view.clear_rife_field(cx);
+                            }
+                        }
+                        TWEEN_AI2 => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai3_subdivision(cx);
+                            if let Some(midpoint) =
+                                ai2_lease.as_deref().and_then(|product| product.midpoint())
+                            {
+                                if !view.set_ai2_midpoint(cx, midpoint) {
+                                    view.clear_ai2_midpoint(cx);
+                                }
+                            } else {
+                                view.clear_ai2_midpoint(cx);
+                            }
+                        }
+                        TWEEN_AI3 => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai2_midpoint(cx);
+                            if let Some(subdivision) = ai3_lease
+                                .as_deref()
+                                .and_then(|product| product.subdivision())
+                            {
+                                if !view.set_ai3_subdivision(cx, subdivision, ai3_depth) {
+                                    view.clear_ai3_subdivision(cx);
+                                }
+                            } else {
+                                view.clear_ai3_subdivision(cx);
+                            }
+                        }
+                        _ => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai2_midpoint(cx);
+                            view.clear_ai3_subdivision(cx);
+                        }
                     }
                 } else if mode != TWEEN_AI {
                     view.clear_rife_field(cx);
@@ -15327,7 +15593,17 @@ p2 {}
                     view.cancel_prefetch();
                     None
                 };
-                view.set_t(cx, step.t);
+                if mode == TWEEN_AI2 {
+                    view.select_ai2_pair(cx, ai2_plan.pair);
+                    view.set_t(cx, ai2_plan.t);
+                } else if let Some(plan) = ai3_plan {
+                    view.select_ai2_pair(cx, flow_tween::Ai2Pair::Original);
+                    view.select_ai3_pair(cx, plan.interval);
+                    view.set_t(cx, plan.t);
+                } else {
+                    view.select_ai2_pair(cx, flow_tween::Ai2Pair::Original);
+                    view.set_t(cx, step.t);
+                }
                 (view.output_texture(), remaining)
             });
             self.tween_pair[i] = Some(pair);
@@ -15345,11 +15621,15 @@ p2 {}
             // Prefetch along the map, never by numeric pair + 1. The shared
             // capacity law degrades an impossible future pair to classical
             // before any neural work is queued.
-            if mode == TWEEN_AI
+            if tween_uses_ai(mode)
                 && pair_changed
                 && rife_enabled()
                 && step.pace > 0.0
-                && step.pace <= ai_ceiling
+                && if mode == TWEEN_AI3 {
+                    ai3_capacity_frames >= 1
+                } else {
+                    step.pace <= ai_ceiling
+                }
             {
                 if self.rife_state[i] == 0 {
                     match flow_tween::RifeService::start(&rife_model_path()) {
@@ -15365,16 +15645,41 @@ p2 {}
                     }
                 }
                 if self.rife_state[i] == 1 {
-                    if let Some(ahead) = self.platter_locate_ahead(i, 1.0) {
+                    // AI1 keeps today's one-pair lookahead. AI2 offers two;
+                    // AI3 follows step 8 through three exact traversal pairs.
+                    // The idle service still accepts only the nearest missing
+                    // ladder, at the depth admitted for this source pair.
+                    let offer_depth = match mode {
+                        TWEEN_AI2 => 2,
+                        TWEEN_AI3 => 3,
+                        _ => 1,
+                    };
+                    for depth in 1..=offer_depth {
+                        let Some(ahead) = self.platter_locate_ahead(i, depth as f64) else {
+                            break;
+                        };
                         let ahead_key = pair_cache::PairKey::new(
                             generation,
                             ahead.a,
                             ahead.b,
-                            TWEEN_AI,
+                            mode,
                         );
-                        let already_cached = self.rife_cache[i]
-                            .as_ref()
-                            .is_some_and(|products| products.contains(&ahead_key));
+                        let already_cached = self.rife_cache[i].as_ref().is_some_and(|products| {
+                            if mode == TWEEN_AI3 {
+                                products
+                                    .peek(&ahead_key)
+                                    .and_then(|product| product.subdivision())
+                                    .is_some_and(|ladder| {
+                                        ladder.complete_depth()
+                                            >= self.tween_ai3_target_depth[i]
+                                    })
+                            } else {
+                                products.contains(&ahead_key)
+                            }
+                        });
+                        if already_cached {
+                            continue;
+                        }
                         let ahead_cut_key = pair_cache::PairKey::new(
                             generation,
                             ahead.a,
@@ -15413,25 +15718,34 @@ p2 {}
                                 );
                             verdict
                         });
-                        if !already_cached && !ahead_cut {
-                            if let (Some(service), Some(start)) =
-                                (self.rife_service[i].as_ref(), self.app_start_instant)
-                            {
-                                let (pw, ph) = rife_proxy_dims(width, height);
-                                let deadline = start + std::time::Duration::from_secs_f64(
-                                    (now + 1.0 / step.pace).max(0.0),
-                                );
-                                service.offer(flow_tween::RifeJob {
-                                    generation,
-                                    a: ahead.a,
-                                    b: ahead.b,
-                                    frames: cache.clone(),
-                                    width: pw,
-                                    height: ph,
-                                    deadline,
-                                });
-                            }
+                        if ahead_cut {
+                            continue;
                         }
+                        if let (Some(service), Some(start)) =
+                            (self.rife_service[i].as_ref(), self.app_start_instant)
+                        {
+                            let (pw, ph) = rife_proxy_dims(width, height);
+                            let deadline = start + std::time::Duration::from_secs_f64(
+                                (now + depth as f64 / step.pace).max(0.0),
+                            );
+                            let _ = service.offer_next(flow_tween::RifeJob {
+                                generation,
+                                a: ahead.a,
+                                b: ahead.b,
+                                kind: match mode {
+                                    TWEEN_AI2 => flow_tween::RifeProductKind::Midpoint,
+                                    TWEEN_AI3 => flow_tween::RifeProductKind::Subdivision {
+                                        depth: self.tween_ai3_target_depth[i],
+                                    },
+                                    _ => flow_tween::RifeProductKind::Field,
+                                },
+                                frames: cache.clone(),
+                                width: pw,
+                                height: ph,
+                                deadline,
+                            });
+                        }
+                        break;
                     }
                 }
             }
@@ -16951,7 +17265,7 @@ impl MatchEvent for App {
                 self.save_clip_profile(slot);
                 self.video_pump = cx.new_next_frame();
             }
-            // THE TWEEN PICKER — OFF / XF / FL / AI: how the deck fills
+            // THE TWEEN PICKER — OFF / XF / FL / AI1 / AI2 / AI3: how the deck fills
             // time between source frames, stored with the clip like the
             // trim range. The pump reads the mode every frame; all this
             // does is record and persist it.
@@ -16960,7 +17274,15 @@ impl MatchEvent for App {
                 .drop_down(cx, Self::deck_tween_path(slot))
                 .selected(actions)
             {
-                self.slot_tween_mode[i] = (index as u8).min(TWEEN_AI);
+                self.slot_tween_mode[i] = (index as u8).min(TWEEN_AI3);
+                let status = if self.slot_tween_mode[i] == TWEEN_AI3 {
+                    "AI3 FL"
+                } else {
+                    ""
+                };
+                self.ui
+                    .label(cx, Self::deck_ai3_status_path(slot))
+                    .set_text(cx, status);
                 self.save_clip_profile(slot);
                 self.video_pump = cx.new_next_frame();
             }
@@ -17863,6 +18185,26 @@ impl Drop for App {
             lighting.set_power(false);
             drop(lighting);
         }
+    }
+}
+
+#[cfg(test)]
+mod tween_tier_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_tween_codes_stay_stable_and_parsing_admits_ai3() {
+        assert_eq!(TWEEN_NONE, 0);
+        assert_eq!(TWEEN_FADE, 1);
+        assert_eq!(TWEEN_FLOW, 2);
+        assert_eq!(TWEEN_AI, 3, "existing AI profiles are AI1");
+        assert_eq!(TWEEN_AI2, 4);
+        assert_eq!(TWEEN_AI3, 5);
+        assert_eq!(parse_tween_mode("3"), TWEEN_AI);
+        assert_eq!(parse_tween_mode("4"), TWEEN_AI2);
+        assert_eq!(parse_tween_mode("5"), TWEEN_AI3);
+        assert_eq!(parse_tween_mode("255"), TWEEN_AI3);
+        assert_eq!(parse_tween_mode("broken"), TWEEN_FLOW);
     }
 }
 
