@@ -16320,6 +16320,28 @@ p2 {}
                     self.run_deck_cmds(cx, cmds);
                 }
             }
+            if refs.filter_label.clicked(actions) {
+                if let Some(value) = refs.filter.reset_to_default(cx) {
+                    let cmds = self.decks.set_filter(deck, value as f32);
+                    self.run_deck_cmds(cx, cmds);
+                }
+            }
+            for (band, label) in refs.eq_labels.iter().enumerate() {
+                if label.clicked(actions) {
+                    if let Some(value) = refs.eq_knobs[band].reset_to_default(cx) {
+                        let cmds = self.decks.set_eq(deck, band, value as f32);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+            }
+            for (stem, label) in refs.stem_labels.iter().enumerate() {
+                if label.clicked(actions) {
+                    if let Some(value) = refs.stem_knobs[stem].reset_to_default(cx) {
+                        let cmds = self.decks.set_stem(deck, stem, value as f32);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+            }
             self.music_refs.decks[deck.index()] = refs;
         }
         if self.music_refs.auto_sync.clicked(actions) {
