@@ -71,6 +71,24 @@ pub fn heading_to_camera_yaw(yaw: f32) -> f32 {
     -yaw
 }
 
+/// Sim heading, given an angle already in the *renderer's* camera-yaw
+/// convention — the other side of [`heading_to_camera_yaw`].
+///
+/// The classic-world importers publish every facing they carry (a map's
+/// spawn, a placed thing's angle, a teleport's exit) in the camera
+/// convention: `makepad_render::level::yaw_forward` = `(sin y, 0, −cos y)`,
+/// which is what a walker's camera turns to. A body's `yaw` is a heading —
+/// `(−sin y, 0, −cos y)` — so anything that turns declared map data into a
+/// body's facing must come through here. Feeding the raw declared angle to
+/// `Entity::yaw` mirrors the body about the world's X axis, which is
+/// invisible on the north/south axis and a HALF TURN on the east/west one:
+/// that is exactly how a level's monsters came to walk at the player
+/// showing their backs.
+#[inline]
+pub fn camera_yaw_to_heading(yaw: f32) -> f32 {
+    -yaw
+}
+
 /// Pitch for the renderer's camera rig, given a "positive lifts the camera"
 /// pitch.
 ///
@@ -182,6 +200,23 @@ mod tests {
                 (f.x - cx).abs() < 1e-5 && (f.z - cz).abs() < 1e-5,
                 "at {deg} deg heading faces {f:?} but camera looks ({cx},{cz})"
             );
+        }
+    }
+
+    #[test]
+    fn camera_yaw_round_trips_through_the_heading_basis() {
+        // The declared-map-data direction: an importer's camera-convention
+        // angle must become the heading that faces the same way it does.
+        for deg in [-179.0f32, -90.0, -33.0, 0.0, 45.0, 90.0, 179.0] {
+            let cam = deg.to_radians();
+            let h = camera_yaw_to_heading(cam);
+            let f = heading_to_forward(h);
+            let (cx, cz) = (cam.sin(), -cam.cos());
+            assert!(
+                (f.x - cx).abs() < 1e-5 && (f.z - cz).abs() < 1e-5,
+                "at {deg} deg camera yaw looks ({cx},{cz}) but the heading faces {f:?}"
+            );
+            assert!(heading_delta(cam, heading_to_camera_yaw(h)).abs() < 1e-5);
         }
     }
 
