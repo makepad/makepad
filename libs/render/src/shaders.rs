@@ -749,7 +749,7 @@ script_mod! {
             // texels, the ramp is wider than the texel, and the expression
             // collapses back to the ordinary bilinear average. One sampler,
             // both behaviours, decided per fragment by the derivatives.
-            let uv = self.v_uv
+            var uv = self.v_uv
             let dims = self.screen_size.zw
             if dims.x > 0.5 && dims.y > 0.5 {
                 let texel = uv * dims
@@ -4570,7 +4570,7 @@ script_mod! {
         tex: texture_2d(float)
         // `tint` and `tex_size` come from the Rust struct; see DrawHudShape.
         pixel: fn() {
-            let uv = vec2(
+            var uv = vec2(
                 self.uv_rect.x + self.pos.x * (self.uv_rect.z - self.uv_rect.x),
                 self.uv_rect.y + self.pos.y * (self.uv_rect.w - self.uv_rect.y)
             )
