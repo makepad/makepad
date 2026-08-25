@@ -44,6 +44,7 @@ fn main() {
         let label = match format {
             AudioFormat::Mp3 => "mp3",
             AudioFormat::OggVorbis => "ogg",
+            AudioFormat::Flac => "flac",
         };
         println!(
             "{:<40} {:>8} {:>7.1} {:>9.0} {:>12.3} {:>12.0}",

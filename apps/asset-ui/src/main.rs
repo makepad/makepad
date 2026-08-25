@@ -228,6 +228,7 @@ fn sniff_clip_format(bytes: &[u8]) -> Option<ClipFormat> {
     match makepad_audio_decode::sniff(bytes)? {
         makepad_audio_decode::AudioFormat::Mp3 => Some(ClipFormat::Mp3),
         makepad_audio_decode::AudioFormat::OggVorbis => Some(ClipFormat::Ogg),
+        makepad_audio_decode::AudioFormat::Flac => None,
     }
 }
 use crate::store_views::{
