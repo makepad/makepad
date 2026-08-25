@@ -60,9 +60,52 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
     })
 }
 
+extern "C" {
+    /// libobjc: the hook called with an exception object before it is
+    /// thrown. The only place that still sees the reason when the unwind
+    /// later meets a Rust frame and aborts ("Rust cannot catch foreign
+    /// exceptions") before AppKit's top-level handler can print anything.
+    fn objc_setExceptionPreprocessor(
+        f: extern "C" fn(ObjcId) -> ObjcId,
+    ) -> Option<extern "C" fn(ObjcId) -> ObjcId>;
+}
+
+unsafe fn objc_exception_text(obj: ObjcId) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    let utf8: *const std::os::raw::c_char = msg_send![obj, UTF8String];
+    if utf8.is_null() {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+}
+
+extern "C" fn log_objc_exception(exception: ObjcId) -> ObjcId {
+    unsafe {
+        let name: ObjcId = msg_send![exception, name];
+        let reason: ObjcId = msg_send![exception, reason];
+        eprintln!(
+            "makepad: ObjC exception {}: {}",
+            objc_exception_text(name),
+            objc_exception_text(reason)
+        );
+        let symbols: ObjcId = msg_send![exception, callStackSymbols];
+        if !symbols.is_null() {
+            let count: u64 = msg_send![symbols, count];
+            for i in 0..count.min(16) {
+                let line: ObjcId = msg_send![symbols, objectAtIndex: i];
+                eprintln!("    {}", objc_exception_text(line));
+            }
+        }
+    }
+    exception
+}
+
 pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) {
     unsafe {
         MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
+        objc_setExceptionPreprocessor(log_objc_exception);
     }
     MACOS_APP.with(|app| {
         *app.borrow_mut() = Some(MacosApp::new(event_callback));

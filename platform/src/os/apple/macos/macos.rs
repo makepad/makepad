@@ -81,6 +81,10 @@ pub struct MetalWindow {
     /// Packed: low 32 bits are the count, high 32 bits are a reset generation,
     /// so a handler armed before a watchdog reset can't decrement a newer count.
     pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Paced by CAMetalDisplayLink, which owns the layer's drawables: a paint
+    /// must use the drawable its update hands over; `nextDrawable` meanwhile
+    /// raises CAMetalLayerInvalidOperation (took visible windows down at launch).
+    pub link_is_metal: bool,
     /// When the present gate started skipping beats, so a gate whose
     /// handlers were lost can be forced back open instead of wedging.
     gate_closed_since: Option<Instant>,
@@ -130,6 +134,7 @@ impl MetalWindow {
 
         MetalWindow {
             is_resizing: false,
+            link_is_metal: false,
             window_id,
             cal_size: Vec2d::default(),
             ca_layer,
@@ -179,6 +184,7 @@ impl MetalWindow {
 
         MetalWindow {
             is_resizing: false,
+            link_is_metal: false,
             window_id,
             cal_size: Vec2d::default(),
             ca_layer,
@@ -586,6 +592,12 @@ impl Cx {
                         // the main thread, so it gets its own channel.
                         self.perf_monitor
                             .frame_boundary(with_macos_app(|app| app.time_now()));
+                        if link_drawable.is_none() && metal_window.link_is_metal {
+                            // The layer's display link owns the drawables and this beat did
+                            // not come from it: leave the pass dirty, the next update paints it.
+                            self.repaint_pass(*draw_pass_id);
+                            return;
+                        }
                         let drawable = if let Some(drawable) = link_drawable {
                             drawable
                         } else {
@@ -1062,6 +1074,13 @@ impl Cx {
                 self.os.link_scope = Some(window as usize);
                 self.os.link_flip_time = Some(time);
                 self.os.link_drawable = drawable;
+                if drawable.is_some() {
+                    for mw in metal_windows.iter_mut() {
+                        if mw.cocoa_window.window as usize == window as usize {
+                            mw.link_is_metal = true;
+                        }
+                    }
+                }
                 self.os.link_target_presentation_time = target_presentation_time;
                 let flow = if primary {
                     // The primary link drives the WHOLE beat — identical to
