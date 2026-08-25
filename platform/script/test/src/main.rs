@@ -253,6 +253,14 @@ pub fn main() {
         assert(1 + 2 < 4) assert(!(1 + 2 < 2))
         assert(1 < 2 && 3 < 4) assert(!(1 > 2 && 3 < 4))
         assert(1 > 2 || 3 < 4) assert(!(1 > 2 || 3 > 4))
+        // unary on a field access followed by a looser binary op: the unary
+        // binds to the field, not to the whole expression (-(a.b - c) bug)
+        let uo = {x: 2.0, y: 4.0, f: false, t: true, inner: {z: 3.0}}
+        assert(-uo.x - 1.0 == -3.0) assert(-uo.x + 1.0 == -1.0)
+        assert(-uo.x * uo.y == -8.0) assert(-uo.inner.z - 1.0 == -4.0)
+        assert(-uo.x < 0.0) assert(!(-uo.x > 0.0))
+        assert(!uo.f && uo.t) assert(!uo.f || uo.f) assert(!uo.t == false)
+        assert(-uo.x == -2.0) assert(uo.y + -uo.x == 2.0)
         assert((1 & 3) == 1) assert((1 | 2) == 3) assert((3 ^ 1) == 2)
         assert(1 << 2 == 4) assert(8 >> 2 == 2)
 
