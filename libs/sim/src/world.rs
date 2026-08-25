@@ -55,6 +55,11 @@ pub struct GameWorld {
     /// HUD gauges, keyed by name.
     pub hud_bars: Vec<HudBar>,
     pub crosshair: bool,
+    /// The composed HUD: panels, gauges, readouts, icons, slot grids, the
+    /// message log and the screen flash. The layer above `hud_slots`/
+    /// `hud_bars`, which stay exactly as they are for the games that use
+    /// them.
+    pub hud: crate::hud::HudDoc,
     /// Camera requests from script.
     pub cam_target: Vec3f,
     pub cam_distance: f32,
@@ -337,6 +342,7 @@ impl GameWorld {
         self.timers.clear();
         self.hud_slots.clear();
         self.hud_bars.clear();
+        self.hud.clear();
         self.crosshair = false;
         self.beams.clear();
         self.cam_target = vec3f(0.0, 2.0, 0.0);
