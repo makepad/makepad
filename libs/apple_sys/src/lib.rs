@@ -458,9 +458,12 @@ extern "C" {
     pub fn CMSampleBufferGetFormatDescription(sbuf: CMSampleBufferRef) -> CMFormatDescriptionRef;
     pub fn CMSampleBufferGetDataBuffer(sbuf: CMSampleBufferRef) -> CMBlockBufferRef;
     pub fn CMSampleBufferDataIsReady(sbuf: CMSampleBufferRef) -> BOOL;
+    // CoreMedia declares this parameter as CoreFoundation `Boolean` (a u8 on
+    // every Apple arch), not Objective-C `BOOL` (`bool` on arm64, `signed
+    // char` on x86_64) — the old signature only compiled on arm64.
     pub fn CMSampleBufferGetSampleAttachmentsArray(
         sbuf: CMSampleBufferRef,
-        createIfNecessary: BOOL,
+        createIfNecessary: Boolean,
     ) -> CFArrayRef;
     pub fn CMSampleBufferGetPresentationTimeStamp(sbuf: CMSampleBufferRef) -> CMTime;
 
