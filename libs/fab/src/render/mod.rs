@@ -187,6 +187,10 @@ pub fn settings_from_api(r: &RenderSettings, sky: &SkyState, preview: bool) -> P
         // transparent, not the flat G-buffer fallback. F12 keeps the
         // fallback (it draws on the editor background).
         untraced_transparent: preview,
+        // The resolution ladder: a complete coarse traced picture within the
+        // first few dispatches, sharpening rung by rung to native, then
+        // converging. Interactive panes only — F12/track render native-only.
+        progressive: preview,
         // `FAB_PT_DEBUG=n` selects the tracer's debug output (the modes are
         // documented on `PtSettings::debug_mode`) — the seam's diagnostic
         // knob, like `MAKEPAD_PT_BUDGET_MS`.
@@ -763,6 +767,7 @@ impl RenderedPreview {
                 converging: false,
                 done: t.stats.done,
                 samples_done: t.stats.spp as u32,
+                stage_shift: t.stats.rung_shift,
             });
         }
         if job_active {
@@ -860,8 +865,8 @@ impl RenderedPreview {
             let centre = t.focus_distance_at(w * 0.5, h * 0.5);
             let (ro, rd) = t.pixel_ray(w * 0.5, h * 0.5);
             log!(
-                "render: seam frame {} spp {:.3} tile {} x{} host {:.1} ms gpu {:.2}/{:.2} ms ({} samples); centre ray {:?} -> {:?} hits at {:?}; sky sun_rad {:?} zenith {:?} up {:?}",
-                t.stats.frames, t.stats.spp, t.stats.tile_edge, t.stats.tiles, t.stats.last_frame_ms,
+                "render: seam frame {} rung 1/{} spp {:.3} tile {} x{} host {:.1} ms gpu {:.2}/{:.2} ms ({} samples); centre ray {:?} -> {:?} hits at {:?}; sky sun_rad {:?} zenith {:?} up {:?}",
+                t.stats.frames, 1u32 << t.stats.rung_shift, t.stats.spp, t.stats.tile_edge, t.stats.tiles, t.stats.last_frame_ms,
                 t.stats.gpu_time_ms, t.stats.gpu_budget_ms, t.stats.gpu_samples, ro, rd, centre,
                 t.sky().sun_radiance, t.sky().zenith, t.sky().up
             );
@@ -875,6 +880,7 @@ impl RenderedPreview {
             converging: !t.stats.done || self.track.is_some(),
             done: t.stats.done,
             samples_done: t.stats.spp as u32,
+            stage_shift: t.stats.rung_shift,
         })
     }
 
