@@ -71,12 +71,19 @@ pub struct SceneDraws<'a> {
 }
 
 /// One world-space upright quad. `pos.xyz` is the centre, `pos.w` is yaw
-/// (camera yaw faces the orbit/walk camera). `size.xy` is width/height.
+/// (camera yaw faces the orbit/walk camera). `size.xy` is width/height in
+/// world units; `size.zw` is the TEXTURE's pixel size, which the shader needs
+/// to sample on texel centres (crisp magnification, filtered minification).
+/// Leave `zw` zero and the quad falls back to a plain bilinear fetch.
 #[derive(Clone)]
 pub struct ScreenInstance {
     pub texture: Texture,
     pub pos: Vec4f,
     pub size: Vec4f,
+    /// Sub-rectangle of the texture this quad shows, `(u0, v0, u1, v1)`.
+    /// `u0 > u1` draws it X-mirrored. A whole-texture quad passes
+    /// `(0, 0, 1, 1)`.
+    pub uv: Vec4f,
 }
 
 /// Per-frame render counters, handed back for the host's profiler.
@@ -792,7 +799,8 @@ impl ModelDraw<'_> {
             d.metallic = m.metallic;
             d.roughness = m.roughness;
             d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
-            d.skinned.draw_vars.set_texture(6, &m.orm);
+            // Slot 7: the inherited set now ends at elem_map (slot 6).
+            d.skinned.draw_vars.set_texture(7, &m.orm);
         }
     }
 }
@@ -7475,6 +7483,8 @@ impl Renderer {
             let geometry_id = self.ensure_flare_geometry(cx.cx);
             sc.draw_vars.geometry_id = Some(geometry_id);
             sc.depth_clip = 1.0;
+            sc.cutout = 0.0;
+            sc.uv_rect = vec4(0.0, 0.0, 1.0, 1.0);
             if sc.screen_size.x.abs() > 0.0
                 && sc.screen_size.y > 0.0
                 && sc.draw_vars.can_instance()
@@ -7482,6 +7492,11 @@ impl Renderer {
                 let new_area = cx.add_instance(&sc.draw_vars);
                 sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
             }
+            // Sprite billboards are cut-out artwork, always: the quad is a
+            // bounding box around a figure and everything outside it is
+            // transparent. Without the alpha test every actor is a black
+            // rectangle. The video screen above keeps cutout 0.
+            sc.cutout = 1.0;
             for inst in draws.screen_instances {
                 if inst.size.x <= 0.0 || inst.size.y <= 0.0 {
                     continue;
@@ -7489,6 +7504,7 @@ impl Renderer {
                 sc.draw_vars.set_texture(0, &inst.texture);
                 sc.screen_pos = inst.pos;
                 sc.screen_size = inst.size;
+                sc.uv_rect = inst.uv;
                 if sc.draw_vars.can_instance() {
                     let new_area = cx.add_instance(&sc.draw_vars);
                     sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
