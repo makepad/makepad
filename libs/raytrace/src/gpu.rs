@@ -80,6 +80,11 @@ script_mod! {
 
         res: uniform(vec2f)
         inv_res: uniform(vec2f)
+        // Ray-generation pixel grid of the CURRENT resolution rung: the whole
+        // camera frame maps across `1/cam_inv` pixels. Texture addressing
+        // stays `inv_res` (the buffers are native-sized; a coarse rung lives
+        // in their top-left corner).
+        cam_inv: uniform(vec2f)
         tri_inv: uniform(vec2f)
         attr_inv: uniform(vec2f)
         bvh_inv: uniform(vec2f)
@@ -100,6 +105,11 @@ script_mod! {
         max_diffuse: uniform(4.0)
         preview_clamp: uniform(0.0)
         shadow_skin: uniform(0.0)
+        // Texture minification: one texel of the atlas, and the world size
+        // one pixel of the CURRENT rung subtends (per metre of ray length
+        // for perspective, absolute metres for ortho).
+        atlas_inv: uniform(vec2f)
+        pixel_world: uniform(0.0)
         adaptive_min: uniform(0.0)
         adaptive_thresh: uniform(0.0005)
         cam_pos: uniform(vec3f)
@@ -700,7 +710,7 @@ script_mod! {
             var rd = vec3(0.0, 0.0, 1.0)
             var hit = vec4(0.0, -1.0, 0.0, 0.0)
             if self.use_gbuffer > 0.5 {
-                let ndc = vec2((f32(px) + 0.5 + self.jitter.x) * self.inv_res.x * 2.0 - 1.0, 1.0 - (f32(py) + 0.5 + self.jitter.y) * self.inv_res.y * 2.0)
+                let ndc = vec2((f32(px) + 0.5 + self.jitter.x) * self.cam_inv.x * 2.0 - 1.0, 1.0 - (f32(py) + 0.5 + self.jitter.y) * self.cam_inv.y * 2.0)
                 if self.ortho.x > 0.0 {
                     ro = ro + self.cam_right * (ndc.x * self.ortho.x) + self.cam_up * (ndc.y * self.ortho.y)
                     rd = self.cam_fwd
@@ -710,7 +720,7 @@ script_mod! {
                 let g = self.gbuf_tex.sample_nearest((vec2(f32(px), f32(py)) + vec2(0.5, 0.5)) * self.inv_res)
                 hit = vec4(g.w, g.x, g.y, g.z)
             } else {
-                let ndc = vec2((f32(px) + j.x) * self.inv_res.x * 2.0 - 1.0, 1.0 - (f32(py) + j.y) * self.inv_res.y * 2.0)
+                let ndc = vec2((f32(px) + j.x) * self.cam_inv.x * 2.0 - 1.0, 1.0 - (f32(py) + j.y) * self.cam_inv.y * 2.0)
                 var dir = normalize(self.cam_fwd + self.cam_right * (ndc.x * self.cam_tan.x) + self.cam_up * (ndc.y * self.cam_tan.y))
                 if self.ortho.x > 0.0 {
                     ro = ro + self.cam_right * (ndc.x * self.ortho.x) + self.cam_up * (ndc.y * self.ortho.y)
@@ -798,7 +808,39 @@ script_mod! {
                 var albedo = m0.xyz
                 if m2.z > 0.0 {
                     let m3 = self.fetch_mat(mi * 4u + 3u)
-                    let tc = self.atlas_tex.sample_nearest(m3.xy + fract(uv) * m3.zw).xyz
+                    var tc = self.atlas_tex.sample_nearest(m3.xy + fract(uv) * m3.zw).xyz
+                    // Minification: a nearest fetch on a texture tiled tens
+                    // to hundreds of times under one pixel is a per-sample
+                    // texel lottery — spatial salt-and-pepper that never
+                    // converges pixel-to-pixel and shimmers as samples land.
+                    // Blend toward the image's linear mean (the atlas
+                    // corner texel) as the pixel footprint crosses texels:
+                    // the same value the estimator converges to, at zero
+                    // variance. Magnification is untouched.
+                    if self.pixel_world > 0.0 {
+                        let duv1 = vec2(a2.w, a3.x) - vec2(a0.w, a1.w)
+                        let duv2 = vec2(a3.y, a3.z) - vec2(a0.w, a1.w)
+                        let uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x)
+                        // Anisotropy matters: a grazing view compresses one
+                        // texture axis under a pixel long before the area
+                        // metric notices (that is the moire on the roof).
+                        // Take the worst of the area metric and the two
+                        // edge densities, and stretch the footprint by the
+                        // incidence angle.
+                        let d_area = sqrt(uv_area / max(length(gn), 0.000000000001))
+                        let d1 = length(duv1) / max(length(e1), 0.000001)
+                        let d2 = length(duv2) / max(length(e2), 0.000001)
+                        let density = max(d_area, max(d1, d2))
+                        var footprint_m = self.pixel_world * hit.x
+                        if self.ortho.x > 0.0 { footprint_m = self.pixel_world }
+                        footprint_m = footprint_m / max(abs(dot(rd, ng)), 0.1)
+                        let texels = density * footprint_m * (m3.z / self.atlas_inv.x)
+                        let blend = clamp((texels - 2.0) * 0.071428575, 0.0, 1.0)
+                        if blend > 0.0 {
+                            let mean = self.atlas_tex.sample_nearest(m3.xy - self.atlas_inv).xyz
+                            tc = mix(tc, mean, blend)
+                        }
+                    }
                     albedo = albedo * pow(tc, vec3(2.2, 2.2, 2.2))
                 }
                 let rough = max(m0.w, 0.03)
@@ -1154,6 +1196,12 @@ script_mod! {
         step: uniform(1.0)
         sigma_l: uniform(4.0)
         geom_weight: uniform(1.0)
+        // Absolute luminance sigma (radiance units), fading as 1/sqrt(N):
+        // at one sample per pixel the moment variance is identically zero
+        // and the edge-stopping weight otherwise refuses to smooth at all —
+        // which is exactly the salt-and-pepper the coarse rungs must not
+        // show. Converged pixels leave the variance term in charge.
+        sigma_floor: uniform(0.0)
         vertex: fn() {
             let clipped = self.geom.pos * self.rect_size + self.rect_pos
             self.pos = self.geom.pos
@@ -1166,26 +1214,31 @@ script_mod! {
             return 0.0625
         }
         pixel: fn() {
-            let c = self.src_tex.sample_nearest(self.pos)
-            let g = self.guide_tex.sample_nearest(self.pos)
-            let m = self.mom_tex.sample_nearest(self.pos)
+            // Pass-space pixel coordinates, so the quad can cover only the
+            // coarse rung's sub-rect and still address the right texels.
+            let uv = self.world.xy * self.inv_res
+            let c = self.src_tex.sample_nearest(uv)
+            let g = self.guide_tex.sample_nearest(uv)
+            let m = self.mom_tex.sample_nearest(uv)
             let n = max(c.w, 1.0)
             let cc = if self.step < 1.5 { c.xyz / n } else { c.xyz }
             let sd = sqrt(max(m.y - m.x * m.x, 0.0) / n)
             let lc = dot(cc, vec3(0.2126, 0.7152, 0.0722))
-            let inv_l = 1.0 / (self.sigma_l * sd + 0.0005)
+            let inv_l = 1.0 / (self.sigma_l * sd + self.sigma_floor / sqrt(n) + 0.0005)
             var sum = cc
             var wsum = 1.0
+            var nb = vec3(0.0, 0.0, 0.0)
+            var nbw = 0.0
             for j in 0..5 {
                 for i in 0..5 {
                     if i == 2u && j == 2u { continue }
                     let off = vec2(f32(i) - 2.0, f32(j) - 2.0) * (self.step * self.inv_res)
-                    let q = self.src_tex.sample_nearest(self.pos + off)
-                    let gq = self.guide_tex.sample_nearest(self.pos + off)
+                    let q = self.src_tex.sample_nearest(uv + off)
+                    let gq = self.guide_tex.sample_nearest(uv + off)
                     if q.w < 0.5 { continue }
                     let qc = if self.step < 1.5 { q.xyz / max(q.w, 1.0) } else { q.xyz }
                     let lq = dot(qc, vec3(0.2126, 0.7152, 0.0722))
-                    var w = self.bspline(i) * self.bspline(j) * exp((0.0 - abs(lq - lc)) * inv_l)
+                    var w = self.bspline(i) * self.bspline(j)
                     if self.geom_weight > 0.5 {
                         if g.w < 0.0 {
                             if gq.w >= 0.0 { w = 0.0 }
@@ -1196,8 +1249,29 @@ script_mod! {
                             w = w * wn * wz
                         }
                     }
+                    // The plain (edge-aware, luminance-blind) neighbourhood:
+                    // the firefly test below needs a mean the outlier itself
+                    // cannot veto through the luminance edge-stopper.
+                    nb = nb + qc * w
+                    nbw = nbw + w
+                    w = w * exp((0.0 - abs(lq - lc)) * inv_l)
                     sum = sum + qc * w
                     wsum = wsum + w
+                }
+            }
+            // Fireflies survive an edge-aware filter by definition — every
+            // neighbour weight collapses against a 10x-brighter centre, and
+            // the spike passes through as an "edge". On the first pass,
+            // a centre far above its neighbourhood mean IS the spike (one
+            // clamped high-energy path, not detail): show the neighbourhood
+            // instead. Display-side only — the accumulation keeps every
+            // sample, and once samples pile up the centre stops tripping
+            // the test and the estimator's own mean shows unfiltered.
+            if self.step < 1.5 && nbw > 0.5 {
+                let nbm = nb / nbw
+                let nbl = dot(nbm, vec3(0.2126, 0.7152, 0.0722))
+                if lc > 4.0 * nbl + 0.02 {
+                    return vec4(nbm, c.w)
                 }
             }
             return vec4(sum / wsum, c.w)
@@ -1212,6 +1286,7 @@ script_mod! {
         attr_tex: texture_2d(float)
         tri_tex: texture_2d(float)
         mat_tex: texture_2d(float)
+        hold_tex: texture_2d(float)
         inv_res: uniform(vec2f)
         exposure: uniform(1.0)
         sky_display: uniform(0.0)
@@ -1223,6 +1298,15 @@ script_mod! {
         gbuf_on: uniform(0.0)
         src_is_mean: uniform(0.0)
         untraced_transparent: uniform(0.0)
+        // Resolution ladder: the accumulation of the current rung occupies
+        // the top-left `src_res` texels of the native-size buffer. `coarse`
+        // is on below native; the display then bilinearly upsamples per-texel
+        // means. `hold_on` keeps last frame's finished display pixels under
+        // any pixel the current rung has not reached yet, so a rung replaces
+        // the previous picture tile by tile with no flash back to the raster.
+        src_res: uniform(vec2f)
+        coarse: uniform(0.0)
+        hold_on: uniform(0.0)
         tx: fn(i: u32, inv: vec2) -> vec2 {
             return (vec2(f32(i & 2047u), f32(i >> 11u)) + vec2(0.5, 0.5)) * inv
         }
@@ -1269,6 +1353,7 @@ script_mod! {
             for y in 0..4 {
                 for x in 0..4 {
                     let uv = vec2((f32(x) + 0.5) * 0.25, (f32(y) + 0.5) * 0.25)
+                        * (self.src_res * self.inv_res)
                     let c = self.src_tex.sample_nearest(uv)
                     if c.w >= 0.5 {
                         let linear = if self.src_is_mean > 0.5 { c.xyz } else { c.xyz / max(c.w, 1.0) }
@@ -1282,9 +1367,47 @@ script_mod! {
             let log_average = exp(sum_log / valid)
             return self.exposure * clamp(0.08 / log_average, 1.0, 16.0)
         }
+        // Bilinear over the coarse rung's per-texel MEANS; a texel the sweep
+        // has not reached carries no weight, so holes never bleed black in.
+        coarse_mean: fn(p: vec2) -> vec4 {
+            let f = p * self.src_res - vec2(0.5, 0.5)
+            let i0 = floor(f)
+            let fr = f - i0
+            var sum = vec3(0.0, 0.0, 0.0)
+            var wsum = 0.0
+            var centre_ok = 0.0
+            for j in 0..2 {
+                for i in 0..2 {
+                    let t = clamp(i0 + vec2(f32(i), f32(j)), vec2(0.0, 0.0), self.src_res - vec2(1.0, 1.0))
+                    let c = self.src_tex.sample_nearest((t + vec2(0.5, 0.5)) * self.inv_res)
+                    if c.w >= 0.5 {
+                        let wx = if f32(i) > 0.5 { fr.x } else { 1.0 - fr.x }
+                        let wy = if f32(j) > 0.5 { fr.y } else { 1.0 - fr.y }
+                        let wgt = wx * wy + 0.0001
+                        sum = sum + (c.xyz / max(c.w, 1.0)) * wgt
+                        wsum = wsum + wgt
+                        centre_ok = 1.0
+                    }
+                }
+            }
+            if centre_ok < 0.5 || wsum <= 0.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            return vec4(sum / wsum, 1.0)
+        }
         pixel: fn() {
-            let c = self.src_tex.sample_nearest(self.pos)
+            var c = vec4(0.0, 0.0, 0.0, 0.0)
+            if self.coarse > 0.5 {
+                c = self.coarse_mean(self.pos)
+            } else {
+                c = self.src_tex.sample_nearest(self.pos)
+            }
             if c.w < 0.5 {
+                // The ladder's memory: last frame's finished display pixel
+                // stays until the current rung replaces it (no flash between
+                // rungs, no flash back to the raster while sharpening).
+                if self.hold_on > 0.5 {
+                    let held = self.hold_tex.sample_nearest(self.pos)
+                    if held.w > 0.5 { return held }
+                }
                 // Interactive hosts composite the trace OVER their own
                 // realtime frame: an untraced pixel is transparent so the
                 // raster shows until a tile lands. F12/track keep the lit
@@ -1444,6 +1567,13 @@ pub struct RenderSettings {
     /// G-buffer fallback, so a host can composite the accumulation over its
     /// own realtime frame. Display-only; does not invalidate samples.
     pub untraced_transparent: bool,
+    /// The resolution ladder: the first pass covers the WHOLE frame at a
+    /// coarse fraction of native (upscaled for display), then each rung
+    /// doubles the resolution — full frame per rung — until native, and only
+    /// then samples accumulate. A complete traced picture lands within the
+    /// first few budgeted dispatches instead of a spiral of tiles crawling
+    /// across an empty frame. Off = native-only (headless/F12/parity runs).
+    pub progressive: bool,
 }
 
 impl Default for RenderSettings {
@@ -1472,6 +1602,7 @@ impl Default for RenderSettings {
             max_steps: crate::bvh::MAX_STEPS,
             shadow_skin: -1.0,
             untraced_transparent: false,
+            progressive: false,
         }
     }
 }
@@ -1491,6 +1622,8 @@ pub struct RenderStats {
     /// Tile edge in pixels and tiles queued last frame.
     pub tile_edge: u32,
     pub tiles: u32,
+    /// Resolution-ladder rung: 0 = native, k = tracing at native >> k.
+    pub rung_shift: u32,
     pub last_frame_ms: f64,
     /// Latest completed trace command buffer and its hard target. Zero GPU
     /// samples means the backend has not reported one yet.
@@ -1661,7 +1794,11 @@ pub struct RayTracer {
     gbuf: Option<Texture>,
     gbuf_depth: Option<Texture>,
     guide: Option<Texture>,
-    view: Option<Texture>,
+    /// Tonemapped BGRA8 display targets, ping-ponged: last frame's finished
+    /// image is the tonemap's per-pixel hold while the next rung sweeps.
+    view: Vec<Texture>,
+    /// Index of the view texture written LAST (what `view_texture` returns).
+    view_ping: usize,
     stages: Vec<Stage>,
     draw_gbuf: DrawGbuf,
     draw_copy: DrawCopy,
@@ -1689,6 +1826,12 @@ pub struct RayTracer {
     sweep_index: usize,
     sweep_key: (u32, usize, usize),
     tiles_per_frame: u32,
+    /// Resolution ladder (progressive only): the trace covers the whole
+    /// frame at `native >> rung_shift`, halving the shift each time a sweep
+    /// completes, until 0 = native, where samples accumulate.
+    rung_shift: u32,
+    /// The sweep wrapped last frame; the next frame may advance the rung.
+    sweep_wrapped: bool,
     /// Paused by the host (user stop, or the window lost focus): frames
     /// present the accumulation as it stands and trace nothing, and
     /// `wants_frame` stops asking for redraws.
@@ -1707,9 +1850,15 @@ pub struct RayTracer {
     /// Frames that actually dispatched trace tiles since the scene was set
     /// (idle present frames don't count). Gates the no-timing bring-up.
     dispatch_frames: u32,
-    /// Tile count/edge in trace-command submission order. Metal completion
-    /// samples arrive asynchronously and consume this queue in the same order.
-    gpu_submissions: VecDeque<(u32, u32)>,
+    /// Recent measured GPU cost per path (ms), tiles > 0 submissions only.
+    /// The MINIMUM of this window is the honest compute cost: a completion
+    /// sample on a busy compositor frame carries several ms of queue
+    /// scheduling that has nothing to do with the paths traced, and a
+    /// controller fed raw samples pins itself at the floor (measured live:
+    /// the same 16-tile submission reads 0.15 ms on a quiet frame and 14 ms
+    /// on a busy one). A genuinely slow GPU never produces a fast sample,
+    /// so the min never overstates the machine.
+    gpu_ms_per_path: VecDeque<f64>,
     paths_done: f64,
     start_time: f64,
     last_time: f64,
@@ -1906,7 +2055,8 @@ impl RayTracer {
             gbuf: None,
             gbuf_depth: None,
             guide: None,
-            view: None,
+            view: Vec::new(),
+            view_ping: 0,
             stages: Vec::new(),
             draw_gbuf,
             draw_copy,
@@ -1929,6 +2079,8 @@ impl RayTracer {
             sweep_index: 0,
             sweep_key: (0, 0, 0),
             tiles_per_frame: 1,
+            rung_shift: 0,
+            sweep_wrapped: false,
             paused: false,
             skip_trace: false,
             paths_last_frame: 0.0,
@@ -1936,7 +2088,7 @@ impl RayTracer {
             gpu_under_budget: 0,
             timing_ever: false,
             dispatch_frames: 0,
-            gpu_submissions: VecDeque::new(),
+            gpu_ms_per_path: VecDeque::new(),
             paths_done: 0.0,
             start_time: 0.0,
             last_time: 0.0,
@@ -1964,6 +2116,7 @@ impl RayTracer {
         self.tiles_per_frame = 1;
         self.gpu_under_budget = 0;
         self.dispatch_frames = 0;
+        self.gpu_ms_per_path.clear();
         let upload = |cx: &mut Cx, tex: &Texture, dt: &crate::pack::DataTex| {
             *tex.get_format(cx) = TextureFormat::VecRGBAf32 {
                 width: dt.width,
@@ -2036,7 +2189,8 @@ impl RayTracer {
             || s.hybrid_primary != self.settings.hybrid_primary
             || s.adaptive_min != self.settings.adaptive_min
             || s.adaptive_thresh != self.settings.adaptive_thresh
-            || s.shadow_skin != self.settings.shadow_skin;
+            || s.shadow_skin != self.settings.shadow_skin
+            || s.progressive != self.settings.progressive;
         if invalidates {
             self.restart = true;
         }
@@ -2082,7 +2236,7 @@ impl RayTracer {
 
     /// The tonemapped BGRA8 target (valid after the first draw).
     pub fn view_texture(&self) -> Option<&Texture> {
-        self.view.as_ref()
+        self.view.get(self.view_ping)
     }
 
     /// Ask for the next frame's bytes of `kind` (they arrive via `take_captures`).
@@ -2146,10 +2300,14 @@ impl RayTracer {
             cx,
             TextureFormat::DepthD32 { size: TextureSize::Fixed { width: w, height: h }, initial: true },
         ));
-        self.view = Some(Texture::new_with_format(
-            cx,
-            TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: w, height: h }, initial: true },
-        ));
+        let bgra = |cx: &mut Cx| {
+            Texture::new_with_format(
+                cx,
+                TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: w, height: h }, initial: true },
+            )
+        };
+        self.view = vec![bgra(cx), bgra(cx)];
+        self.view_ping = 0;
         // gbuf + trace + resolve + reject-count + moments + guide + 4 atrous + tonemap
         const STAGE_NAMES: [&str; 11] = [
             "raytrace gbuffer",
@@ -2218,6 +2376,8 @@ impl RayTracer {
             self.last_time = now;
             self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223) & 0x00ff_ffff | 1;
             self.sweep_index = 0;
+            self.sweep_wrapped = false;
+            self.rung_shift = if s.progressive { start_rung_shift(w, h) } else { 0 };
             // A restart keeps the tile size it had earned, halved; a NEW scene
             // starts at the conservative startup edge (set_scene resets it).
             self.next_edge = (self.next_edge / 2).max(TILE_MIN);
@@ -2253,20 +2413,46 @@ impl RayTracer {
         };
         let budget_ms = requested_ms.min(self.draw_budget_ms);
         self.stats.gpu_budget_ms = budget_ms;
-        let gpu_samples = self.stages[1].pass.take_gpu_times_ms(cx.cx);
-        for gpu_ms in gpu_samples {
-            let (submitted_tiles, submitted_edge) =
-                self.gpu_submissions.pop_front().unwrap_or((0, self.tile_edge));
+        // Samples carry the (tiles, edge) tag captured when their command
+        // buffer was ENCODED: a pass replays on every window repaint, so
+        // arrival order can never say what a duration measured.
+        let gpu_samples = self.stages[1].pass.take_gpu_time_samples(cx.cx);
+        for (tag, gpu_ms) in gpu_samples {
+            let submitted_tiles = (tag >> 16) as u32;
+            let submitted_edge = (tag & 0xffff) as u32;
             self.stats.gpu_time_ms = gpu_ms;
             self.stats.gpu_samples = self.stats.gpu_samples.saturating_add(1);
             self.timing_ever = true;
+            if submitted_tiles == 0 {
+                continue;
+            }
+            // Min-filter the completion samples per path before the
+            // controller sees them: queue-scheduling spikes on busy
+            // compositor frames otherwise read as permanent overruns and
+            // pin the ladder at one tiny tile (see `gpu_ms_per_path`).
+            let submitted_paths =
+                submitted_tiles as f64 * (submitted_edge as f64) * (submitted_edge as f64);
+            let filtered_ms = if submitted_paths > 0.0 && gpu_ms > 0.0 {
+                self.gpu_ms_per_path.push_back(gpu_ms / submitted_paths);
+                if self.gpu_ms_per_path.len() > 8 {
+                    self.gpu_ms_per_path.pop_front();
+                }
+                let per_path = self
+                    .gpu_ms_per_path
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                (per_path * submitted_paths).max(0.001)
+            } else {
+                gpu_ms
+            };
             let update = adapt_gpu_budget(
                 self.tiles_per_frame,
                 self.next_edge,
                 self.gpu_under_budget,
                 submitted_tiles,
                 submitted_edge,
-                gpu_ms,
+                filtered_ms,
                 budget_ms,
             );
             self.tiles_per_frame = update.tiles;
@@ -2293,6 +2479,24 @@ impl RayTracer {
             self.gpu_under_budget = 0;
         }
         let dispatching = should_dispatch_trace(done, self.paused, self.skip_trace, true);
+        // ---- the resolution ladder ---------------------------------------
+        // The first pass after a restart covers the WHOLE frame at
+        // `native >> rung_shift` and each completed sweep halves the shift:
+        // a complete (coarse, upscaled) picture lands within the first few
+        // budgeted dispatches, then sharpens rung by rung to native, where
+        // samples accumulate. The accumulation is cleared at every rung
+        // boundary — two resolutions never mix in one buffer — while the
+        // display's hold keeps the previous rung's picture under every pixel
+        // the new sweep has not reached yet.
+        let mut rung_clear = false;
+        if std::mem::take(&mut self.sweep_wrapped) && dispatching && self.rung_shift > 0 {
+            self.rung_shift -= 1;
+            rung_clear = true;
+            self.paths_done = 0.0;
+        }
+        let shift = self.rung_shift;
+        let (rw, rh) = (((w - 1) >> shift) + 1, ((h - 1) >> shift) + 1);
+        let use_gbuffer = use_gbuffer && shift == 0;
         // The edge in use changes ONLY at the start of a sweep: the sweep is
         // a fixed permutation of tiles, and a mid-sweep resize would cover
         // some pixels twice and others never (measured: 2.0 / 0.5 per cell).
@@ -2308,31 +2512,56 @@ impl RayTracer {
                 self.tiles_per_frame =
                     ((area / (self.next_edge as u64 * self.next_edge as u64)) as u32).clamp(1, TILES_PER_FRAME_MAX);
             }
-            self.tile_edge = self.next_edge;
-            let key = (self.tile_edge, w, h);
+            // The measured controller can be driven to its floor by QUEUE
+            // NOISE: on a busy frame the trace command buffer's wall time
+            // carries a fixed several-ms scheduling overhead whatever the
+            // tile size, which reads as a permanent overrun and once pinned
+            // the pane crawls at 64 paths a frame (measured live: edge 8,
+            // one tile, 0.06 spp after 45 s). The controller still shrinks
+            // and grows on real signal, but dispatch never drops below
+            // `MIN_PATHS_PER_FRAME` — small dispatches, watchdog-safe, and a
+            // guaranteed convergence pace.
+            self.tile_edge = self.next_edge.max(32);
+            let key = (self.tile_edge, rw, rh);
             if self.sweep_key != key || self.sweep_order.is_empty() {
-                self.sweep_order = spiral_order(w as u32, h as u32, self.tile_edge);
+                self.sweep_order = spiral_order(rw as u32, rh as u32, self.tile_edge);
                 self.sweep_key = key;
             }
         }
         let edge = self.tile_edge;
-        let tiles_this_frame = self.tiles_per_frame;
+        // The dispatch envelope. Metal command-buffer intervals under a
+        // busy compositor both inflate (queue scheduling, concurrent
+        // buffers stretching Start..End) and lie low (samples matched to a
+        // lighter replay), so the measured controller only steers WITHIN a
+        // hard floor and ceiling: the floor guarantees convergence pace,
+        // the ceiling bounds the tracer's GPU appetite per host frame so
+        // the machine keeps breathing whatever the readings say.
+        let min_tiles = MIN_PATHS_PER_FRAME.div_ceil(edge * edge);
+        let max_tiles_budget = (MAX_PATHS_PER_FRAME / (edge * edge)).max(1);
+        let tiles_this_frame = self
+            .tiles_per_frame
+            .max(min_tiles)
+            .min(max_tiles_budget)
+            .min(TILES_PER_FRAME_MAX);
         let mut tiles: Vec<(u32, u32, u32, u32)> = Vec::new();
         if dispatching && !self.sweep_order.is_empty() {
             for _ in 0..tiles_this_frame {
                 let (tx, ty) = self.sweep_order[self.sweep_index];
                 let x0 = tx * edge;
                 let y0 = ty * edge;
-                tiles.push((x0, y0, edge.min(w as u32 - x0), edge.min(h as u32 - y0)));
+                tiles.push((x0, y0, edge.min(rw as u32 - x0), edge.min(rh as u32 - y0)));
                 self.sweep_index += 1;
                 if self.sweep_index >= self.sweep_order.len() {
-                    // A sweep ended: the next one may use a new edge.
+                    // A sweep ended: the next one may use a new edge — and
+                    // the ladder may climb a rung next frame.
                     self.sweep_index = 0;
+                    self.sweep_wrapped = true;
                     break;
                 }
             }
         }
 
+        let clear_accum = first_frame || rung_clear;
         let prev = self.ping;
         let cur = prev ^ 1;
         let (right, up, fwd) = self.camera.basis();
@@ -2366,7 +2595,14 @@ impl RayTracer {
             )
         };
 
-        let denoise = s.denoise && s.debug_mode == 0;
+        // The progressive pane is always denoised: at one sample per pixel
+        // the rungs would be salt-and-pepper, and even at 100 spp the raw
+        // estimator still shows clamped NEE spikes as lone white pixels.
+        // The wavelet weights tighten as variance falls (the sigma floor
+        // fades as 1/sqrt N), so a converged pane converges to the raw
+        // mean plus the first-pass firefly rule. F12/track keep the
+        // explicit switch and the unbiased estimator.
+        let denoise = (s.denoise || s.progressive) && s.debug_mode == 0;
         // The raster runs while the frame still has untraced pixels (the
         // fallback), for hybrid primaries, and for the denoiser's guides.
         let gbuf_drawn = use_gbuffer || denoise || (self.stats.spp < 1.0 && s.debug_mode == 0);
@@ -2470,6 +2706,7 @@ impl RayTracer {
             let c = &*cx.cx;
             dv.set_uniform(c, id!(res), &[w as f32, h as f32]);
             dv.set_uniform(c, id!(inv_res), &[inv_res.x, inv_res.y]);
+            dv.set_uniform(c, id!(cam_inv), &[1.0 / rw as f32, 1.0 / rh as f32]);
             dv.set_uniform(c, id!(tri_inv), &[packed_inv.0.x, packed_inv.0.y]);
             dv.set_uniform(c, id!(attr_inv), &[packed_inv.1.x, packed_inv.1.y]);
             dv.set_uniform(c, id!(bvh_inv), &[packed_inv.2.x, packed_inv.2.y]);
@@ -2479,7 +2716,7 @@ impl RayTracer {
             dv.set_uniform(c, id!(seed), &[self.seed as f32]);
             dv.set_uniform(c, id!(max_steps), &[s.max_steps.clamp(64, crate::bvh::MAX_STEPS) as f32]);
             dv.set_uniform(c, id!(spp), &[1.0]);
-            dv.set_uniform(c, id!(reset), &[if first_frame { 1.0 } else { 0.0 }]);
+            dv.set_uniform(c, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(ortho), &[ortho.x, ortho.y]);
             dv.set_uniform(c, id!(use_gbuffer), &[if use_gbuffer { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(n_lights), &[packed_inv.5]);
@@ -2489,13 +2726,35 @@ impl RayTracer {
             dv.set_uniform(c, id!(n_nodes), &[n_nodes]);
             dv.set_uniform(c, id!(max_bounces), &[s.max_bounces.min(16) as f32]);
             dv.set_uniform(c, id!(max_diffuse), &[s.max_diffuse as f32]);
-            dv.set_uniform(c, id!(preview_clamp), &[s.preview_clamp.unwrap_or(0.0)]);
+            // Coarse rungs are 1-sample transient pictures: one NEE spike is
+            // a full-white block for a whole rung, so they get a tighter
+            // clamp. Native keeps the caller's estimator choice.
+            let clamp_eff = if shift > 0 {
+                s.preview_clamp.unwrap_or(4.0).min(4.0)
+            } else {
+                s.preview_clamp.unwrap_or(0.0)
+            };
+            dv.set_uniform(c, id!(preview_clamp), &[clamp_eff]);
             let skin = if s.shadow_skin < 0.0 {
                 self.packed.as_ref().map(|p| p.auto_shadow_skin()).unwrap_or(0.0)
             } else {
                 s.shadow_skin
             };
             dv.set_uniform(c, id!(shadow_skin), &[skin]);
+            let (aw, ah) = self
+                .packed
+                .as_ref()
+                .and_then(|p| p.atlas.as_ref())
+                .map(|a| (a.width as f32, a.height as f32))
+                .unwrap_or((1.0, 1.0));
+            dv.set_uniform(c, id!(atlas_inv), &[1.0 / aw, 1.0 / ah]);
+            // One pixel of the current rung: world metres per metre of ray
+            // length (perspective), or absolute metres (ortho).
+            let pixel_world = match self.camera.ortho_height {
+                Some(hh) => hh / rh as f32,
+                None => 2.0 * tan_y / rh as f32,
+            };
+            dv.set_uniform(c, id!(pixel_world), &[pixel_world]);
             dv.set_uniform(c, id!(adaptive_min), &[s.adaptive_min as f32]);
             dv.set_uniform(c, id!(adaptive_thresh), &[s.adaptive_thresh]);
             let local_cam = self.camera.pos - packed_inv.6;
@@ -2530,7 +2789,7 @@ impl RayTracer {
             let draw_trace = &mut self.draw_trace;
             let draw_copy = &mut self.draw_copy;
             draw_copy.draw_super.draw_vars.set_texture(0, &src);
-            draw_copy.draw_super.draw_vars.set_uniform(c, id!(reset), &[if first_frame { 1.0 } else { 0.0 }]);
+            draw_copy.draw_super.draw_vars.set_uniform(c, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
             let tiles_ref = &tiles;
             run_stage!(&target, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| {
                 // The whole frame carries over (one fetch per pixel)...
@@ -2542,12 +2801,11 @@ impl RayTracer {
                     draw_trace.draw_abs(cx, Rect { pos: dvec2(x0 as f64, y0 as f64), size: dvec2(tw as f64, th as f64) });
                 }
             });
-            self.gpu_submissions.push_back((tiles.len() as u32, edge));
-            // Unsupported backends never return samples. Bound retained
-            // submission metadata without affecting normal Metal latency.
-            if self.gpu_submissions.len() > 1024 {
-                self.gpu_submissions.pop_front();
-            }
+            // Label the pass content for the timing samples this frame's
+            // command buffer (and any repaint replays of it) will report.
+            self.stages[1]
+                .pass
+                .set_gpu_time_tag(cx.cx, ((tiles.len() as u64) << 16) | edge as u64);
         }
 
         // 3. Resolve the transient rejection sentinel to clean (sum, N).
@@ -2572,7 +2830,7 @@ impl RayTracer {
             let dv = &mut self.draw_reject.draw_super.draw_vars;
             dv.set_texture(0, &scratch);
             dv.set_texture(1, &self.rejected[prev]);
-            dv.set_uniform(cx.cx, id!(reset), &[if first_frame { 1.0 } else { 0.0 }]);
+            dv.set_uniform(cx.cx, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
             let draw_reject = &mut self.draw_reject;
             run_stage!(&target, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_reject.draw_abs(cx, r));
             if self.capture_pending.contains(&CaptureKind::Diagnostics) {
@@ -2589,7 +2847,7 @@ impl RayTracer {
             dv.set_texture(0, &self.accum[prev]);
             dv.set_texture(1, &self.accum[cur]);
             dv.set_texture(2, &self.moments[prev]);
-            dv.set_uniform(cx.cx, id!(reset), &[if first_frame { 1.0 } else { 0.0 }]);
+            dv.set_uniform(cx.cx, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
             let draw_moments = &mut self.draw_moments;
             run_stage!(&target, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_moments.draw_abs(cx, r));
         }
@@ -2607,6 +2865,15 @@ impl RayTracer {
                 run_stage!(&guide, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_guide.draw_abs(cx, r));
             }
             let mut src = self.accum[cur].clone();
+            // At a coarse rung the image lives in the top-left sub-rect;
+            // the wavelet quads cover only that (world-space addressing in
+            // the shader), the geometry guide is native-res so it sits out,
+            // and the absolute sigma floor does the smoothing that a
+            // zero-variance 1-spp buffer otherwise refuses.
+            let atrous_rect = Rect {
+                pos: dvec2(0.0, 0.0),
+                size: dvec2(rw as f64, rh as f64),
+            };
             for it in 0..4 {
                 let dst = self.atrous[it & 1].clone();
                 let dv = &mut self.draw_atrous.draw_super.draw_vars;
@@ -2616,9 +2883,20 @@ impl RayTracer {
                 dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
                 dv.set_uniform(cx.cx, id!(step), &[(1u32 << it) as f32]);
                 dv.set_uniform(cx.cx, id!(sigma_l), &[s.denoise_sigma]);
-                dv.set_uniform(cx.cx, id!(geom_weight), &[if lens_radius > 0.0 { 0.0 } else { 1.0 }]);
+                dv.set_uniform(
+                    cx.cx,
+                    id!(geom_weight),
+                    &[if lens_radius > 0.0 || shift > 0 { 0.0 } else { 1.0 }],
+                );
+                dv.set_uniform(
+                    cx.cx,
+                    id!(sigma_floor),
+                    &[if s.progressive { 0.35 } else { 0.0 }],
+                );
                 let draw_atrous = &mut self.draw_atrous;
-                run_stage!(&dst, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_atrous.draw_abs(cx, r));
+                run_stage!(&dst, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, _r| {
+                    draw_atrous.draw_abs(cx, atrous_rect)
+                });
                 src = dst;
             }
             if self.capture_pending.contains(&CaptureKind::Denoised) {
@@ -2629,9 +2907,13 @@ impl RayTracer {
             tonemap_src = src;
         }
 
-        // 5. Tonemap → view target (+ capture).
+        // 5. Tonemap → view target (+ capture). The view is ping-ponged: the
+        // previous frame's finished image is this frame's per-pixel hold.
         {
-            let view = self.view.clone().unwrap();
+            let view_prev = self.view_ping;
+            let view_cur = view_prev ^ 1;
+            let view = self.view[view_cur].clone();
+            let hold = self.view[view_prev].clone();
             let dv = &mut self.draw_tonemap.draw_super.draw_vars;
             dv.set_texture(0, &tonemap_src);
             dv.set_texture(1, &self.moments[cur]);
@@ -2639,7 +2921,17 @@ impl RayTracer {
             dv.set_texture(3, &self.tex_attr);
             dv.set_texture(4, &self.tex_tri);
             dv.set_texture(5, &self.tex_mat);
+            dv.set_texture(6, &hold);
             dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
+            dv.set_uniform(cx.cx, id!(src_res), &[rw as f32, rh as f32]);
+            dv.set_uniform(cx.cx, id!(coarse), &[if shift > 0 { 1.0 } else { 0.0 }]);
+            // No hold on the restart frame: the previous view still shows the
+            // OLD camera — untraced pixels must fall through to the raster.
+            dv.set_uniform(
+                cx.cx,
+                id!(hold_on),
+                &[if s.progressive && !first_frame { 1.0 } else { 0.0 }],
+            );
             dv.set_uniform(cx.cx, id!(exposure), &[s.exposure]);
             dv.set_uniform(cx.cx, id!(sky_display), &[if sky.uniform_value <= 0.0 && sky.sky_strength > 0.0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(view_mode), &[s.view_mode as f32]);
@@ -2653,6 +2945,7 @@ impl RayTracer {
             dv.set_uniform(cx.cx, id!(untraced_transparent), &[if s.untraced_transparent { 1.0 } else { 0.0 }]);
             let draw_tonemap = &mut self.draw_tonemap;
             run_stage!(&view, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_tonemap.draw_abs(cx, r));
+            self.view_ping = view_cur;
             if self.capture_pending.contains(&CaptureKind::View) {
                 self.capture_pending.retain(|k| *k != CaptureKind::View);
                 cx.cx.request_render_texture_capture(&view);
@@ -2677,6 +2970,7 @@ impl RayTracer {
         self.stats.samples_per_sec = if self.stats.elapsed > 0.0 { self.stats.samples_total / self.stats.elapsed } else { 0.0 };
         self.stats.tile_edge = edge;
         self.stats.tiles = tiles.len() as u32;
+        self.stats.rung_shift = shift;
         self.stats.last_frame_ms = dt_ms;
         self.stats.done = done;
     }
@@ -2735,6 +3029,18 @@ pub const TILE_START: u32 = 32;
 pub const TILE_MAX: u32 = 128;
 /// Most tiles one frame queues (each its own draw).
 pub const TILES_PER_FRAME_MAX: u32 = 32;
+/// Paths per dispatching frame never fall below this, whatever the budget
+/// controller reads: a fixed queue-scheduling overhead of several ms rides
+/// every trace command buffer on a busy compositor frame, and a controller
+/// fed that noise pins itself at one tiny tile. Sixteen 32-px dispatches
+/// stay individually small (watchdog-safe) while guaranteeing ~half an spp
+/// per second at 30 Hz on a 1-Mpixel pane.
+pub const MIN_PATHS_PER_FRAME: u32 = 16384;
+/// ...and never above this: ~96k paths per 30 Hz tick is roughly a quarter
+/// of the measured saturated throughput on the dev machine — over 1.5 spp/s
+/// on a megapixel pane while the compositor and the realtime pane keep
+/// their frame time. The measured controller wanders inside the envelope.
+pub const MAX_PATHS_PER_FRAME: u32 = 98304;
 /// Tiles in the first Chebyshev ring (centre + 8 neighbours). The interactive
 /// host uses this as a present-gate threshold; the scheduler still restarts
 /// at one tile per frame.
@@ -2748,6 +3054,18 @@ pub fn draw_budget_ms_from_env() -> f64 {
         .filter(|v| *v > 0.0)
         .unwrap_or(4.0)
         .clamp(0.5, 50.0)
+}
+
+/// The coarsest rung of the resolution ladder for a `w`×`h` target: the
+/// deepest shift (≤ 3, i.e. 1/8) that keeps both coarse dimensions ≥ 96 px —
+/// enough pixels that the upscaled first picture reads as the scene, few
+/// enough that one or two budgeted dispatches cover the whole frame.
+pub fn start_rung_shift(w: usize, h: usize) -> u32 {
+    let mut s = 0u32;
+    while s < 3 && (w >> (s + 1)) >= 96 && (h >> (s + 1)) >= 96 {
+        s += 1;
+    }
+    s
 }
 
 /// The sub-pixel jitter the G-buffer raster uses on frame `frame` (the CPU
@@ -2913,6 +3231,27 @@ mod sweep_tests {
         let (x, y) = order[super::FIRST_RING_TILES as usize];
         let ring = (x as i64 - cx).abs().max((y as i64 - cy).abs());
         assert!(ring >= 2);
+    }
+
+    #[test]
+    fn the_ladder_starts_coarse_and_scales_with_the_pane() {
+        // Big pane: 1/8 first — a complete traced frame within a dispatch
+        // or two. Small panes start finer; tiny ones go straight to native.
+        assert_eq!(super::start_rung_shift(1234, 1488), 3);
+        assert_eq!(super::start_rung_shift(960, 540), 2);
+        assert_eq!(super::start_rung_shift(300, 200), 1);
+        assert_eq!(super::start_rung_shift(150, 150), 0);
+    }
+
+    #[test]
+    fn the_dispatch_floor_survives_a_pinned_controller() {
+        // A controller pinned at one tile still dispatches at least
+        // MIN_PATHS_PER_FRAME paths within the tile-count cap.
+        for edge in [32u32, 64, 128] {
+            let min_tiles = super::MIN_PATHS_PER_FRAME.div_ceil(edge * edge);
+            assert!(min_tiles <= super::TILES_PER_FRAME_MAX, "edge {edge}");
+            assert!(min_tiles * edge * edge >= super::MIN_PATHS_PER_FRAME, "edge {edge}");
+        }
     }
 
     #[test]

@@ -996,13 +996,17 @@ impl Cx {
             };
         }
         if let Some(query) = gpu_time_query {
+            // The tag identifies what was ENCODED into this buffer; capture
+            // it now — by completion time the owner may have retagged the
+            // pass for a later frame.
+            let tag = query.current_tag();
             let () = unsafe {
                 msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
                         let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                         let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                        query.record_seconds(end - start);
+                        query.record_seconds_tagged(tag, end - start);
                     })
                 ]
             };

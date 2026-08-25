@@ -238,7 +238,10 @@ impl<'a> CpuTracer<'a> {
         )
     }
 
-    fn atlas_albedo(&self, ti: usize, w0: f32, u: f32, v: f32, base: Vec3f) -> Vec3f {
+    /// `footprint_m` is the pixel's world footprint at the hit (0 = skip
+    /// the minification blend, e.g. shadow-ray glass tints). GPU twin: the
+    /// blend in `PtTrace`'s albedo fetch.
+    fn atlas_albedo(&self, ti: usize, w0: f32, u: f32, v: f32, base: Vec3f, footprint_m: f32) -> Vec3f {
         let mi = self.packed.tri_material[ti] as usize;
         let m2 = &self.packed.mat.data[mi * 16 + 8..mi * 16 + 12];
         if m2[2] <= 0.0 {
@@ -256,7 +259,37 @@ impl<'a> CpuTracer<'a> {
         let x = ((r[0] + fu * r[2]) * atlas.width as f32).floor() as usize;
         let y = ((r[1] + fv * r[3]) * atlas.height as f32).floor() as usize;
         let px = atlas.data[y.min(atlas.height - 1) * atlas.width + x.min(atlas.width - 1)];
-        let c = vec3f(((px >> 16) & 255) as f32, ((px >> 8) & 255) as f32, (px & 255) as f32) * (1.0 / 255.0);
+        let mut c = vec3f(((px >> 16) & 255) as f32, ((px >> 8) & 255) as f32, (px & 255) as f32) * (1.0 / 255.0);
+        if footprint_m > 0.0 {
+            // Minification blend toward the image mean (the atlas corner
+            // texel one texel above-left of the rect): a nearest fetch on a
+            // heavily tiled texture is a per-sample texel lottery.
+            let tri = &self.packed.accel.tris[ti];
+            let e1 = tri.v1 - tri.v0;
+            let e2 = tri.v2 - tri.v0;
+            let gn = Vec3f::cross(e1, e2);
+            let duv1 = vec2f(a[11] - a[3], a[12] - a[7]);
+            let duv2 = vec2f(a[13] - a[3], a[14] - a[7]);
+            let uv_area = (duv1.x * duv2.y - duv1.y * duv2.x).abs();
+            // Worst-axis density plus grazing stretch (GPU twin comments).
+            let d_area = (uv_area / gn.length().max(1.0e-12)).sqrt();
+            let d1 = duv1.length() / e1.length().max(1.0e-6);
+            let d2 = duv2.length() / e2.length().max(1.0e-6);
+            let density = d_area.max(d1).max(d2);
+            let texels = density * footprint_m * (r[2] * atlas.width as f32);
+            let blend = ((texels - 2.0) * 0.071428575).clamp(0.0, 1.0);
+            if blend > 0.0 {
+                let mx = ((r[0] * atlas.width as f32).floor() as usize).saturating_sub(1);
+                let my = ((r[1] * atlas.height as f32).floor() as usize).saturating_sub(1);
+                let mp = atlas.data[my * atlas.width + mx];
+                let mean = vec3f(
+                    ((mp >> 16) & 255) as f32,
+                    ((mp >> 8) & 255) as f32,
+                    (mp & 255) as f32,
+                ) * (1.0 / 255.0);
+                c = c + (mean - c) * blend;
+            }
+        }
         base * vec3f(c.x.powf(2.2), c.y.powf(2.2), c.z.powf(2.2))
     }
 
@@ -466,7 +499,7 @@ impl<'a> CpuTracer<'a> {
                 }
                 continue;
             }
-            let tint = self.atlas_albedo(ti, w0, h.u, h.v, v3(m.albedo));
+            let tint = self.atlas_albedo(ti, w0, h.u, h.v, v3(m.albedo), 0.0);
             let fr = fresnel_dielectric(ng.dot(-rd).abs(), m.ior.max(1.0));
             tr = tr * tint * (trans * (1.0 - fr));
             previous_glass = Some((material_id, ng));
@@ -515,6 +548,12 @@ impl<'a> CpuTracer<'a> {
                 stats.primary_hits += 1;
             }
         });
+        // One pixel's world footprint (the GPU's `pixel_world` uniform):
+        // metres per metre of ray length, or absolute metres for ortho.
+        let pixel_world = match self.camera.ortho_height {
+            Some(hh) => hh / h as f32,
+            None => 2.0 * tan_y / h as f32,
+        };
         let mut tp = vec3f(1.0, 1.0, 1.0);
         let mut lsum = vec3f(0.0, 0.0, 0.0);
         let mut prev_pdf = 0.0f32;
@@ -561,7 +600,12 @@ impl<'a> CpuTracer<'a> {
             if ns.dot(ng) < 0.05 {
                 ns = ng;
             }
-            let albedo = self.atlas_albedo(ti, w0, hit.u, hit.v, v3(m.albedo));
+            let footprint_m = if self.camera.ortho_height.is_some() {
+                pixel_world
+            } else {
+                pixel_world * hit.t
+            } / ng.dot(rd).abs().max(0.1);
+            let albedo = self.atlas_albedo(ti, w0, hit.u, hit.v, v3(m.albedo), footprint_m);
             let rough = m.roughness.clamp(0.0, 1.0).max(0.03);
             let emission = v3(m.emission);
             let metal = m.metal.clamp(0.0, 1.0);
@@ -967,6 +1011,44 @@ mod tests {
             ));
             assert!(direction.dot(tracer.sun_dir()) >= tracer.sky.sun_dir.w - 1.0e-6);
         }
+    }
+
+    #[test]
+    fn heavy_minification_blends_the_albedo_to_the_texture_mean() {
+        // A ground quad tiled 400x with a black/white texture: up close the
+        // fetch keeps texel detail; once the pixel footprint spans texels
+        // the albedo converges to the image's linear mean instead of being
+        // a per-sample texel lottery (the roof moire / lawn shimmer).
+        let mut s = SceneInput { up: vec3f(0.0, 0.0, 1.0), ..Default::default() };
+        s.materials = vec![Material {
+            albedo: [1.0, 1.0, 1.0],
+            texture: Some(0),
+            ..Default::default()
+        }];
+        s.images = vec![crate::scene::Image {
+            width: 2,
+            height: 1,
+            data: vec![0xff00_0000, 0xffff_ffff],
+        }];
+        s.push_mesh(
+            &[[0.0, 0.0, 0.0], [200.0, 0.0, 0.0], [0.0, 200.0, 0.0]],
+            None,
+            Some(&[[0.0, 0.0], [400.0, 0.0], [0.0, 400.0]]),
+            &[0, 1, 2],
+            0,
+        );
+        s.ensure_normals();
+        let packed = PackedScene::pack(&s);
+        let tracer = cpu_tracer(&s, &packed);
+        // Near: texel detail survives (footprint far below a texel).
+        let dark = tracer.atlas_albedo(0, 0.9, 0.0004, 0.05, vec3f(1.0, 1.0, 1.0), 0.0001);
+        let light = tracer.atlas_albedo(0, 0.9, 0.0016, 0.05, vec3f(1.0, 1.0, 1.0), 0.0001);
+        assert!(dark.x < 0.05 && light.x > 0.9, "near: {dark:?} vs {light:?}");
+        // Far: both sample points give the linear mean (0.5).
+        let a = tracer.atlas_albedo(0, 0.9, 0.0004, 0.05, vec3f(1.0, 1.0, 1.0), 10.0);
+        let b = tracer.atlas_albedo(0, 0.9, 0.0016, 0.05, vec3f(1.0, 1.0, 1.0), 10.0);
+        assert!((a.x - b.x).abs() < 1.0e-3, "far mismatch: {a:?} vs {b:?}");
+        assert!((a.x - 0.5).abs() < 0.02, "far mean off: {a:?}");
     }
 
     fn emissive_quad(two_sided: bool, value: f32, camera_z: f32) -> SceneInput {
