@@ -11,6 +11,40 @@ use crate::{
     texture::Texture,
     window::WindowId,
 };
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Clone, Default)]
+pub(crate) struct GpuTimeQuery {
+    samples_ms: Arc<Mutex<VecDeque<f64>>>,
+}
+
+impl GpuTimeQuery {
+    pub(crate) fn record_seconds(&self, seconds: f64) {
+        let ms = seconds * 1000.0;
+        if !ms.is_finite() || ms < 0.0 {
+            return;
+        }
+        let mut samples = self
+            .samples_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if samples.len() == 1024 {
+            samples.pop_front();
+        }
+        samples.push_back(ms);
+    }
+
+    fn take_samples(&self) -> Vec<f64> {
+        self.samples_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
+    }
+}
 
 #[derive(Debug)]
 pub struct DrawPass(PoolId);
@@ -328,6 +362,27 @@ impl DrawPass {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.dpi_factor = Some(dpi);
     }
+
+    /// Enable asynchronous backend GPU timing for this pass. Metal records
+    /// the command buffer's GPUStartTime/GPUEndTime; unsupported backends
+    /// simply leave the sample queue empty.
+    pub fn set_gpu_timing_enabled(&self, cx: &mut Cx, enabled: bool) {
+        let pass = &mut cx.passes[self.draw_pass_id()];
+        if enabled {
+            pass.gpu_time_query.get_or_insert_with(GpuTimeQuery::default);
+        } else {
+            pass.gpu_time_query = None;
+        }
+    }
+
+    /// Drain completed command-buffer durations without blocking for work
+    /// that is still in flight.
+    pub fn take_gpu_times_ms(&self, cx: &Cx) -> Vec<f64> {
+        cx.passes[self.draw_pass_id()]
+            .gpu_time_query
+            .as_ref()
+            .map_or_else(Vec::new, GpuTimeQuery::take_samples)
+    }
 }
 
 #[derive(Clone)]
@@ -422,6 +477,7 @@ pub struct CxDrawPass {
     pub pass_uniforms: DrawPassUniforms,
     pub zbias_step: f32,
     pub os: CxOsPass,
+    pub(crate) gpu_time_query: Option<GpuTimeQuery>,
 }
 
 impl Default for CxDrawPass {
@@ -446,6 +502,7 @@ impl Default for CxDrawPass {
             paint_dirty: false,
             pass_rect: None,
             os: CxOsPass::default(),
+            gpu_time_query: None,
         }
     }
 }

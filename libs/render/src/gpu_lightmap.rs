@@ -428,6 +428,11 @@ struct BakeState {
     size: usize,
     regions: Vec<Region>,
     meshes: Vec<GpuBakeMesh>,
+    /// Prefix of `meshes` that owns lightmap regions. The suffix is the old
+    /// caster-only snapshot used by atlas passes; Realtime gets those same
+    /// uncharted statics from the renderer's upload-time registry instead,
+    /// including all material layers.
+    region_mesh_count: usize,
     /// All occluder boxes packed as one world-space triangle soup.
     box_geometry: Option<Geometry>,
     lights: Vec<LmLight>,
@@ -637,6 +642,10 @@ pub struct GpuLightmapBaker {
     /// This frame's fitted cascades (Realtime), for the renderer's material
     /// uniforms. None in OnChange.
     csm_last: Option<CsmFrame>,
+    /// The last announced `(static, live)` caster counts. A scene can upload
+    /// after the first empty Realtime frame, so count changes announce again
+    /// instead of leaving the log permanently claiming zero casters.
+    csm_logged: Option<(usize, usize)>,
     /// Realtime perf probe accumulators (`MAKEPAD_GPU_LM_PERF=1` logs the
     /// per-frame cascade-encode averages every 120 frames).
     rt_frames: u64,
@@ -664,6 +673,7 @@ impl Default for GpuLightmapBaker {
             bake_passes: 0,
             bake_us: 0,
             csm_last: None,
+            csm_logged: None,
             rt_frames: 0,
             rt_us: 0,
         }
@@ -682,6 +692,17 @@ fn bake_budget_from_env() -> usize {
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
     Vec3f { x, y, z }
+}
+
+fn csm_caster_counts(
+    state: Option<&BakeState>,
+    registered_statics: usize,
+    live: usize,
+) -> (usize, usize) {
+    (
+        state.map_or(0, |state| state.region_mesh_count) + registered_statics,
+        live,
+    )
 }
 
 /// The one number a region's exposure report is about: what the brightest
@@ -1146,6 +1167,7 @@ impl GpuLightmapBaker {
         self.bake_passes = 0;
         self.bake_us = 0;
         self.csm_last = None;
+        self.csm_logged = None;
         self.rt_frames = 0;
         self.rt_us = 0;
     }
@@ -1491,6 +1513,7 @@ impl GpuLightmapBaker {
             size,
             regions,
             meshes,
+            region_mesh_count: mesh_count,
             box_geometry,
             lights: job.scene.lights.clone(),
             ground,
@@ -1547,9 +1570,11 @@ impl GpuLightmapBaker {
         &mut self,
         cx: &mut CxDraw,
         sun_dir: Vec3f,
+        static_casters: &[GpuBakeMesh],
         movers: &[GpuLmMover],
         csm_view: Option<&CsmView>,
         eye: Vec3f,
+        scene_bounds: Option<(Vec3f, Vec3f)>,
     ) -> Option<GpuLmDelivery> {
         self.csm_last = None;
         if !self.ensure_draws(cx.cx) {
@@ -1606,9 +1631,10 @@ impl GpuLightmapBaker {
             // exact; without one, a range-sized box around the eye is the
             // honest stand-in — it can only make the window longer than
             // needed, never clip a caster out of it.
-            let (scene_min, scene_max) = match self.state.as_ref() {
-                Some(state) => (state.scene_min, state.scene_max),
-                None => (
+            let (scene_min, scene_max) = match (scene_bounds, self.state.as_ref()) {
+                (Some(bounds), _) => bounds,
+                (None, Some(state)) => (state.scene_min, state.scene_max),
+                (None, None) => (
                     v3(eye.x - range, eye.y - range, eye.z - range),
                     v3(eye.x + range, eye.y + range, eye.z + range),
                 ),
@@ -1637,7 +1663,7 @@ impl GpuLightmapBaker {
             passes += self.encode_batch(cx, sun_dir, &batch);
         }
         if let Some(frame) = csm {
-            passes += self.encode_cascades(cx, movers, &frame);
+            passes += self.encode_cascades(cx, static_casters, movers, &frame);
         }
         let us = t0.elapsed().as_micros() as u64;
         self.csm_last = csm;
@@ -2441,6 +2467,7 @@ impl GpuLightmapBaker {
     fn encode_cascades(
         &mut self,
         cx: &mut CxDraw,
+        static_casters: &[GpuBakeMesh],
         movers: &[GpuLmMover],
         frame: &CsmFrame,
     ) -> usize {
@@ -2484,7 +2511,11 @@ impl GpuLightmapBaker {
             d.flip_a = Vec4f::default();
             d.tile_a = tile;
             if let Some(state) = state.as_ref() {
-                for m in &state.meshes {
+                // Regioned meshes already live in the realized atlas state.
+                // Its caster-only suffix is deliberately skipped here: the
+                // upload-time registry below owns that lane in Realtime and
+                // carries every material layer rather than only layer zero.
+                for m in state.meshes.iter().take(state.region_mesh_count) {
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
                     if d.draw_vars.can_instance() {
@@ -2497,6 +2528,13 @@ impl GpuLightmapBaker {
                     if d.draw_vars.can_instance() {
                         cx.add_instance(&d.draw_vars);
                     }
+                }
+            }
+            for m in static_casters {
+                d.transform = m.transform;
+                d.draw_vars.geometry_id = Some(m.geometry);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
                 }
             }
             for mv in movers.iter().filter(|m| m.skin.is_none()) {
@@ -2525,6 +2563,22 @@ impl GpuLightmapBaker {
         }
         seq.close(cx, idx);
         let encoded = seq.cursor;
+        let caster_counts = csm_caster_counts(
+            state.as_ref(),
+            static_casters.len(),
+            movers.len(),
+        );
+        let statics = caster_counts.0;
+        if encoded > 0 && self.csm_logged != Some(caster_counts) {
+            log!(
+                "gpu csm: first Realtime shadow pass — {} cascades at {}px, {} static + {} live caster(s)",
+                CSM_CASCADES,
+                res,
+                statics,
+                movers.len()
+            );
+            self.csm_logged = Some(caster_counts);
+        }
         self.draws = Some(draws);
         self.state = state;
         encoded
@@ -2634,6 +2688,16 @@ mod tests {
         baker.sync_csm_targets(&mut cx);
         assert!(baker.csm_tex.is_none() && baker.csm_depth.is_none());
         assert!(baker.csm_binding().is_none());
+    }
+
+    /// Imported editor geometry has no renderer lightmap chart, but its
+    /// upload-time static registry is still the complete static half of the
+    /// Realtime CSM pass. This is the CPU-side form of the zero-caster
+    /// regression: no `BakeState` must not erase registered model layers.
+    #[test]
+    fn registered_static_layers_do_not_need_an_atlas_state() {
+        assert_eq!(csm_caster_counts(None, 9, 0), (9, 0));
+        assert_eq!(csm_caster_counts(None, 9, 3), (9, 3));
     }
 
     /// The mode split is airtight by construction: exactly ONE tier serves

@@ -315,6 +315,14 @@ pub struct RadioButton {
     #[apply_default]
     animator: Animator,
 
+    /// Opt in to toggling OFF on a second click. A radio in a group must
+    /// not — picking the selected option again is a no-op there. But the
+    /// same widget is also used for icons that stand for a boolean of their
+    /// own (a view lock, an overlay), and those were unswitchable: the
+    /// second click emitted nothing at all.
+    #[live(false)]
+    independent: bool,
+
     #[live]
     icon_walk: Walk,
     #[live]
@@ -401,6 +409,10 @@ impl Widget for RadioButton {
             self.draw_bg.redraw(cx);
         }
 
+        if let Event::ClearHover = event {
+            self.animator_cut(cx, ids!(hover.off));
+        }
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -428,8 +440,13 @@ impl Widget for RadioButton {
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(active.on));
                     cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                } else if self.independent {
+                    // A boolean of its own: the second click turns it off and
+                    // still speaks, so the host can flip its state.
+                    self.animator_play(cx, ids!(active.off));
+                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
                 }
-                // Radio buttons don't toggle off when clicked again
+                // A radio in a GROUP does not toggle off when clicked again.
             }
             Hit::FingerMove(_fe) => {}
             _ => (),

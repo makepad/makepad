@@ -233,6 +233,11 @@ pub struct Renderer {
     model_anim_state: ModelStates,
     /// Stock props placed for this frame, set by the host before drawing.
     placed_models: Vec<ModelInstance>,
+    /// Static placed-model layers that have no lightmap layout of their own.
+    /// They are registered when the placed scene changes and feed Realtime
+    /// CSM directly, rather than waiting for an atlas layout that may never
+    /// exist (an imported editor scene commonly has none).
+    csm_static_casters: Vec<crate::gpu_lightmap::GpuBakeMesh>,
     /// Actor-attached presentation meshes in world space. They use the
     /// ordinary world material/depth path, but are deliberately outside the
     /// placed scene's identity, bakes, caster lists, lamp harvest and blob
@@ -299,6 +304,15 @@ pub struct Renderer {
     /// out of `self` for the duration of the draw so the loop can still
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
+    /// Whether shiny loaded models use the PBR material lane. Enabled by
+    /// default so existing hosts keep their rendering unchanged; CAD-style
+    /// views can temporarily request the diffuse textured lane instead.
+    pbr_materials_enabled: bool,
+    /// A host's screen-space AO output (ssao.rs) and its strength, bound to
+    /// BOTH model lanes' `ssao_map` / `ssao_ctl` each frame. `None` (the
+    /// default, and what every game host leaves it at) writes the strength
+    /// OFF, so the shaders never sample the slot.
+    ssao: Option<(Texture, f32)>,
     /// Per placed-model uv remap into the atlas, parallel to placed_models
     /// (zero = unmapped, the shader's disable signal). Rebuilt per delivery.
     lm_remaps: Vec<Vec4f>,
@@ -316,6 +330,10 @@ pub struct Renderer {
     lm_top_fallback: Option<Texture>,
     /// SANDBOX_LM_DEBUG=1: shader shows the lightmap alone.
     lm_debug: f32,
+    /// The model lanes' shading space: 0 writes the game's display-referred
+    /// product raw, 1 shades in linear and finishes through ACES + gamma.
+    /// See [`Renderer::set_display_transform`].
+    display_transform: f32,
     /// The baked lightmap's KILL SWITCH (F9 in the sandbox,
     /// `MAKEPAD_LIGHTMAP=off` at launch). Off binds the 1x1 "fully sunlit,
     /// no lamps" stand-in instead of the atlas, so every static falls back
@@ -428,6 +446,10 @@ pub struct Renderer {
     /// to that plane so shadow texels stay roughly one screen pixel under
     /// zoom; `None` keeps the village-scale ladder (walk / game).
     csm_focus: Option<f32>,
+    /// Optional host-owned scene bound for CSM fitting. Imported editor
+    /// models may deliberately submit as per-frame casters and therefore
+    /// own no lightmap layout from which the baker could infer this bound.
+    csm_scene_bounds: Option<(Vec3f, Vec3f)>,
 }
 
 /// One GPU-skinned character instance for [`Renderer::draw_scene_full`].
@@ -799,8 +821,13 @@ impl ModelDraw<'_> {
             d.metallic = m.metallic;
             d.roughness = m.roughness;
             d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
-            // Slot 7: the inherited set now ends at elem_map (slot 6).
-            d.skinned.draw_vars.set_texture(7, &m.orm);
+            // Texture slots are DECLARATION order. DrawSceneSkinned's
+            // inherited set ends at elem_map (6) and ssao_map (7); orm_map
+            // is DrawScenePbr's own declaration after the spread, slot 8.
+            // (This was still binding 6 from before elem_map existed, which
+            // parked the ORM texture over the element lookup and left
+            // orm_map on the fallback.)
+            d.skinned.draw_vars.set_texture(8, &m.orm);
         }
     }
 }
@@ -2025,6 +2052,7 @@ impl Default for Renderer {
             model_casts_shadow: std::collections::BTreeMap::new(),
             model_anim_state: ModelStates::default(),
             placed_models: Vec::new(),
+            csm_static_casters: Vec::new(),
             world_attachments: Vec::new(),
             view_models: Vec::new(),
             placed_scene_signature: None,
@@ -2046,6 +2074,8 @@ impl Default for Renderer {
             detail_fallback: None,
             orm_fallback: None,
             pbr_draw: None,
+            pbr_materials_enabled: true,
+            ssao: None,
             lm_remaps: Vec::new(),
             lm_ground: None,
             lm_top: None,
@@ -2055,6 +2085,7 @@ impl Default for Renderer {
                 Ok("off") | Ok("0") | Ok("false")
             ),
             lm_debug: if std::env::var("SANDBOX_LM_DEBUG").is_ok() { 1.0 } else { 0.0 },
+            display_transform: 0.0,
             star_map: None,
             star_texture: None,
             gpu_baker: {
@@ -2098,6 +2129,7 @@ impl Default for Renderer {
             lm_box_geometry: None,
             bake: LightBake::default(),
             csm_focus: None,
+            csm_scene_bounds: None,
         }
     }
 }
@@ -2228,6 +2260,7 @@ impl Renderer {
         // only their frame-to-instance mapping belongs to the old realm.
         self.skin_joint_bases.clear();
         self.placed_models.clear();
+        self.csm_static_casters.clear();
         self.world_attachments.clear();
         self.view_models.clear();
         self.placed_scene_signature = None;
@@ -2247,6 +2280,7 @@ impl Renderer {
         self.lm_ground = None;
         self.lm_top = None;
         self.gpu_baker.enter_realm();
+        self.csm_scene_bounds = None;
         self.lm_lights.clear();
         self.frame_lights.clear();
         self.frame_baked_count = 0;
@@ -2498,16 +2532,60 @@ impl Renderer {
         self.particle_instances = instances;
     }
 
+    /// Rebuild the static half of Realtime's CSM caster list.
+    ///
+    /// Models with a lightmap source already become `BakeState` meshes when
+    /// their atlas is realized. The list here is the complementary case:
+    /// uncharted static geometry, including every material layer. Keeping it
+    /// next to placed-scene identity makes a scene upload the registration
+    /// boundary instead of turning static architecture into a per-frame
+    /// "mover" merely to get a shadow.
+    fn rebuild_csm_static_casters(&mut self) {
+        self.csm_static_casters.clear();
+        for inst in self.placed_models.iter().filter(|instance| !instance.dynamic) {
+            let Some((_, model)) = self
+                .static_models
+                .iter()
+                .find(|(id, _)| *id == inst.model)
+            else {
+                continue;
+            };
+            if model.lm_source.is_some() {
+                continue;
+            }
+            let (min, max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
+            if !casts_as_caster_only(
+                self.model_casts_shadow.get(&inst.model).copied(),
+                model.prelit,
+                min,
+                max,
+            ) {
+                continue;
+            }
+            for geometry in std::iter::once(&model.geometry)
+                .chain(model.extra_draws.iter().map(|(geometry, ..)| geometry))
+            {
+                self.csm_static_casters.push(crate::gpu_lightmap::GpuBakeMesh {
+                    geometry: geometry.geometry_id(),
+                    transform: inst.transform,
+                    min,
+                    max,
+                });
+            }
+        }
+    }
+
     /// Hand this frame's stock props to the renderer. Draw submission is
     /// batched by model, but list order is still scene identity: lightmap
     /// remaps are indexed by placed slot. Producers should therefore keep a
     /// stable order so a harmless reorder does not request a new bake.
     pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
         let signature = placed_scene_signature(&instances);
+        let scene_changed = self.placed_scene_signature != Some(signature);
         // Statics are cached against a key; any meaningful placed-scene
         // change must break it or an equal-length replacement would retain
         // the previous realm's lamps, lightmap remaps, and shadows.
-        if self.placed_scene_signature != Some(signature) {
+        if scene_changed {
             self.models_rev = self.models_rev.wrapping_add(1);
             // The lightmap remaps are indexed by placed position — a changed
             // list makes them point at the wrong props. Drop them; the
@@ -2520,6 +2598,9 @@ impl Renderer {
             self.model_anim_state.forget_slots();
         }
         self.placed_models = instances;
+        if scene_changed {
+            self.rebuild_csm_static_casters();
+        }
     }
 
     /// Hand this frame's actor-attached world props to the renderer.
@@ -3601,6 +3682,7 @@ impl Renderer {
                 bake_geometry,
             },
         ));
+        self.rebuild_csm_static_casters();
         Ok(triangles)
     }
 
@@ -3653,6 +3735,7 @@ impl Renderer {
             self.lm_remaps.clear();
             self.placed_scene_signature = None;
             self.models_rev = self.models_rev.wrapping_add(1);
+            self.rebuild_csm_static_casters();
         }
         had
     }
@@ -4087,6 +4170,51 @@ impl Renderer {
         }
     }
 
+    /// Find and load the star panorama by the standard search order:
+    /// the `MAKEPAD_STAR_MAP` env override, then — walking up from the
+    /// working directory — the repo-local cache `local/sky/` that
+    /// `tools/download_stars.sh` fills (NASA/GSFC SVS "Deep Star Maps
+    /// 2020", public domain, credit NASA/GSFC SVS; the ATTRIBUTION.txt
+    /// sits beside it), then the sandbox's bundled copy. Without a hit the
+    /// analytic point stars stay and one hint is logged. Returns whether a
+    /// panorama is loaded.
+    pub fn load_star_map(&mut self) -> bool {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(path) = std::env::var("MAKEPAD_STAR_MAP") {
+            if !path.is_empty() {
+                candidates.push(path.into());
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            let mut dir = Some(cwd.as_path());
+            while let Some(d) = dir {
+                candidates.push(d.join("local/sky/starmap_2020_4k.png"));
+                candidates
+                    .push(d.join("apps/sandbox/resources/sky/starmap_2020_4k.png"));
+                dir = d.parent();
+            }
+        }
+        for path in &candidates {
+            if !path.is_file() {
+                continue;
+            }
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    self.set_star_map_png(&bytes);
+                    if self.star_map.is_some() {
+                        log!("star map: {}", path.display());
+                        return true;
+                    }
+                }
+                Err(e) => log!("star map: {}: {e}", path.display()),
+            }
+        }
+        log!(
+            "star map: none found — analytic stars only (run tools/download_stars.sh, or set MAKEPAD_STAR_MAP)"
+        );
+        false
+    }
+
     /// The bound star texture + gain: the decoded panorama, or a 1x1 black
     /// stand-in (gain 0) so the sky shader samples unconditionally.
     fn star_binding(&mut self, cx: &mut Cx) -> (Texture, f32) {
@@ -4153,6 +4281,44 @@ impl Renderer {
     /// around. Pass `None` for first-person walk (village-scale ladder).
     pub fn set_csm_focus_distance(&mut self, focus: Option<f32>) {
         self.csm_focus = focus.filter(|d| d.is_finite() && *d > 0.0);
+    }
+
+    /// Supply the complete caster/receiver bound for Realtime cascade
+    /// fitting. This is presentation state and is especially useful for an
+    /// imported editor model that is intentionally submitted as a dynamic
+    /// caster so its first frame already has shadows.
+    pub fn set_csm_scene_bounds(&mut self, bounds: Option<(Vec3f, Vec3f)>) {
+        self.csm_scene_bounds = bounds.filter(|(min, max)| {
+            min.x.is_finite()
+                && min.y.is_finite()
+                && min.z.is_finite()
+                && max.x.is_finite()
+                && max.y.is_finite()
+                && max.z.is_finite()
+                && min.x <= max.x
+                && min.y <= max.y
+                && min.z <= max.z
+        });
+    }
+
+    /// Select whether loaded metallic/roughness materials use the renderer's
+    /// PBR lane. This is presentation-only and defaults to `true`.
+    pub fn set_pbr_materials_enabled(&mut self, enabled: bool) {
+        self.pbr_materials_enabled = enabled;
+    }
+
+    pub fn pbr_materials_enabled(&self) -> bool {
+        self.pbr_materials_enabled
+    }
+
+    /// Bind a screen-space AO target (`ssao::SsaoPass::output`; x =
+    /// occlusion, 1 = unoccluded) for this frame's model lanes, with its
+    /// strength.
+    /// The factor multiplies the AMBIENT fill only — the shaders never
+    /// apply it to the direct sun or the shadow-mapped light. `None`
+    /// switches it off; a host must call this every frame it wants it.
+    pub fn set_ssao(&mut self, ssao: Option<(Texture, f32)>) {
+        self.ssao = ssao;
     }
 
     /// The bake's stand-in geometry for primitive ENTITY casters: one unit
@@ -4252,13 +4418,20 @@ impl Renderer {
             if !inst.dynamic {
                 continue;
             }
-            out.push(crate::gpu_lightmap::GpuLmMover {
-                geometry: m.geometry.geometry_id(),
-                transform: inst.transform,
-                min: m.min,
-                max: m.max,
-                skin: None,
-            });
+            // A multi-material GLB owns one resident geometry per layer.
+            // The main geometry alone would make only layer zero cast; walk
+            // every visible layer so "dynamic model" means the whole model.
+            for geometry in std::iter::once(&m.geometry)
+                .chain(m.extra_draws.iter().map(|(geometry, ..)| geometry))
+            {
+                out.push(crate::gpu_lightmap::GpuLmMover {
+                    geometry: geometry.geometry_id(),
+                    transform: inst.transform,
+                    min: m.min,
+                    max: m.max,
+                    skin: None,
+                });
+            }
         }
         if let (Some(items), Some(palette_tex)) = (skinned_items, &self.skin_palette_tex) {
             for (i, item) in items.iter().enumerate() {
@@ -4477,7 +4650,16 @@ impl Renderer {
                 SETTLED_FRAMES.store(0, Ordering::Relaxed);
             }
         }
-        if let Some(d) = self.gpu_baker.run_frame(cx, sun.dir, movers, csm_view, eye) {
+        let csm_scene_bounds = self.csm_scene_bounds;
+        if let Some(d) = self.gpu_baker.run_frame(
+            cx,
+            sun.dir,
+            &self.csm_static_casters,
+            movers,
+            csm_view,
+            eye,
+            csm_scene_bounds,
+        ) {
             self.lightmap = Some(d.atlas);
             self.lm_remaps = vec![Vec4f::default(); self.placed_models.len()];
             for (k, pi) in d.mesh_map.iter().enumerate() {
@@ -4514,6 +4696,35 @@ impl Renderer {
     pub fn set_lightmap_enabled(&mut self, on: bool) -> bool {
         self.lightmap_enabled = on;
         on
+    }
+
+    /// Which SPACE the model lanes shade in.
+    ///
+    /// Off (the default) is the game's, and it is right for a game: its
+    /// texels are sRGB bytes used as-is, its [`crate::sun::SunLight`] rig is
+    /// display-referred (0.72 direct plus 0.28 ambient, one for a fully lit
+    /// white surface), and their product goes straight into the 8-bit
+    /// target. Nothing in that path is linear and nothing needs mapping.
+    ///
+    /// On, the lanes decode their texels to linear reflectance, shade there,
+    /// and finish through the same ACES fit and display gamma the analytic
+    /// sky, the fog colour and the path tracer already use. That is what a
+    /// host shading with real light needs — and, just as much, what any host
+    /// with DARK materials needs: multiplying a cosine by an sRGB-encoded
+    /// albedo and writing it raw crushes the midtones, so a fully sunlit
+    /// charcoal wall lands at a tenth of the value it should and reads as a
+    /// silhouette against a sky that WAS tone mapped.
+    ///
+    /// Only the placed/attached model lanes carry it. A world that also
+    /// drives the cube, terrain or water lanes is a game world, and games
+    /// leave this off.
+    pub fn set_display_transform(&mut self, on: bool) {
+        self.display_transform = if on { 1.0 } else { 0.0 };
+    }
+
+    /// Is the model lanes' linear + ACES lane on?
+    pub fn display_transform(&self) -> bool {
+        self.display_transform > 0.5
     }
 
     /// Flip it. The sandbox binds this to F9.
@@ -4796,7 +5007,7 @@ impl Renderer {
             .map(|s| (s.positions.as_slice(), s.indices.as_slice()))
     }
 
-    /// Say whether a model casts into the baked sun shadows.
+    /// Say whether a model casts into the baked sun shadows and Realtime CSM.
     ///
     /// Only matters for a static that owns no AO layout of its own, which is
     /// the lane that otherwise falls back to a size heuristic
@@ -4805,11 +5016,13 @@ impl Renderer {
     /// casts into the bake shadows its own interior and every room goes
     /// dark. Props default to casting, so a fence still throws a shadow.
     ///
-    /// Takes effect on the next bake; the pending one is re-kicked.
+    /// CSM registration updates immediately; the pending atlas bake is also
+    /// re-kicked for OnChange.
     pub fn set_model_casts_shadow(&mut self, id: &str, casts: bool) {
         if self.model_casts_shadow.insert(id.to_string(), casts) != Some(casts) {
             self.placed_scene_signature = None;
             self.models_rev = self.models_rev.wrapping_add(1);
+            self.rebuild_csm_static_casters();
         }
     }
 
@@ -5036,11 +5249,34 @@ impl Renderer {
             draw.depth_clip = 1.0;
             draw.lm_debug = self.lm_debug;
         }
+        // Shading space, once for the whole lane: written before anything
+        // binds, so every draw item of the frame reads the same value.
+        {
+            let display = self.display_transform;
+            let vars = &mut draw.base().draw_vars;
+            vars.set_uniform(cx.cx, live_id!(display), &[display, 0.0, 0.0, 0.0]);
+        }
         // The specular lobe is the one term in this renderer that needs the
         // camera. TRUE world position, matching v_csm.xyz / v_csm_n.
         if pbr_lane {
             let vars = &mut draw.base().draw_vars;
             vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z, 0.0]);
+        }
+        // Screen-space AO, once for the whole lane (both lanes pass through
+        // here). Ambient-only by shader law; strength 0 = the slot is never
+        // sampled, which is every game host's path.
+        {
+            let ssao = self.ssao.clone();
+            let vars = &mut draw.base().draw_vars;
+            match &ssao {
+                Some((tex, strength)) => {
+                    vars.set_texture(7, tex);
+                    vars.set_uniform(cx.cx, live_id!(ssao_ctl), &[*strength, 0.0, 0.0, 0.0]);
+                }
+                None => {
+                    vars.set_uniform(cx.cx, live_id!(ssao_ctl), &[0.0, 0.0, 0.0, 0.0]);
+                }
+            }
         }
         // One atlas for the whole static scene, so binding it here costs
         // nothing per instance and never breaks batching.
@@ -5124,7 +5360,8 @@ impl Renderer {
             // address `lm_remaps` / `model_ground` / the light-cell key, so
             // they must not be renumbered — and each takes only the models
             // its shader owns.
-            if loaded.1.wants_pbr != pbr_lane {
+            let uses_pbr_lane = self.pbr_materials_enabled && loaded.1.wants_pbr;
+            if uses_pbr_lane != pbr_lane {
                 continue;
             }
             // Hoisted: `loaded` borrows self, and the per-instance light
@@ -5362,6 +5599,9 @@ impl Renderer {
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
     ) {
+        if !self.pbr_materials_enabled {
+            return;
+        }
         let any = instances.iter().any(|inst| {
             self.static_models
                 .iter()
@@ -6119,14 +6359,30 @@ impl Renderer {
             .sky
             .as_ref()
             .filter(|s| shows_environment && sky_wants_analytic(s))
-            .map(|_| crate::sky::preetham_frame(sun.dir, sky_turbidity(), sky_exposure()));
+            .map(|sky| {
+                let turbidity = if sky.turbidity.is_finite() {
+                    sky.turbidity
+                } else {
+                    sky_turbidity()
+                };
+                let compensation = if sky.exposure_ev.is_finite() {
+                    2.0f32.powf(sky.exposure_ev.clamp(-12.0, 12.0))
+                } else {
+                    1.0
+                };
+                crate::sky::preetham_frame(
+                    sun.dir,
+                    turbidity,
+                    sky_exposure() * compensation,
+                )
+            });
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
             Some(sky) if shows_environment => {
                 let c = sky_frame
                     .as_ref()
-                    .map(|f| f.fog_rgb)
+                    .map(|frame| frame.fog_rgb)
                     .unwrap_or(vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z));
                 (c, sky.fog)
             }
@@ -7569,6 +7825,14 @@ mod realm_lifecycle_tests {
         let renamed_rev = renderer.models_rev;
         renderer.set_models(vec![model("kit/lantern", 2.0, false, 3.0)]);
         assert_eq!(renderer.models_rev, renamed_rev.wrapping_add(1));
+    }
+
+    #[test]
+    fn pbr_material_policy_defaults_on_and_can_be_disabled() {
+        let mut renderer = Renderer::default();
+        assert!(renderer.pbr_materials_enabled());
+        renderer.set_pbr_materials_enabled(false);
+        assert!(!renderer.pbr_materials_enabled());
     }
 
     #[test]
