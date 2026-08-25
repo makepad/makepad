@@ -942,7 +942,7 @@ pub(crate) fn build_to_glb(x: f32, up: f32, y: f32) -> [f32; 3] {
 /// `yaw = a + π/2`. The π/2 is BUILD's angle 0 being +X (the engine's yaw 0
 /// looks down −Z), and it is not optional — without it every Duke start faced
 /// a quarter turn off its own map.
-fn build_yaw(ang: i16) -> f32 {
+pub(crate) fn build_yaw(ang: i16) -> f32 {
     std::f32::consts::FRAC_PI_2 + (ang as f32) * std::f32::consts::PI / 1024.0
 }
 
@@ -2436,6 +2436,7 @@ fn map_to_place(
             width,
             height,
             align: "face".into(),
+            flags: 0,
         });
     }
     crate::world_place::WorldPlace {
@@ -3264,6 +3265,7 @@ pub fn assemble_duke_billboards(
     n
 }
 
+
 fn tile_slug(name: &str) -> String {
     let slug: String = name
         .chars()
@@ -3742,14 +3744,29 @@ fn emit_leftover_tiles(
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::write(&dest, png).is_err() {
+        if std::fs::write(&dest, &png).is_err() {
             continue;
         }
+        // The raw tile is the CONTENT; it is far under the published
+        // thumbnail's 256px floor, so offering it as the icon published no
+        // thumbnail at all and drew a blank library tile. The still beside
+        // it is the same artwork in the shape the contract wants.
+        let icon_rel = match crate::billboard_sheet::still_icon_png(&png) {
+            Some(icon) => {
+                let icon_rel =
+                    format!("{key}{}.png", crate::billboard_sheet::THUMB_SUFFIX);
+                match std::fs::write(staged.join(&icon_rel), &icon) {
+                    Ok(()) => Some(icon_rel),
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
         owner.entry(pic).or_insert_with(|| key.clone());
         extra.push(ClassicAsset {
             key,
             kind: AssetKind::Billboard,
-            rel_path: rel_path.clone(),
+            rel_path,
             tags: vec![
                 "billboard".into(),
                 source_id.into(),
@@ -3758,7 +3775,7 @@ fn emit_leftover_tiles(
                 format!("tile-{pic}"),
                 slug,
             ],
-            icon_rel: Some(rel_path),
+            icon_rel,
         });
     }
 }
@@ -4914,6 +4931,7 @@ enda
                 width: 0.6,
                 height: 1.2,
                 align: "face".into(),
+                flags: 0,
             }],
         };
         std::fs::write(staged.join("worlds/e1l1.place"), place.to_text()).unwrap();

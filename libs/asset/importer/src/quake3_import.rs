@@ -3093,6 +3093,7 @@ fn bsp46_place(
             width: 0.0,
             height: 0.0,
             align: String::new(),
+            flags: 0,
         });
         i += 1;
     }
