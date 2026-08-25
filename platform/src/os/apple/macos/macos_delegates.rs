@@ -720,7 +720,11 @@ pub fn define_cocoa_view_class() -> *const Class {
             }
             let bounds: NSRect = msg_send![this, bounds];
             if let MouseCursor::Hidden = current_cursor {
-                let _: () = msg_send![cursor_id, setHiddenUntilMouseMoves: true];
+                // +[NSCursor setHiddenUntilMouseMoves:] is a CLASS method. Sending it to
+                // the cursor instance raised NSInvalidArgumentException inside this
+                // callback, and a foreign exception crossing the shield below is a
+                // hard abort — every entry into walk mode died here.
+                let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: true];
             }
             let _: () = msg_send![this, addCursorRect: bounds cursor: cursor_id];
         });

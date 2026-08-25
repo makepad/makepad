@@ -13,6 +13,10 @@ workspace.members = [
     "libs/asset/chat_ui",
     "libs/asset/annotate",
     "libs/render",
+    "libs/raytrace",
+    "libs/fab",
+    "libs/fab_tour",
+    "apps/fab/loaders/gltf",
     "libs/sim",
     "libs/sim/math",
     "libs/show_control",
@@ -37,6 +41,7 @@ workspace.members = [
     "examples/aichat",
     "examples/pdf",
     "examples/shader",
+    "examples/raytrace",
     "examples/text_input",
     "examples/text_atlas_stress",
     "examples/text_selection",
@@ -55,6 +60,8 @@ workspace.members = [
     "examples/box3d",
     "examples/hello_world",
     "examples/render_to_texture",
+    # === digital-fabrication product ===
+    "apps/fab",
     # === xr app ===
     "xr",
     # === studio ===

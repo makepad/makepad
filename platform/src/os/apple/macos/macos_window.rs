@@ -11,7 +11,10 @@ use {
             apple::apple_sys::*,
             apple::apple_util::str_to_nsstring,
             macos::{
-                macos_app::{get_macos_class_global, with_macos_app, MacosApp},
+                macos_app::{
+                    activate_cocoa_window_on_pointer_down, get_macos_class_global,
+                    with_macos_app, MacosApp,
+                },
                 macos_event::MacosEvent,
             },
         },
@@ -69,7 +72,10 @@ impl MacosWindow {
             let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
 
             let () = msg_send![pool, drain];
-            with_macos_app(|app| app.cocoa_windows.push((window, view)));
+            with_macos_app(|app| {
+                app.cocoa_windows.push((window, view));
+                app.cocoa_window_ids.push((window_id, window));
+            });
             MacosWindow {
                 is_fullscreen: false,
                 is_popup: false,
@@ -885,6 +891,7 @@ impl MacosWindow {
         }
         // A real press arrived, so the current touch needs no synthesized tap.
         self.touch_disqualified = true;
+        activate_cocoa_window_on_pointer_down(self.window);
         let () = unsafe { msg_send![self.window, makeFirstResponder: self.view] };
         self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,

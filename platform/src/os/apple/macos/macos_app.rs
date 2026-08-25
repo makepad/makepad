@@ -141,6 +141,26 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
     })
 }
 
+/// Activate one Cocoa window without holding the global `MacosApp` RefCell
+/// borrow across AppKit calls (which can synchronously re-enter delegates).
+pub fn activate_cocoa_window_on_pointer_down(window: ObjcId) -> bool {
+    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+        return false;
+    }
+    unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![ns_app, isActive];
+        if !active {
+            let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+        }
+        let key: bool = msg_send![window, isKeyWindow];
+        if !key {
+            let () = msg_send![window, makeKeyAndOrderFront: nil];
+        }
+        !active || !key
+    }
+}
+
 extern "C" {
     /// libobjc: the hook called with an exception object before it is
     /// thrown. The only place that still sees the reason when the unwind
@@ -272,6 +292,8 @@ pub struct MacosApp {
     display_links_paused: bool,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
+    /// Exact framework-to-Cocoa lookup for bridge-injected pointer activation.
+    pub cocoa_window_ids: Vec<(WindowId, ObjcId)>,
     /// Cocoa owns/retains window delegates and views beyond `windowWillClose:`.
     /// Keep their Rust callback targets alive for the same lifetime so a queued
     /// native callback can never dereference a freed `MacosWindow`.
@@ -330,6 +352,7 @@ impl MacosApp {
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
+                cocoa_window_ids: Vec::new(),
                 retired_cocoa_windows: Vec::new(),
                 event_flow: EventFlow::Poll,
                 last_key_mod: KeyModifiers {
@@ -380,6 +403,13 @@ impl MacosApp {
                 let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory as i64];
             }
         }
+    }
+
+    pub fn cocoa_window_for_id(&self, window_id: WindowId) -> Option<ObjcId> {
+        self.cocoa_window_ids
+            .iter()
+            .find(|(candidate, _)| *candidate == window_id)
+            .map(|(_, window)| *window)
     }
     pub fn update_macos_menu(&mut self, menu: &MacosMenu) {
         unsafe fn make_menu(
@@ -936,6 +966,8 @@ impl MacosApp {
     pub fn retire_cocoa_window(&mut self, mut window: Box<MacosWindow>) {
         window.retire();
         let native_window = window.window;
+        self.cocoa_window_ids
+            .retain(|(window_id, _)| *window_id != window.window_id);
         self.cocoa_windows
             .retain(|(window, _view)| *window != native_window);
         self.retired_cocoa_windows.push(window);

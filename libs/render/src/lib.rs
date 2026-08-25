@@ -36,6 +36,7 @@ pub mod shadow_mesh;
 pub mod shadow_csm;
 pub mod shadow_sdf;
 pub mod sky;
+pub mod ssao;
 pub mod sun;
 pub mod thermometer;
 
@@ -56,6 +57,7 @@ pub use play::*;
 pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
+pub use ssao::*;
 pub use sun::*;
 // `sun::solar_dir` (axis-mapped game-space wrapper) and
 // `makepad_draw::solar_dir` (the underlying shared solar model, pulled in
@@ -70,5 +72,6 @@ use makepad_draw::*;
 /// `makepad_widgets::script_mod` (the shader block uses the widgets prelude)
 /// and before any widget that declares these draw types.
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    ssao::script_mod(vm);
     shaders::script_mod(vm)
 }
