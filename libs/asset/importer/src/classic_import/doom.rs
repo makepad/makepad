@@ -255,7 +255,131 @@ pub(crate) fn convert_wad(
         }
     }
 
+    // Sound effects. Unlike sprites and flats these sit under no marker
+    // range at all — the engine finds them by name (`I_GetSfxLumpNum`
+    // prefixes "ds"), so the only way to find them is to read every lump
+    // and let the format check reject whatever is not a sound.
+    let mut sfx_i = 0usize;
+    for lump in &wad.lumps {
+        if !lump.name.starts_with("DS") {
+            continue;
+        }
+        let Some(sound) = decode_dmx_sound(&lump.data) else {
+            continue;
+        };
+        let key = format!("sfx/{wad_slug}/{}", sanitize_slug(&lump.name));
+        let rel_path = format!("{key}.wav");
+        let dest = staged.join(&rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let wav = dmx_to_wav(&sound);
+        std::fs::write(&dest, &wav).map_err(|e| e.to_string())?;
+        let icon_rel = write_audio_thumb(staged, &key, &wav);
+        sfx_i += 1;
+        if (sfx_i == 1 || sfx_i % 32 == 0)
+            && !tick(map_n.saturating_sub(1), map_n.max(1), &lump.name, None)
+        {
+            return Err("cancelled".into());
+        }
+        assets.push(ClassicAsset {
+            key,
+            kind: AssetKind::Audio,
+            rel_path,
+            tags: tags_for(AssetKind::Audio, &[source.id(), "sfx", &lump.name]),
+            icon_rel,
+        });
+    }
+
     Ok(assets)
+}
+
+// ---------------------------------------------------------------------------
+// DMX sound lumps
+// ---------------------------------------------------------------------------
+
+/// One decoded DMX ("Doom sound") lump: mono unsigned 8-bit PCM with the
+/// hardware pad already off the ends.
+pub(crate) struct DmxSound {
+    pub sample_rate: u32,
+    pub samples: Vec<u8>,
+}
+
+/// DMX header: `u16` format id, `u16` sample rate, `u32` sample count.
+const DMX_HEADER: usize = 8;
+/// The only format id the digitised-sound lumps ever carry; 0 and 1 are the
+/// PC-speaker and Adlib scores, which hold no PCM.
+const DMX_FORMAT_PCM: u16 = 3;
+/// A run of the first and last real sample at each end, added for the
+/// DMX card's interpolation. It is not part of the sound: played verbatim
+/// through a modern mixer it is a click at both ends of every effect.
+const DMX_PAD: usize = 16;
+/// The rate DMX shipped almost everything at, and what a header that says
+/// something impossible falls back to.
+const DMX_RATE_DEFAULT: u32 = 11_025;
+/// A rate outside this band is a corrupt header rather than exotic
+/// material — DMX only ever recorded between these.
+const DMX_RATE_RANGE: std::ops::RangeInclusive<u32> = 8_000..=48_000;
+
+/// The PCM inside a DS lump, or `None` when the lump is not a digitised
+/// sound or cannot back what its header claims.
+pub(crate) fn decode_dmx_sound(data: &[u8]) -> Option<DmxSound> {
+    if data.len() < DMX_HEADER || u16_le(data, 0) != DMX_FORMAT_PCM {
+        return None;
+    }
+    let rate = u32::from(u16_le(data, 2));
+    let sample_rate = if DMX_RATE_RANGE.contains(&rate) {
+        rate
+    } else {
+        DMX_RATE_DEFAULT
+    };
+    let declared = u32_le(data, 4) as usize;
+    let body = &data[DMX_HEADER..];
+    // The count is a claim, the lump is the fact: clamping first means no
+    // slice below can leave the lump whatever the header said, and a claim
+    // the lump cannot back is a corrupt sound rather than a short one.
+    let count = declared.min(body.len());
+    if count == 0 || count < declared {
+        return None;
+    }
+    let samples = if count >= DMX_PAD * 2 {
+        &body[DMX_PAD..count - DMX_PAD]
+    } else {
+        &body[..count]
+    };
+    if samples.is_empty() {
+        return None;
+    }
+    Some(DmxSound {
+        sample_rate,
+        samples: samples.to_vec(),
+    })
+}
+
+/// A DMX sound as a mono 16-bit PCM WAV. Eight-bit source needs no encoder:
+/// the file is a 44-byte RIFF header and the samples recentred on zero.
+pub(crate) fn dmx_to_wav(sound: &DmxSound) -> Vec<u8> {
+    let data_len = (sound.samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sound.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sound.sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for &s in &sound.samples {
+        // DMX is unsigned and centred on 128; PCM16 is signed and centred
+        // on zero, and the byte's range maps onto the top eight bits.
+        out.extend_from_slice(&(((s as i16) - 128) << 8).to_le_bytes());
+    }
+    out
 }
 
 pub(crate) fn is_weapon_sprite(name: &str) -> bool {
@@ -792,6 +916,32 @@ fn doom_floor_at(
     floor_z
 }
 
+/// THING flags bit 1 (0x0002): appears on skill 3, "Hurt Me Plenty".
+const DOOM_SKILL_HMP: u16 = 0x0002;
+/// THING flags bit 4 (0x0010): multiplayer only, absent in single player.
+const DOOM_MULTIPLAYER_ONLY: u16 = 0x0010;
+
+/// Whether vanilla single-player Doom would spawn this THING at all, using
+/// the exported default cast: skill 3, "Hurt Me Plenty".
+///
+/// Player starts (types 1-4) and the deathmatch start (type 11) are exempt —
+/// `P_LoadThings` in vanilla `p_setup.c` special-cases those two groups and
+/// spawns them unconditionally, checking neither the skill bits nor the
+/// multiplayer-only bit. Every other thing (monsters, pickups, decorations
+/// alike) must carry the HMP skill bit (0x0002) and must NOT be
+/// multiplayer-only (0x0010).
+///
+/// A thing with none of the three skill bits set (`flags & 0x0007 == 0`) is
+/// not a "spawns everywhere" wildcard: vanilla's skill check is a positive
+/// bit test, so such a thing fails it on every skill, HMP included, and is
+/// correctly excluded here too rather than treated as "all skills".
+pub(crate) fn doom_thing_spawns_on_hmp(typ: u16, flags: u16) -> bool {
+    if matches!(typ, 1 | 2 | 3 | 4 | 11) {
+        return true;
+    }
+    flags & DOOM_SKILL_HMP != 0 && flags & DOOM_MULTIPLAYER_ONLY == 0
+}
+
 pub(crate) fn doom_map_place(
     lumps: &[WadLump],
     map: &str,
@@ -809,6 +959,14 @@ pub(crate) fn doom_map_place(
             let Some((kind, prefix)) = crate::world_place::doom_thing_actor(typ) else {
                 continue;
             };
+            let flags = u16_le(things, o + 8);
+            // Default published cast = single-player skill 3 (HMP). See
+            // `doom_thing_spawns_on_hmp` for the exact vanilla rule,
+            // including the player/deathmatch-start exemption and the
+            // no-skill-bits corner case.
+            if !doom_thing_spawns_on_hmp(typ, flags) {
+                continue;
+            }
             let tx = i16_le(things, o) as f32 * DOOM_UNIT;
             let ty = i16_le(things, o + 2) as f32 * DOOM_UNIT;
             let angle = u16_le(things, o + 4) as f32;
@@ -828,6 +986,10 @@ pub(crate) fn doom_map_place(
                 width: 0.0,
                 height: 0.0,
                 align: String::new(),
+                // Raw THING flags, preserved verbatim (skill mask +
+                // multiplayer-only) so a future difficulty option can
+                // re-derive another cast without re-importing the WAD.
+                flags: flags as u32,
             });
         }
     }
@@ -1068,6 +1230,9 @@ pub(crate) fn quake_bsp_place(bytes: &[u8], source: &str, world_key: &str) -> cr
                         width: 0.0,
                         height: 0.0,
                         align: String::new(),
+                        // Quake's .map entities carry no Doom-style skill
+                        // bits; nothing to preserve here.
+                        flags: 0,
                     });
                     i += 1;
                 }
@@ -4952,5 +5117,142 @@ mod tests {
             );
             assert!(seams > 0, "line 30's lower band crosses a tile seam");
         });
+    }
+
+    // -----------------------------------------------------------------
+    // DMX sound lumps
+    // -----------------------------------------------------------------
+
+    /// A DS lump the way a WAD stores one: header, a pad of the first
+    /// sample, the sound, a pad of the last sample. `declared` is written
+    /// into the header verbatim so a test can lie about it.
+    fn dmx_lump(format: u16, rate: u16, real: &[u8], declared: Option<u32>) -> Vec<u8> {
+        let mut body = vec![*real.first().unwrap_or(&128); DMX_PAD];
+        body.extend_from_slice(real);
+        body.extend(std::iter::repeat(*real.last().unwrap_or(&128)).take(DMX_PAD));
+        let count = declared.unwrap_or(body.len() as u32);
+        let mut out = Vec::new();
+        out.extend_from_slice(&format.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn dmx_decode_strips_the_hardware_pad() {
+        let real: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let lump = dmx_lump(3, 22050, &real, None);
+        assert_eq!(lump.len(), DMX_HEADER + DMX_PAD * 2 + real.len());
+        let sound = decode_dmx_sound(&lump).expect("a well-formed DS lump decodes");
+        assert_eq!(sound.sample_rate, 22050);
+        assert_eq!(sound.samples, real, "the 16-byte pads are not the sound");
+        assert_eq!(sound.samples.first(), Some(&10));
+        assert_eq!(sound.samples.last(), Some(&80));
+
+        // A rate the header cannot mean falls back rather than resampling
+        // the sound to a speed nothing recorded it at.
+        let zero_rate = dmx_lump(3, 0, &real, None);
+        assert_eq!(
+            decode_dmx_sound(&zero_rate).expect("still a sound").sample_rate,
+            DMX_RATE_DEFAULT
+        );
+
+        // Shorter than one pad pair: every byte is sound, nothing to strip.
+        let mut tiny = vec![3u8, 0, 0x11, 0x2b];
+        tiny.extend_from_slice(&12u32.to_le_bytes());
+        tiny.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let sound = decode_dmx_sound(&tiny).expect("a sub-pad lump keeps all of itself");
+        assert_eq!(sound.samples.len(), 12);
+        assert_eq!(sound.sample_rate, 11025);
+    }
+
+    #[test]
+    fn dmx_decode_refuses_malformed_lumps() {
+        let real: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        // Not a lump at all, and a lump too short to hold a header.
+        assert!(decode_dmx_sound(&[]).is_none());
+        assert!(decode_dmx_sound(&[3, 0, 0x11, 0x2b, 0, 0, 0]).is_none());
+        // The PC-speaker and Adlib scores share the DS/DP naming but carry
+        // no PCM.
+        assert!(decode_dmx_sound(&dmx_lump(0, 11025, &real, None)).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(1, 11025, &real, None)).is_none());
+        // A count the lump cannot back: the slice must never leave the
+        // buffer, and a truncated sound is not published.
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &real, Some(1_000_000))).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &real, Some(u32::MAX))).is_none());
+        // Nothing but header, and nothing but pad.
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &[], Some(0))).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &[], None)).is_none());
+    }
+
+    #[test]
+    fn dmx_wav_parses_back() {
+        let real: Vec<u8> = vec![0, 64, 128, 192, 255, 128, 1, 254];
+        let sound = decode_dmx_sound(&dmx_lump(3, 11025, &real, None)).expect("sound");
+        let wav = dmx_to_wav(&sound);
+
+        // The 44-byte canonical header, field by field.
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_le(&wav, 4) as usize, wav.len() - 8);
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(u32_le(&wav, 16), 16);
+        assert_eq!(u16_le(&wav, 20), 1, "PCM");
+        assert_eq!(u16_le(&wav, 22), 1, "mono");
+        assert_eq!(u32_le(&wav, 24), 11025);
+        assert_eq!(u32_le(&wav, 28), 11025 * 2, "byte rate");
+        assert_eq!(u16_le(&wav, 32), 2, "block align");
+        assert_eq!(u16_le(&wav, 34), 16, "bits per sample");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_le(&wav, 40) as usize, real.len() * 2);
+        assert_eq!(wav.len(), 44 + real.len() * 2);
+
+        // And it survives the crate's own RIFF reader — the one every
+        // catalog thumbnail and duration goes through.
+        let pcm = crate::thumbs::parse_wav(&wav).expect("the staged WAV parses");
+        assert_eq!(pcm.sample_rate, 11025);
+        assert_eq!(pcm.frames.len(), real.len());
+        for (i, &s) in real.iter().enumerate() {
+            let want = (((s as i16) - 128) << 8) as f32 / 32768.0;
+            assert_eq!(pcm.frames[i].0, want, "sample {i}");
+            assert_eq!(pcm.frames[i].1, want, "mono duplicates to both sides");
+        }
+    }
+
+    /// The real lumps, when this machine has the shareware IWAD. CI has no
+    /// id Software data — no IWAD, no test, and it says so.
+    #[test]
+    fn shareware_iwad_sounds_decode() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let mut decoded = 0usize;
+        for lump in wad.lumps.iter().filter(|l| l.name.starts_with("DS")) {
+            let sound = decode_dmx_sound(&lump.data)
+                .unwrap_or_else(|| panic!("{} is a DS lump that will not decode", lump.name));
+            assert!(DMX_RATE_RANGE.contains(&sound.sample_rate), "{}", lump.name);
+            assert_eq!(
+                crate::thumbs::parse_wav(&dmx_to_wav(&sound))
+                    .expect(&lump.name)
+                    .frames
+                    .len(),
+                sound.samples.len()
+            );
+            decoded += 1;
+        }
+        // Every DS lump decoded (the loop panics on any that did not), and
+        // the shareware IWAD carries only episode 1's cast.
+        assert_eq!(decoded, wad.lumps.iter().filter(|l| l.name.starts_with("DS")).count());
+        assert!(decoded >= 50, "shareware DOOM1.WAD carries 55 sounds, got {decoded}");
+        // DSPISTOL is the one every player hears first.
+        let pistol = wad.lumps.iter().find(|l| l.name == "DSPISTOL").expect("DSPISTOL");
+        let sound = decode_dmx_sound(&pistol.data).expect("pistol");
+        assert_eq!(sound.sample_rate, 11025);
+        assert_eq!(sound.samples.len(), pistol.data.len() - DMX_HEADER - DMX_PAD * 2);
     }
 }
