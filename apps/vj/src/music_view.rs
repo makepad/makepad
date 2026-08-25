@@ -467,6 +467,7 @@ script_mod! {
         min: 0.0
         max: 2.0
         default: 1.0
+        scroll_step: 0.025
         text: ""
         flow: Down
         text_input: TextInput{width: 0 height: 0}
@@ -525,6 +526,7 @@ script_mod! {
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
+        scroll_step: 0.025
         width: 40
         height: Fill
         text: ""
@@ -565,6 +567,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
