@@ -70,8 +70,11 @@
 #endif
 
 #define GGML_UNUSED(x) (void)(x)
+// constexpr because GGML_UNUSED_VARS is called from constexpr config helpers
+// (e.g. ggml_cuda_fattn_mma_get_nstages' no-cp.async branch); a non-constexpr
+// callee poisons those on the pre-Ampere device pass.
 template <typename... Args>
-static __host__ __device__ __forceinline__ void mkllm_unused_vars(Args && ...) {}
+static __host__ __device__ __forceinline__ constexpr void mkllm_unused_vars(Args && ...) {}
 #define GGML_UNUSED_VARS(...) mkllm_unused_vars(__VA_ARGS__)
 #define GGML_ASSERT(x) do { if (!(x)) { printf("GGML_ASSERT failed: %s\n", #x); } } while (0)
 #define GGML_ABORT(...) do { printf("GGML_ABORT %s\n", #__VA_ARGS__); } while (0)
