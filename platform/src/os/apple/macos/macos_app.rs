@@ -48,6 +48,18 @@ pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
     MACOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
 
+/// Like [`with_macos_app`], but returns `None` instead of panicking when the
+/// app is already borrowed — for callbacks AppKit fires re-entrantly from
+/// inside our own event handling (`resetCursorRects` after an
+/// `invalidateCursorRects`, tracking-area updates), where a RefCell panic
+/// cannot unwind through the ObjC frame and aborts the whole process.
+pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
+    MACOS_APP.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut app) => app.as_mut().map(f),
+        Err(_) => None,
+    })
+}
+
 pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) {
     unsafe {
         MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
