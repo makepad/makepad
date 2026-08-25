@@ -45,7 +45,9 @@ widgets stacked above each knob; stem labels already have instance names
     `to_external`/`set_internal` round-trip dragging uses.
   - Emits the same `Slide(value)` then `EndSlide(value)` actions as a drag, so
     app handlers, `bind`, and the text display update through existing paths.
-  - Redraws and consumes the event (the containing view must not also scroll).
+  - Handles `Hit::FingerScroll` the same way the existing chart/browser
+    widgets do (no consume flag exists in the Hit API); the DJ tab has no
+    enclosing scroll view, so no scroll conflict arises.
 
 ### 2. Title-click reset (app: `apps/vj/src/music_view.rs` + `main.rs`)
 
