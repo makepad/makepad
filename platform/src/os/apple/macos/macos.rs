@@ -654,14 +654,17 @@ impl Cx {
                         };
                         self.passes[*draw_pass_id].set_time(time_now);
                         let presented = if link_drawable.is_some() {
+                            // This drawable came from a CAMetalDisplayLink update,
+                            // which already schedules it for the update's target
+                            // presentation time; `presentDrawable:atTime:` on it
+                            // raises CAMetalDrawableInvalidOperation and took
+                            // every visible window down at launch. Present it
+                            // plainly — the link does the pacing. The target time
+                            // still feeds the frame trace above.
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
-                                DrawPassMode::Drawable(
-                                    drawable,
-                                    (link_target_presentation_time > 0.0)
-                                        .then_some(link_target_presentation_time),
-                                ),
+                                DrawPassMode::Drawable(drawable, None),
                             )
                         } else if metal_window.is_resizing {
                             self.draw_pass(
