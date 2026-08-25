@@ -674,8 +674,11 @@ script_mod! {
             )
             self.world = self.draw_list.view_transform
                 * vec4(world3.x, world3.y, world3.z, 1.0)
-            // Video rows are top-first; quad uv.y grows upward. Flip v.
-            self.v_uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
+            // Video rows are top-first; quad uv.y grows upward. Flip v,
+            // then map into the caller's atlas window (sprite billboards
+            // share this draw with the full-frame video screen).
+            let uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
+            self.v_uv = mix(self.uv_rect.xy, self.uv_rect.zw, uv)
             self.vertex_pos = self.draw_pass.camera_projection
                 * (self.draw_pass.camera_view * self.world)
             return self.vertex_pos
@@ -683,6 +686,9 @@ script_mod! {
 
         pixel: fn() {
             let color = self.tex.sample_as_bgra(self.v_uv)
+            if self.cutout > 0.5 && color.w < 0.5 {
+                discard()
+            }
             return vec4(color.x, color.y, color.z, 1.0)
         }
 
@@ -1005,7 +1011,10 @@ script_mod! {
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        // Imported model layers may be deliberate sheets (roof soffits,
+        // glazing, CAD faces). The shadow depth path is already two-sided;
+        // the receiver path must show and light the same geometry.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -1256,9 +1265,20 @@ script_mod! {
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
             let normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             let model_view = self.draw_list.view_transform * self.transform
-            let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+            let raw_world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
+            // Face-forward only the side the camera actually sees. This is
+            // the two-sided material convention: an authored back face gets
+            // the opposite normal, so N.L, hemisphere fill, CSM bias and the
+            // PBR lobe all agree instead of an underside rendering black.
+            let raw_view_normal = (self.draw_pass.camera_view
+                * vec4(raw_world_normal.x, raw_world_normal.y, raw_world_normal.z, 0.0)).xyz
+            var face_sign = 1.0
+            if dot(raw_view_normal, view_pos.xyz) > 0.0 {
+                face_sign = 0.0 - 1.0
+            }
+            let world_normal = raw_world_normal * face_sign
             let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
             let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
@@ -1268,6 +1288,7 @@ script_mod! {
             // move them).
             let dl_wp = (self.transform * vec4(pos.x, pos.y, pos.z, 1.0)).xyz
             let dl_n = normalize((self.transform * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+                * face_sign
             self.v_dl = self.dl_sum_gated(dl_wp, dl_n)
             // Ground-field sun shadow for DYNAMIC instances (dl_apply = 1).
             // The field stores GROUND-level visibility, so the sample is
@@ -4533,6 +4554,12 @@ pub struct DrawSceneScreen {
     /// x = width, y = height in world units; zw unused.
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_size: Vec4f,
+    /// `(u0, v0, u1, v1)` atlas window. The full-frame screen uses 0..1.
+    #[live(vec4(0.0, 0.0, 1.0, 1.0))]
+    pub uv_rect: Vec4f,
+    /// Sprite billboards alpha-test their bounding quad; video does not.
+    #[live(0.0)]
+    pub cutout: f32,
 }
 
 /// GPU-skinned character mesh: rest geometry + joint-palette texture.
