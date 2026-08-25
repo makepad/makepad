@@ -455,6 +455,8 @@ pub struct ViewportState {
     /// Last progress reported by this viewport's tracer.
     pub rendered_samples: u32,
     pub rendered_done: bool,
+    /// Resolution-ladder rung the tracer is on (0 = native).
+    pub rendered_stage: u32,
 }
 
 impl Default for ViewportState {
@@ -474,6 +476,7 @@ impl Default for ViewportState {
             rendered_paused: false,
             rendered_samples: 0,
             rendered_done: false,
+            rendered_stage: 0,
         }
     }
 }
@@ -503,6 +506,10 @@ impl ViewportState {
             format!("stopped · {} spp", self.rendered_samples)
         } else if self.rendered_done {
             format!("done · {} spp", self.rendered_samples)
+        } else if self.rendered_stage > 0 {
+            // The resolution ladder's coarse rungs: the whole frame is
+            // traced at native >> stage and sharpens rung by rung.
+            format!("tracing · 1/{}", 1u32 << self.rendered_stage)
         } else {
             format!("converging · {} spp", self.rendered_samples)
         }
@@ -1587,6 +1594,31 @@ impl AppState {
                 self.sun_shadows = *on;
                 true
             }
+            SetMaterialBaseColor(id, rgba) => {
+                // The scene Arc is normally unshared between edits (loaders
+                // and bakes hold clones only transiently), so make_mut is a
+                // plain mutation; when something does hold a ref it pays one
+                // clone rather than corrupting a reader.
+                let changed =
+                    Arc::make_mut(&mut self.scene).set_material_base_color(*id, *rgba);
+                if changed {
+                    // The traced pane uploads `snapshot` keyed by its
+                    // generation. A colour edit touches one material and
+                    // nothing else, so patch the snapshot in place instead
+                    // of rebuilding it (a rebuild copies every triangle and
+                    // every texture — far too slow per drag step).
+                    let generation = self.scene.generation;
+                    if let Some(snap) = self.snapshot.as_mut() {
+                        let snap = Arc::make_mut(snap);
+                        snap.generation = generation;
+                        if let Some(sm) = snap.materials.get_mut(id.index()) {
+                            sm.albedo = *rgba;
+                        }
+                    }
+                    self.mark_render_dirty();
+                }
+                changed
+            }
             SetRenderSettings(r) => {
                 let mut next = *r;
                 next.max_samples = RenderSettings::clamp_max_samples(next.max_samples);
@@ -1792,6 +1824,9 @@ pub struct RenderedFrame {
     pub converging: bool,
     pub done: bool,
     pub samples_done: u32,
+    /// Resolution-ladder rung: 0 = tracing at native, k = at native >> k
+    /// (the badge shows "tracing · 1/2ᵏ" while the picture sharpens).
+    pub stage_shift: u32,
 }
 
 /// # The B↔F seam (blocker B3). FROZEN.
@@ -2009,6 +2044,11 @@ pub enum ShellAction {
     SetSnap(SnapOptions),
     SetSun(SunSettings),
     SetSunShadows(bool),
+    /// Live material edit from the colour picker: the scene material's base
+    /// colour. Bumps `Scene::generation`, so both viewports re-upload (the
+    /// base colour is folded into the vertex tint at pack time) and the
+    /// traced pane restarts its accumulation.
+    SetMaterialBaseColor(MaterialId, [f32; 4]),
     /// Display unit + decimal places for every length/area label
     /// (`AppState::units`; lane E report R4). Never touches geometry.
     SetDisplayUnit(LengthUnit, u8),

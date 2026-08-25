@@ -164,6 +164,20 @@ pub enum FabUiAction {
     /// what is in it, which is what lets lane G's header dropdown work without
     /// lane G writing a line of menu code.
     DropdownClicked { tag: LiveId, anchor: Rect },
+    /// Raise the colour-picker popover (`FabColorPickerLayer`, shell overlay
+    /// stack) anchored to a swatch's drawn rect. The layer mirrors the menu
+    /// contract: it broadcasts `MenuOpened` / `MenuClosed` for `owner`, so
+    /// every popup button agrees on what is open.
+    OpenColorPicker {
+        owner: LiveId,
+        anchor: Rect,
+        rgba: [f32; 4],
+        with_alpha: bool,
+    },
+    /// Live colour while the picker's wheel / rows / hex are being edited.
+    ColorPickerChanged { owner: LiveId, rgba: [f32; 4] },
+    /// A commit point (release, Enter, click-away close, Escape-revert).
+    ColorPickerEnded { owner: LiveId, rgba: [f32; 4] },
 }
 
 /// Read every `FabUiAction` out of an actions pass.
