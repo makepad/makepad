@@ -191,8 +191,35 @@ impl TrackPcm {
     }
 }
 
+/// Headroom the stem lanes are stored with.
+///
+/// BS-RoFormer's masks are complex ratios, not a partition of unity, so a
+/// stem legitimately peaks ABOVE full scale: the reference vocals stem hits
+/// 1.12 and a measured drums stem 1.47. Encoding those straight to i16 hard-
+/// clipped every peak past 1.0 — about 0.05% of drum samples on a real
+/// track, which is exactly the transients, and it hardens them audibly.
+///
+/// So every lane is divided by this on the way in and multiplied back on the
+/// way out, spending one bit of resolution to keep the peaks intact. The
+/// on-disk span cache solves the same problem differently (a per-span peak
+/// stored beside the samples); this is the in-memory playback format, where
+/// a chunk has to be indexable arithmetically and cannot carry side data.
+///
+/// Every producer of a [`TrackStems`] lane must encode through
+/// [`encode_stem_sample`], and the only consumer that reads absolute levels
+/// out of one is [`DeckSource::frame`].
+pub const STEM_CHUNK_HEADROOM: f32 = 2.0;
+
+/// One stem sample (nominally -1.0..1.0, legitimately beyond) into the lane
+/// format. See [`STEM_CHUNK_HEADROOM`].
+pub fn encode_stem_sample(value: f32) -> i16 {
+    ((value / STEM_CHUNK_HEADROOM).clamp(-1.0, 1.0) * 32767.0) as i16
+}
+
 /// A separated track: four stem lanes on the SAME timeline as the mixed
 /// file, delivered in fixed chunks as the separator streams them.
+///
+/// Lanes are stored with [`STEM_CHUNK_HEADROOM`], not at full scale.
 ///
 /// A chunk that has not arrived is not silence — the deck falls back to the
 /// mixed file there, so playback is never interrupted by separation and the
@@ -268,8 +295,11 @@ impl FrameSource for DeckSource<'_> {
                 continue;
             }
             let Some(frame) = block.get(offset) else { continue };
-            out[0] += frame[0] as f32 / 32768.0 * gain;
-            out[1] += frame[1] as f32 / 32768.0 * gain;
+            // Lanes carry STEM_CHUNK_HEADROOM; undo it here so a stem that
+            // peaks past full scale plays at the level it was separated at.
+            let scale = STEM_CHUNK_HEADROOM / 32768.0 * gain;
+            out[0] += frame[0] as f32 * scale;
+            out[1] += frame[1] as f32 * scale;
         }
         // Nothing separated here yet: the mixed file plays, as it did
         // before separation existed.
@@ -1468,6 +1498,30 @@ mod tests {
         20.0 * ratio.max(1e-12).log10()
     }
 
+    /// A separated stem peaks above full scale — the lane format has to
+    /// carry that, because clipping it is what hardened the transients.
+    #[test]
+    fn stem_lanes_carry_peaks_above_full_scale() {
+        // The decode side of `DeckSource::frame`, at unity gain.
+        let played = |value: f32| {
+            encode_stem_sample(value) as f32 / 32768.0 * STEM_CHUNK_HEADROOM
+        };
+        // The two peaks this bug was found on: the reference vocals stem
+        // and a measured drums stem.
+        for peak in [1.12f32, 1.47] {
+            let out = played(peak);
+            assert!(
+                (out - peak).abs() < 0.001,
+                "a stem peaking at {peak} must survive the lane format: {out}"
+            );
+        }
+        // Ordinary audio is unharmed, and the format still clamps — just at
+        // the headroom instead of at full scale.
+        assert!((played(0.5) - 0.5).abs() < 0.001);
+        assert!((played(-0.5) + 0.5).abs() < 0.001);
+        assert!((played(9.0) - STEM_CHUNK_HEADROOM).abs() < 0.001);
+    }
+
     /// The "fade to A/B" buttons hand the mixer a duration; the fader must
     /// take that long to cross, not jump and land.
     #[test]
@@ -1634,6 +1688,22 @@ mod tests {
         );
     }
 
+    /// Full-scale PCM re-encoded into the lane format, the way every real
+    /// producer does it — so a fixture measures what playback measures.
+    fn stem_block(frames: &[[i16; 2]]) -> Arc<Vec<[i16; 2]>> {
+        Arc::new(
+            frames
+                .iter()
+                .map(|f| {
+                    [
+                        encode_stem_sample(f[0] as f32 / 32768.0),
+                        encode_stem_sample(f[1] as f32 / 32768.0),
+                    ]
+                })
+                .collect(),
+        )
+    }
+
     /// Four chunked stem lanes over a four-second track.
     fn chunked_stems(tones: [f64; 4], rate: u32, seconds: f64) -> Arc<TrackStems> {
         let chunk = rate as usize;
@@ -1648,8 +1718,7 @@ mod tests {
             for index in 0..count {
                 let start = index * chunk;
                 let end = (start + chunk).min(frames);
-                stems.lanes[lane][index] =
-                    Some(Arc::new(pcm.frames[start..end].to_vec()));
+                stems.lanes[lane][index] = Some(stem_block(&pcm.frames[start..end]));
             }
         }
         Arc::new(stems)
@@ -1688,9 +1757,8 @@ mod tests {
         for index in 2..4 {
             let start = index * 48_000;
             for lane in 0..STEM_COUNT {
-                stems.lanes[lane][index] = Some(Arc::new(
-                    separated.frames[start..start + 48_000].to_vec(),
-                ));
+                stems.lanes[lane][index] =
+                    Some(stem_block(&separated.frames[start..start + 48_000]));
             }
         }
         assert!(!stems.covers(0) && stems.covers(2 * 48_000));

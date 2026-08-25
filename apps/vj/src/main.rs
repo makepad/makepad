@@ -14536,7 +14536,12 @@ p2 {}
                     let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
                     sum += mono * mono;
                 }
-                rms[lane] = (sum / (end - offset) as f64).sqrt();
+                // The headroom is undone once per lane rather than per
+                // sample. `stem_column_shares` only reads these relative to
+                // each other, so it cannot change the picture — but a level
+                // that claims to be an amplitude should be one.
+                rms[lane] = (sum / (end - offset) as f64).sqrt()
+                    * crate::mixer::STEM_CHUNK_HEADROOM as f64;
             }
             if any {
                 tiles[column] = crate::music_view::stem_column_shares(rms);
