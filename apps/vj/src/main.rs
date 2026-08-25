@@ -2525,9 +2525,11 @@ struct DeckRefs {
     vu: ViewRef,
     eq_knobs: Vec<SliderRef>,
     eq_kills: Vec<ButtonRef>,
+    eq_labels: Vec<ButtonRef>,
+    filter_label: ButtonRef,
     stem_knobs: Vec<SliderRef>,
     stem_kills: Vec<ButtonRef>,
-    stem_labels: Vec<LabelRef>,
+    stem_labels: Vec<ButtonRef>,
     /// The transcript panel filling the bottom of the deck column.
     lyrics: WidgetRef,
 }
@@ -2560,9 +2562,11 @@ impl DeckRefs {
             vu: ui.view(cx, ids.vu),
             eq_knobs: ids.eq_knobs.iter().map(|p| ui.slider(cx, p)).collect(),
             eq_kills: ids.eq_kills.iter().map(|p| ui.button(cx, p)).collect(),
+            eq_labels: ids.eq_labels.iter().map(|p| ui.button(cx, p)).collect(),
+            filter_label: ui.button(cx, ids.filter_label),
             stem_knobs: ids.stem_knobs.iter().map(|p| ui.slider(cx, p)).collect(),
             stem_kills: ids.stem_kills.iter().map(|p| ui.button(cx, p)).collect(),
-            stem_labels: ids.stem_labels.iter().map(|p| ui.label(cx, p)).collect(),
+            stem_labels: ids.stem_labels.iter().map(|p| ui.button(cx, p)).collect(),
             lyrics: ui.widget(cx, ids.lyrics),
         }
     }
@@ -2648,6 +2652,9 @@ struct MusicDeckIds {
     lyrics: &'static [LiveId],
     /// The legends over those knobs, tinted to match the waveform.
     stem_labels: [&'static [LiveId]; 4],
+    /// Low, mid, high — matches `eq_knobs`.
+    eq_labels: [&'static [LiveId]; 3],
+    filter_label: &'static [LiveId],
 }
 
 impl MusicDeckIds {
@@ -2704,6 +2711,12 @@ impl MusicDeckIds {
                     ids!(deck_a_label_bass),
                     ids!(deck_a_label_other),
                 ],
+                eq_labels: [
+                    ids!(deck_a_label_eq_low),
+                    ids!(deck_a_label_eq_mid),
+                    ids!(deck_a_label_eq_high),
+                ],
+                filter_label: ids!(deck_a_label_filter),
                 lyrics: ids!(deck_a_lyrics),
             },
             DeckId::B => MusicDeckIds {
@@ -2757,6 +2770,12 @@ impl MusicDeckIds {
                     ids!(deck_b_label_bass),
                     ids!(deck_b_label_other),
                 ],
+                eq_labels: [
+                    ids!(deck_b_label_eq_low),
+                    ids!(deck_b_label_eq_mid),
+                    ids!(deck_b_label_eq_high),
+                ],
+                filter_label: ids!(deck_b_label_filter),
                 lyrics: ids!(deck_b_lyrics),
             },
         }
