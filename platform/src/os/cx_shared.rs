@@ -594,6 +594,10 @@ impl Cx {
     ) -> bool {
         match msg {
             StudioToApp::MouseDown(e) => {
+                // Synthetic input must take the same activation path as a
+                // native click. In particular, an unfocused macOS window
+                // must become key before its drag starts.
+                self.activate_window_on_pointer_down(window_id);
                 let event = crate::event::MouseDownEvent {
                     abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
@@ -605,6 +609,7 @@ impl Cx {
                 self.fingers.process_tap_count(event.abs, event.time);
                 self.fingers.mouse_down(event.button, window_id);
                 self.call_event_handler(&Event::MouseDown(event));
+                self.update_pointer_capture_pacing();
             }
             StudioToApp::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
@@ -630,6 +635,7 @@ impl Cx {
                 self.call_event_handler(&Event::MouseUp(event));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.update_pointer_capture_pacing();
                 self.send_studio_key_focus_rect_response();
             }
             StudioToApp::Scroll(e) => {

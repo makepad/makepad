@@ -2,6 +2,7 @@ use makepad_micro_serde::*;
 use std::collections::HashMap;
 
 pub const GLTF_MODE_TRIANGLES: u32 = 4;
+pub const GLTF_MODE_LINES: u32 = 1;
 
 #[derive(Clone, Debug, DeJson)]
 pub struct GltfDocument {
@@ -25,6 +26,8 @@ pub struct GltfDocument {
     pub extensions_used: Option<Vec<String>>,
     #[rename(extensionsRequired)]
     pub extensions_required: Option<Vec<String>>,
+    pub extensions: Option<JsonValue>,
+    pub extras: Option<JsonValue>,
 }
 
 impl GltfDocument {
@@ -86,6 +89,7 @@ pub struct GltfAsset {
 pub struct GltfScene {
     pub name: Option<String>,
     pub nodes: Option<Vec<usize>>,
+    pub extras: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -100,6 +104,8 @@ pub struct GltfNode {
     pub rotation: Option<[f32; 4]>,
     pub scale: Option<[f32; 3]>,
     pub weights: Option<Vec<f32>>,
+    pub extensions: Option<JsonValue>,
+    pub extras: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -133,6 +139,7 @@ pub struct GltfMesh {
     pub name: Option<String>,
     pub primitives: Vec<GltfPrimitive>,
     pub weights: Option<Vec<f32>>,
+    pub extras: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -142,6 +149,7 @@ pub struct GltfPrimitive {
     pub material: Option<usize>,
     pub mode: Option<u32>,
     pub targets: Option<Vec<HashMap<String, usize>>>,
+    pub extras: Option<JsonValue>,
 }
 
 impl GltfPrimitive {
@@ -233,6 +241,8 @@ pub struct GltfMaterial {
     pub alpha_cutoff: Option<f32>,
     #[rename(doubleSided)]
     pub double_sided: Option<bool>,
+    pub extensions: Option<JsonValue>,
+    pub extras: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug, DeJson)]

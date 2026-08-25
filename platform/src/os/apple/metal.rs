@@ -267,12 +267,20 @@ impl Cx {
 
                 if self.passes[draw_pass_id].depth_texture.is_some() {
                     let depth_state = if draw_call.options.depth_write {
-                        self.passes[draw_pass_id].os.mtl_depth_state_write
+                        self.passes[draw_pass_id]
+                            .os
+                            .mtl_depth_state_write
+                            .as_ref()
                     } else {
-                        self.passes[draw_pass_id].os.mtl_depth_state_no_write
+                        self.passes[draw_pass_id]
+                            .os
+                            .mtl_depth_state_no_write
+                            .as_ref()
                     };
                     if let Some(depth_state) = depth_state {
-                        let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state] };
+                        let () = unsafe {
+                            msg_send![encoder, setDepthStencilState: depth_state.as_id()]
+                        };
                     }
                 }
 
@@ -802,28 +810,40 @@ impl Cx {
             }
             // create depth state
             if self.passes[draw_pass_id].os.mtl_depth_state_write.is_none() {
-                let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
+                let desc = RcObjcId::from_owned(
+                    NonNull::new(unsafe {
+                        msg_send![class!(MTLDepthStencilDescriptor), new]
+                    })
+                    .unwrap(),
+                );
                 let () = unsafe {
-                    msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
+                    msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
                 };
-                let () = unsafe { msg_send![desc, setDepthWriteEnabled: true] };
+                let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: true] };
                 let depth_stencil_state: ObjcId =
-                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
-                self.passes[draw_pass_id].os.mtl_depth_state_write = Some(depth_stencil_state);
+                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()] };
+                self.passes[draw_pass_id].os.mtl_depth_state_write =
+                    NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
             }
             if self.passes[draw_pass_id]
                 .os
                 .mtl_depth_state_no_write
                 .is_none()
             {
-                let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
+                let desc = RcObjcId::from_owned(
+                    NonNull::new(unsafe {
+                        msg_send![class!(MTLDepthStencilDescriptor), new]
+                    })
+                    .unwrap(),
+                );
                 let () = unsafe {
-                    msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
+                    msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual]
                 };
-                let () = unsafe { msg_send![desc, setDepthWriteEnabled: false] };
+                let () = unsafe { msg_send![desc.as_id(), setDepthWriteEnabled: false] };
                 let depth_stencil_state: ObjcId =
-                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
-                self.passes[draw_pass_id].os.mtl_depth_state_no_write = Some(depth_stencil_state);
+                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc.as_id()] };
+                self.passes[draw_pass_id].os.mtl_depth_state_no_write =
+                    NonNull::new(depth_stencil_state).map(RcObjcId::from_owned);
             }
         }
 
@@ -875,8 +895,12 @@ impl Cx {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
 
-        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state_write {
-            let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state] };
+        if let Some(depth_state) = self.passes[draw_pass_id]
+            .os
+            .mtl_depth_state_write
+            .as_ref()
+        {
+            let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state.as_id()] };
         }
 
         let pass_width = dpi_factor * pass_rect.size.x;
@@ -1164,12 +1188,16 @@ impl Cx {
             let _: () = unsafe {
                 msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm]
             };
-            let texture: ObjcId =
-                unsafe { msg_send![metal_cx.device, newTextureWithDescriptor: descriptor] };
+            let texture = RcObjcId::from_owned(
+                NonNull::new(unsafe {
+                    msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id()]
+                })
+                .unwrap(),
+            );
             unsafe {
                 let blit_encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
-                let () = msg_send![blit_encoder, copyFromTexture: in_texture toTexture:texture];
-                let () = msg_send![blit_encoder, synchronizeTexture: texture slice:0 level:0];
+                let () = msg_send![blit_encoder, copyFromTexture: in_texture toTexture:texture.as_id()];
+                let () = msg_send![blit_encoder, synchronizeTexture: texture.as_id() slice:0 level:0];
                 let () = msg_send![blit_encoder, endEncoding];
             };
             return Some(ScreenshotInfo {
@@ -1206,14 +1234,14 @@ impl Cx {
                 command_buffer,
                 addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
                     // alright lets grab a texture if need be
-                    if let Some(sf) = &*screenshot_info.lock().unwrap(){
+                    if let Some(sf) = screenshot_info.lock().unwrap().take(){
                         let mut bgra = vec![0u8; sf.width * sf.height * 4];
                         let region = MTLRegion {
                             origin: MTLOrigin {x: 0, y: 0, z: 0},
                             size: MTLSize {width: sf.width as u64, height: sf.height as u64, depth: 1}
                         };
                         let _:() = unsafe{msg_send![
-                            sf.texture,
+                            sf.texture.as_id(),
                             getBytes: bgra.as_mut_ptr()
                             bytesPerRow: sf.width *4
                             bytesPerImage: sf.width * sf.height * 4
@@ -1221,8 +1249,6 @@ impl Cx {
                             mipmapLevel: 0
                             slice: 0
                         ]};
-                        let () = msg_send![sf.texture, release];
-
                         // Metal readback for BGRA8 textures returns BGRA bytes. Convert to RGBA
                         // before PNG encoding so AppToStudio::Screenshot always transports PNG bytes.
                         for px in bgra.chunks_exact_mut(4) {
@@ -1236,7 +1262,7 @@ impl Cx {
                             }
                         };
                         Cx::send_studio_screenshot_response(
-                            sf.request_ids.clone(),
+                            sf.request_ids,
                             sf.width as _,
                             sf.height as _,
                             png,
@@ -1470,12 +1496,11 @@ impl Cx {
     }
 }
 
-#[derive(Clone)]
 struct ScreenshotInfo {
     width: usize,
     height: usize,
     request_ids: Vec<u64>,
-    texture: ObjcId,
+    texture: RcObjcId,
 }
 
 pub enum DrawPassMode {
@@ -1536,6 +1561,8 @@ pub struct MetalCx {
     repaint_tail_seqs: VecDeque<u64>,
     /// Repaints skipped by that backpressure (diagnostics).
     pub(crate) backpressure_skips: u64,
+    /// Once-per-second cadence for the opt-in staging/command-buffer counters.
+    memory_trace_at: Instant,
 }
 
 /// Highest `MetalCx::cb_seq` whose command buffer has COMPLETED. One
@@ -1618,8 +1645,7 @@ fn gpu_hang_max_ms() -> u64 {
 
 /// `MAKEPAD_GPU_TRACE=1` logs every command buffer whose GPU time exceeds
 /// 4 ms (`=N` sets the threshold in ms) with its passes and shaders, plus
-/// every backpressure skip — so an agent can SEE which pass is heavy before
-/// it becomes a hang.
+/// once-per-second staging, queue, and backpressure counters.
 pub(crate) fn gpu_trace_threshold_ms() -> Option<f64> {
     static T: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
@@ -1724,6 +1750,73 @@ struct StagingBuffer {
 // the pool mutex, and Metal objects are safe to use from any thread.
 unsafe impl Send for StagingBuffer {}
 
+static STAGING_LIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static STAGING_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static STAGING_USED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static STAGING_USED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+impl StagingBuffer {
+    fn from_owned(buffer: ObjcId, len: usize) -> Self {
+        STAGING_LIVE_COUNT.fetch_add(1, Ordering::Relaxed);
+        STAGING_LIVE_BYTES.fetch_add(len, Ordering::Relaxed);
+        Self { buffer, len }
+    }
+}
+
+impl Drop for StagingBuffer {
+    fn drop(&mut self) {
+        STAGING_LIVE_COUNT.fetch_sub(1, Ordering::Relaxed);
+        STAGING_LIVE_BYTES.fetch_sub(self.len, Ordering::Relaxed);
+        let () = unsafe { msg_send![self.buffer, release] };
+    }
+}
+
+/// Staging buffers retained by a command-buffer completion block. Its Drop
+/// path is just as important as the normal callback: Metal may discard an
+/// uncommitted command buffer, in which case the block is destroyed without
+/// ever running and the buffers must still be released.
+struct UsedStagingBuffers {
+    buffers: Option<Vec<StagingBuffer>>,
+    count: usize,
+    bytes: usize,
+}
+
+impl UsedStagingBuffers {
+    fn new(buffers: Vec<StagingBuffer>) -> Self {
+        let count = buffers.len();
+        let bytes = buffers.iter().map(|buffer| buffer.len).sum();
+        STAGING_USED_COUNT.fetch_add(count, Ordering::Relaxed);
+        STAGING_USED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        Self {
+            buffers: Some(buffers),
+            count,
+            bytes,
+        }
+    }
+
+    fn untrack(&mut self) {
+        if self.count != 0 {
+            STAGING_USED_COUNT.fetch_sub(self.count, Ordering::Relaxed);
+            STAGING_USED_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+            self.count = 0;
+            self.bytes = 0;
+        }
+    }
+
+    fn return_to_pool(mut self, pool: &Mutex<Vec<StagingBuffer>>) {
+        self.untrack();
+        if let Some(buffers) = self.buffers.take() {
+            staging_pool_return(pool, buffers);
+        }
+    }
+}
+
+impl Drop for UsedStagingBuffers {
+    fn drop(&mut self) {
+        self.untrack();
+    }
+}
+
 /// Past these the pool releases a returning buffer instead of keeping it:
 /// enough for a few frames of NV12 planes + flow fields in flight, not a
 /// place for a one-off 16K upload to live forever.
@@ -1738,7 +1831,7 @@ fn staging_pool_return(pool: &Mutex<Vec<StagingBuffer>>, used: Vec<StagingBuffer
             bytes += staging.len;
             pool.push(staging);
         } else {
-            let () = unsafe { msg_send![staging.buffer, release] };
+            drop(staging);
         }
     }
 }
@@ -1787,13 +1880,13 @@ impl VecUploadEncoder {
         }
         if !self.used.is_empty() {
             let pool = metal_cx.staging_pool.clone();
-            let used = Mutex::new(Some(self.used));
+            let used = Mutex::new(Some(UsedStagingBuffers::new(self.used)));
             let () = unsafe {
                 msg_send![
                     self.command_buffer,
                     addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
                         if let Some(used) = used.lock().unwrap().take() {
-                            staging_pool_return(&pool, used);
+                            used.return_to_pool(&pool);
                         }
                     })
                 ]
@@ -1873,6 +1966,43 @@ impl MetalCx {
             .count()
     }
 
+    /// `MAKEPAD_GPU_TRACE=1`: report the allocations whose lifetime follows
+    /// command-buffer completion. The pool is bounded, while `used` identifies
+    /// work waiting on the GPU; growth there is queue growth, not pool growth.
+    pub(crate) fn trace_memory_once_per_second(&mut self) {
+        if gpu_trace_threshold_ms().is_none() || self.memory_trace_at.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        self.memory_trace_at = Instant::now();
+        let (pool_count, pool_bytes) = {
+            let pool = self
+                .staging_pool
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (pool.len(), pool.iter().map(|buffer| buffer.len).sum::<usize>())
+        };
+        let live_count = STAGING_LIVE_COUNT.load(Ordering::Relaxed);
+        let live_bytes = STAGING_LIVE_BYTES.load(Ordering::Relaxed);
+        let used_count = STAGING_USED_COUNT.load(Ordering::Relaxed);
+        let used_bytes = STAGING_USED_BYTES.load(Ordering::Relaxed);
+        let encoding_count = live_count.saturating_sub(pool_count.saturating_add(used_count));
+        let command_buffers = metal_in_flight().len();
+        eprintln!(
+            "[gpu-memory] staging_live={} staging_used={} staging_pool={} staging_encoding={} total_bytes={} used_bytes={} pool_bytes={} command_buffers={} frames={} backpressure_skips={}",
+            live_count,
+            used_count,
+            pool_count,
+            encoding_count,
+            live_bytes,
+            used_bytes,
+            pool_bytes,
+            command_buffers,
+            self.frames_in_flight(),
+            self.backpressure_skips,
+        );
+    }
+
     /// Record a pass just encoded into the buffer being built, for the hang
     /// diagnostic and the GPU trace.
     fn register_pass(&self, pass_id: DrawPassId, name: &str) {
@@ -1918,7 +2048,7 @@ impl MetalCx {
         if buffer == nil {
             return None;
         }
-        Some(StagingBuffer { buffer, len: alloc })
+        Some(StagingBuffer::from_owned(buffer, alloc))
     }
 }
 
@@ -1970,8 +2100,8 @@ pub struct CxOsDrawList {}
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {
-    mtl_depth_state_write: Option<ObjcId>,
-    mtl_depth_state_no_write: Option<ObjcId>,
+    mtl_depth_state_write: Option<RcObjcId>,
+    mtl_depth_state_no_write: Option<RcObjcId>,
 }
 
 pub enum PackType {
@@ -2028,6 +2158,21 @@ impl MetalCx {
             pass_shaders: RefCell::new(Vec::new()),
             repaint_tail_seqs: VecDeque::new(),
             backpressure_skips: 0,
+            memory_trace_at: Instant::now(),
+        }
+    }
+}
+
+impl Drop for MetalCx {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.frame_command_buffer.take() {
+            metal_in_flight().retain(|entry| entry.buffer != buffer as usize);
+            let () = unsafe { msg_send![buffer, release] };
+        }
+        unsafe {
+            let () = msg_send![self.fallback_texture, release];
+            let () = msg_send![self.command_queue, release];
+            let () = msg_send![self.device, release];
         }
     }
 }
@@ -2526,6 +2671,15 @@ pub struct CxOsTexture {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     iosurface_id: IOSurfaceID,
 }
+
+impl Drop for CxOsTexture {
+    fn drop(&mut self) {
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+        if let Some(iosurface) = self.iosurface.take() {
+            unsafe { CFRelease(iosurface) };
+        }
+    }
+}
 impl Cx {
     /// DEBUG ONLY: synchronous GPU->CPU readback of a render-target texture
     /// (private storage), via a one-off blit to a shared staging texture.
@@ -2687,6 +2841,15 @@ impl Cx {
                 };
                 (alloc.width, alloc.height, tex.as_id(), alloc.pixel.clone())
             };
+            // Native pixel stride: float targets are wider than 4 bytes — a
+            // 4-byte assumption under-allocates the readback and trips the
+            // AGX `bytes_per_row` assertion (same law as debug_read above).
+            let bpp: usize = match &pixel {
+                crate::texture::TexturePixel::RGBAf32 => 16,
+                crate::texture::TexturePixel::RGBAf16 => 8,
+                crate::texture::TexturePixel::Rf32 => 4,
+                _ => 4,
+            };
             unsafe {
                 let descriptor = RcObjcId::from_owned(
                     NonNull::new(msg_send![class!(MTLTextureDescriptor), new]).unwrap(),
@@ -2701,24 +2864,26 @@ impl Cx {
                     descriptor.as_id(),
                     setPixelFormat: texture_pixel_to_mtl_pixel(&pixel)
                 ];
-                let staging: ObjcId =
-                    msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id()];
-                if staging == nil {
+                let staging = NonNull::new(
+                    msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id()],
+                )
+                .map(RcObjcId::from_owned);
+                let Some(staging) = staging else {
                     crate::error!("render texture capture: staging texture alloc failed");
                     continue;
-                }
+                };
                 let blit: ObjcId = msg_send![command_buffer, blitCommandEncoder];
-                let () = msg_send![blit, copyFromTexture: mtl_tex toTexture: staging];
-                let () = msg_send![blit, synchronizeTexture: staging slice: 0 level: 0];
+                let () = msg_send![blit, copyFromTexture: mtl_tex toTexture: staging.as_id()];
+                let () = msg_send![blit, synchronizeTexture: staging.as_id() slice: 0 level: 0];
                 let () = msg_send![blit, endEncoding];
-                let capture = Mutex::new(Some((tid, width, height, staging)));
+                let capture = Mutex::new(Some((tid, width, height, bpp, staging)));
                 let () = msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |_cmd: ObjcId| {
-                        if let Some((tid, width, height, staging)) =
+                        if let Some((tid, width, height, bpp, staging)) =
                             capture.lock().unwrap().take()
                         {
-                            let mut bytes = vec![0u8; width * height * 4];
+                            let mut bytes = vec![0u8; width * height * bpp];
                             let region = MTLRegion {
                                 origin: MTLOrigin { x: 0, y: 0, z: 0 },
                                 size: MTLSize {
@@ -2728,15 +2893,14 @@ impl Cx {
                                 },
                             };
                             let _: () = msg_send![
-                                staging,
+                                staging.as_id(),
                                 getBytes: bytes.as_mut_ptr()
-                                bytesPerRow: width * 4
-                                bytesPerImage: width * height * 4
+                                bytesPerRow: width * bpp
+                                bytesPerImage: width * height * bpp
                                 fromRegion: region
                                 mipmapLevel: 0
                                 slice: 0
                             ];
-                            let () = msg_send![staging, release];
                             RENDER_TEXTURE_CAPTURE_RESULTS
                                 .lock()
                                 .unwrap()
@@ -3004,7 +3168,6 @@ impl CxTexture {
         };
         let dst: *mut u8 = unsafe { msg_send![staging.buffer, contents] };
         if dst.is_null() {
-            let () = unsafe { msg_send![staging.buffer, release] };
             crate::error!("vec texture upload: staging buffer has no contents");
             return 0;
         }
@@ -3200,7 +3363,9 @@ impl CxTexture {
         }
 
         // Store the IOSurface and ID (keep IOSurface alive)
-        self.os.iosurface = Some(iosurface);
+        if let Some(previous) = self.os.iosurface.replace(iosurface) {
+            unsafe { CFRelease(previous) };
+        }
         self.os.iosurface_id = iosurface_id;
         self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
 
@@ -3280,7 +3445,9 @@ impl CxTexture {
         }
 
         // Store IOSurface and texture
-        self.os.iosurface = Some(iosurface);
+        if let Some(previous) = self.os.iosurface.replace(iosurface) {
+            unsafe { CFRelease(previous) };
+        }
         self.os.iosurface_id = iosurface_id;
         self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         true

@@ -592,6 +592,20 @@ impl DockItem {
     }
 }
 
+fn preserve_item_for_layout(
+    dock_items: &HashMap<LiveId, DockItem>,
+    id: LiveId,
+    old_kind: LiveId,
+) -> bool {
+    match dock_items.get(&id) {
+        Some(DockItem::Tab { kind, .. }) => *kind == old_kind,
+        // Not in this layout: retain it as a dormant tab body.
+        None => true,
+        // A container took this ID, so it cannot also name a tab.
+        Some(_) => false,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DockCompactDump {
     pub tabs: Vec<DockCompactTabsInfo>,
@@ -888,6 +902,13 @@ impl Dock {
     }
 
     pub fn item(&self, entry_id: LiveId) -> Option<WidgetRef> {
+        // `load_state_preserving_items` may keep a tab body resident while it
+        // is absent from the current layout. Resident is not the same as
+        // visible: callers asking for a current Dock item must not see that
+        // cache entry until its Tab node is loaded again.
+        if !matches!(self.dock_items.get(&entry_id), Some(DockItem::Tab { .. })) {
+            return None;
+        }
         if let Some(entry) = self.items.get(&entry_id) {
             return Some(entry.1.clone());
         }
@@ -1624,6 +1645,29 @@ impl Dock {
         self.area.redraw(cx);
         self.create_all_items(cx);
     }
+
+    /// Load a new node map without destroying stable tab bodies.
+    ///
+    /// This is for alternate layouts of the same logical editors. A tab
+    /// absent from `dock_items` stays resident in `items`, ready to be drawn
+    /// again when a later layout names it. If a present tab reuses an ID with
+    /// a different kind, the old body is dropped and recreated normally.
+    /// Splitters and tab bars are layout objects and are always rebuilt.
+    pub fn load_state_preserving_items(
+        &mut self,
+        cx: &mut Cx,
+        dock_items: HashMap<LiveId, DockItem>,
+    ) {
+        self.items
+            .retain(|id, (old_kind, _)| preserve_item_for_layout(&dock_items, *id, *old_kind));
+        self.dock_items = dock_items;
+        self.tab_bars.clear();
+        self.splitters.clear();
+        // Reset so the next next_internal_id call re-seeds from loaded state.
+        self.next_internal_id = 0;
+        self.area.redraw(cx);
+        self.create_all_items(cx);
+    }
 }
 
 impl Widget for Dock {
@@ -2142,8 +2186,44 @@ impl DockRef {
         }
     }
 
+    pub fn load_state_preserving_items(
+        &self,
+        cx: &mut Cx,
+        dock_items: HashMap<LiveId, DockItem>,
+    ) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.load_state_preserving_items(cx, dock_items);
+        }
+    }
+
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserving_layout_keeps_absent_and_matching_tab_bodies() {
+        let present = LiveId(1);
+        let absent = LiveId(2);
+        let kind = LiveId(3);
+        let mut layout = HashMap::new();
+        layout.insert(present, DockItem::tab("present".into(), kind, LiveId(4)));
+
+        assert!(preserve_item_for_layout(&layout, present, kind));
+        assert!(preserve_item_for_layout(&layout, absent, kind));
+        assert!(!preserve_item_for_layout(&layout, present, LiveId(5)));
+    }
+
+    #[test]
+    fn preserving_layout_drops_a_tab_when_its_id_becomes_a_container() {
+        let reused = LiveId(1);
+        let mut layout = HashMap::new();
+        layout.insert(reused, DockItem::tabs(Vec::new(), 0, false));
+
+        assert!(!preserve_item_for_layout(&layout, reused, LiveId(2)));
+    }
+}

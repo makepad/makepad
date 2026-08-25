@@ -295,6 +295,7 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("269_band_lattice", include_str!("../../resources/effects/269_band_lattice.splash")),
     ("270_harmonic_petals", include_str!("../../resources/effects/270_harmonic_petals.splash")),
     ("271_scope_horizon", include_str!("../../resources/effects/271_scope_horizon.splash")),
+    ("272_test_sine_rect", include_str!("../../resources/effects/272_test_sine_rect.splash")),
     ]
 }
 

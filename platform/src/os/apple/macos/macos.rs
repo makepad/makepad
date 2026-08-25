@@ -25,8 +25,9 @@ use {
                 apple_webview::MacosSystemBrowser,
                 macos::{
                     macos_app::{
-                        init_macos_app_global, metal_link_trace_drawable_consumed,
-                        metal_link_trace_presented, with_macos_app, MacosApp,
+                        activate_cocoa_window_on_pointer_down, init_macos_app_global,
+                        metal_link_trace_drawable_consumed, metal_link_trace_presented,
+                        with_macos_app, MacosApp,
                     },
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
@@ -68,6 +69,25 @@ const PRESENT_GATE_IN_FLIGHT: u32 = 3;
 /// stick on "hidden" while the window is really on screen, which used to skip
 /// every beat forever.
 const OCCLUSION_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Private paint-clock used only while a widget owns the mouse. AppKit may
+/// reduce a non-key/occluded view's display-link callbacks to roughly 12 Hz;
+/// a captured drag must retain the panel's full refresh cadence.
+const POINTER_CAPTURE_TIMER_ID: u64 = u64::MAX;
+
+fn fastest_display_interval() -> f64 {
+    unsafe {
+        let screens: ObjcId = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let mut max_fps: i64 = 60;
+        for i in 0..count {
+            let screen: ObjcId = msg_send![screens, objectAtIndex: i];
+            let fps: i64 = msg_send![screen, maximumFramesPerSecond];
+            max_fps = max_fps.max(fps);
+        }
+        1.002 / max_fps.max(1) as f64
+    }
+}
 
 fn set_metal_layer_background_color(layer: ObjcId, alpha: f64) {
     unsafe {
@@ -426,6 +446,31 @@ const KEEP_ALIVE_COUNT: usize = 5;
 const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
 
 impl Cx {
+    fn update_macos_pointer_capture_pacing(&mut self) {
+        let active = self.fingers.any_areas_captured()
+            || with_macos_app(|app| app.mouse_pointer_lock);
+        if active == self.os.pointer_capture_pacing {
+            return;
+        }
+        if active {
+            with_macos_app(|app| {
+                app.pause_display_link();
+                app.stop_timer(0);
+                app.start_timer(POINTER_CAPTURE_TIMER_ID, fastest_display_interval(), true);
+            });
+            self.os.pointer_capture_pacing = true;
+            self.os.timer0_armed = true;
+            self.os.timer0_idle_since = None;
+        } else {
+            with_macos_app(|app| app.stop_timer(POINTER_CAPTURE_TIMER_ID));
+            self.os.pointer_capture_pacing = false;
+            // The capture clock replaced whichever normal source was armed.
+            // Re-arm the per-window links (or their timer fallback) now.
+            self.os.timer0_armed = false;
+            self.ensure_timer0_started();
+        }
+    }
+
     /// Bring this app's windows to the front, as if the user clicked its Dock icon.
     /// Useful for test automation driving an unfocused (or occluded) instance.
     /// `orderFrontRegardless` raises the windows even when macOS's cooperative
@@ -567,7 +612,11 @@ impl Cx {
                         // glass and an exhausted pool would block nextDrawable forever.
                         // Skip and keep the pass dirty, but only for so long, since this
                         // flag can stick on "hidden" while the window is really on screen.
-                        let occlusion: usize = if link_drawable.is_none() {
+                        let inherited_occlusion_gate = self.os.pointer_capture_pacing
+                            && metal_window.occluded_since.is_some();
+                        let occlusion: usize = if link_drawable.is_none()
+                            && !self.os.pointer_capture_pacing
+                        {
                             unsafe {
                                 msg_send![metal_window.cocoa_window.window, occlusionState]
                             }
@@ -599,24 +648,33 @@ impl Cx {
                         // beat retries with the pool drained and event
                         // handling never stalls behind vsync.
                         if link_drawable.is_none() && in_flight >= PRESENT_GATE_IN_FLIGHT {
-                            let now = Instant::now();
-                            let since =
-                                *metal_window.gate_closed_since.get_or_insert(now);
-                            if now.duration_since(since) < PRESENT_GATE_STUCK_TIMEOUT {
-                                self.repaint_pass(*draw_pass_id);
-                                continue;
+                            if inherited_occlusion_gate {
+                                // A just-activated drag may inherit three
+                                // presents that an occluded compositor never
+                                // acknowledged. Do not spend the first 250 ms
+                                // of the gesture in the background watchdog.
+                                metal_window.rebuild_drawable_pool();
+                                metal_window.gate_closed_since = None;
+                            } else {
+                                let now = Instant::now();
+                                let since =
+                                    *metal_window.gate_closed_since.get_or_insert(now);
+                                if now.duration_since(since) < PRESENT_GATE_STUCK_TIMEOUT {
+                                    self.repaint_pass(*draw_pass_id);
+                                    continue;
+                                }
+                                // Handlers this overdue are lost, so reclaim their
+                                // drawables before the present below can block on
+                                // an exhausted pool.
+                                // Quiet while hidden: the probe above trips this every time.
+                                if metal_window.occluded_since.is_none() {
+                                    crate::error!(
+                                        "present gate stuck for {:?} with {} in flight, rebuilding drawable pool",
+                                        now.duration_since(since), in_flight,
+                                    );
+                                }
+                                metal_window.rebuild_drawable_pool();
                             }
-                            // Handlers this overdue are lost, so reclaim their
-                            // drawables before the present below can block on
-                            // an exhausted pool.
-                            // Quiet while hidden: the probe above trips this every time.
-                            if metal_window.occluded_since.is_none() {
-                                crate::error!(
-                                    "present gate stuck for {:?} with {} in flight, rebuilding drawable pool",
-                                    now.duration_since(since), in_flight,
-                                );
-                            }
-                            metal_window.rebuild_drawable_pool();
                         }
                         metal_window.gate_closed_since = None;
                         // PerfMonitor: a presented window frame starts here;
@@ -773,6 +831,9 @@ impl Cx {
     }
 
     fn ensure_timer0_started(&mut self) {
+        if self.os.pointer_capture_pacing {
+            return;
+        }
         // FRAME-FLIP pacing: the display link IS the refresh — one beat per
         // actual flip, phase-locked, tracking the window's own panel. The
         // NSTimer stays as the fallback (no window yet, pre-macOS-14) and
@@ -807,17 +868,7 @@ impl Cx {
             // phases as the beat drifted through vblank alignment). Matching
             // the refresh period (+0.2% so NSTimer lateness drains the queue
             // instead of accumulating) keeps acquisition non-blocking.
-            let interval = unsafe {
-                let screens: ObjcId = msg_send![class!(NSScreen), screens];
-                let count: usize = msg_send![screens, count];
-                let mut max_fps: i64 = 60;
-                for i in 0..count {
-                    let screen: ObjcId = msg_send![screens, objectAtIndex: i];
-                    let fps: i64 = msg_send![screen, maximumFramesPerSecond];
-                    max_fps = max_fps.max(fps);
-                }
-                1.002 / max_fps.max(1) as f64
-            };
+            let interval = fastest_display_interval();
             with_macos_app(|app| app.start_timer(0, interval, true));
             self.os.timer0_armed = true;
             self.os.timer0_idle_since = None;
@@ -825,6 +876,9 @@ impl Cx {
     }
 
     fn ensure_timer0_stopped(&mut self) {
+        if self.os.pointer_capture_pacing {
+            return;
+        }
         if self.os.timer0_armed {
             with_macos_app(|app| {
                 app.pause_display_link();
@@ -859,7 +913,7 @@ impl Cx {
                 self.ensure_timer0_started();
             }
             MacosEvent::Timer(te) => {
-                if te.timer_id == 0 {
+                if te.timer_id == 0 || te.timer_id == POINTER_CAPTURE_TIMER_ID {
                     // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
                     // act — was the gap a LATE FIRE (runloop starved / OS
                     // deferred the NSTimer) or a SLOW CALLBACK (our work)?
@@ -912,6 +966,9 @@ impl Cx {
                     // instead of one idle poll. Idle cost when nothing is
                     // pending: none.
                     if crate::remote::needs_ticks() {
+                        needs_timer = true;
+                    }
+                    if self.os.pointer_capture_pacing {
                         needs_timer = true;
                     }
                     self.handle_actions();
@@ -1255,10 +1312,12 @@ impl Cx {
                 {
                     return EventFlow::Wait;
                 }
+                self.activate_window_on_pointer_down(e.window_id);
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()));
+                self.update_pointer_capture_pacing();
             }
             MacosEvent::MouseMove(mut e) => {
                 if !self.windows.is_valid(e.window_id)
@@ -1304,6 +1363,7 @@ impl Cx {
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.update_pointer_capture_pacing();
                 if button == MouseButton::PRIMARY {
                     if let Some(items) = self.os.internal_drag_items.take() {
                         self.call_event_handler(&Event::Drop(DropEvent {
@@ -1649,6 +1709,7 @@ impl Cx {
                         app.mouse_pointer_lock = lock;
                         app.apply_pointer_lock_effects(lock);
                     });
+                    self.update_macos_pointer_capture_pacing();
                 }
                 CxOsOp::RepinMousePointer => {
                     with_macos_app(|app| app.repin_pointer());
@@ -2194,6 +2255,22 @@ impl CxOsApi for Cx {
         }));
     }
 
+    fn activate_window_on_pointer_down(&mut self, window_id: WindowId) {
+        let window = with_macos_app(|app| app.cocoa_window_for_id(window_id));
+        if let Some(window) = window {
+            if activate_cocoa_window_on_pointer_down(window) {
+                // AppKit's delegate callback is synchronous and bridge input
+                // runs inside our event callback, where the delegate cannot
+                // re-enter it. Deliver the focus transition once here.
+                self.call_event_handler(&Event::WindowGotFocus(window_id));
+            }
+        }
+    }
+
+    fn update_pointer_capture_pacing(&mut self) {
+        self.update_macos_pointer_capture_pacing();
+    }
+
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -2248,6 +2325,9 @@ pub struct CxOs {
     pub(crate) link_target_presentation_time: f64,
     /// Indicates wether the main timer is armed
     pub(crate) timer0_armed: bool,
+    /// A widget owns the mouse, so the private full-refresh timer replaces
+    /// AppKit's throttleable per-window display-link clock until release.
+    pub(crate) pointer_capture_pacing: bool,
     /// Start time of the current idle stretch while timer0 is armed.
     pub(crate) timer0_idle_since: Option<f64>,
     pub(crate) media: CxAppleMedia,

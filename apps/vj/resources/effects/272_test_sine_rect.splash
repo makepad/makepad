@@ -1,0 +1,19 @@
+// TEST SINE RECT — deterministic transport/tween fixture. A hard-edged
+// rectangle follows one sinusoid; the headless harness below mirrors this
+// equation without opening a window or touching a GPU.
+{
+    name: "Test Sine Rect"
+    engine: "screen"
+    speed: 1.0
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let x = 0.5 + 0.24 * sin(self.time_beat.x)
+            let inside_x = step(abs(uv.x - x), 0.12)
+            let inside_y = step(abs(uv.y - 0.5), 0.18)
+            let rect = inside_x * inside_y
+            let bg = vec3(0.035, 0.055, 0.085)
+            let fg = vec3(0.92, 0.34, 0.12)
+            return vec4(bg.mix(fg, rect), 1.0)
+        }
+    }
+}
