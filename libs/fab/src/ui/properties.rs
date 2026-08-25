@@ -317,9 +317,10 @@ script_mod! {
                             label: "Amount"
                             min: 0.0
                             max: 1.0
-                            step: 0.004
+                            step: 0.05
                             snap: 0.1
                             precision: 2
+                            show_fill: true
                         }
                         cb_explode_story := mod.widgets.FabCheckBox{ text: "By story" }
                     }
@@ -330,16 +331,23 @@ script_mod! {
                         width: Fill height: Fit flow: Down
                         padding: Inset{left: 8 right: 6 top: 2 bottom: 6}
                         spacing: 2
-                        num_year := Num{ label: "Year" min: 2000.0 max: 2100.0 step: 0.5 snap: 1.0 precision: 0 }
-                        num_month := Num{ label: "Month" min: 1.0 max: 12.0 step: 0.05 snap: 1.0 precision: 0 }
-                        num_day := Num{ label: "Day" min: 1.0 max: 31.0 step: 0.12 snap: 1.0 precision: 0 }
-                        num_hour := Num{ label: "Hour" min: 0.0 max: 24.0 step: 0.06 snap: 1.0 precision: 2 }
-                        num_lat := Num{ label: "Latitude" min: -90.0 max: 90.0 step: 0.25 snap: 5.0 precision: 3 suffix: "°" }
-                        num_lon := Num{ label: "Longitude" min: -180.0 max: 180.0 step: 0.25 snap: 5.0 precision: 3 suffix: "°" }
-                        num_tz := Num{ label: "UTC offset" min: -12.0 max: 14.0 step: 0.05 snap: 0.25 precision: 2 suffix: " h" }
-                        num_north := Num{ label: "North" min: -180.0 max: 180.0 step: 0.5 snap: 15.0 precision: 1 suffix: "°" }
-                        num_turbidity := Num{ label: "Turbidity" min: 1.2 max: 10.0 step: 0.02 snap: 0.5 precision: 1 }
-                        num_haze := Num{ label: "Haze" min: 0.0 max: 1.0 step: 0.01 snap: 0.05 precision: 2 }
+                        // The same controls the Sun Study sidebar carries, in
+                        // the same shape: a value with a meaningful range is a
+                        // slider (fill bar, range swept across the row) — the
+                        // bare pixel-per-step fields here were the "sun does
+                        // not update as I drag" report. Coordinates and the
+                        // year keep the unbounded mapping: their ranges are
+                        // validity limits, not a track worth sweeping.
+                        num_year := Num{ label: "Year" min: 2000.0 max: 2100.0 step: 1.0 snap: 1.0 precision: 0 quantize: true }
+                        num_month := Num{ label: "Month" min: 1.0 max: 13.0 step: 1.0 snap: 1.0 precision: 0 wrap: true show_fill: true quantize: true }
+                        num_day := Num{ label: "Day" min: 1.0 max: 31.0 step: 1.0 snap: 1.0 precision: 0 show_fill: true quantize: true }
+                        num_hour := Num{ label: "Hour" min: 0.0 max: 24.0 step: 0.25 snap: 1.0 wrap: true show_fill: true time_of_day: true text_input +: {is_numeric_only: false} }
+                        num_lat := Num{ label: "Latitude" min: -90.0 max: 90.0 step: 1.0 snap: 5.0 precision: 3 suffix: "°" show_fill: true }
+                        num_lon := Num{ label: "Longitude" min: -180.0 max: 180.0 step: 1.0 snap: 5.0 precision: 3 suffix: "°" show_fill: true }
+                        num_tz := Num{ label: "UTC offset" min: -12.0 max: 14.0 step: 0.25 snap: 0.25 precision: 2 suffix: " h" show_fill: true }
+                        num_north := Num{ label: "North" min: -180.0 max: 180.0 step: 1.0 snap: 15.0 precision: 1 wrap: true suffix: "°" show_fill: true }
+                        num_turbidity := Num{ label: "Turbidity" min: 1.2 max: 10.0 step: 0.1 snap: 0.5 precision: 1 show_fill: true }
+                        num_haze := Num{ label: "Haze" min: 0.0 max: 1.0 step: 0.05 snap: 0.05 precision: 2 show_fill: true }
                         row_elev := Row{ name +: { text: "Elevation" } }
                         cb_shadows := mod.widgets.FabCheckBox{ text: "Shadows" }
                     }
@@ -358,8 +366,8 @@ script_mod! {
                         padding: Inset{left: 8 right: 6 top: 2 bottom: 6}
                         spacing: 2
                         num_samples := Num{ label: "Max samples" min: 64.0 max: 8192.0 step: 16.0 snap: 64.0 precision: 0 }
-                        num_bounces := Num{ label: "Bounces" min: 1.0 max: 32.0 step: 0.08 snap: 1.0 precision: 0 }
-                        num_preview := Num{ label: "Preview scale" min: 0.25 max: 1.0 step: 0.004 snap: 0.25 precision: 2 }
+                        num_bounces := Num{ label: "Bounces" min: 1.0 max: 32.0 step: 1.0 snap: 1.0 precision: 0 quantize: true show_fill: true }
+                        num_preview := Num{ label: "Preview scale" min: 0.25 max: 1.0 step: 0.05 snap: 0.25 precision: 2 show_fill: true }
                         row_progress := Row{ name +: { text: "Progress" } }
                     }
                 }
@@ -369,7 +377,7 @@ script_mod! {
                         width: Fill height: Fit flow: Down
                         padding: Inset{left: 8 right: 6 top: 2 bottom: 6}
                         spacing: 2
-                        num_exposure := Num{ label: "Exposure EV" min: -6.0 max: 6.0 step: 0.02 snap: 0.5 precision: 2 }
+                        num_exposure := Num{ label: "Exposure EV" min: -6.0 max: 6.0 step: 0.25 snap: 0.5 precision: 2 show_fill: true }
                         num_width := Num{ label: "Width" min: 128.0 max: 7680.0 step: 8.0 snap: 128.0 precision: 0 }
                         num_height := Num{ label: "Height" min: 128.0 max: 4320.0 step: 8.0 snap: 128.0 precision: 0 }
                         cb_denoise := mod.widgets.FabCheckBox{ text: "Denoise" }
@@ -381,7 +389,7 @@ script_mod! {
                         width: Fill height: Fit flow: Down
                         padding: Inset{left: 8 right: 6 top: 2 bottom: 6}
                         spacing: 2
-                        num_fstop := Num{ label: "f-stop" min: 0.0 max: 22.0 step: 0.04 snap: 1.0 precision: 2 }
+                        num_fstop := Num{ label: "f-stop" min: 0.0 max: 22.0 step: 0.04 snap: 1.0 precision: 2 show_fill: true }
                         num_focus := Num{ label: "Focus dist" min: 0.1 max: 500.0 step: 0.25 snap: 1.0 precision: 2 suffix: " m" }
                     }
                 }
@@ -461,6 +469,14 @@ pub struct FabProperties {
     pinned: Option<ElementId>,
     #[rust]
     synced_values: bool,
+    /// The scene revision the fields were last synced against. A model load
+    /// mutates the sun in place (`install_scene` applies site metadata with
+    /// no `SetSun` action for the event hook to observe), so without this
+    /// the panel keeps showing pre-load values until the user's first edit —
+    /// and that edit then snaps latitude/longitude/UTC/north to the model's
+    /// site mid-drag, teleporting the sun for no visible reason.
+    #[rust]
+    synced_scene: Option<u64>,
     /// Panel width the attribute-row label/value split was last computed
     /// for: the value column keeps a readable minimum, the label gives way.
     #[rust]
@@ -1271,6 +1287,10 @@ impl Widget for FabProperties {
 
             // Push the model values into the fields once (and whenever the
             // model changed underneath us) — never while the user drags.
+            if self.synced_scene != Some(state.scene_revision) {
+                self.synced_scene = Some(state.scene_revision);
+                self.synced_values = false;
+            }
             if !self.synced_values {
                 self.synced_values = true;
                 let sun = state.sun;

@@ -198,8 +198,10 @@ pub struct SceneInput {
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub tri_material: Vec<u32>,
-    /// Render-time coplanar priority. Higher wins when two nearest hits are
-    /// within the numeric/authoring tie window; zero disables prioritization.
+    /// Render-time coplanar priority. Inside the numeric/authoring tie
+    /// window a candidate facing the ray beats one facing away (the exposed
+    /// side of a stacked assembly is the one the viewer sees); among equal
+    /// facings the higher priority wins. Zero disables prioritization.
     pub tri_priority: Vec<u16>,
     /// Measured overlap component. Priority is compared only for equal,
     /// non-zero groups, so unrelated nearby surfaces remain nearest-hit.

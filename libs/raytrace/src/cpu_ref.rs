@@ -24,7 +24,8 @@ pub struct CpuStats {
     pub emissive_nee_successes: u64,
     pub shadow_rays: u64,
     pub glass_shadow_hits: u64,
-    pub opaque_backface_terminations: u64,
+    pub opaque_backface_flips: u64,
+    pub primary_backface_skips: u64,
 }
 
 impl CpuStats {
@@ -151,7 +152,10 @@ fn spurious_neighbour(hit: &Hit, rd: Vec3f, tris: &[crate::bvh::Tri]) -> bool {
 }
 
 fn shading_normal_correction(ng: Vec3f, ns: Vec3f, v: Vec3f, l: Vec3f) -> f32 {
-    ((v.dot(ns) * l.dot(ng)) / (v.dot(ng) * l.dot(ns)).max(1.0e-6)).abs()
+    // Bounded: at grazing geometry the raw ratio is unbounded and turns a
+    // modest NEE sample into a firefly. 4x covers every legitimate
+    // smooth-normal correction on building geometry.
+    ((v.dot(ns) * l.dot(ng)) / (v.dot(ng) * l.dot(ns)).max(1.0e-6)).abs().min(4.0)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -196,6 +200,12 @@ impl<'a> CpuTracer<'a> {
         let mut hit = Hit::miss(tmax);
         for _ in 0..4 {
             hit = self.trace(ro, rd, tmax, false, tmin, skip);
+            if hit.truncated {
+                // A truncated traversal must surface as truncated (GPU twin
+                // returns immediately on its -2 code); the ladder must not
+                // retry it into a fake clean result.
+                return hit;
+            }
             if !spurious_neighbour(&hit, rd, &self.packed.accel.tris) {
                 return hit;
             }
@@ -419,6 +429,11 @@ impl<'a> CpuTracer<'a> {
     }
 
     fn escape(&self, rd: Vec3f, prev_pdf: f32, delta: bool) -> Vec3f {
+        // Brute mode is the BSDF-only oracle: no NEE runs, so nothing may be
+        // suppressed here — return the complete environment, sun included.
+        if self.brute {
+            return self.environment_radiance(rd, true);
+        }
         // Camera rays see the disc; indirect BSDF bounces leave its tiny
         // solid angle to the explicit uniform-disc NEE sampler.
         let l = self.environment_radiance(rd, delta);
@@ -554,6 +569,37 @@ impl<'a> CpuTracer<'a> {
             Some(hh) => hh / h as f32,
             None => 2.0 * tan_y / h as f32,
         };
+        // Primary parity with the raster pane: a camera ray passes through
+        // one-sided backfaces exactly as fixed-function backface culling
+        // does, so the two panes agree about WHICH surface exists at every
+        // pixel (a wrong-wound sign plate or deck otherwise shows in one
+        // pane only). Bounce rays keep flip-shading below — culling them
+        // would leak sky through every single-sided wall into the GI.
+        // Single-hop continuations only: the spurious-neighbour ladder in
+        // `secondary_trace` is material-blind and could step past a paired
+        // two-sided glazing backface the raster would keep. Every returned
+        // surface comes back to this loop for its own facing/material test.
+        // A stack deeper than eight falls through to the bounce loop's
+        // flip-shading — a visible ninth layer, never a rejected sample
+        // (rejection is what freezes a pixel's display).
+        for _ in 0..8 {
+            if !hit.is_hit() || hit.truncated {
+                break;
+            }
+            let ti = hit.tri as usize;
+            let tri = &p.accel.tris[ti];
+            let png = geom_ng(tri);
+            if png.dot(rd) < 0.0 {
+                break;
+            }
+            if self.materials[p.tri_material[ti] as usize].two_sided {
+                break;
+            }
+            self.bump_stats(|stats| stats.primary_backface_skips += 1);
+            let w0 = 1.0 - hit.u - hit.v;
+            let pt = tri.v0 * w0 + tri.v1 * hit.u + tri.v2 * hit.v;
+            hit = self.trace(offset_ray(pt, png, rd), rd, 1.0e9, false, 0.0, ti as i32);
+        }
         let mut tp = vec3f(1.0, 1.0, 1.0);
         let mut lsum = vec3f(0.0, 0.0, 0.0);
         let mut prev_pdf = 0.0f32;
@@ -588,9 +634,15 @@ impl<'a> CpuTracer<'a> {
             let m = &self.materials[p.tri_material[ti] as usize];
             let front = ng.dot(rd) < 0.0;
             if !front {
+                // A one-sided face seen from behind shades with the flipped
+                // normal instead of terminating the path black. The realtime
+                // rasterizer culls such faces; painting them black made every
+                // exposed underside (shingle overlaps, framing bays, a
+                // wrong-wound roof plane) a hard black stripe the raster pane
+                // never shows. Emission stays front-gated below, so the
+                // sidedness test for lights is unchanged.
                 if !m.two_sided {
-                    self.bump_stats(|stats| stats.opaque_backface_terminations += 1);
-                    break;
+                    self.bump_stats(|stats| stats.opaque_backface_flips += 1);
                 }
                 ng = -ng;
             }
@@ -946,7 +998,19 @@ impl<'a> CpuTracer<'a> {
                 let mut sum = vec3f(0.0, 0.0, 0.0);
                 let mut valid = 0u32;
                 for s in 0..spp {
-                    if let Some(l) = self.radiance_checked(px, py, w, h, seed, s) {
+                    if let Some(mut l) = self.radiance_checked(px, py, w, h, seed, s) {
+                        // Preview-only relative clamp (GPU twin agrees):
+                        // once a pixel has a mean, no single sample may
+                        // exceed five times it. Off (with preview_clamp)
+                        // for final/parity renders.
+                        if self.preview_clamp.is_some() && valid >= 8 {
+                            let mean_peak = (sum.x.max(sum.y).max(sum.z)) / valid as f32;
+                            let limit = (mean_peak * 5.0).max(0.05);
+                            let pk = l.x.max(l.y).max(l.z);
+                            if pk > limit {
+                                l = l * (limit / pk);
+                            }
+                        }
                         sum = sum + l;
                         valid += 1;
                     } else {
@@ -1059,6 +1123,101 @@ mod tests {
         s.camera = Camera { pos: vec3f(0.0, 0.0, camera_z), target: Vec3f::default(), f_stop: 0.0, ..Default::default() };
         s.sun = crate::scene::Sun { sky_strength: 0.0, sun_strength: 0.0, ..Default::default() };
         s
+    }
+
+    #[test]
+    fn one_sided_backface_is_invisible_to_the_camera_like_the_raster() {
+        // The raster pane culls one-sided backfaces; the tracer used to paint
+        // them black, which drew stripes and holes the raster never shows.
+        // Now the camera ray passes through them (raster parity): the back
+        // view of a one-sided quad sees the sky behind it, the front view
+        // shades normally.
+        let quad = |camera_z: f32| {
+            let mut s = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+            s.materials = vec![Material::diffuse([0.5, 0.5, 0.5])];
+            s.push_quad(
+                [[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]],
+                0,
+            );
+            s.ensure_normals();
+            s.camera = Camera {
+                pos: vec3f(0.0, 0.0, camera_z),
+                target: Vec3f::default(),
+                f_stop: 0.0,
+                ..Default::default()
+            };
+            s
+        };
+        let mean = |scene: &SceneInput| {
+            let packed = PackedScene::pack(scene);
+            let mut t = cpu_tracer(scene, &packed);
+            t.sky = SkyUniforms::uniform_white(1.0);
+            let mut sum = 0.0f32;
+            for sidx in 0..64 {
+                sum += t.radiance(0, 0, 1, 1, 1, sidx).x;
+            }
+            sum / 64.0
+        };
+        let front = mean(&quad(3.0));
+        let back = mean(&quad(-3.0));
+        assert!(front > 0.2 && front < 0.9, "front view must be lit surface: {front}");
+        assert!(
+            (back - 1.0).abs() < 0.02,
+            "the camera must see through a one-sided backface to the sky: back {back}"
+        );
+    }
+
+    #[test]
+    fn bounce_rays_flip_shade_one_sided_backfaces_instead_of_culling() {
+        // A one-sided canopy ABOVE a lit floor, wound so the floor's bounce
+        // rays strike its BACK. If bounces culled it like primary rays do,
+        // the floor would see the full sky through it (no darkening); the
+        // opaque flip-shade keeps it a light blocker for GI. Direct camera
+        // rays reach the floor from the side, under the canopy's edge.
+        let floor_only = || {
+            let mut s = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+            s.materials = vec![Material::diffuse([0.7, 0.7, 0.7])];
+            s.push_quad(
+                [[-4.0, 0.0, -4.0], [-4.0, 0.0, 4.0], [4.0, 0.0, 4.0], [4.0, 0.0, -4.0]],
+                0,
+            );
+            s.ensure_normals();
+            // Looking steeply down from under the canopy edge: every jittered
+            // ray of the 1x1 frame lands on the floor beneath the canopy.
+            s.camera = Camera {
+                pos: vec3f(0.0, 0.5, 5.0),
+                target: vec3f(0.0, 0.0, 1.5),
+                f_stop: 0.0,
+                ..Default::default()
+            };
+            s
+        };
+        let mean = |scene: &SceneInput| {
+            let packed = PackedScene::pack(scene);
+            let mut t = cpu_tracer(scene, &packed);
+            t.sky = SkyUniforms::uniform_white(1.0);
+            let mut sum = 0.0f32;
+            for sidx in 0..96 {
+                sum += t.radiance(0, 0, 1, 1, 1, sidx).x;
+            }
+            sum / 96.0
+        };
+        let open_sky = mean(&floor_only());
+        let mut covered = floor_only();
+        // Canopy at y=1 with its normal UP: the floor's upward bounce rays
+        // hit its underside (a backface of a one-sided material).
+        covered.push_quad(
+            [[-4.0, 1.0, -4.0], [-4.0, 1.0, 4.0], [4.0, 1.0, 4.0], [4.0, 1.0, -4.0]],
+            0,
+        );
+        covered.ensure_normals();
+        let covered = mean(&covered);
+        assert!(open_sky > 0.4, "open floor must be sky-lit: {open_sky}");
+        assert!(
+            covered < open_sky * 0.75,
+            "a one-sided canopy's backface must still block GI at bounce time: open {open_sky} covered {covered}"
+        );
+        assert!(covered > 0.01, "the covered floor must not be black: {covered}");
     }
 
     #[test]

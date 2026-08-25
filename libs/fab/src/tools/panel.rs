@@ -322,16 +322,16 @@ script_mod! {
                 sun_day := PanelNum{ label: "Day" min: 1.0 max: 31.0 step: 1.0 precision: 0 show_fill: true quantize: true }
             }
             FabTipFill{ text: "Latitude"
-                sun_lat := PanelNum{ label: "Latitude" min: -90.0 max: 90.0 step: 1.0 precision: 3 }
+                sun_lat := PanelNum{ label: "Latitude" min: -90.0 max: 90.0 step: 1.0 precision: 3 show_fill: true }
             }
             FabTipFill{ text: "Longitude"
-                sun_lon := PanelNum{ label: "Longitude" min: -180.0 max: 180.0 step: 1.0 precision: 3 }
+                sun_lon := PanelNum{ label: "Longitude" min: -180.0 max: 180.0 step: 1.0 precision: 3 show_fill: true }
             }
             FabTipFill{ text: "UTC offset"
-                sun_tz := PanelNum{ label: "UTC offset" min: -12.0 max: 14.0 step: 0.25 precision: 2 }
+                sun_tz := PanelNum{ label: "UTC offset" min: -12.0 max: 14.0 step: 0.25 precision: 2 show_fill: true }
             }
             FabTipFill{ text: "North offset"
-                sun_north := PanelNum{ label: "North" min: -180.0 max: 180.0 step: 1.0 precision: 1 wrap: true }
+                sun_north := PanelNum{ label: "North" min: -180.0 max: 180.0 step: 1.0 precision: 1 wrap: true show_fill: true }
             }
             FabTipFill{ text: "Sky turbidity"
                 sun_turbidity := PanelNum{ label: "Turbidity" min: 1.2 max: 10.0 step: 0.1 precision: 1 show_fill: true }
