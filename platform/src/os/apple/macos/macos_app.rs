@@ -28,7 +28,7 @@ use {
         },
         window::WindowId,
     },
-    makepad_objc_sys::objc_block,
+    makepad_objc_sys::{objc_block, Encode, Encoding},
     std::{cell::RefCell, collections::HashMap, os::raw::c_void, rc::Rc, time::Instant},
 };
 
@@ -42,6 +42,87 @@ pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 
 thread_local! {
     pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CAFrameRateRange {
+    minimum: f32,
+    maximum: f32,
+    preferred: f32,
+}
+
+unsafe impl Encode for CAFrameRateRange {
+    fn encode() -> Encoding {
+        unsafe { Encoding::from_str("{CAFrameRateRange=fff}") }
+    }
+}
+
+static METAL_LINK_TRACE_UPDATES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_DRAWABLES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_PRESENTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_LAST_US: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn metal_link_frame_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some())
+}
+
+pub(super) fn metal_link_trace_drawable_consumed() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_DRAWABLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub(super) fn metal_link_trace_presented() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn metal_link_trace_update_fired() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn metal_link_trace_report() {
+    if !metal_link_frame_trace_enabled() {
+        return;
+    }
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let now_us = START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    let last_us = METAL_LINK_TRACE_LAST_US.load(std::sync::atomic::Ordering::Relaxed);
+    if now_us.saturating_sub(last_us) < 1_000_000
+        || METAL_LINK_TRACE_LAST_US
+            .compare_exchange(
+                last_us,
+                now_us,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+    {
+        return;
+    }
+    let updates = METAL_LINK_TRACE_UPDATES.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let drawables = METAL_LINK_TRACE_DRAWABLES.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let presented = METAL_LINK_TRACE_PRESENTED.swap(0, std::sync::atomic::Ordering::AcqRel);
+    eprintln!(
+        "[frame-trace] metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
+        now_us.saturating_sub(last_us) as f64 / 1000.0,
+        updates,
+        drawables,
+        presented,
+    );
 }
 
 pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
@@ -1064,6 +1145,37 @@ impl MacosApp {
                         link = msg_send![allocated, initWithMetalLayer: layer];
                         if link != nil {
                             let () = msg_send![link, setDelegate: self.timer_delegate_instance];
+                            let default_range: CAFrameRateRange =
+                                msg_send![link, preferredFrameRateRange];
+                            let default_latency: isize =
+                                msg_send![link, preferredFrameLatency];
+                            let screen: ObjcId = msg_send![window, screen];
+                            let maximum_fps: isize = if screen != nil {
+                                msg_send![screen, maximumFramesPerSecond]
+                            } else {
+                                60
+                            };
+                            let requested_fps = maximum_fps.max(1) as f32;
+                            let requested_range = CAFrameRateRange {
+                                minimum: requested_fps,
+                                maximum: requested_fps,
+                                preferred: requested_fps,
+                            };
+                            // The defaults do not promise the panel maximum. Request it
+                            // explicitly, and keep two frames of render latency against
+                            // the CAMetalLayer's three-drawable pool.
+                            let () = msg_send![link, setPreferredFrameRateRange: requested_range];
+                            let () = msg_send![link, setPreferredFrameLatency: 2isize];
+                            if metal_link_frame_trace_enabled() {
+                                eprintln!(
+                                    "[frame-trace] metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
+                                    default_range.minimum,
+                                    default_range.maximum,
+                                    default_range.preferred,
+                                    default_latency,
+                                    requested_fps,
+                                );
+                            }
                             is_metal_link = true;
                         }
                     }
@@ -1149,7 +1261,9 @@ impl MacosApp {
     /// layer. A re-entrant callback simply skips this update rather than
     /// panicking through the Objective-C delegate frame.
     pub fn send_metal_display_link_update(link: ObjcId, update: ObjcId) {
+        metal_link_trace_update_fired();
         if update == nil {
+            metal_link_trace_report();
             return;
         }
         let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) =
@@ -1166,6 +1280,7 @@ impl MacosApp {
                 (app.display_links[i].0, i == 0, app.time_now())
             })
         }).flatten() else {
+            metal_link_trace_report();
             return;
         };
         let flip_target = if target_presentation > 0.0 {
@@ -1181,6 +1296,7 @@ impl MacosApp {
             drawable: Some(drawable),
             target_presentation_time: flip_target,
         });
+        metal_link_trace_report();
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
