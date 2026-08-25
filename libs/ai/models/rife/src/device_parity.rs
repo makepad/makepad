@@ -115,29 +115,45 @@ mod tests {
             return;
         }
         let weights = crate::rife::RifeWeights::load(&path).expect("load");
-        let model = weights.prepare_model(None).expect("prepare");
-        let rife = crate::rife::Rife::from_model_weights_scaled(
-            model,
-            crate::rife::RifeBackendKind::Device,
-            crate::rife::RifeScale::Half,
-        );
-        for (w, h) in [(384usize, 224usize), (512, 288), (768, 448)] {
-            let a: Vec<u8> = (0..w * h * 3).map(|i| (i * 13 % 251) as u8).collect();
-            let b: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 249) as u8).collect();
-            let pair = crate::rife::RifeFramePair::new(&a, &b, w, h).unwrap();
-            // warm
-            let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
-            let t0 = std::time::Instant::now();
-            let n = 5;
-            for _ in 0..n {
-                let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
-            }
-            println!(
-                "rife flow_field {w}x{h}: {:.1} ms/pair",
-                t0.elapsed().as_secs_f64() * 1000.0 / n as f64
+        // BOTH scales at the VJ tweener's proxy sizes. The player's budget
+        // is one pair per source frame — 40 ms at 25 fps — and the only
+        // question the bench has to answer is which (size, scale) pairs sit
+        // under it. Half alone cannot answer that: it is the cheaper knob
+        // but it costs far more picture than a smaller canvas does, so the
+        // two have to be timed side by side or the cheap axis wins by
+        // default.
+        for scale in [crate::rife::RifeScale::Half, crate::rife::RifeScale::Full] {
+            let model = weights.prepare_model(None).expect("prepare");
+            let rife = crate::rife::Rife::from_model_weights_scaled(
+                model,
+                crate::rife::RifeBackendKind::Device,
+                scale,
             );
-            #[cfg(target_os = "macos")]
-            makepad_ai_common::metal_rife_prof_dump();
+            for (w, h) in [
+                (192usize, 128usize),
+                (256, 144),
+                (320, 180),
+                (384, 224),
+                (512, 288),
+                (768, 448),
+            ] {
+                let a: Vec<u8> = (0..w * h * 3).map(|i| (i * 13 % 251) as u8).collect();
+                let b: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 249) as u8).collect();
+                let pair = crate::rife::RifeFramePair::new(&a, &b, w, h).unwrap();
+                // warm
+                let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
+                let t0 = std::time::Instant::now();
+                let n = 5;
+                for _ in 0..n {
+                    let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
+                }
+                println!(
+                    "rife flow_field {w}x{h} {scale:?}: {:.1} ms/pair",
+                    t0.elapsed().as_secs_f64() * 1000.0 / n as f64
+                );
+                #[cfg(target_os = "macos")]
+                makepad_ai_common::metal_rife_prof_dump();
+            }
         }
     }
 

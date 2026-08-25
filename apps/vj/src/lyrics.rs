@@ -154,11 +154,13 @@ pub fn whisper_model_path() -> Option<PathBuf> {
         if !path.is_file() {
             return false;
         }
-        // The managed install (where INSTALL MODELS commits) must be the
-        // pinned artifact exactly — a truncated file there reads as
-        // not-installed, never as a model. Operator-placed copies on the
-        // other probe paths are trusted as-is.
-        *path != canonical || crate::models::dest_is_installed(&crate::models::WHISPER)
+        // Every PROBED path must be the pinned artifact exactly. A download
+        // that stopped half way leaves a short file, and trusting it by
+        // presence alone hides INSTALL MODELS behind a model that cannot
+        // load. Only an explicit `MAKEPAD_VOICE_MODEL` override (handled
+        // above) is taken on trust.
+        let _ = &canonical;
+        crate::models::file_is_pinned_size(path, crate::models::WHISPER.bytes)
     })
 }
 

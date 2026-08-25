@@ -174,7 +174,38 @@ fn external_store_reachable(config: &SessionConfig) -> bool {
         }
     }
     // Ports move every asset-ui launch; the beacon does not.
-    beacon_heard(2_400)
+    if beacon_heard(2_400) {
+        return true;
+    }
+    // THE USER'S MAIN STORE IS ALIVE BUT NOT ANSWERING YET (a succession
+    // handover, a stale `listen` file, a beacon missed by a hair): the
+    // lock holder is proof it exists. Self-hosting here would SILENTLY
+    // put this VJ on a private empty store — "no videos in the grid",
+    // four times in one day — so treat a held lock as reachable and let
+    // the attach path keep discovering; it retries on its own.
+    main_store_lock_held()
+}
+
+/// True when another process holds the main (asset-ui) store's server
+/// lock — i.e. the user's library is hosted right now, whatever its ports.
+fn main_store_lock_held() -> bool {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../local/asset-ui/asset-server");
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("server.lock"))
+    else {
+        return false;
+    };
+    // The SAME advisory lock the store takes (File::try_lock): if we can
+    // take it, nobody serves that root; the file drop releases it.
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 /// The in-process server, held for as long as the VJ runs.
