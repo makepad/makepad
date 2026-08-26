@@ -191,35 +191,36 @@ fn we_wait_for_a_writer_from_another_process() {
 }
 
 #[test]
-fn sqlite_can_read_a_wal_database_between_our_transactions() {
+fn sqlite_can_read_a_wal_database_after_our_connection_closes() {
     if !have_sqlite3() {
         return;
     }
-    // The engine owns the log only while a statement runs. When it goes idle
-    // it zeroes the wal-index header, which is SQLite's signal to rebuild the
-    // index from the log — so a `sqlite3` process sees frames we appended.
+    // A live connection owns the log for its whole life (there is exactly one
+    // serving process per store root). The interop contract is at CLOSE: the
+    // guard's release zeroes the wal-index header, which is SQLite's signal
+    // to rebuild the index from the log — so a `sqlite3` process sees every
+    // frame we appended, and a fresh connection of ours recovers frames a
+    // `sqlite3` process wrote in between.
     let scratch = Scratch::new("conc-wal-share");
     let path = scratch.path("shared.db");
-    let mut db = Connection::open(&path, Duration::from_millis(500)).unwrap();
-    db.execute("PRAGMA journal_mode=WAL", &[]).unwrap();
-    db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)", &[])
-        .unwrap();
-    db.execute("INSERT INTO t(v) VALUES ('first')", &[]).unwrap();
-
-    // The connection stays open and idle; the CLI must still read our rows.
-    assert_eq!(
-        sqlite3(&path, ".mode list\nSELECT COUNT(*) FROM t;\n").trim(),
-        "1"
-    );
-    db.execute("INSERT INTO t(v) VALUES ('second')", &[]).unwrap();
+    {
+        let mut db = Connection::open(&path, Duration::from_millis(500)).unwrap();
+        db.execute("PRAGMA journal_mode=WAL", &[]).unwrap();
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .unwrap();
+        db.execute("INSERT INTO t(v) VALUES ('first')", &[]).unwrap();
+        db.execute("INSERT INTO t(v) VALUES ('second')", &[]).unwrap();
+    }
     assert_eq!(
         sqlite3(&path, ".mode list\nSELECT v FROM t ORDER BY id;\n").trim(),
         "first\nsecond"
     );
     assert_eq!(sqlite3(&path, "PRAGMA integrity_check;\n").trim(), "ok");
 
-    // And the other direction: rows the CLI wrote show up for us.
+    // And the other direction: rows the CLI wrote show up for a fresh
+    // connection of ours.
     sqlite3(&path, "INSERT INTO t(v) VALUES ('theirs');");
+    let mut db = Connection::open(&path, Duration::from_millis(500)).unwrap();
     assert_eq!(
         db.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
         Some(3),

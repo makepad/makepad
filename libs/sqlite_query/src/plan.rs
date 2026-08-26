@@ -945,6 +945,36 @@ impl<'a> Planner<'a> {
             }
         }
 
+        // ---- push predicates into derived tables ---------------------------
+        // A term that constrains only a derived table is also applied inside
+        // it, so its rows are discarded as they are scanned instead of being
+        // materialized and thrown away. Without this a search over a posting
+        // list buffers every posting in the database before the outer WHERE
+        // ever sees a row.
+        //
+        // The outer copy of the term is deliberately kept. That is what makes
+        // this always safe: the inner copy can only discard rows the outer one
+        // would discard anyway, so it narrows the scan without being able to
+        // change the answer.
+        //
+        // Except on the optional side of a LEFT JOIN, where discarding a row is
+        // not the same as losing it: the join NULL-extends instead, and a term
+        // like `c.tag IS NULL` then matches the very rows it was meant to
+        // reject. Those items are left alone.
+        for level in levels.iter_mut() {
+            if level.outer {
+                continue;
+            }
+            let Source::Subquery(inner) = &mut level.source else {
+                continue;
+            };
+            for (_, term) in conjuncts.iter() {
+                if constrains_only(term, level.slot) && is_safe_to_push(term) {
+                    push_into_derived(inner, level.slot, term);
+                }
+            }
+        }
+
         // ---- join order ----------------------------------------------------
         // Nested loops are cheapest when the most constrained table runs
         // outermost. Reordering is only safe when no LEFT JOIN is involved,
@@ -1537,6 +1567,242 @@ fn term_level(e: &PExpr, level_of_slot: &HashMap<usize, usize>) -> usize {
     max.unwrap_or(usize::MAX)
 }
 
+// ---------------------------------------------------------------------------
+// Pushing predicates into derived tables
+// ---------------------------------------------------------------------------
+
+/// True when `term` reads at least one column and every column it reads comes
+/// from `slot`, so it constrains that FROM item and nothing else.
+fn constrains_only(term: &PExpr, slot: usize) -> bool {
+    let mut slots = Vec::new();
+    term.slots(&mut slots);
+    !slots.is_empty() && slots.iter().all(|s| *s == slot)
+}
+
+/// Whether a term may also be applied inside the derived table it constrains.
+///
+/// The rule this has to satisfy is one-sided: the inner copy must never reject
+/// a row the outer copy accepts. Rejecting *more* is fine, because the outer
+/// copy is kept and has the final say.
+///
+/// That is not automatic. A derived table's column carries no affinity or
+/// collation of its own, so the outer copy compares raw values, while the inner
+/// copy re-introduces the base column's. For equality that can only match more:
+/// applying a column's affinity to a value that already compares equal to it is
+/// a no-op, and every collation the engine has treats identical text as equal.
+/// Inequalities are excluded for exactly this reason — TEXT affinity turns a
+/// true `n > 5` into a false `n > '5'`, dropping rows the outer term keeps —
+/// and so is anything negated, which flips the direction.
+fn is_safe_to_push(e: &PExpr) -> bool {
+    match e {
+        PExpr::Binary {
+            op: BinOp::Eq | BinOp::Is,
+            lhs,
+            rhs,
+            ..
+        } => is_plain_operand(lhs) && is_plain_operand(rhs),
+        PExpr::Binary {
+            op: BinOp::And | BinOp::Or,
+            lhs,
+            rhs,
+            ..
+        } => is_safe_to_push(lhs) && is_safe_to_push(rhs),
+        PExpr::InList {
+            expr,
+            list,
+            negated: false,
+            ..
+        } => is_plain_operand(expr) && list.iter().all(is_plain_operand),
+        // A null test reads the stored value without converting it, so it means
+        // the same on either side of the derived table.
+        PExpr::IsNull { expr, .. } => is_plain_operand(expr),
+        _ => false,
+    }
+}
+
+/// An operand with no aggregate and no nested query plan, so it can be copied
+/// into another plan and evaluated there unchanged.
+fn is_plain_operand(e: &PExpr) -> bool {
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if matches!(
+            x,
+            PExpr::Agg(_) | PExpr::InSelect { .. } | PExpr::Exists { .. } | PExpr::Subquery(_)
+        ) {
+            ok = false;
+        }
+    });
+    ok
+}
+
+/// Apply `term` inside the plan of the derived table occupying `slot`.
+///
+/// References to the materialized row are rewritten into the expressions the
+/// plan produces, so `c.asset_id` becomes whatever `c`'s select list computes
+/// for that column.
+fn push_into_derived(plan: &mut Plan, slot: usize, term: &PExpr) {
+    // The arms of a UNION are independent, and narrowing one narrows the whole.
+    // INTERSECT and EXCEPT are not: dropping rows from the right of an EXCEPT
+    // *adds* rows to the result, so only the left arm is pushed into. A LIMIT
+    // or OFFSET belongs to the whole compound and is checked before any arm.
+    if plan.limit.is_some() || plan.offset.is_some() {
+        // Filtering ahead of a LIMIT picks a different set of rows to keep.
+        return;
+    }
+    if let Some((op, right)) = &mut plan.compound {
+        if matches!(op, CompoundOp::Union | CompoundOp::UnionAll) {
+            push_into_derived(right, slot, term);
+        }
+    }
+    if !plan.group_by.is_empty() || !plan.aggregates.is_empty() || plan.levels.is_empty() {
+        // Filtering ahead of an aggregate changes the aggregate, which is a
+        // different answer rather than a narrower scan.
+        return;
+    }
+    let Some(mapped) = substitute(term, slot, &plan.result) else {
+        return;
+    };
+
+    // Attach the term to the level that reads it, so the scan discards rows as
+    // it goes. When it spans levels, or lands on the optional side of a LEFT
+    // JOIN — where a level filter would turn a dropped row into a NULL-extended
+    // one instead of removing it — fall back to the plan's post filter, which
+    // still runs before any row is buffered.
+    let level_of_slot: HashMap<usize, usize> = plan
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.slot, i))
+        .collect();
+    let mut slots = Vec::new();
+    mapped.slots(&mut slots);
+    let mut positions: Vec<usize> = slots
+        .iter()
+        .filter_map(|s| level_of_slot.get(s).copied())
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    let target = match positions.as_slice() {
+        [only] if !plan.levels[*only].outer => Some(*only),
+        _ => None,
+    };
+    let slot_holder = match target {
+        Some(i) => &mut plan.levels[i].filter,
+        None => &mut plan.post_filter,
+    };
+    let mut terms: Vec<PExpr> = slot_holder.take().into_iter().collect();
+    terms.push(mapped);
+    *slot_holder = combine_and(terms);
+}
+
+/// Rewrite every reference to the derived table's materialized row into the
+/// expression its plan computes for that column. `None` when some part of the
+/// term has no meaning inside the plan, which abandons the push.
+fn substitute(e: &PExpr, slot: usize, result: &[ResultCol]) -> Option<PExpr> {
+    let sub = |x: &PExpr| substitute(x, slot, result);
+    let boxed = |x: &PExpr| sub(x).map(Box::new);
+    Some(match e {
+        PExpr::Column { slot: s, col, .. } => {
+            if *s != slot {
+                return None; // a level of some other query; not ours to move
+            }
+            return Some(result.get(*col)?.expr.clone());
+        }
+        // A derived table has no rowid to speak of.
+        PExpr::Rowid { .. } => return None,
+        PExpr::Literal(v) => PExpr::Literal(v.clone()),
+        PExpr::Param(i) => PExpr::Param(*i),
+        PExpr::Unary { op, expr } => PExpr::Unary {
+            op: *op,
+            expr: boxed(expr)?,
+        },
+        PExpr::Binary { op, lhs, rhs, coll } => PExpr::Binary {
+            op: *op,
+            lhs: boxed(lhs)?,
+            rhs: boxed(rhs)?,
+            coll: *coll,
+        },
+        PExpr::IsNull { expr, negated } => PExpr::IsNull {
+            expr: boxed(expr)?,
+            negated: *negated,
+        },
+        PExpr::Between {
+            expr,
+            low,
+            high,
+            negated,
+            coll,
+        } => PExpr::Between {
+            expr: boxed(expr)?,
+            low: boxed(low)?,
+            high: boxed(high)?,
+            negated: *negated,
+            coll: *coll,
+        },
+        PExpr::InList {
+            expr,
+            list,
+            negated,
+            coll,
+        } => PExpr::InList {
+            expr: boxed(expr)?,
+            list: list.iter().map(sub).collect::<Option<Vec<_>>>()?,
+            negated: *negated,
+            coll: *coll,
+        },
+        PExpr::Func { func, args } => PExpr::Func {
+            func: *func,
+            args: args.iter().map(sub).collect::<Option<Vec<_>>>()?,
+        },
+        PExpr::Case {
+            operand,
+            whens,
+            else_result,
+        } => PExpr::Case {
+            operand: match operand {
+                Some(o) => Some(boxed(o)?),
+                None => None,
+            },
+            whens: whens
+                .iter()
+                .map(|(w, t)| Some((sub(w)?, sub(t)?)))
+                .collect::<Option<Vec<_>>>()?,
+            else_result: match else_result {
+                Some(x) => Some(boxed(x)?),
+                None => None,
+            },
+        },
+        PExpr::Cast { expr, affinity } => PExpr::Cast {
+            expr: boxed(expr)?,
+            affinity: *affinity,
+        },
+        PExpr::Collate { expr, coll } => PExpr::Collate {
+            expr: boxed(expr)?,
+            coll: *coll,
+        },
+        PExpr::Like {
+            lhs,
+            rhs,
+            escape,
+            negated,
+            glob,
+        } => PExpr::Like {
+            lhs: boxed(lhs)?,
+            rhs: boxed(rhs)?,
+            escape: match escape {
+                Some(x) => Some(boxed(x)?),
+                None => None,
+            },
+            negated: *negated,
+            glob: *glob,
+        },
+        // Nothing with its own plan or accumulator is moved.
+        PExpr::Agg(_) | PExpr::InSelect { .. } | PExpr::Exists { .. } | PExpr::Subquery(_) => {
+            return None
+        }
+    })
+}
+
 fn alias_lookup(result: &[ResultCol], e: &Expr) -> Option<PExpr> {
     if let Expr::Column { table: None, name } = e {
         for r in result {
@@ -1548,13 +1814,17 @@ fn alias_lookup(result: &[ResultCol], e: &Expr) -> Option<PExpr> {
     None
 }
 
+/// The name an unaliased result column is known by.
+///
+/// A plain column reference is named by its column, with any table qualifier
+/// dropped: `SELECT a.asset_id` yields `asset_id`, which is what SQLite does
+/// under its default `short_column_names`. This is not cosmetic. A derived
+/// table's columns are addressed by these names, so keeping the qualifier here
+/// would name the column `a.asset_id` and make `c.asset_id` unresolvable in
+/// `FROM (SELECT a.asset_id …) c`.
 fn display_name(e: &Expr) -> String {
     match e {
-        Expr::Column { table: None, name } => name.clone(),
-        Expr::Column {
-            table: Some(t),
-            name,
-        } => format!("{t}.{name}"),
+        Expr::Column { name, .. } => name.clone(),
         Expr::Function { name, star, .. } if *star => format!("{name}(*)"),
         Expr::Function { name, args, .. } => {
             let inner: Vec<String> = args.iter().map(display_name).collect();
