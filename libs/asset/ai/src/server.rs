@@ -978,11 +978,38 @@ fn chat_worker_loop(shared: Arc<ServiceShared>) {
 }
 
 fn worker_loop(shared: Arc<ServiceShared>) {
+    // Whether the device caches this thread owns have already been released
+    // for the current idle stretch. Cleared the moment a job runs, so the
+    // sweep below fires once per quiet period rather than every 500 ms.
+    let mut caches_released = false;
+    // Models that have RUN ON THIS THREAD since the last release. They are the
+    // only ones that can have left anything in this thread's device caches, so
+    // they are the only ones whose residency the sweep has to respect. A model
+    // that owns its own execution thread — the LLM session is the one that
+    // matters here — never appears, which is what lets a chat box that keeps a
+    // 27B resident forever still reclaim what an image job left behind.
+    let mut ran_here: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
             idle_evict_sweep(&shared);
+            if !caches_released
+                && !ran_here.is_empty()
+                && release_orphaned_device_caches(&shared, &ran_here)
+            {
+                caches_released = true;
+                ran_here.clear();
+            }
             continue;
         };
+        caches_released = false;
+        // THIS job's model only. `running_models` would also hand back a chat
+        // turn running on the other worker, and a resident LLM landing in this
+        // set would veto the sweep for the life of the process — on a chat box
+        // that is every box, which would leave the fix inert exactly where the
+        // leak was found.
+        if let Some(model) = shared.jobs.with(|store| store.model_of(&job_id)) {
+            ran_here.insert(model);
+        }
         let is_live = shared.jobs.with(|store| store.is_live(&job_id));
         let result = if is_live {
             execute_live_job(&shared, &job_id)
@@ -996,6 +1023,66 @@ fn worker_loop(shared: Arc<ServiceShared>) {
         }
         apply_finished_retention(&shared);
     }
+}
+
+/// The recovery for device memory that no residency record points at any more.
+///
+/// This is the exact state the fleet node was found in: `models_loaded: []`,
+/// no jobs, 43 GB of the card still gone. Nothing was resident, so no eviction
+/// path had anything to evict — and the memory was not held by a backend at
+/// all, it was sitting in this thread's weight cache and tensor pool where the
+/// models that ran had left it. Retiring a model from the accounting is not the
+/// same act as freeing what it ran on, and until now only the first one had an
+/// owner.
+///
+/// Runs only when the box is genuinely idle AND none of the models that ran on
+/// THIS thread still reports residency — so there is no live model whose
+/// buffers a flush could pull out from under it. Scoping the guard to this
+/// thread's own history is what makes the sweep useful on a chat box: the LLM
+/// session is resident essentially forever, but it lives on a thread of its own
+/// and has nothing in these caches, so it must not veto reclaiming what an
+/// image or mesh job left here.
+///
+/// Returns whether it ran, so the caller can do it once per idle stretch.
+fn release_orphaned_device_caches(
+    shared: &Arc<ServiceShared>,
+    ran_here: &std::collections::HashSet<String>,
+) -> bool {
+    // A queued or running job means the box is between pieces of work, not
+    // idle; freeing caches under it would only make the next job slower.
+    let busy = shared
+        .jobs
+        .with(|store| store.pending_count() > 0 || !store.running_models().is_empty());
+    if busy {
+        return false;
+    }
+    let still_resident = with_backends(shared, |backends| {
+        ran_here
+            .iter()
+            .any(|id| backends.get(id).is_some_and(|backend| backend.is_resident()))
+    });
+    if still_resident {
+        return false;
+    }
+    let before = residency::fresh_free_mb();
+    let mut said: Vec<String> = Vec::new();
+    release_worker_thread_device_caches(&mut |line| said.push(line.to_string()));
+    let after = residency::fresh_free_mb();
+    if let (Some(before), Some(after)) = (before, after) {
+        // Only worth a log line when it actually recovered something. A quiet
+        // box that was already clean should stay quiet.
+        if after > before + 64 {
+            eprintln!(
+                "[asset-ai] idle vram sweep: nothing resident, released orphaned device caches \
+                 — vram free {before} -> {after} MB (+{} MB){}",
+                after - before,
+                said.iter()
+                    .map(|line| format!(" [{line}]"))
+                    .collect::<String>()
+            );
+        }
+    }
+    true
 }
 
 /// Applies the jobs retention policy: evicted finished records also drop
@@ -1331,6 +1418,9 @@ fn execute_job(
                         crate::backend::ServingUpdate::Think { think, visible } => {
                             serving.think_tokens = Some(think as u64);
                             serving.visible_tokens = visible.map(|v| v as u64);
+                        }
+                        crate::backend::ServingUpdate::Decode { generated } => {
+                            serving.gen_tokens = Some(generated as u64);
                         }
                     })
                 });
@@ -1733,6 +1823,17 @@ fn resident_others_lru(
     out.into_iter().map(|(model_id, _)| model_id).collect()
 }
 
+/// True while ANY backend still admits to holding model state. Deliberately
+/// the same self-report `resident_others_lru` trusts: this is the guard on
+/// flushing the worker thread's shared device caches, and flushing those while
+/// a model that DOES report residency is live would pull the buffers out from
+/// under it. Under-reporting backends only make this answer `false` sooner,
+/// which is the safe direction — it means the flush happens, and a model that
+/// lied about residency has nothing left to invalidate anyway.
+fn any_backend_resident(backends: &HashMap<String, Box<dyn ContentBackend>>) -> bool {
+    backends.values().any(|backend| backend.is_resident())
+}
+
 /// Unloads one resident and VERIFIES the freed VRAM became visible through
 /// fresh NVML reads before returning (serialized teardown — "do not assume
 /// VRAM magically unloads"). Model state goes Ready on success; an unload
@@ -1750,8 +1851,18 @@ fn evict_resident(
         .unwrap_or(0);
     let before = residency::fresh_free_mb();
     progress(&format!("evict {model_id}"));
+    // Unload whenever the backend EXISTS, not only when it admits residency.
+    //
+    // `is_resident()` is a self-report, and several backends under-report it:
+    // one returns a hard-coded `false` while holding a full working set, others
+    // never override it at all. Gating the unload on that self-report made
+    // those models unreachable by every eviction path there is — the retire
+    // said "done", the accounting said `models_loaded: []`, and the card stayed
+    // 43 GB down. A backend that genuinely holds nothing gets a cheap no-op;
+    // one that lied gets unloaded. Only the honest case was ever being served
+    // by the old gate.
     match backends.get_mut(model_id) {
-        Some(backend) if backend.is_resident() => {
+        Some(backend) => {
             backend.unload().map_err(|error| {
                 set_model_state(shared, model_id, ModelTrack::Error(error.to_string()));
                 AssetAiError::Backend(format!(
@@ -1759,9 +1870,20 @@ fn evict_resident(
                 ))
             })?;
         }
-        _ => return Ok(()),
+        None => return Ok(()),
     }
     set_model_state(shared, model_id, ModelTrack::Ready);
+    // A backend's `unload()` can only reach what it owns. The device memory it
+    // actually ran on lives in THIS THREAD's weight cache and tensor pool
+    // (`gpu_weight_cache_ensure` keys, the idle block pool), which no Drop
+    // impl on a backend struct can see. So once nothing at all is resident,
+    // release those too: with no live model there is nothing a cache flush can
+    // invalidate, and re-uploading on the next miss is exactly what the cache
+    // is designed for. This is the step whose absence left the card full while
+    // the service reported it empty.
+    if !any_backend_resident(backends) {
+        release_worker_thread_device_caches(progress);
+    }
     if let (Some(before), true) = (before, est_mb > 0) {
         // Expect at least a quarter of the estimate back (estimates are
         // peaks; steady-resident footprints are smaller), capped under the
@@ -1781,6 +1903,27 @@ fn evict_resident(
                     ));
                 }
             }
+        }
+    }
+    // Say what the retire actually recovered, AFTER the visibility wait above.
+    // A teardown is asynchronous — the LLM's arena is freed on the session's
+    // own thread as it unwinds — so a reading taken the instant `unload()`
+    // returns says `+0 MB` for a retire that is about to hand back 57 GB. Read
+    // it once the driver has had its window, or the diagnostic cries wolf on
+    // every eviction and stops meaning anything.
+    if let (Some(before), Some(after)) = (before, residency::fresh_free_mb()) {
+        let freed = after.saturating_sub(before);
+        progress(&format!(
+            "evict {model_id}: vram free {before} -> {after} MB (+{freed} MB, estimate {est_mb} MB)"
+        ));
+        // A retire that frees almost nothing is the failure this whole path
+        // exists to prevent, and it used to leave no trace at all.
+        if est_mb > 0 && freed * 4 < est_mb {
+            eprintln!(
+                "[asset-ai] RETIRE FREED ALMOST NOTHING: {model_id} released {freed} MB against \
+                 an estimated {est_mb} MB footprint (vram free {before} -> {after} MB). The \
+                 backend's unload path is not reaching its device allocations."
+            );
         }
     }
     Ok(())
@@ -1806,7 +1949,13 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
         feature = "motion-native",
         feature = "video",
         feature = "audio",
-        feature = "indextts"
+        feature = "indextts",
+        // Both of these run heavy GPU pipelines through the same thread-local
+        // weight cache, and both were missing: a build enabled for them and
+        // nothing else compiled this whole function to a no-op, so the release
+        // that the retire path depends on silently did not exist.
+        feature = "paint-cuda",
+        feature = "upscale-native"
     ))]
     {
         match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {

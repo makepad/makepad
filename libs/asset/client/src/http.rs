@@ -513,13 +513,25 @@ fn call_once<'a>(
         out.extend_from_slice(body);
     }
     let mut stream = stream;
-    if let Err(e) = stream.write_all(&out) {
-        if from_pool {
+    // A write failure on a FRESH connection is not necessarily "nothing
+    // reached the peer": a server that refuses a body it is still receiving
+    // (an over-budget batch, say) answers and closes as soon as it decides
+    // that, while this call may still be mid-`write_all` on the rest of a
+    // large body. The kernel then reports our next write as BrokenPipe /
+    // ConnectionReset — even though the peer's response is already sitting
+    // in our receive buffer, unread. Don't surface that write failure yet:
+    // remember it and still attempt to read a response head below. Only if
+    // NOTHING at all comes back does the write failure become the reported
+    // error — it is the more informative root cause than a bare EOF/timeout
+    // on a response that was never going to arrive.
+    let write_err: Option<std::io::Error> = match stream.write_all(&out) {
+        Ok(()) => None,
+        Err(_) if from_pool => {
             // The server closed this idle socket; nothing was processed.
             return Err(HttpAttemptError::StaleIdle);
         }
-        return Err(io_err("http write request")(e).into());
-    }
+        Err(e) => Some(e),
+    };
 
     // ---- response head ----
     let head_ms = req.head_deadline_ms.unwrap_or(limits.head_deadline_ms).max(1);
@@ -535,6 +547,11 @@ fn call_once<'a>(
         }
         let now = Instant::now();
         if now >= head_deadline {
+            if buf.is_empty() {
+                if let Some(e) = write_err {
+                    return Err(io_err("http write request")(e).into());
+                }
+            }
             return Err(ClientError::Timeout { op: "http response head" }.into());
         }
         let timeout = (head_deadline - now).min(read_timeout).max(Duration::from_millis(1));
@@ -543,6 +560,11 @@ fn call_once<'a>(
             // nothing yet, the socket is the problem, not the request.
             if from_pool && buf.is_empty() {
                 return Err(HttpAttemptError::StaleIdle);
+            }
+            if buf.is_empty() {
+                if let Some(we) = write_err {
+                    return Err(io_err("http write request")(we).into());
+                }
             }
             return Err(io_err("http set head timeout")(e).into());
         }
@@ -555,6 +577,11 @@ fn call_once<'a>(
                     // Idle socket the server had already closed: retry once
                     // on a fresh connection, because nothing was processed.
                     return Err(HttpAttemptError::StaleIdle);
+                }
+                if buf.is_empty() {
+                    if let Some(e) = write_err {
+                        return Err(io_err("http write request")(e).into());
+                    }
                 }
                 return Err(ClientError::Io {
                     op: "http response head",
@@ -572,6 +599,11 @@ fn call_once<'a>(
                     kind => {
                         if from_pool && buf.is_empty() {
                             return Err(HttpAttemptError::StaleIdle);
+                        }
+                        if buf.is_empty() {
+                            if let Some(we) = write_err {
+                                return Err(io_err("http write request")(we).into());
+                            }
                         }
                         return Err(ClientError::Io { op: "http response head", kind }.into());
                     }

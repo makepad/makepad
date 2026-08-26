@@ -1071,6 +1071,10 @@ pub enum ServingUpdate {
     /// Tokens generated so far inside the think block, and after it. `visible`
     /// is `None` while the block is still open.
     Think { think: usize, visible: Option<usize> },
+    /// Tokens generated so far this turn, think block included. Reported as a
+    /// COUNT rather than left to be scraped off the `decode k/n` progress
+    /// label, which only exists while that label is the current one.
+    Decode { generated: usize },
 }
 
 /// Sink for [`ServingUpdate`]s. `&mut dyn FnMut` like every other sink here.

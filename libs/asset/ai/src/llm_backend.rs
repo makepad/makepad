@@ -1552,6 +1552,19 @@ mod llama_worker {
                 format!("{}s", stall.budget().as_secs())
             },
         );
+        // The batched ladder this box will actually run, priced on its own
+        // card. Printed once so the log proves which calibration the allocator
+        // took and what it decides at each width.
+        let ladder: Vec<String> = makepad_ai_llm::BATCH_WIDTHS
+            .iter()
+            .map(|&width| format!("w{width}:d{}", exec.modelled_depth(width)))
+            .collect();
+        eprintln!(
+            "[llm-worker] batched depth ladder: {} (cost model {} on '{}')",
+            ladder.join(" "),
+            exec.cost_calibration(),
+            exec.session().device_name(),
+        );
 
         loop {
             // Take new work. Block only when there is genuinely nothing to do,
@@ -1882,6 +1895,9 @@ mod llama_worker {
                                     visible: Some(total.saturating_sub(think)),
                                 },
                             ));
+                            let _ = lane.events.send(WorkerEvent::Serving(
+                                crate::backend::ServingUpdate::Decode { generated: total },
+                            ));
                         }
                         let total = lane.token_ids.len();
                         if total == 0 {
@@ -1995,6 +2011,16 @@ mod llama_worker {
                     },
                 };
                 let _ = lane.events.send(WorkerEvent::Serving(update));
+                // The generated count as a COUNT. It used to reach a client
+                // only through the `decode k/n` progress label, so any poll
+                // that landed while the label said something else handed the
+                // client a turn with zero tokens generated and its tok/s
+                // meter read an exact-looking 0.
+                let _ = lane.events.send(WorkerEvent::Serving(
+                    crate::backend::ServingUpdate::Decode {
+                        generated: lane.token_ids.len(),
+                    },
+                ));
                 if let Some(snapshot) = super::next_stream_snapshot(&lane.streamed, &decoded) {
                     lane.streamed = snapshot.clone();
                     let _ = lane.events.send(WorkerEvent::Text(snapshot));
@@ -2188,6 +2214,7 @@ mod llama_worker {
             model_id: String,
             progress: &mut dyn FnMut(&str, f64),
         ) -> Result<Self, String> {
+            use std::time::{Duration, Instant};
             enum BootEvt {
                 Progress(String, f64),
                 Ready(Result<(), String>),
@@ -2260,14 +2287,59 @@ mod llama_worker {
                     // Sender dropped -> backend dropped: session unloads here.
                 })
                 .map_err(|e| format!("spawn llm worker: {e}"))?;
+            // A load reports named phases (parse, vocab, plan, mmap, device,
+            // cache, reserve k/n, gguf upload, compile k/n), but a phase is
+            // still ONE tick and some of them are long: building and planning a
+            // 62-layer decode graph takes tens of seconds and has nothing to
+            // say while it does. A bar frozen at 85% is indistinguishable from
+            // a hung box, so the wait itself is reported: between phases the
+            // last stage is re-emitted with the seconds it has been running and
+            // a fraction that creeps, asymptotically, toward a small headroom
+            // above the phase's own mark.
+            //
+            // The creep can never overtake the next real phase because the
+            // reported fraction is held MONOTONE — a real mark below what the
+            // creep already showed keeps the bar still and updates the label,
+            // which is what a reader wants anyway. It is a liveness signal, not
+            // a measurement, and the elapsed seconds are the honest part.
+            const HEARTBEAT: Duration = Duration::from_millis(250);
+            /// How far above a phase's own mark the creep may reach.
+            const CREEP_HEADROOM: f64 = 0.03;
+            /// Time constant of the approach: ~63% of the headroom at 12s.
+            const CREEP_TAU: f64 = 12.0;
+            /// Below this the wait is not worth narrating.
+            const CREEP_ANNOUNCE_AFTER: f64 = 3.0;
+            let mut stage = String::from("load llm");
+            let mut mark = 0.10_f64;
+            let mut shown = 0.0_f64;
+            let mut phase_started = Instant::now();
             loop {
-                match boot_rx.recv() {
-                    Ok(BootEvt::Progress(stage, frac)) => progress(&stage, frac),
+                match boot_rx.recv_timeout(HEARTBEAT) {
+                    Ok(BootEvt::Progress(next_stage, next_mark)) => {
+                        stage = next_stage;
+                        mark = next_mark;
+                        phase_started = Instant::now();
+                        shown = shown.max(mark);
+                        progress(&stage, shown);
+                    }
                     Ok(BootEvt::Ready(result)) => {
                         result?;
                         break;
                     }
-                    Err(_) => return Err("llm worker died during load".to_string()),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let elapsed = phase_started.elapsed().as_secs_f64();
+                        let crept =
+                            mark + CREEP_HEADROOM * (1.0 - (-elapsed / CREEP_TAU).exp());
+                        shown = shown.max(crept);
+                        if elapsed >= CREEP_ANNOUNCE_AFTER {
+                            progress(&format!("{stage} ({elapsed:.0}s)"), shown);
+                        } else {
+                            progress(&stage, shown);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("llm worker died during load".to_string())
+                    }
                 }
             }
             Ok(Self { tx })
@@ -2467,6 +2539,13 @@ mod llama_worker {
                 .map_err(|e| format!("decode: {e:?}"))?;
             token_ids.extend_from_slice(&generated.token_ids);
             let _ = events.send(WorkerEvent::Token(token_ids.len() as u32, max as u32));
+            // The same count as a serving FACT, not only as a progress label
+            // (see the lane worker's Decode update for why that matters).
+            let _ = events.send(WorkerEvent::Serving(
+                crate::backend::ServingUpdate::Decode {
+                    generated: token_ids.len(),
+                },
+            ));
             // Partial-text snapshots: decode the FULL sequence each chunk —
             // byte-level BPE can split one character across a chunk edge,
             // so per-chunk decodes do not concatenate cleanly — and only

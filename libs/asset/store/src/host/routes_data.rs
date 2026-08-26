@@ -53,6 +53,8 @@ pub fn dispatch(
         // Ordered batch pull. Must be matched BEFORE `["v1","blobs",b]` so
         // `fetch` is never parsed as a (malformed) blob id.
         ["v1", "blobs", "fetch"] if m == Method::Post => blob_batch(conn, head, rc, force_close),
+        // Bulk upload: many blobs in ONE request, one catalog transaction.
+        ["v1", "blobs", "batch"] if m == Method::Post => blob_upload_batch(conn, head, rc),
         // Admit a server-local file BY REFERENCE. Matched before the blob-id
         // arm for the same reason `fetch` is.
         ["v1", "blobs", "ref"] if m == Method::Post => blob_ref_admit(conn, head, rc),
@@ -126,6 +128,142 @@ fn blob_upload(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
             ("size", Value::Int(commit.size as i64)),
             ("deduped", Value::Bool(commit.deduped)),
         ]),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// bulk upload (many blobs, one request, one catalog transaction)
+// ---------------------------------------------------------------------------
+
+/// Most blobs one upload batch may carry. Sized for a publish page (each
+/// asset contributes a couple of small blobs); big media still travels one
+/// blob per request.
+pub const UPLOAD_BATCH_MAX_ITEMS: usize = 64;
+
+/// `POST /v1/blobs/batch?ns=<ns>` — admit MANY blobs in one request.
+///
+/// Body framing: repeated `length(8, big-endian) | bytes[length]`. The
+/// response answers `{"blobs": [{"blob_id", "size", "deduped"}, …]}` in
+/// request order.
+///
+/// Why it exists: bulk publication (a compiled-in preset library seeding a
+/// virgin store) used to pay one round trip AND one catalog commit per blob.
+/// Here the connection thread hashes, fsyncs and renames every object into
+/// the CAS itself — off the single state thread — and then ONE state-thread
+/// visit records the whole set in ONE catalog transaction. The admission
+/// ordering law is untouched: every byte is durable in the CAS before any
+/// catalog row exists; a crash in between leaves only harmless unrecorded
+/// objects that a retry dedups against.
+fn blob_upload_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let ns = head
+        .query_get("ns")
+        .ok_or(Fail::Http(400, "missing ns"))?
+        .to_string();
+    // Authorize BEFORE consuming the body: an unauthorized uploader costs
+    // one head, not the whole batch stream.
+    let now = now_ms();
+    let auth_secret = secret.clone();
+    let auth_ns = ns.clone();
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(auth_secret.as_bytes(), now)?;
+        require_cap(ctx, &p, Capability::BlobWrite, &auth_ns)
+    })?;
+    let body = match super::routes::read_body(
+        conn,
+        head,
+        rc.cfg.batch_max_bytes,
+        rc.cfg.data_body_deadline_ms,
+    ) {
+        Ok(b) => b,
+        Err(o) => return Ok(o),
+    };
+    // Parse the framing completely before touching the CAS.
+    let mut frames: Vec<&[u8]> = Vec::new();
+    let mut at = 0usize;
+    while at < body.len() {
+        if body.len() - at < 8 {
+            return Err(Fail::Http(400, "malformed batch framing"));
+        }
+        let len = u64::from_be_bytes(body[at..at + 8].try_into().expect("8 bytes"));
+        at += 8;
+        if len == 0 || len > rc.cfg.budgets.max_blob_bytes {
+            return Err(Fail::Http(400, "batch blob length"));
+        }
+        let end = at
+            .checked_add(len as usize)
+            .filter(|end| *end <= body.len())
+            .ok_or(Fail::Http(400, "malformed batch framing"))?;
+        frames.push(&body[at..end]);
+        at = end;
+    }
+    if frames.is_empty() {
+        return Err(Fail::Http(400, "empty batch"));
+    }
+    if frames.len() > UPLOAD_BATCH_MAX_ITEMS {
+        return Err(Fail::Http(400, "batch too large"));
+    }
+    // CAS admission off the state thread, and PARALLEL: each object costs
+    // two fsyncs (temp file + directory entry), ~10ms of pure disk barrier
+    // on a laptop — serialized, a 64-blob page is most of a second of
+    // nothing but fsync. A few workers overlap those barriers; every byte
+    // is still durable before the catalog transaction below records it.
+    let mut commits: Vec<Option<crate::BlobCommit>> = Vec::new();
+    commits.resize_with(frames.len(), || None);
+    {
+        const CAS_BATCH_WORKERS: usize = 8;
+        let per = frames.len().div_ceil(frames.len().min(CAS_BATCH_WORKERS));
+        let mut first_err: Option<ServerError> = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (frame_chunk, out_chunk) in frames.chunks(per).zip(commits.chunks_mut(per)) {
+                let cas = rc.cas.clone();
+                handles.push(scope.spawn(move || -> Result<(), ServerError> {
+                    for (bytes, slot) in frame_chunk.iter().zip(out_chunk.iter_mut()) {
+                        let mut writer = cas.begin()?;
+                        writer.write(bytes)?;
+                        *slot = Some(cas.commit(writer, None)?);
+                    }
+                    Ok(())
+                }));
+            }
+            for handle in handles {
+                let outcome = handle.join().unwrap_or(Err(ServerError::InvalidState {
+                    what: "cas batch worker",
+                    state: "panicked",
+                }));
+                if let Err(e) = outcome {
+                    first_err.get_or_insert(e);
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(Fail::Srv(e));
+        }
+    }
+    let commits: Vec<crate::BlobCommit> = commits
+        .into_iter()
+        .map(|c| c.expect("every slot filled on success"))
+        .collect();
+    // ONE state-thread visit, ONE catalog transaction for every record.
+    let rows: Vec<(BlobId, u64)> = commits.iter().map(|c| (c.blob_id, c.size)).collect();
+    let record_now = now_ms();
+    call_state(&rc.state, move |ctx| {
+        ctx.core.record_blobs(&rows, record_now)
+    })?;
+    let blobs: Vec<Value> = commits
+        .iter()
+        .map(|c| {
+            obj(vec![
+                ("blob_id", s(c.blob_id.to_string())),
+                ("size", Value::Int(c.size as i64)),
+                ("deduped", Value::Bool(c.deduped)),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        201,
+        &obj(vec![("blobs", Value::Arr(blobs))]),
     )))
 }
 

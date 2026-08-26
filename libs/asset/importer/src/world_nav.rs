@@ -29,7 +29,12 @@ pub const PRIMARY: &str = "player_start";
 pub const DEATHMATCH: &str = "deathmatch";
 
 /// One spawn point. `pos` is the eye, `yaw` 0 looks down −Z and grows toward
-/// −X (the engine convention the classic converters already write).
+/// **+X**: this is the renderer's CAMERA yaw, `forward = (sin yaw, 0,
+/// −cos yaw)` (`makepad_render::level::yaw_forward`), which is what every
+/// consumer of these anchors reads — the map walker, `player_nav`, and the
+/// importer's own `world_preview`. It is NOT the sim's entity heading, whose
+/// forward is `(−sin yaw, 0, −cos yaw)`; the two agree only at yaw 0, and
+/// `makepad_game_sim::heading_to_camera_yaw` negates between them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavStart {
     pub name: String,

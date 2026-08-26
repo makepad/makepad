@@ -847,3 +847,95 @@ pub(crate) struct RgbaImage {
     pub h: u32,
     pub rgba: Vec<u8>,
 }
+
+// ---------------------------------------------------------------------------
+// Staged thumbnails
+// ---------------------------------------------------------------------------
+
+/// Write the picture a SOUND shows in a grid beside its staged WAV, and
+/// return the staged-relative path.
+///
+/// Every other audio importer (music, the coordinator, the local-media
+/// scanner) bakes this picture; the classic path was the one that shipped
+/// `thumbnail: None`, so a pack's whole sound set drew as blank tiles in the
+/// library and nothing but a re-import with this fix could fill them.
+///
+/// The picture is [`crate::thumbs::audio_thumbnail_jpeg`]'s: the spectrogram
+/// composite when the clip has a spectrum, else the waveform strip — the
+/// honest picture of a sound too short to transform, which most of a classic
+/// game's effects are. `None` when the bytes do not decode as audio at all;
+/// the sound still publishes, it just keeps the blank tile it has today.
+pub fn write_audio_thumb(staged: &Path, key: &str, wav: &[u8]) -> Option<String> {
+    let pcm = crate::thumbs::parse_wav(wav).ok()?;
+    let thumb = crate::thumbs::audio_thumbnail_jpeg(&pcm).ok()?;
+    let rel = format!("{key}{}.jpg", crate::billboard_sheet::THUMB_SUFFIX);
+    let dest = staged.join(&rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&dest, &thumb.bytes).ok()?;
+    Some(rel)
+}
+
+#[cfg(test)]
+mod thumb_tests {
+    use super::*;
+
+    /// A 16-bit mono PCM WAV of `millis` at 11 025 Hz — a classic effect's
+    /// shape, sound enough for the picture bakers to read.
+    fn wav(millis: u32) -> Vec<u8> {
+        let rate = 11_025u32;
+        let n = (rate * millis / 1000).max(1) as usize;
+        let mut pcm = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f32 / rate as f32;
+            let v = ((t * 440.0 * std::f32::consts::TAU).sin() * 12_000.0) as i16;
+            pcm.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&((36 + pcm.len()) as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // mono
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        out.extend_from_slice(&pcm);
+        out
+    }
+
+    /// Every other audio importer bakes a picture; the classic path shipped
+    /// `thumbnail: None`, so a pack's whole sound set drew as blank tiles.
+    #[test]
+    fn a_staged_sound_gets_a_picture_that_clears_the_thumbnail_floor() {
+        let dir = std::env::temp_dir().join(format!(
+            "classic-audio-thumb-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bytes = wav(400);
+        let rel = write_audio_thumb(&dir, "sfx/doom1/dsbarexp", &bytes)
+            .expect("a decodable sound gets a picture");
+        assert!(rel.ends_with("_thumb.jpg"), "{rel}");
+
+        let jpeg = std::fs::read(dir.join(&rel)).expect("picture on disk");
+        let (w, h) = crate::thumbs::jpeg_dims(&jpeg).expect("jpeg dims");
+        assert!(
+            w >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && h >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM,
+            "{w}x{h} must clear the published-thumbnail floor"
+        );
+
+        // Bytes that are not audio leave the sound alone rather than
+        // publishing a picture of nothing.
+        assert!(write_audio_thumb(&dir, "sfx/doom1/notsound", b"not a wav").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

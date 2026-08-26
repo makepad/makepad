@@ -25,6 +25,7 @@
 //!   downgrade below what their own findings require.
 
 pub mod activation;
+pub mod actor_def;
 pub mod asset;
 pub mod codec;
 pub mod content_set;

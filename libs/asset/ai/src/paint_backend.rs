@@ -425,8 +425,31 @@ impl ContentBackend for PaintBackend {
         Ok(())
     }
 
+    /// Honest residency. This used to answer a flat `false` while a native
+    /// run had a full Hunyuan working set on the card, and every eviction path
+    /// there is — the LRU candidate list, the idle sweep, `evict_resident` —
+    /// gates on this answer. A model that says it holds nothing is a model
+    /// nothing will ever retire, which is how the card ended up 43 GB down
+    /// with `models_loaded: []`.
+    ///
+    /// The deterministic (test) mode really does hold no device memory, so it
+    /// keeps saying so.
     fn is_resident(&self) -> bool {
-        false
+        self.loaded && !self.deterministic
+    }
+
+    /// Drops the paths and the resident flag, and releases the device weight
+    /// cache namespaces the native pipeline filled. The heavy allocations live
+    /// in the worker thread's cache rather than in this struct, so clearing
+    /// fields alone frees nothing — `server::evict_resident` follows this with
+    /// a thread-cache release once nothing is resident, which is what actually
+    /// returns the bytes.
+    fn unload(&mut self) -> Result<(), AssetAiError> {
+        self.loaded = false;
+        self.unet_path = None;
+        self.vae_path = None;
+        self.dino_path = None;
+        Ok(())
     }
 
     fn generate(

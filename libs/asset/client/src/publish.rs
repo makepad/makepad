@@ -1064,6 +1064,123 @@ impl AssetClient {
         self.publish_bundle_with(request, None, &|| false)
     }
 
+    /// Publish MANY bundles in one batched exchange: every unique blob goes
+    /// up in bulk (`POST /v1/blobs/batch`, one catalog transaction), then the
+    /// whole page publishes through `POST /v1/publish/batch` — ONE
+    /// state-thread visit and ONE catalog transaction for every asset,
+    /// annotation and alias in it, all-or-nothing.
+    ///
+    /// This is the bulk lane the split [`Self::publish_bundle`] ceremony is
+    /// not: two round trips a page instead of ~ten per asset. At most
+    /// [`wire::MAX_PUBLISH_BATCH_ITEMS`] bundles per call — callers page
+    /// larger sets and stream results between pages. Bundles must carry
+    /// their bytes (a `reference` slot needs the split flow), and a bundle
+    /// without an `asset_id` has one minted locally.
+    ///
+    /// Idempotent per page: replaying a landed page re-uploads nothing (the
+    /// CAS dedups) and re-publishing an identical revision refreshes its
+    /// annotation and alias without minting anything new.
+    pub fn publish_bundles(
+        &mut self,
+        requests: &[PublishBundle],
+    ) -> ClientResult<Vec<PublishedBundle>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requests.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
+            return Err(ClientError::OverBudget {
+                what: "publish batch bundles",
+                limit: wire::MAX_PUBLISH_BATCH_ITEMS as u64,
+                found: requests.len() as u64,
+            });
+        }
+        for request in requests {
+            request.validate()?;
+            if request.files.iter().any(PublishBundleFile::is_reference) {
+                return Err(ClientError::InvalidInput {
+                    what: "publish batch reference slot",
+                });
+            }
+        }
+        // Build every manifest locally first — identity before any byte
+        // moves — and collect the unique blobs per namespace.
+        let mut items: Vec<crate::api::PublishBatchWireItem> = Vec::with_capacity(requests.len());
+        let mut results: Vec<PublishedBundle> = Vec::with_capacity(requests.len());
+        let mut per_ns: Vec<(String, Vec<(BlobId, &[u8])>)> = Vec::new();
+        for request in requests {
+            let asset_id = match request.asset_id {
+                Some(id) => id,
+                None => mint_asset_id(),
+            };
+            let resolved: Vec<(BlobId, u64)> = request
+                .files
+                .iter()
+                .map(|f| (BlobId::hash_of(&f.bytes), f.bytes.len() as u64))
+                .collect();
+            let (canonical, revision, file_refs) = request.manifest_with(asset_id, &resolved)?;
+            let thumbnail_blob = BlobId::hash_of(&request.thumbnail.bytes);
+            let ns_blobs = match per_ns.iter_mut().find(|(ns, _)| *ns == request.namespace) {
+                Some((_, blobs)) => blobs,
+                None => {
+                    per_ns.push((request.namespace.clone(), Vec::new()));
+                    &mut per_ns.last_mut().expect("just pushed").1
+                }
+            };
+            for (file, (blob, _)) in request.files.iter().zip(&resolved) {
+                if !ns_blobs.iter().any(|(b, _)| b == blob) {
+                    ns_blobs.push((*blob, &file.bytes));
+                }
+            }
+            if !ns_blobs.iter().any(|(b, _)| *b == thumbnail_blob) {
+                ns_blobs.push((thumbnail_blob, &request.thumbnail.bytes));
+            }
+            items.push(crate::api::PublishBatchWireItem {
+                namespace: request.namespace.clone(),
+                manifest: canonical,
+                alias: request.alias.clone(),
+                annotation: request.annotation(),
+            });
+            results.push(PublishedBundle {
+                asset_id,
+                revision,
+                alias: request.alias.clone(),
+                files: file_refs,
+                thumbnail_blob,
+            });
+        }
+        // Bytes before catalog rows, in bounded pages per namespace. The
+        // page budget stays under the server's batch byte cap.
+        const UPLOAD_PAGE_BYTES: usize = 8 * 1024 * 1024;
+        for (ns, blobs) in &per_ns {
+            let mut page: Vec<&[u8]> = Vec::new();
+            let mut page_bytes = 0usize;
+            for (_, bytes) in blobs {
+                if !page.is_empty()
+                    && (page.len() >= wire::MAX_UPLOAD_BATCH_ITEMS
+                        || page_bytes + bytes.len() > UPLOAD_PAGE_BYTES)
+                {
+                    self.api().upload_blob_batch(ns, &page)?;
+                    page.clear();
+                    page_bytes = 0;
+                }
+                page.push(bytes);
+                page_bytes += bytes.len();
+            }
+            if !page.is_empty() {
+                self.api().upload_blob_batch(ns, &page)?;
+            }
+        }
+        // One request publishes the page; echoed identities must match the
+        // locally computed ones.
+        let outcomes = self.api().publish_batch(&items)?;
+        for ((asset_id, revision, _already), local) in outcomes.iter().zip(&results) {
+            if *asset_id != local.asset_id || *revision != local.revision {
+                return Err(ClientError::Protocol { what: "publish batch identity mismatch" });
+            }
+        }
+        Ok(results)
+    }
+
     /// As [`Self::publish_bundle`], with explicit operation-stage progress
     /// and cooperative cancellation. `progress` observes each
     /// [`PublishStage`] as it begins; `abort` is consulted before every
@@ -1240,6 +1357,31 @@ impl AssetClient {
     }
 }
 
+/// Mint a fresh 16-byte asset identity locally, so a batch page never pays a
+/// per-asset register round trip. Entropy comes from the OS-seeded standard
+/// hasher keys mixed with time and a process-wide counter — the same class
+/// of uniqueness the server's own minting provides, and a true collision is
+/// caught by the namespace-conflict check at registration.
+fn mint_asset_id() -> AssetId {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(now);
+        hasher.write_u64(nonce);
+        hasher.write_u64(std::process::id() as u64);
+        hasher.write_u64(i as u64);
+        chunk.copy_from_slice(&hasher.finish().to_be_bytes());
+    }
+    AssetId::from_bytes(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,7 +1515,21 @@ mod tests {
 
     fn bundle_file(role: FileRole, media: MediaType, byte: u8, len: usize) -> PublishBundleFile {
         let dims = matches!(media, MediaType::Png | MediaType::Jpeg).then_some((512, 512));
-        PublishBundleFile { role, tier: DeviceTier::Any, lod: 0, media, bytes: vec![byte; len], dims }
+        PublishBundleFile { role, tier: DeviceTier::Any, lod: 0, media, bytes: vec![byte; len], reference: None, dims }
+    }
+
+    /// Byte-carrying bundles resolve every slot from their own bytes; the
+    /// tests exercise the manifest through that path.
+    fn manifest_of(
+        b: &PublishBundle,
+        asset: AssetId,
+    ) -> ClientResult<(Vec<u8>, AssetRevisionId, Vec<PublishedFile>)> {
+        let resolved: Vec<(BlobId, u64)> = b
+            .files
+            .iter()
+            .map(|f| (BlobId::hash_of(&f.bytes), f.bytes.len() as u64))
+            .collect();
+        b.manifest_with(asset, &resolved)
     }
 
     /// A prop with the full derived PBR set: render mesh + base color +
@@ -1511,14 +1667,14 @@ mod tests {
     fn bundle_manifest_is_deterministic_and_order_independent() {
         let b = bundle();
         let asset = AssetId::from_bytes([3; 16]);
-        let (bytes_a, rev_a, refs_a) = b.manifest(asset).unwrap();
-        let (bytes_b, rev_b, _) = b.manifest(asset).unwrap();
+        let (bytes_a, rev_a, refs_a) = manifest_of(&b, asset).unwrap();
+        let (bytes_b, rev_b, _) = manifest_of(&b, asset).unwrap();
         assert_eq!(bytes_a, bytes_b);
         assert_eq!(rev_a, rev_b);
         // Caller file order does not change the identity…
         let mut shuffled = b.clone();
         shuffled.files.reverse();
-        let (bytes_c, rev_c, refs_c) = shuffled.manifest(asset).unwrap();
+        let (bytes_c, rev_c, refs_c) = manifest_of(&shuffled, asset).unwrap();
         assert_eq!(bytes_a, bytes_c);
         assert_eq!(rev_a, rev_c);
         // …while the returned refs stay in the caller's order.
@@ -1527,7 +1683,7 @@ mod tests {
         // Any byte change is a different revision.
         let mut changed = b.clone();
         changed.files[3].bytes[0] ^= 0xff;
-        let (_, rev_d, _) = changed.manifest(asset).unwrap();
+        let (_, rev_d, _) = manifest_of(&changed, asset).unwrap();
         assert_ne!(rev_a, rev_d);
     }
 
@@ -1564,7 +1720,7 @@ mod tests {
             params_digest: Some([5; 32]),
         });
         let asset = AssetId::from_bytes([4; 16]);
-        let (bytes, rev, refs) = b.manifest(asset).unwrap();
+        let (bytes, rev, refs) = manifest_of(&b, asset).unwrap();
         let decoded = AssetManifest::from_canonical_bytes(&bytes).unwrap();
         assert_eq!(decoded.asset_id, asset);
         assert_eq!(decoded.kind, AssetKind::Prop);
@@ -1626,13 +1782,13 @@ mod tests {
         b.files.retain(|f| f.role != FileRole::RenderGlb);
         assert!(b.validate().is_ok(), "local checks are shape-only");
         assert!(matches!(
-            b.manifest(AssetId::from_bytes([1; 16])).unwrap_err(),
+            manifest_of(&b, AssetId::from_bytes([1; 16])).unwrap_err(),
             ClientError::Content(_)
         ));
         // Mesh metrics must be measured, never zero.
         let mut b = bundle();
         b.stats.triangles = 0;
-        assert!(b.manifest(AssetId::from_bytes([1; 16])).is_err());
+        assert!(manifest_of(&b, AssetId::from_bytes([1; 16])).is_err());
     }
 
     #[test]
