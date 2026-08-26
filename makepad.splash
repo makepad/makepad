@@ -96,10 +96,12 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-bugfix"}
     RunStudioRelease{name: "makepad-example-move-after-draw"}
     RunStudioRelease{name: "makepad-example-render-to-texture"}
+    RunStudioRelease{name: "makepad-example-raytrace"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudio{name: "makepad-studio"} 
     RunStudioExt{name: "makepad-studio-ext"} 
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
+    RunStudioRelease{name: "makepad-fab"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
 ])
