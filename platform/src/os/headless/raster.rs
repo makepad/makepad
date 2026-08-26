@@ -287,6 +287,30 @@ impl HeadlessRenderTargets {
         Some(fb)
     }
 
+    /// CPU readback of a color render target — the headless twin of the GPU
+    /// backends' `debug_read_render_texture`. Returns the framebuffer the
+    /// raster last rendered for this texture as packed BGRA8 bytes, origin
+    /// top-left (the byte layout the Metal readback returns; alpha
+    /// unpremultiplied exactly like the window frame writer). `None` when
+    /// the target was never rendered or has been evicted.
+    pub(crate) fn read_color_bgra8(
+        &self,
+        texture_id: crate::texture::TextureId,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        let fb = self.color_target(texture_id.0)?;
+        let mut out = vec![0u8; fb.width * fb.height * 4];
+        for (i, c) in fb.color.iter().enumerate() {
+            let a = c[3].clamp(0.0, 1.0);
+            let inv_a = if a > 0.0 { 1.0 / a } else { 0.0 };
+            let base = i * 4;
+            out[base] = ((c[2] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+            out[base + 1] = ((c[1] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+            out[base + 2] = ((c[0] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+            out[base + 3] = (a * 255.0).round() as u8;
+        }
+        Some((fb.width, fb.height, out))
+    }
+
     fn touch(&mut self, texture_index: usize) {
         let frame = self.frame;
         self.last_used
@@ -936,8 +960,15 @@ impl Cx {
                 .unwrap_or(u64::MAX);
             still_a_render_target && idle < RENDER_TARGET_IDLE_FRAMES
         });
-        // Over budget: release least-recently-used targets, never one this
-        // frame still worked with.
+        // Over budget: release least-recently-used targets — but never one
+        // touched within the last few frames. "Same frame" alone is not
+        // safe: a target can legitimately be READ one or two frames after
+        // its last render (the VJ's thumbnail sheet accumulates cells over
+        // many paints and is read back a frame after the last one), and an
+        // eviction in that window hands the reader nothing. Recent targets
+        // may keep the store over budget for a beat; that costs memory
+        // briefly, never pixels.
+        const RENDER_TARGET_EVICT_GUARD_FRAMES: u64 = 3;
         let budget = render_target_budget_bytes();
         if budget > 0 && render_targets.bytes() > budget {
             let mut by_age: Vec<(u64, usize)> = render_targets
@@ -955,7 +986,9 @@ impl Cx {
             by_age.sort_unstable();
             let mut bytes = render_targets.bytes();
             for (used, texture_index) in by_age {
-                if bytes <= budget || used == frame {
+                if bytes <= budget
+                    || used.saturating_add(RENDER_TARGET_EVICT_GUARD_FRAMES) >= frame
+                {
                     break;
                 }
                 if let Some(fb) = render_targets.framebuffers.remove(&texture_index) {
