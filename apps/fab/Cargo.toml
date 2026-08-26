@@ -1,0 +1,38 @@
+[package]
+name = "makepad-fab"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Fab digital-fabrication and architecture application"
+license = "MIT OR Apache-2.0"
+# src/bin/frames_to_mp4.rs makes this a two-binary package; without this,
+# `cargo run -p makepad-fab` (the headless test harness) refuses to
+# guess and demands --bin.
+default-run = "makepad-fab"
+
+[features]
+default = ["gltf"]
+gltf = ["dep:makepad-fab-loader-gltf"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-fab-shell = { path = "../../libs/fab", version = "0.1.0" }
+makepad-fab-loader-gltf = { path = "loaders/gltf", version = "0.1.0", optional = true }
+makepad-video = { path = "../../platform/video", version = "1.0.0" }
+makepad-zune-png = { path = "../../libs/zune/zune-png", version = "0.5.2" }
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+makepad-raytrace = { path = "../../libs/raytrace", version = "0.1.0" }
+
+# The headless harness (`MAKEPAD=headless`) execs one `target/release/<bin>`
+# chosen from this manifest: a lone `[[bin]]` is treated as the whole package,
+# so the UI binary has to be named here or `frames_to_mp4` is launched instead.
+[[bin]]
+name = "makepad-fab"
+path = "src/main.rs"
+
+[[bin]]
+name = "frames_to_mp4"
+path = "src/bin/frames_to_mp4.rs"

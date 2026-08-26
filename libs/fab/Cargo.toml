@@ -1,0 +1,20 @@
+[package]
+name = "makepad-fab-shell"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Reusable 3D design shell, document model, navigation, tools, viewports, and rendering seams"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "fab"
+
+[dependencies]
+makepad-math = { path = "../math", version = "1.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-render = { path = "../render", version = "0.1.0" }
+makepad-game-sim = { path = "../sim", version = "0.1.0" }
+makepad-raytrace = { path = "../raytrace", version = "0.1.0" }
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
+makepad-video = { path = "../../platform/video", version = "1.0.0" }
+makepad-fab-tour = { path = "../fab_tour", version = "0.1.0" }
