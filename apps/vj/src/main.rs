@@ -4843,13 +4843,18 @@ pub struct App {
     fx_prefab: HashMap<String, Texture>,
     #[rust(BrowseModel::visual())]
     video_model: BrowseModel,
-    // The deck explorer lists EVERY audio asset in the store, whatever its
-    // namespace or category: a generated song is as loadable as an imported
-    // one. Only the intermediate-artifact exclusion applies (that is in the
-    // query itself). The sfx surface keeps its own narrower model.
-    #[rust(BrowseModel::new(AssetKind::Audio, ""))]
+    // The deck explorer lists every MUSIC-tagged audio asset in the store,
+    // whatever its namespace: a generated song is as loadable as an
+    // imported one. The classic-import sound effects (tagged `sfx`, and
+    // alphabetically ahead of the music) belong to the sfx surface — an
+    // unfiltered audio listing buried the user's library pages deep under
+    // door hinges and shotgun noises.
+    #[rust(BrowseModel::music())]
     music_model: BrowseModel,
-    #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
+    // Tag-narrowed too: the old `sfx` CATEGORY filter matched nothing
+    // (the imports write an `sfx` TAG, never a category), so this surface
+    // listed an empty store.
+    #[rust(BrowseModel::sfx())]
     sfx_model: BrowseModel,
     #[rust(BrowseModel::dance())]
     mesh_model: BrowseModel,
