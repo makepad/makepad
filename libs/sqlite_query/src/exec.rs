@@ -166,9 +166,17 @@ pub fn run(
     }
 
     let mut rows = run_body(rt, plan)?;
-    if let Some((op, right)) = &plan.compound {
-        let other = run_body(rt, right)?;
-        rows = combine(*op, rows, other);
+    if plan.compound.is_some() {
+        // A compound chains to the right, one arm per link, and combines from
+        // the left: `A UNION ALL B EXCEPT C` is `(A UNION ALL B) EXCEPT C`.
+        // Every link has to be walked — stopping at the first one silently
+        // drops the third and later arms.
+        let mut link = &plan.compound;
+        while let Some((op, right)) = link {
+            let other = run_body(rt, right)?;
+            rows = combine(*op, rows, other);
+            link = &right.compound;
+        }
         // ORDER BY over a compound sorts by result column position.
         if let Some(positions) = &plan.order_by_positions {
             for row in rows.iter_mut() {

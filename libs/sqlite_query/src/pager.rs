@@ -236,6 +236,10 @@ pub struct Pager {
     /// Held for as long as this connection owns the log (WAL mode, writable).
     shm: Option<ShmGuard>,
     cache: PageCache,
+    /// The committed snapshot the cache's pages were read under. `None` =
+    /// cache contents are not vouched for and the next `load_snapshot`
+    /// clears them. See [`Pager::snapshot_stamp`].
+    cache_stamp: Option<SnapshotStamp>,
     /// Byte-range locks; readers take SHARED, writers climb to EXCLUSIVE.
     lock: FileLock,
     busy_timeout: Duration,
@@ -243,6 +247,19 @@ pub struct Pager {
     autocheckpoint: u32,
     /// Write support; `None` for a read-only pager.
     write: Option<WriteSupport>,
+}
+
+/// Identity of one committed snapshot, for page-cache validity: the change
+/// counter and size cover rollback-journal commits (and truncation), the WAL
+/// fields cover every commit, reset and checkpoint of the log. Equal stamps =
+/// byte-identical committed content = the cache's pages are still this
+/// snapshot's pages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SnapshotStamp {
+    change_counter: u32,
+    page_count: u32,
+    /// (salt, checkpoint_seq, committed frames); `None` = no log.
+    wal: Option<((u32, u32), u32, u32)>,
 }
 
 /// Everything a writable pager needs beyond reading.
@@ -306,6 +323,7 @@ impl Pager {
             wal: None,
             shm: None,
             cache: PageCache::new(cache_pages),
+            cache_stamp: None,
             lock: FileLock::new(),
             busy_timeout: Duration::from_secs(5),
             autocheckpoint: DEFAULT_AUTOCHECKPOINT,
@@ -330,6 +348,27 @@ impl Pager {
             return Ok(false);
         }
         Ok(!crate::lock::reserved_lock_held(&self.file)?)
+    }
+
+    /// The identity of the committed snapshot currently visible. Computed
+    /// from state `load_snapshot` has already established.
+    fn snapshot_stamp(&self) -> SnapshotStamp {
+        SnapshotStamp {
+            change_counter: self.header.file_change_counter,
+            page_count: self.page_count,
+            wal: self
+                .wal
+                .as_ref()
+                .map(|w| (w.salt(), w.checkpoint_seq(), w.frames())),
+        }
+    }
+
+    /// Clear the page cache AND mark it unvouched-for, so the next
+    /// `load_snapshot` restamps from scratch. Every clear outside the
+    /// stamp check itself must come through here.
+    fn invalidate_cache(&mut self) {
+        self.cache.clear();
+        self.cache_stamp = None;
     }
 
     fn load_snapshot(&mut self) -> Result<()> {
@@ -367,7 +406,19 @@ impl Pager {
             }
         };
         self.wal = wal;
-        self.cache.clear();
+        // Drop cached pages ONLY when the committed snapshot actually moved:
+        // the stamp covers every way it can (rollback-journal commits bump
+        // the change counter, WAL commits/resets/checkpoints move the log
+        // fields). Clearing unconditionally here made EVERY autocommit
+        // statement re-read its b-tree path from disk — the dominant cost of
+        // small indexed reads on a live database. Sites that mutate content
+        // outside a committed snapshot (rollback, checkpoint, recovery) go
+        // through [`Pager::invalidate_cache`], which forces the clear below.
+        let stamp = self.snapshot_stamp();
+        if self.cache_stamp != Some(stamp) {
+            self.cache.clear();
+            self.cache_stamp = Some(stamp);
+        }
         // Page 1 carries the header, and in WAL mode the newest copy of it is
         // a frame, not the start of the database file. Everything downstream —
         // schema cookie, freelist, user_version — reads it from here.
@@ -550,6 +601,7 @@ impl Pager {
             wal: None,
             shm: None,
             cache: PageCache::new(cache_pages),
+            cache_stamp: None,
             lock: FileLock::new(),
             busy_timeout,
             autocheckpoint: DEFAULT_AUTOCHECKPOINT,
@@ -601,11 +653,19 @@ impl Pager {
         if !writable {
             return Ok(());
         }
-        if Wal::open(&self.path, self.header.page_size, true)?.is_none() {
-            // No usable log yet: start one.
-            let salt = (journal_nonce(), journal_nonce().rotate_left(7));
-            let wal = Wal::create(&self.path, self.header.page_size, 0, salt)?;
-            self.wal = Some(wal);
+        // A live log handle is kept across statements and refreshed
+        // incrementally by `load_snapshot`; probing the file again here would
+        // re-read and re-checksum every frame ON EVERY STATEMENT (and, on a
+        // database whose log was checkpointed away, re-create the log once
+        // per statement, fsync included). Only a connection that has no
+        // handle yet needs to find out whether a usable log exists.
+        if self.wal.is_none() {
+            if Wal::open(&self.path, self.header.page_size, true)?.is_none() {
+                // No usable log yet: start one.
+                let salt = (journal_nonce(), journal_nonce().rotate_left(7));
+                let wal = Wal::create(&self.path, self.header.page_size, 0, salt)?;
+                self.wal = Some(wal);
+            }
         }
         Ok(())
     }
@@ -643,7 +703,7 @@ impl Pager {
             self.file.seek(SeekFrom::Start(0))?;
             self.file.write_all(&header)?;
             crate::sync::sync(&self.file)?;
-            self.cache.clear();
+            self.invalidate_cache();
             self.reload_header()?;
             self.acquire_wal_ownership()?;
             self.load_snapshot()?;
@@ -667,7 +727,7 @@ impl Pager {
             return Ok(0);
         };
         let moved = wal.checkpoint(&mut self.file)?;
-        self.cache.clear();
+        self.invalidate_cache();
         self.reload_header()?;
         self.load_snapshot()?;
         Ok(moved)
@@ -710,7 +770,7 @@ impl Pager {
         // The log is gone; so is any shared-memory index of it.
         self.shm = None;
         let _ = std::fs::remove_file(crate::wal::shm_path(&self.path));
-        self.cache.clear();
+        self.invalidate_cache();
         self.reload_header()?;
         self.load_snapshot()?;
         {
@@ -770,7 +830,7 @@ impl Pager {
         }
         journal::rollback(&mut self.file, &jpath)?;
         std::fs::remove_file(&jpath).ok();
-        self.cache.clear();
+        self.invalidate_cache();
         {
             let Pager { file, lock, .. } = self;
             lock.release(file)?;
@@ -824,7 +884,7 @@ impl Pager {
         let counter = self.header.file_change_counter;
         self.reload_header()?;
         if self.header.file_change_counter != counter {
-            self.cache.clear();
+            self.invalidate_cache();
         }
         self.load_snapshot()?;
         Ok(())
@@ -1104,7 +1164,7 @@ impl Pager {
         self.file.set_len(pages as u64 * self.page_size as u64)?;
         crate::sync::sync(&self.file)?;
         write_step();
-        self.cache.clear();
+        self.invalidate_cache();
         // 4. the commit point
         {
             let w = self.write_support()?;
@@ -1164,6 +1224,9 @@ impl Pager {
             self.cache.insert(pgno, page);
         }
         self.page_count = pages;
+        // The cache now IS the new snapshot (committed pages were inserted
+        // above): restamp so the next `load_snapshot` keeps it warm.
+        self.cache_stamp = Some(self.snapshot_stamp());
         {
             let w = self.write_support()?;
             w.tx = None;
@@ -1213,7 +1276,7 @@ impl Pager {
         if let Some(wal) = self.wal.as_mut() {
             wal.rollback();
         }
-        self.cache.clear();
+        self.invalidate_cache();
         self.reload_header()?;
         self.load_snapshot()?;
         {
@@ -1224,9 +1287,15 @@ impl Pager {
         Ok(())
     }
 
-    /// Release every lock; the next read re-acquires SHARED. Connections do
-    /// this between autocommit statements, like SQLite, so another process can
-    /// write while this one is idle.
+    /// Release the byte-range lock; the next read re-acquires SHARED.
+    ///
+    /// A WRITABLE connection keeps its WAL ownership (the shm guard) for its
+    /// whole life: sibling connections coordinate through `refresh`'s
+    /// generation checks and the in-process write slot, a store root has
+    /// exactly one serving process by law (`server.lock`), and crash safety
+    /// comes from the log's write discipline, not from lock courtesy. A
+    /// read-only handle still hands its shared slot back between statements,
+    /// so it can watch a database some other program is writing.
     pub fn unlock(&mut self) -> Result<()> {
         if self.in_transaction() {
             return Ok(());
@@ -1235,9 +1304,9 @@ impl Pager {
             let Pager { file, lock, .. } = self;
             lock.release(file)?;
         }
-        // Hand the log back too, so a `sqlite3` process can read or write this
-        // database while we are idle. It re-recovers the index from the log.
-        self.shm = None;
+        if self.write.is_none() {
+            self.shm = None;
+        }
         self.release_process_write();
         Ok(())
     }
