@@ -388,6 +388,21 @@ pub struct PackCompileReport {
     pub skipped_models: Vec<(String, String)>,
 }
 
+/// Progress observed while [`compile_pack_with_progress`] walks the pack:
+/// files fully hashed+measured so far / discovered total, and cumulative
+/// bytes hashed so far / total bytes across every discovered file (both
+/// totals known upfront, from the same directory walk that already stats
+/// every file). `current` names the file that just finished (its
+/// pack-relative path); empty for the initial call, before the first file.
+#[derive(Clone, Debug, Default)]
+pub struct CompileProgress {
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub current: String,
+}
+
 /// Compile one local pack into canonical documents + an upload plan.
 /// Does not contact the Asset Server.
 pub fn compile_pack(
@@ -396,6 +411,25 @@ pub fn compile_pack(
     cli: PackSourceSpec,
     source_config: Option<&Path>,
     log: bool,
+) -> Result<PackCompileReport, PackImportError> {
+    compile_pack_with_progress(pack_dir, out_dir, cli, source_config, log, None)
+}
+
+/// As [`compile_pack`], with `progress` called once files are known (their
+/// count and total bytes) and again after each file is fully hashed and
+/// measured — this is the ONLY per-file work in a compile, so it is also
+/// the only source of granular progress here. Called on every file, not
+/// throttled: a big pack calls back a few hundred to a few thousand times
+/// over the whole compile, which is cheap for any reasonable callback: the
+/// classic-pack publish path throttles what it forwards from this into a
+/// UI phase message (see `apps/asset-ui/src/import_classic.rs`).
+pub fn compile_pack_with_progress(
+    pack_dir: &Path,
+    out_dir: &Path,
+    cli: PackSourceSpec,
+    source_config: Option<&Path>,
+    log: bool,
+    progress: Option<&mut dyn FnMut(CompileProgress)>,
 ) -> Result<PackCompileReport, PackImportError> {
     let mut spec = PackSourceSpec::default();
     if let Some(path) = source_config {
@@ -410,7 +444,7 @@ pub fn compile_pack(
 
     let (discovered, dir_snaps) = scan_pack(&pack_root)?;
     fire_after_enum_hook();
-    let built = build_manifest(&pack_root, &resolved, discovered, &dir_snaps)?;
+    let built = build_manifest(&pack_root, &resolved, discovered, &dir_snaps, progress)?;
     if log {
         eprintln!(
             "[asset-worker] import-pack {} assets / {} blobs → {}",
@@ -2551,15 +2585,43 @@ fn build_manifest(
     source: &ResolvedSource,
     files: Vec<DiscoveredFile>,
     dir_snaps: &[DirSnapshot],
+    mut progress: Option<&mut dyn FnMut(CompileProgress)>,
 ) -> Result<BuiltPack, PackImportError> {
+    let files_total = files.len();
+    let bytes_total: u64 = files.iter().map(|f| f.snapshot.len).sum();
+    let mut files_done = 0usize;
+    let mut bytes_done = 0u64;
+    if let Some(cb) = progress.as_deref_mut() {
+        cb(CompileProgress {
+            files_done,
+            files_total,
+            bytes_done,
+            bytes_total,
+            current: String::new(),
+        });
+    }
     let mut hashed = Vec::with_capacity(files.len());
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut skipped_keys: BTreeSet<String> = BTreeSet::new();
     for file in files {
         let pack_path = file.pack_path.clone();
         let key = file.key.clone();
+        let file_len = file.snapshot.len;
         match hash_and_measure(root, file) {
-            Ok(h) => hashed.push(h),
+            Ok(h) => {
+                files_done += 1;
+                bytes_done += file_len;
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(CompileProgress {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                        current: pack_path.clone(),
+                    });
+                }
+                hashed.push(h)
+            }
             // ONE unusable entry must not cost the other three hundred.
             // A pack is a vendor's folder, not a curated set: an entry in a
             // shape this importer declares it does not SUPPORT — a model
@@ -2668,6 +2730,31 @@ fn build_manifest(
         }
     }
 
+    // A companion `<key>_thumb` picture for an entry that is not a stateful
+    // billboard: a sound's spectrogram, a single-tile sprite's padded still.
+    // Without this the entry published `thumbnail: None` and drew a BLANK
+    // library tile forever — a re-import could not repair it, because the
+    // picture beside it was being published as its own card instead of being
+    // attached (or, for a sound, ignored outright).
+    let mut thumb_for_entry: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, file) in hashed.iter().enumerate() {
+        if !matches!(file.discovered.kind, MediaKind::Png | MediaKind::Jpeg) {
+            continue;
+        }
+        let Some(owner) = file
+            .discovered
+            .key
+            .strip_suffix(crate::billboard_sheet::THUMB_SUFFIX)
+        else {
+            continue;
+        };
+        if file.placeholder || !thumb_dims_ok(file.dims) {
+            continue;
+        }
+        thumb_for_entry.insert(owner.to_string(), index);
+        attached_images.insert(index);
+    }
+
     // ONE asset per stateful-billboard actor: the manifest text plus the
     // packed sheet it indexes. Its frame PNGs (483 `bossa2a8` cards, once)
     // and its preview strip stay attached, never independent.
@@ -2756,7 +2843,11 @@ fn build_manifest(
                 if pack_has_glb && is_pack_atlas(&file.discovered.pack_path) {
                     continue;
                 }
-                texture_asset(file)?
+                let thumb = thumb_for_entry.get(&file.discovered.key).map(|&i| &hashed[i]);
+                if let Some(t) = thumb {
+                    push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
+                }
+                texture_asset(file, thumb)?
             }
             MediaKind::Billboard => {
                 let Some(&sheet) = sheet_for_billboard.get(&file.discovered.key) else {
@@ -2773,7 +2864,13 @@ fn build_manifest(
                 }
                 billboard_asset(file, &hashed[sheet], thumb)?
             }
-            MediaKind::Wav => audio_asset(file)?,
+            MediaKind::Wav => {
+                let thumb = thumb_for_entry.get(&file.discovered.key).map(|&i| &hashed[i]);
+                if let Some(t) = thumb {
+                    push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
+                }
+                audio_asset(file, thumb)?
+            }
             MediaKind::Mp4 => video_asset(file)?,
             MediaKind::Glb => {
                 let thumb_idx = thumb_for_glb.get(&file.discovered.key).copied().ok_or_else(|| {
@@ -3065,7 +3162,10 @@ fn classic_image_kind(pack_path: &str) -> AssetKind {
     }
 }
 
-fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
+fn texture_asset(
+    file: &HashedFile,
+    thumb: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
     let dims = file.dims.ok_or_else(|| {
         PackImportError::new(
             PackImportErrorKind::Malformed,
@@ -3073,6 +3173,14 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
         )
     })?;
     let byte_len = file.byte_len;
+    let thumbnail = match thumb {
+        Some(t) => companion_thumbnail(t)?,
+        None => None,
+    };
+    let total_bytes = match &thumbnail {
+        Some(t) => byte_len.saturating_add(t.meta.byte_len),
+        None => byte_len,
+    };
     Ok(ImportAsset {
         key: parse_key(&file.discovered.key)?,
         kind: classic_image_kind(&file.discovered.pack_path),
@@ -3088,9 +3196,9 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
                 dims: Some(dims),
             },
         }],
-        thumbnail: None,
+        thumbnail,
         metrics: Metrics {
-            total_bytes: byte_len,
+            total_bytes,
             triangles: 0,
             vertices: 0,
             joints: 0,
@@ -3113,6 +3221,41 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
 /// the manifest that indexes it (`Source`). The manifest's `sheet` header is
 /// checked against the real sheet dimensions — a sheet that does not match
 /// its cell table would cut garbage frames on the far side.
+/// The `<key>_thumb` picture an entry publishes, when it has one.
+///
+/// The same shape [`billboard_asset`] builds for a preview strip, for the
+/// entries that are not stateful billboards: a sound's spectrogram, a
+/// single-tile sprite's padded still. A PNG carries its own stamped cell
+/// layout, so its views are read back from the file; a JPEG carries none and
+/// declares no regions — "one picture, take it as it comes", which the
+/// manifest treats as no claim rather than a wrong one.
+fn companion_thumbnail(t: &HashedFile) -> Result<Option<ImportThumbnail>, PackImportError> {
+    if !thumb_dims_ok(t.dims) {
+        return Ok(None);
+    }
+    let Some(d) = t.dims else { return Ok(None) };
+    let media = match t.discovered.kind {
+        MediaKind::Png => ThumbnailMedia::Png,
+        MediaKind::Jpeg => ThumbnailMedia::Jpeg,
+        _ => return Ok(None),
+    };
+    let views = match t.discovered.kind {
+        MediaKind::Png => sheet_views(t),
+        _ => Vec::new(),
+    };
+    Ok(Some(ImportThumbnail {
+        path: t.discovered.pack_path.clone(),
+        meta: ThumbnailMeta {
+            blob: t.blob,
+            media,
+            width: d.width,
+            height: d.height,
+            byte_len: t.byte_len,
+            views,
+        },
+    }))
+}
+
 fn billboard_asset(
     manifest: &HashedFile,
     sheet: &HashedFile,
@@ -3247,13 +3390,24 @@ fn billboard_asset(
     })
 }
 
-fn audio_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
+fn audio_asset(
+    file: &HashedFile,
+    thumb: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
     if file.media_millis == 0 {
         return Err(PackImportError::new(
             PackImportErrorKind::Malformed,
             format!("{}: unmeasured audio duration", file.discovered.pack_path),
         ));
     }
+    let thumbnail = match thumb {
+        Some(t) => companion_thumbnail(t)?,
+        None => None,
+    };
+    let total_bytes = match &thumbnail {
+        Some(t) => file.byte_len.saturating_add(t.meta.byte_len),
+        None => file.byte_len,
+    };
     Ok(ImportAsset {
         key: parse_key(&file.discovered.key)?,
         kind: AssetKind::Audio,
@@ -3269,9 +3423,9 @@ fn audio_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
                 dims: None,
             },
         }],
-        thumbnail: None,
+        thumbnail,
         metrics: Metrics {
-            total_bytes: file.byte_len,
+            total_bytes,
             triangles: 0,
             vertices: 0,
             joints: 0,
@@ -7366,6 +7520,43 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The progress callback: fires once before any file (files_done=0,
+    /// totals already known), once per file after (monotonic, ending at the
+    /// discovered total), and reports a plausible byte count along the way
+    /// — what a caller like the classic-pack publish path drives its status
+    /// line from.
+    #[test]
+    fn compile_with_progress_reports_a_monotonic_file_and_byte_count() {
+        let pack = test_root("progress");
+        let out = test_bundle("progress_out");
+        write_mixed_pack(&pack, shared_mp4());
+
+        let mut calls: Vec<CompileProgress> = Vec::new();
+        let mut cb = |p: CompileProgress| calls.push(p);
+        compile_pack_with_progress(&pack, &out, licensed_spec(), None, false, Some(&mut cb))
+            .expect("compile with progress");
+
+        assert!(calls.len() >= 2, "at least an initial call and one per file");
+        let first = &calls[0];
+        assert_eq!(first.files_done, 0, "no file has landed on the very first call");
+        assert!(first.files_total > 0, "the total is known from the first call");
+        assert_eq!(first.bytes_done, 0);
+        assert!(first.bytes_total > 0);
+
+        let last = calls.last().unwrap();
+        assert_eq!(last.files_done, last.files_total, "the run ends fully counted");
+        assert_eq!(last.files_total, first.files_total, "the total never changes mid-run");
+        assert_eq!(last.bytes_total, first.bytes_total, "the byte total never changes mid-run");
+        assert!(last.bytes_done > 0);
+        assert!(last.bytes_done <= last.bytes_total);
+
+        // Every field only ever moves forward.
+        for pair in calls.windows(2) {
+            assert!(pair[1].files_done >= pair[0].files_done, "files_done went backwards");
+            assert!(pair[1].bytes_done >= pair[0].bytes_done, "bytes_done went backwards");
+        }
     }
 
     #[test]

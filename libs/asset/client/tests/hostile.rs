@@ -421,6 +421,47 @@ fn blob_wrong_bytes_never_committed() {
     assert!(client.cached_blob(&blob).unwrap().is_none(), "bad bytes reached the cache");
 }
 
+/// `upload_blob_with_digest`/`upload_blob_batch_with_digests` let a caller
+/// that already hashed the bytes (e.g. against an upload plan's expected
+/// digest) skip a redundant local rehash on upload. That must never weaken
+/// the identity guarantee: a server that echoes a DIFFERENT blob id than the
+/// one the caller supplied is still refused, exactly like the always-hashes
+/// `upload_blob`/`upload_blob_batch` path.
+#[test]
+fn upload_with_precomputed_digest_still_refuses_a_server_disagreement() {
+    let bytes = payload(41, 3_000);
+    let correct = BlobId::hash_of(&bytes);
+    let wrong = BlobId::hash_of(&payload(42, 3_000));
+    let data = RawServer::start(Arc::new(move |req: ParsedRequest, stream: &mut TcpStream| {
+        // Echoes an identity that does NOT match what the caller sent — or
+        // what it precomputed — on either the single or the batch route.
+        if req.target.starts_with("/v1/blobs/batch") {
+            let rows: Vec<Value> =
+                (0..2).map(|_| obj(vec![("blob_id", s(wrong.to_string()))])).collect();
+            write_json_resp(stream, 201, &obj(vec![("blobs", Value::Arr(rows))]));
+        } else {
+            write_json_resp(stream, 201, &obj(vec![("blob_id", s(wrong.to_string()))]));
+        }
+    }));
+    let api = api_at(data.addr);
+
+    // Single-blob path: the caller passes the CORRECT precomputed digest
+    // (skipping its own local hash), but the server's reply still disagrees.
+    let err = api.upload_blob_with_digest("ns", &bytes, correct).unwrap_err();
+    assert!(matches!(err, ClientError::DigestMismatch { .. }), "{err:?}");
+
+    // Batch path: same guarantee, N blobs at once.
+    let bytes2 = payload(43, 1_000);
+    let correct2 = BlobId::hash_of(&bytes2);
+    let err = api
+        .upload_blob_batch_with_digests(
+            "ns",
+            &[(correct, bytes.as_slice()), (correct2, bytes2.as_slice())],
+        )
+        .unwrap_err();
+    assert!(matches!(err, ClientError::DigestMismatch { .. }), "{err:?}");
+}
+
 #[test]
 fn blob_size_lie_refused_before_streaming() {
     let real = payload(80, 5_000);

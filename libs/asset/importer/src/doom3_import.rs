@@ -2026,7 +2026,7 @@ fn write_gray_glb(
     Ok(glb)
 }
 
-fn xform(p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn xform(p: [f32; 3]) -> [f32; 3] {
     // id Tech 4 is Z-up; glTF / engine is Y-up.
     [p[0] * SCALE, p[2] * SCALE, -p[1] * SCALE]
 }

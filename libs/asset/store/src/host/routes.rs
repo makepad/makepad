@@ -12,6 +12,7 @@ use super::http::{BodyError, Conn, Head, Method, Resp};
 use super::state::{StateCtx, StateHandle};
 use super::util::log;
 use crate::{ServerError, ServerResult};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
@@ -59,6 +60,13 @@ pub struct RouteCtx {
     /// them. In memory and leased: a room is a process on somebody's desk,
     /// not a catalog entry.
     pub rooms: std::sync::Arc<super::rooms::RoomRegistry>,
+    /// Direct CAS handle for data-plane bulk writes: pure path/budget config
+    /// over the same `<root>/cas` the core owns, so connection threads can
+    /// hash, fsync and rename object files WITHOUT occupying the state
+    /// thread. Catalog rows for those objects still commit on the state
+    /// thread, after the bytes are durable — the admission ordering law is
+    /// unchanged.
+    pub cas: std::sync::Arc<crate::cas::Cas>,
 }
 
 /// Serve one parsed request head to completion.
@@ -120,13 +128,32 @@ pub fn body_err_outcome(e: BodyError) -> Outcome {
 
 /// Read a whole bounded request body, mapping framing violations to their
 /// refusal outcomes.
+///
+/// On `TooLarge` specifically, drains whatever the client declared is still
+/// coming before returning the refusal: the caller is about to answer 413
+/// and close, and closing over an unread declared remainder risks an
+/// abortive RST that can drop the 413 response itself — see
+/// [`Conn::drain_remaining`]. The drain gets its own copy of `deadline_ms`
+/// rather than whatever was left of the read attempt's budget: the read
+/// side of an oversized body typically fails near-instantly (the length is
+/// known from the declared Content-Length, before a single body byte is
+/// read), so a shared budget would leave almost nothing to drain with.
 pub fn read_body(
     conn: &mut Conn,
     head: &mut Head,
     max: u64,
     deadline_ms: u64,
 ) -> Result<Vec<u8>, Outcome> {
-    conn.read_body_full(head, max, deadline_ms).map_err(body_err_outcome)
+    match conn.read_body_full(head, max, deadline_ms) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            if matches!(e, BodyError::TooLarge) {
+                let deadline = Instant::now() + Duration::from_millis(deadline_ms.max(1));
+                conn.drain_remaining(head, deadline);
+            }
+            Err(body_err_outcome(e))
+        }
+    }
 }
 
 /// Capability check with ROOT BYPASS: the transport-recorded bootstrap

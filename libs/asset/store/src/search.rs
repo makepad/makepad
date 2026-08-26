@@ -885,6 +885,20 @@ impl<'a> Search<'a> {
         ann: &AssetAnnotation,
         now_ms: u64,
     ) -> ServerResult<()> {
+        self.db
+            .tx(|db| self.set_annotation_in_tx(db, asset_id, ann, now_ms))
+    }
+
+    /// The body of [`Self::set_annotation`] inside the caller's open
+    /// transaction, so a composite operation (batch publish) can land its
+    /// annotations atomically with the catalog rows they describe.
+    pub(crate) fn set_annotation_in_tx(
+        &self,
+        db: &Db,
+        asset_id: &AssetId,
+        ann: &AssetAnnotation,
+        now_ms: u64,
+    ) -> ServerResult<()> {
         if ann.title.is_empty() {
             return Err(ServerError::InvalidInput { what: "annotation title empty" });
         }
@@ -959,7 +973,7 @@ impl<'a> Search<'a> {
             });
         }
 
-        self.db.tx(|db| {
+        {
             // Namespace comes from the catalog record — the single source of
             // truth an annotation can never contradict.
             let mut s = db.prepare(
@@ -1058,7 +1072,7 @@ impl<'a> Search<'a> {
             // and retire every open cursor.
             rebuild_alias_postings(db, self.budgets, asset_id.as_bytes())?;
             bump_generation(db)
-        })
+        }
     }
 
     /// Remove an asset's annotation and every index row. Idempotent; the
@@ -1319,25 +1333,20 @@ impl<'a> Search<'a> {
                     &scope_namespaces,
                     query.facets as u64,
                 );
-                let mut s = db.prepare("search facets", &facet_sql)?;
-                apply_binds(&mut s, &facet_binds)?;
-                let mut out = Vec::new();
-                while s.step()? {
-                    let kind = match s.column_text(0).as_str() {
-                        "category" => FacetKind::Category,
-                        "tag" => FacetKind::Tag,
-                        // The label index only ever holds those two kinds
-                        // (a CHECK constraint says so); anything else is a
-                        // corrupt row, not a new vocabulary to guess at.
-                        _ => continue,
-                    };
-                    out.push(Facet {
-                        kind,
-                        label: s.column_text(1),
-                        count: s.column_u64(2),
-                    });
+                // Facets are DECORATION on the page, never the page: a
+                // facet failure degrades to no facets instead of failing
+                // the whole request. (Found live: the engine could not yet
+                // plan the derived-table join this SQL uses, and every
+                // catalog browse 500'd for it — hits included.)
+                match facet_rows(db, &facet_sql, &facet_binds) {
+                    Ok(out) => out,
+                    Err(error) => {
+                        eprintln!(
+                            "[asset-server] search facets failed (page served without them): {error:?}"
+                        );
+                        Vec::new()
+                    }
                 }
-                out
             };
             Ok(SearchPage { hits, total, cursor, facets })
         })
@@ -1485,6 +1494,29 @@ mod tests {
 /// first. `build_sql`'s counting form is exactly that candidate SELECT
 /// wrapped in a COUNT, so the facet query reuses it as a subquery: one
 /// definition of "what matches", three uses (count, page, facets).
+/// The facet query's rows, isolated so a failure can degrade (see caller).
+fn facet_rows(db: &Db, facet_sql: &str, facet_binds: &[Bind]) -> ServerResult<Vec<Facet>> {
+    let mut s = db.prepare("search facets", facet_sql)?;
+    apply_binds(&mut s, facet_binds)?;
+    let mut out = Vec::new();
+    while s.step()? {
+        let kind = match s.column_text(0).as_str() {
+            "category" => FacetKind::Category,
+            "tag" => FacetKind::Tag,
+            // The label index only ever holds those two kinds (a CHECK
+            // constraint says so); anything else is a corrupt row, not a
+            // new vocabulary to guess at.
+            _ => continue,
+        };
+        out.push(Facet {
+            kind,
+            label: s.column_text(1),
+            count: s.column_u64(2),
+        });
+    }
+    Ok(out)
+}
+
 fn build_facet_sql(
     terms: &[String],
     browse: bool,

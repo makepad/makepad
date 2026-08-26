@@ -345,9 +345,19 @@ pub fn stamp_layout(png: &[u8], cells: ThumbnailCells, fps: f32) -> Vec<u8> {
     out
 }
 
-/// Read back a stamped layout, if the picture carries one.
+/// Read back a stamped layout, if the picture carries one. Understands
+/// both containers a sheet ships in: a PNG's `tEXt` chunk and an MP4's
+/// layout trailer box ([`stamp_layout_mp4`]).
 pub fn read_layout(png: &[u8]) -> Option<(ThumbnailCells, f32)> {
-    let body = png_text_chunk(png, SHEET_LAYOUT_KEY)?;
+    let body = if is_mp4(png) {
+        mp4_layout_text(png)?
+    } else {
+        png_text_chunk(png, SHEET_LAYOUT_KEY)?
+    };
+    parse_layout_text(&body)
+}
+
+fn parse_layout_text(body: &str) -> Option<(ThumbnailCells, f32)> {
     let mut parts = body.split_whitespace();
     if parts.next()? != "cells" {
         return None;
@@ -359,6 +369,95 @@ pub fn read_layout(png: &[u8]) -> Option<(ThumbnailCells, f32)> {
         return None;
     }
     Some((ThumbnailCells { cols, cell_w, cell_h, first, count }, fps))
+}
+
+/// An ISO-BMFF container (mp4): every file starts with a box whose type is
+/// `ftyp`.
+fn is_mp4(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[4..8] == b"ftyp"
+}
+
+/// Walk an mp4's TOP-LEVEL boxes, calling `f(kind, payload, whole-box
+/// range)` for each. Defensive: a malformed size ends the walk rather than
+/// reading junk. 64-bit `largesize` boxes are skipped over correctly.
+fn mp4_boxes(bytes: &[u8], mut f: impl FnMut(&[u8; 4], &[u8], std::ops::Range<usize>)) {
+    let mut off = 0usize;
+    while off + 8 <= bytes.len() {
+        let size32 = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = bytes[off + 4..off + 8].try_into().unwrap();
+        let (size, head) = if size32 == 1 {
+            if off + 16 > bytes.len() {
+                return;
+            }
+            let large = u64::from_be_bytes(bytes[off + 8..off + 16].try_into().unwrap());
+            (large as usize, 16usize)
+        } else if size32 == 0 {
+            // "To end of file".
+            (bytes.len() - off, 8usize)
+        } else {
+            (size32, 8usize)
+        };
+        if size < head || off + size > bytes.len() {
+            return;
+        }
+        f(&kind, &bytes[off + head..off + size], off..off + size);
+        off += size;
+    }
+}
+
+/// The MP4 twin of [`stamp_layout`]: append the same layout text as a
+/// top-level `free` box (every demuxer skips it; it survives a byte copy,
+/// which is the whole point of stamping the file rather than a sidecar).
+/// A restamp REPLACES any layout box already present.
+pub fn stamp_layout_mp4(mp4: &[u8], cells: ThumbnailCells, fps: f32) -> Vec<u8> {
+    let mut out = strip_layout_mp4(mp4);
+    let text = format!(
+        "{SHEET_LAYOUT_KEY}\0cells {} {} {} {} {} {}",
+        cells.cols, cells.cell_w, cells.cell_h, cells.first, cells.count, fps
+    );
+    out.extend_from_slice(&((8 + text.len()) as u32).to_be_bytes());
+    out.extend_from_slice(b"free");
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
+/// Drop any layout trailer already in the file, so a restamp replaces
+/// rather than stacks.
+fn strip_layout_mp4(bytes: &[u8]) -> Vec<u8> {
+    if !is_mp4(bytes) {
+        return bytes.to_vec();
+    }
+    let mut drop: Vec<std::ops::Range<usize>> = Vec::new();
+    mp4_boxes(bytes, |kind, payload, range| {
+        if kind == b"free"
+            && payload.starts_with(SHEET_LAYOUT_KEY.as_bytes())
+            && payload.get(SHEET_LAYOUT_KEY.len()) == Some(&0)
+        {
+            drop.push(range);
+        }
+    });
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0usize;
+    for range in drop {
+        out.extend_from_slice(&bytes[at..range.start]);
+        at = range.end;
+    }
+    out.extend_from_slice(&bytes[at..]);
+    out
+}
+
+fn mp4_layout_text(bytes: &[u8]) -> Option<String> {
+    let mut found = None;
+    mp4_boxes(bytes, |kind, payload, _| {
+        if found.is_none()
+            && kind == b"free"
+            && payload.starts_with(SHEET_LAYOUT_KEY.as_bytes())
+            && payload.get(SHEET_LAYOUT_KEY.len()) == Some(&0)
+        {
+            found = String::from_utf8(payload[SHEET_LAYOUT_KEY.len() + 1..].to_vec()).ok();
+        }
+    });
+    found
 }
 
 /// The declared views of a thumbnail image: an `anim` view when the picture

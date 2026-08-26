@@ -214,8 +214,16 @@ fn write_thumb_strip(
     let name = thumb_name(manifest)?;
     let mut tiles = Vec::new();
     for frame in bb.preview_frames().into_iter().take(MAX_THUMB_TILES) {
-        let (x, y, w, h) = bb.frame_rect(frame)?;
-        let cut = cut_rect(&packed.rgba, packed.width, packed.height, x, y, w, h)?;
+        // SKIP a frame we cannot cut, never abandon the strip. A pack is
+        // allowed one malformed frame — a zero-size cell, or artwork wider
+        // than the sheet's cell — and giving up on the whole thumbnail for
+        // it published a BLANK library tile that no re-import could ever
+        // repair. The frames that did cut are a perfectly good preview.
+        let Some((x, y, w, h)) = bb.frame_rect(frame) else { continue };
+        let Some(cut) = cut_rect(&packed.rgba, packed.width, packed.height, x, y, w, h)
+        else {
+            continue;
+        };
         tiles.push(anim_icon::fit_tile(&cut, w as usize, h as usize));
     }
     if tiles.is_empty() {
@@ -244,6 +252,34 @@ fn write_thumb_strip(
     let path = dir.join(name);
     std::fs::write(&path, png).ok()?;
     Some(path)
+}
+
+/// The still a SINGLE-frame sprite shows in a grid: its one tile fitted into
+/// the 128² cell grid and padded to the two rows a published thumbnail's
+/// 256px floor demands, as PNG bytes.
+///
+/// A classic pack is mostly single tiles — a can, a bottle, a chair — and
+/// they are not stateful billboards, so they never reached the strip above.
+/// They published with no thumbnail at all and drew as blank library tiles
+/// that no re-import could fill, because the raw 46×49 tile beside them is
+/// far under the floor. This is that tile, in the shape the contract wants.
+pub fn still_icon_png(src_png: &[u8]) -> Option<Vec<u8>> {
+    let (rgba, w, h) = decode_png_stored(src_png).ok()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut tiles = vec![anim_icon::fit_tile(&rgba, w as usize, h as usize)];
+    while tiles.len() <= anim_icon::SHEET_W / anim_icon::TILE {
+        tiles.push(anim_icon::fit_tile(&[], 0, 0));
+    }
+    let sheet = anim_icon::pack_sheet(&tiles).ok()?;
+    // One real cell: a consumer that plays the strip shows the still and
+    // stops, rather than cycling through the clear padding.
+    Some(anim_icon::stamp_layout(
+        &sheet.png,
+        makepad_asset_data::ThumbnailCells { count: 1, ..sheet.cells() },
+        1.0,
+    ))
 }
 
 fn cut_rect(
@@ -282,6 +318,26 @@ mod tests {
             rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
         encode_png_rgba(&rgba, w, h).unwrap()
+    }
+
+    /// A single tile — a can, a bottle, a chair — is most of a classic pack,
+    /// and it published NO thumbnail because the raw 46x49 artwork is far
+    /// under the 256px floor a published thumbnail must clear. The still it
+    /// gets now is that same artwork, in the shape the contract wants.
+    #[test]
+    fn a_single_tile_still_clears_the_published_thumbnail_floor() {
+        let png = solid_png(46, 49, [200, 40, 40]);
+        let icon = still_icon_png(&png).expect("still icon");
+        let (w, h) = crate::thumbs::png_dims(&icon).expect("dims");
+        assert!(
+            w >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && h >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM,
+            "{w}x{h} must clear the floor"
+        );
+        // One REAL cell: a consumer plays the still and stops rather than
+        // cycling the clear padding that bought the height.
+        let (cells, _fps) = anim_icon::read_layout(&icon).expect("stamped layout");
+        assert_eq!(cells.count, 1, "one real frame");
     }
 
     fn frame(letter: char, rot: u8, w: u32, h: u32, file: &str, flip: bool) -> SpriteFrame {

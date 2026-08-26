@@ -105,6 +105,19 @@ pub fn path_alias(alias: &AssetAlias) -> String {
     format!("/v1/aliases/{alias}")
 }
 
+/// Batch alias status in ONE request (see the server's
+/// `alias_status_batch`): what the store already holds under a list of
+/// aliases, whether each head's Source blob is the one the caller has, and
+/// which of a requested tag set each carries. Absent on older servers, which
+/// answer 404 — callers fall back to per-alias resolves.
+pub fn path_alias_status() -> String {
+    "/v1/aliases/status".to_string()
+}
+
+/// Most entries this client will put in one alias-status request. The server
+/// enforces its own ceiling; this is the one we promise not to exceed.
+pub const MAX_ALIAS_STATUS_ITEMS: usize = 512;
+
 pub fn path_revision(rev: &AssetRevisionId) -> String {
     format!("/v1/revisions/{rev}")
 }
@@ -161,6 +174,40 @@ pub const MAX_BLOB_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub fn path_blob_upload(ns: &str) -> String {
     format!("/v1/blobs?ns={ns}")
 }
+
+/// Bulk blob admission: many blobs in one request, one catalog transaction
+/// (see the server's `blob_upload_batch`). Body framing is
+/// `length(8, big-endian) | bytes` per item.
+pub fn path_blob_upload_batch(ns: &str) -> String {
+    format!("/v1/blobs/batch?ns={ns}")
+}
+
+/// Batch publication: N complete assets in one request, one state-thread
+/// visit, one catalog transaction.
+pub fn path_publish_batch() -> String {
+    "/v1/publish/batch".to_string()
+}
+
+/// Most blobs one upload batch may carry (mirrors the server cap).
+pub const MAX_UPLOAD_BATCH_ITEMS: usize = 64;
+
+/// Default byte budget a caller should aim for when SIZING an upload batch
+/// request, chosen to match the store's compiled-in default
+/// (`ServerConfig::new(..).batch_max_bytes`,
+/// libs/asset/store/src/host/config.rs — tied to this constant by
+/// `libs/asset/store/tests/publish_batch_http.rs::
+/// client_batch_budget_never_assumes_more_than_the_servers_default`, which
+/// fails the moment the two drift). Deliberately BELOW
+/// [`MAX_BLOB_BATCH_BYTES`] — that ceiling is what a FETCH batch response is
+/// allowed to weigh, unrelated to how big an upload request should be built.
+/// This is only a target for the common case: a server configured smaller
+/// still is handled by `Api::upload_blob_batch_with_digests` splitting the
+/// batch and retrying on a 413, so undershooting this budget is never a
+/// correctness requirement, only a latency one (fewer round trips).
+pub const UPLOAD_BATCH_SAFE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Most items one publish batch may carry (mirrors the server cap).
+pub const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
 
 /// Admit a SERVER-LOCAL file by reference: the store hashes it where it lies
 /// and catalogues it without copying (see the server's `blob_ref_admit`).
