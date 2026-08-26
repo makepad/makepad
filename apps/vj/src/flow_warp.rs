@@ -38,15 +38,25 @@ use makepad_widgets::*;
 use std::path::Path;
 use std::time::Instant;
 
-/// Decoded-endpoint cache ceiling (BGRA bytes). The two shipped enhance
-/// shapes both fit: a 640×352 flow-only clip is 141 endpoints × 0.90 MB =
-/// 127 MB, a 1280×704 upscale2+tween clip is 141 endpoints × 3.6 MB =
-/// 508 MB. Anything bigger (e.g. a 1920×1080 flow clip ≈ 1.17 GB) logs and
-/// plays exactly as today.
-pub const MAX_FLOW_CACHE_BYTES: usize = 640 * 1024 * 1024;
+/// Decoded-endpoint cache ceiling (BGRA bytes). A VJ deck lives or dies by
+/// this ceiling: a clip UNDER it gets the whole warp instrument (any-rate
+/// bidirectional clock, scratch, the fixed-sweep beat law); a clip over it
+/// falls to plain streaming where none of that exists. So it is sized for
+/// the performance machine, not the minimum: 4 GB holds a 1920×1080 flow
+/// clip of ~480 endpoints (8.3 MB each) or ~40 s of 720p endpoints.
+/// Anything bigger logs and plays as plain video.
+pub const MAX_FLOW_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Largest mp4 the `mkfl` scan will lift into memory to parse the box walk.
 pub const MAX_FLOW_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+/// `VJ_TL=1` timeline trace — the same switch as `crate::media::tl_on`,
+/// duplicated because this file also compiles standalone in the
+/// flow_warp_lab example.
+fn tl_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_TL").is_some())
+}
 
 /// One clip fully prepared for warp playback: pair-endpoint frames (BGRA),
 /// the parsed motion payload, and the pair-space clock rate.
@@ -268,6 +278,14 @@ pub fn prepare_flow_clip(path: &Path) -> Result<Option<Box<FlowClipData>>, Strin
     if usable == 0 {
         return Ok(None);
     }
+    eprintln!(
+        "flow: WARP path accepted — {} endpoints at {}x{} ({} MB cache), stride {stride}, {:.2} pairs/s",
+        frames.len(),
+        info.width,
+        info.height,
+        need >> 20,
+        fps / stride as f64
+    );
     Ok(Some(Box::new(FlowClipData {
         frames,
         pairs: usable,
@@ -532,6 +550,12 @@ impl FlowWarpView {
         self.bounce
     }
 
+    /// The direction the warp clock is actually traveling (true =
+    /// forward): the rate's sign folded with the bounce leg.
+    pub fn travel_forward(&self) -> bool {
+        self.rate * self.dir >= 0.0
+    }
+
     pub fn pairs(&self) -> u32 {
         self.clip.as_ref().map(|c| c.data.pairs).unwrap_or(0)
     }
@@ -580,6 +604,12 @@ impl FlowWarpView {
         let delta = self.rate * clip.data.pairs_per_sec * dt;
         let (position, dir) =
             advance_position(self.position, self.dir, delta, lo, hi, self.bounce);
+        if tl_on() {
+            eprintln!(
+                "tl warp pos={:.3} dir={:+.0} rate={:+.4} delta={:+.4} dt={:.1}ms win={:.1}..{:.1} bounce={}",
+                position, dir, self.rate, delta, dt * 1000.0, lo, hi, self.bounce
+            );
+        }
         self.position = position;
         self.dir = dir;
         self.area.redraw(cx);

@@ -611,6 +611,15 @@ impl BeatClock {
         self.discipline(now, target);
     }
 
+    /// The operator TAPPED: the beat is HERE, exactly. The second
+    /// sanctioned discontinuity (after [`BeatClock::start`]): a tap is not
+    /// a claim to converge on, it is a declaration, and gliding to it over
+    /// a beat defeats the gesture — the phase pins to the press. Consumers
+    /// see it as an epoch, same as a fresh start.
+    pub fn pin(&mut self, now: f64, target: BeatTarget) {
+        self.start(now, target);
+    }
+
     /// Arm the operator regime for the NEXT target the clock sees. RESYNC
     /// has nothing to anchor to at the moment it is pressed — the detector
     /// is only just starting to look — so the intent is carried forward.

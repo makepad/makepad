@@ -34,7 +34,7 @@ use std::path::Path;
 /// The flow-warp endpoint cache budget in the VJ player
 /// (`apps/vj/src/flow_warp.rs`). Kept here as the converter's default target
 /// so a clip is produced at a size that actually warps.
-pub const DEFAULT_FIT_CACHE_BYTES: usize = 640 * 1024 * 1024;
+pub const DEFAULT_FIT_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Largest mp4 the player will lift into memory to scan for the box.
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
@@ -448,11 +448,14 @@ mod tests {
         let opts = ConvertOptions::default();
         // A 3 second 640x360 clip fits at full size.
         assert_eq!(choose_output_size(640, 360, 90, &opts), (640, 360, 1));
-        // 300 frames of 1920x1080 need 2.4 GB of endpoints: halve, and halve
-        // again if that still does not fit.
-        let (w, h, k) = choose_output_size(1920, 1080, 300, &opts);
+        // 300 frames of 1920x1080 are 2.4 GB of endpoints — inside the
+        // 4 GB budget, so the fit leaves them alone.
+        assert_eq!(choose_output_size(1920, 1080, 300, &opts), (1920, 1080, 1));
+        // 300 frames of 4K need ~10 GB: halve, and halve again if that
+        // still does not fit.
+        let (w, h, k) = choose_output_size(3840, 2160, 300, &opts);
         assert_eq!(k, 2);
-        assert_eq!((w, h), (960, 540));
+        assert_eq!((w, h), (1920, 1080));
         assert!(300 * w * h * 4 <= opts.fit_cache_bytes);
         // Odd dimensions always come back even.
         let (w, h, _) = choose_output_size(641, 361, 10, &opts);
