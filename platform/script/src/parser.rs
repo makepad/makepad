@@ -1027,6 +1027,55 @@ impl ScriptParser {
         }
     }
 
+    /// True when the states on top of the stack are a (possibly empty) run
+    /// of tighter-than-unary EmitOps (field access, order < 6) sitting on
+    /// a pending unary operator: `-a.b`, `!a.b.c`.
+    fn unary_pending_under_tight_ops(&self) -> bool {
+        for st in self.state.iter().rev() {
+            match st {
+                State::EmitOp { what_op, .. } => {
+                    let order = State::operator_order(*what_op);
+                    if order == 0 || order >= 6 {
+                        return false;
+                    }
+                }
+                State::EmitUnary { .. } => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Emit the pending unary operators before a binary operator that binds
+    /// looser than they do. A pending field access may sit ON TOP of the
+    /// unary (`-a.b - c`, `!a.b && c`): it binds tighter still, so it is
+    /// drained first — otherwise the unary would only be emitted after the
+    /// whole binary expression and `-a.b - c` would compile as `-(a.b - c)`.
+    fn flush_pending_unary(&mut self) {
+        loop {
+            match self.state.last() {
+                Some(State::EmitUnary { what_op, index }) => {
+                    let (what_op, index) = (*what_op, *index);
+                    self.state.pop();
+                    self.push_code(State::operator_to_unary(what_op), index);
+                }
+                Some(State::EmitOp {
+                    what_op,
+                    index,
+                    slot_assign,
+                }) if self.unary_pending_under_tight_ops() => {
+                    let (what_op, index, slot_assign) = (*what_op, *index, *slot_assign);
+                    self.state.pop();
+                    if let Some(name) = slot_assign {
+                        self.slot_poison(name);
+                    }
+                    self.push_code(State::operator_to_opcode(what_op), index);
+                }
+                _ => break,
+            }
+        }
+    }
+
     /// Mark the innermost body ineligible (dynamic scope visibility needed).
     fn slot_disqualify_body(&mut self) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
@@ -4078,15 +4127,7 @@ impl ScriptParser {
                 // These need the TEST opcode emitted BEFORE the second operand
                 if State::is_short_circuit_op(op) {
                     // Emit any pending unary operators first - they bind tighter than all binary ops
-                    loop {
-                        if let Some(State::EmitUnary { what_op, index }) = self.state.last() {
-                            let (what_op, index) = (*what_op, *index);
-                            self.state.pop();
-                            self.push_code(State::operator_to_unary(what_op), index);
-                        } else {
-                            break;
-                        }
-                    }
+                    self.flush_pending_unary();
 
                     let op_order = State::operator_order(op);
 
@@ -4189,16 +4230,8 @@ impl ScriptParser {
                     // Emit any pending unary operators, but only if this binary op has lower
                     // precedence than unary (order >= 6). Field access (order 3) has higher
                     // precedence than unary, so -x.y should parse as -(x.y), not (-x).y
-                    if State::operator_order(op) >= 6 {
-                        loop {
-                            if let Some(State::EmitUnary { what_op, index }) = self.state.last() {
-                                let (what_op, index) = (*what_op, *index);
-                                self.state.pop();
-                                self.push_code(State::operator_to_unary(what_op), index);
-                            } else {
-                                break;
-                            }
-                        }
+                    if State::operator_order(op) >= 6 && !State::is_assign_operator(op) {
+                        self.flush_pending_unary();
                     }
 
                     // Slot resolver: an assign operator directly after a bare
