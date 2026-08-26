@@ -105,9 +105,6 @@ fn heap_pool() -> usize {
 /// Live script timers across every isolate before the pool starts rationing.
 const GLOBAL_TIMERS: u32 = 512;
 
-/// In-flight HTTP requests across every isolate before the pool rations.
-const GLOBAL_INFLIGHT_HTTP: u32 = 64;
-
 /// The container rule, in one function, for every contended resource.
 ///
 /// `true` means "this isolate must yield": the pool is genuinely full AND
@@ -233,13 +230,11 @@ pub struct SplashLimitEvent {
 #[derive(Default)]
 struct IsolateState {
     limits: SplashLimits,
-    /// Live timers this isolate holds, and in-flight requests — both slot
-    /// pools, rationed by the same rule as CPU and memory.
+    /// Live timers this isolate holds — a slot pool, rationed by the same
+    /// rule as CPU and memory.
     timers: u32,
     /// Live heap slots as of this isolate's last collection.
     heap_slots: usize,
-    /// In-flight HTTP requests, as last reported by the stdlib.
-    inflight_http: usize,
     /// Consecutive collections this isolate has finished over its share.
     /// Pressure first, a stop only if it will not come back down — cgroup
     /// `memory.high` before `memory.max`.
@@ -715,46 +710,16 @@ pub(crate) fn under_memory_pressure(heap_key: usize) -> bool {
     STATES.with(|s| s.borrow().get(&heap_key).map(|st| st.heap_pressure > 0).unwrap_or(false))
 }
 
-/// Whether one more HTTP request may go out, given how many are already in
-/// flight for this isolate.
-pub(crate) fn admit_http(heap_key: usize, in_flight: usize) -> bool {
-    let limits = limits_for_heap(heap_key);
-    // The launcher tells us this isolate's own count; the pool is every
-    // isolate's. Same rule again: a lone app downloading twenty things is
-    // using capacity nobody else wants.
-    let (pool, fraction) = STATES.with(|s| {
-        let st = s.borrow();
-        let pool: usize = st.values().map(|v| v.inflight_http).sum();
-        let weights: u64 = st
-            .values()
-            .filter(|v| v.inflight_http > 0)
-            .map(|v| v.limits.weight.max(1) as u64)
-            .sum::<u64>()
-            .max(limits.weight.max(1) as u64);
-        (pool, limits.weight.max(1) as f64 / weights as f64)
-    });
-    STATES.with(|s| {
-        s.borrow_mut().entry(heap_key).or_default().inflight_http = in_flight;
-    });
-    let refused = in_flight as u64 >= limits.http_max as u64
-        || over_share(
-            pool as f64 + 1.0,
-            GLOBAL_INFLIGHT_HTTP as f64,
-            in_flight as f64 + 1.0,
-            fraction,
-        );
-    if !refused {
-        return true;
-    }
-    let allowed = if in_flight as u64 >= limits.http_max as u64 {
-        limits.http_max as u64
-    } else {
-        (GLOBAL_INFLIGHT_HTTP as f64 * fraction) as u64
-    };
-    record(heap_key, SplashLimitKind::Network, in_flight as u64 + 1, allowed);
-    false
-}
-
+/// Network is the one resource here that is a CEILING rather than a share.
+///
+/// The others are rationed against a measured pool because the machine has one
+/// processor and one heap to go round. In-flight requests are not that: what
+/// is actually scarce is bandwidth, which this cannot see, and the count says
+/// nothing about how much of it any one request uses. The ceiling exists as a
+/// backstop against a runaway loop, and the launcher can set it per app
+/// ([`SplashLimits::http_max`]); it is pushed into the isolate's own net
+/// runtime, which is where a request is admitted, rather than being consulted
+/// here — that path has no `Cx` and so no view of anyone else's traffic.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,15 +1021,6 @@ mod tests {
         assert_eq!(admit_timer(A, 1.0), None, "the fourth is refused");
         release_timer(A);
         assert!(admit_timer(A, 1.0).is_some(), "stopping one frees a slot");
-    }
-
-    /// Downloads are a pool too: alone, an app may have plenty in flight.
-    #[test]
-    fn requests_are_pooled() {
-        reset();
-        set_limits_for_heap(A, Some(SplashLimits::default()));
-        assert!(admit_http(A, 8), "eight at once is fine when nobody else is asking");
-        assert!(!admit_http(A, SplashLimits::default().http_max as usize), "its own max binds");
     }
 
     // ---- housekeeping ----------------------------------------------------
