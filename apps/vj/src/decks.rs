@@ -734,12 +734,17 @@ impl DeckEngine {
     }
 
     /// Timed move to one side (the "fade to A/B" performance buttons).
+    ///
+    /// `crossfader` is NOT jumped to the target here: the fade takes the
+    /// operator's chosen seconds, and this field is what the on-screen fader
+    /// mirrors. Landing it now made the fader teleport while the audio was
+    /// still crossing — the move looked instant and untrusted even though it
+    /// was running. The host walks it across (`track_crossfade`) instead.
     pub fn fade_to(&mut self, deck: DeckId, secs: f32) -> Vec<DeckCmd> {
         let position = match deck {
             DeckId::A => 0.0,
             DeckId::B => 1.0,
         };
-        self.crossfader = position;
         vec![DeckCmd::FadeCrossfader { position, secs: secs.max(0.0) }]
     }
 

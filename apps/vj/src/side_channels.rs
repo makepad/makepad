@@ -29,7 +29,7 @@
 //! what THIS machine separated.
 
 use crate::decks::DeckId;
-use crate::mixer::TrackPcm;
+use crate::mixer::{encode_stem_sample, TrackPcm};
 use crate::stems::{
     chunk_count, chunk_frames, model_frames, resample, track_digest, StemChunk, StemsMsg,
 };
@@ -150,12 +150,7 @@ fn decode_stem(path: &Path, track_rate: u32) -> Result<Vec<[i16; 2]>, String> {
     Ok(left
         .iter()
         .zip(right.iter())
-        .map(|(l, r)| {
-            [
-                (l.clamp(-1.0, 1.0) * 32767.0) as i16,
-                (r.clamp(-1.0, 1.0) * 32767.0) as i16,
-            ]
-        })
+        .map(|(l, r)| [encode_stem_sample(*l), encode_stem_sample(*r)])
         .collect())
 }
 
