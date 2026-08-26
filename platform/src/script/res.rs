@@ -70,6 +70,55 @@ impl CxScriptResources {
             .copied()
     }
 
+    /// Forget everything heaps in `dead` owned — call this the moment a script
+    /// heap is dropped WHOLESALE, rather than collected.
+    ///
+    /// A `heap_key` is an allocation address, so a heap that dies frees its key
+    /// for the next heap to land on. The per-handle [`CxScriptResourceGc`] only
+    /// runs when the owning heap's own GC sweeps that handle, which never
+    /// happens for a heap that is simply dropped — so its `(heap_key, path)`
+    /// entries outlive it, and the NEXT heap allocated at that address is
+    /// handed a dead heap's handle index for a path it asks about. That index
+    /// means nothing in the new heap's own (usually smaller) handle table, and
+    /// nothing notices at the time: the value sits in a font object until that
+    /// heap's next GC walks it and indexes out of bounds, in code that did
+    /// nothing wrong.
+    pub fn gc_heaps(&self, dead: &[usize]) {
+        if dead.is_empty() {
+            return;
+        }
+        let mut orphaned: Vec<(String, ScriptHandle)> = Vec::new();
+        self.handles_by_abs_path.borrow_mut().retain(|(heap_key, path), handle| {
+            if dead.contains(heap_key) {
+                orphaned.push((path.clone(), *handle));
+                return false;
+            }
+            true
+        });
+        if orphaned.is_empty() {
+            return;
+        }
+        // Handle VALUES are heap-local, so a dead heap's handle can be equal to
+        // a live heap's. Only detach one that no surviving heap still maps to.
+        let live: Vec<ScriptHandle> = self
+            .handles_by_abs_path
+            .borrow()
+            .values()
+            .copied()
+            .collect();
+        let mut resources = self.resources.borrow_mut();
+        for (abs_path, handle) in orphaned {
+            if live.contains(&handle) {
+                continue;
+            }
+            if let Some(res) = resources.iter_mut().find(|v| v.abs_path == abs_path) {
+                res.handles.retain(|h| *h != handle);
+            }
+        }
+        // An entry nobody references anymore goes with them.
+        resources.retain(|v| !v.handles.is_empty());
+    }
+
     pub fn insert_resource(&self, heap_key: usize, resource: CxScriptResource) {
         self.handles_by_abs_path.borrow_mut().insert(
             (heap_key, resource.abs_path.clone()),
