@@ -14,7 +14,9 @@ use crate::{
     makepad_script::shader_backend::*,
     makepad_script::*,
     os::{
-        windows::win32_app::{FALSE, TRUE},
+        windows::win32_app::{
+            try_with_win32_app, with_win32_app, FALSE, TRUE,
+        },
         windows::win32_window::Win32Window,
     },
     script::vm::*,
@@ -88,8 +90,10 @@ use crate::{
                         DXGI_SAMPLE_DESC,
                     },
                     CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource,
-                    IDXGIResource1, IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
-                    DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
+                    IDXGIResource1, IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2,
+                    DXGI_CREATE_FACTORY_FLAGS,
+                    DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
+                    DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
                     DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -604,15 +608,26 @@ impl Cx {
         // Pace the CPU to the display refresh by waiting on this swap chain's
         // frame-latency waitable before building the frame. The waitable is a
         // counted semaphore replenished once per retired Present, so each wait
-        // must be paired with the vsync Present below; popups have no waitable
-        // and live-resize presents without vsync, so neither waits here. The
-        // finite timeout (roughly two refresh intervals) keeps the loop alive
-        // if the compositor stops signaling, e.g. while the window is
-        // occluded; on timeout the frame is still built but the Present is
-        // downgraded to non-blocking (see `present`) so a stalled DWM cannot
-        // park the thread indefinitely.
+        // must be paired with the vsync Present below.
+        //
+        // The beat in the event loop normally does that wait for us — one wait
+        // covering every window plus input — and dispatches a scoped tick for the
+        // window it woke on, holding the credit it took. Waiting AGAIN here would
+        // take a second credit and stall a whole refresh, so a window that already
+        // holds one goes straight to the present that spends it. Only the paths
+        // the beat does not cover actually wait here: popups (no waitable), a live
+        // resize (unpaced), and the unscoped heartbeat tick.
+        let window_id = d3d11_window.window_id;
+        // A `--remote` `/g` grab (or a studio screenshot) is only ever answered by
+        // a pass that actually renders, so a pending one has to survive every
+        // pacing skip below — otherwise an occluded or stalled window turns the
+        // request into a ten-second timeout instead of a PNG.
+        let capture_pending = self.has_pending_window_screenshot(window_id);
+        let holds_credit =
+            try_with_win32_app(|app| app.has_beat_credit(window_id)).unwrap_or(false);
         let mut latency_wait_timed_out = false;
         if vsync
+            && !holds_credit
             && !d3d11_window.is_in_resize
             && !d3d11_window.frame_latency_waitable.is_invalid()
         {
@@ -620,6 +635,31 @@ impl Cx {
                 latency_wait_timed_out =
                     WaitForSingleObject(d3d11_window.frame_latency_waitable, 33) == WAIT_TIMEOUT;
             }
+            if !latency_wait_timed_out {
+                try_with_win32_app(|app| app.take_beat_credit(window_id));
+            }
+        }
+        if latency_wait_timed_out {
+            // The compositor is not retiring this window's presents (occluded,
+            // minimized, or DWM stalled). The old code pushed a DO_NOT_WAIT frame
+            // anyway, so a hidden window rebuilt and re-presented its whole scene
+            // every 33 ms forever. Skip the frame instead — the caller keeps the
+            // pass dirty — and only spend a frame probing now and then, since the
+            // stall can end without anything telling us.
+            let now = std::time::Instant::now();
+            let since = *d3d11_window.latency_timeout_since.get_or_insert(now);
+            if now.duration_since(since) < LATENCY_TIMEOUT_PROBE_INTERVAL {
+                // Unless a capture is waiting on this window: render it anyway and
+                // leave the probe clock alone — this frame belongs to the grab, not
+                // to the periodic probe, so it must not postpone the next one.
+                if !capture_pending {
+                    return false;
+                }
+            } else {
+                d3d11_window.latency_timeout_since = Some(now);
+            }
+        } else {
+            d3d11_window.latency_timeout_since = None;
         }
 
         // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
@@ -631,8 +671,19 @@ impl Cx {
             let zbias_step = self.passes[pass_id].zbias_step;
 
             self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
+            // Read the frame back BEFORE it flips: the chain is FLIP_DISCARD, so
+            // the back buffer's contents are undefined the moment `Present` takes
+            // it. Cheap when nothing asked for a capture (one Vec check).
+            if capture_pending {
+                self.capture_window_screenshot(d3d11_window, d3d11_cx);
+            }
             presented = d3d11_window.present(vsync, latency_wait_timed_out);
         });
+        // A frame went to `Present`, so the credit is spent — whether or not the
+        // compositor kept it. Assuming it spent when it was not only costs one
+        // paced wait; assuming it held when it was spent would remove the pacing
+        // for this window entirely, so err on the side of waiting again.
+        try_with_win32_app(|app| app.spend_beat_credit(window_id));
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
@@ -853,6 +904,86 @@ impl Cx {
         }
     }
 
+    /// True when a pending screenshot request can be answered by the pass that
+    /// belongs to `window_id` — a `--remote` `/g` grab targeted at it, or an
+    /// untargeted studio / `capture_next_frame_to_file` request.
+    ///
+    /// Deliberately non-destructive, unlike
+    /// `take_studio_screenshot_request_ids_for_window`: the pacing skips decide
+    /// whether to render a frame at all, and they have to see the request while
+    /// it is still pending.
+    pub(crate) fn has_pending_window_screenshot(&self, window_id: WindowId) -> bool {
+        if self.screenshot_requests.is_empty() {
+            return false;
+        }
+        let window_id = Some(window_id.id());
+        self.screenshot_requests.iter().any(|request| {
+            request.kind_id == 0
+                && crate::remote::grab_targets_window(request.request_id, window_id)
+        })
+    }
+
+    /// Answer the screenshot requests this window's pass can serve: staging-copy
+    /// the swap-chain back buffer, map it, and hand the rows to the shared PNG
+    /// path that `/g` grabs, studio screenshots and `capture_next_frame_to_file`
+    /// all consume (`send_studio_screenshot_response`).
+    ///
+    /// Called from `draw_pass_to_window` after `render_view` and before
+    /// `Present`. Ordering needs no fence of ours: `CopySubresourceRegion` is
+    /// queued on the immediate context behind this pass's draw calls, and
+    /// `Map(D3D11_MAP_READ)` blocks until that copy has retired — the same
+    /// argument `debug_read_render_texture` already relies on.
+    fn capture_window_screenshot(&mut self, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
+        let request_ids = self
+            .take_studio_screenshot_request_ids_for_window(0, Some(d3d11_window.window_id.id()));
+        if request_ids.is_empty() {
+            return;
+        }
+        // Every failure path below still answers the request with an empty PNG:
+        // a grab that is never answered blocks its HTTP thread for the full
+        // timeout, which reads as a hung app rather than a failed capture.
+        let Some(swap_texture) = d3d11_window.swap_texture.clone() else {
+            crate::error!("window capture: swap chain has no back buffer");
+            Self::send_studio_screenshot_response(request_ids, 0, 0, Vec::new());
+            return;
+        };
+        let Some((width, height, mut rgba)) = read_texture_rgba(&swap_texture, d3d11_cx) else {
+            Self::send_studio_screenshot_response(request_ids, 0, 0, Vec::new());
+            return;
+        };
+        // The chain is DXGI_ALPHA_MODE_IGNORE, so its alpha channel is not part
+        // of the presented image. Ship it opaque rather than let a premultiplied
+        // stray alpha make the PNG disagree with what is on the glass.
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        match Self::encode_rgba_as_png(width, height, &rgba) {
+            Ok(png) => Self::send_studio_screenshot_response(request_ids, width, height, png),
+            Err(err) => {
+                crate::error!("window capture: {}", err);
+                Self::send_studio_screenshot_response(request_ids, width, height, Vec::new());
+            }
+        }
+    }
+
+    /// Renderer-owned texture capture (see the metal backend): not
+    /// implemented here — callers fall back to `debug_read_render_texture`
+    /// (D3D11 immediate-context commands are ordered against the staging
+    /// copy, so the sync path is safe).
+    pub fn request_render_texture_capture(
+        &mut self,
+        _texture: &crate::texture::Texture,
+    ) -> bool {
+        false
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn take_render_texture_captures(
+        &mut self,
+    ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        Vec::new()
+    }
+
     /// CPU grab of a render target (thumbnail icons). Staging copy + Map.
     /// Returns packed BGRA8, same layout as the Metal readback.
     pub fn debug_read_render_texture(
@@ -1049,6 +1180,153 @@ fn dwm_flush() {
     }
 }
 
+/// Staging-copy + `Map` readback of a render target or swap-chain back buffer,
+/// returned as `(width, height, packed top-down RGBA8 rows)` — the layout
+/// `Cx::encode_rgba_as_png` and every other backend's screenshot path expect.
+/// Returns `None` (having logged) on any D3D failure.
+///
+/// The staging copy is what makes the read safe: a back buffer is
+/// `D3D11_USAGE_DEFAULT` and cannot be mapped, so it is copied into a
+/// `D3D11_USAGE_STAGING` twin with CPU read access, and the map blocks until
+/// that copy retires. `RowPitch` is honoured — the driver pads rows to its own
+/// alignment and is under no obligation to match `width * 4`.
+fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, u32, Vec<u8>)> {
+    unsafe {
+        // Physical pixels straight from the texture, so a DPI-scaled window
+        // reports the size it actually rendered rather than a logical one.
+        let mut src_desc = D3D11_TEXTURE2D_DESC::default();
+        src.GetDesc(&mut src_desc);
+        let (width, height) = (src_desc.Width, src_desc.Height);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // Channel order of the copied bytes. Window chains are created BGRA8;
+        // accept the RGBA8 variant too so an offscreen target reads back
+        // correctly instead of with red and blue swapped.
+        let swap_rb = if src_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM {
+            true
+        } else if src_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM {
+            false
+        } else {
+            crate::error!(
+                "window capture: unsupported back buffer format {}",
+                src_desc.Format.0
+            );
+            return None;
+        };
+        // A staging destination must otherwise describe the same surface, or
+        // CopySubresourceRegion silently does nothing.
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: src_desc.Format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE(3), // D3D11_USAGE_STAGING (const stripped from bindings)
+            BindFlags: 0,
+            CPUAccessFlags: 0x20000, // D3D11_CPU_ACCESS_READ (const stripped from bindings)
+            MiscFlags: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        if let Err(err) = d3d11_cx
+            .device
+            .CreateTexture2D(&desc, None, Some(&mut staging))
+        {
+            crate::error!("window capture: CreateTexture2D(staging) failed: {}", err);
+            return None;
+        }
+        let staging_res: ID3D11Resource = staging?.cast().ok()?;
+        let src_res: ID3D11Resource = src.cast().ok()?;
+        d3d11_cx
+            .context
+            .CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        if let Err(err) = d3d11_cx.context.Map(
+            &staging_res,
+            0,
+            D3D11_MAP(1), // D3D11_MAP_READ (const stripped from bindings)
+            0,
+            Some(&mut mapped),
+        ) {
+            crate::error!("window capture: Map(staging) failed: {}", err);
+            return None;
+        }
+        let pitch = mapped.RowPitch as usize;
+        let row_bytes = width as usize * 4;
+        let mut out = vec![0u8; row_bytes * height as usize];
+        let src_ptr = mapped.pData as *const u8;
+        for y in 0..height as usize {
+            std::ptr::copy_nonoverlapping(
+                src_ptr.add(y * pitch),
+                out.as_mut_ptr().add(y * row_bytes),
+                row_bytes,
+            );
+        }
+        d3d11_cx.context.Unmap(&staging_res, 0);
+        if swap_rb {
+            for px in out.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+        Some((width, height, out))
+    }
+}
+
+/// `Present` succeeded but the window is fully occluded, so nothing reached the
+/// screen and DWM will stop retiring our presents. It is a SUCCESS hresult
+/// (0x087A0001), which is why `hr.is_err()` misses it. Not in the vendored
+/// bindings, so spelled out here (likewise the two device-lost codes).
+const DXGI_STATUS_OCCLUDED: windows_core::HRESULT = windows_core::HRESULT(0x087A0001u32 as i32);
+const DXGI_ERROR_DEVICE_REMOVED: windows_core::HRESULT =
+    windows_core::HRESULT(0x887A0005u32 as i32);
+const DXGI_ERROR_DEVICE_RESET: windows_core::HRESULT = windows_core::HRESULT(0x887A0007u32 as i32);
+
+/// A frame-latency wait that timed out: skip presenting (the old
+/// code fired a `Present(1)` + DO_NOT_WAIT into a 33 ms churn instead), but
+/// re-probe now and then so a transient DWM stall cannot freeze the window.
+const LATENCY_TIMEOUT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Fallback display period used until DXGI frame statistics report a real one.
+const DEFAULT_REFRESH_PERIOD: f64 = 1.0 / 60.0;
+
+/// `IDXGISwapChain::GetFrameStatistics` has a vtable slot in the vendored
+/// bindings but no generated wrapper, so call it through the vtable. This is the
+/// only source of a driver-side vblank timestamp (`SyncQPCTime`, in the same QPC
+/// domain `Win32Time` counts) plus the refresh counter the period is measured from.
+unsafe fn get_frame_statistics(
+    swap_chain: &IDXGISwapChain1,
+    stats: &mut DXGI_FRAME_STATISTICS,
+) -> windows_core::HRESULT {
+    let base: &IDXGISwapChain = swap_chain;
+    unsafe {
+        (Interface::vtable(base).GetFrameStatistics)(Interface::as_raw(base), stats as *mut _)
+    }
+}
+
+/// Swap-chain headroom for a vsync-paced main window: 3 buffers with a maximum
+/// frame latency of 2 lets the CPU build frame N+1 while the compositor still
+/// holds N, which is what keeps a beat-paced loop from stalling on every hitch.
+/// `MAKEPAD_WIN_LATENCY=1` restores the previous minimum-latency configuration
+/// (2 buffers, latency 1) for latency-sensitive work like drawing/ink.
+fn main_window_latency() -> u32 {
+    use std::sync::OnceLock;
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| match std::env::var("MAKEPAD_WIN_LATENCY").ok().as_deref() {
+        Some("1") => 1,
+        _ => 2,
+    })
+}
+
+/// Buffer count must stay one ahead of the frame latency, and `ResizeBuffers`
+/// has to be handed the same count the chain was created with.
+fn main_window_buffer_count() -> u32 {
+    main_window_latency() + 1
+}
+
 pub struct D3d11Window {
     pub window_id: WindowId,
     pub is_in_resize: bool,
@@ -1083,9 +1361,30 @@ pub struct D3d11Window {
     pub resize_error_logged: bool,
     /// Same once-per-failure-episode latch for the `present` error path.
     pub present_error_logged: bool,
+    /// Estimated display refresh period in seconds, refined from successive DXGI
+    /// frame statistics (`SyncQPCTime` / `SyncRefreshCount` deltas) so the beat's
+    /// target-flip timestamp lands on a real vblank rather than a nominal 60 Hz.
+    pub refresh_period: f64,
+    /// Last frame-statistics sample: (SyncRefreshCount, its app time).
+    pub last_frame_stats: Option<(u32, f64)>,
+    /// When this window first reported itself occluded or minimized; drives the
+    /// probe interval that keeps a stale flag from freezing it forever.
+    pub occluded_since: Option<std::time::Instant>,
+    /// When its frame-latency wait first timed out; same probe treatment.
+    pub latency_timeout_since: Option<std::time::Instant>,
+    /// The D3D device was removed/reset. Nothing this window presents can ever
+    /// land again, so the paint loop stops re-dirtying its pass (recovery would
+    /// mean recreating the device, which is out of scope).
+    pub device_lost: bool,
 }
 
 impl D3d11Window {
+    /// How long a window stays skipped after it reported itself occluded or
+    /// minimized before the paint loop spends one frame probing whether that is
+    /// still true. Matches the macOS backend's `OCCLUSION_PROBE_INTERVAL`; both
+    /// flags can stick on "hidden" while the window is really on screen.
+    pub const OCCLUSION_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
     pub fn new(
         window_id: WindowId,
         d3d11_cx: &D3d11Cx,
@@ -1104,7 +1403,7 @@ impl D3d11Window {
 
         let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            BufferCount: 2,
+            BufferCount: main_window_buffer_count(),
             Width: (wg.inner_size.x * wg.dpi_factor) as u32,
             Height: (wg.inner_size.y * wg.dpi_factor) as u32,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1128,18 +1427,26 @@ impl D3d11Window {
                 .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
                 .unwrap();
 
-            // Set the maximum frame latency to 1 on the *swap chain* (not the
-            // device) and retrieve its frame-latency waitable object. With a
-            // FLIP_DISCARD swap chain this is the canonical low-latency present
-            // pattern: the render loop waits on this object once per frame so it
-            // runs ~once per vblank and the OS can coalesce mouse-move messages.
+            // Set the maximum frame latency on the *swap chain* (not the device)
+            // and retrieve its frame-latency waitable object — the beat the event
+            // loop waits on, one credit per retired present. Latency 2 (with 3
+            // buffers) gives the CPU a frame of headroom so a single slow tick
+            // does not cost a whole refresh; `MAKEPAD_WIN_LATENCY=1` restores the
+            // old minimum-latency pair.
             let frame_latency_waitable = match swap_chain.cast::<IDXGISwapChain2>() {
                 Ok(swap_chain2) => {
-                    let _ = swap_chain2.SetMaximumFrameLatency(1);
+                    let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
                     swap_chain2.GetFrameLatencyWaitableObject()
                 }
                 Err(_) => HANDLE(std::ptr::null_mut()),
             };
+            // Publish it as this window's paint beat. Registration order decides
+            // the primary window (index 0), whose beat drives the whole app tick.
+            if !frame_latency_waitable.is_invalid() {
+                with_win32_app(|app| {
+                    app.register_beat_handle(window_id, frame_latency_waitable, false)
+                });
+            }
 
             let swap_texture = swap_chain.GetBuffer(0).unwrap();
             let mut render_target_view = None;
@@ -1170,6 +1477,11 @@ impl D3d11Window {
                 waitable_swap_chain: true,
                 resize_error_logged: false,
                 present_error_logged: false,
+                refresh_period: DEFAULT_REFRESH_PERIOD,
+                last_frame_stats: None,
+                occluded_since: None,
+                latency_timeout_since: None,
+                device_lost: false,
             }
         }
     }
@@ -1239,12 +1551,21 @@ impl D3d11Window {
                 waitable_swap_chain: false,
                 resize_error_logged: false,
                 present_error_logged: false,
+                refresh_period: DEFAULT_REFRESH_PERIOD,
+                last_frame_stats: None,
+                occluded_since: None,
+                latency_timeout_since: None,
+                device_lost: false,
             }
         }
     }
 
     pub fn start_resize(&mut self) {
         self.is_in_resize = true;
+        // A live resize presents unpaced (Present(0) + DwmFlush), so its waitable
+        // is no longer a frame clock — retire the beat and let the resize SetTimer
+        // heartbeat drive the loop until the drag ends.
+        try_with_win32_app(|app| app.unregister_beat_handle(self.window_id));
     }
 
     // switch back to swapchain
@@ -1255,17 +1576,61 @@ impl D3d11Window {
         self.alloc_size = Vec2d::default();
         self.alloc_dpi = 0.0;
         // Live-resize presents without vsync and skips the frame-latency wait, but
-        // every retired Present still credits the waitable semaphore. Drain the
-        // accumulated credits here so the per-frame wait in draw_pass_to_window
-        // actually paces again instead of returning immediately for the rest of
-        // the window's lifetime.
+        // every retired Present still credits the waitable semaphore, so a credit
+        // is almost certainly waiting. Claim it rather than waiting for the next
+        // one: the first frame after the drag then goes out immediately instead of
+        // sitting out a whole refresh (the old code drained the semaphore to zero
+        // here, which made every resize end with a visible stall). Any surplus
+        // credits are capped by the chain's maximum frame latency, so pacing
+        // re-establishes itself within a frame or two by itself.
         if !self.frame_latency_waitable.is_invalid() {
-            unsafe {
-                while WaitForSingleObject(self.frame_latency_waitable, 0)
-                    == windows::Win32::Foundation::WAIT_OBJECT_0
-                {}
+            let (window_id, handle) = (self.window_id, self.frame_latency_waitable);
+            try_with_win32_app(|app| app.register_beat_handle(window_id, handle, true));
+        }
+    }
+
+    /// The app-time of the first display flip at or after `wake_time` — the
+    /// timestamp the whole frame is stamped with, so animation advances by the
+    /// interval the frame will actually be *shown* for rather than by whenever
+    /// each individual pass happened to sample the wall clock.
+    ///
+    /// DXGI reports the last vblank it synced to (`SyncQPCTime`, raw QPC — the
+    /// same clock `Win32Time` counts) plus a refresh counter; stepping forward in
+    /// whole refresh periods from there lands on the next vblank. The period
+    /// itself is measured from successive samples, since DXGI does not report it.
+    pub fn target_present_time(&mut self, wake_time: f64) -> f64 {
+        let mut stats = DXGI_FRAME_STATISTICS::default();
+        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT (and a fresh chain that has not
+        // presented yet) means the sequence broke: fall back to one period out
+        // from the wake time and start the estimate over.
+        if unsafe { get_frame_statistics(&self.swap_chain, &mut stats) }.is_err()
+            || stats.SyncQPCTime == 0
+        {
+            self.last_frame_stats = None;
+            return wake_time + self.refresh_period;
+        }
+        let sync_time = with_win32_app(|app| app.time.qpc_to_time(stats.SyncQPCTime));
+        if let Some((prev_refresh, prev_time)) = self.last_frame_stats {
+            let refreshes = stats.SyncRefreshCount.wrapping_sub(prev_refresh);
+            let elapsed = sync_time - prev_time;
+            if refreshes > 0 && refreshes < 1000 && elapsed > 0.0 {
+                let estimate = elapsed / refreshes as f64;
+                // 20 Hz..500 Hz; anything outside that is a bad sample, not a display.
+                if estimate > 0.002 && estimate < 0.05 {
+                    self.refresh_period = self.refresh_period * 0.75 + estimate * 0.25;
+                }
             }
         }
+        self.last_frame_stats = Some((stats.SyncRefreshCount, sync_time));
+        let period = self.refresh_period;
+        let target = if sync_time > wake_time {
+            sync_time
+        } else {
+            let steps = ((wake_time - sync_time) / period).floor() + 1.0;
+            sync_time + steps * period
+        };
+        // Never hand the app a timestamp far in the future if the stats are stale.
+        target.min(wake_time + 0.1)
     }
 
     /// Update the swap chain's background color to match the pass clear
@@ -1325,7 +1690,10 @@ impl D3d11Window {
             };
             let mut resize_ok = true;
             if let Err(e) = self.swap_chain.ResizeBuffers(
-                2,
+                // 0 = keep the count the chain was created with. It used to be
+                // hardcoded to 2, which silently shrank a 3-buffer main window
+                // back to 2 on the first resize and undid the beat's headroom.
+                0,
                 (wg.inner_size.x * wg.dpi_factor) as u32,
                 (wg.inner_size.y * wg.dpi_factor) as u32,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1398,6 +1766,31 @@ impl D3d11Window {
                 // DO_NOT_WAIT path only: a benign dropped frame; the caller schedules a retry.
                 return false;
             }
+            if hr == DXGI_STATUS_OCCLUDED {
+                // A SUCCESS hresult, so `is_err()` below never sees it — but nothing
+                // reached the screen and DWM will stop retiring our presents, which
+                // would then time out the frame-latency wait every frame. Report it
+                // as not-presented and let the occlusion probe back us off, the same
+                // way the macOS backend handles `occlusionState`.
+                self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                return false;
+            }
+            if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
+                // Nothing this swap chain presents can ever land again (GPU reset,
+                // driver update, TDR). Say so loudly, once, and stop the paint loop
+                // from re-dirtying the pass forever — full device recreation is a
+                // separate job.
+                if !self.device_lost {
+                    self.device_lost = true;
+                    crate::error!(
+                        "D3D11 DEVICE LOST ({}): the GPU device was removed or reset; \
+                         window {:?} will stop updating until the app is restarted",
+                        hr,
+                        self.window_id
+                    );
+                }
+                return false;
+            }
             if hr.is_err() {
                 // Transient failures must not hard-abort the app; log once per failure
                 // episode and carry on with stale content.
@@ -1408,6 +1801,8 @@ impl D3d11Window {
                 return false;
             }
             self.present_error_logged = false;
+            // A present that actually landed clears the occlusion back-off.
+            self.occluded_since = None;
 
             // During an active window resize, synchronize with the DWM compositor so the
             // freshly-presented frame is composited before the desktop is repainted at the new size.
@@ -1421,6 +1816,10 @@ impl D3d11Window {
 
 impl Drop for D3d11Window {
     fn drop(&mut self) {
+        // Retire this window's paint beat BEFORE closing the handle, or the event
+        // loop would wait on a dead handle (WAIT_FAILED) on its very next pass.
+        let window_id = self.window_id;
+        try_with_win32_app(|app| app.unregister_beat_handle(window_id));
         // The frame-latency waitable is a separate kernel handle owned by the application
         // (GetFrameLatencyWaitableObject hands back a new reference), so close it on window
         // teardown — otherwise each main-window lifecycle leaks a handle. Popups store a null
