@@ -1913,6 +1913,7 @@ impl Widget for MeshView {
                         texture: s.frames[i].clone(),
                         pos: vec4(s.pos.x, s.pos.y, s.pos.z, self.orbit_yaw),
                         size: vec4(s.width, s.height, 0.0, 0.0),
+                        uv: vec4(0.0, 0.0, 1.0, 1.0),
                     })
                 })
                 .collect();
