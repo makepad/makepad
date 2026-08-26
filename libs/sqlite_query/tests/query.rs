@@ -597,3 +597,243 @@ fn anonymous_parameters_bind_in_text_order() {
         &[Value::Integer(1), Value::text("second"), Value::text("third")],
     );
 }
+
+#[test]
+fn derived_tables_are_addressed_by_their_alias_in_every_from_position() {
+    if !have_sqlite3() {
+        return;
+    }
+    // A derived table exports its columns under the column's own name, with any
+    // table qualifier dropped, exactly as SQLite names an unaliased result
+    // column. Keeping the qualifier would export `t.name` and leave `c.name`
+    // unresolvable, which is how a faceted search — a derived table on the
+    // right of a JOIN — failed to prepare at all.
+    let scratch = Scratch::new("derived-position");
+    let path = fixture(&scratch);
+    let queries: Vec<(&str, Vec<Value>)> = vec![
+        // The failing shape: derived table on the right of the join, selecting
+        // qualified columns.
+        (
+            "SELECT u.tag, c.name FROM u JOIN (SELECT t.id, t.name FROM t) c ON c.id = u.t_id ORDER BY u.tag, c.name",
+            vec![],
+        ),
+        // The same derived table in the first FROM slot.
+        (
+            "SELECT u.tag, c.name FROM (SELECT t.id, t.name FROM t) c JOIN u ON c.id = u.t_id ORDER BY u.tag, c.name",
+            vec![],
+        ),
+        // Unqualified inner columns, both orders.
+        (
+            "SELECT u.tag, c.name FROM u JOIN (SELECT id, name FROM t) c ON c.id = u.t_id ORDER BY u.tag, c.name",
+            vec![],
+        ),
+        (
+            "SELECT u.tag, c.name FROM (SELECT id, name FROM t) c JOIN u ON c.id = u.t_id ORDER BY u.tag, c.name",
+            vec![],
+        ),
+        // An explicit alias on the inner column wins over the column name.
+        (
+            "SELECT c.who FROM u JOIN (SELECT t.name AS who, t.id FROM t) c ON c.id = u.t_id ORDER BY c.who",
+            vec![],
+        ),
+        // `SELECT *` inside, expanded to the underlying column names.
+        (
+            "SELECT c.name FROM u JOIN (SELECT * FROM t) c ON c.id = u.t_id ORDER BY c.name",
+            vec![],
+        ),
+        // LEFT JOIN onto a derived table.
+        (
+            "SELECT t.id, c.tag FROM t LEFT JOIN (SELECT u.t_id, u.tag FROM u WHERE u.tag <> 'red') c ON c.t_id = t.id ORDER BY t.id, c.tag",
+            vec![],
+        ),
+        // A derived table on both sides.
+        (
+            "SELECT x.id, y.tag FROM (SELECT t.id FROM t) x JOIN (SELECT u.t_id, u.tag FROM u) y ON y.t_id = x.id ORDER BY x.id, y.tag",
+            vec![],
+        ),
+        // Nested: a derived table whose own FROM is a derived table.
+        (
+            "SELECT c.id FROM u JOIN (SELECT i.id FROM (SELECT t.id, t.kind FROM t) i WHERE i.kind = 'a') c ON c.id = u.t_id ORDER BY c.id",
+            vec![],
+        ),
+        // Three items with the derived table in the middle.
+        (
+            "SELECT t.id, c.tag, u.tag FROM t JOIN (SELECT u.t_id, u.tag FROM u) c ON c.t_id = t.id JOIN u ON u.t_id = t.id ORDER BY t.id, c.tag, u.tag",
+            vec![],
+        ),
+        // A compound derived table joined on the right: the search candidate
+        // shape, whose arms are named by the first arm's columns.
+        (
+            "SELECT u.tag, c.id FROM u JOIN (SELECT t.id FROM t UNION ALL SELECT u.t_id FROM u) c ON c.id = u.t_id ORDER BY u.tag, c.id",
+            vec![],
+        ),
+        // No alias at all: the columns stay reachable unqualified.
+        (
+            "SELECT name FROM u JOIN (SELECT t.id AS tid, t.name FROM t) ON tid = u.t_id ORDER BY name",
+            vec![],
+        ),
+        // A parameter inside the derived table, one outside.
+        (
+            "SELECT c.id FROM u JOIN (SELECT t.id, t.kind FROM t WHERE t.kind = ?) c ON c.id = u.t_id WHERE u.tag = ? ORDER BY c.id",
+            vec![Value::text("a"), Value::text("red")],
+        ),
+    ];
+    for (sql, params) in queries {
+        compare(&path, sql, &params);
+    }
+}
+
+#[test]
+fn predicates_pushed_into_derived_tables_do_not_change_the_answer() {
+    if !have_sqlite3() {
+        return;
+    }
+    // A term that constrains only a derived table is applied inside it too, so
+    // the scan discards rows instead of materializing them. Each of these is a
+    // case where doing that naively would return something other than what
+    // SQLite returns.
+    let scratch = Scratch::new("derived-pushdown");
+    let path = fixture(&scratch);
+    let queries: Vec<(&str, Vec<Value>)> = vec![
+        // The plain pushable cases.
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t) c WHERE c.kind = 'a' ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t) c WHERE c.kind IN (?, ?) ORDER BY c.id",
+            vec![Value::text("a"), Value::text("c")],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t) c WHERE c.kind IS NULL ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t) c WHERE c.kind IS NOT NULL ORDER BY c.id",
+            vec![],
+        ),
+        // Through a UNION ALL, where every arm has to be narrowed by itself.
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t UNION ALL SELECT u.id, u.tag FROM u) c WHERE c.kind = 'red' ORDER BY c.id",
+            vec![],
+        ),
+        // Not pushable, and must still answer correctly: an inequality means
+        // something different once a column's affinity is reintroduced, and a
+        // negation flips which rows a widened match keeps.
+        (
+            "SELECT c.id FROM (SELECT t.id, t.n FROM t) c WHERE c.n > 20 ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t) c WHERE c.kind NOT IN ('a') ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.name FROM t) c WHERE c.name LIKE 'a%' ORDER BY c.id",
+            vec![],
+        ),
+        // A LIMIT inside fixes which rows exist; filtering first would keep a
+        // different set.
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t ORDER BY t.id LIMIT 3) c WHERE c.kind = 'a' ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT t.id, t.kind FROM t ORDER BY t.id LIMIT 3 OFFSET 1) c WHERE c.kind = 'a' ORDER BY c.id",
+            vec![],
+        ),
+        // An aggregate inside: filtering ahead of it would change the count,
+        // whether the term names a grouping key or the aggregate itself.
+        (
+            "SELECT c.kind, c.n FROM (SELECT t.kind, COUNT(*) AS n FROM t GROUP BY t.kind) c WHERE c.kind = 'a' ORDER BY c.kind",
+            vec![],
+        ),
+        (
+            "SELECT c.kind, c.n FROM (SELECT t.kind, COUNT(*) AS n FROM t GROUP BY t.kind) c WHERE c.n = 2 ORDER BY c.kind",
+            vec![],
+        ),
+        // Narrowing the right arm of an EXCEPT would *add* rows; of an
+        // INTERSECT, remove them.
+        (
+            "SELECT c.id FROM (SELECT id FROM t EXCEPT SELECT t_id FROM u) c WHERE c.id = 2 ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id FROM (SELECT id FROM t INTERSECT SELECT t_id FROM u) c WHERE c.id = 2 ORDER BY c.id",
+            vec![],
+        ),
+        // The optional side of a LEFT JOIN inside: a pushed term must remove the
+        // row, not turn it into a NULL-extended one.
+        (
+            "SELECT c.id, c.tag FROM (SELECT t.id, u.tag FROM t LEFT JOIN u ON u.t_id = t.id) c WHERE c.tag IS NULL ORDER BY c.id",
+            vec![],
+        ),
+        (
+            "SELECT c.id, c.tag FROM (SELECT t.id, u.tag FROM t LEFT JOIN u ON u.t_id = t.id) c WHERE c.tag = 'red' ORDER BY c.id",
+            vec![],
+        ),
+        // The derived table itself LEFT JOINed, with the term in WHERE.
+        (
+            "SELECT t.id, c.tag FROM t LEFT JOIN (SELECT u.t_id, u.tag FROM u) c ON c.t_id = t.id WHERE c.tag = 'red' ORDER BY t.id",
+            vec![],
+        ),
+        (
+            "SELECT t.id, c.tag FROM t LEFT JOIN (SELECT u.t_id, u.tag FROM u) c ON c.t_id = t.id WHERE c.tag IS NULL ORDER BY t.id",
+            vec![],
+        ),
+        // In join position, with the term on the derived side.
+        (
+            "SELECT u.tag, c.id FROM u JOIN (SELECT t.id, t.kind FROM t) c ON c.id = u.t_id WHERE c.kind = 'a' ORDER BY u.tag, c.id",
+            vec![],
+        ),
+        // A DISTINCT inside commutes with the filter either way round.
+        (
+            "SELECT c.kind FROM (SELECT DISTINCT t.kind FROM t) c WHERE c.kind = 'a' ORDER BY c.kind",
+            vec![],
+        ),
+    ];
+    for (sql, params) in queries {
+        compare(&path, sql, &params);
+    }
+}
+
+#[test]
+fn compound_selects_evaluate_every_arm() {
+    if !have_sqlite3() {
+        return;
+    }
+    // A compound chains one arm per link and combines from the left. Walking
+    // only the first link drops the third and later arms, silently returning
+    // short results rather than an error.
+    let scratch = Scratch::new("compound-chain");
+    let path = fixture(&scratch);
+    let queries: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "SELECT id FROM t UNION ALL SELECT id FROM u UNION ALL SELECT t_id FROM u ORDER BY id",
+            vec![],
+        ),
+        (
+            "SELECT COUNT(*) FROM (SELECT id FROM t UNION ALL SELECT id FROM u UNION ALL SELECT t_id FROM u) x",
+            vec![],
+        ),
+        (
+            "SELECT id FROM t UNION SELECT id FROM u UNION SELECT t_id FROM u ORDER BY id",
+            vec![],
+        ),
+        (
+            "SELECT id FROM t EXCEPT SELECT t_id FROM u EXCEPT SELECT id FROM u ORDER BY id",
+            vec![],
+        ),
+        (
+            "SELECT id FROM t UNION ALL SELECT id FROM u EXCEPT SELECT t_id FROM u ORDER BY id",
+            vec![],
+        ),
+        (
+            "SELECT id FROM t UNION ALL SELECT id FROM u UNION ALL SELECT t_id FROM u UNION ALL SELECT id FROM t ORDER BY id",
+            vec![],
+        ),
+    ];
+    for (sql, params) in queries {
+        compare(&path, sql, &params);
+    }
+}
