@@ -1,4 +1,4 @@
-//! One error type for both codecs. Every variant is reachable from a
+//! One error type for every codec. Every variant is reachable from a
 //! malformed file: nothing here is an assertion in disguise.
 
 use std::fmt;

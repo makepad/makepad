@@ -1,9 +1,9 @@
-//! Compressed audio decoding: MPEG-1/2/2.5 Layer III (MP3) and Ogg Vorbis,
-//! written here rather than pulled in, like the repo's own inflate, PNG,
+//! Compressed audio decoding: MPEG-1/2/2.5 Layer III (MP3), Ogg Vorbis, and
+//! FLAC, written here rather than pulled in, like the repo's own inflate, PNG,
 //! SQLite and zip readers. No dependencies, no `unsafe`.
 //!
-//! Both decoders read attacker-supplied bytes — a scraped music library, a
-//! downloaded asset pack — so both are *total*: malformed input yields an
+//! All three decoders read attacker-supplied bytes — a scraped music library, a
+//! downloaded asset pack — so they are *total*: malformed input yields an
 //! error, never a panic, and never an allocation sized straight from an
 //! unchecked header field. Every buffer that grows with the stream is bounded
 //! by [`Limits`].
@@ -13,16 +13,17 @@
 //! * whole-file: [`decode_audio`] / [`decode_any`] → [`DecodedAudio`]
 //!   (interleaved `f32` in [-1, 1], the shape the VJ decks and the importer's
 //!   waveform pass want);
-//! * progressive: [`mp3::Mp3Decoder`] / [`vorbis::VorbisDecoder`], which hand
-//!   back one granule/block at a time into a caller-owned buffer so a deck can
-//!   start playing before the tail has been read. The frame loop allocates
-//!   nothing.
+//! * progressive: [`mp3::Mp3Decoder`] / [`vorbis::VorbisDecoder`] /
+//!   [`flac::FlacDecoder`], which hand back one granule/block/frame at a time
+//!   into a caller-owned buffer so a deck can start playing before the tail
+//!   has been read. The frame loop allocates nothing.
 //!
 //! Duration without decoding is [`probe_duration`] (Xing/VBRI/LAME for MP3,
-//! the last Ogg page's granule position for Vorbis), and container metadata is
-//! [`read_tags`] (ID3v2 text frames, Vorbis comments).
+//! the last Ogg page's granule position for Vorbis, STREAMINFO for FLAC), and
+//! container metadata is [`read_tags`] (ID3v2 text frames, Vorbis comments).
 
 pub mod error;
+pub mod flac;
 pub mod mp3;
 pub mod ogg;
 pub mod tags;
@@ -75,6 +76,7 @@ impl DecodedAudio {
 pub enum AudioFormat {
     Mp3,
     OggVorbis,
+    Flac,
 }
 
 /// Bounds every decode honours. Defaults are generous for a music library
@@ -84,8 +86,8 @@ pub enum AudioFormat {
 pub struct Limits {
     /// Longest decode, in frames (sample positions), per stream.
     pub max_frames: usize,
-    /// Highest channel count accepted. Vorbis streams can declare any number;
-    /// MP3 is always mono or stereo, so this only ever binds the Ogg path.
+    /// Highest channel count accepted. Vorbis can declare any number and FLAC
+    /// up to eight; MP3 is always mono or stereo.
     pub max_channels: usize,
 }
 
@@ -108,6 +110,11 @@ pub fn sniff(bytes: &[u8]) -> Option<AudioFormat> {
     if bytes.len() >= 4 && &bytes[0..4] == b"OggS" {
         return Some(AudioFormat::OggVorbis);
     }
+    // FLAC's marker is exact; MP3's probe is a loose frame-sync scan and also
+    // treats any ID3v2 prefix as MP3, so a tagged FLAC must win here.
+    if flac::looks_like_flac(bytes) {
+        return Some(AudioFormat::Flac);
+    }
     if mp3::looks_like_mp3(bytes) {
         return Some(AudioFormat::Mp3);
     }
@@ -127,6 +134,7 @@ pub fn decode_audio_limited(
     match format {
         AudioFormat::Mp3 => mp3::decode_all_limited(bytes, limits),
         AudioFormat::OggVorbis => vorbis::decode_all_limited(bytes, limits),
+        AudioFormat::Flac => flac::decode_all_limited(bytes, limits),
     }
 }
 
@@ -142,6 +150,7 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     match sniff(bytes).ok_or(AudioError::UnknownFormat)? {
         AudioFormat::Mp3 => mp3::probe_duration(bytes),
         AudioFormat::OggVorbis => vorbis::probe_duration(bytes),
+        AudioFormat::Flac => flac::probe_duration(bytes),
     }
 }
 
@@ -150,6 +159,7 @@ pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {
     match sniff(bytes).ok_or(AudioError::UnknownFormat)? {
         AudioFormat::Mp3 => Ok(mp3::read_tags(bytes)),
         AudioFormat::OggVorbis => vorbis::read_tags(bytes),
+        AudioFormat::Flac => flac::read_tags(bytes),
     }
 }
 
@@ -167,6 +177,16 @@ mod lib_tests {
     #[test]
     fn sniff_finds_ogg() {
         assert_eq!(sniff(b"OggS\0\x02rest"), Some(AudioFormat::OggVorbis));
+    }
+
+    #[test]
+    fn sniff_finds_flac_before_mp3() {
+        assert_eq!(sniff(b"fLaC\0\0\0\0"), Some(AudioFormat::Flac));
+        // ID3v2 with a zero-length body, then the FLAC marker: looks_like_mp3
+        // would claim this as MP3 because of the ID3 prefix.
+        let mut tagged = vec![b'I', b'D', b'3', 3, 0, 0, 0, 0, 0, 0];
+        tagged.extend_from_slice(b"fLaC");
+        assert_eq!(sniff(&tagged), Some(AudioFormat::Flac));
     }
 
     #[test]
