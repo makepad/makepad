@@ -34,7 +34,7 @@
 //! arrived simply falls back to the mixed file.
 
 use crate::decks::DeckId;
-use crate::mixer::TrackPcm;
+use crate::mixer::{encode_stem_sample, TrackPcm};
 use makepad_ai_stems::{
     CacheHeader, Demixer, StemCache, StemSet, StemsModel, StereoBuf, CHUNK_STEP,
     SAMPLE_RATE as STEMS_RATE,
@@ -447,12 +447,7 @@ fn i16_frames(
     };
     left.iter()
         .zip(right.iter())
-        .map(|(l, r)| {
-            [
-                (l.clamp(-1.0, 1.0) * 32767.0) as i16,
-                (r.clamp(-1.0, 1.0) * 32767.0) as i16,
-            ]
-        })
+        .map(|(l, r)| [encode_stem_sample(*l), encode_stem_sample(*r)])
         .collect()
 }
 
@@ -475,8 +470,17 @@ fn run_sidecar(job: &StemsJob, lanes: [TrackPcm; 4], out: &Sender<StemsMsg>) {
         }
         let mut blocks: Vec<Arc<Vec<[i16; 2]>>> = Vec::with_capacity(4);
         for lane in lanes.iter() {
+            // Sidecar WAVs are ordinary full-scale audio, so they are
+            // re-encoded into the lane format rather than copied: every
+            // producer of a lane owes it the same headroom.
             let slice: Vec<[i16; 2]> = (start..end)
-                .map(|frame| lane.frames.get(frame).copied().unwrap_or([0, 0]))
+                .map(|frame| {
+                    let f = lane.frames.get(frame).copied().unwrap_or([0, 0]);
+                    [
+                        encode_stem_sample(f[0] as f32 / 32768.0),
+                        encode_stem_sample(f[1] as f32 / 32768.0),
+                    ]
+                })
                 .collect();
             blocks.push(Arc::new(slice));
         }
@@ -1068,7 +1072,9 @@ mod tests {
         // reads back rotated — which is the mapping the mixer depends on.
         let first = &chunks[0].lanes;
         for (lane, stem) in [(0usize, 3usize), (1, 0), (2, 1), (3, 2)] {
-            let want = ((stem as f32 + 1.0) * 0.1 * 32767.0) as i16;
+            // Published lanes carry STEM_CHUNK_HEADROOM, so the expectation
+            // goes through the same encoder the publisher used.
+            let want = encode_stem_sample((stem as f32 + 1.0) * 0.1);
             assert!(
                 (first[lane][0][0] - want).abs() <= 2,
                 "lane {lane} came back as {} not {want}",

@@ -142,14 +142,26 @@ pub fn whisper_model_path() -> Option<PathBuf> {
         }
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let canonical = root.join("local/models").join(WHISPER_MODEL_FILE);
     [
         PathBuf::from(WHISPER_MODEL_FILE),
         root.join(WHISPER_MODEL_FILE),
         root.join("local").join(WHISPER_MODEL_FILE),
-        root.join("local/models").join(WHISPER_MODEL_FILE),
+        canonical.clone(),
     ]
     .into_iter()
-    .find(|path| path.is_file())
+    .find(|path| {
+        if !path.is_file() {
+            return false;
+        }
+        // Every PROBED path must be the pinned artifact exactly. A download
+        // that stopped half way leaves a short file, and trusting it by
+        // presence alone hides INSTALL MODELS behind a model that cannot
+        // load. Only an explicit `MAKEPAD_VOICE_MODEL` override (handled
+        // above) is taken on trust.
+        let _ = &canonical;
+        crate::models::file_is_pinned_size(path, crate::models::WHISPER.bytes)
+    })
 }
 
 // ---------------------------------------------------------------------------
