@@ -424,6 +424,17 @@ impl AssetClient {
         self.api.resolve_alias(alias)
     }
 
+    /// Ask about MANY aliases at once (see [`crate::api::Api::alias_status`]).
+    /// `Err(NotFound)` = the server does not have the route; fall back to
+    /// [`Self::resolve_alias`] per entry.
+    pub fn alias_status(
+        &self,
+        entries: &[(makepad_asset_data::AssetAlias, Option<makepad_asset_data::BlobId>)],
+        tags: &[String],
+    ) -> ClientResult<Vec<crate::dto::AliasStatusDto>> {
+        self.api.alias_status(entries, tags)
+    }
+
     // ---- deletion ----------------------------------------------------------
 
     /// Delete an asset from the store (see [`crate::api::Api::retire_asset`]).
@@ -835,6 +846,41 @@ impl AssetClient {
         bytes: &[u8],
     ) -> ClientResult<makepad_asset_data::BlobId> {
         self.api.upload_blob(ns, bytes)
+    }
+
+    /// As [`Self::upload_blob`], but the digest is supplied by the caller
+    /// instead of being (re)computed here — see
+    /// [`crate::api::Api::upload_blob_with_digest`]. For a caller that
+    /// already hashed `bytes` (e.g. to verify it against an upload plan's
+    /// expected digest), this skips hashing the same bytes a second time.
+    /// The server's echoed identity is still checked against `digest`.
+    pub fn upload_blob_with_digest(
+        &self,
+        ns: &str,
+        bytes: &[u8],
+        digest: makepad_asset_data::BlobId,
+    ) -> ClientResult<makepad_asset_data::BlobId> {
+        self.api.upload_blob_with_digest(ns, bytes, digest)
+    }
+
+    /// Admit MANY blobs in ONE request, one catalog transaction — see
+    /// [`crate::api::Api::upload_blob_batch`].
+    pub fn upload_blob_batch(
+        &self,
+        ns: &str,
+        blobs: &[&[u8]],
+    ) -> ClientResult<Vec<makepad_asset_data::BlobId>> {
+        self.api.upload_blob_batch(ns, blobs)
+    }
+
+    /// As [`Self::upload_blob_batch`], with caller-supplied digests — see
+    /// [`crate::api::Api::upload_blob_batch_with_digests`].
+    pub fn upload_blob_batch_with_digests(
+        &self,
+        ns: &str,
+        blobs: &[(makepad_asset_data::BlobId, &[u8])],
+    ) -> ClientResult<Vec<makepad_asset_data::BlobId>> {
+        self.api.upload_blob_batch_with_digests(ns, blobs)
     }
 
     /// Register and publish-side lifecycle calls for immutable game

@@ -492,6 +492,29 @@ impl Conn {
         }
     }
 
+    /// Best-effort: read and discard whatever body the client declared is
+    /// still coming, bounded by `deadline`. Call this before writing a
+    /// refusal and closing over a body that was never fully read (an
+    /// over-budget upload, refused before or mid-stream): closing a socket
+    /// with declared bytes still sitting unread in the kernel receive
+    /// buffer can make the OS answer with an abortive RST instead of a
+    /// graceful FIN, and an RST can silently drop the very response this
+    /// connection is about to write — the client then sees a bare
+    /// `BrokenPipe`/`ConnectionReset` on its OWN write, with no way to tell
+    /// that apart from a crashed peer. Draining first makes the close
+    /// clean. Opportunistic only: never fails outward, and the caller
+    /// closes either way when this cannot finish before `deadline`.
+    pub fn drain_remaining(&mut self, head: &mut Head, deadline: Instant) {
+        let mut sink = [0u8; 16 * 1024];
+        loop {
+            match self.body_read(head, &mut sink, u64::MAX, deadline) {
+                Ok(0) => return,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        }
+    }
+
     /// Decide whether the connection can be kept alive after a response, and
     /// drain a small unread Length remainder if that is all that blocks it.
     pub fn finish_request(&mut self, head: &mut Head) -> bool {

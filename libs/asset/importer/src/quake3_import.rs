@@ -2649,7 +2649,7 @@ fn entities_of(bytes: &[u8]) -> Vec<Q3Entity> {
 }
 
 /// Q3 is Z-up: map `(x, y, z)` → GLB `(x, z, −y)`, scaled to metres.
-fn map_to_glb(o: [f32; 3]) -> [f32; 3] {
+pub(crate) fn map_to_glb(o: [f32; 3]) -> [f32; 3] {
     [o[0] * SCALE, o[2] * SCALE, -o[1] * SCALE]
 }
 
@@ -3093,6 +3093,7 @@ fn bsp46_place(
             width: 0.0,
             height: 0.0,
             align: String::new(),
+            flags: 0,
         });
         i += 1;
     }

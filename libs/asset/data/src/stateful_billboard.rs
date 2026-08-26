@@ -310,6 +310,40 @@ impl StatefulBillboard {
         (sector.rem_euclid(i32::from(n)) as u8) + 1
     }
 
+    /// The viewing sector for a body that stands in a world: its own facing
+    /// and the bearing to the camera, both as HEADINGS.
+    ///
+    /// This is the classics' own rule, stated once for every pack that
+    /// publishes 8-way artwork rather than once per game. Vanilla Doom
+    /// (`r_things.c`) picks
+    ///
+    /// ```text
+    ///     rot = (R_PointToAngle(thing) - thing->angle + (ANG45/2)*9) >> 29
+    /// ```
+    ///
+    /// — with `(ANG45/2)*9` = 202.5° and `>> 29` the 45° bucket, that is
+    /// `rot index = round((bearing_to_viewer − facing) / 45°)` in Doom's
+    /// anticlockwise compass. Duke's `animatesprites` viewtype-5 branch,
+    /// `k = ((ang + 3072 + 128 − getangle(…)) & 2047) >> 8`, is the same
+    /// expression in BUILD's clockwise compass, and BUILD's clockwise
+    /// compass is what its axis mapping mirrors back. So across families:
+    ///
+    /// > **rotation `r` is the drawing seen from a camera standing
+    /// > `(r−1)·45°` ANTICLOCKWISE of the way the body faces.**
+    ///
+    /// A heading grows anticlockwise too (`0` faces −Z, `+π/2` faces −X), so
+    /// in that convention the sector is one subtraction and no sign per
+    /// game. [`Self::facing_for_yaw`] counts the other way — a camera-rig
+    /// yaw grows clockwise — and that single mirror is the whole conversion.
+    ///
+    /// Passing a camera-convention angle as `facing` reflects the body about
+    /// the world's X axis: correct due north and south, a HALF TURN due east
+    /// and west. That is what made a level's monsters show their backs while
+    /// walking straight at the player.
+    pub fn facing_for_bearing(facing: f32, bearing_to_camera: f32, facings: u8) -> u8 {
+        Self::facing_for_yaw(facing - bearing_to_camera, facings)
+    }
+
     pub fn state_frame_range(&self, name: &str) -> std::ops::Range<usize> {
         self.states
             .iter()
@@ -718,8 +752,15 @@ pub fn sprite_role(prefix: &str) -> SpriteRole {
     }
 }
 
+/// The weapon a player HOLDS — the artwork a view model can name.
+///
+/// Vanilla pairs each held gun with a `…F` MUZZLE FLASH lump (`PISG` with
+/// `PISF`) that is drawn over it for the two tics it fires. A flash is an
+/// effect, not something to hold: labelling it `weapon` puts it in the
+/// answer to "which artwork is the gun in your hands", and a level that
+/// picks it arms the player with a puff of light and no gun.
 fn crate_weapon(p: &str) -> bool {
-    ["PISG", "PISF", "SHTG", "SHTF", "CHGG", "CHGF", "MISG", "MISF", "SAWG", "PLSG", "PLSF", "BFGG", "BFGF"]
+    ["PISG", "SHTG", "CHGG", "MISG", "SAWG", "PLSG", "BFGG"]
         .iter()
         .any(|s| p.starts_with(s))
 }
@@ -734,9 +775,14 @@ fn crate_character(p: &str) -> bool {
 }
 
 fn crate_effect(p: &str) -> bool {
-    ["BAL1", "BAL2", "BAL7", "MISL", "PUFF", "BLUD", "TFOG", "IFOG", "BFE1", "BFE2", "APLS", "APBX"]
-        .iter()
-        .any(|s| p.starts_with(s))
+    [
+        // The muzzle flashes, paired with the held guns above.
+        "PISF", "SHTF", "CHGF", "MISF", "PLSF", "BFGF", //
+        "BAL1", "BAL2", "BAL7", "MISL", "PUFF", "BLUD", "TFOG", "IFOG", "BFE1", "BFE2",
+        "APLS", "APBX",
+    ]
+    .iter()
+    .any(|s| p.starts_with(s))
 }
 
 /// Build one actor from (parsed name, png rel path, w, h) lumps.
@@ -977,6 +1023,67 @@ mod tests {
         assert_eq!(pick_facing_frame(&refs, 8).unwrap().0.rot, 2);
         assert_eq!(pick_facing_frame(&refs, 7).unwrap().0.rot, 3);
         assert_eq!(pick_facing_frame(&refs, 6).unwrap().0.rot, 4);
+    }
+
+    /// A held gun is a weapon; its muzzle flash is not.
+    ///
+    /// This is the label a level's author queries to find "the gun in your
+    /// hands", and both halves of vanilla's pair used to answer it — so a
+    /// generated first-person level could arm its player with `PISF`, two
+    /// tics of light with no pistol behind them.
+    #[test]
+    fn a_muzzle_flash_is_an_effect_not_something_to_hold() {
+        for held in ["PISG", "SHTG", "CHGG", "MISG", "SAWG", "PLSG", "BFGG"] {
+            assert_eq!(sprite_role(held), SpriteRole::Weapon, "{held}");
+        }
+        for flash in ["PISF", "SHTF", "CHGF", "MISF", "PLSF", "BFGF"] {
+            assert_eq!(sprite_role(flash), SpriteRole::Effect, "{flash}");
+        }
+        // The floor pickups keep answering as items, not as guns to hold.
+        for pickup in ["SHOT", "MGUN", "LAUN", "PLAS", "CSAW", "BFUG"] {
+            assert_eq!(sprite_role(pickup), SpriteRole::Item, "{pickup}");
+        }
+    }
+
+    /// Heading of a ground direction — the sim's convention, restated here
+    /// so this crate can pin the rule without depending on the sim.
+    fn heading(dx: f32, dz: f32) -> f32 {
+        (-dx).atan2(-dz)
+    }
+
+    /// The pin: a body facing +X, seen by a camera standing on its +X side,
+    /// is looking the camera in the face — rotation 1. Reversed selection
+    /// (the body's facing handed over in the camera's mirrored convention)
+    /// answers 5 here, which is the level walking backwards at you.
+    #[test]
+    fn a_body_seen_from_the_side_it_faces_shows_its_front() {
+        let east = heading(1.0, 0.0);
+        assert_eq!(StatefulBillboard::facing_for_bearing(east, east, 8), 1);
+        // Straight behind it: the back drawing.
+        let west = heading(-1.0, 0.0);
+        assert_eq!(StatefulBillboard::facing_for_bearing(east, west, 8), 5);
+        // Ninety degrees anticlockwise of "facing east" is north (−Z), which
+        // is the body's own LEFT: rotation 3 in every classic's table.
+        assert_eq!(StatefulBillboard::facing_for_bearing(east, heading(0.0, -1.0), 8), 3);
+        // Its right (south, +Z) is the mirrored partner, 7.
+        assert_eq!(StatefulBillboard::facing_for_bearing(east, heading(0.0, 1.0), 8), 7);
+    }
+
+    /// Each 45° anticlockwise step of the camera walks the table by exactly
+    /// one, from ANY facing — the whole of vanilla's rule.
+    #[test]
+    fn the_sector_table_steps_once_per_45_degrees_anticlockwise() {
+        for facing_deg in [-170.0f32, -90.0, 0.0, 37.0, 90.0, 175.0] {
+            let facing = facing_deg.to_radians();
+            for step in 0..8u8 {
+                let bearing = facing + f32::from(step) * std::f32::consts::FRAC_PI_4;
+                assert_eq!(
+                    StatefulBillboard::facing_for_bearing(facing, bearing, 8),
+                    step + 1,
+                    "facing {facing_deg} deg, camera {step} sectors anticlockwise"
+                );
+            }
+        }
     }
 
     #[test]
