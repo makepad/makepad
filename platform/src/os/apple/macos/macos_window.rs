@@ -11,7 +11,10 @@ use {
             apple::apple_sys::*,
             apple::apple_util::str_to_nsstring,
             macos::{
-                macos_app::{get_macos_class_global, with_macos_app, MacosApp},
+                macos_app::{
+                    activate_cocoa_window_on_pointer_down, get_macos_class_global,
+                    with_macos_app, MacosApp,
+                },
                 macos_event::MacosEvent,
             },
         },
@@ -69,7 +72,10 @@ impl MacosWindow {
             let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
 
             let () = msg_send![pool, drain];
-            with_macos_app(|app| app.cocoa_windows.push((window, view)));
+            with_macos_app(|app| {
+                app.cocoa_windows.push((window, view));
+                app.cocoa_window_ids.push((window_id, window));
+            });
             MacosWindow {
                 is_fullscreen: false,
                 is_popup: false,
@@ -311,10 +317,16 @@ impl MacosWindow {
 
             let () = msg_send![self.window, setContentView: self.view];
             let () = msg_send![self.window, makeFirstResponder: self.view];
-            if self.is_nonactivating_panel() {
-                let () = msg_send![self.window, orderFront: nil];
-            } else {
-                let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+            // MAKEPAD_HIDE_WINDOWS=1: never order the window onto the
+            // screen — GPU eval/test runs render their offscreen passes on
+            // real Metal without flashing a window (the occlusion gate only
+            // skips the WINDOW pass's present; child passes still render).
+            if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+                if self.is_nonactivating_panel() {
+                    let () = msg_send![self.window, orderFront: nil];
+                } else {
+                    let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+                }
             }
 
             let rect = NSRect {
@@ -879,6 +891,7 @@ impl MacosWindow {
         }
         // A real press arrived, so the current touch needs no synthesized tap.
         self.touch_disqualified = true;
+        activate_cocoa_window_on_pointer_down(self.window);
         let () = unsafe { msg_send![self.window, makeFirstResponder: self.view] };
         self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,
