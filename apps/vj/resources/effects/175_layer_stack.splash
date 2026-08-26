@@ -1,0 +1,50 @@
+// LAYER STACK — COUNT scaled, slowly rotating copies of the same frame
+// composited back to front, receding by SPACING each step.
+{
+    name: "Layer Stack"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPACING", bind: "p0", default: 0.5},
+        {name: "COUNT", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let n = floor(mix(2.0, 6.0, self.user.y) + 0.5)
+            let step_scale = 0.10 + 0.24 * self.user.x
+            let spin = 0.35 * (0.2 + 1.6 * self.user.z)
+            let c = uv - vec2(0.5, 0.5)
+            let mut acc = vec3(0.0, 0.0, 0.0)
+            let mut wsum = 0.0
+            let mut i = 0.0
+            loop {
+                if i > n - 0.5 {
+                    break
+                }
+                let s = 1.0 + i * step_scale
+                let a = spin * i * 0.16 + self.time_beat.x * 0.02
+                let cs = cos(a)
+                let sn = sin(a)
+                let r = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs) * s
+                let w = r + vec2(0.5, 0.5)
+                if w.x > 0.0 && w.x < 1.0 && w.y > 0.0 && w.y < 1.0 {
+                    let t = self.tex0.sample_as_bgra(w)
+                    let wt = 1.0 / (1.0 + i * 0.6)
+                    acc = acc + t.xyz * wt
+                    wsum = wsum + wt
+                }
+                i = i + 1.0
+            }
+            let out = acc / max(wsum, 0.0001)
+            return vec4(out, 1.0)
+        }
+    }
+}

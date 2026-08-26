@@ -1,0 +1,97 @@
+// PLANE GRID — a wall of big textured planes, each one turning on its own
+// hashed axis at its own rate, each one showing its own window into the
+// clip. Slow, architectural, endlessly watchable.
+//
+// Pattern taught here: A CONTINUOUS ROTATION THAT NEVER LEAVES ITS RANGE.
+// The angle is `fract(t * rate + phase) * TAU` — a wrapped 0..2pi ramp — not
+// `t * rate`. Both look the same for the first minute; only the wrapped one
+// is still exactly as smooth in the third hour of a set, because the float
+// it feeds sin/cos never grows.
+{
+    name: "Plane Grid"
+    engine: "tiles"
+    mode: "hook"
+    seed: 41
+
+    grid: 8
+    spread: 9.0
+    aspect: 0.62
+    gap: 0.12
+
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.35
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5
+    p2: "0.05 + 0.10 * pulse"
+    dials: [
+        {name: "TURN", bind: "p0", default: 0.5},
+        {name: "DEPTH", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x060a0c
+    color_a: #x5ff0d0
+    color_b: #x186050
+    color_c: #xd8fff2
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.85, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the mode highlight drive, attr = (shade, edge, stagger, tumble).
+    // Vertex hooks: fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale),
+    // fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTiles {
+        // Each plane drifts toward and away from the camera on its own slow
+        // wrapped phase, so the wall never reads as one flat sheet.
+        fx_tile: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let ph = fract(fract(t * 0.031) + self.hash1(id * 3.17 + 9.0))
+            let depth = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
+                * self.shape.z * 0.055
+            let z = sin(ph * 6.2831853) * depth
+            let pump = 1.0 + 0.05 * self.time_beat.w
+            return vec4(0.0, 0.0, z, pump)
+        }
+
+        // One hashed axis and one wrapped ramp per plane.
+        fx_tile_spin: fn(id: float, grid: vec2, uv_window: vec4, t: float) -> vec4 {
+            let ax = self.hash1(id * 5.71 + 1.0) - 0.5
+            let ay = self.hash1(id * 7.13 + 2.0) - 0.5
+            let az = self.hash1(id * 9.77 + 3.0) - 0.5
+            let a = vec3(ax, ay, az * 0.4)
+            let al = max(length(a), 0.05)
+            let rate = (0.02 + 0.10 * self.hash1(id * 11.3 + 4.0))
+                * (0.2 + 1.6 * clamp(self.user.x, 0.0, 1.0))
+            let ang = fract(fract(t * rate) + self.hash1(id * 13.9 + 5.0)) * 6.2831853
+            return vec4(a.x / al, a.y / al, a.z / al, ang)
+        }
+
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let border = attr.y
+            // A hard bright frame around each plane — the planes have to
+            // read as separate objects, or the wall collapses into mush.
+            let frame = 1.0 - smoothstep(0.0, 0.35, border)
+            let lit = content.xyz * (attr.x * (0.45 + 0.55 * border))
+            let rim = self.col_a.xyz * frame
+                * (0.35 + 0.9 * clamp(self.user.z, 0.0, 4.0) + t)
+            let inner = self.col_b.xyz * (1.0 - border) * 0.25
+            return vec4((lit + rim + inner) * self.fog.y, 1.0)
+        }
+    }
+}

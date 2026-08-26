@@ -1,0 +1,24 @@
+// PRESS WIPE — a vertical pressure ramp: deck B is squeezed in from the
+// bottom (or top with FLIP) with a bulge that presses hardest at centre
+// screen, like a plate being pushed across the frame. PRESS bends the
+// bulge — low values a shallow bow, high values a steep one.
+{
+    name: "Press Wipe"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.12},
+        {name: "PRESS", bind: "p1", default: 0.4},
+        {name: "FLIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let yy = mix(uv.y, 1.0 - uv.y, step(0.5, self.user.z))
+            let bulge = sin(uv.x * 3.14159265) * (0.1 + self.user.y * 0.3)
+            let field = clamp(yy - bulge, 0.0, 1.0)
+            let soft = 0.01 + self.user.x * 0.3
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            return self.deck_b(uv).mix(self.deck_a(uv), m)
+        }
+    }
+}

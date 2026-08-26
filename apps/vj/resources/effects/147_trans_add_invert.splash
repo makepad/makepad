@@ -1,0 +1,29 @@
+// ADD INVERT — deck B's negative pours light into deck A: result =
+// a+(1-b), so B's SHADOWS add light and B's highlights add nothing — the
+// inverse of the additive mix at 109. GAIN sets the pour's strength,
+// CURVE bends the fader response, KEY narrows the pour to B's own
+// shadows only.
+{
+    name: "Add Invert"
+    engine: "transition"
+    engage: "ramp"
+    p1: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "CURVE", bind: "p1", default: 0.5},
+        {name: "KEY", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let gain = 0.5 + self.user.x * 1.5
+            let tt = pow(clamp(t, 0.0, 1.0), pow(4.0, self.user.y * 2.0 - 1.0))
+            let inv = vec3(1.0, 1.0, 1.0) - b.xyz
+            let luma = dot(b.xyz, vec3(0.2126, 0.7152, 0.0722))
+            let gate = mix(1.0, smoothstep(0.75, 0.25, luma), self.user.z)
+            let c = a.xyz + inv * gain * tt * gate
+            return vec4(min(c.x, 1.0), min(c.y, 1.0), min(c.z, 1.0), 1.0)
+        }
+    }
+}

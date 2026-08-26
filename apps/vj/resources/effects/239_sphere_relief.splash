@@ -1,0 +1,57 @@
+// SPHERE RELIEF — the clip EXTRUDED off a revolving globe: every vertex of
+// a dense sphere is pushed out along its normal by the video's brightness
+// there, so bright passages grow spiky mountain ranges that roll around the
+// ball while dark passages stay smooth sea. PUMP (p1) gains the relief —
+// bind it to the music and the globe breathes terrain. Pattern taught here:
+// the engine's `relief:` key, a vertex-stage luma displacement.
+{
+    name: "Sphere Relief"
+    engine: "videomesh"
+    shape: "sphere"
+    seed: 10
+
+    detail: 48
+    size: 3.2
+    relief: 0.4
+    fly: 0.6
+
+    beat_pulse: 0.45
+    p1: "0.2 + 1.4*energy"
+    input0: "test"
+
+    dials: [
+        {name: "SPIN", bind: "p0", default: 0.0},
+        {name: "PUMP", bind: "p1", default: 0.3},
+        {name: "EDGE", bind: "p2", default: 0.2}
+    ]
+
+    color_bg: #x040810
+    color_a: #x40e8c0
+    color_b: #x1a4a7a
+    color_c: #xe0fff4
+
+    fog: 0.02
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — the terrain fragment: the clip shaded by its
+    // own luma, valleys sunk dark, peaks lifted toward color_c.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.1, 1.0, 0.05)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 0.0, t * 0.4 * (1.0 + clamp(self.user.x, 0.0, 4.0)))
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let l = dot(content.xyz, vec3(0.299, 0.587, 0.114))
+            let lit = content.xyz * (t * (0.35 + 0.95 * l))
+            let peak = self.col_c.xyz * smoothstep(0.72, 1.0, l)
+                * (0.25 + self.time_beat.w * 0.9)
+            return vec4((lit + peak) * self.fog.y, 1.0)
+        }
+    }
+}

@@ -1,0 +1,36 @@
+// MIRROR STRIP — the frame cut into bands, every other band mirrored;
+// the band seam slowly scrolls across, a moving mirrored grating.
+{
+    name: "Mirror Strip"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIDTH", bind: "p0", default: 0.5},
+        {name: "SCROLL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let bandw = mix(0.04, 0.22, self.user.x)
+            let scroll = modf(self.time_beat.x * 0.04 * (0.2 + 1.6 * self.user.y), bandw)
+            let bx = uv.x + scroll
+            let idx = floor(bx / bandw)
+            let local = fract(bx / bandw)
+            let odd = modf(idx, 2.0)
+            let mlocal = mix(local, 1.0 - local, step(0.5, odd))
+            let band0 = idx * bandw - scroll
+            let wx = band0 + mlocal * bandw
+            let w = vec2(clamp(wx, 0.0, 1.0), uv.y)
+            let tex = self.tex0.sample_as_bgra(w)
+            let seam = smoothstep(0.0, 0.02 + 0.06 * self.user.z, min(local, 1.0 - local))
+            return vec4(tex.xyz * (0.55 + 0.45 * seam), 1.0)
+        }
+    }
+}

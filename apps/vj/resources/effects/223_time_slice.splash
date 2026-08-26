@@ -1,0 +1,44 @@
+// TIME SLICE — the frame is sliced into scanline bands and each band runs
+// on its own delay: the top of the picture is already on the new frame
+// while the bottom is still holding the last one, and the boundary rakes
+// down the frame once a beat.
+//
+// Pattern taught here: ONE STORED FRAME IS ENOUGH. A true per-line delay
+// would want a whole ring of frames; the `hold` stage keeps exactly one and
+// indexes the CHOICE by position — band n releases to live when the beat
+// phase passes n/bands. The result reads as a per-line delay, costs one
+// texture, and is bounded by construction (the phase is a 0..1 saw, the
+// index a function of the band number — nothing accumulates).
+{
+    name: "Time Slice"
+    engine: "screen"
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DELAY", bind: "p0", default: 0.5},
+        {name: "LINES", bind: "p1", default: 0.5},
+        {name: "SPLIT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03050c
+
+    stages: [
+        {
+            kind: "hold"
+            beats: 1
+            mix: "clamp(0.30 + p0 * 1.4, 0.0, 1.0)"
+            bands: "8.0 + 88.0 * p1"
+            stagger: 0.0
+            axis: "h"
+        },
+        {kind: "chroma", p1: "(0.05 + 0.10 * pulse) * (0.2 + 1.6*p2)", p2: 0.5},
+        {kind: "bloom", threshold: 0.66, strength: 0.9, levels: 3}
+    ]
+}
