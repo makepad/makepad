@@ -467,6 +467,7 @@ script_mod! {
         min: 0.0
         max: 2.0
         default: 1.0
+        scroll_step: 0.025
         text: ""
         flow: Down
         text_input: TextInput{width: 0 height: 0}
@@ -504,11 +505,28 @@ script_mod! {
     }
 
     // A knob's legend: fills its stack, never widens it, never wraps.
-    let KnobLabel = MusicLabel{
+    // A flat Button rather than a Label so a click on it resets its knob.
+    let KnobLabel = Button{
         width: Fill
-        flow: Flow.Right{wrap: false}
-        max_lines: 1
-        draw_text.text_style: theme.font_bold{font_size: 7}
+        height: Fit
+        padding: 0
+        margin: 0
+        align: Align{x: 0.5, y: 0.0}
+        draw_bg +: {
+            color: #x00000000
+            color_focus: #x00000000
+            color_hover: #x00000000
+            color_down: #x00000000
+            border_size: 0.0
+            border_radius: 0.0
+        }
+        draw_text +: {
+            color: #xa6b1bd
+            color_focus: #xa6b1bd
+            color_hover: #xd6dee6
+            color_down: #x8e9aa7
+            text_style: theme.font_bold{font_size: 7}
+        }
     }
 
     let KnobStack = View{
@@ -525,6 +543,7 @@ script_mod! {
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
+        scroll_step: 0.025
         width: 40
         height: Fill
         text: ""
@@ -565,6 +584,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
@@ -825,22 +845,22 @@ script_mod! {
                             flow: Right
                             spacing: 3
                             KnobStack{
-                                KnobLabel{text: "HIGH"}
+                                deck_a_label_eq_high := KnobLabel{text: "HIGH"}
                                 deck_a_eq_high := MusicKnob{}
                                 deck_a_kill_high := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "MID"}
+                                deck_a_label_eq_mid := KnobLabel{text: "MID"}
                                 deck_a_eq_mid := MusicKnob{}
                                 deck_a_kill_mid := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "LOW"}
+                                deck_a_label_eq_low := KnobLabel{text: "LOW"}
                                 deck_a_eq_low := MusicKnob{}
                                 deck_a_kill_low := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "FILTER"}
+                                deck_a_label_filter := KnobLabel{text: "FILTER"}
                                 deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
                             }
                         }
@@ -926,21 +946,21 @@ script_mod! {
                             flow: Right
                             spacing: 3
                             KnobStack{
-                                KnobLabel{text: "FILTER"}
+                                deck_b_label_filter := KnobLabel{text: "FILTER"}
                                 deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
                             }
                             KnobStack{
-                                KnobLabel{text: "LOW"}
+                                deck_b_label_eq_low := KnobLabel{text: "LOW"}
                                 deck_b_eq_low := MusicKnob{}
                                 deck_b_kill_low := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "MID"}
+                                deck_b_label_eq_mid := KnobLabel{text: "MID"}
                                 deck_b_eq_mid := MusicKnob{}
                                 deck_b_kill_mid := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "HIGH"}
+                                deck_b_label_eq_high := KnobLabel{text: "HIGH"}
                                 deck_b_eq_high := MusicKnob{}
                                 deck_b_kill_high := KillButton{}
                             }
