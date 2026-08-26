@@ -28,7 +28,7 @@ use {
         },
         window::WindowId,
     },
-    makepad_objc_sys::objc_block,
+    makepad_objc_sys::{objc_block, Encode, Encoding},
     std::{cell::RefCell, collections::HashMap, os::raw::c_void, rc::Rc, time::Instant},
 };
 
@@ -44,13 +44,169 @@ thread_local! {
     pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CAFrameRateRange {
+    minimum: f32,
+    maximum: f32,
+    preferred: f32,
+}
+
+unsafe impl Encode for CAFrameRateRange {
+    fn encode() -> Encoding {
+        unsafe { Encoding::from_str("{CAFrameRateRange=fff}") }
+    }
+}
+
+static METAL_LINK_TRACE_UPDATES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_DRAWABLES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_PRESENTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static METAL_LINK_TRACE_LAST_US: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn metal_link_frame_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some())
+}
+
+pub(super) fn metal_link_trace_drawable_consumed() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_DRAWABLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub(super) fn metal_link_trace_presented() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn metal_link_trace_update_fired() {
+    if metal_link_frame_trace_enabled() {
+        METAL_LINK_TRACE_UPDATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn metal_link_trace_report() {
+    if !metal_link_frame_trace_enabled() {
+        return;
+    }
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let now_us = START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    let last_us = METAL_LINK_TRACE_LAST_US.load(std::sync::atomic::Ordering::Relaxed);
+    if now_us.saturating_sub(last_us) < 1_000_000
+        || METAL_LINK_TRACE_LAST_US
+            .compare_exchange(
+                last_us,
+                now_us,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+    {
+        return;
+    }
+    let updates = METAL_LINK_TRACE_UPDATES.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let drawables = METAL_LINK_TRACE_DRAWABLES.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let presented = METAL_LINK_TRACE_PRESENTED.swap(0, std::sync::atomic::Ordering::AcqRel);
+    eprintln!(
+        "[frame-trace] metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
+        now_us.saturating_sub(last_us) as f64 / 1000.0,
+        updates,
+        drawables,
+        presented,
+    );
+}
+
 pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
     MACOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
+}
+
+/// Like [`with_macos_app`], but returns `None` instead of panicking when the
+/// app is already borrowed — for callbacks AppKit fires re-entrantly from
+/// inside our own event handling (`resetCursorRects` after an
+/// `invalidateCursorRects`, tracking-area updates), where a RefCell panic
+/// cannot unwind through the ObjC frame and aborts the whole process.
+pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
+    MACOS_APP.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut app) => app.as_mut().map(f),
+        Err(_) => None,
+    })
+}
+
+/// Activate one Cocoa window without holding the global `MacosApp` RefCell
+/// borrow across AppKit calls (which can synchronously re-enter delegates).
+pub fn activate_cocoa_window_on_pointer_down(window: ObjcId) -> bool {
+    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+        return false;
+    }
+    unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![ns_app, isActive];
+        if !active {
+            let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+        }
+        let key: bool = msg_send![window, isKeyWindow];
+        if !key {
+            let () = msg_send![window, makeKeyAndOrderFront: nil];
+        }
+        !active || !key
+    }
+}
+
+extern "C" {
+    /// libobjc: the hook called with an exception object before it is
+    /// thrown. The only place that still sees the reason when the unwind
+    /// later meets a Rust frame and aborts ("Rust cannot catch foreign
+    /// exceptions") before AppKit's top-level handler can print anything.
+    fn objc_setExceptionPreprocessor(
+        f: extern "C" fn(ObjcId) -> ObjcId,
+    ) -> Option<extern "C" fn(ObjcId) -> ObjcId>;
+}
+
+unsafe fn objc_exception_text(obj: ObjcId) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    let utf8: *const std::os::raw::c_char = msg_send![obj, UTF8String];
+    if utf8.is_null() {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+}
+
+extern "C" fn log_objc_exception(exception: ObjcId) -> ObjcId {
+    unsafe {
+        let name: ObjcId = msg_send![exception, name];
+        let reason: ObjcId = msg_send![exception, reason];
+        eprintln!(
+            "makepad: ObjC exception {}: {}",
+            objc_exception_text(name),
+            objc_exception_text(reason)
+        );
+        let symbols: ObjcId = msg_send![exception, callStackSymbols];
+        if !symbols.is_null() {
+            let count: u64 = msg_send![symbols, count];
+            for i in 0..count.min(16) {
+                let line: ObjcId = msg_send![symbols, objectAtIndex: i];
+                eprintln!("    {}", objc_exception_text(line));
+            }
+        }
+    }
+    exception
 }
 
 pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) {
     unsafe {
         MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
+        objc_setExceptionPreprocessor(log_objc_exception);
     }
     MACOS_APP.with(|app| {
         *app.borrow_mut() = Some(MacosApp::new(event_callback));
@@ -126,8 +282,18 @@ pub struct MacosApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
+    /// Per-layer CAMetalDisplayLink paint pacing on macOS 14+, with the
+    /// existing per-view CADisplayLink path as its runtime fallback: each
+    /// window's paint beat fires FROM its own panel's refresh callback
+    /// instead of an NSTimer racing it — the real frame-flip clock, per
+    /// window, per display. Empty until a window exists (or unsupported:
+    /// NSTimer pacing stays). Entries are (cocoa window, link).
+    display_links: Vec<(ObjcId, ObjcId)>,
+    display_links_paused: bool,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
+    /// Exact framework-to-Cocoa lookup for bridge-injected pointer activation.
+    pub cocoa_window_ids: Vec<(WindowId, ObjcId)>,
     /// Cocoa owns/retains window delegates and views beyond `windowWillClose:`.
     /// Keep their Rust callback targets alive for the same lifetime so a queued
     /// native callback can never dereference a freed `MacosWindow`.
@@ -179,11 +345,14 @@ impl MacosApp {
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
                 timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
+                display_links: Vec::new(),
+                display_links_paused: false,
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
+                cocoa_window_ids: Vec::new(),
                 retired_cocoa_windows: Vec::new(),
                 event_flow: EventFlow::Poll,
                 last_key_mod: KeyModifiers {
@@ -234,6 +403,13 @@ impl MacosApp {
                 let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory as i64];
             }
         }
+    }
+
+    pub fn cocoa_window_for_id(&self, window_id: WindowId) -> Option<ObjcId> {
+        self.cocoa_window_ids
+            .iter()
+            .find(|(candidate, _)| *candidate == window_id)
+            .map(|(_, window)| *window)
     }
     pub fn update_macos_menu(&mut self, menu: &MacosMenu) {
         unsafe fn make_menu(
@@ -369,7 +545,9 @@ impl MacosApp {
                         my_app,
                         activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
                     ];
-                    let () = msg_send![self.cocoa_windows[0].0, makeKeyAndOrderFront: nil];
+                    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+                        let () = msg_send![self.cocoa_windows[0].0, makeKeyAndOrderFront: nil];
+                    }
                 }
                 //}
             }
@@ -788,9 +966,37 @@ impl MacosApp {
     pub fn retire_cocoa_window(&mut self, mut window: Box<MacosWindow>) {
         window.retire();
         let native_window = window.window;
+        self.cocoa_window_ids
+            .retain(|(window_id, _)| *window_id != window.window_id);
         self.cocoa_windows
             .retain(|(window, _view)| *window != native_window);
         self.retired_cocoa_windows.push(window);
+        // Drop the closing window's link; if the PRIMARY died, beats died
+        // with it — keep a heartbeat alive so the paint loop wakes and
+        // re-anchors (ensure_timer0_started spots the missing link).
+        let had = !self.display_links.is_empty();
+        self.display_links.retain(|(window, link)| {
+            if *window == native_window {
+                unsafe {
+                    let () = msg_send![*link, invalidate];
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if had && self.display_links.is_empty() {
+            self.stop_timer(0);
+            self.start_timer(0, 0.2, true);
+        }
+    }
+
+    /// True when link pacing SHOULD be re-armed: a window exists without
+    /// its own link (fresh window, or the self-heal after a close).
+    pub fn display_link_needs_rearm(&self) -> bool {
+        self.cocoa_windows
+            .iter()
+            .any(|(window, _)| !self.display_links.iter().any(|(w, _)| w == window))
     }
     /*
     pub fn post_signal(signal: Signal) {
@@ -931,6 +1137,198 @@ impl MacosApp {
                 }
             }
         }
+    }
+
+    /// Arm (or resume) display-link pacing: one link per window. On macOS 14+
+    /// CAMetalDisplayLink is built from that view's CAMetalLayer so its update
+    /// owns both the beat and drawable. Older systems take the existing
+    /// NSView.displayLink path unchanged. Returns false when neither can run,
+    /// so the caller falls back to NSTimer pacing.
+    pub fn ensure_display_link(&mut self) -> bool {
+        unsafe {
+            // Prune links whose window is gone.
+            let windows: Vec<ObjcId> = self.cocoa_windows.iter().map(|(w, _)| *w).collect();
+            self.display_links.retain(|(window, link)| {
+                if windows.contains(window) {
+                    true
+                } else {
+                    let () = msg_send![*link, invalidate];
+                    false
+                }
+            });
+            // Create missing ones.
+            for (window, view) in self.cocoa_windows.clone() {
+                if self.display_links.iter().any(|(w, _)| *w == window) {
+                    continue;
+                }
+                // Runtime availability is the contract here: referring to the
+                // class by name keeps the binary loadable before macOS 14.
+                let mut is_metal_link = false;
+                let mut link = nil;
+                // Opt-in until it paces at the display's rate: measured 11 fps
+                // visible on 2026-08-25 against 62 fps on the CVDisplayLink path.
+                let metal_link_wanted = std::env::var("MAKEPAD_METAL_DISPLAY_LINK")
+                    .map(|v| v != "0")
+                    .unwrap_or(false);
+                if let Some(link_class) = Class::get("CAMetalDisplayLink").filter(|_| metal_link_wanted) {
+                    let layer: ObjcId = msg_send![view, layer];
+                    if layer != nil {
+                        let allocated: ObjcId = msg_send![link_class, alloc];
+                        link = msg_send![allocated, initWithMetalLayer: layer];
+                        if link != nil {
+                            let () = msg_send![link, setDelegate: self.timer_delegate_instance];
+                            let default_range: CAFrameRateRange =
+                                msg_send![link, preferredFrameRateRange];
+                            let default_latency: isize =
+                                msg_send![link, preferredFrameLatency];
+                            let screen: ObjcId = msg_send![window, screen];
+                            let maximum_fps: isize = if screen != nil {
+                                msg_send![screen, maximumFramesPerSecond]
+                            } else {
+                                60
+                            };
+                            let requested_fps = maximum_fps.max(1) as f32;
+                            let requested_range = CAFrameRateRange {
+                                minimum: requested_fps,
+                                maximum: requested_fps,
+                                preferred: requested_fps,
+                            };
+                            // The defaults do not promise the panel maximum. Request it
+                            // explicitly, and keep two frames of render latency against
+                            // the CAMetalLayer's three-drawable pool.
+                            let () = msg_send![link, setPreferredFrameRateRange: requested_range];
+                            let () = msg_send![link, setPreferredFrameLatency: 2isize];
+                            if metal_link_frame_trace_enabled() {
+                                eprintln!(
+                                    "[frame-trace] metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
+                                    default_range.minimum,
+                                    default_range.maximum,
+                                    default_range.preferred,
+                                    default_latency,
+                                    requested_fps,
+                                );
+                            }
+                            is_metal_link = true;
+                        }
+                    }
+                }
+                if link == nil {
+                    let responds: bool = msg_send![
+                        view,
+                        respondsToSelector: sel!(displayLinkWithTarget: selector:)
+                    ];
+                    if !responds {
+                        return false;
+                    }
+                    link = msg_send![
+                        view,
+                        displayLinkWithTarget: self.timer_delegate_instance
+                        selector: sel!(receivedDisplayLink:)
+                    ];
+                }
+                if link == nil {
+                    continue;
+                }
+                let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
+                let () =
+                    msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
+                if self.display_links_paused {
+                    let () = msg_send![link, setPaused: YES];
+                }
+                self.display_links.push((window, link));
+                crate::log!(
+                    "macos: paint pacing on {} (frame-flip clock), window {}",
+                    if is_metal_link { "CAMetalDisplayLink" } else { "CADisplayLink" },
+                    self.display_links.len()
+                );
+            }
+            if self.display_links_paused {
+                for (_w, link) in &self.display_links {
+                    let () = msg_send![*link, setPaused: NO];
+                }
+                self.display_links_paused = false;
+            }
+            !self.display_links.is_empty()
+        }
+    }
+
+    pub fn pause_display_link(&mut self) {
+        unsafe {
+            if !self.display_links_paused {
+                for (_w, link) in &self.display_links {
+                    let () = msg_send![*link, setPaused: YES];
+                }
+                self.display_links_paused = true;
+            }
+        }
+    }
+
+    /// One window's display link fired: dispatch a LinkFire carrying WHICH
+    /// window and the flip's TARGET timestamp mapped into app time — the
+    /// rock-solid per-window clock the paint below samples.
+    pub fn send_display_link_fired(link: ObjcId) {
+        let Some((window, primary, app_now)) = try_with_macos_app(|app| {
+            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
+                (app.display_links[i].0, i == 0, app.time_now())
+            })
+        }).flatten() else {
+            return;
+        };
+        let (target, media_now): (f64, f64) = unsafe {
+            (msg_send![link, targetTimestamp], CACurrentMediaTime())
+        };
+        let time = app_now + (target - media_now).clamp(0.0, 0.1);
+        MacosApp::do_callback(MacosEvent::LinkFire {
+            window,
+            time,
+            primary,
+            drawable: None,
+            target_presentation_time: target,
+        });
+    }
+
+    /// CAMetalDisplayLink's delegate update is the authoritative frame:
+    /// transport time comes from its presentation target, and rendering uses
+    /// the drawable delivered for that same target instead of polling the
+    /// layer. A re-entrant callback simply skips this update rather than
+    /// panicking through the Objective-C delegate frame.
+    pub fn send_metal_display_link_update(link: ObjcId, update: ObjcId) {
+        metal_link_trace_update_fired();
+        if update == nil {
+            metal_link_trace_report();
+            return;
+        }
+        let (target, target_presentation, drawable, media_now): (f64, f64, ObjcId, f64) =
+            unsafe {
+                (
+                    msg_send![update, targetTimestamp],
+                    msg_send![update, targetPresentationTimestamp],
+                    msg_send![update, drawable],
+                    CACurrentMediaTime(),
+                )
+            };
+        let Some((window, primary, app_now)) = try_with_macos_app(|app| {
+            app.display_links.iter().position(|(_w, l)| *l == link).map(|i| {
+                (app.display_links[i].0, i == 0, app.time_now())
+            })
+        }).flatten() else {
+            metal_link_trace_report();
+            return;
+        };
+        let flip_target = if target_presentation > 0.0 {
+            target_presentation
+        } else {
+            target
+        };
+        let time = app_now + (flip_target - media_now).clamp(-0.1, 0.1);
+        MacosApp::do_callback(MacosEvent::LinkFire {
+            window,
+            time,
+            primary,
+            drawable: Some(drawable),
+            target_presentation_time: flip_target,
+        });
+        metal_link_trace_report();
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
@@ -1114,7 +1512,9 @@ fn run_select_folder_panel(title: &str, location: &str) -> Option<std::path::Pat
         if panel == nil {
             return None;
         }
-        let () = msg_send![panel, setCanChooseFiles: NO];
+        // Files AND folders: one panel serves both "import this clip" and
+        // "import this library" — the consumer's scan handles either.
+        let () = msg_send![panel, setCanChooseFiles: YES];
         let () = msg_send![panel, setCanChooseDirectories: YES];
         let () = msg_send![panel, setAllowsMultipleSelection: NO];
         let () = msg_send![panel, setCanCreateDirectories: NO];
