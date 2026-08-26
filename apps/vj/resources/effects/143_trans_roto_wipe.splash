@@ -1,0 +1,25 @@
+// ROTO WIPE — an angular gradient spins around the centre like a clock
+// hand sweeping the frame open; deck B pours in following the spin. ROT
+// dials in a static rotation offset, FLIP reverses the spin direction.
+{
+    name: "Roto Wipe"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.08},
+        {name: "ROT", bind: "p1", default: 0.0},
+        {name: "FLIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let p = vec2((uv.x - 0.5) * self.aspect(), uv.y - 0.5)
+            let ang = atan2(p.y, p.x)
+            let spin = self.user.y * 6.28319
+            let mut field = fract((ang + spin) / 6.28319 + 0.5)
+            field = mix(field, 1.0 - field, step(0.5, self.user.z))
+            let soft = 0.005 + self.user.x * 0.2
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            return self.deck_b(uv).mix(self.deck_a(uv), m)
+        }
+    }
+}

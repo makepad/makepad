@@ -1,0 +1,36 @@
+// SPLIT SCREEN — the frame divided along a tilted seam into two halves,
+// each independently zoomed — LEFT and RIGHT ride their own scale.
+{
+    name: "Split Screen"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ANGLE", bind: "p0", default: 0.5},
+        {name: "LEFT", bind: "p1", default: 0.5},
+        {name: "RIGHT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let pi = 3.14159265
+            let ang = (self.user.x - 0.5) * pi * 0.6
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let c = uv - vec2(0.5, 0.5)
+            let side = c.x * cs + c.y * sn
+            let za = 0.2 + 1.6 * self.user.y
+            let zb = 0.2 + 1.6 * self.user.z
+            let z = mix(za, zb, step(0.0, side))
+            let w = c / z + vec2(0.5, 0.5)
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let seam = smoothstep(0.0, 0.006, abs(side))
+            return vec4(tex.xyz * (0.15 + 0.85 * seam), 1.0)
+        }
+    }
+}

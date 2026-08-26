@@ -1,0 +1,28 @@
+// JAWS H — deck A closes from the top and bottom toward a horizontal
+// seam; the seam zigzags along x so the two edges mesh like teeth
+// instead of meeting on a flat line. DEPTH sets the tooth size, TEETH
+// the count.
+{
+    name: "Jaws H"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.4},
+        {name: "TEETH", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let teeth = 5.0 + floor(self.user.y * 11.0)
+            let tri = abs(fract(uv.x * teeth) * 2.0 - 1.0)
+            let depth = 0.03 + self.user.x * 0.14
+            let field = min(uv.y, 1.0 - uv.y) * 2.0 + (tri - 0.5) * depth
+            let soft = 0.012
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

@@ -1,0 +1,80 @@
+// LEVEL PULSE RINGS — every kick that happened in the last five seconds,
+// still travelling. Radius is age, so the outermost ring is the oldest
+// hit; nothing here is spawned, tracked or decayed on the CPU — the rings
+// ARE the low-band column of the spectrogram, read along the radius.
+//
+// The classic "VU pump" without a single accumulator: the whole picture is
+// a function of (radius -> age -> texture row).
+{
+    name: "Level Pulse Rings"
+    engine: "screen"
+    seed: 5
+
+    speed: 1.0
+    beat_pulse: 0.9
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.05
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "REACH", bind: "p0", default: 0.5},
+        {name: "BAND", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03040b
+    color_a: #xff9a3c
+    color_b: #x3ce0ff
+    color_c: #xffffff
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.25, levels: 4}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = length(p)
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5
+
+            // BAND picks which part of the spectrum drives the rings:
+            // 0 = the kick, 1 = the hats.
+            let f = clamp(self.user.y, 0.0, 1.0)
+            // REACH turns how much history fits inside the frame.
+            let reach = 0.35 + 1.6 * clamp(self.user.x, 0.0, 1.0)
+            let age = clamp(r * reach, 0.0, 1.0)
+
+            // The level that was playing when this radius left the middle.
+            let lvl = self.audio_fft(f, age)
+            // Idle: a slow breathing ring so a silent rig is not a void.
+            let idle = 0.09 * (0.5 + 0.5 * sin(age * 26.0 - self.time_beat.x * 2.2))
+            let e = max(lvl, idle)
+
+            // A ring is bright where the level was HIGH: the shell is the
+            // level itself, sharpened by EDGE.
+            let sharp = 2.0 + 12.0 * clamp(self.user.z, 0.0, 1.0)
+            let shell = pow(clamp(e, 0.0, 1.0), sharp)
+            // Rings thin out as they travel (energy spread over a circle).
+            let spread = 1.0 / (0.25 + r * 4.5)
+
+            // A little angular texture so a ring is not a perfect circle:
+            // the waveform of that same moment, wrapped around it.
+            let wob = self.audio_wave(clamp(1.0 - age * 0.9, 0.0, 1.0))
+            let lobed = shell * (1.0 + 0.35 * wob * sin(fract(ang) * 25.1327))
+
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, clamp(age * 1.4, 0.0, 1.0))
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + tint * (lobed * spread * 1.6)
+            // The middle: the live level as a lamp, punched by the beat.
+            let hit = 0.15 + 0.85 * self.audio_env.x
+            rgb = rgb + self.col_c.xyz
+                * (exp(0.0 - r * 26.0) * hit * (0.6 + 0.6 * self.time_beat.w))
+            // A vignette keeps the outermost (oldest) rings from smearing
+            // into the corners.
+            let vig = 1.0 - 0.5 * smoothstep(0.35, 0.95, r)
+            return vec4(rgb * vig * self.fog.y, 1.0)
+        }
+    }
+}

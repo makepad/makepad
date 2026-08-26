@@ -1,0 +1,66 @@
+// PIXEL JITTER — every particle carries one texel of input0 and snaps to
+// a freshly hashed offset from its home cell once per beat (or faster),
+// holding steady between snaps — a nervous quantised shuffle, not a
+// continuous shake.
+{
+    name: "Pixel Jitter"
+    engine: "particles"
+    mode: "image"
+    seed: 162
+    input0: "test"
+
+    count: 14400
+    spread: 6.0
+    size: 0.085
+    rate: 0.0
+
+    beat_pulse: "0.5 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "AMOUNT", bind: "p0", default: 0.5},
+        {name: "RATE", bind: "p1", default: 0.5},
+        {name: "SNAP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program. The
+    // hash seed is QUANTISED on floor(beat) (times a subdivision count)
+    // — never the raw clock — so every particle holds one jittered
+    // offset for a whole beat (or fraction) before snapping to the next.
+    // Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let gx = modf(id, w)
+            let gy = floor(id / w)
+            let home = vec3((gx / w - 0.5) * spread * 1.2, (0.5 - gy / w) * spread * 1.2, 0.0)
+            let div = 1.0 + floor(3.0 * clamp(self.user.y, 0.0, 1.0))
+            let step_i = floor(self.time_beat.y * div)
+            let hx = fract(sin(id * 12.9898 + step_i * 78.233) * 43758.5453)
+            let hy = fract(sin(id * 39.346 + step_i * 11.135) * 24634.6345)
+            let hz = fract(sin(id * 71.324 + step_i * 96.321) * 51749.2691)
+            let amount = spread * (0.03 + 0.35 * self.user.x)
+            let jitter = (vec3(hx, hy, hz) - vec3(0.5, 0.5, 0.5)) * 2.0 * amount
+            let snapphase = fract(self.time_beat.y * div)
+            let ease = 1.0 + 3.0 * clamp(self.user.z, 0.0, 1.0)
+            let settle = clamp(pow(snapphase, 1.0 / ease) * 4.0, 0.0, 1.0)
+            return home + jitter * settle
+        }
+    }
+}

@@ -1,0 +1,113 @@
+// CARD FLIP — the frame is a wall of cards, deck A printed on the front
+// of every one and deck B on the back. The fader turns them: each card
+// takes its own half turn about its own horizontal axis, and the takeoffs
+// are staggered so the wall changes over in a ripple instead of a snap.
+//
+// Pattern taught: the plane-in-3D helper (`plane_uv` below, the family's
+// shared block — the reference copy lives in the Perspective doc) with a
+// PER-CARD hinge. The pivot goes in as world coordinates and comes back
+// out after the intersection, so a wall of independently spinning cards
+// costs one helper call per fragment — the card that owns a fragment is
+// the cell it falls in, and a card foreshortened off its own cell simply
+// clips, which is what opens the dark seams mid-flip.
+//
+// THE STAGGER IS QUANTISED ON THE CELL ID — a hash of WHICH card it is,
+// never of the clock — and the sweep is driven by t alone, so the wall
+// looks the same on every pass of the fader and at any point in a set.
+// The v flip past edge-on comes free with the intersection (that is what
+// makes a turn read as a turn); deck B is sampled with it undone about the
+// card's own centre, so the back of every card is the right way up.
+{
+    name: "Card Flip"
+    engine: "transition"
+    p0: 0.5  p1: 0.5
+    dials: [
+        {name: "CARDS", bind: "p0", default: 0.5},
+        {name: "SPREAD", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        // ---- THE SHARED HELPER: one ray, one rotated video plane --------
+        // The plane is the rectangle of half-extents (aspect, 1) * 0.5/f
+        // whose HINGE sits at world (piv.x, piv.y, -d), spun about that
+        // hinge by the Euler angles `ang` (Rz then Ry then Rx, radians).
+        // Returns (plane u, plane v, on-quad 0/1, front-facing 0/1).
+        plane_uv: fn(uv: vec2, ang: vec3, piv: vec2, d: float, f: float) -> vec4 {
+            let a = self.aspect()
+            let c0 = cos(ang.x)
+            let s0 = sin(ang.x)
+            let c1 = cos(ang.y)
+            let s1 = sin(ang.y)
+            let c2 = cos(ang.z)
+            let s2 = sin(ang.z)
+            // The ray through this fragment (y up) and the eye, both
+            // measured from the hinge.
+            let rd = vec3((uv.x - 0.5) * a, 0.5 - uv.y, 0.0 - f)
+            let ro = vec3(0.0 - piv.x, 0.0 - piv.y, d)
+            let r1 = vec3(rd.x * c2 + rd.y * s2, rd.y * c2 - rd.x * s2, rd.z)
+            let o1 = vec3(ro.x * c2 + ro.y * s2, ro.y * c2 - ro.x * s2, ro.z)
+            let r2 = vec3(r1.x * c1 - r1.z * s1, r1.y, r1.x * s1 + r1.z * c1)
+            let o2 = vec3(o1.x * c1 - o1.z * s1, o1.y, o1.x * s1 + o1.z * c1)
+            let r3 = vec3(r2.x, r2.y * c0 + r2.z * s0, r2.z * c0 - r2.y * s0)
+            let o3 = vec3(o2.x, o2.y * c0 + o2.z * s0, o2.z * c0 - o2.y * s0)
+            // Intersect z = 0. A ray running parallel to the plane is
+            // NUDGED, never divided by zero — it lands far off the quad.
+            let den = r3.z + (1.0 - step(0.0001, abs(r3.z))) * 0.001
+            let k = 0.0 - o3.z / den
+            let hx = o3.x + k * r3.x + piv.x
+            let hy = o3.y + k * r3.y + piv.y
+            let pu = hx * f / a + 0.5
+            let pv = 0.5 - hy * f
+            let onq = step(0.0, pu) * step(pu, 1.0) * step(0.0, pv) * step(pv, 1.0)
+                * step(0.001, k)
+            return vec4(pu, pv, onq, step(0.0, o3.z))
+        }
+
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let tc = clamp(t, 0.0, 1.0)
+            let fl = 1.12
+            let a = self.aspect()
+            // CARDS: 3..10 columns; the rows follow the aspect so a card
+            // is roughly square.
+            let nx = floor(mix(3.0, 10.0, clamp(self.user.x, 0.0, 1.0)) + 0.5)
+            let ny = max(floor(nx / a + 0.5), 2.0)
+            let cell = floor(vec2(uv.x * nx, uv.y * ny))
+            let cu = (cell.x + 0.5) / nx
+            let cv = (cell.y + 0.5) / ny
+            // The card's signature: a stable hash of the CELL ID.
+            let h = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453)
+            // SPREAD widens the takeoff window. At t = 0 every card is
+            // still face A, at t = 1 every card has finished its turn —
+            // both ends of the sweep are exact.
+            let lead = 0.25 + 1.5 * clamp(self.user.y, 0.0, 1.0)
+            let tt = clamp(tc * (1.0 + lead) - h * lead, 0.0, 1.0)
+            // Half a turn about the card's own horizontal axis.
+            let ax = tt * 3.1415927
+            // The hinge: this card's centre, in world units.
+            let piv = vec2((cu - 0.5) * a / fl, (0.5 - cv) / fl)
+            let p = self.plane_uv(uv, vec3(ax, 0.0, 0.0), piv, 1.0, fl)
+            // Clip to THIS card's cell — a neighbour leaning into it is
+            // that neighbour's fragment to draw, not ours.
+            let hit = p.z * step(abs(p.x - cu), 0.5 / nx) * step(abs(p.y - cv), 0.5 / ny)
+            // Front = deck A. Back = deck B with the intersection's v flip
+            // undone about the card's own centre line.
+            let front = self.deck_a(vec2(p.x, p.y)).xyz
+            let back = self.deck_b(vec2(p.x, 2.0 * cv - p.y)).xyz
+            let face = mix(back, front, p.w)
+            // Lambert-ish shading — exactly 1 flat, dark edge-on — plus a
+            // GLINT as the card passes through edge-on, hardest on the
+            // beat (the eased pulse is 0..1, and the glint is zero at both
+            // ends of the turn, so the ends stay pixel-clean).
+            let edge_on = 1.0 - abs(cos(ax))
+            let sh = 0.55 + 0.45 * abs(cos(ax))
+            let glint = pow(edge_on, 8.0) * (0.25 + 0.55 * self.time_beat.w)
+            // Behind the wall: deck B in shadow, so the seams that open
+            // between foreshortened cards read as depth, not as holes.
+            let mut c = mix(self.deck_b(uv).xyz * 0.3, face * sh, hit)
+            c = c + vec3(1.0, 1.0, 1.0) * (glint * hit)
+            // DIP: duck through black mid-flip (0 = off, the stock look).
+            let dim = 1.0 - 4.0 * tc * (1.0 - tc) * self.user.z * 0.9
+            return vec4(c * dim, 1.0)
+        }
+    }
+}

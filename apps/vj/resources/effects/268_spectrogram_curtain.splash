@@ -1,0 +1,72 @@
+// SPECTROGRAM CURTAIN — the audio texture shown almost raw, as the
+// waterfall it is: frequency across, time falling down the frame, palette
+// mapped straight onto magnitude. The honest picture of the analysis, and
+// the one to read when you want to SEE what the other presets are eating.
+//
+// The only liberties are a slow horizontal fold (so it hangs like cloth)
+// and a live edge at the top where the newest row lands.
+{
+    name: "Spectrogram Curtain"
+    engine: "screen"
+    seed: 2
+
+    speed: 1.0
+    beat_pulse: 0.35
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.5},
+        {name: "FOLD", bind: "p1", default: 0.5},
+        {name: "LIFT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03030a
+    color_a: #x1b6bff
+    color_b: #xff5a2b
+    color_c: #xfff5d0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            // FOLD: a gentle cloth wave, strongest low down.
+            let fold = clamp(self.user.y, 0.0, 1.0)
+            let sway = sin(uv.y * 7.0 - self.time_beat.x * 0.8) * 0.06 * fold * uv.y
+            let x = clamp(uv.x + sway, 0.0, 1.0)
+
+            // DEPTH: how many seconds of history fill the frame.
+            let depth = 0.20 + 0.80 * clamp(self.user.x, 0.0, 1.0)
+            let age = clamp(uv.y * depth, 0.0, 1.0)
+            let v = self.audio_fft(x, age)
+            // Idle weave so a silent curtain still has a fabric.
+            let idle = 0.045
+                + 0.030 * sin(x * 47.0 + age * 30.0)
+                + 0.020 * sin(uv.y * 61.0 - self.time_beat.x * 0.7)
+            let m = clamp(max(v, idle) * (0.7 + 1.0 * clamp(self.user.z, 0.0, 1.0)), 0.0, 1.0)
+
+            // Three-stop ramp: dark -> cold -> hot -> white.
+            let mut rgb = self.col_bg.xyz.mix(self.col_a.xyz, smoothstep(0.0, 0.45, m))
+            rgb = rgb.mix(self.col_b.xyz, smoothstep(0.35, 0.80, m))
+            rgb = rgb.mix(self.col_c.xyz, smoothstep(0.78, 1.0, m))
+
+            // The live edge: the newest row, drawn hot at the top so you can
+            // see the sound ARRIVE.
+            let edge = exp(0.0 - uv.y * 90.0)
+            let now = self.audio_fft(x, 0.0)
+            rgb = rgb + self.col_c.xyz * (edge * (0.15 + 1.1 * now))
+
+            // Vertical seams every octave-ish, so the frequency axis is
+            // readable rather than a smear.
+            let ticks = smoothstep(0.93, 1.0, abs(sin(x * 12.5664)))
+            rgb = rgb + self.col_a.xyz * (ticks * 0.05)
+            // The curtain darkens as it falls out of memory.
+            rgb = rgb * (1.0 - 0.35 * uv.y * uv.y)
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

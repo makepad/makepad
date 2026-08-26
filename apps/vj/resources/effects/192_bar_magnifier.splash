@@ -1,0 +1,38 @@
+// BAR MAGNIFIER — a horizontal and a vertical bar-shaped lens crossing the
+// centre; ORIENT sweeps from a pure H bar through a cross to a pure V bar.
+{
+    name: "Bar Magnifier"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIDTH", bind: "p0", default: 0.5},
+        {name: "POWER", bind: "p1", default: 0.5},
+        {name: "ORIENT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let halfw = 0.04 + 0.22 * self.user.x
+            let mag = 1.0 + 3.0 * self.user.y * (0.6 + 0.4 * self.time_beat.w)
+            let center = 0.5
+            let dy = uv.y - center
+            let insideh = 1.0 - smoothstep(halfw * 0.7, halfw, abs(dy))
+            let zx = center + (uv.x - center) / mag
+            let dx = uv.x - center
+            let insidev = 1.0 - smoothstep(halfw * 0.7, halfw, abs(dx))
+            let zy = center + (uv.y - center) / mag
+            let orient = clamp(self.user.z, 0.0, 1.0)
+            let wh = 1.0 - orient
+            let wv = orient
+            let w = vec2(mix(uv.x, zx, insideh * wh), mix(uv.y, zy, insidev * wv))
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

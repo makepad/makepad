@@ -76,6 +76,12 @@
 //!         {kind: "bloom" threshold: 0.5 strength: 1.4 levels: 3}
 //!         {kind: "feedback" amount: 0.86 zoom: 1.012 rotate: 0.004 dim: 0.97}
 //!         {kind: "blur" levels: 2}
+//!         // frame latch: grab every `beats` (0 = trigger only) or on the
+//!         // rising edge of `trigger`; `bands` > 1 releases the held frame
+//!         // band by band across the beat (`axis: "h"` rows / "v" columns,
+//!         // `stagger` 0 = in order, 1 = hashed order)
+//!         {kind: "hold" beats: 2 trigger: "step(0.55, p1)" mix: 1.0
+//!          bands: 1 stagger: 0.0 axis: "h"}
 //!     ]
 //!
 //!     // ---- THE LOOK: this document's own shader ----
@@ -214,13 +220,42 @@
 //! * `mode`: `wave` (traveling swell, tiles tilt with the slope) |
 //!   `shatter` (BAR-SYNCED explode + pixel-perfect reassembly) |
 //!   `conveyor` (endless belt, alternate rows opposite ways, edge rolls) |
-//!   `spiral` (differential whirlpool with a beat funnel)
+//!   `spiral` (differential whirlpool with a beat funnel) |
+//!   `hook` (no engine motion — the document's vertex hooks are the whole
+//!   choreography)
 //! * `grid` (24, 4..64 per side), `spread` (7 plane width), `aspect` (1.0),
 //!   `gap` (0.06 grout), `amp` (0.5), `freq` (1.0 — wave freq / conveyor
 //!   speed / spiral spin), `spin` (1.0 shatter tumble), `scatter` (1.2
-//!   shatter flight distance)
+//!   shatter flight distance), `extrude` (0 — LUMA RELIEF: each tile is
+//!   pushed along the plane normal by its own centre texel's brightness,
+//!   and shaded by its own height so the relief reads)
 //! * bindings: `p0` ADDS shatter drive (strobe the explosion), `p1` scales
-//!   wave amp, `p2` adds grout glow; hooks: `fx_color` (t = highlight drive)
+//!   wave amp, `p2` adds grout glow; hooks: `fx_color` (t = highlight
+//!   drive) plus the per-tile MOTION pair, applied on top of the mode:
+//!   `fx_tile(id, grid, uv_window, t) -> (dx, dy, dz, scale)` and
+//!   `fx_tile_spin(id, grid, uv_window, t) -> (axis.xyz, angle)` — both
+//!   VERTEX stage, both free to read input0 with `sample_nearest`
+//!
+//! ### `engine: "videomesh"` — live video mapped onto parametric 3D shapes
+//! One indexed mesh built at load from a shape catalogue, stamped
+//! `instances` times; the DOCUMENT choreographs every instance through
+//! vertex hooks and owns the pixel look. `tex1` is bound too, so a
+//! `decks: 2` doc is a two-deck transition (p3 = the crossfader).
+//! * `shape`: `box` | `sphere` | `torus` | `disc` | `cylinder` | `capsule`
+//!   | `octahedron` | `star_prism` | `facets` | `grid` | `corridor`
+//! * `instances` (1, ≤64), `size` (1.6), `spread` (3.0 ring radius /
+//!   corridor pitch), `detail` (24), `points` (5), `aspect` (1.0),
+//!   `spin` (1.0), `relief` (0 — input0-luma displacement),
+//!   `uv_split` (`none`/`bands_x`/`bands_y`/`cells` — per-instance video
+//!   windows), `cam` (`orbit`/`inside`/`corridor`), `fly` (1.0),
+//!   `alt` (auto), `backdrop` (0/1 — full-frame quad behind the scene),
+//!   `decks` (1; 2 = two-deck transition)
+//! * bindings: `p0` adds spin, `p1` gains relief/pump, `p2` edge glow,
+//!   `p3` = crossfader (two-deck docs)
+//! * hooks: vertex `fx_place(id, hash, t) -> vec4` (pos + spin angle),
+//!   `fx_axis(id, hash) -> vec3`, `fx_scale(id, hash, t) -> float`;
+//!   pixel `fx_color(t, attr, content, cmix)`, `fx_backdrop(uv, t)`
+//!   (see engines_videomesh.rs)
 //!
 //! ### `engine: "flock"` — boid murmuration of oriented gliders
 //! CPU boids (O(N²), regen-per-frame family) emit banked wing/fin
@@ -322,6 +357,23 @@
 //! `sin cos abs floor fract sqrt tri saw env min max pow step clamp mix`).
 //! Full grammar + the standard shader signal block: `CONTRACT.md`.
 //!
+//! ## THE AUDIO PICTURE (live sound, sampleable from any hook)
+//! Every fx shader carries one float texture rewritten each frame from the
+//! SAME stream the beat-sync analysis listens to — no source picker, and
+//! the tap is read-only so beat sync stays the single authority. Three
+//! things are in scope in every hook of every family:
+//! * `self.audio_fft(f, age)` — spectrum 0..1; `f` = log frequency 0..1
+//!   (30 Hz .. 16 kHz), `age` = how far back 0..1 (0 = now, 1 ≈ 5.5 s).
+//! * `self.audio_wave(t)` — waveform -1..1 across ≈1.4 s (`t` 1 = newest).
+//! * `self.audio_env` — (bass, mid, high, rms), smoothed 0..1, no sample.
+//!
+//! `age` is a real axis: the texture keeps a spectrogram RING, so a look
+//! can draw seconds of sound at once (a landscape, a tunnel whose depth is
+//! time, rings that are old kicks still travelling) instead of one FFT
+//! frame. THE IDLE LAW: silence reads 0 everywhere — floor every level
+//! with a small figure off the beat clock or a quiet rig goes black.
+//! Implementation and exact layout: `effects/audio_tex.rs`.
+//!
 //! ## Hosting modes
 //! * **Primary**: the effect IS a channel's content — `VjFxView` in the
 //!   slot, `composite: false`, host composites `output_texture()`.
@@ -332,6 +384,8 @@
 //!   texture effect always renders something.
 //! ---------------------------------------------------------------------------
 
+pub mod audio_tex;
+pub mod deck_pattern;
 pub mod doc;
 pub mod engines;
 pub mod engines_charts;
@@ -348,6 +402,7 @@ pub mod engines_duo;
 pub mod engines_raymarch;
 pub mod engines_simfx;
 pub mod engines_tiles;
+pub mod engines_videomesh;
 pub mod expr;
 pub mod lsys;
 pub mod mesh;
@@ -370,6 +425,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     engines_forge::script_mod(vm);
     engines_copper::script_mod(vm);
     engines_tiles::script_mod(vm);
+    engines_videomesh::script_mod(vm);
     engines_flock::script_mod(vm);
     engines_duo::script_mod(vm);
     engines_raymarch::script_mod(vm);

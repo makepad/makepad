@@ -28,12 +28,21 @@
 
     frame: fn(fx) {
         let out = []
+        // BEAT EDGE, robustly: a bare `phase < dt*2` is a single-frame
+        // window a fixed-step clock can straddle forever (the thumbnail
+        // bake's 30fps at 120bpm steps phase by exactly dt*2). Floor the
+        // window wider than one step and key each spawn to the BEAT
+        // NUMBER via `slot`, so an extra frame in the window replaces the
+        // spawn instead of doubling it.
+        let edge = fx.phase < max(fx.dt * 2.0, 0.075)
+        let n = floor(fx.beat)
         // A meteor on every beat, entering high on one side.
-        if fx.phase < fx.dt * 2.0 {
-            let lane = modf(fx.beat * 2.7, 12.0) - 6.0
+        if edge {
+            let lane = modf(n * 2.7, 12.0) - 6.0
             out.push({
                 kind: "jet"
-                pos: vec3(lane + 6.0, 8.0, 0.0 - modf(fx.beat, 4.0))
+                slot: 60 + modf(n, 6.0)
+                pos: vec3(lane + 6.0, 8.0, 0.0 - modf(n, 4.0))
                 vel: vec3(-6.0, -5.5, 0.0)
                 life: 1.6
                 speed: 0.9
@@ -43,14 +52,15 @@
                 gravity: 0.0
                 color: #xffffff
                 color2: #x88bbff
-                seed: fx.beat
+                seed: n
             })
         }
         // The impact ring where a meteor from two beats ago came down.
-        if fx.phase < fx.dt * 2.0 && modf(fx.beat, 2.0) < 0.5 {
-            let lane2 = modf((fx.beat - 2.0) * 2.7, 12.0) - 6.0
+        if edge && modf(n, 2.0) < 0.5 {
+            let lane2 = modf((n - 2.0) * 2.7, 12.0) - 6.0
             out.push({
                 kind: "ring"
+                slot: 50 + modf(n * 0.5, 2.0)
                 pos: vec3(lane2 - 3.0, -1.0, 0.0)
                 life: 1.4
                 speed: 5.0 * (0.5 + fx.p0)
@@ -58,7 +68,7 @@
                 fraction: 0.8
                 color: #xffffff
                 color2: #x99aaff
-                seed: fx.beat * 3.3
+                seed: n * 3.3
             })
         }
         return out

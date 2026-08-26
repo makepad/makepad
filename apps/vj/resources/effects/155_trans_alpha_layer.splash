@@ -1,0 +1,30 @@
+// ALPHA LAYER — deck B composites over deck A using B's OWN ALPHA
+// channel as the per-pixel key, like laying a clip with real transparency
+// on top of the program instead of a flat crossfade. OPACITY scales the
+// whole layer, GAMMA bends B's alpha curve before it gates, PREMULT
+// un-premultiplies B's colour by its own alpha first (off by default).
+{
+    name: "Alpha Layer"
+    engine: "transition"
+    engage: "ramp"
+    p0: 1.0  p1: 0.5
+    dials: [
+        {name: "OPACITY", bind: "p0", default: 1.0},
+        {name: "GAMMA", bind: "p1", default: 0.5},
+        {name: "PREMULT", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let curve = pow(4.0, self.user.y * 2.0 - 1.0)
+            let ba = pow(clamp(b.w, 0.0, 1.0), curve)
+            let opacity = self.user.x * clamp(t, 0.0, 1.0)
+            let k = ba * opacity
+            let unmult = b.xyz / max(b.w, 0.05)
+            let bc = b.xyz.mix(unmult, step(0.5, self.user.z))
+            let composite = a.xyz.mix(bc, k)
+            return vec4(composite.x, composite.y, composite.z, 1.0)
+        }
+    }
+}

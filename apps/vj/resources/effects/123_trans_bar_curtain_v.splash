@@ -1,0 +1,30 @@
+// BAR CURTAIN V — horizontal bars close toward alternating edges: even
+// bars slide in from the top, odd bars from the bottom. SAW staggers
+// each bar's start by a per-bar hash so the curtain does not close in
+// lockstep.
+{
+    name: "Bar Curtain V"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.15},
+        {name: "BARS", bind: "p1", default: 0.5},
+        {name: "SAW", bind: "p2", default: 0.3}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 6.0 + floor(self.user.y * 14.0)
+            let row = floor(uv.y * n)
+            let celly = fract(uv.y * n)
+            let parity = modf(row, 2.0)
+            let local = mix(celly, 1.0 - celly, parity)
+            let soft = 0.02 + self.user.x * 0.3
+            let hash = fract(sin(row * 12.9898 + 4.0) * 43758.5453)
+            let saw = (hash - 0.5) * self.user.z * 0.6
+            let tt = t * (1.0 + 2.0 * soft) - soft + saw
+            let m = smoothstep(tt - soft, tt + soft, local)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            return vec4(c.xyz, 1.0)
+        }
+    }
+}

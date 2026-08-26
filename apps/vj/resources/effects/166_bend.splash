@@ -1,0 +1,37 @@
+// BEND — rotate, radially spread, and barrel-warp the frame together: a
+// single lens-like twist rather than a straight rotozoom.
+{
+    name: "Bend"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "ROTATE", bind: "p0", default: 0.5},
+        {name: "SPREAD", bind: "p1", default: 0.5},
+        {name: "BARREL", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let tau = 6.2831853
+            let ang = (self.user.x - 0.5) * 1.4 + sin(self.sig.x * tau) * 0.04
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let c = uv - vec2(0.5, 0.5)
+            let r0 = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs)
+            let spread = 0.5 + 1.4 * self.user.y
+            let r1 = r0 * spread
+            let rad = length(r1)
+            let barrel = 1.0 + (0.2 + 1.6 * self.user.z) * 0.4 * rad * rad * (0.4 + self.time_beat.w * 0.6)
+            let r2 = r1 * barrel
+            let w = r2 + vec2(0.5, 0.5)
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

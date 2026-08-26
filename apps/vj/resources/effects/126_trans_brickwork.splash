@@ -1,0 +1,35 @@
+// BRICKWORK — offset masonry rows; bricks flip left-to-right in
+// sequence with a small per-brick hash jitter so it never feels
+// metronomic. COLS sets the brick count per row.
+{
+    name: "Brickwork"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.15},
+        {name: "COLS", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let cols = 5.0 + floor(self.user.y * 9.0)
+            let rows = cols * 0.45
+            let row = floor(uv.y * rows)
+            let offset = modf(row, 2.0) * 0.5
+            let colf = uv.x * cols - offset
+            let col = floor(colf)
+            let cellx = fract(colf)
+            let celly = fract(uv.y * rows)
+            let hash = fract(sin((col + row * 37.0) * 12.9898 + 3.0) * 43758.5453)
+            let field = clamp(col / cols, 0.0, 1.0) * 0.85 + hash * 0.15
+            let soft = 0.02 + self.user.x * 0.2
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let seam = smoothstep(0.0, 0.03, cellx) * smoothstep(0.0, 0.03, 1.0 - cellx) * smoothstep(0.0, 0.06, celly) * smoothstep(0.0, 0.06, 1.0 - celly)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dip = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            let dim = dip * (0.85 + 0.15 * seam)
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

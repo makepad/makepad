@@ -1,0 +1,50 @@
+// BUG EYE — the frame reads through a hex lens array, an insect's compound
+// eye: every cell bulges its own patch, JITTER varying the magnification
+// per cell off a stable hash.
+{
+    name: "Bug Eye"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SIZE", bind: "p0", default: 0.5},
+        {name: "BULGE", bind: "p1", default: 0.5},
+        {name: "JITTER", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        hash2: fn(p: vec2) -> float {
+            return fract(sin(p.x * 127.1 + p.y * 311.7 + 43.13) * 43758.5453)
+        }
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let cell = 0.035 + 0.11 * self.user.x
+            let r = vec2(1.0, 1.7320508) * cell
+            let h = r * 0.5
+            let pa = modf(uv, r) - h
+            let pb = modf(uv - h, r) - h
+            let da = length(pa)
+            let db = length(pb)
+            let mut off = pa
+            let mut ctr = uv - pa
+            if db < da {
+                off = pb
+                ctr = uv - h - pb
+            }
+            let hsh = self.hash2(ctr)
+            let jitter = clamp(1.0 + self.user.z * (hsh - 0.5) * 1.6, 0.3, 1.8)
+            let mag = (1.3 + 2.6 * self.user.y) * jitter * (0.85 + 0.15 * self.time_beat.w)
+            let lensoff = off / max(mag, 0.05)
+            let w = clamp(ctr + lensoff, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let tex = self.tex0.sample_as_bgra(w)
+            let rimt = length(off) / max(length(h), 0.0001)
+            let rim = smoothstep(0.82, 1.05, rimt)
+            let out = tex.xyz * (1.0 - rim * 0.35)
+            return vec4(out, 1.0)
+        }
+    }
+}

@@ -1,0 +1,43 @@
+// OVERLAY — the classic photo-editor combine, applied to LUMA only (so
+// deck B keeps its own hue while borrowing deck A's contrast curve):
+// per pixel, if A's luma is dark the result folds toward 2*a*b (a
+// multiply), if light it folds toward 1-2*(1-a)*(1-b) (a screen) — one
+// seamless S-curve between the two. DEPTH pushes A's luma contrast
+// before the fold, SAT keeps or flattens B's own colour in the result,
+// BAL shifts the fold's pivot off the classic 0.5 midpoint.
+{
+    name: "Overlay"
+    engine: "transition"
+    engage: "ramp"
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.5},
+        {name: "SAT", bind: "p1", default: 0.6},
+        {name: "BAL", bind: "p2", default: 0.5}
+    ]
+    shader: draw.DrawVjFxDuo {
+        overlay1: fn(a: float, b: float, piv: float) -> float {
+            let lo = 2.0 * a * b
+            let hi = 1.0 - 2.0 * (1.0 - a) * (1.0 - b)
+            return mix(lo, hi, step(piv, a))
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let w = vec3(0.2126, 0.7152, 0.0722)
+            let luma_a = dot(a.xyz, w)
+            let luma_b = dot(b.xyz, w)
+            let depth = 0.2 + self.user.x * 1.8
+            let la = clamp(0.5 + (luma_a - 0.5) * depth, 0.0, 1.0)
+            let piv = 0.1 + self.user.z * 0.8
+            let luma_out = self.overlay1(la, luma_b, piv)
+            let ratio = luma_out / max(luma_b, 0.02)
+            let flat = vec3(luma_out, luma_out, luma_out)
+            let toned = flat.mix(b.xyz * ratio, self.user.y)
+            let composite = a.xyz.mix(toned, clamp(t, 0.0, 1.0))
+            let cx = clamp(composite.x, 0.0, 1.0)
+            let cy = clamp(composite.y, 0.0, 1.0)
+            let cz = clamp(composite.z, 0.0, 1.0)
+            return vec4(cx, cy, cz, 1.0)
+        }
+    }
+}

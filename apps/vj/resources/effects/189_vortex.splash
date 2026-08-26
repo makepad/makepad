@@ -1,0 +1,37 @@
+// VORTEX — the frame sucks around a pivot that sits off-centre and drifts
+// slowly on an ellipse; rotation is strongest near the pivot and fades out.
+{
+    name: "Vortex"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "STRENGTH", bind: "p0", default: 0.5},
+        {name: "REACH", bind: "p1", default: 0.5},
+        {name: "DRIFT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let speed = 0.06 + 0.3 * self.user.z
+            let pang = self.time_beat.x * speed
+            let pivot = vec2(0.5, 0.5) + vec2(cos(pang), sin(pang) * 0.8) * 0.16
+            let d = uv - pivot
+            let r = length(d)
+            let reach = 0.22 + 0.4 * self.user.y
+            let falloff = clamp(1.0 - r / reach, 0.0, 1.0)
+            let spin = falloff * falloff * (3.0 + 7.0 * self.user.x) * (0.5 + 0.5 * self.time_beat.w)
+            let cs = cos(spin)
+            let sn = sin(spin)
+            let rd = vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs)
+            let w = pivot + rd
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

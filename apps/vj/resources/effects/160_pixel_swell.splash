@@ -1,0 +1,60 @@
+// PIXEL SWELL — every particle carries one texel of input0, sitting on
+// the flat picture grid but lifted by two slightly detuned sine sheets,
+// so the surface swells like an interference pattern instead of a plane.
+{
+    name: "Pixel Swell"
+    engine: "particles"
+    mode: "image"
+    seed: 160
+    input0: "test"
+
+    count: 14400
+    spread: 6.0
+    size: 0.085
+    rate: 0.0
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p2)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FREQ", bind: "p0", default: 0.5},
+        {name: "DETUNE", bind: "p1", default: 0.5},
+        {name: "SWELL", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program — the
+    // grid HOME stays put in X/Y, Z rides two detuned sine sheets summed
+    // together. Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let gx = modf(id, w)
+            let gy = floor(id / w)
+            let u = gx / w - 0.5
+            let v = 0.5 - gy / w
+            let freq = 3.0 + 10.0 * self.user.x
+            let detune = 0.15 + 0.6 * self.user.y
+            let amp = spread * (0.06 + 0.3 * self.user.z)
+            let w1 = sin(u * freq + self.time_beat.x * 0.9)
+            let w2 = sin(v * freq * (1.0 + detune) - self.time_beat.x * (0.9 + detune))
+            let z = (w1 + w2) * 0.5 * amp
+            return vec3(u * spread * 1.2, v * spread * 1.2, z)
+        }
+    }
+}

@@ -1,0 +1,33 @@
+// HONEYCOMB — a staggered-row cell grid where whole cells pop open in
+// expanding rings from the centre, echoing a honeycomb's offset rows.
+// CELLS sets the grid density.
+{
+    name: "Honeycomb"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.1},
+        {name: "CELLS", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 5.0 + floor(self.user.y * 7.0)
+            let rows = n * 0.87
+            let row = floor(uv.y * rows)
+            let offset = modf(row, 2.0) * 0.5
+            let col = floor(uv.x * n - offset)
+            let ccx = (col + offset + 0.5) / n
+            let ccy = (row + 0.5) / rows
+            let d = vec2((ccx - 0.5) * self.aspect(), ccy - 0.5)
+            let field = length(d)
+            let rmax = 0.5 * sqrt(self.aspect() * self.aspect() + 1.0)
+            let soft = 0.03 + self.user.x * 0.12
+            let edge = t * (rmax + 2.0 * soft) - soft
+            let inside = smoothstep(edge + soft, edge - soft, field)
+            let c = self.deck_a(uv).mix(self.deck_b(uv), inside)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}
