@@ -132,6 +132,26 @@ fn log_with_level_rustc(
 pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)> =
     RwLock::new(log_with_level_rustc);
 
+/// An OBSERVER of everything logged, installed alongside (never instead of)
+/// the logger.
+///
+/// It exists so a process can COLLECT what it already reports rather than
+/// growing a second reporting path: the draw-shader compiler, the script
+/// evaluator and every other subsystem already say what went wrong through
+/// `error!`, and a tap is how a livecoding loop turns that into an answer
+/// for whoever just saved the file. Off by default and free when off.
+///
+/// A tap must never log: it runs inside the logging call.
+static LOG_TAP: RwLock<Option<fn(&str, LogLevel)>> = RwLock::new(None);
+static LOG_TAP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install (or with `None`, remove) the log tap. One per process.
+pub fn set_log_tap(tap: Option<fn(&str, LogLevel)>) {
+    let mut slot = LOG_TAP.write().expect("Log tap lock poisoned");
+    *slot = tap;
+    LOG_TAP_ON.store(tap.is_some(), std::sync::atomic::Ordering::Release);
+}
+
 pub fn log_with_level(
     file_name: &str,
     line_start: u32,
@@ -141,6 +161,13 @@ pub fn log_with_level(
     message: String,
     level: LogLevel,
 ) {
+    if LOG_TAP_ON.load(std::sync::atomic::Ordering::Acquire) {
+        if let Ok(tap) = LOG_TAP.read() {
+            if let Some(tap) = *tap {
+                tap(&message, level);
+            }
+        }
+    }
     let logger = LOG_WITH_LEVEL.read().expect("Logger lock poisoned");
     logger(
         file_name,
