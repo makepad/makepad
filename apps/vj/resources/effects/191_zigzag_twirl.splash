@@ -1,0 +1,38 @@
+// ZIGZAG TWIRL — a normal centre twirl, but the sampled radius rides a
+// travelling triangle wave first, so the swirl arms come out jagged.
+{
+    name: "Zigzag Twirl"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPIN", bind: "p0", default: 0.5},
+        {name: "ZIGS", bind: "p1", default: 0.5},
+        {name: "DEPTH", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let center = vec2(0.5, 0.5)
+            let d = uv - center
+            let r = length(d)
+            let ang0 = atan2(d.y, d.x)
+            let reach = 0.5
+            let falloff = clamp(1.0 - r / reach, 0.0, 1.0)
+            let spin = falloff * falloff * (4.0 + 9.0 * self.user.x) * (0.6 + 0.4 * self.time_beat.w)
+            let zfreq = 6.0 + 26.0 * self.user.y
+            let tri = abs(fract(r * zfreq - fract(self.time_beat.y * 0.1)) - 0.5) * 2.0
+            let zig = (tri - 0.5) * 0.05 * self.user.z * falloff
+            let newr = clamp(r + zig, 0.0, 0.75)
+            let ang = ang0 + spin
+            let w = center + vec2(cos(ang), sin(ang)) * newr
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

@@ -1,0 +1,26 @@
+// CLOCK SWEEP — an angular hand sweeps from 12 o'clock clockwise around
+// the frame, revealing deck B behind it. FLIP runs it counter-clockwise.
+{
+    name: "Clock Sweep"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.05},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let c2 = vec2((uv.x - 0.5) * self.aspect(), uv.y - 0.5)
+            let ang = atan2(c2.y, c2.x)
+            let ang01 = fract(1.25 - ang / 6.28318530718)
+            let soft = 0.002 + self.user.x * 0.08
+            let flip = step(0.5, self.user.y)
+            let field = mix(ang01, 1.0 - ang01, flip)
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

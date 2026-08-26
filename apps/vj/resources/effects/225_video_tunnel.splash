@@ -1,0 +1,102 @@
+// VIDEO TUNNEL — the clip is the wall. A wide, slow bore papered end to
+// end with the channel video, mirrored around the seam so the wrap is
+// invisible, with the beat rings sweeping over it as light rather than as
+// colour.
+//
+// Pattern taught here: the tunnel family has TWO hooks now, and they do
+// different jobs. `fx_wall(uv, content, cmix, ring)` is the DRAPE — what
+// the video looks like on the bore — and at `content: 1` it owns every wall
+// pixel. `fx_color` is the tube's own colour, and it now gets the wall
+// texel too, so the rings and rails can pick their tint out of the picture
+// they are sweeping across instead of being a fixed neon on top of it.
+{
+    name: "Video Tunnel"
+    engine: "tunnel"
+    seed: 7
+
+    knot_p: 2.0
+    knot_q: 3.0
+    major: 7.0
+    tube: 1.9
+    rings: 800
+    sides: 26
+    fly: 2.1
+    bands: 70.0
+
+    input0: "test"
+    // The wall IS the clip here — not a tint over neon.
+    content: 1.0
+
+    speed: 1.0
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "RINGS", bind: "p0", default: 0.5},
+        {name: "GAIN", bind: "p1", default: 0.5},
+        {name: "TRAIL", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x02040a
+    color_a: #x7fd8ff
+    color_b: #x2050a0
+    color_c: #xc8e6ff
+
+    fog: 0.055
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.84, strength: 0.65, levels: 3},
+        {
+            kind: "feedback"
+            amount: "min(0.20 + (p2 - 0.5) * 0.7, 0.9)"
+            zoom: 1.006
+            rotate: 0.0
+            dim: 0.93
+        }
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash,
+    // radius), content = the wall texel, cmix = the pre-gated content
+    // strength. `fx_color` runs in the VERTEX stage, `fx_wall` in the pixel
+    // stage — a fn called from one may never be called from the other.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        // THE DRAPE. Mirrored around the seam (`1 - |2u - 1|`) so the wrap
+        // has no visible join, graded a little cold in the troughs and
+        // brightened where a ring is passing — the ring reads as light
+        // falling on the picture instead of a stripe drawn over it.
+        fx_wall: fn(uv: vec2, content: vec4, cmix: float, ring: float) -> vec3 {
+            let mu = vec2(1.0 - abs(uv.x * 2.0 - 1.0), uv.y)
+            let texel = self.tex0.sample_as_bgra(mu)
+            let lum = clamp(dot(texel.xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
+            let gain = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
+                * (1.0 + 0.24 * self.time_beat.w)
+            let lifted = texel.xyz * gain
+            // Ring light: a warm-white wash that follows the sweep.
+            let lit = lifted + self.col_c.xyz * ring * (0.08 + 0.26 * lum)
+                * (0.3 + 1.4 * clamp(self.user.x, 0.0, 1.0))
+            // Deep shade in the darkest parts keeps the bore reading as a
+            // tube; a flat-lit wall looks like wallpaper, not depth.
+            return lit.mix(self.col_b.xyz * 0.25, (1.0 - lum) * 0.35)
+        }
+
+        // The rings/rails take their tint from the picture they cross.
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3,
+                     content: vec4, cmix: float) -> vec4 {
+            let base = self.col_a.mix(self.col_b, t)
+            let tint = vec4(content.x, content.y, content.z, 1.0)
+            return base.mix(tint, clamp(cmix, 0.0, 1.0) * 0.55)
+        }
+    }
+}

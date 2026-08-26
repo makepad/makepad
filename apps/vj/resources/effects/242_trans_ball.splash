@@ -1,0 +1,70 @@
+// BALL — the two-deck transition where the outgoing picture curls into a
+// video ball and rolls away: at the A end the frame is exactly deck A; as
+// the fader travels, a sphere wrapped in deck A inflates and rolls across
+// while the backdrop dissolves to deck B underneath; at the B end the ball
+// has shrunk to nothing and the frame is exactly deck B. ROLL spins the
+// ball harder, ARC lifts its flight. Pattern taught here: the videomesh
+// two-deck contract — `decks: 2` + `backdrop: 1`, every hook a function of
+// the crossfader (self.user.w), scale zero at both ends keeping the
+// endpoints pop-free.
+{
+    name: "Ball"
+    engine: "videomesh"
+    shape: "sphere"
+    seed: 2
+
+    detail: 40
+    size: 2.4
+    spread: 0.0
+    decks: 2
+    backdrop: 1
+    fly: 0.05
+    alt: 0.0
+
+    beat_pulse: 0.2
+    fog: 0.0
+    glow: 1.0
+
+    // Gallery/thumbnail preview sweep — in the VJ the host overrides p3
+    // with the real crossfader.
+    p3: "0.5 - 0.5*cos(6.28318*fract(beat/16.0))"
+
+    dials: [
+        {name: "ROLL", bind: "p0", default: 0.3},
+        {name: "ARC", bind: "p1", default: 0.4}
+    ]
+
+    color_bg: #x000000
+    color_a: #x40c8f0
+    color_b: #xe84f9a
+    color_c: #xffffff
+
+    // THE LOOK LIVES HERE — the whole transition: backdrop deck mix,
+    // ball flight, ball shading. t in fx_backdrop = the crossfader.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.0, 0.0, 1.0)
+        }
+        fx_scale: fn(id: float, hash: float, t: float) -> float {
+            let k = clamp(self.user.w, 0.0, 1.0)
+            return 4.0 * k * (1.0 - k) * (1.0 + self.time_beat.w * 0.05)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let k = clamp(self.user.w, 0.0, 1.0)
+            let x = (k * 2.0 - 1.0) * 3.4
+            let y = sin(3.14159 * k) * (0.1 + 1.0 * clamp(self.user.y, 0.0, 2.0)) - 0.3
+            let ang = 0.0 - k * (5.5 + 5.0 * clamp(self.user.x, 0.0, 2.0))
+            return vec4(x, y, 0.0, ang)
+        }
+        fx_backdrop: fn(uv: vec2, t: float) -> vec4 {
+            let m = smoothstep(0.22, 0.78, t)
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            return vec4(a.xyz.mix(b.xyz, m), 1.0)
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let sheen = self.col_c.xyz * pow(clamp(t - 0.9, 0.0, 1.0), 2.0) * 0.6
+            return vec4(content.xyz * (0.35 + 0.75 * t) + sheen, 1.0)
+        }
+    }
+}

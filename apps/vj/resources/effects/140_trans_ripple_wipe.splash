@@ -1,0 +1,28 @@
+// RIPPLE WIPE — an interference field of layered sine and cosine ripples
+// sweeps deck B in instead of a straight edge: pixels caught in a trough
+// reveal first, pixels riding a crest hold onto deck A longest. RATE
+// sets the ripple frequency, FLIP inverts which pixels go first.
+{
+    name: "Ripple Wipe"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.12},
+        {name: "RATE", bind: "p1", default: 0.4},
+        {name: "FLIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let p = vec2((uv.x - 0.5) * self.aspect(), uv.y - 0.5)
+            let r = length(p)
+            let freq = 4.0 + self.user.y * 16.0
+            let f1 = sin(r * freq * 6.283 - p.x * freq * 2.0)
+            let f2 = cos((p.x + p.y) * freq * 3.0)
+            let mut field = clamp(f1 * 0.3 + f2 * 0.3 + 0.5, 0.0, 1.0)
+            field = mix(field, 1.0 - field, step(0.5, self.user.z))
+            let soft = 0.01 + self.user.x * 0.3
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            return self.deck_b(uv).mix(self.deck_a(uv), m)
+        }
+    }
+}

@@ -1,0 +1,27 @@
+// BARN DOORS V — the same split as Barn Doors H, turned 90 degrees: deck
+// A's halves retreat toward the top and bottom edges while deck B blooms
+// outward from the horizontal centre seam. FLIP swaps the roles.
+{
+    name: "Barn Doors V"
+    engine: "transition"
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.1},
+        {name: "FLIP", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let field = abs(uv.y - 0.5) * 2.0
+            let soft = 0.005 + self.user.x * 0.2
+            let flip = step(0.5, self.user.y)
+            let tt = mix(t, 1.0 - t, flip)
+            let edge = tt * (1.0 + 2.0 * soft) - soft
+            let inside = smoothstep(edge + soft, edge - soft, field)
+            let cin = self.deck_b(uv).mix(self.deck_a(uv), flip)
+            let cout = self.deck_a(uv).mix(self.deck_b(uv), flip)
+            let c = cout.mix(cin, inside)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

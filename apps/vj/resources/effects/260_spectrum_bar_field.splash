@@ -1,0 +1,87 @@
+// SPECTRUM BAR FIELD — the plainest possible reading of the live sound,
+// and the reference for how a document uses the AUDIO PICTURE.
+//
+// Everything here comes from two shader helpers every family carries:
+//   self.audio_fft(f, age)  spectrum 0..1; f = log frequency 0..1
+//                           (0 = 30 Hz, 1 = 16 kHz), age = how far back
+//                           in time 0..1 (0 = now, 1 ~ 5.5 s ago)
+//   self.audio_wave(t)      waveform -1..1; t = 0..1 across ~1.4 s
+// plus self.audio_env = (bass, mid, high, rms), already smoothed.
+//
+// THE IDLE LAW: with nothing playing every helper reads 0. A look that
+// simply drew the reading would go black on a silent rig, so each preset
+// here floors its level with a small figure off the free-running beat
+// clock — loud audio always wins, silence still performs.
+{
+    name: "Spectrum Bar Field"
+    engine: "screen"
+    seed: 11
+
+    speed: 1.0
+    beat_pulse: 0.7
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "BARS", bind: "p1", default: 0.5},
+        {name: "TRAIL", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x04050c
+    color_a: #x2af0d0
+    color_b: #xff3d7f
+    color_c: #xfff2c8
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.2, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            // BARS quantises the 256 log bins into readable columns.
+            let bars = floor(20.0 + 76.0 * clamp(self.user.y, 0.0, 1.0))
+            let col = floor(uv.x * bars)
+            let f = (col + 0.5) / bars
+            let inbar = fract(uv.x * bars)
+
+            // The live reading, floored by an idle figure (see the header).
+            let idle = 0.05
+                + 0.045 * sin(f * 11.0 + self.time_beat.x * 1.3)
+                + 0.055 * self.time_beat.w
+            let gain = 0.55 + 1.1 * clamp(self.user.x, 0.0, 1.0)
+            let lvl = clamp(max(self.audio_fft(f, 0.0), idle) * gain, 0.0, 1.0)
+            // TRAIL: the same column a few hops back, drawn dim behind it —
+            // a decay that is a TEXTURE READ, never an accumulator.
+            let back = 0.015 + 0.16 * clamp(self.user.z, 0.0, 1.0)
+            let gh = clamp(max(self.audio_fft(f, back), idle * 0.7) * gain, 0.0, 1.0)
+
+            // uv.y is 0 at the top; height is measured from the floor.
+            let h = 1.0 - uv.y
+            let gap = smoothstep(0.0, 0.07, inbar) * smoothstep(0.0, 0.07, 1.0 - inbar)
+
+            let fill = smoothstep(0.0, 0.012, lvl - h) * gap
+            let ghost = smoothstep(0.0, 0.02, gh - h) * gap * 0.28
+            // The cap: a bright lid riding the top of each bar.
+            let cap = exp(0.0 - abs(h - lvl) * 110.0) * gap
+            // A dim mirrored copy hanging from the ceiling.
+            let mirror = smoothstep(0.0, 0.02, lvl * 0.40 - uv.y) * gap * 0.22
+
+            // Colour runs cold at the floor to hot at the cap.
+            let t = clamp(h / max(lvl, 0.06), 0.0, 1.0)
+            let body = self.col_a.xyz.mix(self.col_b.xyz, t)
+
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + body * (ghost + mirror)
+            rgb = rgb + body * fill
+            rgb = rgb + self.col_c.xyz * (cap * 1.25)
+            // A floor glow that reads the broadband level (audio_env.w),
+            // so even a look with no bars alive still shows the room.
+            let floorglow = exp(0.0 - h * 14.0) * (0.10 + 0.55 * self.audio_env.w)
+            rgb = rgb + self.col_a.xyz * floorglow
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

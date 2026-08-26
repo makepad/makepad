@@ -1,0 +1,42 @@
+// STRIP DELAY — the same trick stood on its end and scrambled: vertical
+// strips, each one catching up to the live frame in HASHED order rather
+// than left to right, so the picture reassembles in a shuffle every beat.
+//
+// Pattern taught here: `stagger` on the `hold` stage. At 0 the strips
+// release in position order (a clean rake); at 1 the release index is a
+// hash of the strip number, so the order is scrambled but FIXED — the same
+// strips always go first, which is what makes it read as a machine fault
+// rather than as noise. Everything still resolves inside one beat.
+{
+    name: "Strip Delay"
+    engine: "screen"
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.85
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DELAY", bind: "p0", default: 0.5},
+        {name: "STRIPS", bind: "p1", default: 0.5},
+        {name: "SCRAMBLE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x080310
+
+    stages: [
+        {
+            kind: "hold"
+            beats: 1
+            mix: "clamp(0.35 + p0 * 1.3, 0.0, 1.0)"
+            bands: "6.0 + 42.0 * p1"
+            stagger: "clamp(0.30 + p2 * 1.4, 0.0, 1.0)"
+            axis: "v"
+        },
+        {kind: "glitch", p1: 0.55, p2: "0.06 + 0.16 * pulse"},
+        {kind: "bloom", threshold: 0.7, strength: 0.85, levels: 3}
+    ]
+}

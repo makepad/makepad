@@ -1,0 +1,95 @@
+// VIDEO TORUS — the same drape wrapped on a plain ring instead of a knot:
+// a fat doughnut of video flown from the inside, so the clip comes round
+// again every lap. Steady, hypnotic, and it never surprises you — which is
+// what makes it the one you can leave up.
+//
+// Pattern taught here: the knot winding numbers make the SHAPE, and (1, 0)
+// is a circle. Nothing else about the family changes: `major` is the ring's
+// radius, `tube` the bore, and the drape hook does not care which curve it
+// is papering.
+{
+    name: "Video Torus"
+    engine: "tunnel"
+    seed: 11
+
+    knot_p: 1.0
+    knot_q: 0.0
+    major: 6.2
+    tube: 2.3
+    rings: 640
+    sides: 30
+    fly: 1.5
+    bands: 48.0
+
+    input0: "test"
+    content: 1.0
+
+    speed: 1.0
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    bar_beats: 4
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "COPIES", bind: "p0", default: 0.5},
+        {name: "GAIN", bind: "p1", default: 0.5},
+        {name: "BLOOM", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050208
+    color_a: #xffa8d8
+    color_b: #x50208a
+    color_c: #xffd0ee
+
+    fog: 0.045
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.84, strength: "0.35 + 0.8*p2", levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash,
+    // radius), content = the wall texel, cmix = the pre-gated content
+    // strength. `fx_color` runs in the VERTEX stage, `fx_wall` in the pixel
+    // stage — a fn called from one may never be called from the other.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        // The engine hands over a uv already scrolled with the flight; this
+        // drape re-tiles it (COPIES) and mirrors BOTH ways, so the ring is
+        // a seamless kaleidoscopic band whichever way you look along it.
+        fx_wall: fn(uv: vec2, content: vec4, cmix: float, ring: float) -> vec3 {
+            let copies = floor(1.0 + 3.0 * clamp(self.user.x, 0.0, 1.0) + 0.5)
+            let tu = fract(uv.x * copies)
+            let mu = vec2(
+                1.0 - abs(tu * 2.0 - 1.0),
+                1.0 - abs(uv.y * 2.0 - 1.0)
+            )
+            let texel = self.tex0.sample_as_bgra(mu)
+            let gain = (0.2 + 1.6 * clamp(self.user.y, 0.0, 1.0))
+                * (1.0 + 0.22 * self.time_beat.w)
+            let lum = clamp(dot(texel.xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
+            // A soft seam glow at every tile boundary ties the copies
+            // together instead of letting them look like a torn strip.
+            let seam = pow(1.0 - min(tu, 1.0 - tu) * 2.0, 12.0)
+            return texel.xyz * gain
+                + self.col_a.xyz * seam * 0.12
+                + self.col_c.xyz * ring * (0.06 + 0.22 * lum)
+        }
+
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3,
+                     content: vec4, cmix: float) -> vec4 {
+            // Bore-position gradient, warmed toward the clip's own colour.
+            let base = self.col_a.mix(self.col_b, t)
+            let tint = vec4(content.x, content.y, content.z, 1.0)
+            return base.mix(tint, clamp(cmix, 0.0, 1.0) * 0.35)
+        }
+    }
+}

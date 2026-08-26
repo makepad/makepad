@@ -1,0 +1,90 @@
+// ZOOM IN — deck B is a card far back in the room that RUSHES the camera
+// and lands flush on the frame. It is not a scale: the card is at a real
+// distance and its size is the perspective divide, so it grows the way
+// something coming at you grows — slow while it is far, then all at once.
+//
+// Pattern taught: the plane-in-3D helper (`plane_uv` below, the family's
+// shared block — the reference copy lives in the Perspective doc). Camera
+// at the origin looking down -z; the RAY and the EYE are pushed into the
+// plane's own frame by the transposed rotation, where the plane is z = 0
+// and one divide gives the hit. Distance enters as `d` alone, and d = 1
+// with no rotation returns `uv` EXACTLY — which is why the landing is deck
+// B to the pixel. The approach is geometric (d = depth^(1-t)) because a
+// linear one crawls in and then slams.
+{
+    name: "Zoom In"
+    engine: "transition"
+    p0: 0.5  p1: 0.5
+    dials: [
+        {name: "DEPTH", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        // ---- THE SHARED HELPER: one ray, one rotated video plane --------
+        // The plane is the rectangle of half-extents (aspect, 1) * 0.5/f
+        // whose HINGE sits at world (piv.x, piv.y, -d), spun about that
+        // hinge by the Euler angles `ang` (Rz then Ry then Rx, radians).
+        // Returns (plane u, plane v, on-quad 0/1, front-facing 0/1).
+        plane_uv: fn(uv: vec2, ang: vec3, piv: vec2, d: float, f: float) -> vec4 {
+            let a = self.aspect()
+            let c0 = cos(ang.x)
+            let s0 = sin(ang.x)
+            let c1 = cos(ang.y)
+            let s1 = sin(ang.y)
+            let c2 = cos(ang.z)
+            let s2 = sin(ang.z)
+            // The ray through this fragment (y up) and the eye, both
+            // measured from the hinge.
+            let rd = vec3((uv.x - 0.5) * a, 0.5 - uv.y, 0.0 - f)
+            let ro = vec3(0.0 - piv.x, 0.0 - piv.y, d)
+            let r1 = vec3(rd.x * c2 + rd.y * s2, rd.y * c2 - rd.x * s2, rd.z)
+            let o1 = vec3(ro.x * c2 + ro.y * s2, ro.y * c2 - ro.x * s2, ro.z)
+            let r2 = vec3(r1.x * c1 - r1.z * s1, r1.y, r1.x * s1 + r1.z * c1)
+            let o2 = vec3(o1.x * c1 - o1.z * s1, o1.y, o1.x * s1 + o1.z * c1)
+            let r3 = vec3(r2.x, r2.y * c0 + r2.z * s0, r2.z * c0 - r2.y * s0)
+            let o3 = vec3(o2.x, o2.y * c0 + o2.z * s0, o2.z * c0 - o2.y * s0)
+            // Intersect z = 0. A ray running parallel to the plane is
+            // NUDGED, never divided by zero — it lands far off the quad.
+            let den = r3.z + (1.0 - step(0.0001, abs(r3.z))) * 0.001
+            let k = 0.0 - o3.z / den
+            let hx = o3.x + k * r3.x + piv.x
+            let hy = o3.y + k * r3.y + piv.y
+            let pu = hx * f / a + 0.5
+            let pv = 0.5 - hy * f
+            let onq = step(0.0, pu) * step(pu, 1.0) * step(0.0, pv) * step(pv, 1.0)
+                * step(0.001, k)
+            return vec4(pu, pv, onq, step(0.0, o3.z))
+        }
+
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let tc = clamp(t, 0.0, 1.0)
+            // DEPTH: 4..18 units back. Geometric approach — equal ratios
+            // per unit of fader, which is what reads as constant speed.
+            let far = 4.0 + 14.0 * clamp(self.user.x, 0.0, 1.0)
+            let d = pow(far, 1.0 - tc)
+            // SPIN is bipolar: mid-knob = no roll, either side rolls the
+            // card in. Whatever it is, it unwinds to zero on landing.
+            let sp = (self.user.y - 0.5) * 2.6
+            // A vanishing lean, so the card is visibly a PLANE in a room
+            // on the way in and dead flush when it arrives.
+            let lean = (1.0 - tc) * 0.14
+            let an = vec3(lean, lean * 0.7, (1.0 - tc) * sp)
+            let p = self.plane_uv(uv, an, vec2(0.0, 0.0), d, 1.12)
+            // Guarantee the near end: nothing of B at t = 0.
+            let vis = p.z * smoothstep(0.0, 0.03, tc)
+            let cb = self.deck_b(vec2(p.x, p.y))
+            // The back face (only ever seen at extreme SPIN) is mirrored
+            // for free by the intersection; it is just dimmed.
+            let card = cb.xyz * mix(0.34, 1.0, p.w)
+            // A hairline rim so the card has an edge against deck A.
+            let ed = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y))
+            let rim = (1.0 - smoothstep(0.0, 0.006, ed)) * vis * (1.0 - tc)
+            let mut c = mix(self.deck_a(uv).xyz, card, vis)
+            c = c + vec3(1.0, 1.0, 1.0) * (rim * 0.4)
+            // DIP: duck through black mid-rush (0 = off, the stock look).
+            let dim = 1.0 - 4.0 * tc * (1.0 - tc) * self.user.z * 0.9
+            return vec4(c * dim, 1.0)
+        }
+    }
+}

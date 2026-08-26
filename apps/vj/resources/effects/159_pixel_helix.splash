@@ -1,0 +1,57 @@
+// PIXEL HELIX — every particle carries one texel of input0, wound onto a
+// spiral column: angle grows with the particle's own index, so the
+// picture reads as a climbing ribbon rather than a flat sheet.
+{
+    name: "Pixel Helix"
+    engine: "particles"
+    mode: "image"
+    seed: 159
+    input0: "test"
+
+    count: 12100
+    spread: 6.0
+    size: 0.09
+    rate: 0.0
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "TURNS", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "SPREAD", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "feedback", amount: "0.4 + 0.3*p1", zoom: 1.008, rotate: "(p1-0.5)*0.02", dim: 0.95},
+        {kind: "bloom", threshold: 0.55, strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program — angle
+    // is proportional to the particle's index, climbing a helix instead
+    // of sitting flat on the image grid. Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let n = w * w
+            let along = id / max(n, 1.0)
+            let turns = 2.0 + 10.0 * self.user.x
+            let ang = along * turns * 6.2831853 + self.time_beat.x * (0.08 + 0.7 * self.user.y)
+            let radius = spread * (0.25 + 0.55 * r0) * (0.4 + 1.3 * self.user.z)
+            let y = (along - 0.5) * spread * 1.4
+            return vec3(cos(ang) * radius, y, sin(ang) * radius)
+        }
+    }
+}

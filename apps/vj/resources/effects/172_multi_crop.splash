@@ -1,0 +1,30 @@
+// MULTI CROP — the same cropped window sampled again into a tiled grid:
+// N copies of one framing, breathing together on the beat.
+{
+    name: "Multi Crop"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WINDOW", bind: "p0", default: 0.5},
+        {name: "GRID", bind: "p1", default: 0.5},
+        {name: "PULSE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let cols = floor(mix(1.0, 6.0, self.user.y) + 0.5)
+            let cell = fract(uv * cols)
+            let winsz = (0.25 + 0.55 * self.user.x) * (1.0 - self.time_beat.w * 0.12 * (0.2 + 1.6 * self.user.z))
+            let lo = vec2(0.5, 0.5) - vec2(winsz, winsz) * 0.5
+            let src = lo + cell * winsz
+            let tex = self.tex0.sample_as_bgra(clamp(src, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}
