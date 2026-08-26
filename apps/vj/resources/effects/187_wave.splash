@@ -1,0 +1,35 @@
+// WAVE — a single sine displacement runs through the frame along one
+// steerable axis; DIR spins the axis, the crest travels on the beat.
+{
+    name: "Wave"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "AMP", bind: "p0", default: 0.5},
+        {name: "FREQ", bind: "p1", default: 0.5},
+        {name: "DIR", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let ang = self.user.z * 6.2831853
+            let dir = vec2(cos(ang), sin(ang))
+            let perp = vec2(-dir.y, dir.x)
+            let c = uv - vec2(0.5, 0.5)
+            let along = c.x * dir.x + c.y * dir.y
+            let freq = 6.0 + 34.0 * self.user.y
+            let phase = self.time_beat.y * 1.6
+            let amp = (0.01 + 0.05 * self.user.x) * (0.6 + 0.4 * self.time_beat.w)
+            let disp = sin(along * freq + phase) * amp
+            let w = uv + perp * disp
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

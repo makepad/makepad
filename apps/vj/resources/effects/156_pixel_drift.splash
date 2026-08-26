@@ -1,0 +1,61 @@
+// PIXEL DRIFT — every particle carries one texel of input0 and streams
+// steadily along one steerable heading, each texel's own phase offset so
+// the stream reads as a soft current rather than a lockstep scroll.
+{
+    name: "Pixel Drift"
+    engine: "particles"
+    mode: "image"
+    seed: 156
+    input0: "test"
+
+    count: 14400
+    spread: 6.0
+    size: 0.085
+    rate: 0.0
+
+    beat_pulse: "0.35 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DIRECTION", bind: "p0", default: 0.5},
+        {name: "SPEED", bind: "p1", default: 0.5},
+        {name: "SPAN", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: "1.1 * (0.25 + 1.5*p2)", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program. Every
+    // texel's HOME sits on the image-plane grid; this hook only decides
+    // where it drifts from there. Rewrite it and the current changes,
+    // everything else (geometry, the beat, the content coupling) keeps
+    // working because the block SUBCLASSES the engine shader.
+    // Params: mode/id/dir/t01/cyc/r0/r1 — see CONTRACT.md "particles".
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let gx = modf(id, w)
+            let gy = floor(id / w)
+            let home = vec3((gx / w - 0.5) * spread * 1.2, (0.5 - gy / w) * spread * 1.2, 0.0)
+            let angle = self.user.x * 6.2831853
+            let speed = 0.12 + 0.9 * self.user.y
+            let span = spread * (0.5 + 1.1 * self.user.z)
+            let drift_t = fract(fract(self.time_beat.x * speed) + r0) - 0.5
+            let stream = vec3(cos(angle), sin(angle), 0.0) * (drift_t * span)
+            return home + stream
+        }
+    }
+}

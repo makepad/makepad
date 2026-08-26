@@ -1,0 +1,28 @@
+// CHECKER TILES — a plain square grid where alternating cells flip on
+// opposite phases: half the checkerboard pops early in the sweep, the
+// other half late, so the frame reads as a checkerboard mid-transition.
+{
+    name: "Checker Tiles"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.2},
+        {name: "CELLS", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 5.0 + floor(self.user.y * 9.0)
+            let cx = floor(uv.x * n)
+            let cy = floor(uv.y * n)
+            let parity = modf(cx + cy, 2.0)
+            let field = 0.15 + parity * 0.55
+            let soft = 0.02 + self.user.x * 0.25
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

@@ -1,0 +1,44 @@
+// DITHER MULTIPLY — the multiply blend (145) revealed cell-by-cell
+// through the same 4x4 ordered-dither mask as Dither Fade: each cell
+// pops from plain A into A*B as the fader crosses its threshold, instead
+// of a smooth curve. The dither is a function of cell + fader only —
+// never a clock. GAIN pushes the multiplier, SIZE the cell density.
+{
+    name: "Dither Multiply"
+    engine: "transition"
+    engage: "ramp"
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "SIZE", bind: "p1", default: 0.35},
+        {name: "SOFT", bind: "p2", default: 0.12}
+    ]
+    shader: draw.DrawVjFxDuo {
+        b2: fn(x: float, y: float) -> float {
+            return 2.0 * x + 3.0 * y - 4.0 * x * y
+        }
+        bayer4: fn(cell: vec2) -> float {
+            let ix = modf(cell.x, 4.0)
+            let iy = modf(cell.y, 4.0)
+            let x0 = modf(ix, 2.0)
+            let y0 = modf(iy, 2.0)
+            let x1 = floor(ix / 2.0)
+            let y1 = floor(iy / 2.0)
+            let v = 4.0 * self.b2(x0, y0) + self.b2(x1, y1)
+            return (v + 0.5) / 16.0
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let gain = 0.5 + self.user.x * 1.5
+            let density = 24.0 + self.user.y * 120.0
+            let cx = floor(uv.x * density)
+            let cy = floor(uv.y * density / self.aspect())
+            let thr = self.bayer4(vec2(cx, cy))
+            let soft = 0.005 + self.user.z * 0.2
+            let gate = smoothstep(thr - soft, thr + soft, clamp(t, 0.0, 1.0))
+            let mult = a.xyz * clamp(b.xyz * gain, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let composite = a.xyz.mix(mult, gate)
+            return vec4(composite.x, composite.y, composite.z, 1.0)
+        }
+    }
+}

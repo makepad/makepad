@@ -1,0 +1,49 @@
+// TRAIL ADD — additive feedback trails with one explicit decay dial: no
+// hidden pulse/bar math driving the persistence, DECAY alone sets how
+// long a frame lingers before it's gone.
+{
+    name: "Trail Add"
+    engine: "screen"
+    seed: 208
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.3
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DECAY", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03040a
+    color_a: #x30ffd0
+    color_b: #xff3a86
+    color_c: #xfff0d0
+
+    stages: [
+        {kind: "feedback", amount: "0.35 + 0.6*p0", zoom: "1.006 + 0.02*p0",
+         rotate: "(p2-0.5)*0.05", dim: "0.88 + 0.11*p0"}
+    ]
+
+    // THE LOOK LIVES HERE: fx_color hot-boosts the scene before the
+    // feedback stage sees it — bright pixels burn extra hard so the
+    // additive trail reads as a hot streak rather than a soft wash.
+    // Inputs: uv, content = input0 at uv, cmix = pre-gated content
+    // strength. Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let luma = dot(content.xyz, vec3(0.299, 0.587, 0.114))
+            let boost = 1.0 + 1.2 * clamp(self.user.y, 0.0, 1.0)
+            let hot = vec3(1.0, 1.0, 1.0) * pow(clamp(luma, 0.0, 1.0), 4.0) * clamp(self.user.y, 0.0, 1.0) * 0.4
+            let rgb = content.xyz * boost + hot
+            return vec4(clamp(rgb, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), 1.0)
+        }
+    }
+}

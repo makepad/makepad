@@ -1,0 +1,49 @@
+// OCTA RING — ten small video octahedra strung on a slow carousel, every
+// stone tumbling on its own hashed axis and bobbing on a detuned sine, so
+// the ring glitters with staggered flashes of the clip. Pattern taught
+// here: leaving fx_axis at the engine default (a hashed per-instance axis)
+// while the doc owns only the carousel placement.
+{
+    name: "Octa Ring"
+    engine: "videomesh"
+    shape: "octahedron"
+    seed: 17
+
+    instances: 10
+    size: 1.15
+    spread: 3.6
+    fly: 0.8
+
+    beat_pulse: 0.4
+    input0: "test"
+
+    color_bg: #x060610
+    color_a: #xf0a840
+    color_b: #x40e8c0
+    color_c: #xfff0d8
+
+    fog: 0.02
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — carousel + tumble placement, facet fragment.
+    shader: draw.DrawVjFxVideomesh {
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let a = (id / 10.0 + t * 0.025) * 6.2831853
+            let r = self.shape.w
+            let y = 0.35 * sin(t * 0.5 + id)
+            let spin = t * (0.4 + hash * 0.7) * (1.0 + clamp(self.user.x, 0.0, 4.0))
+            return vec4(sin(a) * r, y, cos(a) * r, spin)
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, attr.x)
+            let lit = content.xyz * t + tint * 0.14
+            let rim = self.col_c.xyz * (1.0 - attr.z)
+                * (0.4 + self.time_beat.w * 1.0 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + rim) * self.fog.y, 1.0)
+        }
+    }
+}

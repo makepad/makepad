@@ -214,6 +214,24 @@ pub enum StageCfg {
     /// Fullscreen warp pass: kaleido, chroma, glitch… `p1`/`p2` meaning per
     /// mode (see the contract in mod.rs).
     Warp { mode: WarpMode, p1: Animatable, p2: Animatable },
+    /// FRAME LATCH: grab the incoming frame on a beat slot or a rising
+    /// trigger and hold it over the live one. `bands` > 1 indexes the hold
+    /// by position (rows, or columns with `axis: "v"`) and releases band by
+    /// band across the beat — a scanline/strip delay off ONE stored frame.
+    Hold {
+        /// Rising edge above 0.5 re-grabs (any binding: `"pulse"`, `"p0"`…).
+        trigger: Animatable,
+        /// Beats per automatic re-grab; 0 = only the trigger grabs.
+        beats: f32,
+        /// How much of the held frame shows, 0..1.
+        mix: Animatable,
+        /// 1 = plain freeze; >1 = positional delay bands.
+        bands: Animatable,
+        /// 0 = bands release in order, 1 = hashed order.
+        stagger: Animatable,
+        /// Bands run down the frame (false) or across it (true).
+        vertical: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +288,7 @@ pub fn engine_default_dials(engine: &str) -> Vec<DialDecl> {
         "forge" => vec![d("HEAT", 0, 0.5), d("RING", 1, 0.5), d("EMBER", 2, 0.5)],
         "copper" => vec![d("BARS", 0, 0.5), d("GLOW", 1, 0.5)],
         "tiles" => vec![d("DRIVE", 0, 0.0), d("WAVE", 1, 0.5), d("SHADE", 2, 0.5)],
+        "videomesh" => vec![d("SPIN", 0, 0.0), d("PUMP", 1, 0.0), d("EDGE", 2, 0.3)],
         "city" => vec![d("DENS", 0, 0.5), d("SPEED", 1, 0.5), d("GLOW", 2, 0.5)],
         "pipes" => vec![d("FRONT", 0, 0.0), d("HEAT", 1, 0.5), d("GLOW", 2, 0.5)],
         "stockcharts" => vec![d("GAIN", 0, 0.5), d("GLOW", 1, 0.5), d("PANIC", 2, 0.0)],
@@ -659,7 +678,7 @@ impl EffectDoc {
                     match TilesMode::parse(&mode) {
                         Some(m) => cfg.mode = m,
                         None => r.warnings.push(format!(
-                            "mode '{mode}' unknown (wave/shatter/conveyor/spiral)"
+                            "mode '{mode}' unknown (wave/shatter/conveyor/spiral/hook)"
                         )),
                     }
                 }
@@ -671,7 +690,54 @@ impl EffectDoc {
                 cfg.freq = r.f32(live_id!(freq), cfg.freq);
                 cfg.spin = r.f32(live_id!(spin), cfg.spin);
                 cfg.scatter = r.f32(live_id!(scatter), cfg.scatter);
+                cfg.extrude = r.f32(live_id!(extrude), cfg.extrude);
                 Engine::Tiles(TilesEngine::new(cfg))
+            }
+            "videomesh" => {
+                use super::engines_videomesh::{
+                    UvSplit, VideomeshCam, VideomeshConfig, VideomeshEngine, VideomeshShape,
+                };
+                let mut cfg = VideomeshConfig { seed, ..Default::default() };
+                if let Some(shape) = r.string(live_id!(shape)) {
+                    match VideomeshShape::parse(&shape) {
+                        Some(sh) => cfg.shape = sh,
+                        None => r.warnings.push(format!(
+                            "shape '{shape}' unknown (box/sphere/torus/disc/cylinder/capsule/\
+                             octahedron/star_prism/facets/grid/corridor)"
+                        )),
+                    }
+                }
+                cfg.instances = r
+                    .usize(live_id!(instances), cfg.instances)
+                    .clamp(1, super::engines_videomesh::MAX_INSTANCES);
+                cfg.size = r.f32(live_id!(size), cfg.size);
+                cfg.spread = r.f32(live_id!(spread), cfg.spread);
+                cfg.detail = r.usize(live_id!(detail), cfg.detail).clamp(4, 64);
+                cfg.points = r.usize(live_id!(points), cfg.points).clamp(3, 12);
+                cfg.aspect = r.f32(live_id!(aspect), cfg.aspect);
+                cfg.spin = r.f32(live_id!(spin), cfg.spin);
+                cfg.relief = r.f32(live_id!(relief), cfg.relief).clamp(0.0, 4.0);
+                if let Some(split) = r.string(live_id!(uv_split)) {
+                    match UvSplit::parse(&split) {
+                        Some(sp) => cfg.split = sp,
+                        None => r.warnings.push(format!(
+                            "uv_split '{split}' unknown (none/bands_x/bands_y/cells)"
+                        )),
+                    }
+                }
+                if let Some(cam) = r.string(live_id!(cam)) {
+                    match VideomeshCam::parse(&cam) {
+                        Some(c) => cfg.cam = Some(c),
+                        None => r
+                            .warnings
+                            .push(format!("cam '{cam}' unknown (orbit/inside/corridor)")),
+                    }
+                }
+                cfg.fly = r.f32(live_id!(fly), cfg.fly);
+                cfg.alt = r.f32(live_id!(alt), cfg.alt);
+                cfg.backdrop = r.f32(live_id!(backdrop), cfg.backdrop);
+                cfg.decks = r.usize(live_id!(decks), cfg.decks).clamp(1, 2);
+                Engine::VideoMesh(VideomeshEngine::new(cfg))
             }
             "flock" | "murmuration" => {
                 use super::engines_flock::{FlockConfig, FlockEngine};
@@ -835,8 +901,8 @@ impl EffectDoc {
                 return Err(format!(
                     "engine '{other}' unknown — one of particles, lsystem, metaballs, \
                      heightmap, ribbons, tunnel, grass, emitters, firefly, harmonograph, \
-                     domino, forge, copperbars, tiles, flock, raymarch, mountainjet, city, \
-                     pipes, stockcharts, simswarm, fluid, screen"
+                     domino, forge, copperbars, tiles, videomesh, flock, raymarch, \
+                     mountainjet, city, pipes, stockcharts, simswarm, fluid, screen"
                 ));
             }
         };
@@ -961,6 +1027,32 @@ impl EffectDoc {
                     width: r.anim(live_id!(width), 0.25),
                     levels: r.usize(live_id!(levels), 3).clamp(1, 4),
                 }),
+                "hold" | "freeze" => {
+                    // `axis` is static (it selects a shader branch, not a
+                    // value), everything else is animatable like every
+                    // other stage parameter.
+                    let vertical = match r.string(live_id!(axis)) {
+                        None => false,
+                        Some(a) => match a.as_str() {
+                            "h" | "rows" | "horizontal" => false,
+                            "v" | "cols" | "columns" | "vertical" => true,
+                            other => {
+                                r.warnings.push(format!(
+                                    "hold axis '{other}' unknown (h/v) — using h"
+                                ));
+                                false
+                            }
+                        },
+                    };
+                    stages.push(StageCfg::Hold {
+                        trigger: r.anim(live_id!(trigger), 0.0),
+                        beats: r.f32(live_id!(beats), 4.0).clamp(0.0, 64.0),
+                        mix: r.anim(live_id!(mix), 1.0),
+                        bands: r.anim(live_id!(bands), 1.0),
+                        stagger: r.anim(live_id!(stagger), 0.0),
+                        vertical,
+                    });
+                }
                 other => match warp_kind(other) {
                     Some(mode) => stages.push(StageCfg::Warp {
                         mode,
@@ -968,9 +1060,9 @@ impl EffectDoc {
                         p2: r.anim(live_id!(p2), 0.5),
                     }),
                     None => r.warnings.push(format!(
-                        "stage kind '{other}' unknown (feedback/bloom/blur/kaleido/mirror/\
-                         chroma/pixelate/swirl/ripple/glitch/posterize/radial_blur/warp_tunnel) \
-                         — skipped"
+                        "stage kind '{other}' unknown (feedback/bloom/blur/tiltshift/hold/\
+                         kaleido/mirror/chroma/pixelate/swirl/ripple/glitch/posterize/\
+                         radial_blur/warp_tunnel) — skipped"
                     )),
                 },
             }

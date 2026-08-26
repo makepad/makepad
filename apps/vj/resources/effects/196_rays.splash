@@ -1,0 +1,37 @@
+// RAYS — a starburst of light streaks fans out of a movable origin and
+// adds onto the picture; the comb of rays pulses with the beat.
+{
+    name: "Rays"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "COUNT", bind: "p0", default: 0.5},
+        {name: "STRENGTH", bind: "p1", default: 0.5},
+        {name: "DRIFT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let speed = 0.1 + 0.5 * self.user.z
+            let ox = 0.5 + 0.3 * cos(self.time_beat.x * speed)
+            let oy = 0.5 + 0.24 * sin(self.time_beat.x * speed * 0.8)
+            let origin = vec2(ox, oy)
+            let d = uv - origin
+            let r = length(d)
+            let ang = atan2(d.y, d.x)
+            let n = 4.0 + 26.0 * self.user.x
+            let comb = pow(abs(cos(ang * n * 0.5 + self.time_beat.y * 0.03)), 10.0)
+            let falloff = clamp(1.0 - r * 1.1, 0.0, 1.0)
+            let strength = (0.4 + 1.8 * self.user.y) * (0.5 + 0.5 * self.time_beat.w)
+            let rays = comb * falloff * falloff * strength
+            let out = content.xyz + vec3(1.0, 0.95, 0.85) * rays
+            return vec4(out, 1.0)
+        }
+    }
+}

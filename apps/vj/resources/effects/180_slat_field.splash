@@ -1,0 +1,39 @@
+// SLAT FIELD — the frame sliced into a rotatable grating of thin slats;
+// each slat shifts sideways by its own hashed amount, a jittered blind.
+{
+    name: "Slat Field"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "AMOUNT", bind: "p0", default: 0.5},
+        {name: "SIZE", bind: "p1", default: 0.5},
+        {name: "ANGLE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let pi = 3.14159265
+            let ang = (self.user.z - 0.5) * pi * 0.5
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let c = uv - vec2(0.5, 0.5)
+            let rc = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs)
+            let size = mix(0.012, 0.11, self.user.y)
+            let idx = floor(rc.y / size)
+            let h = fract(sin(idx * 12.9898 + 7.0) * 43758.5453)
+            let amount = 0.02 + 0.11 * self.user.x
+            let disp = (h - 0.5) * 2.0 * amount
+            let rc2 = vec2(rc.x + disp, rc.y)
+            let c2 = vec2(rc2.x * cs + rc2.y * sn, -rc2.x * sn + rc2.y * cs)
+            let w = c2 + vec2(0.5, 0.5)
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

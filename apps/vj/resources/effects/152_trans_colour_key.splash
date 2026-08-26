@@ -1,0 +1,47 @@
+// COLOUR KEY — deck B replaces deck A wherever B is near a chosen KEY
+// COLOUR, matched by straight RGB distance rather than hue alone (the
+// hue-only match is Chroma Key at 108 — this one also weighs brightness
+// and saturation, so a dim or washed-out pixel near the same hue is left
+// alone). HUE picks the key colour, TOL the RGB-distance tolerance, SOFT
+// the matte edge.
+{
+    name: "Colour Key"
+    engine: "transition"
+    engage: "ramp"
+    dials: [
+        {name: "HUE", bind: "p0", default: 0.33},
+        {name: "TOL", bind: "p1", default: 0.35},
+        {name: "SOFT", bind: "p2", default: 0.2}
+    ]
+    shader: draw.DrawVjFxDuo {
+        key_rgb: fn(h: float) -> vec3 {
+            let hh = fract(h) * 6.0
+            let x = 1.0 - abs(modf(hh, 2.0) - 1.0)
+            let mut c = vec3(1.0, 0.0, 0.0)
+            if hh < 1.0 {
+                c = vec3(1.0, x, 0.0)
+            } else if hh < 2.0 {
+                c = vec3(x, 1.0, 0.0)
+            } else if hh < 3.0 {
+                c = vec3(0.0, 1.0, x)
+            } else if hh < 4.0 {
+                c = vec3(0.0, x, 1.0)
+            } else if hh < 5.0 {
+                c = vec3(x, 0.0, 1.0)
+            } else {
+                c = vec3(1.0, 0.0, x)
+            }
+            return c
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let target = self.key_rgb(self.user.x)
+            let dist = length(b.xyz - target)
+            let tol = 0.05 + self.user.y * 0.7
+            let soft = 0.01 + self.user.z * 0.25
+            let matte = smoothstep(tol - soft, tol + soft, dist)
+            return a.mix(b, matte * t)
+        }
+    }
+}

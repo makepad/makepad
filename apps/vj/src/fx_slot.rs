@@ -56,7 +56,9 @@ script_mod! {
             let p = self.pos * self.rect_size
             let sdf = Sdf2d.viewport(p)
             let acc = vec3(0.243, 0.878, 0.690)
-            let r = 7.0
+            // ONE RADIUS: the mode dropdown's corner (theme 2.5) is the
+            // app's canonical small-chrome rounding.
+            let r = 2.5
             sdf.box(1.0, 1.0, w - 2.0, h - 2.0, r)
             // Loaded: the live picture, dimmed under bypass, with a darkened
             // band at the bottom so the name always reads.
@@ -535,6 +537,13 @@ impl VjFxSlotHost {
 
     pub fn set_signals(&mut self, audio: [f32; 4]) {
         self.fx.set_signals(audio);
+    }
+
+    /// THE AUDIO PICTURE (effects/audio_tex.rs): the live spectrogram +
+    /// waveform texture every engine's shaders sample, plus the four
+    /// binding levels derived from the same analysis.
+    pub fn set_audio(&mut self, binding: Option<crate::effects::audio_tex::AudioBinding>) {
+        self.fx.set_audio(binding);
     }
 
     pub fn set_speed(&mut self, scale: f32) {

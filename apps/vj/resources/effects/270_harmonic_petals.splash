@@ -1,0 +1,89 @@
+// HARMONIC PETALS — a flower whose outline IS the spectrum. The petal
+// boundary at each angle is the magnitude of the band that angle owns, and
+// four older outlines sit inside it, so the bloom opens and closes with
+// the arrangement rather than with a timer.
+//
+// Pattern taught: an SDF built from a texture read. Once the boundary is a
+// function of angle, everything else (fill, edge, shadow) is the usual
+// distance-field toolkit — and it stays bounded because the reading is.
+{
+    name: "Harmonic Petals"
+    engine: "screen"
+    seed: 33
+
+    speed: 1.0
+    beat_pulse: 0.65
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.05
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PETALS", bind: "p0", default: 0.5},
+        {name: "OPEN", bind: "p1", default: 0.5},
+        {name: "LAYERS", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x060310
+    color_a: #xff58c8
+    color_b: #x50e0ff
+    color_c: #xfff0a8
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.25, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // Petal boundary radius at this angle for one history layer.
+        bound: fn(ang: float, age: float, petals: float, open: float) -> float {
+            // Each petal spans one fold of the frequency axis.
+            let w = fract(ang * petals)
+            let f = 1.0 - abs(w * 2.0 - 1.0)
+            let lvl = self.audio_fft(f, age)
+            let idle = 0.10 + 0.07 * sin(f * 6.0 + self.time_beat.x * 1.2 + age * 9.0)
+            let m = max(lvl, idle)
+            // The notch between petals: the boundary pinches to almost
+            // nothing at the seam, which is what makes them petals.
+            let pinch = pow(sin(w * 3.1415927), 0.55)
+            return (0.10 + open * m) * pinch + 0.045
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = length(p)
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5 + modf(self.time_beat.x * 0.035, 1.0)
+
+            let petals = floor(4.0 + 10.0 * clamp(self.user.x, 0.0, 1.0))
+            let open = 0.16 + 0.42 * clamp(self.user.y, 0.0, 1.0)
+            let layers = clamp(self.user.z, 0.0, 1.0)
+
+            let b0 = self.bound(ang, 0.0, petals, open)
+            let b1 = self.bound(ang, 0.05 + 0.18 * layers, petals, open * 0.80)
+            let b2 = self.bound(ang, 0.11 + 0.34 * layers, petals, open * 0.62)
+            let b3 = self.bound(ang, 0.19 + 0.52 * layers, petals, open * 0.46)
+
+            let mut rgb = self.col_bg.xyz
+            // Back to front, each layer a little hotter.
+            let f3 = smoothstep(0.004, 0.0, r - b3)
+            let f2 = smoothstep(0.004, 0.0, r - b2)
+            let f1 = smoothstep(0.004, 0.0, r - b1)
+            let f0 = smoothstep(0.004, 0.0, r - b0)
+            rgb = rgb.mix(self.col_b.xyz * 0.35, f0 * 0.55)
+            rgb = rgb.mix(self.col_a.xyz * 0.55, f1 * 0.55)
+            rgb = rgb.mix(self.col_a.xyz * 0.85, f2 * 0.60)
+            rgb = rgb.mix(self.col_c.xyz * 0.75, f3 * 0.65)
+
+            // Hot rims on every boundary: this is what makes it read.
+            rgb = rgb + self.col_c.xyz * (exp(0.0 - abs(r - b0) * 150.0) * 0.9)
+            rgb = rgb + self.col_a.xyz * (exp(0.0 - abs(r - b1) * 180.0) * 0.5)
+            rgb = rgb + self.col_b.xyz * (exp(0.0 - abs(r - b2) * 200.0) * 0.35)
+
+            // The stamen: live broadband level, punched by the beat.
+            rgb = rgb + self.col_c.xyz
+                * (exp(0.0 - r * 34.0) * (0.12 + 0.8 * self.audio_env.w)
+                   * (0.7 + 0.6 * self.time_beat.w))
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

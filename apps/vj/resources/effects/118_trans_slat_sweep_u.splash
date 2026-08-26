@@ -1,0 +1,28 @@
+// SLAT SWEEP U — the frame splits into vertical slats; every slat fills
+// from the bottom upward at once, deck B rising behind deck A like a
+// bank of level meters. COUNT sets the slat count.
+{
+    name: "Slat Sweep U"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.15},
+        {name: "COUNT", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 5.0 + floor(self.user.y * 15.0)
+            let cell = fract(uv.x * n)
+            let soft = 0.01 + self.user.x * 0.25
+            let field = 1.0 - uv.y
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let seam = smoothstep(0.0, 0.04, cell) * smoothstep(0.0, 0.04, 1.0 - cell)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dip = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            let dim = dip * (0.82 + 0.18 * seam)
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

@@ -27,6 +27,7 @@ use super::engines_pipes::PipesEngine;
 use super::engines_duo::DuoEngine;
 use super::engines_raymarch::RaymarchEngine;
 use super::engines_tiles::TilesEngine;
+use super::engines_videomesh::VideomeshEngine;
 use super::lsys;
 use super::mesh::{FxMesh, FxRng};
 use makepad_widgets::*;
@@ -60,6 +61,9 @@ pub enum ShaderKind {
     Copper,
     /// Textured tile grid sampling input0 per tile (engines_tiles).
     Tiles,
+    /// Live video on parametric 3D shapes, doc-placed instances; tex1
+    /// bound too for the two-deck variant (engines_videomesh).
+    VideoMesh,
     /// Oriented glider triangles, wing flap in the VS (engines_flock).
     Flock,
     /// Fullscreen SDF raymarcher, scene = subclassable shader hook
@@ -1479,6 +1483,8 @@ pub enum Engine {
     Forge(ForgeEngine),
     Copper(CopperEngine),
     Tiles(TilesEngine),
+    /// Video-textured parametric shapes (engines_videomesh).
+    VideoMesh(VideomeshEngine),
     Flock(FlockEngine),
     Raymarch(RaymarchEngine),
     /// Two-deck transition compositor (engines_duo).
@@ -1511,6 +1517,7 @@ impl Engine {
             Engine::Forge(_) => ShaderKind::Forge,
             Engine::Copper(_) => ShaderKind::Copper,
             Engine::Tiles(_) => ShaderKind::Tiles,
+            Engine::VideoMesh(_) => ShaderKind::VideoMesh,
             Engine::Flock(_) => ShaderKind::Flock,
             Engine::Raymarch(_) => ShaderKind::Raymarch,
             Engine::Duo(_) => ShaderKind::Duo,
@@ -1542,6 +1549,7 @@ impl Engine {
             Engine::Forge(_) => "forge",
             Engine::Copper(_) => "copperbars",
             Engine::Tiles(_) => "tiles",
+            Engine::VideoMesh(_) => "videomesh",
             Engine::Flock(_) => "flock",
             Engine::Raymarch(_) => "raymarch",
             Engine::MountainJet(_) => "mountainjet",
@@ -1684,6 +1692,15 @@ impl Engine {
                 e.build(mesh);
                 true
             }
+            Engine::VideoMesh(e) => {
+                if e.built {
+                    return false;
+                }
+                e.built = true;
+                mesh.clear();
+                e.build(mesh);
+                true
+            }
             Engine::Flock(e) => {
                 if !e.warmed {
                     // Pre-roll so the first visible frame is a formed flock.
@@ -1775,6 +1792,7 @@ impl Engine {
             Engine::Forge(e) => e.uniforms(),
             Engine::Copper(e) => e.uniforms(),
             Engine::Tiles(e) => e.uniforms(),
+            Engine::VideoMesh(e) => e.uniforms(),
             Engine::Flock(e) => e.uniforms(),
             Engine::Raymarch(e) => e.uniforms(),
             Engine::Duo(e) => e.uniforms(),
@@ -1793,6 +1811,7 @@ impl Engine {
         match self {
             Engine::Tunnel(e) => Some(e.camera(time)),
             Engine::Tiles(e) => Some(e.camera(time)),
+            Engine::VideoMesh(e) => Some(e.camera(time)),
             Engine::City(e) => Some(e.camera(time)),
             _ => None,
         }

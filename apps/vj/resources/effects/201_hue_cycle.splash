@@ -1,0 +1,97 @@
+// HUE CYCLE — the whole frame's hue slides continuously (or steps through
+// a fixed-size palette) while saturation and brightness stay untouched,
+// so the picture keeps its shape and only repaints its colour.
+{
+    name: "Hue Cycle"
+    engine: "screen"
+    seed: 201
+    input0: "test"
+
+    speed: 1.0
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "MODE", bind: "p0", default: 0.5},
+        {name: "SHIFT", bind: "p1", default: 0.5},
+        {name: "COUNT", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x03040a
+    color_a: #x30ffd0
+    color_b: #xff3a86
+    color_c: #xfff0d0
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.0, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: the whole frame is this function. MODE blends
+    // between a continuous hue rotation and a stepped N-colour palette;
+    // SHIFT is the rotation speed, COUNT the palette size in stepped mode.
+    // Inputs: uv, content = input0 at uv, cmix = pre-gated content
+    // strength. Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxScreen {
+        rgb2hsv: fn(c: vec3) -> vec3 {
+            let hi = max(c.x, max(c.y, c.z))
+            let lo = min(c.x, min(c.y, c.z))
+            let d = hi - lo
+            let mut h = 0.0
+            if d < 0.0001 {
+                h = 0.0
+            } else if hi == c.x {
+                h = modf((c.y - c.z) / d + 6.0, 6.0) / 6.0
+            } else if hi == c.y {
+                h = ((c.z - c.x) / d + 2.0) / 6.0
+            } else {
+                h = ((c.x - c.y) / d + 4.0) / 6.0
+            }
+            let mut s = 0.0
+            if hi > 0.0001 {
+                s = d / hi
+            }
+            return vec3(h, s, hi)
+        }
+        hsv2rgb: fn(h: float, s: float, v: float) -> vec3 {
+            let hh = fract(h) * 6.0
+            let i = floor(hh)
+            let f = hh - i
+            let p = v * (1.0 - s)
+            let q = v * (1.0 - s * f)
+            let t = v * (1.0 - s * (1.0 - f))
+            if i < 0.5 {
+                return vec3(v, t, p)
+            }
+            if i < 1.5 {
+                return vec3(q, v, p)
+            }
+            if i < 2.5 {
+                return vec3(p, v, t)
+            }
+            if i < 3.5 {
+                return vec3(p, q, v)
+            }
+            if i < 4.5 {
+                return vec3(t, p, v)
+            }
+            return vec3(v, p, q)
+        }
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let hsv = self.rgb2hsv(content.xyz)
+            let speed = 0.06 + 0.5 * self.user.y
+            let flow = fract(self.time_beat.x * speed)
+            let steps = floor(2.0 + 10.0 * clamp(self.user.z, 0.0, 1.0))
+            let stepped = floor(hsv.x * steps) / steps
+            let mode = clamp(self.user.x, 0.0, 1.0)
+            let base_h = mix(stepped, hsv.x, mode)
+            let h = fract(base_h + flow)
+            let rgb = self.hsv2rgb(h, hsv.y, hsv.z)
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

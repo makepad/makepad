@@ -1,0 +1,40 @@
+// DITHER FADE — a stippled crossfade: deck B pops in cell-by-cell through
+// a classic 4x4 ordered-dither (Bayer) threshold, instead of a smooth
+// gradient edge. The dither is a pure function of the PIXEL CELL and the
+// FADER POSITION — never a clock, so a parked fader holds one stable
+// stipple, not a flicker. SIZE sets the cell density, SOFT feathers each
+// cell's pop, FLIP reverses which cells go first.
+{
+    name: "Dither Fade"
+    engine: "transition"
+    dials: [
+        {name: "SIZE", bind: "p0", default: 0.35},
+        {name: "SOFT", bind: "p1", default: 0.12},
+        {name: "FLIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        b2: fn(x: float, y: float) -> float {
+            return 2.0 * x + 3.0 * y - 4.0 * x * y
+        }
+        bayer4: fn(cell: vec2) -> float {
+            let ix = modf(cell.x, 4.0)
+            let iy = modf(cell.y, 4.0)
+            let x0 = modf(ix, 2.0)
+            let y0 = modf(iy, 2.0)
+            let x1 = floor(ix / 2.0)
+            let y1 = floor(iy / 2.0)
+            let v = 4.0 * self.b2(x0, y0) + self.b2(x1, y1)
+            return (v + 0.5) / 16.0
+        }
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let density = 24.0 + self.user.x * 120.0
+            let cx = floor(uv.x * density)
+            let cy = floor(uv.y * density / self.aspect())
+            let mut thr = self.bayer4(vec2(cx, cy))
+            thr = mix(thr, 1.0 - thr, step(0.5, self.user.z))
+            let soft = 0.005 + self.user.y * 0.2
+            let m = smoothstep(thr - soft, thr + soft, clamp(t, 0.0, 1.0))
+            return self.deck_a(uv).mix(self.deck_b(uv), m)
+        }
+    }
+}

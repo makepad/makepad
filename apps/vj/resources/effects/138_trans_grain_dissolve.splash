@@ -1,0 +1,29 @@
+// GRAIN DISSOLVE — the frame breaks into a fine cell grid and each cell
+// pops to deck B at its own hashed moment, so the dissolve reads as
+// random film grain rather than a smooth fade. GRAIN sets the cell
+// density.
+{
+    name: "Grain Dissolve"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.1},
+        {name: "GRAIN", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 24.0 + floor(self.user.y * 56.0)
+            let cx = floor(uv.x * n)
+            let cy = floor(uv.y * n * 0.5625)
+            let h = cx * 12.9898 + cy * 78.233 + 3.0
+            let field = fract(sin(h) * 43758.5453)
+            let soft = 0.01 + self.user.x * 0.25
+            let tt = t * (1.0 + 2.0 * soft) - soft
+            let m = smoothstep(tt - soft, tt + soft, field)
+            let c = self.deck_b(uv).mix(self.deck_a(uv), m)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

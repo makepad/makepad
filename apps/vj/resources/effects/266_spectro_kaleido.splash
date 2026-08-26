@@ -1,0 +1,81 @@
+// SPECTRO KALEIDO — the spectrogram itself as stained glass. Radius is
+// frequency, angle is time, and the polar plane is folded into wedges, so
+// the last few seconds of sound become a mandala that turns over as it
+// plays.
+//
+// Pattern taught: reading the audio texture on BOTH axes at once. Most
+// looks read one instant (age 0) or one bin; this one uses the ring as a
+// two-dimensional image, which is exactly what it is.
+{
+    name: "Spectro Kaleido"
+    engine: "screen"
+    seed: 13
+
+    speed: 1.0
+    beat_pulse: 0.55
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WEDGES", bind: "p0", default: 0.5},
+        {name: "DEPTH", bind: "p1", default: 0.5},
+        {name: "TURN", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05040f
+    color_a: #x24f0a8
+    color_b: #xff2f9c
+    color_c: #xffe27a
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.2, levels: 3},
+        {kind: "mirror", p1: 0.5, p2: 0.5}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = length(p)
+            let turn = (clamp(self.user.z, 0.0, 1.0) - 0.5) * 0.7
+            let raw = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * turn, 1.0)
+
+            // Fold the circle into WEDGES, then mirror inside each one.
+            let wedges = floor(3.0 + 9.0 * clamp(self.user.x, 0.0, 1.0))
+            let w = fract(raw * wedges)
+            let folded = 1.0 - abs(w * 2.0 - 1.0)
+
+            // Radius -> frequency (low in the middle), wedge -> time.
+            let f = clamp(r * 1.9, 0.0, 1.0)
+            let depth = 0.10 + 0.85 * clamp(self.user.y, 0.0, 1.0)
+            let age = clamp(folded * depth, 0.0, 1.0)
+
+            let lvl = self.audio_fft(f, age)
+            // Idle: a slow moire that any real spectrum overwrites.
+            let idle = 0.06 + 0.05 * sin(f * 21.0 + folded * 12.0 - self.time_beat.x * 1.1)
+            let v = max(lvl, idle)
+
+            // Glass: hard steps between level bands so it reads as panes,
+            // with the seam between panes drawn as lead.
+            let panes = 7.0
+            let step_v = floor(v * panes) / panes
+            let seam = smoothstep(0.0, 0.03, abs(v * panes - floor(v * panes) - 0.5) - 0.44)
+
+            let hue = fract(step_v * 1.7 + age * 0.6)
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, hue)
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + tint * (0.25 + 1.35 * step_v)
+            rgb = rgb + self.col_c.xyz * (seam * 0.35 * v)
+            // The centre pane holds the live low end, so the mandala has a
+            // heart that moves with the track.
+            rgb = rgb + self.col_c.xyz
+                * (exp(0.0 - r * 13.0) * (0.10 + 0.7 * self.audio_env.x))
+            // Edge falloff so the corners do not stretch the wedge seams.
+            let vig = 1.0 - 0.55 * smoothstep(0.4, 1.0, r)
+            return vec4(rgb * vig * self.fog.y, 1.0)
+        }
+    }
+}

@@ -55,7 +55,7 @@
             d = self.smin(d, length(p - c3) - (0.56 + swell), 1.05)
             d = self.smin(d, length(p - c4) - (0.50 + swell), 1.05)
             // Material bands slide up the blobs with the beat count.
-            let m = fract(p.y * 0.30 + self.time_beat.y * 0.02)
+            let m = fract(p.y * 0.30 + fract(self.time_beat.y * 0.02))
             return vec2(d, m)
         }
     }
