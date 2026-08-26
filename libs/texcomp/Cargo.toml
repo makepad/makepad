@@ -1,0 +1,8 @@
+[package]
+name = "makepad-texcomp"
+version = "0.1.0"
+edition = "2021"
+description = "Texture compression: block codecs and the KTX2 container, in safe Rust with no dependencies"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
