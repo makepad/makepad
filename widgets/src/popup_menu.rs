@@ -22,6 +22,8 @@ script_mod! {
             hover: instance(0.0)
             disabled: instance(0.0)
 
+            ink_centered: true
+
             color: theme.color_label_inner
             color_hover: uniform(theme.color_label_inner_hover)
             color_active: uniform(theme.color_label_inner_active)

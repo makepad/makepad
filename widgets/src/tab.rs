@@ -18,7 +18,10 @@ script_mod! {
         height: max(theme.tab_height, 23.)
 
         align: Align{x: 0.0, y: 0.5}
-        padding: theme.mspace_3{top: theme.space_2 * 1.2}
+        // Symmetric padding: the label used to be pulled up by a lighter top
+        // padding to fake optical centering, which stacked with the line-box
+        // bias instead of cancelling it. `ink_centered` below does the job.
+        padding: theme.mspace_3
         margin: Inset{right: theme.space_1, top: theme.space_1}
 
         close_button: TabCloseButton{}
@@ -26,6 +29,8 @@ script_mod! {
         draw_text +: {
             hover: instance(0.0)
             active: instance(0.0)
+
+            ink_centered: true
 
             text_style: theme.font_regular{
                 font_size: theme.font_size_p

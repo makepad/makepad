@@ -90,6 +90,9 @@ pub struct Tip {
     /// The tip text. State-aware hosts update it with `set_text`.
     #[live]
     pub text: String,
+    /// Whether the pointer is over the wrapped child right now.
+    #[rust]
+    hovered: bool,
 }
 
 impl Widget for Tip {
@@ -98,20 +101,44 @@ impl Widget for Tip {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The wrapper cannot hit-test for hover itself: the child it wraps
+        // claims the pointer first, and `Event::hits` answers hover only to
+        // the claiming area. So use the claim itself — snapshot it around the
+        // subtree dispatch (the documented `pointer_claimed_area` idiom): a
+        // claim that appeared across it is the child under the pointer. This
+        // also keeps tips honest under a modal grab (an open menu's
+        // `sweep_lock`): a locked-out child claims nothing, so no tip.
+        let claimed_before = if let Event::MouseMove(_) = event {
+            event.pointer_claimed_area()
+        } else {
+            Area::Empty
+        };
         self.view.handle_event(cx, event, scope);
         if self.text.is_empty() {
             return;
         }
         let uid = self.widget_uid();
-        match event.hits_with_capture_overload(cx, self.view.area(), true) {
-            Hit::FingerHoverIn(_) => {
-                // The FINAL rect, straight from the drawn area — the one
-                // positioning source the overlay law allows.
-                let rect = self.view.area().rect(cx);
-                cx.widget_action(uid, TipAction::HoverIn(self.text.clone(), rect));
+        match event {
+            Event::MouseMove(_) => {
+                let claimed_after = event.pointer_claimed_area();
+                let over = claimed_after != claimed_before && !claimed_after.is_empty();
+                if over != self.hovered {
+                    self.hovered = over;
+                    if over {
+                        // The FINAL rect, straight from the drawn area — the
+                        // one positioning source the overlay law allows.
+                        let rect = self.view.area().rect(cx);
+                        cx.widget_action(uid, TipAction::HoverIn(self.text.clone(), rect));
+                    } else {
+                        cx.widget_action(uid, TipAction::HoverOut);
+                    }
+                }
             }
-            Hit::FingerHoverOut(_) | Hit::FingerDown(_) => {
-                cx.widget_action(uid, TipAction::HoverOut);
+            Event::MouseLeave(_) | Event::ClearHover => {
+                if self.hovered {
+                    self.hovered = false;
+                    cx.widget_action(uid, TipAction::HoverOut);
+                }
             }
             _ => {}
         }
@@ -246,9 +273,10 @@ impl Widget for TipLayer {
             self.show_pending(cx);
         }
         // Any press or scroll dismisses instantly (performance surface:
-        // tips must never linger over a working hand).
+        // tips must never linger over a working hand), and so does an
+        // overlay clearing hover state for everyone.
         match event {
-            Event::MouseDown(_) | Event::Scroll(_) => self.hide(cx),
+            Event::MouseDown(_) | Event::Scroll(_) | Event::ClearHover => self.hide(cx),
             _ => {}
         }
         if let Event::Actions(actions) = event {
