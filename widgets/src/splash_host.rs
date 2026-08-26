@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use crate::makepad_draw::makepad_platform::makepad_script;
 use crate::makepad_draw::makepad_platform::SignalToUI;
-use crate::widget_async::{CxSplashVmExt, WIDGET_SCRIPT_INSTRUCTION_LIMIT};
+use crate::widget_async::CxSplashVmExt;
 use crate::makepad_draw::makepad_platform::Cx;
 use makepad_script::*;
 
@@ -178,7 +178,8 @@ pub fn splash_host_respond(
         vm.bx.heap.set_value(obj, id!(is_ok).into(), ok.into(), trap);
         vm.bx.heap.set_value(obj, id!(data).into(), data, trap);
         vm.bx.heap.set_value(obj, id!(error).into(), error, trap);
-        vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+        let limit = crate::splash_limits::entry_instructions(heap_key);
+        vm.with_instruction_limit(limit, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
     });

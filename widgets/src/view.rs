@@ -4,7 +4,7 @@ use {
         animator::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        makepad_script::{script_err_wrong_value, ScriptFnRef},
+        makepad_script::ScriptFnRef,
         scroll_bars::ScrollBars,
         widget::*,
         widget_async::{
@@ -737,6 +737,18 @@ impl Widget for View {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(render) {
+            // `me` protos off `self.source`, and the caller's `args` object
+            // travels into the VM that owns `on_render` — both are heap values,
+            // and a heap value means nothing outside the heap that minted it.
+            // Refuse when this view was minted somewhere else: rendering it
+            // would build `me` here holding another heap's object index (or
+            // plant these args over there), and nothing would notice until that
+            // heap's next GC walked the value and indexed out of bounds, in
+            // code that did nothing wrong. Includes the case that actually
+            // bites — a view whose isolate has since been torn down.
+            if !self.source.is_zero() && self.source.heap_key() != vm.bx.heap.heap_key() {
+                return ScriptAsyncResult::MethodNotFound;
+            }
             let me = self.make_render_me(vm);
             return vm.with_cx_mut(|cx| {
                 cx.widget_to_script_async_call_fwd(
@@ -749,36 +761,6 @@ impl Widget for View {
                     id!(render),
                 )
             });
-        }
-        if method == live_id!(set_visible) {
-            if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
-                let visible = value
-                    .as_bool()
-                    .or_else(|| value.as_number().map(|n| n != 0.0));
-                match visible {
-                    Some(visible) => {
-                        vm.with_cx_mut(|cx| {
-                            if self.visible != visible {
-                                self.visible = visible;
-                                self.redraw(cx);
-                            }
-                        });
-                    }
-                    // Never guess on a bad argument: a silent default (especially
-                    // `true`) turns script bugs into invisible misbehavior. Keep
-                    // the current visibility and surface an error instead.
-                    None => {
-                        return ScriptAsyncResult::Return(script_err_wrong_value!(
-                            vm.trap(),
-                            "set_visible expects a bool (or number), got {:?}",
-                            value.value_type()
-                        ));
-                    }
-                }
-            }
-            return ScriptAsyncResult::Return(NIL);
         }
         ScriptAsyncResult::MethodNotFound
     }

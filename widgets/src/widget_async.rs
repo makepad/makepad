@@ -92,6 +92,11 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
+    crate::splash_limits::gc_limits(&dead_heaps);
+    // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
+    // frees that address for the next isolate, and a leftover entry would hand
+    // the newcomer a dead heap's handle. See `CxScriptResources::gc_heaps`.
+    cx.script_data.resources.gc_heaps(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
     state.dead_heaps.extend(dead_heaps.iter().copied());
     for vm_id in dead {
@@ -297,20 +302,37 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
 }
 
 /// A Splash isolate runs untrusted-ish user script on the UI thread; cap how long any
-/// single entry into it may run.
+/// single entry into it may run, and how much it may spend across ALL entries
+/// in a window (`splash_limits`).
+///
+/// The second half is what a per-entry budget cannot say. Ten cheap entries in
+/// a frame cost ten times one, and a script that arranges to be entered often
+/// — a fast interval, a chain of widget events — used to get a fresh full
+/// allowance every time. When the window is spent the entry still RUNS, but on
+/// what is left of the window rather than a fresh 64ms; at zero it gets the
+/// minimum slice, which is enough to make progress and not enough to matter.
 fn with_splash_budget<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
-    let old_budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(
-        std::time::Duration::from_millis(64),
-        std::time::Duration::from_millis(64),
-        512,
-    ));
+    let heap_key = vm.bx.heap.heap_key();
+    let slice = crate::splash_limits::cpu_allowance(heap_key)
+        .unwrap_or(std::time::Duration::from_millis(1));
+    let old_budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(slice, slice, 512));
+    let started = std::time::Instant::now();
     let out = f(vm);
+    crate::splash_limits::charge_cpu(heap_key, started.elapsed());
     vm.bx.run_budget = old_budget;
     out
 }
 
 pub trait CxSplashVmExt {
     fn alloc_splash_vm(&mut self) -> SplashVmId;
+    /// Whether the VM currently installed on `Cx` has the net runtime. The app
+    /// VM (the embedder's own script) counts as yes; an isolate answers with
+    /// what it was actually allocated. Used to stop a nested Splash granting
+    /// itself more than its parent has.
+    fn current_vm_allows_net(&mut self) -> bool;
+    /// Pushes an isolate's in-flight HTTP cap from its limits into the stdlib
+    /// state that enforces it. Called whenever those limits change.
+    fn sync_splash_http_cap(&mut self, vm_id: SplashVmId);
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
     fn with_script_vm_id_thread<R>(
@@ -333,6 +355,37 @@ pub trait CxSplashVmExt {
 impl CxSplashVmExt for Cx {
     fn alloc_splash_vm(&mut self) -> SplashVmId {
         self.alloc_splash_vm_with_network(false)
+    }
+
+    fn current_vm_allows_net(&mut self) -> bool {
+        let state = self.global::<CxWidgetAsync>();
+        let current = state.current_vm_id;
+        if current == MAIN_SPLASH_VM_ID {
+            return true;
+        }
+        state
+            .isolated_vms
+            .vms
+            .get(&current)
+            .map(|iso| iso.network_enabled)
+            .unwrap_or(false)
+    }
+
+    fn sync_splash_http_cap(&mut self, vm_id: SplashVmId) {
+        if vm_id == MAIN_SPLASH_VM_ID {
+            return;
+        }
+        let heap_key = self
+            .global::<CxWidgetAsync>()
+            .heap_to_vm
+            .iter()
+            .find(|(_, v)| **v == vm_id)
+            .map(|(k, _)| *k);
+        let Some(heap_key) = heap_key else { return };
+        let cap = crate::splash_limits::limits_for_heap(heap_key).http_max as usize;
+        if let Some(iso) = self.global::<CxWidgetAsync>().isolated_vms.vms.get_mut(&vm_id) {
+            iso.std.data.max_inflight_http = Some(cap);
+        }
     }
 
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId {
@@ -373,11 +426,17 @@ impl CxSplashVmExt for Cx {
             // the stdlib's `net.socket_stream` errors when no net runtime is
             // configured, same as `net.http_request`.
             // `cx.quit` would let any mini-app close the whole host process.
+            // `gc.set_static` marks a value (and everything it reaches)
+            // permanently unreclaimable — no collection, the host's or the
+            // script's own, can ever free it again. In an isolate that is not
+            // an optimisation, it is an unbounded memory leak with a friendly
+            // name, and it defeats the heap ceiling below it.
             let strip = crate::makepad_script::script! {
                 mod.fs = nil
                 mod.run = nil
                 mod.res = nil
                 mod.cx.quit = nil
+                mod.gc.set_static = nil
             };
             vm.eval(strip);
             // Re-register `fs` as the JAILED per-app storage module: inside an
@@ -514,8 +573,26 @@ pub(crate) fn handle_splash_network_responses(
 
     // The isolate has to be installed on `Cx` while its handlers run — see
     // `with_isolate_installed`.
+    //
+    // Budget it like every other entry. This path used to be the one way into
+    // an isolate with NO deadline at all: `with_isolate_installed` does not
+    // apply one (unlike `with_script_vm_id`), and the handlers are invoked bare
+    // several frames down in the net module. So for any app granted network,
+    // `http_request(url, {on_response: || loop {}})` hung the UI thread
+    // permanently — the only unrecoverable CPU hole in the isolate story.
     with_isolate_installed(cx, vm_id, |cx| {
-        cx.handle_script_network_events_for_current_vm(responses)
+        let heap_key = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let slice = crate::splash_limits::cpu_allowance(heap_key)
+            .unwrap_or(std::time::Duration::from_millis(1));
+        let old_budget = cx.with_vm(|vm| {
+            vm.bx
+                .run_budget
+                .replace(ScriptRunBudget::from_durations(slice, slice, 512))
+        });
+        let started = std::time::Instant::now();
+        cx.handle_script_network_events_for_current_vm(responses);
+        crate::splash_limits::charge_cpu(heap_key, started.elapsed());
+        cx.with_vm(|vm| vm.bx.run_budget = old_budget);
     });
 }
 
@@ -715,7 +792,8 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         let ui_handle = self.build_ui_handle_for_uid(target_uid);
         let call_args =
             self.make_call_args_object_with_context(source.as_object(), ui_handle, args);
-        let result = self.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+        let limit = crate::splash_limits::entry_instructions(self.bx.heap.heap_key());
+        let result = self.with_instruction_limit(limit, |vm| {
             vm.call_with_args_object_with_me(script_fn.clone().into(), call_args, me)
         });
 
@@ -1179,7 +1257,8 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                         ui_handle,
                         req.args,
                     );
-                    let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                    let limit = crate::splash_limits::entry_instructions(vm.bx.heap.heap_key());
+                    let _ = vm.with_instruction_limit(limit, |vm| {
                         vm.call_with_args_object_with_me(
                             req.script_fn.clone().into(),
                             call_args,
@@ -1261,13 +1340,35 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         let last = state.gc_rr_last;
         let next = ids.iter().copied().find(|id| *id > last).unwrap_or(ids[0]);
         state.gc_rr_last = next;
+        let mut over_ceiling = None;
         if let Some(iso) = state.isolated_vms.vms.get_mut(&SplashVmId(next)) {
             if let Some(bx) = iso.vm.as_mut() {
                 if bx.heap.needs_gc() {
                     bx.heap.mark(&bx.threads, &bx.code);
                     bx.heap.sweep(false);
+                    // What a collection LEAVES is what the script is holding.
+                    // An isolate over its ceiling here is not going to come
+                    // back under it on its own — this is the only signal that
+                    // catches an app growing a retained structure forever,
+                    // where every individual step is well inside every
+                    // per-entry budget.
+                    // `check_heap` applies the pressure ladder itself: an
+                    // isolate over its share of a FULL system is collected
+                    // again here, and only a third failure to come back down
+                    // (or its own absolute backstop) condemns it.
+                    if !crate::splash_limits::check_heap(bx.heap.heap_key(), bx.heap.live_slots()) {
+                        over_ceiling = Some(SplashVmId(next));
+                    } else if crate::splash_limits::under_memory_pressure(bx.heap.heap_key()) {
+                        // Reclaim harder while it is over: collecting the same
+                        // isolate again next pump is the pressure.
+                        bx.heap.mark(&bx.threads, &bx.code);
+                        bx.heap.sweep(false);
+                    }
                 }
             }
+        }
+        if let Some(vm_id) = over_ceiling {
+            mark_splash_isolate_dead(vm_id);
         }
     }
 
@@ -1278,6 +1379,31 @@ fn register_task_hooks(cx: &mut Cx) {
     cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed_hook);
     cx.add_script_task_pump_hook(pump_widget_async_hook);
     cx.add_script_timer_dispatch_hook(script_timer_dispatch_hook);
+    cx.set_script_timer_quota_hooks(splash_timer_admit_hook, splash_timer_release_hook);
+}
+
+/// Caps how many timers an isolate holds and how fast they may tick
+/// (`splash_limits`). The main app VM is not an isolate and is left alone:
+/// its script is the embedder's own.
+/// Charges a timer FIRE to the isolate that owns it, on top of whatever its
+/// callback then costs. A wakeup is not free even when the callback is empty.
+fn splash_charge_wakeup(cx: &mut Cx, heap_key: usize) {
+    if cx.global::<CxWidgetAsync>().heap_to_vm.contains_key(&heap_key) {
+        crate::splash_limits::charge_wakeup(heap_key);
+    }
+}
+
+fn splash_timer_admit_hook(cx: &mut Cx, heap_key: usize, requested_s: f64) -> Option<f64> {
+    if !cx.global::<CxWidgetAsync>().heap_to_vm.contains_key(&heap_key) {
+        return Some(requested_s);
+    }
+    crate::splash_limits::admit_timer(heap_key, requested_s)
+}
+
+fn splash_timer_release_hook(cx: &mut Cx, heap_key: usize) {
+    if cx.global::<CxWidgetAsync>().heap_to_vm.contains_key(&heap_key) {
+        crate::splash_limits::release_timer(heap_key);
+    }
 }
 
 /// Routes a firing script timer to the isolate VM that owns its callback. Without this,
@@ -1295,10 +1421,16 @@ fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptVa
         .copied();
     match vm_id {
         Some(vm_id) => {
+            // The wakeup itself is charged before the callback runs: the
+            // dispatch that got us here cost the host whether or not the
+            // script does anything, and an app that asks to be woken a
+            // thousand times a second should pay for it out of its own share.
+            splash_charge_wakeup(cx, heap_key);
             // Same budget/limit as any other isolate entry, so a runaway timer callback
             // can't hang the host.
             cx.with_script_vm_id(vm_id, |vm| {
-                vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                let limit = crate::splash_limits::entry_instructions(vm.bx.heap.heap_key());
+                vm.with_instruction_limit(limit, |vm| {
                     vm.call(timer.callback.as_object().into(), &[time]);
                 });
             });

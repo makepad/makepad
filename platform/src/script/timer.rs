@@ -17,13 +17,70 @@ pub struct CxScriptTimer {
 /// handled the timer; false falls through to the default main-VM dispatch.
 pub type CxScriptTimerDispatchHook = fn(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptValue) -> bool;
 
+/// A hook consulted BEFORE a script timer is created, so an embedder that runs
+/// untrusted script (see the widgets crate's Splash isolates) can cap how many
+/// timers one heap holds and how fast they may tick.
+///
+/// `heap_key` identifies the script heap asking. Return the interval to use —
+/// possibly clamped — or `None` to refuse the timer outright. The default,
+/// with no hook registered, is the requested interval unchanged.
+pub type CxScriptTimerAdmitHook = fn(cx: &mut Cx, heap_key: usize, requested_s: f64) -> Option<f64>;
+
+/// The matching release hook: called when a timer this embedder admitted is
+/// stopped, or fires for the last time, so its slot can be given back.
+pub type CxScriptTimerReleaseHook = fn(cx: &mut Cx, heap_key: usize);
+
 #[derive(Clone, Default)]
 pub struct CxScriptTimers {
     pub timers: Vec<CxScriptTimer>,
     pub dispatch_hooks: Vec<CxScriptTimerDispatchHook>,
+    pub admit_hooks: Vec<CxScriptTimerAdmitHook>,
+    pub release_hooks: Vec<CxScriptTimerReleaseHook>,
 }
 
 impl Cx {
+    /// Registers the admission/release pair that caps script timers per heap.
+    pub fn set_script_timer_quota_hooks(
+        &mut self,
+        admit: CxScriptTimerAdmitHook,
+        release: CxScriptTimerReleaseHook,
+    ) {
+        let timers = &mut self.script_data.timers;
+        if !timers.admit_hooks.iter().any(|v| (*v as usize) == (admit as usize)) {
+            timers.admit_hooks.push(admit);
+        }
+        if !timers.release_hooks.iter().any(|v| (*v as usize) == (release as usize)) {
+            timers.release_hooks.push(release);
+        }
+    }
+
+    /// The interval a new script timer for `heap_key` may actually use, after
+    /// every registered quota hook has had its say. `None` = refused.
+    ///
+    /// The clamp is not only a policy matter: several platform backends hand
+    /// the interval to `Duration::from_secs_f64`, which PANICS on a negative,
+    /// NaN or infinite value, so an unfiltered `start_interval(-1.0)` from
+    /// script takes the process down. The floor below is the last line of
+    /// defence for embedders with no hook registered at all.
+    fn admit_script_timer(&mut self, heap_key: usize, requested_s: f64) -> Option<f64> {
+        let hooks = self.script_data.timers.admit_hooks.clone();
+        let mut interval = requested_s;
+        for hook in hooks {
+            interval = hook(self, heap_key, interval)?;
+        }
+        if !interval.is_finite() || interval < 0.0 {
+            return Some(0.0);
+        }
+        Some(interval)
+    }
+
+    fn release_script_timer(&mut self, heap_key: usize) {
+        let hooks = self.script_data.timers.release_hooks.clone();
+        for hook in hooks {
+            hook(self, heap_key);
+        }
+    }
+
     pub fn add_script_timer_dispatch_hook(&mut self, hook: CxScriptTimerDispatchHook) {
         if !self
             .script_data
@@ -47,6 +104,9 @@ impl Cx {
             let timer = self.script_data.timers.timers[i].clone();
             if !timer.repeat {
                 self.script_data.timers.timers.remove(i);
+                // A one-shot that has fired is gone; give its slot back or an
+                // app that uses timeouts normally would run itself out of them.
+                self.release_script_timer(timer.callback.heap_key());
             }
             let time = if let Some(time) = event.time {
                 time.into()
@@ -219,8 +279,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);
 
+            let heap_key = vm.bx.heap.heap_key();
             let cx = vm.cx_mut();
-            let timer = cx.start_timeout(delay.as_number().unwrap_or(1.0));
+            // A refused timer answers NIL rather than trapping. The embedder
+            // that set the cap already knows it was hit (it is what refused
+            // it), and a script that asks for one timer too many should be
+            // able to cope — `if t.is_nil()` — instead of dying mid-function.
+            let Some(delay) = cx.admit_script_timer(heap_key, delay.as_number().unwrap_or(1.0))
+            else {
+                return NIL;
+            };
+            let cx = vm.cx_mut();
+            let timer = cx.start_timeout(delay);
 
             let id = LiveId::unique();
             cx.script_data.timers.timers.push(CxScriptTimer {
@@ -246,9 +316,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);
 
+            let heap_key = vm.bx.heap.heap_key();
+            let cx = vm.cx_mut();
+            // See start_timeout: over the cap, NIL rather than a trap.
+            let Some(delay) = cx.admit_script_timer(heap_key, delay.as_number().unwrap_or(1.0))
+            else {
+                return NIL;
+            };
             let cx = vm.cx_mut();
 
-            let timer = cx.start_interval(delay.as_number().unwrap_or(1.0));
+            let timer = cx.start_interval(delay);
 
             let id = LiveId::unique();
             cx.script_data.timers.timers.push(CxScriptTimer {
@@ -271,8 +348,24 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 return script_err_type_mismatch!(vm.trap(), "invalid timer arg type");
             }
             let timer = timer.as_id().unwrap_or(id!());
+            // Read the heap BEFORE borrowing cx out of vm.
+            let heap_key = vm.bx.heap.heap_key();
             let cx = vm.cx_mut();
-            cx.script_data.timers.timers.retain(|v| v.id != timer);
+            // Only your own timers, and actually STOP them: dropping the
+            // bookkeeping entry alone left the OS timer firing for the life of
+            // the process, invisible to every teardown path (they all filter
+            // this same Vec), and still costing a full event pass per fire.
+            let found = cx
+                .script_data
+                .timers
+                .timers
+                .iter()
+                .position(|v| v.id == timer && v.callback.heap_key() == heap_key);
+            if let Some(i) = found {
+                let entry = cx.script_data.timers.timers.remove(i);
+                cx.stop_timer(entry.timer);
+                cx.release_script_timer(heap_key);
+            }
             NIL
         },
     );

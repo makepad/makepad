@@ -784,6 +784,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let events = HttpEvents::script_from_value(vm, events);
 
             let std = vm.std_mut::<ScriptStd>();
+            // The in-flight ceiling belongs HERE, on the requests it counts —
+            // it was being applied to `http_server` instead, where the number
+            // of requests in flight says nothing about whether another
+            // listener may be opened, and so it never once refused a request.
+            if let Some(cap) = std.data.max_inflight_http {
+                if std.data.http_requests.len() >= cap {
+                    return script_err_limit!(vm.trap(), "too many requests in flight");
+                }
+            }
             let Some(runtime) = std.net.as_ref() else {
                 return script_err_io!(vm.trap(), "script net runtime is not configured");
             };
