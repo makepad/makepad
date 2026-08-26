@@ -21,3 +21,19 @@ convert = ["dep:makepad-video"]
 
 [dependencies]
 makepad-video = { path = "../../platform/video", optional = true }
+
+# The synthetic optical-flow debug clips. It writes mp4s, so it needs the
+# codec seam the `convert` feature pulls in — declared explicitly rather than
+# auto-discovered so `--no-default-features` skips it instead of failing.
+[[bin]]
+name = "flowtest_gen"
+path = "src/bin/flowtest_gen.rs"
+required-features = ["convert"]
+
+[[bin]]
+name = "flowbake"
+required-features = ["convert"]
+
+[[bin]]
+name = "flowref"
+required-features = ["convert"]
