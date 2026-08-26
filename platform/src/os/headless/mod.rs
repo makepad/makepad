@@ -168,14 +168,29 @@ impl Cx {
     #[cfg(target_os = "macos")]
     pub fn macos_activate_app(&mut self) {}
 
-    /// Diagnostics-only render-target readback (see the metal backend for the
-    /// real one). Headless callers get None, same as a texture that was never
-    /// allocated — every call site already handles that.
+    /// Render-target readback off the software raster's framebuffer store:
+    /// the raster is synchronous on this thread, so by the time a caller
+    /// asks, every pass that fed the target has fully rendered — no queue
+    /// to race. Returns packed BGRA8 (Metal's byte layout); `None` for a
+    /// target never rendered or already evicted.
     pub fn debug_read_render_texture(
         &mut self,
-        _texture: &crate::texture::Texture,
+        texture: &crate::texture::Texture,
     ) -> Option<(usize, usize, Vec<u8>)> {
-        None
+        self.os.render_targets.read_color_bgra8(texture.texture_id())
+    }
+
+    /// Renderer-owned texture capture (see the metal backend): not
+    /// implemented here — callers fall back to `debug_read_render_texture`.
+    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
+        false
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn take_render_texture_captures(
+        &mut self,
+    ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        Vec::new()
     }
 
     #[cfg(target_os = "macos")]

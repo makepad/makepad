@@ -165,6 +165,14 @@ pub trait CxOsApi {
 
     fn browser_history_go(&mut self, _delta: i32) {}
 
+    /// Platform hook shared by native and synthetic pointer injection. Cocoa
+    /// uses it to activate the clicked window before the down is dispatched.
+    fn activate_window_on_pointer_down(&mut self, _window_id: WindowId) {}
+
+    /// Re-evaluate any platform pacing override after widget capture state
+    /// may have changed in a pointer callback.
+    fn update_pointer_capture_pacing(&mut self) {}
+
     fn seconds_since_app_start(&self) -> f64;
 
     fn default_window_size(&self) -> Vec2d {
@@ -2046,4 +2054,3 @@ mod tests {
         assert!(platform_ops.is_empty());
     }
 }
-
