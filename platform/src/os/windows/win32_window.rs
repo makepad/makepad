@@ -1269,6 +1269,15 @@ impl Win32Window {
         }
     }
 
+    /// Whether the window is minimized. A minimized window gets no compositor
+    /// vsync, so painting it is pure waste and its frame-latency waitable never
+    /// signals; the paint loop skips it (keeping the pass dirty) and re-probes.
+    /// `IsIconic` is not in the vendored bindings, so it is linked here.
+    pub fn is_iconic(&self) -> bool {
+        windows_core::link!("user32.dll" "system" fn IsIconic(hwnd: HWND) -> crate::windows::core::BOOL);
+        unsafe { IsIconic(self.hwnd).as_bool() }
+    }
+
     pub fn set_topmost(&self, topmost: bool) {
         unsafe {
             if topmost {
