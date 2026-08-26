@@ -92,6 +92,10 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
+    // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
+    // frees that address for the next isolate, and a leftover entry would hand
+    // the newcomer a dead heap's handle. See `CxScriptResources::gc_heaps`.
+    cx.script_data.resources.gc_heaps(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
     state.dead_heaps.extend(dead_heaps.iter().copied());
     for vm_id in dead {

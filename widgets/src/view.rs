@@ -737,6 +737,18 @@ impl Widget for View {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(render) {
+            // `me` protos off `self.source`, and the caller's `args` object
+            // travels into the VM that owns `on_render` — both are heap values,
+            // and a heap value means nothing outside the heap that minted it.
+            // Refuse when this view was minted somewhere else: rendering it
+            // would build `me` here holding another heap's object index (or
+            // plant these args over there), and nothing would notice until that
+            // heap's next GC walked the value and indexed out of bounds, in
+            // code that did nothing wrong. Includes the case that actually
+            // bites — a view whose isolate has since been torn down.
+            if !self.source.is_zero() && self.source.heap_key() != vm.bx.heap.heap_key() {
+                return ScriptAsyncResult::MethodNotFound;
+            }
             let me = self.make_render_me(vm);
             return vm.with_cx_mut(|cx| {
                 cx.widget_to_script_async_call_fwd(
