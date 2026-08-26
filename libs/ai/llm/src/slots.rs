@@ -104,6 +104,10 @@ pub fn draft_depth_for_budget(width: usize, draft_max: usize, column_budget: usi
 /// measured.
 #[derive(Clone, Debug)]
 pub struct StepCostModel {
+    /// Which box's measurements these are, for the worker's boot line. A cost
+    /// model that cannot say where it came from cannot be checked against the
+    /// card it is running on.
+    calibration: &'static str,
     /// `step_ms[c]` is the cost of a `c`-column step. Index 0 is unused.
     step_ms: Vec<f32>,
     draft_base_ms: f32,
@@ -116,6 +120,58 @@ pub struct StepCostModel {
 }
 
 impl StepCostModel {
+    /// The cost model for the card a session is running on, by device name.
+    ///
+    /// Keyed on the driver's device name rather than probed at start-up, and
+    /// that is a choice worth defending. A probe would have to run verify
+    /// batches at every width on a cold, un-captured graph set before the
+    /// worker serves its first turn — seconds of GPU time on a box that is
+    /// live for everyone else, measuring exactly the compile-and-capture churn
+    /// the bench had to be taught to exclude. Two cards are in service and
+    /// both have been measured on their own hardware; the name picks the
+    /// measurement, the boot line says which one was picked, and a new card
+    /// falls to the **5090** fit. That fallback is the safe direction on
+    /// purpose: it is the most expensive verify curve measured, so an unknown
+    /// card is under-speculated rather than over-speculated until someone
+    /// runs `llama-batch-bench --verify-widths` on it.
+    pub fn for_device(device_name: &str) -> Self {
+        let name = device_name.to_ascii_lowercase();
+        if name.contains("rtx pro 6000") {
+            Self::measured_rtx_pro_6000()
+        } else {
+            Self::measured_5090()
+        }
+    }
+
+    /// Where this model's numbers were measured: `"5090"` or `"rtx-pro-6000"`.
+    pub fn calibration(&self) -> &'static str {
+        self.calibration
+    }
+
+    /// The measured curves on `.165` (RTX PRO 6000 Blackwell, Q4_K_M,
+    /// fill-4096, `llama-batch-bench`, 2026-08-25).
+    ///
+    /// Plain `n_outputs = 1` steps: 1 → 14.24, 2 → 17.16, 4 → 20.65,
+    /// 8 → 31.60 ms — a marginal column costs ~2.1–2.5 ms, against the 5090's
+    /// ~3.7. Verify batches, read off `SpeculativeStats::verify_nanos` at
+    /// widths 2..8: 20.0, 21.2, 26.1, 26.6, 34.0, 38.7, 39.1 ms, which fit
+    /// `13.7 + 3.17 * columns`. Per column the verify batch gets CHEAPER with
+    /// width (10.0 ms at 2, 4.9 at 8), so 8 columns — the MMVQ cap — is the
+    /// efficient point, and the 5090 fit's `17.5 + 5.73 * B` over-charges this
+    /// card by ~1.8x on the per-column term. That over-charge is not a
+    /// rounding matter: it is the difference between an allocator that can
+    /// take a deeper round when acceptance is there and one that never does.
+    ///
+    /// Same caveat as the 5090 curve: the plain points are a lower bound on a
+    /// real multi-slot step, and the verify fit is single-lane, so the
+    /// [`SPECULATION_MARGIN`] stands.
+    pub fn measured_rtx_pro_6000() -> Self {
+        const MEASURED: &[(usize, f32)] = &[(1, 14.24), (2, 17.16), (4, 20.65), (8, 31.60)];
+        let mut model = Self::from_points(MEASURED, 1.80, 0.30).with_verify_cost(13.7, 3.17);
+        model.calibration = "rtx-pro-6000";
+        model
+    }
+
     /// The measured `n_outputs = B` curve on .217 (5090, Q4_K_M, fill-4096,
     /// medians of 12 after 3 warm-ups).
     ///
@@ -142,7 +198,9 @@ impl StepCostModel {
         // Measured draft-forward cost per DRAFTED token with the full
         // 248,320-row draft head: 1.72-1.87 ms. Verify dominates a round; the
         // draft chain is comparatively cheap.
-        Self::from_points(MEASURED, 1.80, 0.30)
+        let mut model = Self::from_points(MEASURED, 1.80, 0.30);
+        model.calibration = "5090";
+        model
     }
 
     /// Cost of a fused multi-lane VERIFY batch of `columns` columns.
@@ -209,6 +267,7 @@ impl StepCostModel {
             }
         }
         Self {
+            calibration: "custom",
             step_ms,
             draft_base_ms,
             draft_per_lane_ms,
@@ -1387,6 +1446,167 @@ mod tests {
             floor_tok_s: 0.0,
             ..SchedulerConfig::default()
         }
+    }
+
+    #[test]
+    fn the_cost_model_is_picked_by_the_card_it_runs_on() {
+        // The two names the driver actually reports on the fleet, verbatim.
+        assert_eq!(
+            StepCostModel::for_device("NVIDIA RTX PRO 6000 Blackwell Workstation Edition")
+                .calibration(),
+            "rtx-pro-6000"
+        );
+        assert_eq!(
+            StepCostModel::for_device("NVIDIA GeForce RTX 5090").calibration(),
+            "5090"
+        );
+        // Anything unmeasured falls to the 5090 fit — the dearest verify curve
+        // on file, so an unknown card under-speculates rather than over.
+        assert_eq!(
+            StepCostModel::for_device("NVIDIA GeForce RTX 4090").calibration(),
+            "5090"
+        );
+        assert_eq!(StepCostModel::for_device("metal").calibration(), "5090");
+        assert_eq!(StepCostModel::for_device("").calibration(), "5090");
+    }
+
+    #[test]
+    fn the_5090_numbers_did_not_move_when_the_6000_got_its_own() {
+        // .217 is a different card with its own measurement; giving .165 a
+        // curve must not touch it. The anchors are the ones
+        // `a_verify_batch_is_priced_as_a_verify_batch` pins.
+        let fit = StepCostModel::for_device("NVIDIA GeForce RTX 5090");
+        assert!((fit.verify_ms(4) - 40.4).abs() < 2.0, "{}", fit.verify_ms(4));
+        assert!((fit.verify_ms(8) - 63.3).abs() < 2.0, "{}", fit.verify_ms(8));
+        assert_eq!(fit.step_ms(1), Some(14.113));
+        assert_eq!(fit.step_ms(8), Some(39.986));
+        // Its verdict on the batched path is unchanged too: no round pays.
+        for width in 2..=4usize {
+            assert_eq!(
+                batched_draft_depth(
+                    width,
+                    SOLO_DRAFT_MAX,
+                    BATCHED_CHAT_ACCEPTANCE,
+                    &SchedulerConfig::default(),
+                    &fit.clone().with_restricted_draft_head()
+                ),
+                0,
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rtx_pro_6000_verify_curve_is_the_measured_one() {
+        let card = StepCostModel::measured_rtx_pro_6000();
+        // Measured anchors from the `.165` sweep (recipe §11, Step C), so a
+        // re-fit that drifts from the box shows up here.
+        for (columns, measured) in [(2usize, 20.03f32), (4, 26.09), (8, 39.05)] {
+            assert!(
+                (card.verify_ms(columns) - measured).abs() < 2.0,
+                "{columns} columns priced {} against measured {measured}",
+                card.verify_ms(columns)
+            );
+        }
+        // Per column the verify batch gets cheaper with width — that is the
+        // whole reason 8 columns is the operating point.
+        assert!(card.verify_ms(8) / 8.0 < card.verify_ms(2) / 2.0);
+        // And it is cheaper than the 5090 fit at every width the cap allows.
+        let fit = StepCostModel::measured_5090();
+        for columns in 2..=8usize {
+            assert!(card.verify_ms(columns) < fit.verify_ms(columns), "{columns}");
+        }
+        // The plain curve is measured too: the marginal column on this card is
+        // ~2.1-2.5 ms, not the 5090's ~3.7.
+        let (one, eight) = (card.step_ms(1).unwrap(), card.step_ms(8).unwrap());
+        assert!((eight - one) / 7.0 < 2.6, "{}", (eight - one) / 7.0);
+    }
+
+    #[test]
+    fn the_6000_ladder_never_spends_more_than_the_column_budget() {
+        // The wall holds for the cheaper curve exactly as it does for the
+        // 5090 one: `width * (depth + 1) <= 8`, whatever the acceptance.
+        for costs in [
+            StepCostModel::measured_rtx_pro_6000(),
+            StepCostModel::measured_rtx_pro_6000().with_restricted_draft_head(),
+        ] {
+            for width in 1..=8usize {
+                for acceptance in [0.0f32, 0.3, 0.58, 0.72, 0.9, 0.99] {
+                    let depth = batched_draft_depth(
+                        width,
+                        SOLO_DRAFT_MAX,
+                        acceptance,
+                        &SchedulerConfig::default(),
+                        &costs,
+                    );
+                    assert!(
+                        width * (depth + 1) <= COLUMN_BUDGET,
+                        "width {width} acceptance {acceptance} chose depth {depth}"
+                    );
+                    assert!(depth <= SOLO_DRAFT_MAX);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_6000_curve_changes_and_what_it_does_not() {
+        // The honest verdict, pinned, at the restricted draft head the box
+        // serves with. The corrected curve is ~1.8x cheaper per verify column
+        // than the 5090 fit, and that changes the allocator's answer at ONE
+        // width, not all of them:
+        //
+        // * width 1 (a lone lane off slot 0, the only place the batched path
+        //   prices a single lane): depth 1 now pays — a 2-column verify at
+        //   20.6 ms for 1.58 expected tokens beats a 14.2 ms plain step for
+        //   one (76.8 vs 70.2 tok/s), by more than the margin. On the 5090
+        //   fit it did not.
+        // * width 2 at the served-chat acceptance (0.58): still depth 0. A
+        //   4-column verify (27.0 ms incl. draft) yields 1.58 tokens per lane,
+        //   117.0 aggregate, against 116.6 for the plain 2-column step at
+        //   17.2 ms — inside the margin, and rightly so.
+        // * width 2 at the production canary's 0.72: depth 1 (127.4 vs
+        //   116.6). Depth 2 and 3 model to 131.8 and 127.6 — depth 2 is a
+        //   3.5 % hair over depth 1 and the margin keeps the shallower one.
+        // * width 4: depth 0 at every acceptance ever measured, up to 0.9. An
+        //   8-column verify costs 39.9 ms for 1.58-1.9 tokens per lane
+        //   (158-191 aggregate) against a plain 4-column step's 20.65 ms for
+        //   one (193.7). The 8-column batch is the cheapest verify PER
+        //   COLUMN, but a depth-1 column buys only `a` of a token, and at
+        //   four lanes the plain step's own columns are 5.2 ms each.
+        //
+        // So "B = 8 as the operating point" is what a block drafter with ~5
+        // accepted tokens per round earns; a depth-1 MTP round at four lanes
+        // does not, on this curve, and the allocator must keep saying so.
+        let config = SchedulerConfig::default();
+        let card = StepCostModel::measured_rtx_pro_6000().with_restricted_draft_head();
+        let fit = StepCostModel::measured_5090().with_restricted_draft_head();
+        let depth = |width: usize, acceptance: f32, costs: &StepCostModel| {
+            batched_draft_depth(width, SOLO_DRAFT_MAX, acceptance, &config, costs)
+        };
+
+        assert_eq!(depth(1, BATCHED_CHAT_ACCEPTANCE, &card), 1);
+        assert_eq!(depth(1, BATCHED_CHAT_ACCEPTANCE, &fit), 0);
+
+        assert_eq!(depth(2, BATCHED_CHAT_ACCEPTANCE, &card), 0);
+        assert_eq!(depth(2, 0.72, &card), 1);
+        assert_eq!(depth(2, 0.72, &fit), 0);
+
+        for acceptance in [BATCHED_CHAT_ACCEPTANCE, 0.72, 0.9] {
+            assert_eq!(depth(4, acceptance, &card), 0, "width 4 at {acceptance}");
+        }
+
+        // The arithmetic behind the width-2 verdicts, so a drift in either
+        // curve is caught as a number and not as a changed depth.
+        let plain = uniform_allocation(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &card)
+            .expect("plain");
+        assert_eq!(plain.columns, 2);
+        assert!((plain.aggregate_tok_s - 116.6).abs() < 1.0, "{}", plain.aggregate_tok_s);
+        let deeper = uniform_allocation(2, SOLO_DRAFT_MAX, 0.72, &config, &card)
+            .expect("deeper");
+        assert_eq!(deeper.columns, 4);
+        assert!((deeper.round_ms - 27.0).abs() < 0.5, "{}", deeper.round_ms);
+        assert!((deeper.aggregate_tok_s - 127.4).abs() < 1.0, "{}", deeper.aggregate_tok_s);
     }
 
     #[test]

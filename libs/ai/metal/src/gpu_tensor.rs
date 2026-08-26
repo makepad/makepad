@@ -563,11 +563,26 @@ pub fn resize_bilinear(
     align_corners: bool,
 ) -> Result<GpuTensor, String> {
     let xd = data(x)?;
+    let xd: &[f32] = &xd;
     let ch = x.rows;
+    let prof_t0 = std::time::Instant::now();
     let mut out = vec![0.0; ch * out_w * out_h];
-    for c in 0..ch {
+    // Channel-parallel: RIFE resizes many-channel tensors every block and
+    // the scalar single-thread loop was a top-3 cost in its profile.
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let small = ch * out_w * out_h < 1_000_000;
+    let per = if threads <= 1 || ch < 2 || small { ch } else { ch.div_ceil(threads.min(ch)) };
+    std::thread::scope(|scope| {
+    let mut chunks = out.chunks_mut(per * out_w * out_h);
+    let mut c0 = 0usize;
+    while let Some(chunk) = chunks.next() {
+        let chunk_ch = chunk.len() / (out_w * out_h);
+        let start = c0;
+        c0 += chunk_ch;
+        scope.spawn(move || {
+        for (ci, dst) in chunk.chunks_mut(out_w * out_h).enumerate() {
+        let c = start + ci;
         let src = &xd[c * in_w * in_h..(c + 1) * in_w * in_h];
-        let dst = &mut out[c * out_w * out_h..(c + 1) * out_w * out_h];
         for y in 0..out_h {
             let fy = if align_corners {
                 if out_h == 1 {
@@ -576,9 +591,14 @@ pub fn resize_bilinear(
                     y as f32 * (in_h - 1) as f32 / (out_h - 1) as f32
                 }
             } else {
-                (y as f32 + 0.5) * in_h as f32 / out_h as f32 - 0.5
+                // torch half-pixel: source coord clamps to 0 BEFORE the
+                // weight is taken, so the edge row repeats instead of
+                // extrapolating (weight-after-clamp gave negative weights
+                // at the border — RIFE's per-block resizes amplified that
+                // edge error through the whole pyramid).
+                ((y as f32 + 0.5) * in_h as f32 / out_h as f32 - 0.5).max(0.0)
             };
-            let y0 = fy.floor().max(0.0) as usize;
+            let y0 = (fy.floor() as usize).min(in_h - 1);
             let y1 = (y0 + 1).min(in_h - 1);
             let wy = fy - y0 as f32;
             for x in 0..out_w {
@@ -589,9 +609,9 @@ pub fn resize_bilinear(
                         x as f32 * (in_w - 1) as f32 / (out_w - 1) as f32
                     }
                 } else {
-                    (x as f32 + 0.5) * in_w as f32 / out_w as f32 - 0.5
+                    ((x as f32 + 0.5) * in_w as f32 / out_w as f32 - 0.5).max(0.0)
                 };
-                let x0 = fx.floor().max(0.0) as usize;
+                let x0 = (fx.floor() as usize).min(in_w - 1);
                 let x1 = (x0 + 1).min(in_w - 1);
                 let wx = fx - x0 as f32;
                 let v00 = src[y0 * in_w + x0];
@@ -602,7 +622,11 @@ pub fn resize_bilinear(
                     + wy * ((1.0 - wx) * v10 + wx * v11);
             }
         }
+        }
+        });
     }
+    });
+    crate::rife::prof_add(4, prof_t0);
     Ok(tensor(ch, out_w * out_h, out))
 }
 
