@@ -16,9 +16,12 @@ use crate::cas::{BlobCommit, BlobWriter, Cas};
 use crate::catalog::{Catalog, CandidateState, CATALOG_SCHEMA};
 use crate::error::{io_err, ServerError, ServerResult};
 use crate::jobs::{Jobs, JOBS_SCHEMA};
+use crate::search::AssetAnnotation;
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
-use makepad_asset_data::{AssetRevisionRef, BlobId};
+use makepad_asset_data::{
+    AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
+};
 use std::path::Path;
 
 /// The catalog schema version this build reads and writes, stored in
@@ -262,6 +265,27 @@ pub struct RefRescanPage {
     pub next: Option<BlobId>,
 }
 
+/// One asset of a batch publication: the complete publish an asset needs —
+/// canonical manifest bytes (already carrying its asset id and blob refs),
+/// its searchable annotation, and an optional alias head.
+#[derive(Clone, Debug)]
+pub struct PublishBatchItem {
+    pub namespace: String,
+    pub manifest_bytes: Vec<u8>,
+    pub annotation: AssetAnnotation,
+    pub alias: Option<AssetAlias>,
+}
+
+/// What one batch item became.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublishBatchOutcome {
+    pub asset_id: AssetId,
+    pub revision: AssetRevisionId,
+    /// The revision was already published (a replayed page); annotation and
+    /// alias were refreshed idempotently.
+    pub already_published: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoverReport {
     pub cas_temps_removed: u64,
@@ -425,6 +449,20 @@ impl AssetServerCore {
         self.commit_blob(w, None, now_ms)
     }
 
+    /// Record MANY already-CAS-committed blobs in ONE catalog transaction —
+    /// one WAL commit for the lot instead of one per blob. The caller
+    /// guarantees the bytes are durable in the CAS first (the admission
+    /// ordering law); a crash before this lands leaves only unrecorded
+    /// objects a retry dedups against.
+    pub fn record_blobs(&self, blobs: &[(BlobId, u64)], now_ms: u64) -> ServerResult<()> {
+        self.db.tx(|_| {
+            for (blob_id, size) in blobs {
+                self.catalog().record_blob(blob_id, *size, now_ms)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Read a blob the catalog knows about, verifying its digest. Unrecorded
     /// objects are invisible: catalog first, then CAS, both fail closed.
     ///
@@ -520,6 +558,130 @@ impl AssetServerCore {
             states.push((entry, state));
         }
         Ok(RefRescanPage { entries: states, next })
+    }
+
+    // ---- batch publication ---------------------------------------------------
+
+    /// Publish MANY complete assets in ONE catalog transaction: for every
+    /// item, register the identity, stage its canonical manifest, publish
+    /// it, write its search annotation, and point its alias — all-or-nothing
+    /// under a single WAL commit (one fsync for the lot). This is the bulk
+    /// lane behind `POST /v1/publish/batch`; the referenced blobs must
+    /// already be admitted (the stage step refuses otherwise), so the
+    /// admission ordering law holds for the whole batch exactly as it does
+    /// for one publish.
+    ///
+    /// Idempotent per item the way the split flow is as a sequence: an item
+    /// whose revision is already published only refreshes its annotation and
+    /// alias (a replayed page after a lost response), a quarantined or
+    /// retired revision refuses the batch, and the rights-immutability guard
+    /// refuses a re-publication that would change an existing asset's terms.
+    pub fn publish_batch(
+        &self,
+        items: &[PublishBatchItem],
+        now_ms: u64,
+    ) -> ServerResult<Vec<PublishBatchOutcome>> {
+        // Decode + guard EVERYTHING before the first mutation, so a bad item
+        // refuses the batch without a rollback ever being needed.
+        let mut decoded: Vec<(AssetManifest, AssetRevisionId)> = Vec::with_capacity(items.len());
+        for item in items {
+            if item.manifest_bytes.len() as u64 > self.budgets.max_manifest_bytes {
+                return Err(ServerError::OverBudget {
+                    what: "asset manifest bytes",
+                    limit: self.budgets.max_manifest_bytes,
+                    found: item.manifest_bytes.len() as u64,
+                });
+            }
+            let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
+            let revision = AssetRevisionId::hash_of(&item.manifest_bytes);
+            if let Some(alias) = &item.alias {
+                if alias.namespace() != item.namespace {
+                    return Err(ServerError::Conflict { what: "alias namespace" });
+                }
+            }
+            // Rights immutability: re-publishing an existing asset must not
+            // change its terms. Compared against the latest published head's
+            // immutable manifest; same-revision replays trivially pass.
+            let candidates = self.catalog().asset_candidates(&manifest.asset_id, 512)?;
+            let prev = candidates
+                .iter()
+                .filter(|c| c.state == CandidateState::Published && c.revision != revision)
+                .max_by_key(|c| c.published_ms.unwrap_or(0))
+                .map(|c| c.revision);
+            if let Some(prev) = prev {
+                if let Some(bytes) = self.catalog().asset_revision_manifest(&prev)? {
+                    if let Ok(previous) = AssetManifest::from_canonical_bytes(&bytes) {
+                        if previous.rights != manifest.rights {
+                            return Err(ServerError::Conflict {
+                                what: "published asset rights would change",
+                            });
+                        }
+                    }
+                }
+            }
+            decoded.push((manifest, revision));
+        }
+        let catalog = self.catalog();
+        let search = self.search();
+        self.db.tx(|db| {
+            let mut out = Vec::with_capacity(items.len());
+            for (item, (manifest, revision)) in items.iter().zip(&decoded) {
+                catalog.register_asset(&manifest.asset_id, &item.namespace, now_ms)?;
+                let already = match catalog.asset_candidate_state(&manifest.asset_id, revision)? {
+                    Some(CandidateState::Published) => true,
+                    Some(CandidateState::Quarantined) => {
+                        return Err(ServerError::InvalidState {
+                            what: "publish batch revision",
+                            state: "quarantined",
+                        });
+                    }
+                    Some(CandidateState::Staged) => {
+                        catalog.transition_in_tx(
+                            db,
+                            "asset",
+                            manifest.asset_id.as_bytes(),
+                            revision.as_bytes(),
+                            &[CandidateState::Staged],
+                            CandidateState::Published,
+                            now_ms,
+                        )?;
+                        false
+                    }
+                    None => {
+                        let staged = catalog.stage_asset_revision_in_tx(
+                            db,
+                            &item.manifest_bytes,
+                            now_ms,
+                        )?;
+                        catalog.transition_in_tx(
+                            db,
+                            "asset",
+                            manifest.asset_id.as_bytes(),
+                            staged.as_bytes(),
+                            &[CandidateState::Staged],
+                            CandidateState::Published,
+                            now_ms,
+                        )?;
+                        false
+                    }
+                };
+                search.set_annotation_in_tx(db, &manifest.asset_id, &item.annotation, now_ms)?;
+                if let Some(alias) = &item.alias {
+                    catalog.set_asset_alias_in_tx(
+                        db,
+                        alias,
+                        &AssetRevisionRef { asset_id: manifest.asset_id, revision: *revision },
+                        now_ms,
+                    )?;
+                }
+                out.push(PublishBatchOutcome {
+                    asset_id: manifest.asset_id,
+                    revision: *revision,
+                    already_published: already,
+                });
+            }
+            Ok(out)
+        })
     }
 
     // ---- deterministic stock seeding ---------------------------------------

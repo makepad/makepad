@@ -255,7 +255,131 @@ pub(crate) fn convert_wad(
         }
     }
 
+    // Sound effects. Unlike sprites and flats these sit under no marker
+    // range at all — the engine finds them by name (`I_GetSfxLumpNum`
+    // prefixes "ds"), so the only way to find them is to read every lump
+    // and let the format check reject whatever is not a sound.
+    let mut sfx_i = 0usize;
+    for lump in &wad.lumps {
+        if !lump.name.starts_with("DS") {
+            continue;
+        }
+        let Some(sound) = decode_dmx_sound(&lump.data) else {
+            continue;
+        };
+        let key = format!("sfx/{wad_slug}/{}", sanitize_slug(&lump.name));
+        let rel_path = format!("{key}.wav");
+        let dest = staged.join(&rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let wav = dmx_to_wav(&sound);
+        std::fs::write(&dest, &wav).map_err(|e| e.to_string())?;
+        let icon_rel = write_audio_thumb(staged, &key, &wav);
+        sfx_i += 1;
+        if (sfx_i == 1 || sfx_i % 32 == 0)
+            && !tick(map_n.saturating_sub(1), map_n.max(1), &lump.name, None)
+        {
+            return Err("cancelled".into());
+        }
+        assets.push(ClassicAsset {
+            key,
+            kind: AssetKind::Audio,
+            rel_path,
+            tags: tags_for(AssetKind::Audio, &[source.id(), "sfx", &lump.name]),
+            icon_rel,
+        });
+    }
+
     Ok(assets)
+}
+
+// ---------------------------------------------------------------------------
+// DMX sound lumps
+// ---------------------------------------------------------------------------
+
+/// One decoded DMX ("Doom sound") lump: mono unsigned 8-bit PCM with the
+/// hardware pad already off the ends.
+pub(crate) struct DmxSound {
+    pub sample_rate: u32,
+    pub samples: Vec<u8>,
+}
+
+/// DMX header: `u16` format id, `u16` sample rate, `u32` sample count.
+const DMX_HEADER: usize = 8;
+/// The only format id the digitised-sound lumps ever carry; 0 and 1 are the
+/// PC-speaker and Adlib scores, which hold no PCM.
+const DMX_FORMAT_PCM: u16 = 3;
+/// A run of the first and last real sample at each end, added for the
+/// DMX card's interpolation. It is not part of the sound: played verbatim
+/// through a modern mixer it is a click at both ends of every effect.
+const DMX_PAD: usize = 16;
+/// The rate DMX shipped almost everything at, and what a header that says
+/// something impossible falls back to.
+const DMX_RATE_DEFAULT: u32 = 11_025;
+/// A rate outside this band is a corrupt header rather than exotic
+/// material — DMX only ever recorded between these.
+const DMX_RATE_RANGE: std::ops::RangeInclusive<u32> = 8_000..=48_000;
+
+/// The PCM inside a DS lump, or `None` when the lump is not a digitised
+/// sound or cannot back what its header claims.
+pub(crate) fn decode_dmx_sound(data: &[u8]) -> Option<DmxSound> {
+    if data.len() < DMX_HEADER || u16_le(data, 0) != DMX_FORMAT_PCM {
+        return None;
+    }
+    let rate = u32::from(u16_le(data, 2));
+    let sample_rate = if DMX_RATE_RANGE.contains(&rate) {
+        rate
+    } else {
+        DMX_RATE_DEFAULT
+    };
+    let declared = u32_le(data, 4) as usize;
+    let body = &data[DMX_HEADER..];
+    // The count is a claim, the lump is the fact: clamping first means no
+    // slice below can leave the lump whatever the header said, and a claim
+    // the lump cannot back is a corrupt sound rather than a short one.
+    let count = declared.min(body.len());
+    if count == 0 || count < declared {
+        return None;
+    }
+    let samples = if count >= DMX_PAD * 2 {
+        &body[DMX_PAD..count - DMX_PAD]
+    } else {
+        &body[..count]
+    };
+    if samples.is_empty() {
+        return None;
+    }
+    Some(DmxSound {
+        sample_rate,
+        samples: samples.to_vec(),
+    })
+}
+
+/// A DMX sound as a mono 16-bit PCM WAV. Eight-bit source needs no encoder:
+/// the file is a 44-byte RIFF header and the samples recentred on zero.
+pub(crate) fn dmx_to_wav(sound: &DmxSound) -> Vec<u8> {
+    let data_len = (sound.samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sound.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sound.sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for &s in &sound.samples {
+        // DMX is unsigned and centred on 128; PCM16 is signed and centred
+        // on zero, and the byte's range maps onto the top eight bits.
+        out.extend_from_slice(&(((s as i16) - 128) << 8).to_le_bytes());
+    }
+    out
 }
 
 pub(crate) fn is_weapon_sprite(name: &str) -> bool {
@@ -457,16 +581,18 @@ pub(crate) fn doom_markers(
         let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
         let floor = doom_floor_at(sectors, linedefs, sidedefs, vertexes, mid[0], mid[1]);
         // Face INTO the line from its front side: Doom's front is to the
-        // right of v1->v2, so the press direction is its inward normal.
-        let yaw = (-(b[0] - a[0])).atan2(b[1] - a[1]);
+        // RIGHT of v1->v2 (`R_PointOnSide`), so a player who can press this
+        // switch stands on that side and looks back along the line's inward
+        // normal — the LEFT normal of `d = v2 - v1`, which is `(-dy, dx)`.
+        let yaw = doom_dir_yaw(-(b[1] - a[1]), b[0] - a[0]);
         seen_exit[usize::from(secret)] = true;
         out.push(NavStart {
             name: if secret { "exit_secret".into() } else { "exit".into() },
-            pos: [
+            pos: doom_to_glb(
                 mid[0] * DOOM_UNIT,
                 floor + DOOM_VIEW_HEIGHT * DOOM_UNIT,
                 mid[1] * DOOM_UNIT,
-            ],
+            ),
             yaw,
             pitch: 0.0,
         });
@@ -486,13 +612,12 @@ pub(crate) fn doom_markers(
             let floor = doom_floor_at(sectors, linedefs, sidedefs, vertexes, tx, ty);
             out.push(NavStart {
                 name: name.into(),
-                pos: [
+                pos: doom_to_glb(
                     tx * DOOM_UNIT,
                     floor + DOOM_VIEW_HEIGHT * DOOM_UNIT,
                     ty * DOOM_UNIT,
-                ],
-                yaw: std::f32::consts::FRAC_PI_2
-                    + (u16_le(things, o + 4) as f32).to_radians(),
+                ),
+                yaw: doom_yaw(u16_le(things, o + 4) as f32),
                 pitch: 0.0,
             });
         }
@@ -500,12 +625,25 @@ pub(crate) fn doom_markers(
     out
 }
 
-/// Doom's sky column at view angle 0 is column 0 (`R_InitSkyMap`:
-/// `angle >> ANGLETOSKYSHIFT`), and this exporter maps Doom +X to GLB +X /
-/// Doom +Y to GLB +Z, so the renderer's `atan2(dir.x, dir.z)` already lands
-/// on column 0 when the player faces Doom east. No phase shift is needed —
-/// stated rather than omitted, because "no offset" is a fact about the axis
-/// mapping, not a default.
+/// Doom picks its sky column straight off the view angle (`R_RenderBSPNode`
+/// / `R_InitSkyMap`: `angle >> ANGLETOSKYSHIFT`, 1024 columns per turn over a
+/// 256-texel image), so at Doom angle `a` the column is `4a/2π` image widths
+/// and it GROWS as the player turns left.
+///
+/// The renderer's cylinder branch is `u = atan2(d.x, d.z)/2π * repeat +
+/// offset`. Through [`doom_to_glb`] a Doom facing `a` is `(cos a, 0, −sin a)`
+/// and `atan2(cos a, −sin a) = a + π/2`, so
+///
+/// ```text
+///     u = (a + π/2)/2π * 4 = 4a/2π + 1
+/// ```
+///
+/// — vanilla's column plus exactly ONE whole image width, which a repeating
+/// sampler cannot tell from zero, and growing the same way vanilla's does.
+/// Hence no phase shift, stated rather than omitted because "no offset" is a
+/// fact about the axis mapping and not a default. (Sending north to +Z
+/// instead would give `u = 1 − 4a/2π`: the same sky wound BACKWARDS, drifting
+/// the wrong way every time the player turns.)
 pub(crate) const DOOM_SKY_OFFSET: f32 = 0.0;
 
 /// Doom's sky is a 256-wide picture wrapped four times around the horizon
@@ -568,6 +706,58 @@ pub(crate) fn fill_colors(colors: &mut Vec<[f32; 3]>, n: usize, rgb: [f32; 3]) {
 
 /// Metres per Doom map unit in every converted Doom GLB.
 pub(crate) const DOOM_UNIT: f32 = 1.0 / 64.0;
+
+/// Doom's map plane is X east, Y north, with sector heights up — a
+/// RIGHT-handed frame (east × north = up). The GLB the renderer consumes is
+/// right-handed too: Y up, −Z forward, +X the walker's right
+/// (`level.rs::yaw_forward` is `(sin yaw, 0, −cos yaw)` and its strafe is
+/// `(cos yaw, 0, sin yaw)`, so `forward × up = right`).
+///
+/// Only one of the two ways to drop Doom's north into that plane keeps the
+/// handedness:
+///
+/// ```text
+///     Doom (east, up, north)  ->  GLB (east, up, −north)
+/// ```
+///
+/// Sending north to **+Z** instead has determinant −1. Nothing about such a
+/// level looks broken from inside it — the walls meet, the doors open, the
+/// spawn faces the room — because every consumer is self-consistent within
+/// the mirror. It is simply the level's reflection: standing at E1M1's start
+/// facing north, the zigzag room that is west in the WAD stands on the
+/// player's RIGHT. It also mirrors every wall texture and runs the sky
+/// backwards as you turn.
+///
+/// `quake.rs`, `quake2_import`, `quake3_import`, `duke_import` and
+/// `doom3_import` have always written the −north form (`(x, z, −y)`); so has
+/// [`crate::skybox`], whose header states this exact bridge as the one "every
+/// classic converter uses for geometry". Doom is the odd one out no longer.
+#[inline]
+pub(crate) fn doom_to_glb(east: f32, up: f32, north: f32) -> [f32; 3] {
+    [east, up, -north]
+}
+
+/// A Doom `angle` (degrees counter-clockwise from east, as THINGS and
+/// `Teleport_` store it) as the GLB yaw a walker turns to.
+///
+/// Doom's facing is `(cos a, sin a)` in (east, north); [`doom_to_glb`] makes
+/// that `(cos a, 0, −sin a)`, and the consumer's forward is
+/// `(sin yaw, 0, −cos yaw)`. Matching both components gives `sin yaw = cos a`
+/// and `cos yaw = sin a`, i.e. `yaw = π/2 − a`. Quake stores its angles the
+/// same way and its converter derives the same formula
+/// ([`quake_bsp_nav`]) — one contract, two games.
+#[inline]
+pub(crate) fn doom_yaw(angle_degrees: f32) -> f32 {
+    std::f32::consts::FRAC_PI_2 - angle_degrees.to_radians()
+}
+
+/// The same yaw for a direction already expressed in Doom's plane rather than
+/// as an angle: `forward = (sin yaw, 0, −cos yaw)` must be
+/// `doom_to_glb(east, 0, north)`, so `sin yaw = east` and `cos yaw = north`.
+#[inline]
+pub(crate) fn doom_dir_yaw(east: f32, north: f32) -> f32 {
+    east.atan2(north)
+}
 /// Doom `VIEWHEIGHT` — the eye above the floor, in map units.
 pub(crate) const DOOM_VIEW_HEIGHT: f32 = 41.0;
 /// Doom `MAXSTEPMOVE` — the tallest ledge a walker may climb, in map units.
@@ -615,12 +805,12 @@ pub(crate) fn doom_map_nav(lumps: &[WadLump], map: &str) -> Option<crate::world_
         let start = NavStart {
             // Named below, once the map order is known.
             name: String::new(),
-            pos: [
+            pos: doom_to_glb(
                 tx * DOOM_UNIT,
                 floor_z + DOOM_VIEW_HEIGHT * DOOM_UNIT,
                 ty * DOOM_UNIT,
-            ],
-            yaw: std::f32::consts::FRAC_PI_2 + angle.to_radians(),
+            ),
+            yaw: doom_yaw(angle),
             pitch: 0.0,
         };
         match (is_coop, typ == 1 && primary.is_none()) {
@@ -726,6 +916,32 @@ fn doom_floor_at(
     floor_z
 }
 
+/// THING flags bit 1 (0x0002): appears on skill 3, "Hurt Me Plenty".
+const DOOM_SKILL_HMP: u16 = 0x0002;
+/// THING flags bit 4 (0x0010): multiplayer only, absent in single player.
+const DOOM_MULTIPLAYER_ONLY: u16 = 0x0010;
+
+/// Whether vanilla single-player Doom would spawn this THING at all, using
+/// the exported default cast: skill 3, "Hurt Me Plenty".
+///
+/// Player starts (types 1-4) and the deathmatch start (type 11) are exempt —
+/// `P_LoadThings` in vanilla `p_setup.c` special-cases those two groups and
+/// spawns them unconditionally, checking neither the skill bits nor the
+/// multiplayer-only bit. Every other thing (monsters, pickups, decorations
+/// alike) must carry the HMP skill bit (0x0002) and must NOT be
+/// multiplayer-only (0x0010).
+///
+/// A thing with none of the three skill bits set (`flags & 0x0007 == 0`) is
+/// not a "spawns everywhere" wildcard: vanilla's skill check is a positive
+/// bit test, so such a thing fails it on every skill, HMP included, and is
+/// correctly excluded here too rather than treated as "all skills".
+pub(crate) fn doom_thing_spawns_on_hmp(typ: u16, flags: u16) -> bool {
+    if matches!(typ, 1 | 2 | 3 | 4 | 11) {
+        return true;
+    }
+    flags & DOOM_SKILL_HMP != 0 && flags & DOOM_MULTIPLAYER_ONLY == 0
+}
+
 pub(crate) fn doom_map_place(
     lumps: &[WadLump],
     map: &str,
@@ -743,10 +959,18 @@ pub(crate) fn doom_map_place(
             let Some((kind, prefix)) = crate::world_place::doom_thing_actor(typ) else {
                 continue;
             };
-            let tx = i16_le(things, o) as f32 / 64.0;
-            let ty = i16_le(things, o + 2) as f32 / 64.0;
+            let flags = u16_le(things, o + 8);
+            // Default published cast = single-player skill 3 (HMP). See
+            // `doom_thing_spawns_on_hmp` for the exact vanilla rule,
+            // including the player/deathmatch-start exemption and the
+            // no-skill-bits corner case.
+            if !doom_thing_spawns_on_hmp(typ, flags) {
+                continue;
+            }
+            let tx = i16_le(things, o) as f32 * DOOM_UNIT;
+            let ty = i16_le(things, o + 2) as f32 * DOOM_UNIT;
             let angle = u16_le(things, o + 4) as f32;
-            let yaw = std::f32::consts::FRAC_PI_2 + angle.to_radians();
+            let yaw = doom_yaw(angle);
             let asset = if prefix.is_empty() {
                 String::new()
             } else {
@@ -756,12 +980,16 @@ pub(crate) fn doom_map_place(
                 id: format!("thing-{i}"),
                 kind: kind.into(),
                 asset,
-                pos: [tx, 0.0, ty],
+                pos: doom_to_glb(tx, 0.0, ty),
                 yaw,
                 class: typ.to_string(),
                 width: 0.0,
                 height: 0.0,
                 align: String::new(),
+                // Raw THING flags, preserved verbatim (skill mask +
+                // multiplayer-only) so a future difficulty option can
+                // re-derive another cast without re-importing the WAD.
+                flags: flags as u32,
             });
         }
     }
@@ -1002,6 +1230,9 @@ pub(crate) fn quake_bsp_place(bytes: &[u8], source: &str, world_key: &str) -> cr
                         width: 0.0,
                         height: 0.0,
                         align: String::new(),
+                        // Quake's .map entities carry no Doom-style skill
+                        // bits; nothing to preserve here.
+                        flags: 0,
                     });
                     i += 1;
                 }
@@ -1510,7 +1741,7 @@ pub(crate) fn doom_map_to_mesh(
         ));
         door_meta.push(DoorMeta {
             name,
-            centre: [door.centre[0] * scale, closed_y, door.centre[1] * scale],
+            centre: doom_to_glb(door.centre[0] * scale, closed_y, door.centre[1] * scale),
             closed_y,
             open_y,
         });
@@ -1553,7 +1784,7 @@ pub(crate) fn doom_map_to_mesh(
         ));
         lift_meta.push(DoorMeta {
             name: lift.name.clone(),
-            centre: [lift.centre[0] * scale, up_y, lift.centre[1] * scale],
+            centre: doom_to_glb(lift.centre[0] * scale, up_y, lift.centre[1] * scale),
             closed_y: up_y,
             open_y: down_y,
         });
@@ -1590,16 +1821,18 @@ pub(crate) fn doom_map_to_mesh(
         teleporters: movers
             .teleporters
             .iter()
+            // Doom (east, north) -> GLB (x, −z): the pad's north bounds swap
+            // ends, so the AABB stays an AABB.
             .map(|t| crate::world_nav::NavTeleport {
                 name: t.name.clone(),
-                pad_min: [t.pad_min[0] * scale, t.pad_min[1] * scale],
-                pad_max: [t.pad_max[0] * scale, t.pad_max[1] * scale],
-                dst: [
+                pad_min: [t.pad_min[0] * scale, -t.pad_max[1] * scale],
+                pad_max: [t.pad_max[0] * scale, -t.pad_min[1] * scale],
+                dst: doom_to_glb(
                     t.dst[0] * scale,
                     t.dst_floor as f32 * scale + DOOM_VIEW_HEIGHT * DOOM_UNIT,
                     t.dst[1] * scale,
-                ],
-                yaw: std::f32::consts::FRAC_PI_2 + t.yaw_degrees.to_radians(),
+                ),
+                yaw: doom_yaw(t.yaw_degrees),
             })
             .collect(),
     })
@@ -1769,6 +2002,24 @@ pub(crate) fn snap_pos(p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// The ONE seam where Doom's map plane becomes GLB space.
+///
+/// Every triangle of every Doom part goes through here — walls, flats, door
+/// leaves, lift and hazard floors, sky faces — and every caller hands its
+/// corners in DOOM order, `[east, up, north]`, because that is what the 2D
+/// emitters above hold: a linedef's or a sector loop's `(x, y)` with a sector
+/// height. Keeping the whole polygon pipeline in Doom's own plane is why
+/// `R_PointOnSide`'s "front is right of v1->v2" and the ear clipper's
+/// orientation still read like the originals.
+///
+/// Two things happen here and they may never be separated:
+///
+/// 1. north flips to −Z ([`doom_to_glb`]), the only handedness-preserving
+///    placement;
+/// 2. the winding reverses, because a reflection turns every triangle inside
+///    out. Flipping the axis alone would give a correct level with every face
+///    pointing backwards — invisible on macOS (the Metal backend sets no cull
+///    mode) and a see-through level everywhere else.
 pub(crate) fn push_tri_uv(
     positions: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
@@ -1780,10 +2031,11 @@ pub(crate) fn push_tri_uv(
     ub: [f32; 2],
     uc: [f32; 2],
 ) {
+    let corner = |p: [f32; 3]| snap_pos(doom_to_glb(p[0], p[1], p[2]));
     let base = positions.len() as u32;
-    positions.extend_from_slice(&[snap_pos(a), snap_pos(b), snap_pos(c)]);
+    positions.extend_from_slice(&[corner(a), corner(b), corner(c)]);
     uvs.extend_from_slice(&[ua, ub, uc]);
-    indices.extend_from_slice(&[base, base + 1, base + 2]);
+    indices.extend_from_slice(&[base, base + 2, base + 1]);
 }
 
 pub(crate) fn push_quad_uv(
@@ -1838,6 +2090,38 @@ pub(crate) fn period_span(a: f32, b: f32) -> (f32, f32) {
     ((a - base).clamp(0.0, 1.0), (b - base).clamp(0.0, 1.0))
 }
 
+/// Walk `[su0, su1]` (already in atlas-tile periods) one period at a time,
+/// handing each piece its world endpoints and its local 0..1 U span.
+fn for_each_u_period(
+    p0: [f32; 2],
+    p1: [f32; 2],
+    su0: f32,
+    su1: f32,
+    mut f: impl FnMut([f32; 2], [f32; 2], f32, f32),
+) {
+    let us = splits_along(su0, su1);
+    if us.len() < 2 {
+        return;
+    }
+    let du = su1 - su0;
+    for ui in 0..us.len() - 1 {
+        let ua = us[ui];
+        let ub = us[ui + 1];
+        let t0 = if du.abs() < 1e-6 { 0.0 } else { (ua - su0) / du };
+        let t1 = if du.abs() < 1e-6 { 1.0 } else { (ub - su0) / du };
+        let a = [
+            p0[0] + (p1[0] - p0[0]) * t0,
+            p0[1] + (p1[1] - p0[1]) * t0,
+        ];
+        let b = [
+            p0[0] + (p1[0] - p0[0]) * t1,
+            p0[1] + (p1[1] - p0[1]) * t1,
+        ];
+        let (lu0, lu1) = period_span(ua, ub);
+        f(a, b, lu0, lu1);
+    }
+}
+
 /// Wall tessellated so no triangle spans more than one atlas tile period.
 pub(crate) fn push_wall_tiled(
     positions: &mut Vec<[f32; 3]>,
@@ -1859,22 +2143,29 @@ pub(crate) fn push_wall_tiled(
     let su1 = u1 / tw;
     let sv0 = v0 / th;
     let sv1 = v1 / th;
-    let us = splits_along(su0, su1);
     let vs = splits_along(sv0, sv1);
-    if us.len() < 2 || vs.len() < 2 {
+    if vs.len() < 2 {
         return;
     }
-    let du = su1 - su0;
     let dv = sv1 - sv0;
-    for ui in 0..us.len() - 1 {
-        let ua = us[ui];
-        let ub = us[ui + 1];
-        let t0 = if du.abs() < 1e-6 { 0.0 } else { (ua - su0) / du };
-        let t1 = if du.abs() < 1e-6 { 1.0 } else { (ub - su0) / du };
-        let ax = p0[0] + (p1[0] - p0[0]) * t0;
-        let ay = p0[1] + (p1[1] - p0[1]) * t0;
-        let bx = p0[0] + (p1[0] - p0[0]) * t1;
-        let by = p0[1] + (p1[1] - p0[1]) * t1;
+    // Half a source texel, in tile-local units.
+    //
+    // The band's own two ends may not sample the tile's edge. Nothing wraps
+    // V in the shader — the scene samples the atlas with raw UVs in REPEAT
+    // (`sample_as_bgra_repeat`), so the tiling is this tessellation plus the
+    // wrap gutter `blit_wrapped` paints around each cell. That gutter holds
+    // the row from the OTHER end of the texture, which is exactly right at
+    // an INTERIOR tile seam and exactly wrong at the ends of the band:
+    // bilinear straddling the edge there blends in a row the wall never
+    // reaches — Doom's nukage glow reappearing as a hairline along the top
+    // of a pit wall. Pull just the outer ends half a texel in; the interior
+    // seams keep the edge, which is what makes them seamless.
+    //
+    // V only. Segs cut a wall ACROSS, so consecutive pieces of one wall meet
+    // at arbitrary U — insetting there would show as a seam at every join.
+    let half_v = 0.5 / th;
+    let last_v = vs.len() - 2;
+    for_each_u_period(p0, p1, su0, su1, |a, b, lu0, lu1| {
         for vi in 0..vs.len() - 1 {
             let va = vs[vi];
             let vb = vs[vi + 1];
@@ -1882,23 +2173,69 @@ pub(crate) fn push_wall_tiled(
             let s1 = if dv.abs() < 1e-6 { 1.0 } else { (vb - sv0) / dv };
             let za = z0 + (z1 - z0) * s0;
             let zb = z0 + (z1 - z0) * s1;
-            let (lu0, lu1) = period_span(ua, ub);
-            let (lv0, lv1) = period_span(va, vb);
+            let (mut lv0, mut lv1) = period_span(va, vb);
+            if vi == 0 {
+                lv0 = lv0.clamp(half_v, 1.0 - half_v);
+            }
+            if vi == last_v {
+                lv1 = lv1.clamp(half_v, 1.0 - half_v);
+            }
             push_quad_uv(
                 positions,
                 uvs,
                 indices,
-                [ax, za, ay],
-                [bx, za, by],
-                [bx, zb, by],
-                [ax, zb, ay],
+                [a[0], za, a[1]],
+                [b[0], za, b[1]],
+                [b[0], zb, b[1]],
+                [a[0], zb, a[1]],
                 slot_uv(slot, lu0, lv0),
                 slot_uv(slot, lu1, lv0),
                 slot_uv(slot, lu1, lv1),
                 slot_uv(slot, lu0, lv1),
             );
         }
-    }
+    });
+}
+
+/// A band of wall that repeats ONE texel row of `slot` over its whole
+/// height: the buried skirt of an apron. It still tiles across U, so it
+/// shares its edge vertices with the band it hangs off (no T-junction).
+fn push_wall_pinned_v(
+    positions: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    p0: [f32; 2],
+    p1: [f32; 2],
+    z0: f32,
+    z1: f32,
+    u0: f32,
+    u1: f32,
+    v: f32,
+    slot: AtlasSlot,
+) {
+    let tw = slot.w.max(1) as f32;
+    let th = slot.h.max(1) as f32;
+    let sv = v / th;
+    // Which row is the caller's (it passes a V half a texel inside the band,
+    // which is what says WHICH side of a period boundary it meant); staying
+    // clear of the tile edge is ours, for the same reason the band's ends do.
+    let half_v = 0.5 / th;
+    let lv = (sv - sv.floor()).clamp(half_v, 1.0 - half_v);
+    for_each_u_period(p0, p1, u0 / tw, u1 / tw, |a, b, lu0, lu1| {
+        push_quad_uv(
+            positions,
+            uvs,
+            indices,
+            [a[0], z0, a[1]],
+            [b[0], z0, b[1]],
+            [b[0], z1, b[1]],
+            [a[0], z1, a[1]],
+            slot_uv(slot, lu0, lv),
+            slot_uv(slot, lu1, lv),
+            slot_uv(slot, lu1, lv),
+            slot_uv(slot, lu0, lv),
+        );
+    });
 }
 
 /// Doom units a wall poke past the flat it meets, so residual T-junctions
@@ -1909,6 +2246,72 @@ pub(crate) fn push_wall_tiled(
 /// — 4 units is 6cm at this scale, and the user could see it. Mids
 /// (railings) stay flush at both ends.
 const WALL_APRON: f32 = 4.0;
+
+/// One wall band, textured EXACTLY over `[z_bot, z_top]` with the vanilla
+/// V range, plus its buried aprons.
+///
+/// The apron must not extend the SAMPLED V range. Doom's own strips are
+/// routinely as tall as their texture (NUKE24 is 24 texels on a 24-unit
+/// nukage riser); carrying V past the band wraps the texture and paints its
+/// far edge — the slime glow at the bottom of NUKE24 — back along the other
+/// end of the band, which is the green fringe on both edges of a pit wall.
+/// Each skirt repeats the band's own edge row instead: what a clamped
+/// sampler would give, and invisible anyway once it is inside the flat.
+#[allow(clippy::too_many_arguments)]
+fn push_wall_with_apron(
+    positions: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    p0: [f32; 2],
+    p1: [f32; 2],
+    z_bot: f32,
+    z_top: f32,
+    u0: f32,
+    u1: f32,
+    v_bot: f32,
+    v_top: f32,
+    apron_bot: f32,
+    apron_top: f32,
+    slot: AtlasSlot,
+) {
+    push_wall_tiled(
+        positions, uvs, indices, p0, p1, z_bot, z_top, u0, u1, v_bot, v_top, slot,
+    );
+    // Half a texel INSIDE the band: sampling exactly on the edge is
+    // ambiguous — a V that lands on a period boundary reads as local 0,
+    // i.e. the row at the far end of the texture.
+    let inward = if v_bot >= v_top { 0.5 } else { -0.5 };
+    if apron_bot > 0.0 {
+        push_wall_pinned_v(
+            positions,
+            uvs,
+            indices,
+            p0,
+            p1,
+            z_bot - apron_bot,
+            z_bot,
+            u0,
+            u1,
+            v_bot - inward,
+            slot,
+        );
+    }
+    if apron_top > 0.0 {
+        push_wall_pinned_v(
+            positions,
+            uvs,
+            indices,
+            p0,
+            p1,
+            z_top,
+            z_top + apron_top,
+            u0,
+            u1,
+            v_top + inward,
+            slot,
+        );
+    }
+}
 
 pub(crate) fn sidedef_has_mid(sidedefs: &[u8], snum: u16, n_side: usize) -> bool {
     if snum == 0xFFFF || snum as usize >= n_side {
@@ -1981,24 +2384,29 @@ pub(crate) fn emit_wall_piece(
         let slot = lookup_slot(uv_map, tex);
         let th = slot.h.max(1) as f32;
         let wall_h = ((sec_ceil[sector] - sec_floor[sector]) as f32).abs();
+        // Vanilla `R_StoreWallRange`, one-sided: ML_DONTPEGBOTTOM puts the
+        // texture's BOTTOM edge on the floor (`floorheight + texheight`);
+        // otherwise its TOP edge on the ceiling (`worldtop`).
         let (v_top, v_bot) = if lower_unpeg {
             let v_bot = yoff + th;
             (v_bot - wall_h, v_bot)
         } else {
             (yoff, yoff + wall_h)
         };
-        push_wall_tiled(
+        push_wall_with_apron(
             positions,
             uvs,
             indices,
             [ax, ay],
             [bx, by],
-            floor_z - apron,
-            ceil_z + apron,
+            floor_z,
+            ceil_z,
             u0,
             u1,
-            v_bot + WALL_APRON,
-            v_top - WALL_APRON,
+            v_bot,
+            v_top,
+            apron,
+            apron,
             slot,
         );
         fill_colors(colors, positions.len(), light);
@@ -2022,15 +2430,18 @@ pub(crate) fn emit_wall_piece(
     let oc = sec_ceil[os] as f32 * scale;
     if floor_z < of && !is_blank_tex(&lower) {
         let slot = lookup_slot(uv_map, lower.as_str());
-        let th = slot.h.max(1) as f32;
         let step_h = (sec_floor[os] - sec_floor[sector]) as f32;
+        // Vanilla `R_StoreWallRange`, lower texture: ML_DONTPEGBOTTOM
+        // anchors it to the FRONT ceiling (`rw_bottomtexturemid = worldtop`)
+        // so it stays put when the floor moves; otherwise it hangs from the
+        // BACK floor (`worldlow`) — the top of the strip, V = 0 there.
         let (v_top, v_bot) = if lower_unpeg {
-            (yoff, yoff + step_h)
+            let v_top = yoff + (sec_ceil[sector] - sec_floor[os]) as f32;
+            (v_top, v_top + step_h)
         } else {
-            let v_bot = yoff + th;
-            (v_bot - step_h, v_bot)
+            (yoff, yoff + step_h)
         };
-        push_wall_tiled(
+        push_wall_with_apron(
             positions,
             uvs,
             indices,
@@ -2039,15 +2450,14 @@ pub(crate) fn emit_wall_piece(
             // Down into the lower floor (hidden), up to the higher floor
             // EXACTLY: Doom's riser spans [lower floor, higher floor] and
             // the higher floor's polygon starts where it ends.
-            // Down into the lower floor (hidden), up to the higher floor
-            // EXACTLY: Doom's riser spans [lower floor, higher floor] and
-            // the higher floor's polygon starts where it ends.
-            floor_z - apron,
+            floor_z,
             of,
             u0,
             u1,
-            v_bot + WALL_APRON,
-            v_top - WALL_APRON,
+            v_bot,
+            v_top,
+            apron,
+            0.0,
             slot,
         );
     }
@@ -2104,13 +2514,17 @@ pub(crate) fn emit_wall_piece(
                 (sec_ceil[sector] - sec_ceil[os]) as f32,
             ),
         };
+        // Vanilla `R_StoreWallRange`, upper texture: ML_DONTPEGTOP hangs it
+        // from the FRONT ceiling (`worldtop`, V = 0 at the top of the
+        // strip); otherwise its BOTTOM edge sits on the BACK ceiling
+        // (`backsector->ceilingheight + texheight`).
         let (v_top, v_bot) = if upper_unpeg {
             (yoff, yoff + step_h)
         } else {
-            let v_top = yoff;
-            (v_top, v_top + step_h.min(th))
+            let v_bot = yoff + th;
+            (v_bot - step_h, v_bot)
         };
-        push_wall_tiled(
+        push_wall_with_apron(
             out_pos,
             out_uv,
             out_idx,
@@ -2119,11 +2533,13 @@ pub(crate) fn emit_wall_piece(
             // Mirror of the riser: the open-air end (the lower ceiling) is
             // exact, only the end buried above the higher ceiling pokes.
             low,
-            ceil_z + apron,
+            ceil_z,
             u0,
             u1,
-            v_bot + WALL_APRON,
-            v_top - WALL_APRON,
+            v_bot,
+            v_top,
+            0.0,
+            apron,
             slot,
         );
         let n = out_pos.len();
@@ -2142,6 +2558,9 @@ pub(crate) fn emit_wall_piece(
         let mid_hi = ceil_z.min(oc);
         if mid_hi > mid_lo + 0.01 {
             let wall_h = (mid_hi - mid_lo) / scale;
+            // Vanilla `R_RenderMaskedSegRange`: ML_DONTPEGBOTTOM puts the
+            // texture's bottom edge on the higher of the two floors,
+            // otherwise its top edge on the lower of the two ceilings.
             let (v_top, v_bot) = if lower_unpeg {
                 let v_bot = yoff + th;
                 (v_bot - wall_h, v_bot)
@@ -4255,4 +4674,585 @@ pub(crate) fn compose_doom_textures(
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Wall V alignment against vanilla (`r_segs.c`, `R_StoreWallRange`)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const SCALE: f32 = 1.0 / 64.0;
+    /// The skirt the emitter buries in the flat a wall meets.
+    const APRON: f32 = WALL_APRON;
+
+    /// Everything `emit_wall_piece` needs for one E1M1 line, built the way
+    /// `doom_map_to_mesh` builds it.
+    struct E1m1<'a> {
+        linedefs: &'a [u8],
+        sidedefs: &'a [u8],
+        verts: Vec<[f32; 2]>,
+        sec_floor: Vec<i16>,
+        sec_ceil: Vec<i16>,
+        sec_ceil_tex: Vec<String>,
+        sec_light: Vec<i16>,
+        n_side: usize,
+        n_sec: usize,
+        uv_map: BTreeMap<String, AtlasSlot>,
+        images: BTreeMap<String, RgbaImage>,
+    }
+
+    /// Run `f` against E1M1 of the shareware IWAD when this machine has it.
+    /// No IWAD (CI has no id Software data) — no test, and it says so.
+    fn with_e1m1(f: impl FnOnce(&E1m1)) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let palette = wad.playpal.expect("PLAYPAL");
+        let lumps = &wad.lumps;
+        let lump = |n: &str| lump_by_name_after(lumps, "E1M1", n).expect(n);
+        let (vertexes, linedefs, sidedefs, sectors) = (
+            lump("VERTEXES"),
+            lump("LINEDEFS"),
+            lump("SIDEDEFS"),
+            lump("SECTORS"),
+        );
+        let n_side = sidedefs.len() / 30;
+        let n_sec = sectors.len() / 26;
+        let verts: Vec<[f32; 2]> = (0..vertexes.len() / 4)
+            .map(|i| {
+                [
+                    i16_le(vertexes, i * 4) as f32,
+                    i16_le(vertexes, i * 4 + 2) as f32,
+                ]
+            })
+            .collect();
+        let mut sec_floor = vec![0i16; n_sec];
+        let mut sec_ceil = vec![0i16; n_sec];
+        let mut sec_light = vec![160i16; n_sec];
+        let mut sec_ceil_tex = vec![String::new(); n_sec];
+        for i in 0..n_sec {
+            let o = i * 26;
+            sec_floor[i] = i16_le(sectors, o);
+            sec_ceil[i] = i16_le(sectors, o + 2);
+            sec_light[i] = i16_le(sectors, o + 20);
+            sec_ceil_tex[i] = lump_name(&sectors[o + 12..o + 20]);
+        }
+        // Same atlas the converter builds, minus the flats no wall uses.
+        let mut needed: BTreeSet<String> = BTreeSet::new();
+        for i in 0..n_side {
+            for off in [4usize, 12, 20] {
+                let name = lump_name(&sidedefs[i * 30 + off..i * 30 + off + 8]);
+                if !name.is_empty() && name != "-" {
+                    needed.insert(name);
+                }
+            }
+        }
+        let mut images: BTreeMap<String, RgbaImage> = BTreeMap::new();
+        images.insert("_default".into(), opaque_gray_tile());
+        for (name, img) in compose_doom_textures(lumps, &palette) {
+            if needed.contains(&name) {
+                images.insert(name, img);
+            }
+        }
+        let (_png, uv_map) = pack_atlas(&images);
+        f(&E1m1 {
+            linedefs,
+            sidedefs,
+            verts,
+            sec_floor,
+            sec_ceil,
+            sec_ceil_tex,
+            sec_light,
+            n_side,
+            n_sec,
+            uv_map,
+            images,
+        });
+    }
+
+    /// Emit the front side of one linedef exactly as `emit_walls_from_segs`
+    /// would for a seg that covers the whole line, and return its
+    /// (position, uv) pairs.
+    fn emit_front(m: &E1m1, line: usize) -> Vec<([f32; 3], [f32; 2])> {
+        let lo = line * 14;
+        let v1 = u16_le(m.linedefs, lo) as usize;
+        let v2 = u16_le(m.linedefs, lo + 2) as usize;
+        let flags = u16_le(m.linedefs, lo + 4);
+        let snum = u16_le(m.linedefs, lo + 10);
+        let other = u16_le(m.linedefs, lo + 12);
+        let (p1, p2) = (m.verts[v1], m.verts[v2]);
+        let xoff = i16_le(m.sidedefs, snum as usize * 30) as f32;
+        let len = (p2[0] - p1[0]).hypot(p2[1] - p1[1]).max(1.0);
+        let (mut pos, mut uv, mut idx, mut col) = (vec![], vec![], vec![], vec![]);
+        emit_wall_piece(
+            &mut pos,
+            &mut uv,
+            &mut idx,
+            p1,
+            p2,
+            xoff,
+            xoff + len,
+            flags,
+            flags & 0x0004 != 0,
+            0,
+            snum,
+            other,
+            m.sidedefs,
+            m.n_side,
+            m.n_sec,
+            &m.sec_floor,
+            &m.sec_ceil,
+            &m.sec_ceil_tex,
+            &m.sec_light,
+            &mut col,
+            &m.uv_map,
+            SCALE,
+            None,
+            None,
+        );
+        pos.into_iter().zip(uv).collect()
+    }
+
+    /// One textured band of a wall, in Doom units, with the V that vanilla
+    /// `R_StoreWallRange` puts on its top and bottom edge. V grows DOWN.
+    struct Band {
+        what: &'static str,
+        tex: &'static str,
+        z_bot: f32,
+        z_top: f32,
+        v_top: f32,
+        v_bot: f32,
+        /// Ends the emitter buries a skirt in (below a floor, above a ceiling).
+        apron_bot: bool,
+        apron_top: bool,
+    }
+
+    /// The local V (0..1 of its atlas tile) an emitted vertex carries.
+    fn local_v(slot: AtlasSlot, uv: [f32; 2]) -> f32 {
+        (uv[1] - slot.uv[1]) / (slot.uv[3] - slot.uv[1])
+    }
+
+    /// Every vertex of `band` must carry vanilla's V for its own height —
+    /// modulo the texture height, because the atlas tile repeats by
+    /// wrapping — and must keep half a texel clear of the tile edge, where
+    /// bilinear would blend the wrap gutter's row in. The exception is an
+    /// INTERIOR tile seam: there the tile edge, gutter and all, is what
+    /// makes the repeat seamless, so it must land on it exactly.
+    /// Returns (vertices checked, of those interior tile seams).
+    fn check_band(m: &E1m1, verts: &[([f32; 3], [f32; 2])], b: &Band) -> (usize, usize) {
+        let slot = lookup_slot(&m.uv_map, b.tex);
+        let th = slot.h.max(1) as f32;
+        let half = 0.5 / th;
+        let lo = b.z_bot - if b.apron_bot { APRON } else { 0.0 };
+        let hi = b.z_top + if b.apron_top { APRON } else { 0.0 };
+        let mut n = 0;
+        let mut seams = 0;
+        for (p, uv) in verts {
+            let y = p[1] / SCALE;
+            if y < lo - 0.01 || y > hi + 0.01 {
+                continue;
+            }
+            // Vanilla's V here — for a skirt, the band edge whose row it
+            // repeats.
+            let want = if y < b.z_bot - 0.001 {
+                b.v_bot
+            } else if y > b.z_top + 0.001 {
+                b.v_top
+            } else {
+                b.v_top + (b.z_top - y)
+            };
+            // An interior tile seam: the texture repeats at this height, so
+            // this is a boundary the band crosses rather than an end of it.
+            let period = want.rem_euclid(th);
+            let seam = (period < 0.01 || period > th - 0.01)
+                && want > b.v_top + 0.01
+                && want < b.v_bot - 0.01;
+            let got_local = local_v(slot, *uv);
+            let got = got_local * th;
+            let d = (got - want).rem_euclid(th);
+            let err = d.min(th - d);
+            if seam {
+                assert!(
+                    err < 0.02,
+                    "{}: tile seam at height {y} carries V {got}, must repeat exactly at {want}",
+                    b.what,
+                );
+                seams += 1;
+            } else {
+                // Half a texel of inset is the whole licence: anything more
+                // is a pegging error, anything less bleeds the gutter.
+                assert!(
+                    err <= 0.5 + 0.02,
+                    "{}: vertex at height {y} carries V {got}, vanilla says {want} (mod {th})",
+                    b.what,
+                );
+                assert!(
+                    got_local >= half - 1e-4 && got_local <= 1.0 - half + 1e-4,
+                    "{}: vertex at height {y} samples local V {got_local}, \
+                     inside half a texel ({half}) of the tile edge — the wrap \
+                     gutter bleeds the far end of the texture in",
+                    b.what,
+                );
+            }
+            n += 1;
+        }
+        assert!(n > 0, "{}: nothing emitted", b.what);
+        (n, seams)
+    }
+
+    /// Rows of a texture that read as the nukage glow: green, and much more
+    /// green than red or blue.
+    fn glow_rows(img: &RgbaImage) -> Vec<bool> {
+        (0..img.h)
+            .map(|row| {
+                let mut g = 0u32;
+                let mut rb = 0u32;
+                for col in 0..img.w {
+                    let i = ((row * img.w + col) * 4) as usize;
+                    g += img.rgba[i + 1] as u32;
+                    rb += (img.rgba[i] as u32).max(img.rgba[i + 2] as u32);
+                }
+                let w = img.w.max(1);
+                g / w > 100 && g / w > rb / w + 40
+            })
+            .collect()
+    }
+
+    /// E1M1's zigzag nukage pit: sector 57 (floor -48, NUKAGE3) against the
+    /// walkway at -24, lower texture NUKE24 — 24 texels on a 24-unit strip,
+    /// and pegged (no ML_DONTPEGBOTTOM), so vanilla paints the texture
+    /// exactly once: row 0 under the walkway lip, row 23 — the brightest
+    /// glow row — at the slime.
+    ///
+    /// Extending the sampled V with the apron wrapped it and painted the
+    /// glow along the TOP edge as well. Landing the top edge exactly ON the
+    /// tile's V=0 then left a hairline of it: the wrap gutter above that
+    /// edge holds row 23, and bilinear reads half of it.
+    #[test]
+    fn nukage_pit_wall_keeps_its_glow_at_the_slime() {
+        with_e1m1(|m| {
+            let verts = emit_front(m, 182);
+            let band = Band {
+                what: "E1M1 line 182 nukage pit lower (NUKE24)",
+                tex: "NUKE24",
+                z_bot: -48.0,
+                z_top: -24.0,
+                v_top: 0.0,
+                v_bot: 24.0,
+                apron_bot: true,
+                apron_top: false,
+            };
+            assert_eq!(check_band(m, &verts, &band).0, verts.len());
+
+            let img = m.images.get("NUKE24").expect("NUKE24");
+            assert_eq!((img.w, img.h), (64, 24));
+            let glow = glow_rows(img);
+            assert!(glow[23] && glow[20], "NUKE24 glows along its bottom rows");
+            assert!(!glow[0] && !glow[5], "NUKE24's top rows are dry brown");
+
+            // The band's two ends sample the CENTRE of the first and last
+            // row, not the edges between them and the gutter.
+            let slot = lookup_slot(&m.uv_map, "NUKE24");
+            let th = slot.h.max(1) as f32;
+            let row_at = |z: f32| -> Vec<f32> {
+                verts
+                    .iter()
+                    .filter(|(p, _)| (p[1] / SCALE - z).abs() < 0.001)
+                    .map(|(_, uv)| local_v(slot, *uv) * th)
+                    .collect()
+            };
+            for row in row_at(-24.0) {
+                assert!(
+                    (row - 0.5).abs() < 0.01,
+                    "under the walkway lip the wall samples row {row}, want 0.5",
+                );
+            }
+            for row in row_at(-48.0) {
+                assert!(
+                    (row - 23.5).abs() < 0.01,
+                    "at the slime the wall samples row {row}, want 23.5",
+                );
+            }
+
+            // And no vertex may sample a glow row anywhere but at the slime.
+            let first_glow = glow.iter().position(|g| *g).expect("a glow row") as f32;
+            for (p, uv) in &verts {
+                let row = local_v(slot, *uv) * th;
+                if row < first_glow - 0.5 {
+                    continue;
+                }
+                let y = p[1] / SCALE;
+                assert!(
+                    y <= band.z_bot + (th - first_glow) + 0.01,
+                    "glow row {row} painted at height {y}, {} units above the slime",
+                    y - band.z_bot,
+                );
+            }
+        });
+    }
+
+    /// The rest of the pegging table, on E1M1 landmarks. Each expected V is
+    /// vanilla `R_StoreWallRange` arithmetic written out for that line.
+    #[test]
+    fn e1m1_wall_bands_carry_vanilla_v() {
+        with_e1m1(|m| {
+            // The start-room window (line 26, ML_DONTPEGTOP | ML_DONTPEGBOTTOM):
+            // front sector 39 (floor -16, ceiling 200), back sector 14
+            // (floor 8, ceiling 192), STARTAN3 (128 tall), rowoffset 0.
+            let window = emit_front(m, 26);
+            check_band(
+                m,
+                &window,
+                &Band {
+                    what: "line 26 upper, ML_DONTPEGTOP: hangs from worldtop",
+                    tex: "STARTAN3",
+                    z_bot: 192.0,
+                    z_top: 200.0,
+                    // texturemid = worldtop -> V 0 at the front ceiling.
+                    v_top: 0.0,
+                    v_bot: 8.0,
+                    apron_bot: false,
+                    apron_top: true,
+                },
+            );
+            check_band(
+                m,
+                &window,
+                &Band {
+                    what: "line 26 lower, ML_DONTPEGBOTTOM: anchored to worldtop",
+                    tex: "STARTAN3",
+                    z_bot: -16.0,
+                    z_top: 8.0,
+                    // texturemid = worldtop (200) -> V = 200 - height.
+                    v_top: 192.0,
+                    v_bot: 216.0,
+                    apron_bot: true,
+                    apron_top: false,
+                },
+            );
+
+            // Line 64, no ML_DONTPEGTOP: the upper's BOTTOM edge sits on the
+            // back ceiling. Front sector 24 (ceiling 224), back sector 41
+            // (ceiling 120), STARG3 (128 tall), rowoffset 104.
+            check_band(
+                m,
+                &emit_front(m, 64),
+                &Band {
+                    what: "line 64 upper, pegged: bottom edge on the back ceiling",
+                    tex: "STARG3",
+                    z_bot: 120.0,
+                    z_top: 224.0,
+                    // texturemid = backceil + texheight + rowoffset.
+                    v_top: 128.0,
+                    v_bot: 232.0,
+                    apron_bot: false,
+                    apron_top: true,
+                },
+            );
+
+            // One-sided, no ML_DONTPEGBOTTOM: top of texture at the ceiling.
+            // Line 47, sector 20 (floor -56, ceiling 24), BROWN144.
+            check_band(
+                m,
+                &emit_front(m, 47),
+                &Band {
+                    what: "line 47 one-sided, pegged: top edge on the ceiling",
+                    tex: "BROWN144",
+                    z_bot: -56.0,
+                    z_top: 24.0,
+                    v_top: 0.0,
+                    v_bot: 80.0,
+                    apron_bot: true,
+                    apron_top: true,
+                },
+            );
+
+            // One-sided WITH ML_DONTPEGBOTTOM: bottom of texture on the
+            // floor. Line 65 (the door track), sector 41 (floor -8, ceiling
+            // 120), DOORTRAK (128 tall).
+            check_band(
+                m,
+                &emit_front(m, 65),
+                &Band {
+                    what: "line 65 one-sided, ML_DONTPEGBOTTOM: bottom edge on the floor",
+                    tex: "DOORTRAK",
+                    z_bot: -8.0,
+                    z_top: 120.0,
+                    // texturemid = floorheight + texheight.
+                    v_top: 0.0,
+                    v_bot: 128.0,
+                    apron_bot: true,
+                    apron_top: true,
+                },
+            );
+
+            // A band that TILES: line 30's lower runs V 208..272 over
+            // STARTAN3, crossing the tile boundary at 256. That seam must
+            // land on the tile edge exactly — the wrap gutter there is the
+            // texture's own next row, which is what makes a repeat
+            // seamless. Only the band's two ends inset. Front sector 5
+            // (floor -56, ceiling 216), back sector 15 (floor 8).
+            let (_, seams) = check_band(
+                m,
+                &emit_front(m, 30),
+                &Band {
+                    what: "line 30 lower, ML_DONTPEGBOTTOM over a tile seam",
+                    tex: "STARTAN3",
+                    z_bot: -56.0,
+                    z_top: 8.0,
+                    // texturemid = worldtop (216) -> V = 216 - height.
+                    v_top: 208.0,
+                    v_bot: 272.0,
+                    apron_bot: true,
+                    apron_top: false,
+                },
+            );
+            assert!(seams > 0, "line 30's lower band crosses a tile seam");
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // DMX sound lumps
+    // -----------------------------------------------------------------
+
+    /// A DS lump the way a WAD stores one: header, a pad of the first
+    /// sample, the sound, a pad of the last sample. `declared` is written
+    /// into the header verbatim so a test can lie about it.
+    fn dmx_lump(format: u16, rate: u16, real: &[u8], declared: Option<u32>) -> Vec<u8> {
+        let mut body = vec![*real.first().unwrap_or(&128); DMX_PAD];
+        body.extend_from_slice(real);
+        body.extend(std::iter::repeat(*real.last().unwrap_or(&128)).take(DMX_PAD));
+        let count = declared.unwrap_or(body.len() as u32);
+        let mut out = Vec::new();
+        out.extend_from_slice(&format.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn dmx_decode_strips_the_hardware_pad() {
+        let real: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let lump = dmx_lump(3, 22050, &real, None);
+        assert_eq!(lump.len(), DMX_HEADER + DMX_PAD * 2 + real.len());
+        let sound = decode_dmx_sound(&lump).expect("a well-formed DS lump decodes");
+        assert_eq!(sound.sample_rate, 22050);
+        assert_eq!(sound.samples, real, "the 16-byte pads are not the sound");
+        assert_eq!(sound.samples.first(), Some(&10));
+        assert_eq!(sound.samples.last(), Some(&80));
+
+        // A rate the header cannot mean falls back rather than resampling
+        // the sound to a speed nothing recorded it at.
+        let zero_rate = dmx_lump(3, 0, &real, None);
+        assert_eq!(
+            decode_dmx_sound(&zero_rate).expect("still a sound").sample_rate,
+            DMX_RATE_DEFAULT
+        );
+
+        // Shorter than one pad pair: every byte is sound, nothing to strip.
+        let mut tiny = vec![3u8, 0, 0x11, 0x2b];
+        tiny.extend_from_slice(&12u32.to_le_bytes());
+        tiny.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let sound = decode_dmx_sound(&tiny).expect("a sub-pad lump keeps all of itself");
+        assert_eq!(sound.samples.len(), 12);
+        assert_eq!(sound.sample_rate, 11025);
+    }
+
+    #[test]
+    fn dmx_decode_refuses_malformed_lumps() {
+        let real: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        // Not a lump at all, and a lump too short to hold a header.
+        assert!(decode_dmx_sound(&[]).is_none());
+        assert!(decode_dmx_sound(&[3, 0, 0x11, 0x2b, 0, 0, 0]).is_none());
+        // The PC-speaker and Adlib scores share the DS/DP naming but carry
+        // no PCM.
+        assert!(decode_dmx_sound(&dmx_lump(0, 11025, &real, None)).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(1, 11025, &real, None)).is_none());
+        // A count the lump cannot back: the slice must never leave the
+        // buffer, and a truncated sound is not published.
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &real, Some(1_000_000))).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &real, Some(u32::MAX))).is_none());
+        // Nothing but header, and nothing but pad.
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &[], Some(0))).is_none());
+        assert!(decode_dmx_sound(&dmx_lump(3, 11025, &[], None)).is_none());
+    }
+
+    #[test]
+    fn dmx_wav_parses_back() {
+        let real: Vec<u8> = vec![0, 64, 128, 192, 255, 128, 1, 254];
+        let sound = decode_dmx_sound(&dmx_lump(3, 11025, &real, None)).expect("sound");
+        let wav = dmx_to_wav(&sound);
+
+        // The 44-byte canonical header, field by field.
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_le(&wav, 4) as usize, wav.len() - 8);
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(u32_le(&wav, 16), 16);
+        assert_eq!(u16_le(&wav, 20), 1, "PCM");
+        assert_eq!(u16_le(&wav, 22), 1, "mono");
+        assert_eq!(u32_le(&wav, 24), 11025);
+        assert_eq!(u32_le(&wav, 28), 11025 * 2, "byte rate");
+        assert_eq!(u16_le(&wav, 32), 2, "block align");
+        assert_eq!(u16_le(&wav, 34), 16, "bits per sample");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_le(&wav, 40) as usize, real.len() * 2);
+        assert_eq!(wav.len(), 44 + real.len() * 2);
+
+        // And it survives the crate's own RIFF reader — the one every
+        // catalog thumbnail and duration goes through.
+        let pcm = crate::thumbs::parse_wav(&wav).expect("the staged WAV parses");
+        assert_eq!(pcm.sample_rate, 11025);
+        assert_eq!(pcm.frames.len(), real.len());
+        for (i, &s) in real.iter().enumerate() {
+            let want = (((s as i16) - 128) << 8) as f32 / 32768.0;
+            assert_eq!(pcm.frames[i].0, want, "sample {i}");
+            assert_eq!(pcm.frames[i].1, want, "mono duplicates to both sides");
+        }
+    }
+
+    /// The real lumps, when this machine has the shareware IWAD. CI has no
+    /// id Software data — no IWAD, no test, and it says so.
+    #[test]
+    fn shareware_iwad_sounds_decode() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let mut decoded = 0usize;
+        for lump in wad.lumps.iter().filter(|l| l.name.starts_with("DS")) {
+            let sound = decode_dmx_sound(&lump.data)
+                .unwrap_or_else(|| panic!("{} is a DS lump that will not decode", lump.name));
+            assert!(DMX_RATE_RANGE.contains(&sound.sample_rate), "{}", lump.name);
+            assert_eq!(
+                crate::thumbs::parse_wav(&dmx_to_wav(&sound))
+                    .expect(&lump.name)
+                    .frames
+                    .len(),
+                sound.samples.len()
+            );
+            decoded += 1;
+        }
+        // Every DS lump decoded (the loop panics on any that did not), and
+        // the shareware IWAD carries only episode 1's cast.
+        assert_eq!(decoded, wad.lumps.iter().filter(|l| l.name.starts_with("DS")).count());
+        assert!(decoded >= 50, "shareware DOOM1.WAD carries 55 sounds, got {decoded}");
+        // DSPISTOL is the one every player hears first.
+        let pistol = wad.lumps.iter().find(|l| l.name == "DSPISTOL").expect("DSPISTOL");
+        let sound = decode_dmx_sound(&pistol.data).expect("pistol");
+        assert_eq!(sound.sample_rate, 11025);
+        assert_eq!(sound.samples.len(), pistol.data.len() - DMX_HEADER - DMX_PAD * 2);
+    }
 }

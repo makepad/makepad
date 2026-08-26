@@ -22,6 +22,11 @@ makepad-sqlite = { path = "../../sqlite_query" }
 makepad-asset-data = { path = "../data" }
 makepad-asset-chat = { path = "../chat" }
 makepad-asset-client = { path = "../client" }
+# OBSERVED ORIGIN DIRECTORIES (src/observe.rs): the per-platform directory
+# watcher (FSEvents / inotify / ReadDirectoryChangesW) and the placeholder
+# thumbnail encoder every publication needs.
+makepad-filesystem-watcher = { path = "../../filesystem_watcher" }
+jpeg-encoder = { path = "../../jpeg-encoder", version = "0.6.1" }
 
 [dev-dependencies]
 makepad-asset-client = { path = "../client" }
@@ -65,6 +70,10 @@ path = "tests/http/import_derive_http.rs"
 [[test]]
 name = "http_jobs_http"
 path = "tests/http/jobs_http.rs"
+
+[[test]]
+name = "http_observe_http"
+path = "tests/http/observe_http.rs"
 
 [[test]]
 name = "http_operations_http"

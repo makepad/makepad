@@ -1486,6 +1486,92 @@ pub fn parse_alias(v: &Value) -> ClientResult<AliasDto> {
     Ok(AliasDto { alias, asset_id, head_revision })
 }
 
+/// What the store holds under ONE alias, from the batch status route.
+///
+/// Everything a seeding client used to spend three round trips finding out:
+/// is there a head, is its Source blob the one I have, and which of the tags
+/// I asked about does it carry. `present: false` means absent (or
+/// quarantined, which a client may not act on either).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AliasStatusDto {
+    pub alias: AssetAlias,
+    pub present: bool,
+    pub asset_id: Option<AssetId>,
+    pub head_revision: Option<AssetRevisionId>,
+    /// The head's `Source` file blob, when it has one.
+    pub source: Option<BlobId>,
+    /// The head's Source blob IS the one the request named.
+    pub source_matches: bool,
+    /// The subset of the REQUESTED tags this asset's annotation carries.
+    pub tags: Vec<String>,
+}
+
+pub fn parse_alias_status(v: &Value) -> ClientResult<Vec<AliasStatusDto>> {
+    let arr = need(v, "entries", "alias status entries")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "alias status entries" })?;
+    if arr.len() > MAX_PAGE_ENTRIES {
+        return Err(ClientError::Protocol { what: "alias status page too large" });
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for e in arr {
+        let alias_s = need_str(e, "alias", 128, "alias status alias")?;
+        let alias = AssetAlias::from_str(alias_s)
+            .map_err(|_| ClientError::Protocol { what: "alias status alias" })?;
+        let present = need_bool(e, "present", "alias status present")?;
+        let asset_id = match e.get("asset_id") {
+            None | Some(Value::Null) => None,
+            Some(x) => Some(parse_asset_id(
+                x.as_str().ok_or(ClientError::Protocol { what: "alias status asset_id" })?,
+            )?),
+        };
+        let head_revision = match e.get("head_revision") {
+            None | Some(Value::Null) => None,
+            Some(x) => Some(parse_revision(
+                x.as_str()
+                    .ok_or(ClientError::Protocol { what: "alias status head_revision" })?,
+            )?),
+        };
+        let source = match e.get("source") {
+            None | Some(Value::Null) => None,
+            Some(x) => {
+                let text =
+                    x.as_str().ok_or(ClientError::Protocol { what: "alias status source" })?;
+                Some(
+                    BlobId::from_str(text)
+                        .map_err(|_| ClientError::Protocol { what: "alias status source" })?,
+                )
+            }
+        };
+        let source_matches = match e.get("source_matches") {
+            None | Some(Value::Null) => false,
+            Some(x) => x
+                .as_bool()
+                .ok_or(ClientError::Protocol { what: "alias status source_matches" })?,
+        };
+        let mut tags = Vec::new();
+        if let Some(list) = e.get("tags").and_then(Value::as_arr) {
+            for t in list {
+                let text = t.as_str().ok_or(ClientError::Protocol { what: "alias status tag" })?;
+                if text.len() > 64 {
+                    return Err(ClientError::Protocol { what: "alias status tag" });
+                }
+                tags.push(text.to_string());
+            }
+        }
+        out.push(AliasStatusDto {
+            alias,
+            present,
+            asset_id,
+            head_revision,
+            source,
+            source_matches,
+            tags,
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameAliasDto {
     pub alias: GameAlias,
@@ -2662,6 +2748,10 @@ mod tests {
                     gen_tokens: 40,
                     lanes_active: Some(2),
                     slots_total: Some(4),
+                    prefix_ingested: None,
+                    prefix_resumed: None,
+                    think_tokens: None,
+                    visible_tokens: None,
                 }),
             }
         );
