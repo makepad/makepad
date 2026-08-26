@@ -39,6 +39,14 @@ mod flow;
 // FLOW-WARP PLAYBACK: GPU warp pre-pass over the mkfl motion fields — also
 // compiled standalone by the flow_warp_lab example.
 mod flow_warp;
+mod flow_tween;
+// THE PLATTER: the single-clock video transport (velocity in, position
+// out, one map) and the keyed per-pair product cache the presenters share.
+mod transport;
+mod pair_cache;
+// The platter in the deck: the per-slot Transport fed from deck state.
+mod platter;
+mod nv12_view;
 // EFFECT SLOTS: the vjeffect content category's home in the mixer — three
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
 // clicking FX tiles in the browse grid (see fx_slot.rs).
@@ -50,6 +58,9 @@ mod fx_thumbs;
 mod import_ui;
 mod gen;
 mod lanes;
+// LIVECODING: the observed effect-document origins, and the compile answer
+// a coding agent polls after saving one. See apps/vj/LIVECODING.md.
+mod livecode;
 mod loop_detect;
 // Karaoke: whisper over the separated vocals stem, cached beside the stems.
 mod lyrics;
@@ -107,6 +118,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
+use crate::effects::audio_tex::AudioTexBus;
 use crate::fx_slot::{
     FxSlotKind, FxSlotTileAction, FxSlotTileState, FxSlots, PremixJob, VjFxSlotHost, VjFxSlotTile,
 };
@@ -180,7 +192,8 @@ script_mod! {
             color_hover: #x2b3440
             color_down: #x1e232b
             border_color: #xffffff2e
-            border_radius: 6.0
+            // ONE RADIUS: match the dropdown chrome (theme 2.5).
+            border_radius: 2.5
             border_size: 1.0
         }
         draw_text +: {
@@ -197,7 +210,8 @@ script_mod! {
             color_hover: #x2f3842
             color_down: #x1c2129
             border_color: #xffffff26
-            border_radius: 12.0
+            // ONE RADIUS: match the dropdown chrome (theme 2.5).
+            border_radius: 2.5
             border_size: 1.0
         }
         draw_text +: {
@@ -239,18 +253,6 @@ script_mod! {
                 sdf.fill(self.cap_color)
                 return sdf.result
             }
-        }
-    }
-
-    let DeckWell = RoundedView{
-        width: Fill
-        height: Fill
-        padding: 1
-        draw_bg +: {
-            color: #x000000
-            border_color: #xffffff26
-            border_size: 1.0
-            border_radius: 10.0
         }
     }
 
@@ -321,7 +323,8 @@ script_mod! {
             color_hover: #x2b3440
             color_down: #x1e232b
             border_color: #xffffff26
-            border_radius: 5.0
+            // ONE RADIUS: match the dropdown chrome (theme 2.5).
+            border_radius: 2.5
             border_size: 1.0
         }
         draw_icon +: {
@@ -583,6 +586,16 @@ script_mod! {
                             // its texture replaces the slot's decoder texture.
                             slot_flow_a := FlowWarpView{}
                             slot_flow_b := FlowWarpView{}
+                            // NV12 present passes (see nv12_view.rs): the
+                            // players' resident NV12 frames become the RGBA
+                            // slot textures here, on the GPU.
+                            slot_nv12_a := Nv12View{}
+                            slot_nv12_b := Nv12View{}
+                            // Realtime GPU frame tweening (flow_tween.rs):
+                            // in-between synthesis for slow-mo / scratch /
+                            // low-fps footage at display rate.
+                            slot_tween_a := FlowTweenView{}
+                            slot_tween_b := FlowTweenView{}
                             // Offscreen vjeffect thumbnail renderer: one
                             // hidden slot-mode effect pass at a time, its
                             // sheets fed back through the thumb decode lane.
@@ -847,7 +860,12 @@ script_mod! {
                                     width: Fill
                                     height: Fill
                                     axis: SplitterAxis.Vertical
-                                    align: SplitterAlign.FromA(290.0)
+                                    align: SplitterAlign.FromA(320.0)
+                                    // The seam keeps the LEFT drawer
+                                    // splitter's exact treatment (size 6,
+                                    // same bar chrome): a divider you can
+                                    // find with the mouse — the one place
+                                    // the 4px gutter law yields.
                                     size: 6.0
                                     draw_bg +: {
                                         color_bg: #x14171c
@@ -861,10 +879,19 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Right
+                                        // THE PAGE RHYTHM (operator-set):
+                                        // the doubled 8px gutter — monitor
+                                        // gaps, both vertical seams and
+                                        // every console band gap breathe
+                                        // at 8; the tile wall keeps its
+                                        // tighter 4px grid.
                                         spacing: 8
                                         // ---- cue A ----
+                                        // The three windows split the strip
+                                        // evenly: the cue monitors are FULL
+                                        // players now, not thumbnails.
                                         View{
-                                            width: 300
+                                            width: Fill
                                             height: Fill
                                             flow: Down
                                             spacing: 4
@@ -872,7 +899,11 @@ script_mod! {
                                             // corner marker overlays the
                                             // picture; every control lives
                                             // in the source transport below.
-                                            DeckWell{
+                                            // NO card behind the picture: the
+                                            // monitor is the plain video quad
+                                            // + four negative corner caps —
+                                            // nothing large fills underneath.
+                                            View{
                                                 width: Fill
                                                 height: Fill
                                                 View{
@@ -880,25 +911,11 @@ script_mod! {
                                                     height: Fill
                                                     flow: Overlay
                                                     preview_a := VideoProgram{}
-                                                    // CUE ACK: the moment a
-                                                    // click lands, this deck
-                                                    // says "working on it" —
-                                                    // spinner over the held
-                                                    // frame or the thumb.
-                                                    deck_a_busy := View{
-                                                        visible: false
-                                                        width: Fill
-                                                        height: Fill
-                                                        align: Align{x: 0.5, y: 0.5}
-                                                        LoadingSpinner{
-                                                            width: 44
-                                                            height: 44
-                                                            draw_bg +: {
-                                                                color: #xff5c39
-                                                                stroke_width: 3.0
-                                                            }
-                                                        }
-                                                    }
+                                                    // NO cue spinner here: the
+                                                    // monitors show the mix
+                                                    // path only — load
+                                                    // feedback lives on the
+                                                    // source card + the tile.
                                                     deck_a_empty := View{
                                                         width: Fill
                                                         height: Fill
@@ -908,6 +925,13 @@ script_mod! {
                                                             draw_text.color: #x6b7783
                                                             draw_text.text_style.font_size: 12
                                                         }
+                                                    }
+                                                    // NEGATIVE CORNERS over
+                                                    // the plain video quad
+                                                    // (see DrawCornerCap).
+                                                    VjCornerCaps{
+                                                        radius: 10.0
+                                                        draw_cap +: { cap_color: #x14171c }
                                                     }
                                                 }
                                             }
@@ -921,19 +945,28 @@ script_mod! {
                                             // No header row: the picture
                                             // says what it is. (Cue/error
                                             // text lives on the tiles + log.)
-                                            DeckWell{
+                                            View{
                                                 width: Fill
                                                 height: Fill
-                                                preview := VideoProgram{}
+                                                View{
+                                                    width: Fill
+                                                    height: Fill
+                                                    flow: Overlay
+                                                    preview := VideoProgram{}
+                                                    VjCornerCaps{
+                                                        radius: 10.0
+                                                        draw_cap +: { cap_color: #x14171c }
+                                                    }
+                                                }
                                             }
                                         }
                                         // ---- cue B ----
                                         View{
-                                            width: 300
+                                            width: Fill
                                             height: Fill
                                             flow: Down
                                             spacing: 4
-                                            DeckWell{
+                                            View{
                                                 width: Fill
                                                 height: Fill
                                                 View{
@@ -941,25 +974,11 @@ script_mod! {
                                                     height: Fill
                                                     flow: Overlay
                                                     preview_b := VideoProgram{}
-                                                    // CUE ACK: the moment a
-                                                    // click lands, this deck
-                                                    // says "working on it" —
-                                                    // spinner over the held
-                                                    // frame or the thumb.
-                                                    deck_b_busy := View{
-                                                        visible: false
-                                                        width: Fill
-                                                        height: Fill
-                                                        align: Align{x: 0.5, y: 0.5}
-                                                        LoadingSpinner{
-                                                            width: 44
-                                                            height: 44
-                                                            draw_bg +: {
-                                                                color: #xff5c39
-                                                                stroke_width: 3.0
-                                                            }
-                                                        }
-                                                    }
+                                                    // NO cue spinner here: the
+                                                    // monitors show the mix
+                                                    // path only — load
+                                                    // feedback lives on the
+                                                    // source card + the tile.
                                                     deck_b_empty := View{
                                                         width: Fill
                                                         height: Fill
@@ -970,6 +989,10 @@ script_mod! {
                                                             draw_text.text_style.font_size: 12
                                                         }
                                                     }
+                                                    VjCornerCaps{
+                                                        radius: 10.0
+                                                        draw_cap +: { cap_color: #x14171c }
+                                                    }
                                                 }
                                             }
                                         }
@@ -978,11 +1001,10 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        spacing: 4
-                                        // Breathing room under the splitter
-                                        // bar — the strip used to sit flush
-                                        // against the video pane.
-                                        padding: Inset{top: 10.0}
+                                        spacing: 8
+                                        // 6px splitter bar + 2 = the 8px
+                                        // page rhythm.
+                                        padding: Inset{top: 2.0}
                                         // A drag on the console background must
                                         // never pan it: on a VJ surface every drag
                                         // belongs to a control (fader, knob, scratch,
@@ -1004,547 +1026,59 @@ script_mod! {
                                         // then click an FX tile in the grid to load it; an
                                         // unarmed FX-tile click cues the effect AS CONTENT onto
                                         // a deck, autofade included, like any clip.
+                                        // THE CONSOLE BAND: one centred
+                                        // composition — Video A's working
+                                        // deck on the left, the middle
+                                        // column (FX A | TRANS | FX B over
+                                        // the boxed crossfader) and Video
+                                        // B's deck on the right. The VJ /
+                                        // LIGHTS page tabs moved to the
+                                        // grid rail's foot (housekeeping,
+                                        // not headline).
+                                        // ONE CENTERED BAND (resize-proof):
+                                        // [video A | middle block | video B]
+                                        // centered as a whole on the window
+                                        // axis the program monitor shares —
+                                        // harmony by shared centering, not
+                                        // edge-locking, with uniform gaps
+                                        // inside the band.
                                         View{
                                             width: Fill
                                             height: Fit
                                             flow: Right
-                                            spacing: 14
-                                            align: Align{x: 0.5, y: 0.5}
-                                            // The VJ / LIGHTS page tabs live UP
-                                            // HERE beside the video players, not
-                                            // beside the content grid — they flip
-                                            // the whole lower region, so they sit
-                                            // above it, at the console's left edge.
-                                            View{
-                                                width: Fit
-                                                height: Fit
-                                                flow: Down
-                                                spacing: 4
-                                                Tip{ text: "Video console"
-                                                    lower_tab_vj := IconButton{
-                                                        width: 28 height: 46
-                                                        icon_walk: Walk{width: 12 height: Fit}
-                                                        draw_icon +: { svg: crate_resource("self:resources/icons/vj.svg") }
-                                                    }
-                                                }
-                                                Tip{ text: "Lighting desk"
-                                                    lower_tab_lights := IconButton{
-                                                        width: 28 height: 46
-                                                        icon_walk: Walk{width: 12 height: Fit}
-                                                        draw_icon +: { svg: crate_resource("self:resources/icons/lights.svg") }
-                                                    }
-                                                }
-                                            }
-                                            View{width: Fill height: 1}
-                                            // DECK A SOURCE: the raw clip
-                                            // (pre-effect) with its own
-                                            // transport — play/pause, loop,
-                                            // restart, scrub. The deck
-                                            // monitor above stays the
-                                            // COMPOSITE (video × effect).
-                                            // Card: one tidy module per
-                                            // cluster (the app's well idiom).
-                                            RoundedView{
-                                                // THE BAND LAW: every card in
-                                                // the center strip is the SAME
-                                                // fixed height — nothing in
-                                                // this row ever moves.
-                                                width: Fit height: 200 flow: Down spacing: 4
-                                                padding: 6
-                                                draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
-                                                    border_size: 1.0
-                                                    border_radius: 9.0
-                                                }
-                                                // A NORMAL VIDEO PLAYER: 16:9
-                                                // black canvas (clips letterbox
-                                                // inside whatever their aspect),
-                                                // one long scrub bar, controls
-                                                // tidily on one line below.
-                                                deck_a_source := VideoView{
-                                                    width: 252
-                                                    height: 156
-                                                    bar_below: true
-                                                    show_controls: false
-                                                    trim_handles: true
-                                                    lane +: {
-                                                        show_bg: true
-                                                        draw_bg +: { color: #x000000 }
-                                                    }
-                                                }
-                                                // THE NO-PUSH ROW LAW,
-                                                // structurally: the × is
-                                                // right-PINNED on its own
-                                                // overlay lane — NOTHING a
-                                                // sibling grows by can ever
-                                                // shove it past the panel
-                                                // edge again (the shuttle
-                                                // did, the timecode before
-                                                // it). The cluster is also
-                                                // budgeted to fit the
-                                                // panel's 252.
-                                                deck_a_controls := View{
-                                                    width: Fill height: 26 flow: Overlay
-                                                    View{
-                                                        width: Fill height: Fill flow: Right spacing: 2
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        deck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
-                                                        deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
-                                                        deck_a_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
-                                                        deck_a_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
-                                                        // Beats-per-sweep as
-                                                        // a real dropdown:
-                                                        // 1/2/4/8/16, — free.
-                                                        Tip{ text: "Beats per sweep"
-                                                            deck_a_rate := VjBeatsDrop{width: 34}
-                                                        }
-                                                        deck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
-                                                        // SCRATCH / SHUTTLE:
-                                                        // sprung jog — right
-                                                        // forward, left back.
-                                                        Tip{ text: "Scratch / shuttle"
-                                                            deck_a_scratch := VjShuttle{width: 56}
-                                                        }
-                                                        Tip{ text: "Auto-spin 3D content"
-                                                            slot_a_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
-                                                        }
-                                                    }
-                                                    View{
-                                                        width: Fill height: Fill flow: Right
-                                                        align: Align{x: 1.0, y: 0.5}
-                                                        // UNSLOT: eject the
-                                                        // clip (the effect
-                                                        // slots' × idiom).
-                                                        deck_a_eject := ChromeButton{width: 22 text: "×"}
-                                                    }
-                                                }
-                                                slot_a_anim_box := View{
-                                                    width: Fill
-                                                    height: Fit
-                                                    visible: false
-                                                    slot_a_anim := DropDown{width: Fill labels: ["—"]}
-                                                }
-                                            }
-                                            // Tile over dials: the effect's face on
-                                            // top, its 2x2 dial grid below — the
-                                            // width this frees belongs to the deck
-                                            // source monitors' transport rows.
-                                            RoundedView{
-                                                // THE BAND LAW: every card in
-                                                // the center strip is the SAME
-                                                // fixed height — nothing in
-                                                // this row ever moves.
-                                                width: Fit height: 200 flow: Down spacing: 4
-                                                padding: 6
-                                                draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
-                                                    border_size: 1.0
-                                                    border_radius: 9.0
-                                                }
-                                                align: Align{x: 0.0, y: 0.0}
-                                                // The deck-window corner
-                                                // idiom: face on top, dials
-                                                // tucked tight, ON bottom-
-                                                // left / × bottom-right —
-                                                // the card takes no more
-                                                // width than its tile.
-                                                fx_slot_a_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // (FIXED widths inside the
-                                                // Fit card: a Fill child
-                                                // resolves against the OUTER
-                                                // context and inflates the
-                                                // card past the tile.)
-                                                // Dial grid pinned to the
-                                                // tile's width: a Fill gutter
-                                                // between the two knob+label
-                                                // pairs pushes the right pair
-                                                // flush to the tile's right
-                                                // edge — the inner column is
-                                                // symmetric in the card, not
-                                                // left-packed.
-                                                View{
-                                                    width: 142 height: Fit flow: Down spacing: 2
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_a_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_a_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                }
-                                                View{width: 142 height: Fill}
-                                                // ONE BASELINE across the
-                                                // band: this row's buttons
-                                                // sit at exactly the deck
-                                                // transports' y (margin
-                                                // solved from the measured
-                                                // rects, verified by snap).
-                                                View{
-                                                    width: 142 height: Fit flow: Right
-                                                    margin: Inset{top: -4.0}
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
-                                                    View{width: Fill height: 1}
-                                                    fx_slot_a_clear := ChromeButton{width: 22 text: "×"}
-                                                }
-                                            }
-                                            // Tile over dials: the effect's face on
-                                            // top, its 2x2 dial grid below — the
-                                            // width this frees belongs to the deck
-                                            // source monitors' transport rows.
-                                            RoundedView{
-                                                // THE BAND LAW: every card in
-                                                // the center strip is the SAME
-                                                // fixed height — nothing in
-                                                // this row ever moves.
-                                                width: Fit height: 200 flow: Down spacing: 4
-                                                padding: 6
-                                                draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
-                                                    border_size: 1.0
-                                                    border_radius: 9.0
-                                                }
-                                                align: Align{x: 0.0, y: 0.0}
-                                                // The deck-window corner
-                                                // idiom: face on top, dials
-                                                // tucked tight, ON bottom-
-                                                // left / × bottom-right —
-                                                // the card takes no more
-                                                // width than its tile.
-                                                fx_slot_t_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // (FIXED widths inside the
-                                                // Fit card: a Fill child
-                                                // resolves against the OUTER
-                                                // context and inflates the
-                                                // card past the tile.)
-                                                // Dial grid pinned to the
-                                                // tile's width (see FX A).
-                                                View{
-                                                    width: 142 height: Fit flow: Down spacing: 2
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_t_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_t_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                }
-                                                View{width: 142 height: Fill}
-                                                // ONE BASELINE across the
-                                                // band: this row's buttons
-                                                // sit at exactly the deck
-                                                // transports' y (margin
-                                                // solved from the measured
-                                                // rects, verified by snap).
-                                                View{
-                                                    width: 142 height: Fit flow: Right
-                                                    margin: Inset{top: -4.0}
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
-                                                    View{width: Fill height: 1}
-                                                    fx_slot_t_clear := ChromeButton{width: 22 text: "×"}
-                                                }
-                                            }
-                                            // Tile over dials: the effect's face on
-                                            // top, its 2x2 dial grid below — the
-                                            // width this frees belongs to the deck
-                                            // source monitors' transport rows.
-                                            RoundedView{
-                                                // THE BAND LAW: every card in
-                                                // the center strip is the SAME
-                                                // fixed height — nothing in
-                                                // this row ever moves.
-                                                width: Fit height: 200 flow: Down spacing: 4
-                                                padding: 6
-                                                draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
-                                                    border_size: 1.0
-                                                    border_radius: 9.0
-                                                }
-                                                align: Align{x: 0.0, y: 0.0}
-                                                // The deck-window corner
-                                                // idiom: face on top, dials
-                                                // tucked tight, ON bottom-
-                                                // left / × bottom-right —
-                                                // the card takes no more
-                                                // width than its tile.
-                                                fx_slot_b_tile := VjFxSlotTile{width: 142 height: 80}
-                                                // (FIXED widths inside the
-                                                // Fit card: a Fill child
-                                                // resolves against the OUTER
-                                                // context and inflates the
-                                                // card past the tile.)
-                                                // Dial grid pinned to the
-                                                // tile's width (see FX A).
-                                                View{
-                                                    width: 142 height: Fit flow: Down spacing: 2
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_b_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                    View{
-                                                        width: Fill height: Fit flow: Right spacing: 1
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_b_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                        View{width: Fill height: 1}
-                                                        fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
-                                                        fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
-                                                    }
-                                                }
-                                                View{width: 142 height: Fill}
-                                                // ONE BASELINE across the
-                                                // band: this row's buttons
-                                                // sit at exactly the deck
-                                                // transports' y (margin
-                                                // solved from the measured
-                                                // rects, verified by snap).
-                                                View{
-                                                    width: 142 height: Fit flow: Right
-                                                    margin: Inset{top: -4.0}
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
-                                                    View{width: Fill height: 1}
-                                                    fx_slot_b_clear := ChromeButton{width: 22 text: "×"}
-                                                }
-                                            }
-                                            // DECK B SOURCE, mirroring A.
-                                            // Card: one tidy module per
-                                            // cluster (the app's well idiom).
-                                            RoundedView{
-                                                // THE BAND LAW: every card in
-                                                // the center strip is the SAME
-                                                // fixed height — nothing in
-                                                // this row ever moves.
-                                                width: Fit height: 200 flow: Down spacing: 4
-                                                padding: 6
-                                                draw_bg +: {
-                                                    color: #x181c23
-                                                    border_color: #xffffff12
-                                                    border_size: 1.0
-                                                    border_radius: 9.0
-                                                }
-                                                // A NORMAL VIDEO PLAYER: 16:9
-                                                // black canvas (clips letterbox
-                                                // inside whatever their aspect),
-                                                // one long scrub bar, controls
-                                                // tidily on one line below.
-                                                deck_b_source := VideoView{
-                                                    width: 252
-                                                    height: 156
-                                                    bar_below: true
-                                                    show_controls: false
-                                                    trim_handles: true
-                                                    lane +: {
-                                                        show_bg: true
-                                                        draw_bg +: { color: #x000000 }
-                                                    }
-                                                }
-                                                // THE NO-PUSH ROW LAW,
-                                                // structurally: the × is
-                                                // right-PINNED on its own
-                                                // overlay lane — NOTHING a
-                                                // sibling grows by can ever
-                                                // shove it past the panel
-                                                // edge again (the shuttle
-                                                // did, the timecode before
-                                                // it). The cluster is also
-                                                // budgeted to fit the
-                                                // panel's 252.
-                                                deck_b_controls := View{
-                                                    width: Fill height: 26 flow: Overlay
-                                                    View{
-                                                        width: Fill height: Fill flow: Right spacing: 2
-                                                        align: Align{x: 0.0, y: 0.5}
-                                                        deck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
-                                                        deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
-                                                        deck_b_loop2 := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
-                                                        deck_b_bounce := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/bounce.svg") } }
-                                                        // Beats-per-sweep as
-                                                        // a real dropdown:
-                                                        // 1/2/4/8/16, — free.
-                                                        Tip{ text: "Beats per sweep"
-                                                            deck_b_rate := VjBeatsDrop{width: 34}
-                                                        }
-                                                        deck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
-                                                        // SCRATCH / SHUTTLE:
-                                                        // sprung jog — right
-                                                        // forward, left back.
-                                                        Tip{ text: "Scratch / shuttle"
-                                                            deck_b_scratch := VjShuttle{width: 56}
-                                                        }
-                                                        Tip{ text: "Auto-spin 3D content"
-                                                            slot_b_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
-                                                        }
-                                                    }
-                                                    View{
-                                                        width: Fill height: Fill flow: Right
-                                                        align: Align{x: 1.0, y: 0.5}
-                                                        // UNSLOT: eject the
-                                                        // clip (the effect
-                                                        // slots' × idiom).
-                                                        deck_b_eject := ChromeButton{width: 22 text: "×"}
-                                                    }
-                                                }
-                                                slot_b_anim_box := View{
-                                                    width: Fill
-                                                    height: Fit
-                                                    visible: false
-                                                    slot_b_anim := DropDown{width: Fill labels: ["—"]}
-                                                }
-                                            }
-                                            View{width: Fill height: 1}
-                                        }
-                                        // The crossfader gets its own row and
-                                        // sits in the MIDDLE of it: equal Fill
-                                        // spacers either side, so its centre
-                                        // detent is the centre of the strip and
-                                        // its travel is symmetric about it.
-                                        // Sharing a row with the FX knobs pinned
-                                        // it to the left, which is exactly where
-                                        // a crossfader must not be.
-                                        View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
+                                            // THE BAND GAP — the one knob
+                                            // for the console centerpiece
+                                            // gaps (import dock | video A |
+                                            // middle block | video B), 2x
+                                            // the page gutter by operator
+                                            // order. Everything else keeps
+                                            // the 4px grid.
                                             spacing: 8
-                                            align: Align{x: 0.5, y: 0.5}
-                                            // EQUAL side plates + Fill gaps:
-                                            // whatever either side holds, the
-                                            // fader's centre stays the console
-                                            // centre. NOTHING else lives on
-                                            // this line any more — output/
-                                            // fadeout/karaoke moved to the
-                                            // top bar's rig group. AUTOWIPE +
-                                            // its speed dial flank the left
-                                            // as SWAP (+ balance) flanks the
-                                            // right.
-                                            // ONE fixed-width cluster, dead-
-                                            // centered and alone on the line:
-                                            // [autowipe + speed] [fader]
-                                            // [swap + autofade]. Every child
-                                            // has a FIXED width, so nothing
-                                            // can ever push it or make it
-                                            // reflow.
-                                            View{
-                                                width: Fit height: Fit
-                                                flow: Right spacing: 8
-                                                align: Align{x: 0.0, y: 0.5}
-                                                // Roster (user law): SPEED,
-                                                // AUTOWIPE, MIXER, SWAP,
-                                                // AUTOFADE.
-                                                Tip{ text: "Autofade / take speed"
-                                                    video_fade_learn := Learn{
-                                                        video_fade := ApcKnob{width: 32 height: 32 min: 0.05 max: 5.0 default: 1.0}
-                                                    }
+                                            align: Align{x: 0.5, y: 0.0}
+                                            // THE IMPORT PANEL'S HOME: the
+                                            // rail keeps the IMPORT button;
+                                            // when a pick arms (or a run is
+                                            // going) THIS transient card
+                                            // appears at the band's left —
+                                            // folder, the FLOW choice,
+                                            // START/x; then bar, phase,
+                                            // file, STOP — the centered
+                                            // band reflows around it, and
+                                            // it folds away on completion.
+                                            import_panel := RoundedView{
+                                                visible: false
+                                                width: Fit height: 270 flow: Down spacing: 4
+                                                padding: 10
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
                                                 }
-                                                Tip{ text: "Auto-run the transition"
-                                                    autowipe := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/autowipe.svg") } }
-                                                }
-                                                Tick{width: 14 text: "A"}
-                                                xfader_learn := Learn{
-                                                    apc_xfader := ApcXfader{width: 360}
-                                                }
-                                                Tick{width: 14 text: "B"}
-                                                // SWAP ⇄: the decks trade
-                                                // their complete personalities
-                                                // under a STATIONARY fader —
-                                                // a cut move.
-                                                Tip{ text: "Swap decks (clips + effects + settings)"
-                                                    deck_swap := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/swap.svg") } }
-                                                }
-                                                // AUTOFADE latch rides with
-                                                // the fader it automates.
-                                                Tip{ text: "Autofade: cue clicks sweep the fader"
-                                                    autofade := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/xfade.svg") } }
-                                                }
-                                            }
-                                        }
-                                        // ---- the LOWER region: content grid OR the lights desk,
-                                        // toggled by the VJ/LIGHTS tab pair up in the console
-                                        // strip — the lights rows no longer stack below the
-                                        // grid, so the page stops scrolling.
-                                        lower_pages := PageFlip{
-                                                width: Fill
-                                                height: Fill
-                                                active_page: @grid_lower_page
-                                                grid_lower_page := View{
-                                                    width: Fill
-                                                    height: Fill
-                                                    flow: Down
-                                                    spacing: 4
-                                        // ---- clips: a VERTICAL filter column
-                                        // on the grid's LEFT — search, the
-                                        // VJ-relevant lane chips (one radio
-                                        // group; the selected chip clicked again
-                                        // returns to ALL), paging, and IMPORT
-                                        // where content enters the library. The
-                                        // exotic authoring kinds live behind
-                                        // the search box, not a chip wall.
-                                        View{
-                                            width: Fill
-                                            height: Fill
-                                            flow: Right
-                                            spacing: 14
-                                            View{
-                                                width: 104
-                                                height: Fill
-                                                flow: Down
-                                                spacing: 4
-                                                pad_filter := TextInput{
-                                                    width: Fill
-                                                    empty_text: "filter"
-                                                }
-                                                preset_transition := PillButton{width: Fill text: "TRANSITION"}
-                                                preset_effect := PillButton{width: Fill text: "EFFECT"}
-                                                preset_video := PillButton{width: Fill text: "VIDEO"}
-                                                chip_image := PillButton{width: Fill text: "IMAGE"}
-                                                chip_mesh := PillButton{width: Fill text: "MESH"}
-                                                chip_map := PillButton{width: Fill text: "MAP"}
-                                                import_toggle := ChromeButton{width: Fill text: "IMPORT"}
-                                                // THE IMPORT MINI-PANEL: born
-                                                // when a folder is picked,
-                                                // gone when the run is. Two
-                                                // faces — ARMED (the picked
-                                                // folder, the FLOW choice,
-                                                // START/×) and RUNNING (bar,
-                                                // phase, file, STOP). The
-                                                // filter column may reflow;
-                                                // this is not the rigid band.
-                                                import_panel := View{
-                                                    visible: false
-                                                    width: Fill height: Fit flow: Down spacing: 3
+                                                align: Align{x: 0.0, y: 0.0}
+                                                Tick{width: Fit text: "IMPORT"}
+                                                View{
+                                                    width: 170 height: Fit flow: Down spacing: 3
                                                     padding: Inset{top: 2, bottom: 2}
                                                     import_armed := View{
                                                         width: Fill height: Fit flow: Down spacing: 3
@@ -1625,10 +1159,786 @@ script_mod! {
                                                         import_stop := ChromeButton{width: Fill text: "STOP"}
                                                     }
                                                 }
+                                            }
+                                            // DECK A SOURCE: the raw clip
+                                            // (pre-effect) with its own
+                                            // transport — play/pause, loop,
+                                            // restart, scrub. The deck
+                                            // monitor above stays the
+                                            // COMPOSITE (video × effect).
+                                            // Card: one tidy module per
+                                            // cluster (the app's well idiom).
+                                            RoundedView{
+                                                // THE BAND LAW: every card in
+                                                // the center strip is a FIXED
+                                                // height — nothing in this
+                                                // row ever moves.
+                                                width: Fit height: 270 flow: Down spacing: 4
+                                                padding: 6
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
+                                                }
+                                                // THE WORKING DECK: a real
+                                                // video player (clips letterbox
+                                                // inside whatever their aspect),
+                                                // one long scrub bar, controls
+                                                // tidily on one line below.
+                                                // CONTENT ROUNDS ITSELF: the
+                                                // lane and the picture clip
+                                                // their own corners in-shader;
+                                                // a card behind a square video
+                                                // quad just gets covered.
+                                                View{
+                                                    width: 420 height: 228 flow: Overlay
+                                                    deck_a_source := VideoView{
+                                                        width: Fill
+                                                        // 4px shy of the
+                                                        // wrapper: the trim
+                                                        // brackets overhang
+                                                        // the scrub strip and
+                                                        // were clipped at the
+                                                        // card's edge.
+                                                        height: 224
+                                                        bar_below: true
+                                                        show_controls: false
+                                                        trim_handles: true
+                                                        lane +: {
+                                                            show_bg: true
+                                                            draw_bg +: { color: #x000000 }
+                                                        }
+                                                    }
+                                                    // NEGATIVE CORNERS: four
+                                                    // tiny cap quads round the
+                                                    // lane in card chrome —
+                                                    // the video quad itself
+                                                    // stays a plain cheap
+                                                    // fill (sized to the lane
+                                                    // above the bar strip).
+                                                    View{
+                                                        width: Fill height: 208
+                                                        VjCornerCaps{
+                                                            radius: 10.0
+                                                            draw_cap +: { cap_color: #x181c23 }
+                                                        }
+                                                    }
+                                                    // CUE ACK, UI-layer only:
+                                                    // the spinner overlays the
+                                                    // SOURCE card widget — it
+                                                    // can never reach the mix
+                                                    // path or the projector.
+                                                    deck_a_busy := View{
+                                                        visible: false
+                                                        width: Fill
+                                                        height: Fill
+                                                        align: Align{x: 0.5, y: 0.5}
+                                                        LoadingSpinner{
+                                                            width: 44
+                                                            height: 44
+                                                            draw_bg +: {
+                                                                color: #xff5c39
+                                                                stroke_width: 3.0
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // THE NO-PUSH ROW LAW,
+                                                // structurally: the × is
+                                                // right-PINNED on its own
+                                                // overlay lane — NOTHING a
+                                                // sibling grows by can ever
+                                                // shove it past the panel
+                                                // edge again (the shuttle
+                                                // did, the timecode before
+                                                // it). The cluster is also
+                                                // budgeted to fit the
+                                                // panel's 252.
+                                                deck_a_controls := View{
+                                                    width: Fill height: 26 flow: Overlay
+                                                    View{
+                                                        width: Fill height: Fill flow: Right spacing: 4
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        // PLAY/PAUSE is ONE
+                                                        // control wearing two
+                                                        // faces: the visible
+                                                        // button shows the
+                                                        // NEXT action.
+                                                        deck_a_play_learn := Learn{
+                                                            vdeck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                        }
+                                                        // INSTANT REVERSE: a
+                                                        // live direction flip,
+                                                        // independent of the
+                                                        // play mode; lit while
+                                                        // the flip is in.
+                                                        Tip{ text: "Reverse: flip play direction now"
+                                                            deck_a_rev_learn := Learn{
+                                                                deck_a_rev := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/reverse.svg") } }
+                                                            }
+                                                        }
+                                                        deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        // PLAY MODE: one picker
+                                                        // instead of the loop +
+                                                        // bounce latch pair.
+                                                        Tip{ text: "Play mode"
+                                                            deck_a_mode := DropDown{
+                                                                width: 92
+                                                                height: 22
+                                                                labels: ["→ Forward" "← Reverse" "↔ Bounce" "→| Single"]
+                                                                // House-dark popup:
+                                                                // the stock theme
+                                                                // menu read system
+                                                                // gray in this
+                                                                // console.
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        // Beats-per-sweep as
+                                                        // a real dropdown:
+                                                        // 1/2/4/8/16, — free.
+                                                        Tip{ text: "Beats per sweep"
+                                                            deck_a_rate := VjBeatsDrop{width: 34}
+                                                        }
+                                                        // FRAME TWEEN: how the
+                                                        // deck fills time between
+                                                        // source frames.
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
+                                                            deck_a_tween := DropDown{
+                                                                width: 40
+                                                                height: 22
+                                                                labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
+                                                                selected_item: 2
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        deck_a_ai3_status := Label{
+                                                            width: 42 height: 22 text: ""
+                                                            draw_text +: {color: #x94a8b8 font_size: 9.0}
+                                                        }
+                                                        vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        // THE JOG WHEEL: the
+                                                        // sprung scratch hand
+                                                        // (push right forward,
+                                                        // pull left reverse,
+                                                        // eases home on
+                                                        // release) — and the
+                                                        // always-on direction
+                                                        // readout: the drum
+                                                        // rolls with the
+                                                        // picture.
+                                                        Tip{ text: "Jog: push right forward, pull left reverse — springs home"
+                                                            deck_a_wheel_learn := Learn{
+                                                                deck_a_wheel := VjSlowmoWheel{width: 84}
+                                                            }
+                                                        }
+                                                        Tip{ text: "Auto-spin 3D content"
+                                                            slot_a_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                        }
+                                                    }
+                                                    View{
+                                                        width: Fill height: Fill flow: Right
+                                                        align: Align{x: 1.0, y: 0.5}
+                                                        // UNSLOT: eject the
+                                                        // clip (the effect
+                                                        // slots' × idiom).
+                                                        deck_a_eject := ChromeButton{width: 22 text: "×"}
+                                                    }
+                                                    // PAUSE face on its own
+                                                    // overlay lane, exactly
+                                                    // over the play button
+                                                    // (one toggle, two faces
+                                                    // — the visible one is
+                                                    // the NEXT action).
+                                                    View{
+                                                        width: Fit height: Fill flow: Right
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        deck_a_pause := IconButton{ visible: false draw_icon +: { svg: crate_resource("self:resources/icons/pause.svg") } }
+                                                    }
+                                                }
+                                                slot_a_anim_box := View{
+                                                    width: Fill
+                                                    height: Fit
+                                                    visible: false
+                                                    slot_a_anim := DropDown{width: Fill labels: ["—"]}
+                                                }
+                                            }
+                                            // THE MIDDLE COLUMN: the three FX
+                                            // slot cards over the boxed
+                                            // crossfader — one nested block,
+                                            // the fader row tucked to the fx
+                                            // row's width.
+                                            View{
+                                                width: Fit height: Fit
+                                                flow: Down spacing: 8
+                                                align: Align{x: 0.5, y: 0.0}
+                                                View{
+                                                    width: Fit height: Fit
+                                                    flow: Right
+                                                    spacing: 8
+                                                    align: Align{x: 0.0, y: 0.0}
+                                            // Tile over dials: the effect's face on
+                                            // top, its 2x2 dial grid below — the
+                                            // width this frees belongs to the deck
+                                            // source monitors' transport rows.
+                                            RoundedView{
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
+                                                padding: 6
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
+                                                }
+                                                align: Align{x: 0.0, y: 0.0}
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_a_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width: a Fill gutter
+                                                // between the two knob+label
+                                                // pairs pushes the right pair
+                                                // flush to the tile's right
+                                                // edge — the inner column is
+                                                // symmetric in the card, not
+                                                // left-packed.
+                                                View{
+                                                    width: 142 height: Fit flow: Down spacing: 2
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                }
+                                                View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
+                                                View{
+                                                    width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_a_clear := ChromeButton{width: 22 text: "×"}
+                                                }
+                                            }
+                                            // Tile over dials: the effect's face on
+                                            // top, its 2x2 dial grid below — the
+                                            // width this frees belongs to the deck
+                                            // source monitors' transport rows.
+                                            RoundedView{
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
+                                                padding: 6
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
+                                                }
+                                                align: Align{x: 0.0, y: 0.0}
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_t_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width (see FX A).
+                                                View{
+                                                    width: 142 height: Fit flow: Down spacing: 2
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                }
+                                                View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
+                                                View{
+                                                    width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_t_clear := ChromeButton{width: 22 text: "×"}
+                                                }
+                                            }
+                                            // Tile over dials: the effect's face on
+                                            // top, its 2x2 dial grid below — the
+                                            // width this frees belongs to the deck
+                                            // source monitors' transport rows.
+                                            RoundedView{
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 200 flow: Down spacing: 4
+                                                padding: 6
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
+                                                }
+                                                align: Align{x: 0.0, y: 0.0}
+                                                // The deck-window corner
+                                                // idiom: face on top, dials
+                                                // tucked tight, ON bottom-
+                                                // left / × bottom-right —
+                                                // the card takes no more
+                                                // width than its tile.
+                                                fx_slot_b_tile := VjFxSlotTile{width: 142 height: 80}
+                                                // (FIXED widths inside the
+                                                // Fit card: a Fill child
+                                                // resolves against the OUTER
+                                                // context and inflates the
+                                                // card past the tile.)
+                                                // Dial grid pinned to the
+                                                // tile's width (see FX A).
+                                                View{
+                                                    width: 142 height: Fit flow: Down spacing: 2
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 1
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                        View{width: Fill height: 1}
+                                                        fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
+                                                    }
+                                                }
+                                                View{width: 142 height: Fill}
+                                                // ONE BASELINE across the
+                                                // band: this row's buttons
+                                                // sit at exactly the deck
+                                                // transports' y (margin
+                                                // solved from the measured
+                                                // rects, verified by snap).
+                                                View{
+                                                    width: 142 height: Fit flow: Right
+                                                    margin: Inset{top: -4.0}
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
+                                                    View{width: Fill height: 1}
+                                                    fx_slot_b_clear := ChromeButton{width: 22 text: "×"}
+                                                }
+                                            }
+                                                }
+                                                // THE CROSSFADER BOX: the A/B
+                                                // slider with its take/swap
+                                                // cluster, in its own rounded
+                                                // card spanning EXACTLY the
+                                                // three fx cards above (154 x
+                                                // 3 + two 8px band gaps =
+                                                // 478, flush at both edges).
+                                                // The slider takes whatever
+                                                // length the flanking
+                                                // controls leave.
+                                                RoundedView{
+                                                    // FIXED height, by
+                                                    // construction equal to
+                                                    // the deck cards: 270
+                                                    // card − 200 fx card −
+                                                    // 8 band gap = 62. The
+                                                    // Fit that resisted
+                                                    // every nudge is gone;
+                                                    // content centers.
+                                                    width: 478 height: 62
+                                                    flow: Right spacing: 8
+                                                    padding: Inset{left: 12.0, right: 12.0}
+                                                    align: Align{x: 0.5, y: 0.5}
+                                                    draw_bg +: {
+                                                        color: #x181c23
+                                                        border_color: #xffffff12
+                                                        border_size: 1.0
+                                                        border_radius: 5.0
+                                                    }
+                                                    // Roster (user law): SPEED,
+                                                    // AUTOWIPE, MIXER, SWAP,
+                                                    // AUTOFADE.
+                                                    Tip{ text: "Autofade / take speed"
+                                                        video_fade_learn := Learn{
+                                                            video_fade := ApcKnob{width: 32 height: 32 min: 0.05 max: 5.0 default: 1.0}
+                                                        }
+                                                    }
+                                                    Tip{ text: "Auto-run the transition"
+                                                        autowipe := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/autowipe.svg") } }
+                                                    }
+                                                    Tick{width: 14 text: "A"}
+                                                    xfader_learn := Learn{
+                                                        apc_xfader := ApcXfader{width: 240}
+                                                    }
+                                                    Tick{width: 14 text: "B"}
+                                                    // SWAP ⇄: the decks trade
+                                                    // their complete
+                                                    // personalities under a
+                                                    // STATIONARY fader — a
+                                                    // cut move.
+                                                    Tip{ text: "Swap decks (clips + effects + settings)"
+                                                        deck_swap := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/swap.svg") } }
+                                                    }
+                                                    // AUTOFADE latch rides
+                                                    // with the fader it
+                                                    // automates.
+                                                    Tip{ text: "Autofade: cue clicks sweep the fader"
+                                                        autofade_learn := Learn{
+                                                            autofade := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/xfade.svg") } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // DECK B SOURCE, mirroring A.
+                                            RoundedView{
+                                                // THE BAND LAW: every card in
+                                                // the center strip is the SAME
+                                                // fixed height — nothing in
+                                                // this row ever moves.
+                                                width: Fit height: 270 flow: Down spacing: 4
+                                                padding: 6
+                                                draw_bg +: {
+                                                    color: #x181c23
+                                                    border_color: #xffffff12
+                                                    border_size: 1.0
+                                                    border_radius: 5.0
+                                                }
+                                                // THE WORKING DECK, mirroring
+                                                // A: rounded-in-shader lane +
+                                                // picture, UI-only spinner.
+                                                View{
+                                                    width: 420 height: 228 flow: Overlay
+                                                    deck_b_source := VideoView{
+                                                        width: Fill
+                                                        // 4px shy of the
+                                                        // wrapper: the trim
+                                                        // brackets overhang
+                                                        // the scrub strip and
+                                                        // were clipped at the
+                                                        // card's edge.
+                                                        height: 224
+                                                        bar_below: true
+                                                        show_controls: false
+                                                        trim_handles: true
+                                                        lane +: {
+                                                            show_bg: true
+                                                            draw_bg +: { color: #x000000 }
+                                                        }
+                                                    }
+                                                    View{
+                                                        width: Fill height: 208
+                                                        VjCornerCaps{
+                                                            radius: 10.0
+                                                            draw_cap +: { cap_color: #x181c23 }
+                                                        }
+                                                    }
+                                                    deck_b_busy := View{
+                                                        visible: false
+                                                        width: Fill
+                                                        height: Fill
+                                                        align: Align{x: 0.5, y: 0.5}
+                                                        LoadingSpinner{
+                                                            width: 44
+                                                            height: 44
+                                                            draw_bg +: {
+                                                                color: #xff5c39
+                                                                stroke_width: 3.0
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // THE NO-PUSH ROW LAW,
+                                                // structurally: the × is
+                                                // right-PINNED on its own
+                                                // overlay lane — NOTHING a
+                                                // sibling grows by can ever
+                                                // shove it past the panel
+                                                // edge again (the shuttle
+                                                // did, the timecode before
+                                                // it). The cluster is also
+                                                // budgeted to fit the
+                                                // panel's 252.
+                                                deck_b_controls := View{
+                                                    width: Fill height: 26 flow: Overlay
+                                                    View{
+                                                        width: Fill height: Fill flow: Right spacing: 4
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        deck_b_play_learn := Learn{
+                                                            vdeck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                        }
+                                                        Tip{ text: "Reverse: flip play direction now"
+                                                            deck_b_rev_learn := Learn{
+                                                                deck_b_rev := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/reverse.svg") } }
+                                                            }
+                                                        }
+                                                        deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        Tip{ text: "Play mode"
+                                                            deck_b_mode := DropDown{
+                                                                width: 92
+                                                                height: 22
+                                                                labels: ["→ Forward" "← Reverse" "↔ Bounce" "→| Single"]
+                                                                // House-dark popup:
+                                                                // the stock theme
+                                                                // menu read system
+                                                                // gray in this
+                                                                // console.
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        // Beats-per-sweep as
+                                                        // a real dropdown:
+                                                        // 1/2/4/8/16, — free.
+                                                        Tip{ text: "Beats per sweep"
+                                                            deck_b_rate := VjBeatsDrop{width: 34}
+                                                        }
+                                                        // FRAME TWEEN: how the
+                                                        // deck fills time between
+                                                        // source frames.
+                                                        Tip{ text: "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision"
+                                                            deck_b_tween := DropDown{
+                                                                width: 40
+                                                                height: 22
+                                                                labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
+                                                                selected_item: 2
+                                                                popup_menu: PopupMenu{
+                                                                    draw_bg +: {
+                                                                        color: #x16161b
+                                                                        border_color: #xffffff2e
+                                                                    }
+                                                                    menu_item: PopupMenuItem{
+                                                                        draw_bg +: {
+                                                                            color_hover: #x2b3440
+                                                                            color_active: #xff5c39
+                                                                        }
+                                                                        draw_text +: {
+                                                                            color: #xd6dee6
+                                                                            color_hover: #xfffaf4
+                                                                            color_active: #x1c0b06
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        deck_b_ai3_status := Label{
+                                                            width: 42 height: 22 text: ""
+                                                            draw_text +: {color: #x94a8b8 font_size: 9.0}
+                                                        }
+                                                        vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        Tip{ text: "Jog: push right forward, pull left reverse — springs home"
+                                                            deck_b_wheel_learn := Learn{
+                                                                deck_b_wheel := VjSlowmoWheel{width: 84}
+                                                            }
+                                                        }
+                                                        Tip{ text: "Auto-spin 3D content"
+                                                            slot_b_spin := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/spin.svg") } }
+                                                        }
+                                                    }
+                                                    View{
+                                                        width: Fill height: Fill flow: Right
+                                                        align: Align{x: 1.0, y: 0.5}
+                                                        // UNSLOT: eject the
+                                                        // clip (the effect
+                                                        // slots' × idiom).
+                                                        deck_b_eject := ChromeButton{width: 22 text: "×"}
+                                                    }
+                                                    View{
+                                                        width: Fit height: Fill flow: Right
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        deck_b_pause := IconButton{ visible: false draw_icon +: { svg: crate_resource("self:resources/icons/pause.svg") } }
+                                                    }
+                                                }
+                                                slot_b_anim_box := View{
+                                                    width: Fill
+                                                    height: Fit
+                                                    visible: false
+                                                    slot_b_anim := DropDown{width: Fill labels: ["—"]}
+                                                }
+                                            }
+                                        }
+                                        // ---- the LOWER region: the filter/
+                                        // housekeeping rail on the left stays
+                                        // PUT; right of it the content grid OR
+                                        // the lights desk, flipped by the tiny
+                                        // page tabs at the rail's foot — so
+                                        // the way back is never on the page
+                                        // being flipped away.
+                                        View{
+                                            width: Fill
+                                            height: Fill
+                                            flow: Right
+                                            spacing: 14
+                                            View{
+                                                width: 104
+                                                height: Fill
+                                                flow: Down
+                                                spacing: 4
+                                                pad_filter := TextInput{
+                                                    width: Fill
+                                                    empty_text: "filter"
+                                                }
+                                                preset_transition := PillButton{width: Fill text: "TRANSITION"}
+                                                preset_effect := PillButton{width: Fill text: "EFFECT"}
+                                                preset_video := PillButton{width: Fill text: "VIDEO"}
+                                                chip_image := PillButton{width: Fill text: "IMAGE"}
+                                                chip_mesh := PillButton{width: Fill text: "MESH"}
+                                                chip_map := PillButton{width: Fill text: "MAP"}
+                                                // (IMPORT moved to its dock
+                                                // card in the console band —
+                                                // the rail keeps REMOVE, the
+                                                // page tabs and the pager.)
                                                 // (No count readout: the
                                                 // scrollbar + pager already
                                                 // say where you are.)
                                                 View{width: Fill height: Fill}
+                                                // THE PAGE TABS, tiny: a
+                                                // rarely-clicked flip between
+                                                // the grid and the lights
+                                                // desk — housekeeping beside
+                                                // IMPORT/REMOVE, not primary
+                                                // navigation.
+                                                View{
+                                                    width: Fill height: Fit
+                                                    flow: Right spacing: 4
+                                                    align: Align{x: 0.0, y: 0.5}
+                                                    Tip{ text: "Video console"
+                                                        lower_tab_vj := IconButton{
+                                                            width: 24 height: 20
+                                                            icon_walk: Walk{width: 10 height: Fit}
+                                                            draw_icon +: { svg: crate_resource("self:resources/icons/vj.svg") }
+                                                        }
+                                                    }
+                                                    Tip{ text: "Lighting desk"
+                                                        lower_tab_lights := IconButton{
+                                                            width: 24 height: 20
+                                                            icon_walk: Walk{width: 10 height: Fit}
+                                                            draw_icon +: { svg: crate_resource("self:resources/icons/lights.svg") }
+                                                        }
+                                                    }
+                                                }
+                                                // Library housekeeping sits
+                                                // at the FOOT with the pager,
+                                                // not among the type chips:
+                                                // filtering is browsing,
+                                                // these change the library.
+                                                // (IMPORT arms the transient
+                                                // panel card up in the
+                                                // console band.)
+                                                import_toggle := ChromeButton{width: Fill text: "IMPORT"}
+                                                remove_asset := ChromeButton{width: Fill text: "REMOVE"}
                                                 // Bank paging at the column's
                                                 // FOOT — one line with the
                                                 // grid's scrollbar beside it.
@@ -1640,7 +1950,69 @@ script_mod! {
                                                     grid_next_page := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_last.svg") }}
                                                 }
                                             }
-                                            video_grid := VjPadMatrix{}
+                                            lower_pages := PageFlip{
+                                                width: Fill
+                                                height: Fill
+                                                active_page: @grid_lower_page
+                                                grid_lower_page := View{
+                                                    width: Fill
+                                                    height: Fill
+                                                    flow: Down
+                                                    spacing: 4
+                                                    video_grid := VjPadMatrix{}
+                                        // ZERO layout footprint HOST: a Fill
+                                        // Modal in this Down flow splits the
+                                        // region 50/50 with the pad matrix
+                                        // (the thin-strip tile bug) — but the
+                                        // Modal itself must KEEP its Fill
+                                        // walk (its overlay pass sizes the
+                                        // dialog from it; a 0x0 modal opens
+                                        // invisible). So the flow slot is a
+                                        // zero view and the modal lives
+                                        // inside it, drawing on the overlay.
+                                        View{
+                                        width: 0
+                                        height: 0
+                                        remove_modal := Modal{
+                                            can_dismiss: true
+                                            content +: {
+                                                width: 420
+                                                height: Fit
+                                                RoundedView{
+                                                    width: Fill
+                                                    height: Fit
+                                                    padding: 20
+                                                    spacing: 10
+                                                    flow: Down
+                                                    draw_bg +: {
+                                                        color: #x16161b
+                                                        border_color: #xffffff18
+                                                        border_size: 1.0
+                                                        border_radius: 5.0
+                                                    }
+                                                    remove_title := Label{
+                                                        text: ""
+                                                        draw_text.color: #xe8eef4
+                                                        draw_text.text_style: theme.font_bold{font_size: 11}
+                                                    }
+                                                    Label{
+                                                        width: Fill
+                                                        text: "Remove from grid, does not delete original."
+                                                        draw_text.color: #x8e9aa7
+                                                        draw_text.text_style.font_size: 9
+                                                    }
+                                                    View{
+                                                        width: Fill
+                                                        height: Fit
+                                                        flow: Right
+                                                        spacing: 8
+                                                        align: Align{x: 1.0 y: 0.5}
+                                                        remove_no := ChromeButton{width: 60 text: "No"}
+                                                        remove_yes := ChromeButton{width: 80 text: "Remove"}
+                                                    }
+                                                }
+                                            }
+                                        }
                                         }
                                                 }
                                                 lights_lower_page := ScrollYView{
@@ -1754,6 +2126,7 @@ script_mod! {
                                         }
                                                 }
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -2152,9 +2525,11 @@ struct DeckRefs {
     vu: ViewRef,
     eq_knobs: Vec<SliderRef>,
     eq_kills: Vec<ButtonRef>,
+    eq_labels: Vec<ButtonRef>,
+    filter_label: ButtonRef,
     stem_knobs: Vec<SliderRef>,
     stem_kills: Vec<ButtonRef>,
-    stem_labels: Vec<LabelRef>,
+    stem_labels: Vec<ButtonRef>,
     /// The transcript panel filling the bottom of the deck column.
     lyrics: WidgetRef,
 }
@@ -2187,9 +2562,11 @@ impl DeckRefs {
             vu: ui.view(cx, ids.vu),
             eq_knobs: ids.eq_knobs.iter().map(|p| ui.slider(cx, p)).collect(),
             eq_kills: ids.eq_kills.iter().map(|p| ui.button(cx, p)).collect(),
+            eq_labels: ids.eq_labels.iter().map(|p| ui.button(cx, p)).collect(),
+            filter_label: ui.button(cx, ids.filter_label),
             stem_knobs: ids.stem_knobs.iter().map(|p| ui.slider(cx, p)).collect(),
             stem_kills: ids.stem_kills.iter().map(|p| ui.button(cx, p)).collect(),
-            stem_labels: ids.stem_labels.iter().map(|p| ui.label(cx, p)).collect(),
+            stem_labels: ids.stem_labels.iter().map(|p| ui.button(cx, p)).collect(),
             lyrics: ui.widget(cx, ids.lyrics),
         }
     }
@@ -2275,6 +2652,9 @@ struct MusicDeckIds {
     lyrics: &'static [LiveId],
     /// The legends over those knobs, tinted to match the waveform.
     stem_labels: [&'static [LiveId]; 4],
+    /// Low, mid, high — matches `eq_knobs`.
+    eq_labels: [&'static [LiveId]; 3],
+    filter_label: &'static [LiveId],
 }
 
 impl MusicDeckIds {
@@ -2331,6 +2711,12 @@ impl MusicDeckIds {
                     ids!(deck_a_label_bass),
                     ids!(deck_a_label_other),
                 ],
+                eq_labels: [
+                    ids!(deck_a_label_eq_low),
+                    ids!(deck_a_label_eq_mid),
+                    ids!(deck_a_label_eq_high),
+                ],
+                filter_label: ids!(deck_a_label_filter),
                 lyrics: ids!(deck_a_lyrics),
             },
             DeckId::B => MusicDeckIds {
@@ -2384,6 +2770,12 @@ impl MusicDeckIds {
                     ids!(deck_b_label_bass),
                     ids!(deck_b_label_other),
                 ],
+                eq_labels: [
+                    ids!(deck_b_label_eq_low),
+                    ids!(deck_b_label_eq_mid),
+                    ids!(deck_b_label_eq_high),
+                ],
+                filter_label: ids!(deck_b_label_filter),
                 lyrics: ids!(deck_b_lyrics),
             },
         }
@@ -2470,6 +2862,10 @@ struct StripShape {
     selected: Option<usize>,
     playing: bool,
     looping: bool,
+    pingpong: bool,
+    reverse: bool,
+    /// The REV button's live flip.
+    flip: bool,
     spinning: bool,
     /// The ♪ chip's two facts: synced at all, and at what rate.
     beat_sync: bool,
@@ -2481,10 +2877,13 @@ struct StripShape {
 struct ClipProfile {
     loop_on: bool,
     pingpong: bool,
+    reverse: bool,
     trim: (f64, f64),
     rate: f32,
     muted: bool,
     sync: bool,
+    /// Frame-tween mode (TWEEN_*).
+    tween: u8,
 }
 
 impl Default for ClipProfile {
@@ -2492,12 +2891,14 @@ impl Default for ClipProfile {
         Self {
             loop_on: true,
             pingpong: false,
+            reverse: false,
             trim: (0.0, 1.0),
             // Loops beat-sync at 4 beats a sweep by default — a bar of
             // motion at 4/4, the natural read for a typical clip at 120.
             rate: 4.0,
             muted: true,
             sync: true,
+            tween: TWEEN_FLOW,
         }
     }
 }
@@ -2610,6 +3011,21 @@ impl Default for GridLane {
     }
 }
 
+/// Prefab effect art size. A pad is ~164x104 layout points and the art is a
+/// soft diagonal weave, so this upscales invisibly while keeping the whole
+/// compiled-in library under three megabytes of texture.
+const PREFAB_W: usize = 128;
+const PREFAB_H: usize = 80;
+
+impl GridLane {
+    /// A lane whose contents are COMPILED INTO THE BINARY, so it can be
+    /// drawn whole before any store has answered (see
+    /// `App::effect_lane_entries`).
+    fn is_effect_lane(self) -> bool {
+        matches!(self, GridLane::Kind(AssetKind::VjEffect) | GridLane::Transition)
+    }
+}
+
 /// The VJ-relevant content lanes, one chip each, in column order. The
 /// exotic authoring kinds (char/prop/material/…) live behind the search
 /// box — a VJ set never browses them by chip.
@@ -2628,10 +3044,17 @@ const LANE_CHIPS: [(&[LiveId], GridLane, &str); 6] = [
 /// Every MIDI-learnable control: wrapper widget path + stable persisted id.
 /// Making another control learnable = wrap it in `Learn{...}` in the DSL
 /// and add one row here (plus its value arm in `apply_learned`).
-const LEARNABLES: [(&[LiveId], &str); 16] = [
+const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(video_fade_learn), "video_fade"),
     (ids!(xfader_learn), "xfader"),
     (ids!(master_learn), "master"),
+    (ids!(autofade_learn), "autofade"),
+    (ids!(deck_a_play_learn), "deck_a_play"),
+    (ids!(deck_a_rev_learn), "deck_a_rev"),
+    (ids!(deck_a_wheel_learn), "deck_a_wheel"),
+    (ids!(deck_b_play_learn), "deck_b_play"),
+    (ids!(deck_b_rev_learn), "deck_b_rev"),
+    (ids!(deck_b_wheel_learn), "deck_b_wheel"),
     (ids!(fx_slot_a_spd_learn), "fx_a_spd"),
     (ids!(fx_slot_a_d0_learn), "fx_a_d0"),
     (ids!(fx_slot_a_d1_learn), "fx_a_d1"),
@@ -2664,6 +3087,9 @@ pub struct LatchPaint {
     pub bg_down: u32,
     pub fg: u32,
     pub fg_hover: u32,
+    /// The chrome outline. A GHOST face must dim this too: a bright 1px
+    /// border on a dimmed well still reads as a live control.
+    pub border: u32,
 }
 
 impl LatchPaint {
@@ -2678,6 +3104,7 @@ impl LatchPaint {
                 bg_down: 0xd94a2cff,
                 fg: 0x1c0b06ff,
                 fg_hover: 0x1c0b06ff,
+                border: 0xffffff26,
             }
         } else {
             LatchPaint {
@@ -2686,6 +3113,7 @@ impl LatchPaint {
                 bg_down: 0x1e232bff,
                 fg: 0xd6dee6ff,
                 fg_hover: 0xfffaf4ff,
+                border: 0xffffff26,
             }
         }
     }
@@ -2699,6 +3127,7 @@ impl LatchPaint {
             bg_down: 0x1a1e2455,
             fg: 0x39404a66,
             fg_hover: 0x39404a66,
+            border: 0x39404a33,
         }
     }
 
@@ -2713,6 +3142,7 @@ impl LatchPaint {
                 bg_down: 0x1c2129ff,
                 fg: 0xb4bfcaff,
                 fg_hover: 0xffffffff,
+                border: 0xffffff26,
             }
         }
     }
@@ -2759,6 +3189,19 @@ enum CatPurpose {
     /// (fx_slot.rs). `title` rides along so the tile can wear the catalog
     /// name even when the document's own name differs.
     FxSlotSource { slot: FxSlotKind, revision: AssetRevisionId, title: String },
+    /// HOT RELOAD, hop 1: the asset running in `slot` was republished —
+    /// which revision is its head now?
+    FxSlotReload { slot: FxSlotKind, asset: AssetId },
+    /// A RESTORED slot's manifest, asked for one fact: which asset it is.
+    /// The persisted slot state carries a revision (its tile picture), and
+    /// hot reload needs the asset behind it.
+    FxSlotIdentify { slot: FxSlotKind },
+    /// HOT RELOAD, hop 2: that head's manifest, for its Source blob.
+    FxSlotReloadManifest {
+        slot: FxSlotKind,
+        asset: AssetId,
+        revision: AssetRevisionId,
+    },
     JobProfiles,
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
@@ -3125,6 +3568,30 @@ impl CaptureFeed {
             dropped_samples: self.dropped_samples.load(Ordering::Relaxed),
             peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
         }
+    }
+}
+
+impl CaptureFeed {
+    /// THE READ-ONLY AUDIO-TEXTURE TAP: copy every sample the producer has
+    /// written since `cursor` into `out` and return `(new_cursor, rate)`.
+    ///
+    /// NEVER advances the ring's `tail`: the beat-sync worker remains the
+    /// single consumer of record, and a slow visualiser can never starve or
+    /// backpressure the detector. If we fell more than a whole ring behind,
+    /// the cursor jumps to the oldest still-valid sample (dropping history
+    /// is the honest outcome; blocking the detector is not).
+    fn peek_since(&self, cursor: usize, out: &mut Vec<f32>) -> (usize, u32) {
+        let head = self.head.load(Ordering::Acquire);
+        let size = CAPTURE_RING;
+        let mut from = cursor;
+        if head.wrapping_sub(from) > size {
+            from = head.wrapping_sub(size);
+        }
+        while from != head {
+            out.push(f32::from_bits(self.ring[from & (size - 1)].load(Ordering::Relaxed)));
+            from = from.wrapping_add(1);
+        }
+        (head, self.sample_rate.load(Ordering::Relaxed))
     }
 }
 
@@ -3521,6 +3988,94 @@ impl BeatOverride {
 /// two beats at the same stride; a sixteen-frame one takes a bar. Powers of
 /// two are the whole point — any other rounding puts the loop point
 /// somewhere that is not a musical boundary, and the eye sees that.
+/// VJ_TWEEN_SELFTEST=1: synthetic-pair tween probe (see pump_tween_selftest).
+fn tween_selftest() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_TWEEN_SELFTEST").is_some())
+}
+
+/// The selftest's synthetic NV12 frame: flat 40-luma field with a bright
+/// 200-luma square at `(x0, y0)`, neutral chroma.
+fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8> {
+    let mut data = vec![0u8; w * h * 3 / 2];
+    for y in 0..h {
+        for x in 0..w {
+            let inside = x >= x0 && x < x0 + sq && y >= y0 && y < y0 + sq;
+            data[y * w + x] = if inside { 200 } else { 40 };
+        }
+    }
+    for b in &mut data[w * h..] {
+        *b = 128;
+    }
+    data
+}
+
+/// The NEURAL field producer is DEFAULT ON for the eyeball comparison;
+/// Per-deck frame-tween modes, in the deck dropdown's order.
+const TWEEN_NONE: u8 = 0;
+const TWEEN_FADE: u8 = 1;
+const TWEEN_FLOW: u8 = 2;
+/// Persisted code 3 is the shipped neural-field tier (now labelled AI1).
+const TWEEN_AI: u8 = 3;
+const TWEEN_AI2: u8 = 4;
+/// Persisted AI3 adaptive-subdivision tier. Existing profile codes never move.
+const TWEEN_AI3: u8 = 5;
+/// Pair-cache namespace for the luma cut verdict (separate from producers).
+const TWEEN_CUT_TIER: u8 = u8::MAX;
+/// Per-deck neural ladder budget. Exact pair keys make eviction harmless.
+const TWEEN_RIFE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
+/// Measured sustainable AI production rate, shared by the active AI decks.
+const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
+/// Capacity-law GPU duty left to neural production; presentation owns rest.
+const TWEEN_RIFE_GPU_BUDGET: f64 = 0.60;
+
+fn tween_uses_ai(mode: u8) -> bool {
+    mode == TWEEN_AI || mode == TWEEN_AI2 || mode == TWEEN_AI3
+}
+
+fn parse_tween_mode(value: &str) -> u8 {
+    value.parse::<u8>().unwrap_or(TWEEN_FLOW).min(TWEEN_AI3)
+}
+
+/// `VJ_TWEEN_PREFETCH=0` keeps the classic boundary derive available as a
+/// diagnostic A/B. The live default pipelines classical fields.
+fn tween_prefetch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VJ_TWEEN_PREFETCH").map(|v| v != "0").unwrap_or(true))
+}
+
+/// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
+/// per-deck dropdown's AI entry is the opt-in now.
+fn rife_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Opt-in while the classical tier gets its enhancement pass — the
+    // neural producer's pulse (field handoffs every few pairs) reads
+    *ON.get_or_init(|| std::env::var("VJ_TWEEN_RIFE").map(|v| v != "0").unwrap_or(true))
+}
+
+/// The RIFE checkpoint path: VJ_RIFE_MODEL, or the repo-local default.
+fn rife_model_path() -> std::path::PathBuf {
+    std::env::var_os("VJ_RIFE_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("local/ai_models/rife_v4.26.safetensors"))
+}
+
+/// The proxy resolution RIFE sees: 384 wide, aspect-matched height (the
+/// net pads internally; flow upsamples to the video in the warp).
+fn rife_proxy_dims(w: u32, h: u32) -> (usize, usize) {
+    let pw = 384usize;
+    let ph = ((pw as u64 * h as u64) / w.max(1) as u64).clamp(96, 384) as usize;
+    (pw, ph & !1)
+}
+
+/// Realtime frame tweening is DEFAULT ON; VJ_NO_TWEEN=1 switches it off
+/// (the settings row will replace this).
+fn tween_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VJ_NO_TWEEN").is_none())
+}
+
 fn sprite_cycle_beats(frames: usize) -> u32 {
     let want = (frames.max(1) as f64 / 4.0).max(1.0);
     let below = 1u32 << want.log2().floor().clamp(0.0, 3.0) as u32;
@@ -3961,14 +4516,23 @@ fn start_loop_worker() -> (
 
 /// Most cached thumbnail textures (revision-keyed, FIFO-evicted).
 /// Byte budget for the in-RAM thumbnail cache. Sized so ALL the lanes'
-/// thumbs stay warm together — filter flips must be RAM hits, never a
-/// redecode (sheet math: a 30-frame animated thumb at 128x80 BGRA is
-/// ~1.2 MB; ~120 effects+transitions is ~150 MB, videos on top). Eviction
-/// is purely LRU by this budget; nothing about a filter change drops
-/// textures by itself.
-const THUMB_CACHE_BYTES: usize = 512 * 1024 * 1024;
+/// thumbs stay warm together — filter flips AND scrolling must be RAM
+/// hits, never a redecode (sheet math at the 4K-class cells: a 30-frame
+/// sheet at 384x240 BGRA is ~11 MB, the whole 261-doc effect library
+/// ~3 GB). Two gigabytes keeps most of a session's working set resident
+/// on unified-memory machines — scrolling a lane must never visibly
+/// re-decode what was just on screen. Eviction is purely LRU by this
+/// budget; nothing about a filter change drops textures by itself.
+// 4GB: the effect lane alone is ~190 sheets x ~11.4MB ≈ 2.2GB — the budget
+// must hold the WHOLE library (~3GB) or scrolling a lane end to end cycles
+// eviction forever. A VJ rig has the unified memory; re-decode mid-set does
+// not have the time.
+const THUMB_CACHE_BYTES: usize = 4096 * 1024 * 1024;
 /// One thumb texture's resident bytes (128x80 BGRA).
-const THUMB_TEX_BYTES: usize = 128 * 80 * 4;
+// Derived from the bake's actual cell size — hardcoded 128x80 undercounted
+// residency 9.2x once cells grew to the measured-4K spec, letting ~3GB of
+// decoded sheets sit under a 512MB estimated budget.
+const THUMB_TEX_BYTES: usize = fx_thumbs::CELL_W * fx_thumbs::CELL_H * 4;
 /// Thumbnails re-requested per grid rebuild after an eviction. A bank of
 /// three thousand tiles must not queue three thousand blob fetches at once.
 const MAX_THUMB_REFETCH: usize = 48;
@@ -4244,6 +4808,15 @@ pub struct App {
     light_track: usize,
     #[rust]
     video_pad_assets: Vec<Option<AssetId>>,
+    /// Aliases of PREFAB tiles under the visible window (no resolved row
+    /// yet) — the bake-priority feed reads revisions for them from
+    /// [`Self::fx_heads`], so scrolling onto prefabs still promotes them.
+    #[rust]
+    video_pad_pending: Vec<Option<String>>,
+    /// Each type-tab's remembered scroll position (pad-matrix bank):
+    /// leaving a lane remembers, returning restores.
+    #[rust]
+    lane_banks: Vec<(GridLane, usize)>,
     #[rust]
     video_pad_total: usize,
     /// GEN drawer visibility — HIDDEN by default (the grid earns the
@@ -4259,15 +4832,29 @@ pub struct App {
     /// APC40 pad colour (palette velocity) ≈ the thumbnail's colour.
     #[rust]
     thumb_leds: HashMap<AssetRevisionId, u8>,
+    /// PREFAB EFFECT ART, by bundled preset name: the same procedural weave
+    /// [`crate::effects::seed`] publishes as each preset's thumbnail,
+    /// generated locally so the effect grid is COMPLETE in the first frame
+    /// (see `App::effect_lane_entries`). Built once, at boot, off no
+    /// network at all. Small on purpose — a tile is ~164x104 points and the
+    /// art is a soft weave, so [`PREFAB_W`]x[`PREFAB_H`] upscales
+    /// invisibly and the whole library costs a couple of megabytes.
+    #[rust]
+    fx_prefab: HashMap<String, Texture>,
     #[rust(BrowseModel::visual())]
     video_model: BrowseModel,
-    // The deck explorer lists EVERY audio asset in the store, whatever its
-    // namespace or category: a generated song is as loadable as an imported
-    // one. Only the intermediate-artifact exclusion applies (that is in the
-    // query itself). The sfx surface keeps its own narrower model.
-    #[rust(BrowseModel::new(AssetKind::Audio, ""))]
+    // The deck explorer lists every MUSIC-tagged audio asset in the store,
+    // whatever its namespace: a generated song is as loadable as an
+    // imported one. The classic-import sound effects (tagged `sfx`, and
+    // alphabetically ahead of the music) belong to the sfx surface — an
+    // unfiltered audio listing buried the user's library pages deep under
+    // door hinges and shotgun noises.
+    #[rust(BrowseModel::music())]
     music_model: BrowseModel,
-    #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
+    // Tag-narrowed too: the old `sfx` CATEGORY filter matched nothing
+    // (the imports write an `sfx` TAG, never a category), so this surface
+    // listed an empty store.
+    #[rust(BrowseModel::sfx())]
     sfx_model: BrowseModel,
     #[rust(BrowseModel::dance())]
     mesh_model: BrowseModel,
@@ -4321,9 +4908,27 @@ pub struct App {
     #[rust]
     thumb_inflight: HashSet<AssetRevisionId>,
     /// Effect-source fetches in flight for the vjeffect thumbnail renderer
-    /// (at most one — the renderer is strictly serial).
+    /// (dedupe only — the bank's pending set is deep, so nothing meters
+    /// these beyond one per revision).
     #[rust]
     fx_source_inflight: HashSet<AssetRevisionId>,
+    /// The bundled effect library's head revisions, streamed by the seed
+    /// worker — the up-front feed for the animated thumbnail bake (no
+    /// catalog paging in the way).
+    #[rust]
+    fx_bundle_rx: Option<std::sync::mpsc::Receiver<Vec<crate::effects::seed::BundleHead>>>,
+    /// alias -> (head revision, transition), retained from that feed. This
+    /// is what unhooks the WARM path from catalog resolution: a cached
+    /// sheet decodes against the head revision and the boot grid's prefab
+    /// tile paints it BY ALIAS, seconds before the tile's catalog row has
+    /// resolved (the store's control plane is busy at boot — the observer
+    /// reconcile — and a visible grid must not wait behind it).
+    #[rust]
+    fx_heads: HashMap<String, (AssetRevisionId, bool)>,
+    /// Revisions whose thumbnail bake FAILED — terminal per revision,
+    /// mirrored from the render bank so the tile paints the failure.
+    #[rust]
+    fx_thumb_failed: HashSet<AssetRevisionId>,
     /// Sheet decodes handed to the thumb lane for rendered/cached effect
     /// thumbnails, by submit time — a decode the epoch guard dropped is
     /// simply asked again a few seconds later (the cache file is idempotent).
@@ -4336,6 +4941,22 @@ pub struct App {
     /// Source fetches in flight for slot loads, per slot (latest wins).
     #[rust]
     fx_slot_inflight: [Option<AssetRevisionId>; 3],
+    /// HOT RELOAD: which ASSET each slot is running, so a catalog republish
+    /// of that asset (a livecoded document saved on disk) can re-fetch the
+    /// new head and re-load the SAME slot key in place. Kept beside the
+    /// slot model rather than in it because it is a session fact about the
+    /// store, not part of the persisted slot state.
+    #[rust]
+    fx_slot_asset: [Option<AssetId>; 3],
+    /// A slot reload already on its way, per slot — a burst of saves must
+    /// not become a burst of overlapping three-hop reloads.
+    #[rust]
+    fx_slot_reloading: [bool; 3],
+    /// A republish that arrived while a reload was already in flight: the
+    /// LATEST head still owes this slot a reload once the current chain
+    /// settles — dropping it left a save burst on the older revision.
+    #[rust]
+    fx_slot_reload_queued: [Option<AssetId>; 3],
     /// This frame's transition engagement (envelope × triangle) and the
     /// quantized value last pushed to the tile UI.
     #[rust]
@@ -4393,6 +5014,18 @@ pub struct App {
     /// warp active the same switch means BOUNCE (triangle-wave position).
     #[rust]
     slot_pingpong: [bool; 2],
+    /// Reversed playback per video slot (the mode picker's ← Reverse):
+    /// loops backwards through the same decoded-frame cache / seek-hop
+    /// tiers ping-pong rides — and, like ping-pong, plays no audio. With
+    /// flow warp active it negates the warp clock's rate.
+    #[rust]
+    slot_reverse: [bool; 2],
+    /// The REV button's LIVE direction flip: XORed onto the play mode
+    /// (Loop↔Reverse; a Once flips into Reverse; a bounce alternates
+    /// anyway). Momentary performance state — never persisted, reset on
+    /// every cue.
+    #[rust]
+    slot_flip: [bool; 2],
     /// FLOW WARP per slot: the load generation the pending/adopted flow
     /// cache belongs to (0 = none), whether a clip is resident in the warp
     /// view, the operator's FLOW toggle (default on — a flow clip warps
@@ -4414,6 +5047,72 @@ pub struct App {
     /// (None = the beat machinery owns the transport).
     #[rust]
     slot_scratch: [Option<f32>; 2],
+    /// Selftest sequencing: which debug view we are capturing (index into
+    /// the mode list), and frames waited since the last mode switch.
+    #[rust]
+    tween_selftest_step: (usize, u32),
+    /// NEURAL tween producer per slot (flow_tween::RifeService): 0 =
+    /// unstarted, 1 = running, 2 = unavailable (stay classical).
+    #[rust]
+    rife_state: [u8; 2],
+    /// Per-deck frame-tween mode (TWEEN_*): how the deck fills time
+    /// between source frames. Stored with the clip like the trim range.
+    #[rust([TWEEN_FLOW, TWEEN_FLOW])]
+    slot_tween_mode: [u8; 2],
+    #[rust]
+    rife_service: [Option<flow_tween::RifeService>; 2],
+    /// FRAME TWEENER state per slot: the exact keyed pair the view holds.
+    #[rust]
+    tween_pair: [Option<pair_cache::PairKey>; 2],
+    /// Products are parked under the pair that made them. A result can
+    /// never change the current lease; it is adopted at a later boundary.
+    #[rust]
+    rife_cache: [Option<pair_cache::PairCache<Arc<flow_tween::RifeProduct>>>; 2],
+    /// AI2 midpoint chosen exactly once at a source-pair boundary. A late
+    /// producer result enters the cache but cannot mutate this lease.
+    #[rust]
+    tween_ai2_lease: [Option<Arc<flow_tween::RifeProduct>>; 2],
+    /// AI3 also freezes its deepest complete level at the source-pair
+    /// boundary. Partial/deeper arrivals remain cache-only until traversal.
+    #[rust]
+    tween_ai3_lease: [Option<Arc<flow_tween::RifeProduct>>; 2],
+    #[rust]
+    tween_ai3_lease_depth: [u8; 2],
+    #[rust]
+    tween_ai3_target_depth: [u8; 2],
+    #[rust]
+    tween_ai3_chooser: [flow_tween::Ai3DepthChooser; 2],
+    #[rust]
+    tween_ai3_dims: [Option<(usize, usize)>; 2],
+    #[rust]
+    tween_ai3_admitted: [bool; 2],
+    /// Last admitted producer obligation, used by the other deck's next
+    /// pair choice. Frames/s enforces the 5-synth law; duty uses measured EMA.
+    #[rust]
+    tween_ai_obligation_fps: [f64; 2],
+    #[rust]
+    tween_ai_obligation_duty: [f64; 2],
+    #[rust]
+    tween_cut_cache: [Option<pair_cache::PairCache<bool>>; 2],
+    /// THE PLATTER per slot (platter.rs): the presenter's clock for a
+    /// resident clip — velocity in, position out, one map.
+    #[rust]
+    platter: [Option<platter::PlatterSlot>; 2],
+    /// Last resident frame sampled by the CPU consumers, and last OFF-tier
+    /// frame uploaded. Both are clip-generation keyed.
+    #[rust]
+    platter_sample: [Option<(u64, usize)>; 2],
+    #[rust]
+    platter_off_frame: [Option<(u64, usize)>; 2],
+    /// The frame stamp's time base as an Instant (captured once at startup)
+    /// so Instant-based clocks (beat epoch, free anchor) convert to it
+    /// without sampling the wall clock in the pump.
+    #[rust]
+    app_start_instant: Option<Instant>,
+    /// What the REV button last painted while TRACKING a bounce's live
+    /// travel direction (None = the latch paint owns the button).
+    #[rust]
+    slot_rev_lit: [Option<bool>; 2],
     /// Per-deck IN/OUT trim (fractions) from the source monitor's range
     /// handles. Session state: reset to (0, 1) on every cue.
     #[rust([(0.0f64, 1.0f64); 2])]
@@ -4443,9 +5142,6 @@ pub struct App {
     beat_clock: BeatClock,
     #[rust]
     clock_epoch: Option<Instant>,
-    /// The next beat boundary the pump will pulse the deck transports at.
-    #[rust]
-    beat_edge: Option<Instant>,
     /// The FREE-RUNNING FLOOR of the clock ladder: there is NO clockless
     /// state. From process start this ticks at 120 BPM; every real source
     /// (tap, typed BPM, deck, detector) steers the ladder above it, and
@@ -4489,6 +5185,10 @@ pub struct App {
     /// The lane chip the explorer is on (one at a time; ALL default).
     #[rust]
     grid_lane: GridLane,
+    /// Last on/off level per learned BUTTON control, so a held pad sends
+    /// one press (rising edge), not a press per CC repeat.
+    #[rust]
+    midi_gates: HashMap<String, bool>,
     /// MIDI-learn state machine + its persisted CC map (midi_learn.rs).
     #[rust]
     midi_learn: MidiLearn,
@@ -4554,6 +5254,11 @@ pub struct App {
     capture: Option<Arc<CaptureFeed>>,
     #[rust]
     sync_worker: Option<SyncWorker>,
+    /// THE AUDIO PICTURE for the effect system: a per-frame spectrogram +
+    /// waveform texture analysed off the SAME capture ring the beat-sync
+    /// worker listens to (effects/audio_tex.rs owns the read-only tap).
+    #[rust]
+    audio_tex: AudioTexBus,
     #[rust]
     loopback_selected: bool,
     #[rust]
@@ -4589,6 +5294,11 @@ pub struct App {
     deck_target: DeckTarget,
     #[rust(4.0f32)]
     xfade_secs: f32,
+    /// Where a timed crossfade is heading, while one is running. The fade
+    /// itself lives on the mixer (it has the device clock); this only says
+    /// "keep mirroring it onto the surface until it lands".
+    #[rust]
+    xfade_target: Option<f32>,
 
     // Music mode: whole-track analysis off-thread, and the deck surface it
     // feeds (waveform tiles, beat grids, explorer rows, queue).
@@ -4724,6 +5434,12 @@ pub struct App {
     /// One-shot initial sync of the models row once the surface is live.
     #[rust]
     models_row_synced: bool,
+    /// Thumb-load profile: (boot instant, last print, decoded at last print).
+    #[rust]
+    thumb_prof: Option<(std::time::Instant, std::time::Instant, u64)>,
+    /// Frame-loop hang detector: the previous pump's instant.
+    #[rust]
+    frame_watch: Option<std::time::Instant>,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -5235,15 +5951,20 @@ impl App {
 
     fn deck_mute_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
-            SlotId::A => ids!(deck_a_mute),
-            SlotId::B => ids!(deck_b_mute),
+            SlotId::A => ids!(vdeck_a_mute),
+            SlotId::B => ids!(vdeck_b_mute),
         }
     }
 
     fn deck_play_path(slot: SlotId) -> &'static [LiveId] {
+        // vdeck_*: the VIDEO console's transports. The DJ page's music
+        // decks own the bare deck_a_play/deck_a_mute names (they had them
+        // first) — when both pages defined the same id the global lookup
+        // resolved to whichever drew first and the OTHER page's button
+        // went dead (the "DJ play does nothing" report).
         match slot {
-            SlotId::A => ids!(deck_a_play),
-            SlotId::B => ids!(deck_b_play),
+            SlotId::A => ids!(vdeck_a_play),
+            SlotId::B => ids!(vdeck_b_play),
         }
     }
 
@@ -5254,10 +5975,32 @@ impl App {
         }
     }
 
-    fn deck_loop2_path(slot: SlotId) -> &'static [LiveId] {
+    fn deck_pause_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
-            SlotId::A => ids!(deck_a_loop2),
-            SlotId::B => ids!(deck_b_loop2),
+            SlotId::A => ids!(deck_a_pause),
+            SlotId::B => ids!(deck_b_pause),
+        }
+    }
+
+    fn deck_rev_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_rev),
+            SlotId::B => ids!(deck_b_rev),
+        }
+    }
+
+    fn deck_wheel_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_wheel),
+            SlotId::B => ids!(deck_b_wheel),
+        }
+    }
+
+    /// The play-mode picker (Forward / Reverse / Bounce / Single).
+    fn deck_mode_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_mode),
+            SlotId::B => ids!(deck_b_mode),
         }
     }
 
@@ -5268,10 +6011,18 @@ impl App {
         }
     }
 
-    fn deck_bounce_path(slot: SlotId) -> &'static [LiveId] {
+    /// The frame-tween picker (OFF / XF / FL / AI).
+    fn deck_tween_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
-            SlotId::A => ids!(deck_a_bounce),
-            SlotId::B => ids!(deck_b_bounce),
+            SlotId::A => ids!(deck_a_tween),
+            SlotId::B => ids!(deck_b_tween),
+        }
+    }
+
+    fn deck_ai3_status_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(deck_a_ai3_status),
+            SlotId::B => ids!(deck_b_ai3_status),
         }
     }
 
@@ -5336,6 +6087,15 @@ impl App {
                     mini.set_trim(cx, trim.0, trim.1);
                 }
             };
+            // The slow-mo drum rolls with the transport clock — exactly as
+            // fast as the picture, stopping with it.
+            if let Some(mut wheel) = self
+                .ui
+                .widget(cx, Self::deck_wheel_path(slot))
+                .borrow_mut::<views::VjSlowmoWheel>()
+            {
+                wheel.set_motion(cx, pos as f32);
+            };
         }
     }
 
@@ -5381,6 +6141,14 @@ impl App {
 
     /// A learned CC's value lands on its control — the same state changes
     /// the pointer path makes, plus the widget mirror.
+    /// Rising-edge detector for learned BUTTON controls (pads repeat CCs;
+    /// a press is the 0→1 crossing only).
+    fn midi_edge(&mut self, control: &str, v: f32) -> bool {
+        let down = v >= 0.5;
+        let prev = self.midi_gates.insert(control.to_string(), down).unwrap_or(false);
+        down && !prev
+    }
+
     fn apply_learned(&mut self, cx: &mut Cx, control: &str, v: f32) {
         match control {
             "video_fade" => {
@@ -5399,6 +6167,50 @@ impl App {
             }
             "fadeout" => {
                 self.set_fadeout(cx, v);
+            }
+            "autofade" => {
+                // A pad press = one click of the AUTOFADE latch.
+                if self.midi_edge(control, v) {
+                    self.fx_slots.click_autofade = !self.fx_slots.click_autofade;
+                    self.save_fx_slots();
+                    self.sync_autofade_ui(cx);
+                }
+            }
+            "deck_a_play" | "deck_b_play" => {
+                let slot = if control == "deck_a_play" { SlotId::A } else { SlotId::B };
+                // Empty-slot law holds for hardware too.
+                if self.midi_edge(control, v)
+                    && self.slot_media[slot.index()] != SlotMedia::Empty
+                {
+                    let playing = self.slot_is_playing(cx, slot);
+                    self.set_slot_paused(cx, slot, playing);
+                    self.sync_slot_controls_ui(cx);
+                }
+            }
+            "deck_a_rev" | "deck_b_rev" => {
+                // TRUE momentary on a pad: reversed exactly while held.
+                let slot = if control == "deck_a_rev" { SlotId::A } else { SlotId::B };
+                let i = slot.index();
+                let flip = v >= 0.5;
+                if self.slot_media[i] != SlotMedia::Empty && self.slot_flip[i] != flip {
+                    self.slot_flip[i] = flip;
+                    let mode = self.slot_play_mode(i);
+                    if let Some(player) = self.players[i].as_mut() {
+                        player.set_mode(mode);
+                    }
+                    self.paint_icon_button(cx, Self::deck_rev_path(slot), flip);
+                }
+            }
+            "deck_a_wheel" | "deck_b_wheel" => {
+                // The hardware jog rides the same sprung scratch the
+                // on-screen wheel speaks: CC centre = rest, deflection
+                // scratches, a small dead zone reads as the release.
+                let slot = if control == "deck_a_wheel" { SlotId::A } else { SlotId::B };
+                if self.slot_media[slot.index()] != SlotMedia::Empty {
+                    let pos = (v * 2.0 - 1.0).clamp(-1.0, 1.0);
+                    let pos = if pos.abs() < 0.06 { 0.0 } else { pos };
+                    self.apply_scratch(cx, slot, pos);
+                }
             }
             "master" => {
                 let value = v * 1.2;
@@ -5483,6 +6295,7 @@ impl App {
             .filter(|_| self.beat_clock.running())
             .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
             .filter(|(_, bpm)| *bpm > 0.0);
+        let audio = self.audio_tex.binding();
         for slot in [SlotId::A, SlotId::B] {
             // Standby decks stay HOT (the standby law): held only means
             // off-program, never paused.
@@ -5495,6 +6308,7 @@ impl App {
                 if let Some((pos, bpm)) = beat {
                     host.set_beat(pos, bpm);
                 }
+                host.set_audio(audio.clone());
             }
         }
     }
@@ -5520,6 +6334,14 @@ impl App {
             FxSlotKind::EffectA => ids!(fx_slot_a_clear),
             FxSlotKind::Transition => ids!(fx_slot_t_clear),
             FxSlotKind::EffectB => ids!(fx_slot_b_clear),
+        }
+    }
+
+    fn fx_slot_spd_lab_path(kind: FxSlotKind) -> &'static [LiveId] {
+        match kind {
+            FxSlotKind::EffectA => ids!(fx_slot_a_spd_lab),
+            FxSlotKind::Transition => ids!(fx_slot_t_spd_lab),
+            FxSlotKind::EffectB => ids!(fx_slot_b_spd_lab),
         }
     }
 
@@ -5575,6 +6397,7 @@ impl App {
             return;
         }
         let title = tile.title.clone();
+        let alias = tile.alias.clone();
         let Some(up) = self.up.as_mut() else { return };
         if let Ok(id) = up.catalog.submit_with(
             ClientRequest::FetchBlob {
@@ -5586,6 +6409,10 @@ impl App {
         ) {
             self.cat_reqs
                 .insert(id, CatPurpose::FxSlotSource { slot: kind, revision, title });
+            livecode::remember(&revision.to_string(), alias.as_deref());
+            // HOT RELOAD: which ASSET is in this slot, so a republish of it
+            // can re-fetch and re-load the same slot in place.
+            self.fx_slot_asset[kind.index()] = Some(asset);
             self.fx_slot_inflight[kind.index()] = Some(revision);
             self.fx_slots.slot_mut(kind).note = Some("loading…".to_string());
             // ONE-SHOT ARM: the accepted click consumes it. A latched arm
@@ -5595,6 +6422,56 @@ impl App {
             self.fx_slots.consume_armed(kind);
             self.sync_fx_slots_ui(cx);
             self.grids_dirty = true;
+        }
+    }
+
+    /// A relaunch restores slots from a persisted revision id, which is not
+    /// enough to notice a republish. One manifest fetch per restored slot
+    /// turns each revision into the asset behind it, and from then on a
+    /// saved document reaches the running slot exactly as it does after a
+    /// click.
+    fn identify_fx_slots(&mut self) {
+        for kind in FxSlotKind::ALL {
+            if self.fx_slot_asset[kind.index()].is_some() {
+                continue;
+            }
+            let Some(rev) = self.fx_slots.slot(kind).rev.clone() else { continue };
+            let Ok(rev) = rev.parse::<AssetRevisionId>() else { continue };
+            let Some(up) = self.up.as_mut() else { return };
+            if let Ok(id) = up
+                .catalog
+                .submit(ClientRequest::FetchAssetManifest { rev })
+            {
+                self.cat_reqs.insert(id, CatPurpose::FxSlotIdentify { slot: kind });
+            }
+        }
+    }
+
+    /// HOT RELOAD: this asset was published again and a slot is running it.
+    ///
+    /// Re-resolve it from the STORE rather than from the grid — the grid
+    /// only re-resolves tiles it is currently showing, and the whole point
+    /// of livecoding is that the effect keeps running while the operator is
+    /// looking at something else. Three bounded hops: head revision,
+    /// manifest, Source blob; the last one lands in the same
+    /// `FxSlotSource` path a click takes, so the slot reloads under the
+    /// SAME key and the running effect recompiles in place.
+    fn reload_fx_slot_from_store(&mut self, kind: FxSlotKind, asset: AssetId) {
+        let index = kind.index();
+        if self.fx_slot_reloading[index] {
+            // Not dropped: re-run against the latest head once the current
+            // chain settles (see `pump_fx_slot_reloads`).
+            self.fx_slot_reload_queued[index] = Some(asset);
+            return;
+        }
+        let Some(up) = self.up.as_mut() else { return };
+        if let Ok(id) = up.catalog.submit_with(
+            ClientRequest::AssetDetail { id: asset },
+            makepad_asset_client::SubmitOptions::newest_first(),
+        ) {
+            self.cat_reqs
+                .insert(id, CatPurpose::FxSlotReload { slot: kind, asset });
+            self.fx_slot_reloading[index] = true;
         }
     }
 
@@ -5611,9 +6488,23 @@ impl App {
         persist: bool,
     ) {
         let widget = self.ui.widget(cx, Self::fx_slot_host_path(kind));
+        // LIVECODING: everything the app logs from here to the settle
+        // window belongs to THIS document's load — including the draw
+        // shader that compiles a frame later.
+        let mark = livecode::mark();
         let result = widget
             .borrow_mut::<VjFxSlotHost>()
             .map(|mut host| host.load(cx, &format!("vjfx_slot_{}", kind.key()), source));
+        if let Some(revision) = revision.as_ref() {
+            livecode::report(
+                &revision.to_string(),
+                mark,
+                match &result {
+                    Some(Err(error)) => Err(error.clone()),
+                    _ => Ok(()),
+                },
+            );
+        }
         match result {
             Some(Ok(name)) => {
                 let title = if title.is_empty() { name } else { title.to_string() };
@@ -5666,6 +6557,8 @@ impl App {
             host.clear(cx);
         }
         self.fx_slots.clear(kind);
+        self.fx_slot_asset[kind.index()] = None;
+        self.fx_slot_reloading[kind.index()] = false;
         let _ = std::fs::remove_file(Self::fx_slot_source_path(kind));
         self.save_fx_slots();
         self.sync_fx_slot_knobs(cx, kind);
@@ -5735,6 +6628,21 @@ impl App {
         self.ui
             .slider(cx, Self::fx_slot_knob_path(kind, 0))
             .set_value(cx, slot.speed as f64);
+        // EMPTY SLOT = zero bright chrome: the always-present SPD dial and
+        // the × clear dim with the unassigned dials until an effect loads
+        // (the same law the empty video decks follow).
+        {
+            let spd_inert = if loaded { 0.0f64 } else { 1.0 };
+            let mut spd = self.ui.slider(cx, Self::fx_slot_knob_path(kind, 0));
+            script_apply_eval!(cx, spd, {
+                draw_bg +: { inert: #(spd_inert) }
+            });
+            self.ui
+                .label(cx, Self::fx_slot_spd_lab_path(kind))
+                .set_text(cx, if loaded { "SPD" } else { "—" });
+            let face = if loaded { LatchPaint::icon(false) } else { LatchPaint::ghost() };
+            self.paint_text_face(cx, Self::fx_slot_clear_path(kind), face);
+        }
         for i in 0..3 {
             // The dial for p_i, whatever position the doc declared it in.
             let dial = dials.iter().find(|d| d.index == i).filter(|_| loaded);
@@ -5793,6 +6701,7 @@ impl App {
             .filter(|_| self.beat_clock.running())
             .map(|secs| (self.beat_clock.position_at(secs), self.beat_clock.bpm()))
             .filter(|(_, bpm)| *bpm > 0.0);
+        let audio = self.audio_tex.binding();
         let mut a = a;
         let mut b = b;
         for (kind, chan) in [(FxSlotKind::EffectA, &mut a), (FxSlotKind::EffectB, &mut b)] {
@@ -5807,6 +6716,7 @@ impl App {
             if let Some((pos, bpm)) = beat {
                 host.set_beat(pos, bpm);
             }
+            host.set_audio(audio.clone());
             host.set_speed(FxSlots::speed_scale(slot.speed));
             // The three fixed dials drive p0..p2 directly; an untouched
             // knob leaves the doc's binding alone. (A touched knob on an
@@ -5854,6 +6764,7 @@ impl App {
                 if let Some((pos, bpm)) = beat {
                     host.set_beat(pos, bpm);
                 }
+                host.set_audio(audio.clone());
                 host.set_speed(FxSlots::speed_scale(slot.speed));
                 if host.wants_deck_inputs() {
                     // TWO-DECK transition (`engine: "transition"`): the doc
@@ -5982,18 +6893,22 @@ impl App {
         let body = format!(
             "loop {}
 bounce {}
+reverse {}
 trim {:.6} {:.6}
 rate {}
 mute {}
 sync {}
+tween {}
 ",
             u8::from(self.slot_loop[i]),
             u8::from(self.slot_pingpong[i]),
+            u8::from(self.slot_reverse[i]),
             trim.0,
             trim.1,
             self.slot_beat_rate[i],
             u8::from(self.slot_video_muted[i]),
             u8::from(self.slot_beat_sync[i]),
+            self.slot_tween_mode[i],
         );
         let _ = std::fs::write(path, body);
     }
@@ -6006,6 +6921,7 @@ sync {}
             match (it.next(), it.next(), it.next()) {
                 (Some("loop"), Some(v), _) => profile.loop_on = v == "1",
                 (Some("bounce"), Some(v), _) => profile.pingpong = v == "1",
+                (Some("reverse"), Some(v), _) => profile.reverse = v == "1",
                 (Some("trim"), Some(a), Some(b)) => {
                     let t0: f64 = a.parse().unwrap_or(0.0);
                     let t1: f64 = b.parse().unwrap_or(1.0);
@@ -6016,6 +6932,9 @@ sync {}
                 }
                 (Some("mute"), Some(v), _) => profile.muted = v == "1",
                 (Some("sync"), Some(v), _) => profile.sync = v == "1",
+                (Some("tween"), Some(v), _) => {
+                    profile.tween = parse_tween_mode(v);
+                }
                 _ => {}
             }
         }
@@ -6208,6 +7127,15 @@ p2 {}
     /// gesture; chip clicks go through [`Self::lane_chip_clicked`], which
     /// adds the click-again-for-ALL radio behavior.
     fn set_lane(&mut self, cx: &mut Cx, lane: GridLane) {
+        // Leaving a lane remembers its scroll position.
+        let previous = self.grid_lane;
+        if let Some(pads) = self.ui.widget(cx, ids!(video_grid)).borrow::<VjPadMatrix>() {
+            let bank = pads.bank;
+            match self.lane_banks.iter_mut().find(|(l, _)| *l == previous) {
+                Some(slot) => slot.1 = bank,
+                None => self.lane_banks.push((previous, bank)),
+            }
+        }
         self.grid_lane = lane;
         let (kinds, tag, exclude) = match lane {
             GridLane::All => (
@@ -6233,6 +7161,19 @@ p2 {}
         let cmds = self.video_model.set_lanes(kinds, tag, exclude);
         self.run_cat_cmds(Surface::Video, cmds);
         self.sync_lane_chips_ui(cx);
+        // Returning to a lane restores where the operator left it; a lane
+        // never visited starts at the top. The matrix clamps for itself if
+        // the lane shrank meanwhile.
+        let restored = self
+            .lane_banks
+            .iter()
+            .find(|(l, _)| *l == lane)
+            .map(|(_, bank)| *bank)
+            .unwrap_or(0);
+        if let Some(mut pads) = self.ui.widget(cx, ids!(video_grid)).borrow_mut::<VjPadMatrix>() {
+            pads.bank = restored;
+        }
+        self.ui.redraw(cx);
     }
 
     /// Radio semantics: a chip click selects that lane alone. One category
@@ -6363,6 +7304,38 @@ p2 {}
         Some(f(cx, &mut view))
     }
 
+    /// Run `f` on a slot's frame-tween pass (no-op without the widget).
+    fn tween_view<R>(
+        &self,
+        cx: &mut Cx,
+        slot: SlotId,
+        f: impl FnOnce(&mut Cx, &mut flow_tween::FlowTweenView) -> R,
+    ) -> Option<R> {
+        let path: &[LiveId] = match slot {
+            SlotId::A => ids!(slot_tween_a),
+            SlotId::B => ids!(slot_tween_b),
+        };
+        let widget = self.ui.widget(cx, path);
+        let mut view = widget.borrow_mut::<flow_tween::FlowTweenView>()?;
+        Some(f(cx, &mut view))
+    }
+
+    /// Run `f` on a slot's NV12 present pass (no-op without the widget).
+    fn nv12_view<R>(
+        &self,
+        cx: &mut Cx,
+        slot: SlotId,
+        f: impl FnOnce(&mut Cx, &mut nv12_view::Nv12View) -> R,
+    ) -> Option<R> {
+        let path: &[LiveId] = match slot {
+            SlotId::A => ids!(slot_nv12_a),
+            SlotId::B => ids!(slot_nv12_b),
+        };
+        let widget = self.ui.widget(cx, path);
+        let mut view = widget.borrow_mut::<nv12_view::Nv12View>()?;
+        Some(f(cx, &mut view))
+    }
+
     /// Drop a slot's flow cache and transport (load superseded / slot closed).
     fn clear_slot_flow(&mut self, cx: &mut Cx, slot: SlotId) {
         let i = slot.index();
@@ -6440,6 +7413,11 @@ p2 {}
         // deck, which is exactly what the operator reported.)
         let (t_in, t_out) = self.slot_trim[i];
         let bounce = self.slot_pingpong[i];
+        // REVERSE through the warp path is just a negated clock: the wrap
+        // math (`advance_position`) walks the window backwards for free.
+        // The REV button's live flip XORs in; the scratch hand carries its
+        // own sign and always wins.
+        let reverse = self.slot_reverse[i] ^ self.slot_flip[i];
         let scratching = self.slot_scratch[i].is_some();
         let synced = self.slot_beat_sync[i] && self.external_sync_enabled;
         let beats = self.slot_beat_rate[i].round().clamp(1.0, 16.0) as f64;
@@ -6458,20 +7436,197 @@ p2 {}
             } else {
                 1.0
             };
+            let rate = if reverse && !scratching { -rate } else { rate };
+            if crate::media::tl_on() {
+                eprintln!(
+                    "tl pump slot={i} rate={rate:+.4} synced={synced} beats={beats} beat_secs={beat_secs:.3} scratch={scratching} rev={reverse} trim={t_in:.3}..{t_out:.3} dt={:.1}ms",
+                    dt * 1000.0
+                );
+            }
             view.set_rate(rate);
             view.advance(cx, dt);
         });
     }
 
-    /// The player mode a slot's toggles add up to (ping-pong wins).
+    /// The player mode a slot's flags add up to. The mode picker sets the
+    /// flags exclusively; a stale profile with several set resolves in the
+    /// old precedence (ping-pong wins, then reverse, then loop). The REV
+    /// button's live flip then mirrors the result: Loop↔Reverse, a Once
+    /// flips into Reverse (backwards looping is the honest live meaning),
+    /// a bounce alternates direction anyway and stays itself.
     fn slot_play_mode(&self, i: usize) -> crate::media::PlayMode {
-        if self.slot_pingpong[i] {
-            crate::media::PlayMode::PingPong
+        use crate::media::PlayMode;
+        let base = if self.slot_pingpong[i] {
+            PlayMode::PingPong
+        } else if self.slot_reverse[i] {
+            PlayMode::Reverse
         } else if self.slot_loop[i] {
-            crate::media::PlayMode::Loop
+            PlayMode::Loop
         } else {
-            crate::media::PlayMode::Once
+            PlayMode::Once
+        };
+        if !self.slot_flip[i] {
+            return base;
         }
+        match base {
+            PlayMode::Loop => PlayMode::Reverse,
+            PlayMode::Reverse => PlayMode::Loop,
+            PlayMode::Once => PlayMode::Reverse,
+            PlayMode::PingPong => PlayMode::PingPong,
+        }
+    }
+
+    /// The selftest pump: feed the synthetic pair once, then cycle the
+    /// debug views (luma / field / warp), give each a few frames to
+    /// render, read the warp target back and write it to /tmp.
+    fn pump_tween_selftest(&mut self, cx: &mut Cx) {
+        const MODES: [(f32, &str); 6] = [
+            (2.0, "frame"),
+            (5.0, "luma_direct"),
+            (4.0, "luma_copy"),
+            (6.0, "seed"),
+            (1.0, "field"),
+            (0.0, "warp"),
+        ];
+        let (mode_ix, waited) = self.tween_selftest_step;
+        if mode_ix == MODES.len() {
+            // Numeric truth: read the float intermediates back and print
+            // channel stats — the shader-viz middleman kept lying.
+            for name in ["luma0", "luma1", "luma2", "luma_top", "seed", "fwd", "bwd"] {
+                let tex = self
+                    .tween_view(cx, SlotId::A, |_cx, view| view.debug_texture(name))
+                    .flatten();
+                let Some(tex) = tex else { continue };
+                let Some((w, h, bytes)) = cx.debug_read_render_texture(&tex) else {
+                    log!("tween selftest: {name}: READBACK FAILED");
+                    continue;
+                };
+                let px: Vec<f32> = if bytes.len() == w * h * 8 {
+                    // RGBAf16 target: decode half floats.
+                    bytes
+                        .chunks_exact(2)
+                        .map(|b| {
+                            let bits = u16::from_le_bytes([b[0], b[1]]);
+                            let sign = if bits >> 15 == 1 { -1.0f32 } else { 1.0 };
+                            let exp = ((bits >> 10) & 0x1f) as i32;
+                            let man = (bits & 0x3ff) as f32;
+                            match exp {
+                                0 => sign * man * 2f32.powi(-24),
+                                31 => sign * f32::INFINITY,
+                                _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+                            }
+                        })
+                        .collect()
+                } else {
+                    bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .collect()
+                };
+                let n = (px.len() / 4).max(1);
+                let (mut mn, mut mx, mut sum) = ([f32::MAX; 2], [f32::MIN; 2], [0.0f64; 2]);
+                for c in px.chunks_exact(4) {
+                    for k in 0..2 {
+                        mn[k] = mn[k].min(c[k]);
+                        mx[k] = mx[k].max(c[k]);
+                        sum[k] += c[k] as f64;
+                    }
+                }
+                // A picture says it instantly: normalized gray PNG per level.
+                let mut rgba = vec![0u8; w * h * 4];
+                for (i, c) in px.chunks_exact(4).enumerate().take(w * h) {
+                    let v = (c[0].abs().min(255.0) as u8).max((c[1].abs().min(255.0)) as u8);
+                    rgba[i * 4] = v;
+                    rgba[i * 4 + 1] = v;
+                    rgba[i * 4 + 2] = v;
+                    rgba[i * 4 + 3] = 255;
+                }
+                if let Ok(png) = makepad_asset_importer::classic_import::encode_png_rgba(
+                    &rgba, w as u32, h as u32,
+                ) {
+                    let _ = std::fs::write(format!("/tmp/tween_tex_{name}.png"), png);
+                }
+                let center = ((h / 2) * w + w / 2) * 4;
+                log!(
+                    "tween selftest: {name} {w}x{h} r[{:.2}..{:.2} avg {:.2}] g[{:.2}..{:.2} avg {:.2}] center=({:.2},{:.2})",
+                    mn[0], mx[0], sum[0] / n as f64,
+                    mn[1], mx[1], sum[1] / n as f64,
+                    px.get(center).copied().unwrap_or(-1.0),
+                    px.get(center + 1).copied().unwrap_or(-1.0)
+                );
+            }
+            self.tween_selftest_step = (mode_ix + 1, 0);
+            return;
+        }
+        if mode_ix > MODES.len() {
+            return;
+        }
+        let (w, h) = (512usize, 512usize);
+        let fed = self
+            .tween_view(cx, SlotId::A, |cx, view| {
+                if !view.has_pair() {
+                    let a = selftest_nv12(w, h, 128, 128, 64);
+                    let b = selftest_nv12(w, h, 136, 128, 64);
+                    view.set_pair(cx, &a, &b, w as u32, h as u32);
+                }
+                view.set_debug(cx, MODES[mode_ix].0);
+                view.set_t(cx, 0.5);
+                view.redraw(cx);
+                view.output_texture()
+            })
+            .flatten();
+        self.video_pump = cx.new_next_frame();
+        if waited < 8 {
+            self.tween_selftest_step = (mode_ix, waited + 1);
+            return;
+        }
+        let Some(tex) = fed else {
+            self.tween_selftest_step = (mode_ix, waited + 1);
+            return;
+        };
+        if let Some((tw, th, bgra)) = cx.debug_read_render_texture(&tex) {
+            let mut rgba = vec![0u8; bgra.len()];
+            for (o, px) in rgba.chunks_exact_mut(4).zip(bgra.chunks_exact(4)) {
+                o[0] = px[2];
+                o[1] = px[1];
+                o[2] = px[0];
+                o[3] = 255;
+            }
+            if let Ok(png) = makepad_asset_importer::classic_import::encode_png_rgba(
+                &rgba, tw as u32, th as u32,
+            ) {
+                let path = format!("/tmp/tween_selftest_{}.png", MODES[mode_ix].1);
+                let _ = std::fs::write(&path, png);
+                log!("tween selftest: wrote {path} ({tw}x{th})");
+            }
+        }
+        self.tween_selftest_step = (mode_ix + 1, 0);
+    }
+
+    /// The mode picker's row for a slot's flags (0 Forward, 1 Reverse,
+    /// 2 Bounce, 3 Single) and back again.
+    fn slot_mode_index(&self, i: usize) -> usize {
+        if self.slot_pingpong[i] {
+            2
+        } else if self.slot_reverse[i] {
+            1
+        } else if self.slot_loop[i] {
+            0
+        } else {
+            3
+        }
+    }
+
+    fn apply_mode_index(&mut self, i: usize, index: usize) {
+        let (looping, pingpong, reverse) = match index {
+            0 => (true, false, false),
+            1 => (false, false, true),
+            2 => (false, true, false),
+            _ => (false, false, false),
+        };
+        self.slot_loop[i] = looping;
+        self.slot_pingpong[i] = pingpong;
+        self.slot_reverse[i] = reverse;
     }
 
     /// The per-slot SYNC control: is this slot's content held to the beat,
@@ -6575,6 +7730,8 @@ p2 {}
         self.slot_trim.swap(0, 1);
         self.slot_loop.swap(0, 1);
         self.slot_pingpong.swap(0, 1);
+        self.slot_reverse.swap(0, 1);
+        self.slot_flip.swap(0, 1);
         self.slot_video_muted.swap(0, 1);
         self.slot_beat_rate.swap(0, 1);
         self.slot_beat_sync.swap(0, 1);
@@ -6713,6 +7870,24 @@ p2 {}
         self.players[i] = None;
         self.slot_textures[i] = None;
         self.clear_slot_flow(cx, slot);
+        self.nv12_view(cx, slot, |cx, view| view.clear(cx));
+        self.tween_view(cx, slot, |cx, view| view.clear(cx));
+        self.tween_pair[i] = None;
+        self.tween_ai2_lease[i] = None;
+        self.tween_ai3_lease[i] = None;
+        self.tween_ai3_lease_depth[i] = 0;
+        self.tween_ai3_target_depth[i] = flow_tween::AI3_MIN_DEPTH;
+        self.tween_ai3_chooser[i] = flow_tween::Ai3DepthChooser::default();
+        self.tween_ai3_dims[i] = None;
+        self.tween_ai3_admitted[i] = false;
+        self.tween_ai_obligation_fps[i] = 0.0;
+        self.tween_ai_obligation_duty[i] = 0.0;
+        self.ui
+            .label(cx, Self::deck_ai3_status_path(slot))
+            .set_text(cx, "");
+        self.platter[i] = None;
+        self.platter_sample[i] = None;
+        self.platter_off_frame[i] = None;
         self.light_samples[i] = None;
         self.light_analyzers[i].reset();
         self.clear_slot_mesh(cx, slot);
@@ -6724,9 +7899,23 @@ p2 {}
         self.applied_fit[i] = None;
         self.mixer.flush_slot_audio(slot);
         self.mixer.set_slot_paused(slot, true);
+        self.slot_flip[i] = false;
         self.strip_shape[i] = None;
         self.sync_slot_controls_ui(cx);
         self.video_pump = cx.new_next_frame();
+    }
+
+    /// The honest transport state of a slot — the warp clock's while flow
+    /// warp drives the picture (the decoder underneath is parked then, and
+    /// reading IT made the play toggle a start-only button).
+    fn slot_is_playing(&mut self, cx: &mut Cx, slot: SlotId) -> bool {
+        let i = slot.index();
+        if self.flow_active(i) {
+            return self
+                .flow_view(cx, slot, |_cx, view| view.is_playing())
+                .unwrap_or(false);
+        }
+        self.players[i].as_ref().is_some_and(|p| !p.is_paused())
     }
 
     /// Pause/resume one slot's video (picture clock + its mixer bus). With
@@ -6847,6 +8036,32 @@ p2 {}
         });
     }
 
+    /// The mini player's scrub chrome follows the same law: track, knob,
+    /// trim brackets and progress all paint disabled-gray on an empty deck
+    /// — no orange, no white, until content loads.
+    fn paint_deck_source_ghost(&mut self, cx: &mut Cx, slot: SlotId, ghost: bool) {
+        let mut source = self.ui.widget(cx, Self::deck_source_path(slot));
+        if ghost {
+            script_apply_eval!(cx, source, {
+                draw_track +: { color: #xffffff0d }
+                draw_progress +: { color: #x39404a33 }
+                draw_knob +: { color: #x39404a66 }
+                draw_handle_in +: { color: #x39404a55 }
+                draw_handle_out +: { color: #x39404a55 }
+                draw_tail +: { color: #x39404a22 }
+            });
+        } else {
+            script_apply_eval!(cx, source, {
+                draw_track +: { color: #xffffff22 }
+                draw_progress +: { color: #xff5a4d99 }
+                draw_knob +: { color: #xffffff }
+                draw_handle_in +: { color: #xf0b34d }
+                draw_handle_out +: { color: #xf0b34d }
+                draw_tail +: { color: #xffffff10 }
+            });
+        }
+    }
+
     fn slot_spin_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
             SlotId::A => ids!(slot_a_spin),
@@ -6896,6 +8111,12 @@ p2 {}
     fn sync_slot_controls_ui(&mut self, cx: &mut Cx) {
         for slot in [SlotId::A, SlotId::B] {
             let i = slot.index();
+            // The cue-ack ring MIRRORS the cue engine: visible exactly
+            // while a load is preloading into this deck — it can never
+            // stick (ready and failure both drop that state), and it can
+            // never reach the mix path (a UI overlay on the source card).
+            let busy = self.cue.preloading_slot() == Some(slot);
+            self.set_deck_busy(cx, slot, busy);
             let media = self.slot_media[i];
             let (tracks, selected) = self.slot_anim_tracks(cx, slot);
             let is_video = media == SlotMedia::Video;
@@ -6924,25 +8145,46 @@ p2 {}
                 selected,
                 playing,
                 looping: self.slot_loop[i],
+                pingpong: self.slot_pingpong[i],
+                reverse: self.slot_reverse[i],
+                flip: self.slot_flip[i],
                 spinning,
                 beat_sync: self.slot_beat_sync[i],
                 beat_rate: self.slot_beat_rate[i],
             };
             if self.strip_shape[i].as_ref() != Some(&shape) {
                 self.strip_shape[i] = Some(shape.clone());
+                // PLAY/PAUSE is one control, two faces: the pause face
+                // overlays the play button while playing (the visible face
+                // is the NEXT action). The play button itself NEVER hides —
+                // hiding it collapsed its Fit-width learn wrap and shifted
+                // the whole row left by a button.
+                let show_pause = is_video && playing;
+                self.ui
+                    .button(cx, Self::deck_pause_path(slot))
+                    .set_visible(cx, show_pause);
                 // THE NO-PUSH LAW: the transport row's SPACE is always
                 // reserved — hiding it made the first cue shove the whole
-                // console down. An empty deck GHOSTS the controls instead.
+                // console down. An empty deck GHOSTS the controls instead,
+                // and EVERY control un-ghosts the moment a clip lands (the
+                // rewind + eject used to stay grey forever).
                 if !shape.present {
                     for path in [
                         Self::deck_play_path(slot),
+                        Self::deck_pause_path(slot),
+                        Self::deck_rev_path(slot),
                         Self::deck_rw_path(slot),
-                        Self::deck_loop2_path(slot),
-                        Self::deck_bounce_path(slot),
                         Self::deck_mute_path(slot),
                     ] {
                         self.paint_icon_face(cx, path, LatchPaint::ghost());
                     }
+                    if let Some(mut wheel) = self
+                        .ui
+                        .widget(cx, Self::deck_wheel_path(slot))
+                        .borrow_mut::<views::VjSlowmoWheel>()
+                    {
+                        wheel.set_inert(cx, true);
+                    };
                     if let Some(mut chip) = self
                         .ui
                         .widget(cx, Self::deck_rate_path(slot))
@@ -6950,21 +8192,79 @@ p2 {}
                     {
                         chip.set_inert(cx, true);
                     };
+                    self.ui
+                        .drop_down(cx, Self::deck_mode_path(slot))
+                        .set_disabled(cx, true);
+                    self.ui
+                        .drop_down(cx, Self::deck_tween_path(slot))
+                        .set_disabled(cx, true);
+                    self.ui
+                        .label(cx, Self::deck_ai3_status_path(slot))
+                        .set_text(cx, "");
+                    self.paint_deck_source_ghost(cx, slot, true);
                     self.paint_text_face(cx, Self::deck_eject_path(slot), LatchPaint::ghost());
                 }
                 self.ui.button(cx, Self::slot_spin_path(slot)).set_visible(cx, is_3d);
+                // The slow-mo drum and the 3D spin latch share the row's
+                // tail: one shows for footage, the other for models.
+                self.ui
+                    .widget(cx, Self::deck_wheel_path(slot))
+                    .set_visible(cx, !is_3d);
                 self.ui
                     .view(cx, Self::slot_anim_box_path(slot))
                     .set_visible(cx, !tracks.is_empty());
                 if is_video {
                     // This runs at cue time too, so a fresh clip shows its
-                    // real latches at once: LOOP lit (loops default on),
-                    // MUTE lit (cues default muted) — never an innocent
-                    // dark icon over an active state.
+                    // real latches at once — never an innocent dark icon
+                    // over an active state, and never a live control still
+                    // wearing the empty deck's ghost. The AUDIO button is
+                    // lit while the deck's sound is LIVE (a lit red mute is
+                    // backwards for a VJ deck — silent is the resting
+                    // state, sound is the event); cues default muted, so a
+                    // fresh clip starts dark.
                     self.paint_icon_button(cx, Self::deck_play_path(slot), playing);
-                    self.paint_icon_button(cx, Self::deck_loop2_path(slot), shape.looping);
-                    self.paint_icon_button(cx, Self::deck_bounce_path(slot), self.slot_pingpong[i]);
-                    self.paint_icon_button(cx, Self::deck_mute_path(slot), self.slot_video_muted[i]);
+                    self.paint_icon_button(cx, Self::deck_pause_path(slot), playing);
+                    self.paint_icon_button(cx, Self::deck_rev_path(slot), shape.flip);
+                    self.paint_icon_button(cx, Self::deck_rw_path(slot), false);
+                    self.paint_icon_button(cx, Self::deck_mute_path(slot), !self.slot_video_muted[i]);
+                    if let Some(mut wheel) = self
+                        .ui
+                        .widget(cx, Self::deck_wheel_path(slot))
+                        .borrow_mut::<views::VjSlowmoWheel>()
+                    {
+                        wheel.set_inert(cx, false);
+                    };
+                    self.paint_text_face(
+                        cx,
+                        Self::deck_eject_path(slot),
+                        LatchPaint::icon(false),
+                    );
+                    self.paint_deck_source_ghost(cx, slot, false);
+                    // The mode picker mirrors the deck's flags.
+                    {
+                        let mode = self.ui.drop_down(cx, Self::deck_mode_path(slot));
+                        mode.set_disabled(cx, false);
+                        mode.set_selected_item(cx, self.slot_mode_index(i));
+                    }
+                    // The tween chip mirrors the clip's stored mode.
+                    {
+                        let tween = self.ui.drop_down(cx, Self::deck_tween_path(slot));
+                        tween.set_disabled(cx, false);
+                        tween.set_selected_item(cx, self.slot_tween_mode[i] as usize);
+                    }
+                    let ai3_status = if self.slot_tween_mode[i] == TWEEN_AI3 {
+                        let depth = self.tween_ai3_lease_depth[i];
+                        if depth > 0 {
+                            format!("AI3 ×{}", flow_tween::ai3_neural_frames(depth))
+                        } else {
+                            "AI3 FL".to_string()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    self.ui
+                        .label(cx, Self::deck_ai3_status_path(slot))
+                        .set_text(cx, &ai3_status);
                     // The beats dropdown mirrors the deck: the value when
                     // synced, — when free (a scratch dash is transient,
                     // painted by apply_scratch).
@@ -7672,15 +8972,25 @@ p2 {}
             leader: self.decks.sync_leader(),
             saw_unlock: false,
         };
-        // Re-anchor the published clock NOW, at operator speed — a fast
-        // slew, not a teleport, so nothing driven by the phase glitches.
+        // PIN the published clock to the press — an epoch, not a slew. A
+        // slew here (the old "operator speed" glide) meant the visible
+        // phase reached the tapped downbeat a beat late, which read as the
+        // button doing nothing: the whole point of the gesture is that the
+        // beat is HERE, now.
         let base = self.current_beat();
         if let Some(beat) = over.beat(base.as_ref(), anchor) {
             if let Some((secs, target)) =
                 self.clock_secs(anchor).zip(beat_target(&beat, anchor, true))
             {
-                self.beat_clock.anchor(secs, target);
+                self.beat_clock.pin(secs, target);
             }
+        }
+        // The free-running floor moves with the tap too, so the pinned
+        // phase (and a four-tap tempo) survives the override's death
+        // instead of snapping back to the stale house grid.
+        self.free_anchor = anchor;
+        if let Some(bpm) = clock.bpm {
+            self.free_bpm = bpm.clamp(40.0, 300.0);
         }
         self.beat_override = Some(over);
         self.tap_flash_secs = Some(now_secs);
@@ -8725,6 +10035,10 @@ p2 {}
                                         .unwrap_or_default();
                                     self.slot_loop[index] = profile.loop_on;
                                     self.slot_pingpong[index] = profile.pingpong;
+                                    self.slot_reverse[index] = profile.reverse;
+                                    // Live performance state never survives
+                                    // a cue: no direction flip held over.
+                                    self.slot_flip[index] = false;
                                     // The chip ladder is 8/4/2/1 now; a
                                     // stale profile (old .5/1/2/4 scale)
                                     // just falls to the default — no
@@ -8741,6 +10055,7 @@ p2 {}
                                     self.slot_sync_beats[index] = 1;
                                     self.slot_video_muted[index] = profile.muted;
                                     self.slot_trim[index] = profile.trim;
+                                    self.slot_tween_mode[index] = profile.tween;
                                     player.set_mode(self.slot_play_mode(index));
                                     player.set_muted(profile.muted);
                                     player.set_trim(profile.trim.0, profile.trim.1);
@@ -9096,6 +10411,20 @@ p2 {}
         self.retry_lighting_if_due();
         // Refresh the worker watchdog and, only while the physical button is
         // held, its shorter hazardous-output heartbeat.
+        // FRAME-LOOP HANG DETECTOR: the pump runs every UI frame, so a gap
+        // between pumps IS a frozen app — a paint that blocked, a stalled
+        // pipeline compile, a synchronous readback. Log the gap and let the
+        // thumbprof timeline say what was in flight when it happened.
+        {
+            let t = std::time::Instant::now();
+            if let Some(last) = self.frame_watch {
+                let gap = t.duration_since(last).as_secs_f64() * 1e3;
+                if gap > 200.0 {
+                    log!("framehang: {gap:.0}ms between frames");
+                }
+            }
+            self.frame_watch = Some(t);
+        }
         self.publish_lighting_controls();
         self.pump_apc40(cx);
         self.pump_session(cx);
@@ -9112,6 +10441,7 @@ p2 {}
         self.pump_stems(cx);
         self.pump_lyrics(cx);
         self.pump_model_install(cx);
+        self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
         self.sync_mesh_liveness(cx);
@@ -9291,15 +10621,31 @@ p2 {}
                         let cache = service::session_config_from_env()
                             .cache_parent
                             .join("cache-vjfx-seed");
+                        // LIVECODING: only the process that HOSTS the store
+                        // may observe local directories for it — reference
+                        // admission is loopback-scoped privilege, not
+                        // something to hand a store on somebody else's box.
+                        let observe = self.local_store.is_some();
+                        // The bake feed: seeding STREAMS every bundled
+                        // head over this channel as it learns it — the
+                        // whole present library in one batch, then each
+                        // fresh publish as it commits.
+                        let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
+                        self.fx_bundle_rx = Some(bundle_rx);
                         std::thread::spawn(move || {
                             let _ = std::fs::create_dir_all(&cache);
-                            let mut cfg = makepad_asset_client::ClientConfig::new(cache);
-                            cfg.token = token;
-                            match makepad_asset_client::AssetClient::connect(cfg, endpoints, None)
-                            {
+                            let connect = || {
+                                let mut cfg =
+                                    makepad_asset_client::ClientConfig::new(cache.clone());
+                                cfg.token = token.clone();
+                                makepad_asset_client::AssetClient::connect(cfg, endpoints, None)
+                            };
+                            match connect() {
                                 Ok(mut client) => {
-                                    let report =
-                                        crate::effects::seed::seed_presets(&mut client);
+                                    let report = crate::effects::seed::seed_presets(
+                                        &mut client,
+                                        &bundle_tx,
+                                    );
                                     log!(
                                         "vjfx preset seeding: {} present, {} published, {} updated, {} retagged, {} failed{}",
                                         report.present,
@@ -9329,6 +10675,26 @@ p2 {}
                                             log!("vjfx library check unavailable: {error}");
                                         }
                                     }
+                                    // The channel closes here: the pump
+                                    // drops its receiver once the last
+                                    // head is drained.
+                                    drop(bundle_tx);
+                                    // LIVECODING, after seeding and on this
+                                    // same worker: watch the origin
+                                    // directories forever. Started second so
+                                    // a file edited while the app was off
+                                    // wins over the compiled-in bytes
+                                    // without racing the seed pass for it.
+                                    if observe {
+                                        // Runs for the life of the process:
+                                        // the store it publishes into is
+                                        // this process's own, so there is
+                                        // no shutdown between them to
+                                        // sequence.
+                                        static RUN_FOREVER: std::sync::atomic::AtomicBool =
+                                            std::sync::atomic::AtomicBool::new(false);
+                                        livecode::run_observer(&mut client, &RUN_FOREVER);
+                                    }
                                 }
                                 Err(error) => {
                                     log!("vjfx preset seeding skipped: {error}");
@@ -9336,6 +10702,9 @@ p2 {}
                             }
                         });
                     }
+                    // Restored slots learn which ASSET they are running, so
+                    // a livecoded document saved on disk reaches them.
+                    self.identify_fx_slots();
                     if !self.gen_panel_loaded {
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);
@@ -9468,6 +10837,15 @@ p2 {}
                                         self.run_cat_cmds(surface, cmds);
                                     }
                                 }
+                                // LIVECODING: a slot RUNNING this asset
+                                // re-fetches its new head and reloads in
+                                // place — the edit reaches the picture on
+                                // the screen, not only the grid tile.
+                                for kind in FxSlotKind::ALL {
+                                    if self.fx_slot_asset[kind.index()] == Some(asset) {
+                                        self.reload_fx_slot_from_store(kind, asset);
+                                    }
+                                }
                                 self.gen.catalog_published(asset);
                             }
                         }
@@ -9544,6 +10922,15 @@ p2 {}
                                 Some("fetch failed".to_string());
                             self.sync_fx_slots_ui(cx);
                             log!("fx slot {:?}: source fetch FAILED {revision}: {error}", slot);
+                        }
+                        CatPurpose::FxSlotIdentify { .. } => {}
+                        CatPurpose::FxSlotReload { slot, .. }
+                        | CatPurpose::FxSlotReloadManifest { slot, .. } => {
+                            // The running effect keeps running: a failed
+                            // reload leaves the slot exactly as it was, and
+                            // the next save republishes and tries again.
+                            self.fx_slot_reloading[slot.index()] = false;
+                            log!("fx slot {slot:?}: hot reload failed: {error}");
                         }
                         CatPurpose::JobProfiles => {
                             self.gen.profiles_failed(error.to_string());
@@ -9712,21 +11099,107 @@ p2 {}
                         if let Some(mut thumbs) =
                             widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
                         {
-                            thumbs.enqueue(
-                                cx,
-                                fx_thumbs::FxThumbJob {
-                                    asset,
-                                    revision,
-                                    title,
-                                    source,
-                                    transition,
-                                },
-                            );
+                            // The bundled feed may have raced this fetch and
+                            // already baked the revision — a cache hit means
+                            // the sheet exists and a re-render would only
+                            // repaint the same file.
+                            let cached = thumbs.cache_dir().is_some_and(|dir| {
+                                fx_thumbs::cache_path(dir, &revision, transition).exists()
+                            });
+                            if !cached {
+                                thumbs.enqueue(
+                                    cx,
+                                    fx_thumbs::FxThumbJob {
+                                        asset,
+                                        revision,
+                                        title,
+                                        source,
+                                        transition,
+                                    },
+                                );
+                            }
                         };
                     }
                     Err(error) => {
                         log!("fx thumb: {title} source unreadable: {error}");
                     }
+                }
+            }
+            (CatPurpose::FxSlotIdentify { slot }, ClientOutput::AssetManifest(manifest)) => {
+                if self.fx_slot_asset[slot.index()].is_none() {
+                    self.fx_slot_asset[slot.index()] = Some(manifest.asset_id);
+                }
+            }
+            (CatPurpose::FxSlotReload { slot, asset }, ClientOutput::AssetDetail(detail)) => {
+                // The operator may have clicked another effect into this
+                // slot while the reload chain was in flight — a stale chain
+                // must never overwrite the newer choice.
+                if self.fx_slot_asset[slot.index()] != Some(asset) {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                }
+                let Some(revision) = detail.latest_published().map(|c| c.revision) else {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                };
+                // Already running exactly this: an event we caused, or one
+                // whose content did not change. Nothing to reload.
+                if self.fx_slots.slot(slot).rev.as_deref() == Some(revision.to_string().as_str())
+                {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                }
+                let Some(up) = self.up.as_mut() else {
+                    self.fx_slot_reloading[slot.index()] = false;
+                    return;
+                };
+                match up.catalog.submit_with(
+                    ClientRequest::FetchAssetManifest { rev: revision },
+                    makepad_asset_client::SubmitOptions::newest_first(),
+                ) {
+                    Ok(id) => {
+                        self.cat_reqs.insert(
+                            id,
+                            CatPurpose::FxSlotReloadManifest { slot, asset, revision },
+                        );
+                    }
+                    Err(_) => self.fx_slot_reloading[slot.index()] = false,
+                }
+            }
+            (
+                CatPurpose::FxSlotReloadManifest { slot, asset, revision },
+                ClientOutput::AssetManifest(manifest),
+            ) => {
+                self.fx_slot_reloading[slot.index()] = false;
+                // Same stale-chain guard as the detail arm: the slot moved
+                // on, this manifest is history.
+                if self.fx_slot_asset[slot.index()] != Some(asset) {
+                    return;
+                }
+                let Some(media) = select_vjfx_source(&manifest) else {
+                    log!("fx slot {slot:?}: reloaded head has no effect document");
+                    return;
+                };
+                let title = self
+                    .video_model
+                    .tile(&asset)
+                    .map(|t| t.title.clone())
+                    .or_else(|| self.fx_slots.slot(slot).title.clone())
+                    .unwrap_or_default();
+                let alias = self.video_model.tile(&asset).and_then(|t| t.alias.clone());
+                let Some(up) = self.up.as_mut() else { return };
+                if let Ok(id) = up.catalog.submit_with(
+                    ClientRequest::FetchBlob {
+                        blob: media.blob,
+                        expected_len: Some(media.len),
+                        pin: false,
+                    },
+                    makepad_asset_client::SubmitOptions::newest_first(),
+                ) {
+                    self.cat_reqs
+                        .insert(id, CatPurpose::FxSlotSource { slot, revision, title });
+                    livecode::remember(&revision.to_string(), alias.as_deref());
+                    self.fx_slot_inflight[slot.index()] = Some(revision);
                 }
             }
             (
@@ -10513,10 +11986,17 @@ p2 {}
                         // rebuild. Only `refresh_thumbs` moves the clock.
                         self.thumb_used.insert(revision, self.thumb_clock);
                         self.thumb_inflight.remove(&revision);
-                        self.fx_decode_pending.remove(&revision);
+                        let fx_sheet = self.fx_decode_pending.remove(&revision).is_some();
                         if frames.len() > 1 {
                             self.thumb_anims
                                 .insert(revision, (frames.clone(), thumb.fps));
+                        }
+                        // An effect sheet may belong to a tile whose catalog
+                        // row has not resolved (the alias-keyed pickup in
+                        // `effect_lane_entries`): `apply_thumb` below cannot
+                        // reach it, only a rebuild can.
+                        if fx_sheet {
+                            self.grids_dirty = true;
                         }
                         if self.trace_thumbs {
                             log!("thumb: decoded {revision} ({} cached)", self.thumbs.len());
@@ -10590,9 +12070,21 @@ p2 {}
         if total <= budget {
             return;
         }
+        // The LIVE visible window is untouchable regardless of stamps: in a
+        // static view no rebuild runs, so visible tiles' last-wanted stamps
+        // go stale while background bakes keep landing — and the evictor
+        // was eating exactly what the operator was looking at.
+        let on_screen: HashSet<AssetRevisionId> = self
+            .video_pad_assets
+            .iter()
+            .flatten()
+            .filter_map(|asset| self.video_model.tile(asset))
+            .filter_map(|t| t.revision)
+            .collect();
         let mut by_age: Vec<(u64, AssetRevisionId)> = self
             .thumbs
             .keys()
+            .filter(|r| !on_screen.contains(r))
             .map(|r| (self.thumb_used.get(r).copied().unwrap_or(0), *r))
             .collect();
         by_age.sort_unstable();
@@ -10726,12 +12218,44 @@ p2 {}
     ///
     /// Each pump tick: land any freshly rendered sheet in the thumb decode
     /// lane (the same lane store thumbnails ride, so the grid needs no new
-    /// path), then — only while the renderer is idle — pick the next effect
-    /// tile still wearing its seeded placeholder, VISIBLE PADS FIRST. A
-    /// cached sheet decodes straight from disk; only a cache miss costs a
-    /// source fetch and an offscreen render, and never more than one at a
-    /// time.
+    /// path), mirror new TERMINAL failures onto their tiles, hand the
+    /// render bank the LIVE viewport (fx_thumbs.rs owns the ordering:
+    /// visible bakes first, most recent visibility wins), and keep its deep
+    /// pending set filled. The feed has two sources: the BUNDLED library
+    /// arrives as complete (revision, source) pairs in ONE batch message
+    /// after seeding — no catalog paging in the way — and everything else
+    /// (livecoded heads, imported or generated docs) bakes via the store
+    /// fetch path the moment its tile resolves. A cached sheet decodes
+    /// straight from disk instead of rendering.
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
+        // THUMB LOAD PROFILE: one line a second from boot until the load
+        // settles — which counter stalls IS the diagnosis (heads = the seed
+        // stream, sub = cache decodes dispatched, done = decoder output,
+        // backlog = decoded-but-not-yet-uploaded, out = jobs in flight).
+        {
+            let t = std::time::Instant::now();
+            let t0 = *self.thumb_prof.get_or_insert((t, t, 0));
+            let busy = self.thumb_decodes_out > 0
+                || !self.decode_backlog.is_empty()
+                || self.thumb_stats.decoded != t0.2;
+            if busy && t.duration_since(t0.1).as_secs_f64() >= 1.0 {
+                if let Some(prof) = self.thumb_prof.as_mut() {
+                    prof.1 = t;
+                    prof.2 = self.thumb_stats.decoded;
+                }
+                log!(
+                    "thumbprof +{:.1}s heads={} sub={} fetch={} done={} out={} backlog={} resident={}MB",
+                    t.duration_since(t0.0).as_secs_f64(),
+                    self.fx_heads.len(),
+                    self.thumb_stats.fx_cache_submitted,
+                    self.thumb_stats.fetch_submitted,
+                    self.thumb_stats.decoded,
+                    self.thumb_decodes_out,
+                    self.decode_backlog.len(),
+                    self.thumb_stats.resident_bytes / 1_000_000
+                );
+            }
+        }
         if self.up.is_none() {
             return;
         }
@@ -10746,7 +12270,7 @@ p2 {}
         // resolves, and the thumbnail decode lane.
         self.sync_fill_politeness(performing);
         let widget = self.ui.widget(cx, ids!(fx_thumbs));
-        let (results, free_lanes, render_disabled, cache_dir) = {
+        let (results, failures, render_disabled, cache_dir) = {
             let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
                 return;
             };
@@ -10761,13 +12285,17 @@ p2 {}
             thumbs.set_full_speed(!performing);
             (
                 thumbs.take_results(),
-                thumbs.free_lanes(),
+                thumbs.take_failures(),
                 thumbs.disabled_reason().is_some(),
                 cache_dir,
             )
         };
-        // Sources already on the way count against the free lanes.
-        let mut fetches = free_lanes.saturating_sub(self.fx_source_inflight.len());
+        // A failed bake is TERMINAL for its revision and the tile says so
+        // (red ring + FAILED) — a spinner that never stops is a lie.
+        if !failures.is_empty() {
+            self.fx_thumb_failed.extend(failures);
+            self.grids_dirty = true;
+        }
         for sheet in results {
             self.fx_decode_pending.insert(sheet.revision, now);
             self.decode.submit(DecodeJob::Thumb {
@@ -10780,18 +12308,188 @@ p2 {}
             self.thumb_decodes_out += 1;
             self.grids_dirty = true;
         }
+        // THE BUNDLED FEED: seeding streams every bundled head whose
+        // source IS the compiled-in bytes — the already-present library
+        // as one batch (a warm store's whole feed, one round trip), then
+        // each fresh publish the moment it commits. Everything enqueues
+        // directly into the bank's deep pending set: no catalog paging,
+        // no per-tile manifest trickle. Edited heads are never streamed
+        // and bake via the store fetch path below.
+        if let Some(rx) = self.fx_bundle_rx.take() {
+            let mut fed = 0usize;
+            let mut open = true;
+            if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+                loop {
+                    let heads = match rx.try_recv() {
+                        Ok(heads) => heads,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            open = false;
+                            break;
+                        }
+                    };
+                    // Reversed: within a class the bank pulls most
+                    // recently enqueued first, so pushing a batch
+                    // backwards makes each tab bake in its own grid order.
+                    for head in heads.into_iter().rev() {
+                        let alias = crate::effects::seed::preset_alias(head.name);
+                        let transition = Self::alias_is_transition(Some(&alias));
+                        self.fx_heads
+                            .insert(alias, (head.revision, transition));
+                        if fx_thumbs::cache_path(&cache_dir, &head.revision, transition)
+                            .exists()
+                        {
+                            continue;
+                        }
+                        thumbs.enqueue(
+                            cx,
+                            fx_thumbs::FxThumbJob {
+                                asset: head.asset,
+                                revision: head.revision,
+                                title: crate::effects::seed::preset_title(
+                                    head.name, head.source,
+                                ),
+                                source: head.source.to_string(),
+                                transition,
+                            },
+                        );
+                        fed += 1;
+                    }
+                }
+            }
+            if fed >= 8 {
+                // The big batches announce themselves; per-publish singles
+                // already log as they render.
+                log!("fx thumb: bundled feed — {fed} documents pending up front");
+            }
+            if open {
+                self.fx_bundle_rx = Some(rx);
+            }
+        }
+        // THE LIVE PRIORITY, every tick: what is on the visible pads right
+        // now (in pad order) and which effect tab is open. The bank pulls
+        // by strict class against exactly this — these two facts are the
+        // whole priority mechanism.
+        let visible: Vec<AssetRevisionId> = (0..self.video_pad_assets.len())
+            .filter_map(|pad| {
+                if let Some(asset) = self.video_pad_assets[pad] {
+                    return self
+                        .video_model
+                        .tile(&asset)
+                        .filter(|t| t.kind == Some(AssetKind::VjEffect))
+                        .and_then(|t| t.revision);
+                }
+                // A prefab under the scroll: no row yet, but the alias->head
+                // map knows its revision — a fast scroll must not demote
+                // exactly the tiles being looked at.
+                self.video_pad_pending
+                    .get(pad)
+                    .and_then(|alias| alias.as_ref())
+                    .and_then(|alias| self.fx_heads.get(alias))
+                    .map(|(revision, _)| *revision)
+            })
+            .collect();
+        let open_tab = if self.grid_lane.is_effect_lane() {
+            Some(self.grid_lane == GridLane::Transition)
+        } else {
+            None
+        };
+        if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+            thumbs.set_priority(&visible, open_tab);
+        }
         // Cached sheets are a DISK READ AND A DECODE, not a render: on a
         // warm relaunch there is no reason to meter them out six a tick.
         // The lane's own width is the throttle, and the politeness verdict
         // already narrowed that; here the only budget is the UI thread's,
         // and reading a sheet's header costs ~0.1ms.
         let cache_budget = if performing { 6 } else { MAX_FX_CACHE_DECODES_PER_TICK };
+        let mut cache_decodes = 0usize;
+        // THE FEED-DRIVEN WARM PASS, before the catalog is even asked:
+        // every bundled head whose sheet is on disk decodes straight off
+        // the alias -> revision map, visible pads first — the effect grid
+        // paints from prefab + cache alone, seconds before the store's
+        // busy boot (the observer reconcile) lets a single tile resolve.
+        if !self.fx_heads.is_empty() {
+            let visible_aliases: Vec<String> = {
+                let grid = self.ui.widget(cx, ids!(video_grid));
+                let pads = grid.borrow::<VjPadMatrix>();
+                pads.map(|pads| {
+                    (0..40)
+                        .filter_map(|pad| pads.visible_at(pad).map(|e| e.sub.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+            };
+            let mut feed: Vec<(AssetRevisionId, bool)> = Vec::new();
+            let mut in_feed: HashSet<AssetRevisionId> = HashSet::new();
+            for alias in &visible_aliases {
+                if let Some(&(revision, transition)) = self.fx_heads.get(alias) {
+                    if in_feed.insert(revision) {
+                        feed.push((revision, transition));
+                    }
+                }
+            }
+            for (revision, transition) in self.fx_heads.values() {
+                if in_feed.insert(*revision) {
+                    feed.push((*revision, *transition));
+                }
+            }
+            for (revision, transition) in feed {
+                if cache_decodes >= cache_budget {
+                    break;
+                }
+                if self.thumb_anims.contains_key(&revision) {
+                    continue;
+                }
+                if self
+                    .fx_decode_pending
+                    .get(&revision)
+                    .is_some_and(|at| now - at < 3.0)
+                {
+                    continue;
+                }
+                let held = widget
+                    .borrow::<fx_thumbs::VjFxThumbs>()
+                    .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
+                if held {
+                    continue;
+                }
+                let cache = fx_thumbs::cache_path(&cache_dir, &revision, transition);
+                if !cache.exists() {
+                    continue;
+                }
+                let t_read = std::time::Instant::now();
+                let layout = std::fs::read(&cache)
+                    .ok()
+                    .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
+                self.thumb_stats.fx_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
+                match layout {
+                    Some((cells, fps)) => {
+                        self.thumb_stats.fx_cache_submitted += 1;
+                        self.fx_decode_pending.insert(revision, now);
+                        self.decode.submit(DecodeJob::Thumb {
+                            revision,
+                            path: cache,
+                            sheet: Some((cells, fps)),
+                            legacy_may_be_sheet: false,
+                            epoch: self.view_epoch,
+                        });
+                        self.thumb_decodes_out += 1;
+                        cache_decodes += 1;
+                    }
+                    None => {
+                        // Unreadable/unstamped cache file: drop it and let
+                        // the render path write a fresh one.
+                        let _ = std::fs::remove_file(&cache);
+                    }
+                }
+            }
+        }
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
         let mut seen: HashSet<AssetId> = HashSet::new();
-        let mut cache_decodes = 0usize;
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -10816,9 +12514,8 @@ p2 {}
             {
                 continue;
             }
-            // Failed this session, or already on a lane / in the bank's
-            // queue (several documents render at once, so "busy" is no
-            // longer the same as "not idle").
+            // Failed this session (terminal per revision), or already
+            // pending / on a lane in the bank.
             let held = widget
                 .borrow::<fx_thumbs::VjFxThumbs>()
                 .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
@@ -10865,15 +12562,17 @@ p2 {}
                 }
                 continue;
             }
-            // Cache miss: keep the render bank fed — one source fetch per
-            // free lane, no more (the bank itself staggers the loads).
-            if render_disabled || fetches == 0 {
+            // Cache miss: fetch the source and enqueue on arrival. The
+            // bank's pending set is deep by design, so ADMISSION NEVER
+            // WAITS on lanes — the only guard is the in-flight dedupe.
+            if render_disabled {
                 continue;
             }
             if self.fx_source_inflight.contains(&revision) {
                 continue;
             }
             let Some(media) = tile.media.clone() else { continue };
+            let alias = tile.alias.clone();
             if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
                 continue;
             }
@@ -10888,8 +12587,10 @@ p2 {}
             ) {
                 self.cat_reqs
                     .insert(id, CatPurpose::FxSource { asset, revision });
+                // LIVECODING: which FILE this revision is, so the render
+                // outcome can be written under the stem an agent edits.
+                livecode::remember(&revision.to_string(), alias.as_deref());
                 self.fx_source_inflight.insert(revision);
-                fetches -= 1;
             }
         }
     }
@@ -10947,6 +12648,16 @@ p2 {}
     }
 
     fn handle_output_window_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Closing the MAIN window is closing the app: the render/output
+        // window must not survive it and keep the event loop alive — that
+        // left a headless output window on screen blocking shutdown.
+        if let Event::WindowClosed(ev) = event {
+            if Some(ev.window_id) == self.ui.window(cx, ids!(main_window)).window_id() {
+                self.close_output_window(cx);
+                cx.quit();
+                return;
+            }
+        }
         let Some(output_id) = self.ui.window(cx, ids!(output_window)).window_id() else {
             return;
         };
@@ -11186,11 +12897,28 @@ p2 {}
             self.video_pad_assets.clear();
             self.video_pad_assets
                 .extend((0..40).map(|pad| pads.visible_at(pad).map(|entry| entry.asset)));
+            // Prefabs under the window, by alias: their rows have not
+            // resolved yet, but the bake-priority feed must still count
+            // them as VISIBLE — a fast scroll lands on prefabs first.
+            self.video_pad_pending.clear();
+            self.video_pad_pending.extend((0..40).map(|pad| {
+                pads.paint_at(pad)
+                    .filter(|entry| entry.pending)
+                    .map(|entry| entry.sub.clone())
+            }));
             pads.at_tail()
         };
         // Page on demand: the window reached the loaded tail, so ask the
         // server for the next page instead of having fetched everything.
-        if at_tail && self.video_model.has_more() && !self.video_model.is_loading() {
+        //
+        // EXCEPT on an effect lane, which pages to the END regardless of
+        // where the window sits. The grid already draws every bundled
+        // preset, so "the operator scrolled far enough" is no longer the
+        // signal that more rows are wanted — and without this the lane
+        // stopped at page one, which is why only the first forty-odd tiles
+        // ever got their animated bake.
+        let want_all = self.grid_lane.is_effect_lane();
+        if (at_tail || want_all) && self.video_model.has_more() && !self.video_model.is_loading() {
             let cmds = self.video_model.load_more();
             self.run_cat_cmds(Surface::Video, cmds);
         }
@@ -11267,6 +12995,18 @@ p2 {}
             Surface::Sfx => &self.sfx_model,
             Surface::Mesh => &self.mesh_model,
         };
+        // THE EFFECT LANES BOOT COMPLETE. Their contents are compiled into
+        // this binary, so they never wait on a listing — see
+        // [`Self::effect_lane_entries`]. A typed filter takes the QUERY
+        // path instead: the whole point of the box is to narrow the wall
+        // down to the match, not to leave it buried at its bundled
+        // position among two hundred prefabs.
+        if surface == Surface::Video
+            && self.grid_lane.is_effect_lane()
+            && self.video_model.text.trim().is_empty()
+        {
+            return self.effect_lane_entries(self.grid_lane);
+        }
         // The program strip is drawn in DISPLAY order — the PENDING head
         // column (reserved to a full column height, so filling it never
         // moves the body) and then the settled body. Every other surface is
@@ -11295,8 +13035,7 @@ p2 {}
                         )
                 })
             })
-            .enumerate()
-            .map(|(index, cell)| {
+            .map(|cell| {
                 let Some(tile) = cell else {
                     // A reserved pending cell: nothing to draw, nothing to
                     // click, and it holds the body still while the column
@@ -11306,7 +13045,6 @@ p2 {}
                         title: String::new(),
                         sub: String::new(),
                         state: String::new(),
-                        pad: String::new(),
                         texture: None,
                         frames: Vec::new(),
                         fps: 0.0,
@@ -11315,8 +13053,19 @@ p2 {}
                         failed: false,
                         active: false,
                         placeholder: true,
+                        pending: false,
+                        fx: false,
                     };
                 };
+                self.tile_entry(tile, surface)
+            }));
+        entries
+    }
+
+    /// One resolved catalog row as a grid cell.
+    fn tile_entry(&self, tile: &catalog::Tile, surface: Surface) -> GridEntry {
+        {
+            {
                 let texture = tile.revision.and_then(|rev| self.thumbs.get(&rev).cloned());
                 let state = match (&tile.state, surface) {
                     (catalog::TileState::Ready, Surface::Sfx) => {
@@ -11373,7 +13122,7 @@ p2 {}
                 // cue being prepared for the program grid, the pad loader
                 // for the SFX bank. An ARMED cue is ready — it is only
                 // waiting for its beat — so it stops spinning.
-                let (loading, failed) = match surface {
+                let (loading, mut failed) = match surface {
                     Surface::Sfx => match self.pads.pad(&tile.asset).map(|p| p.load.clone()) {
                         Some(pads::PadLoad::Loading { .. }) => (true, false),
                         Some(pads::PadLoad::Failed { .. }) => (false, true),
@@ -11384,6 +13133,16 @@ p2 {}
                         self.cue.failed_asset() == Some(tile.asset),
                     ),
                 };
+                // An effect whose thumbnail bake failed wears the failure:
+                // the bake is deterministic, so a doc that cannot compile
+                // or render is a bug in the doc, and a red ring is how it
+                // gets seen (terminal per revision — a republished fix is
+                // a new revision and clears it).
+                if tile.kind == Some(AssetKind::VjEffect)
+                    && tile.revision.is_some_and(|r| self.fx_thumb_failed.contains(&r))
+                {
+                    failed = true;
+                }
                 // The tile says it in words too — a spinner over a dark
                 // thumbnail is easy to miss on a 56px pad.
                 let state = if loading {
@@ -11398,7 +13157,6 @@ p2 {}
                     title: tile.title.clone(),
                     sub,
                     state,
-                    pad: format!("{:02}", index + 1),
                     texture,
                     frames,
                     fps,
@@ -11407,9 +13165,151 @@ p2 {}
                     failed,
                     active,
                     placeholder: false,
+                    pending: false,
+                    // Geometry-stable paint for every effect tile (see
+                    // `GridEntry::fx`) — by kind once resolved, by alias
+                    // before that.
+                    fx: tile.kind == Some(AssetKind::VjEffect)
+                        || tile.alias.as_deref().is_some_and(|a| a.starts_with("vjfx/")),
                 }
-            }));
+            }
+        }
+    }
+
+    /// THE BOOT GRID.
+    ///
+    /// The effect library is not a catalog the app discovers — it is one
+    /// directory of documents COMPILED INTO THIS BINARY. So the grid has no
+    /// business waiting on a store to be told what is in it: it draws the
+    /// whole lane in the first frame, in lane order, every tile carrying the
+    /// same procedural art the store holds for it, and the catalog rows then
+    /// replace those prefabs IN PLACE as they resolve (matched by alias, so
+    /// nothing moves and no cell is ever empty). The animated bake is the
+    /// only thing the operator ever sees change.
+    ///
+    /// Ordering is the BUNDLED order, not newest-first: a seeding burst
+    /// stamps two hundred publishes within a second of each other, and
+    /// sorting those by stamp is a shuffle — one that re-shuffles again on
+    /// the next launch. The lane reads the same every night.
+    ///
+    /// Rows the bundle does not name (imported or AI-generated effects) keep
+    /// the model's own order and follow the bundled block.
+    fn effect_lane_entries(&self, lane: GridLane) -> Vec<GridEntry> {
+        let model = &self.video_model;
+        // The bundled names this lane shows, in the order it shows them.
+        let bundled: Vec<&'static str> = match lane {
+            GridLane::Transition => crate::effects::seed::TRANSITION_PRESETS.to_vec(),
+            _ => crate::effects::seed::bundled_presets()
+                .iter()
+                .map(|(name, _)| *name)
+                .filter(|name| !crate::effects::seed::is_transition_preset(name))
+                .collect(),
+        };
+        // Alias -> the resolved row, when the store has answered for it.
+        let by_alias: HashMap<&str, &catalog::Tile> = model
+            .tiles()
+            .iter()
+            .filter_map(|tile| Some((tile.alias.as_deref()?, tile)))
+            .collect();
+        let bundled_aliases: std::collections::HashSet<String> =
+            bundled.iter().map(|n| crate::effects::seed::preset_alias(n)).collect();
+        let mut entries: Vec<GridEntry> = Vec::with_capacity(bundled.len() + 16);
+        for name in &bundled {
+            let alias = crate::effects::seed::preset_alias(name);
+            let mut entry = match by_alias.get(alias.as_str()) {
+                Some(tile) => {
+                    let mut entry = self.tile_entry(tile, Surface::Video);
+                    // THE PREFAB IS THE FLOOR, not just the first paint. A
+                    // resolved row whose thumbnail blob has not been fetched
+                    // and decoded yet has no texture at all, and a tile with
+                    // no texture is a GREY hole — so the sequence a whole
+                    // page of tiles used to walk was prefab, grey, the
+                    // store's placeholder (the same picture again), and only
+                    // then the animated sheet. Three states, two of them
+                    // noise. Keeping the local art underneath collapses it
+                    // to ONE swap: the bake, when the bake exists.
+                    if entry.texture.is_none() && entry.frames.is_empty() {
+                        entry.texture = self.fx_prefab.get(*name).cloned();
+                    }
+                    entry
+                }
+                None => self.prefab_entry(name),
+            };
+            // THE ALIAS-KEYED BAKE PICKUP: a decoded sheet paints the
+            // moment it exists, keyed by the bundled feed's head revision —
+            // even on a tile whose catalog row has not resolved yet (the
+            // store's control plane is busy at boot). Without this, a fully
+            // baked, fully cached library still trickled onto the grid at
+            // catalog-resolve pace.
+            if entry.frames.is_empty() {
+                if let Some((revision, _)) = self.fx_heads.get(&alias) {
+                    if let Some((frames, fps)) = self.thumb_anims.get(revision) {
+                        entry.frames = frames.clone();
+                        entry.fps = *fps;
+                    }
+                }
+            }
+            entries.push(entry);
+        }
+        // Everything else the lane lists (imported / generated effects), in
+        // the model's own display order, behind the bundled block.
+        for asset in model.display_order().into_iter().flatten() {
+            let Some(tile) = model.tile(&asset) else { continue };
+            if tile.alias.as_deref().is_some_and(|a| bundled_aliases.contains(a)) {
+                continue;
+            }
+            entries.push(self.tile_entry(tile, Surface::Video));
+        }
         entries
+    }
+
+    /// Generate the prefab art for every bundled preset, once, at startup.
+    ///
+    /// One pass over the compiled-in registry; no store, no socket, no
+    /// decode pool. Measured at a couple of hundred milliseconds for the
+    /// whole library at [`PREFAB_W`]x[`PREFAB_H`] — paid once, before the
+    /// window is up, and it is what makes the first painted frame of the
+    /// effect grid a COMPLETE one.
+    fn build_fx_prefab_art(&mut self, cx: &mut Cx) {
+        for (name, _) in crate::effects::seed::bundled_presets() {
+            let data =
+                crate::effects::seed::placeholder_bgra(name, PREFAB_W, PREFAB_H);
+            let texture = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: PREFAB_W,
+                    height: PREFAB_H,
+                    data: Some(data),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            self.fx_prefab.insert(name.to_string(), texture);
+        }
+    }
+
+    /// A prefab cell for a bundled preset the store has not answered for.
+    fn prefab_entry(&self, name: &str) -> GridEntry {
+        let title = crate::effects::seed::bundled_presets()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(n, src)| crate::effects::seed::preset_title(n, src))
+            .unwrap_or_else(|| name.to_string());
+        GridEntry {
+            asset: AssetId::from_bytes([0; 16]),
+            title,
+            sub: crate::effects::seed::preset_alias(name),
+            state: "FX".to_string(),
+            texture: self.fx_prefab.get(name).cloned(),
+            frames: Vec::new(),
+            fps: 0.0,
+            cells: false,
+            loading: false,
+            failed: false,
+            active: false,
+            placeholder: false,
+            pending: true,
+            fx: true,
+        }
     }
 
     fn rebuild_grids(&mut self, cx: &mut Cx) {
@@ -11425,8 +13325,12 @@ p2 {}
             // title in the middle of the list. Subtract what has actually
             // been dropped so far: exact over the loaded prefix, and it can
             // only get more accurate as more pages land.
+            // …and never SHORTER than what is actually on screen: an effect
+            // lane draws its whole compiled-in library from the first frame,
+            // long before the catalog has reported a total for it.
             let hidden = self.video_model.tiles().len().saturating_sub(video_entries.len());
-            pads.set_total(cx, (self.video_model.total as usize).saturating_sub(hidden));
+            let listed = (self.video_model.total as usize).saturating_sub(hidden);
+            pads.set_total(cx, listed.max(video_entries.len()));
             pads.set_entries(cx, video_entries);
             pads.set_offset(cx, self.apc.bank);
             self.apc.bank = pads.bank;
@@ -12063,6 +13967,20 @@ p2 {}
 
     // ---- first-use model install (stem splitter + whisper) ----
 
+    /// A queued hot-reload fires the moment its slot's previous chain
+    /// settles — a save burst always ends on the newest revision.
+    fn pump_fx_slot_reloads(&mut self) {
+        for kind in [FxSlotKind::EffectA, FxSlotKind::Transition, FxSlotKind::EffectB] {
+            let index = kind.index();
+            if self.fx_slot_reloading[index] {
+                continue;
+            }
+            if let Some(asset) = self.fx_slot_reload_queued[index].take() {
+                self.reload_fx_slot_from_store(kind, asset);
+            }
+        }
+    }
+
     /// INSTALL MODELS opens the what-will-download dialog; while a download
     /// runs the same button reads CANCEL and pulls the cord instead.
     fn models_install_clicked(&mut self, cx: &mut Cx) {
@@ -12623,7 +14541,12 @@ p2 {}
                     let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
                     sum += mono * mono;
                 }
-                rms[lane] = (sum / (end - offset) as f64).sqrt();
+                // The headroom is undone once per lane rather than per
+                // sample. `stem_column_shares` only reads these relative to
+                // each other, so it cannot change the picture — but a level
+                // that claims to be an amplitude should be one.
+                rms[lane] = (sum / (end - offset) as f64).sqrt()
+                    * crate::mixer::STEM_CHUNK_HEADROOM as f64;
             }
             if any {
                 tiles[column] = crate::music_view::stem_column_shares(rms);
@@ -13107,7 +15030,99 @@ p2 {}
 
     // ---- video frame pump ---------------------------------------------------
 
-    fn pump_video(&mut self, cx: &mut Cx) {
+    /// Feed the point-sampled consumers exactly once for each resident
+    /// source frame the platter presents. The full frame never leaves its
+    /// NV12 lane.
+    fn sample_platter_frame(
+        &mut self,
+        index: usize,
+        frame: &crate::media::Frame,
+        width: usize,
+        height: usize,
+        position_secs: f64,
+    ) {
+        let proxy = match &frame.px {
+            crate::media::Pixels::Nv12 { data, width, height } => {
+                crate::media::nv12_proxy_bgra(
+                    data,
+                    *width as usize,
+                    *height as usize,
+                    160,
+                    90,
+                )
+            }
+            crate::media::Pixels::Bgra(frame) => {
+                let mut proxy = Vec::with_capacity(160 * 90);
+                for y in 0..90 {
+                    let sy = (y * height / 90).min(height.saturating_sub(1));
+                    for x in 0..160 {
+                        let sx = (x * width / 160).min(width.saturating_sub(1));
+                        proxy.push(frame.get(sy * width + sx).copied().unwrap_or(0));
+                    }
+                }
+                proxy
+            }
+        };
+        self.light_samples[index] = Some(
+            self.light_analyzers[index].push_bgra_frame(&proxy, 160, 90),
+        );
+        if let (Some(revision), Some(tx)) = (self.slot_scan[index], self.loop_tx.as_ref()) {
+            let sig = build_frame_signature(&proxy, 160, 90, &mut self.sig_states[index]);
+            let _ = tx.send(LoopScanCtl::Sig {
+                slot: index,
+                revision,
+                position_secs,
+                sig,
+            });
+        }
+    }
+
+    /// OFF is a presenter too: upload the platter's nearest resident frame,
+    /// but only when that exact frame changes.
+    fn present_platter_off(
+        &mut self,
+        cx: &mut Cx,
+        slot: SlotId,
+        frame: &crate::media::Frame,
+        width: usize,
+        height: usize,
+    ) {
+        let index = slot.index();
+        match &frame.px {
+            crate::media::Pixels::Nv12 { data, width, height } => {
+                let tex = self
+                    .nv12_view(cx, slot, |cx, view| {
+                        view.set_frame(cx, data, *width, *height);
+                        view.output_texture()
+                    })
+                    .flatten();
+                if let Some(tex) = tex {
+                    self.slot_tex_borrowed[index] = false;
+                    self.slot_textures[index] = Some(tex);
+                }
+            }
+            crate::media::Pixels::Bgra(frame) => {
+                match (&self.slot_textures[index], self.slot_tex_borrowed[index]) {
+                    (Some(tex), false) => tex.set_data_u32(cx, width, height, frame.clone()),
+                    _ => {
+                        self.slot_tex_borrowed[index] = false;
+                        self.slot_textures[index] = Some(Texture::new_with_format(
+                            cx,
+                            TextureFormat::VecBGRAu8_32 {
+                                width,
+                                height,
+                                data: Some(frame.clone()),
+                                updated: TextureUpdated::Full,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        self.set_deck_busy(cx, slot, false);
+    }
+
+    fn pump_video(&mut self, cx: &mut Cx, now: f64) {
         // Device-clock transition confirmations run at display-frame rate
         // for tight picture starts (the 20 Hz poll is only a fallback).
         self.pump_transitions(cx);
@@ -13121,8 +15136,54 @@ p2 {}
         }
         for index in 0..2 {
             let Some(player) = self.players[index].as_mut() else { continue };
-            if let Some(frame) = player.take_due_frame() {
+            let resident = player.resident_frames().is_some();
+            if let Some(px) = player.take_due_frame() {
+                // A resident clip is presented exclusively by the platter
+                // below. Drain any handover tail, but never show it.
+                if resident {
+                    continue;
+                }
+                if let crate::media::Pixels::Nv12 { data, width, height } = px {
+                    // THE NV12 LANE: planes go straight to the GPU pass;
+                    // the CPU touches only a small proxy for the
+                    // point-sampling analyzers.
+                    let (w, h) = (width as usize, height as usize);
+                    let proxy = crate::media::nv12_proxy_bgra(&data, w, h, 160, 90);
+                    self.light_samples[index] = Some(
+                        self.light_analyzers[index].push_bgra_frame(&proxy, 160, 90),
+                    );
+                    if let (Some(revision), Some(tx)) =
+                        (self.slot_scan[index], self.loop_tx.as_ref())
+                    {
+                        let sig = build_frame_signature(
+                            &proxy,
+                            160,
+                            90,
+                            &mut self.sig_states[index],
+                        );
+                        let _ = tx.send(LoopScanCtl::Sig {
+                            slot: index,
+                            revision,
+                            position_secs: player.position_secs(),
+                            sig,
+                        });
+                    }
+                    let slot = SlotId::from_index(index);
+                    let tex = self
+                        .nv12_view(cx, slot, |cx, view| {
+                            view.set_frame(cx, &data, width, height);
+                            view.output_texture()
+                        })
+                        .flatten();
+                    if let Some(tex) = tex {
+                        self.slot_tex_borrowed[index] = false;
+                        self.slot_textures[index] = Some(tex);
+                    }
+                    self.set_deck_busy(cx, SlotId::from_index(index), false);
+                    continue;
+                }
                 let (w, h) = (player.width as usize, player.height as usize);
+                let frame = px.to_bgra();
                 self.light_samples[index] = Some(
                     self.light_analyzers[index].push_bgra_frame(&frame, w, h),
                 );
@@ -13162,43 +15223,606 @@ p2 {}
                 self.set_deck_busy(cx, SlotId::from_index(index), false);
             }
         }
+        // REALTIME FRAME TWEENING (flow_tween.rs): with a resident repeat
+        // cache, the presented picture becomes a GPU-warped in-between at
+        // the transport's fractional position — silky slow-mo and scratch,
+        // and low-fps footage smoothed to the display rate. Default ON;
+        // VJ_NO_TWEEN=1 disables (the settings toggle's first form).
+        // VJ_TWEEN_SELFTEST=1: no store, no video — a synthetic NV12
+        // pair (a square shifted +8 px) runs the whole tween stack, and
+        // each stage's view is read back and written as a PNG under
+        // /tmp/tween_selftest_*.png. The definitive shader-debug loop.
+        if tween_selftest() {
+            self.pump_tween_selftest(cx);
+        }
+        let tween_on = tween_enabled();
+        let ai_decks = (0..2)
+            .filter(|&i| {
+                tween_on
+                    && tween_uses_ai(self.slot_tween_mode[i])
+                    && self.slot_media[i] == SlotMedia::Video
+                    && self.players[i].is_some()
+            })
+            .count()
+            .max(1);
+        let ai_ceiling = TWEEN_RIFE_CAPACITY_FPS / ai_decks as f64;
+        // One classical-field capacity shared by both decks. Each slot
+        // records (next-boundary deadline, remaining passes); after both
+        // offers are known, EDF assigns the frame's bounded work.
+        let mut field_wanted = [None; 2];
+        for slot in [SlotId::A, SlotId::B] {
+            let i = slot.index();
+
+            // Land a finished producer result in its exact cache. It can
+            // only be leased at a later pair boundary.
+            if let Some(product) = self.rife_service[i].as_ref().and_then(|s| s.take()) {
+                let tier = match product.kind() {
+                    flow_tween::RifeProductKind::Field => TWEEN_AI,
+                    flow_tween::RifeProductKind::Midpoint => TWEEN_AI2,
+                    flow_tween::RifeProductKind::Subdivision { .. } => TWEEN_AI3,
+                };
+                let key = pair_cache::PairKey::new(
+                    product.generation(),
+                    product.a(),
+                    product.b(),
+                    tier,
+                );
+                let bytes = product.byte_len();
+                let products = self.rife_cache[i]
+                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_RIFE_CACHE_BYTES));
+                let improves_ladder = product.subdivision().is_none_or(|new_ladder| {
+                    products
+                        .peek(&key)
+                        .and_then(|old| old.subdivision())
+                        .is_none_or(|old_ladder| {
+                            new_ladder.complete_depth() >= old_ladder.complete_depth()
+                        })
+                });
+                if improves_ladder {
+                    products.insert(key, Arc::new(product), bytes, 100);
+                }
+            }
+
+            let resident = if self.slot_media[i] == SlotMedia::Video && !self.flow_active(i) {
+                self.players[i].as_ref().and_then(|player| {
+                    player.resident_frames().map(|frames| {
+                        (frames, player.generation(), player.width as usize, player.height as usize)
+                    })
+                })
+            } else {
+                None
+            };
+            let Some((cache, generation, player_width, player_height)) = resident else {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
+                self.platter_sample[i] = None;
+                self.platter_off_frame[i] = None;
+                continue;
+            };
+            let Some(step) = self.platter_step(i, now, &cache) else { continue };
+            if let Some(player) = self.players[i].as_ref() {
+                player.publish_position_secs(step.pos_secs);
+            }
+
+            let sample = (generation, step.nearest);
+            if self.platter_sample[i] != Some(sample) {
+                self.platter_sample[i] = Some(sample);
+                self.sample_platter_frame(
+                    i,
+                    &cache[step.nearest],
+                    player_width,
+                    player_height,
+                    step.pos_secs,
+                );
+            }
+
+            let mode = if tween_on { self.slot_tween_mode[i] } else { TWEEN_NONE };
+            if mode == TWEEN_NONE {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
+                if self.platter_off_frame[i] != Some(sample) {
+                    self.platter_off_frame[i] = Some(sample);
+                    self.present_platter_off(
+                        cx,
+                        slot,
+                        &cache[step.nearest],
+                        player_width,
+                        player_height,
+                    );
+                }
+                continue;
+            }
+            self.platter_off_frame[i] = None;
+            let (pa, pb) = (&cache[step.pair], &cache[step.ib]);
+            let (
+                crate::media::Pixels::Nv12 { data: da, width, height, .. },
+                crate::media::Pixels::Nv12 { data: db, .. },
+            ) = (&pa.px, &pb.px)
+            else {
+                if self.tween_pair[i].take().is_some() {
+                    self.tween_view(cx, slot, |cx, view| view.clear(cx));
+                }
+                self.tween_ai2_lease[i] = None;
+                self.tween_ai3_lease[i] = None;
+                self.tween_ai3_lease_depth[i] = 0;
+                self.tween_ai3_admitted[i] = false;
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+                self.ui.label(cx, Self::deck_ai3_status_path(slot)).set_text(cx, "");
+                if self.platter_off_frame[i] != Some(sample) {
+                    self.platter_off_frame[i] = Some(sample);
+                    self.present_platter_off(
+                        cx,
+                        slot,
+                        &cache[step.nearest],
+                        player_width,
+                        player_height,
+                    );
+                }
+                continue;
+            };
+            let (width, height) = (*width, *height);
+            let pair = pair_cache::PairKey::new(generation, step.pair, step.ib, mode);
+            let pair_changed = self.tween_pair[i] != Some(pair);
+
+            // One luma verdict per exact seam and clip generation.
+            let cut_key = pair_cache::PairKey::new(
+                generation,
+                step.pair,
+                step.ib,
+                TWEEN_CUT_TIER,
+            );
+            let known_cut = self.tween_cut_cache[i]
+                .as_mut()
+                .and_then(|products| products.get(&cut_key).copied());
+            let cut_verdict = known_cut.unwrap_or_else(|| {
+                let verdict = crate::media::nv12_cut_score(
+                    da,
+                    db,
+                    width as usize,
+                    height as usize,
+                ) > 28.0;
+                self.tween_cut_cache[i]
+                    .get_or_insert_with(|| pair_cache::PairCache::new(TWEEN_CUT_CACHE_BYTES))
+                    .insert(cut_key, verdict, std::mem::size_of::<bool>(), 1);
+                verdict
+            });
+            let cut = mode >= TWEEN_FLOW && cut_verdict;
+            let mut ai3_capacity_frames = 0usize;
+            if pair_changed && mode == TWEEN_AI3 {
+                let dims = rife_proxy_dims(width, height);
+                if self.tween_ai3_dims[i] != Some(dims) {
+                    self.tween_ai3_dims[i] = Some(dims);
+                    self.tween_ai3_chooser[i] = flow_tween::Ai3DepthChooser::default();
+                }
+                let synth_seconds = self.rife_service[i]
+                    .as_ref()
+                    .and_then(|service| service.synth_seconds(dims.0, dims.1))
+                    .unwrap_or(flow_tween::AI3_BOOTSTRAP_SYNTH_SECS);
+                let (pair_budget, capacity_frames) = if step.pace > 0.0 {
+                    let pair_period = 1.0 / step.pace;
+                    let other = 1 - i;
+                    let free_duty =
+                        (TWEEN_RIFE_GPU_BUDGET - self.tween_ai_obligation_duty[other])
+                            .max(0.0);
+                    let free_fps =
+                        (TWEEN_RIFE_CAPACITY_FPS - self.tween_ai_obligation_fps[other])
+                            .max(0.0);
+                    (pair_period * free_duty, (pair_period * free_fps).floor() as usize)
+                } else {
+                    (0.0, 0)
+                };
+                ai3_capacity_frames = capacity_frames;
+                self.tween_ai3_admitted[i] = capacity_frames >= 1;
+                self.tween_ai3_target_depth[i] = self.tween_ai3_chooser[i].choose(
+                    synth_seconds,
+                    pair_budget,
+                    capacity_frames,
+                );
+            }
+            if tween_uses_ai(mode)
+                && step.pace > 0.0
+                && rife_enabled()
+                && self.rife_state[i] != 2
+            {
+                let (pw, ph) = rife_proxy_dims(width, height);
+                let synth_seconds = self.rife_service[i]
+                    .as_ref()
+                    .and_then(|service| service.synth_seconds(pw, ph))
+                    .unwrap_or(flow_tween::AI3_BOOTSTRAP_SYNTH_SECS);
+                let frames = if mode == TWEEN_AI3 {
+                    if self.tween_ai3_admitted[i] {
+                        flow_tween::ai3_neural_frames(self.tween_ai3_target_depth[i])
+                    } else {
+                        0
+                    }
+                } else {
+                    1
+                };
+                self.tween_ai_obligation_fps[i] = step.pace * frames as f64;
+                self.tween_ai_obligation_duty[i] =
+                    self.tween_ai_obligation_fps[i] * synth_seconds;
+            } else {
+                self.tween_ai_obligation_fps[i] = 0.0;
+                self.tween_ai_obligation_duty[i] = 0.0;
+            }
+            // Freeze the producer choice at the pair boundary. Late output
+            // stays cached for a later traversal of this exact pair.
+            let neural_product = if tween_uses_ai(mode) && pair_changed {
+                self.rife_cache[i]
+                    .as_mut()
+                    .and_then(|products| products.get(&pair).cloned())
+            } else {
+                None
+            };
+            if pair_changed {
+                self.tween_ai2_lease[i] = if mode == TWEEN_AI2
+                    && !cut
+                    && neural_product
+                        .as_deref()
+                        .and_then(|product| product.midpoint())
+                        .is_some_and(|midpoint| midpoint.is_valid())
+                {
+                    neural_product.clone()
+                } else {
+                    None
+                };
+                let ai3_depth = if mode == TWEEN_AI3 && !cut {
+                    neural_product
+                        .as_deref()
+                        .and_then(|product| product.subdivision())
+                        .map(|ladder| {
+                            ladder.complete_depth().min(self.tween_ai3_target_depth[i])
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                self.tween_ai3_lease[i] = (ai3_depth > 0)
+                    .then(|| neural_product.clone())
+                    .flatten();
+                self.tween_ai3_lease_depth[i] = ai3_depth;
+                let status = if mode == TWEEN_AI3 {
+                    if ai3_depth > 0 {
+                        format!("AI3 ×{}", flow_tween::ai3_neural_frames(ai3_depth))
+                    } else {
+                        "AI3 FL".to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                self.ui
+                    .label(cx, Self::deck_ai3_status_path(slot))
+                    .set_text(cx, &status);
+            }
+            let ai2_lease = self.tween_ai2_lease[i].clone();
+            let has_ai2_midpoint = mode == TWEEN_AI2
+                && ai2_lease
+                    .as_deref()
+                    .and_then(|product| product.midpoint())
+                    .is_some();
+            let ai2_plan = flow_tween::ai2_frame_plan(has_ai2_midpoint, step.t);
+            let ai3_lease = self.tween_ai3_lease[i].clone();
+            let ai3_depth = self.tween_ai3_lease_depth[i];
+            let ai3_plan = (mode == TWEEN_AI3 && ai3_depth > 0)
+                .then(|| flow_tween::ai3_frame_plan(ai3_depth, step.t));
+            // The platter predicts ALONG loop/bounce traversal. Adjacent
+            // pairs share exactly one endpoint, so upload only the other
+            // frame into the view's three-frame ring.
+            let field_offer = if mode == TWEEN_FLOW
+                && tween_prefetch_enabled()
+                && step.rate != 0.0
+            {
+                self.platter_locate_ahead(i, 1.0).and_then(|ahead| {
+                    let key = pair_cache::PairKey::new(
+                        generation,
+                        ahead.a,
+                        ahead.b,
+                        TWEEN_FLOW,
+                    );
+                    let new_frame = if pair.b == key.a {
+                        Some((ahead.b, true))
+                    } else if pair.a == key.b {
+                        Some((ahead.a, false))
+                    } else {
+                        None
+                    }?;
+                    match &cache[new_frame.0].px {
+                        crate::media::Pixels::Nv12 { data, width: w, height: h }
+                            if (*w, *h) == (width, height) =>
+                        {
+                            Some((key, data.as_slice(), new_frame.1))
+                        }
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+            let boundary_fraction = if step.screen_forward {
+                1.0 - step.t as f64
+            } else {
+                step.t as f64
+            };
+            let field_deadline = now + boundary_fraction.max(0.0) / step.pace.max(1e-9);
+            let tex = self.tween_view(cx, slot, |cx, view| {
+                view.set_fade(cx, mode == TWEEN_FADE);
+                if pair_changed {
+                    view.set_pair_keyed(cx, pair, da, db, width, height);
+                    view.set_cut(cx, cut);
+                    match mode {
+                        TWEEN_AI => {
+                            view.clear_ai2_midpoint(cx);
+                            view.clear_ai3_subdivision(cx);
+                            if let Some(field) =
+                                neural_product.as_deref().and_then(|product| product.field())
+                            {
+                                view.set_rife_field(
+                                    cx,
+                                    field.a,
+                                    field.width,
+                                    field.height,
+                                    &field.flow,
+                                    &field.mask,
+                                );
+                            } else {
+                                view.clear_rife_field(cx);
+                            }
+                        }
+                        TWEEN_AI2 => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai3_subdivision(cx);
+                            if let Some(midpoint) =
+                                ai2_lease.as_deref().and_then(|product| product.midpoint())
+                            {
+                                if !view.set_ai2_midpoint(cx, midpoint) {
+                                    view.clear_ai2_midpoint(cx);
+                                }
+                            } else {
+                                view.clear_ai2_midpoint(cx);
+                            }
+                        }
+                        TWEEN_AI3 => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai2_midpoint(cx);
+                            if let Some(subdivision) = ai3_lease
+                                .as_deref()
+                                .and_then(|product| product.subdivision())
+                            {
+                                if !view.set_ai3_subdivision(cx, subdivision, ai3_depth) {
+                                    view.clear_ai3_subdivision(cx);
+                                }
+                            } else {
+                                view.clear_ai3_subdivision(cx);
+                            }
+                        }
+                        _ => {
+                            view.clear_rife_field(cx);
+                            view.clear_ai2_midpoint(cx);
+                            view.clear_ai3_subdivision(cx);
+                        }
+                    }
+                } else if mode != TWEEN_AI {
+                    view.clear_rife_field(cx);
+                }
+                let remaining = if let Some((key, frame, forward)) = field_offer {
+                    view.offer_next(cx, key, frame, width, height, forward)
+                } else {
+                    view.cancel_prefetch();
+                    None
+                };
+                if mode == TWEEN_AI2 {
+                    view.select_ai2_pair(cx, ai2_plan.pair);
+                    view.set_t(cx, ai2_plan.t);
+                } else if let Some(plan) = ai3_plan {
+                    view.select_ai2_pair(cx, flow_tween::Ai2Pair::Original);
+                    view.select_ai3_pair(cx, plan.interval);
+                    view.set_t(cx, plan.t);
+                } else {
+                    view.select_ai2_pair(cx, flow_tween::Ai2Pair::Original);
+                    view.set_t(cx, step.t);
+                }
+                (view.output_texture(), remaining)
+            });
+            self.tween_pair[i] = Some(pair);
+            if let Some((tex, remaining)) = tex {
+                if let Some(remaining) = remaining.filter(|n| *n > 0) {
+                    field_wanted[i] = Some((field_deadline, remaining));
+                }
+                if let Some(tex) = tex {
+                    self.slot_tex_borrowed[i] = false;
+                    self.slot_textures[i] = Some(tex);
+                    self.set_deck_busy(cx, slot, false);
+                }
+            }
+
+            // Prefetch along the map, never by numeric pair + 1. The shared
+            // capacity law degrades an impossible future pair to classical
+            // before any neural work is queued.
+            if tween_uses_ai(mode)
+                && pair_changed
+                && rife_enabled()
+                && step.pace > 0.0
+                && if mode == TWEEN_AI3 {
+                    ai3_capacity_frames >= 1
+                } else {
+                    step.pace <= ai_ceiling
+                }
+            {
+                if self.rife_state[i] == 0 {
+                    match flow_tween::RifeService::start(&rife_model_path()) {
+                        Ok(service) => {
+                            self.rife_service[i] = Some(service);
+                            self.rife_state[i] = 1;
+                            log!("tween: RIFE producer up for slot {i}");
+                        }
+                        Err(error) => {
+                            self.rife_state[i] = 2;
+                            log!("tween: RIFE unavailable ({error}); staying classical");
+                        }
+                    }
+                }
+                if self.rife_state[i] == 1 {
+                    // AI1 keeps today's one-pair lookahead. AI2 offers two;
+                    // AI3 follows step 8 through three exact traversal pairs.
+                    // The idle service still accepts only the nearest missing
+                    // ladder, at the depth admitted for this source pair.
+                    let offer_depth = match mode {
+                        TWEEN_AI2 => 2,
+                        TWEEN_AI3 => 3,
+                        _ => 1,
+                    };
+                    for depth in 1..=offer_depth {
+                        let Some(ahead) = self.platter_locate_ahead(i, depth as f64) else {
+                            break;
+                        };
+                        let ahead_key = pair_cache::PairKey::new(
+                            generation,
+                            ahead.a,
+                            ahead.b,
+                            mode,
+                        );
+                        let already_cached = self.rife_cache[i].as_ref().is_some_and(|products| {
+                            if mode == TWEEN_AI3 {
+                                products
+                                    .peek(&ahead_key)
+                                    .and_then(|product| product.subdivision())
+                                    .is_some_and(|ladder| {
+                                        ladder.complete_depth()
+                                            >= self.tween_ai3_target_depth[i]
+                                    })
+                            } else {
+                                products.contains(&ahead_key)
+                            }
+                        });
+                        if already_cached {
+                            continue;
+                        }
+                        let ahead_cut_key = pair_cache::PairKey::new(
+                            generation,
+                            ahead.a,
+                            ahead.b,
+                            TWEEN_CUT_TIER,
+                        );
+                        let known_ahead_cut = self.tween_cut_cache[i]
+                            .as_mut()
+                            .and_then(|products| products.get(&ahead_cut_key).copied());
+                        let ahead_cut = known_ahead_cut.unwrap_or_else(|| {
+                            let verdict = match (&cache[ahead.a].px, &cache[ahead.b].px) {
+                                (
+                                    crate::media::Pixels::Nv12 {
+                                        data: a,
+                                        width,
+                                        height,
+                                    },
+                                    crate::media::Pixels::Nv12 { data: b, .. },
+                                ) => crate::media::nv12_cut_score(
+                                    a,
+                                    b,
+                                    *width as usize,
+                                    *height as usize,
+                                ) > 28.0,
+                                _ => true,
+                            };
+                            self.tween_cut_cache[i]
+                                .get_or_insert_with(|| {
+                                    pair_cache::PairCache::new(TWEEN_CUT_CACHE_BYTES)
+                                })
+                                .insert(
+                                    ahead_cut_key,
+                                    verdict,
+                                    std::mem::size_of::<bool>(),
+                                    1,
+                                );
+                            verdict
+                        });
+                        if ahead_cut {
+                            continue;
+                        }
+                        if let (Some(service), Some(start)) =
+                            (self.rife_service[i].as_ref(), self.app_start_instant)
+                        {
+                            let (pw, ph) = rife_proxy_dims(width, height);
+                            let deadline = start + std::time::Duration::from_secs_f64(
+                                (now + depth as f64 / step.pace).max(0.0),
+                            );
+                            let _ = service.offer_next(flow_tween::RifeJob {
+                                generation,
+                                a: ahead.a,
+                                b: ahead.b,
+                                kind: match mode {
+                                    TWEEN_AI2 => flow_tween::RifeProductKind::Midpoint,
+                                    TWEEN_AI3 => flow_tween::RifeProductKind::Subdivision {
+                                        depth: self.tween_ai3_target_depth[i],
+                                    },
+                                    _ => flow_tween::RifeProductKind::Field,
+                                },
+                                frames: cache.clone(),
+                                width: pw,
+                                height: ph,
+                                deadline,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let field_budgets = flow_tween::field_prefetch_budgets(field_wanted);
+        for slot in [SlotId::A, SlotId::B] {
+            let budget = field_budgets[slot.index()];
+            self.tween_view(cx, slot, |cx, view| view.set_derive_budget(cx, budget));
+        }
+
+        // REV tracks the live platter leg in a resident bounce; streaming
+        // tiers retain their decoder-published direction.
+        for slot in [SlotId::A, SlotId::B] {
+            let i = slot.index();
+            if self.slot_media[i] != SlotMedia::Video || !self.slot_pingpong[i] {
+                if self.slot_rev_lit[i].take().is_some() {
+                    self.paint_icon_button(cx, Self::deck_rev_path(slot), self.slot_flip[i]);
+                }
+                continue;
+            }
+            let lit = if self.flow_active(i) {
+                self.flow_view(cx, slot, |_cx, view| !view.travel_forward()).unwrap_or(false)
+            } else if let Some(forward) = self.platter_screen_forward(i) {
+                !forward
+            } else if let Some(player) = self.players[i].as_ref() {
+                !player.travel_forward()
+            } else {
+                false
+            };
+            if self.slot_rev_lit[i] != Some(lit) {
+                self.slot_rev_lit[i] = Some(lit);
+                self.paint_icon_button(cx, Self::deck_rev_path(slot), lit);
+            }
+        }
         self.pump_billboards(cx);
         // Live splat scenes orbit slowly and re-render every frame.
-        let now = cx.seconds_since_app_start();
         let dt = (now - self.last_splat_pump.replace(now).unwrap_or(now)).clamp(0.0, 0.25) as f32;
         for slot in [SlotId::A, SlotId::B] {
             self.pump_splat(cx, slot, dt);
             // Flow-warp transport: the free-running pair-space clock, one
             // step per display frame (parked players cost nothing above).
             self.pump_flow(cx, slot, dt as f64);
-        }
-        // THE BEAT EDGE: one pulse per beat boundary to every synced video
-        // deck — the transport turn/wrap authority of the sync law.
-        {
-            let beat = self.current_beat();
-            if let Some(beat) = beat.as_ref() {
-                let now_i = Instant::now();
-                let fire = match self.beat_edge {
-                    Some(edge) => now_i >= edge,
-                    None => false,
-                };
-                if fire {
-                    for i in 0..2 {
-                        if self.slot_beat_sync[i] && self.external_sync_enabled {
-                            if let Some(player) = self.players[i].as_mut() {
-                                player.beat_pulse();
-                            }
-                        }
-                    }
-                }
-                if fire || self.beat_edge.is_none() {
-                    let mut next = beat.next_beat;
-                    if next <= now_i {
-                        next = now_i + beat.period;
-                    }
-                    self.beat_edge = Some(next);
-                }
-            }
         }
         // The program mix mirrors the device-clock transition exactly: the
         // audio gains and this visual mix advance from one sample counter,
@@ -13212,6 +15836,21 @@ p2 {}
         // texture for that slot; everything downstream is untouched.
         let flow_a = self.slot_flow_source(cx, SlotId::A);
         let flow_b = self.slot_flow_source(cx, SlotId::B);
+        // THE AUDIO PICTURE: analyse whatever the beat-sync capture ring
+        // gained since the last frame and republish the texture every
+        // effect shader samples (effects/audio_tex.rs). The ring tap lives
+        // HERE — the bus itself is source-agnostic.
+        {
+            let mut scratch = self.audio_tex.take_scratch();
+            let mut rate = 0.0f32;
+            if let Some(feed) = self.capture.as_deref() {
+                let (head, r) = feed.peek_since(self.audio_tex.tap_cursor(), &mut scratch);
+                self.audio_tex.set_tap_cursor(head);
+                rate = r as f32;
+            }
+            self.audio_tex.pump(cx, &scratch, rate);
+            self.audio_tex.return_scratch(scratch);
+        }
         // Content-mode effects: run their clocks, then read their pictures
         // exactly like the mesh/splat offscreen slots.
         self.pump_fx_content(cx);
@@ -13534,7 +16173,12 @@ p2 {}
     fn alias_is_transition(alias: Option<&str>) -> bool {
         alias
             .and_then(|alias| alias.strip_prefix("vjfx/"))
-            .is_some_and(crate::effects::seed::is_transition_preset)
+            .is_some_and(|stem| {
+                crate::effects::seed::is_transition_preset(stem)
+                    // A LIVECODED document declares its own family, and the
+                    // file that declares it is right there on disk.
+                    || livecode::observed_is_transition(stem)
+            })
     }
 
     /// A wrong-type click while a slot is armed: flash the slot with the
@@ -13691,6 +16335,28 @@ p2 {}
                     self.run_deck_cmds(cx, cmds);
                 }
             }
+            if refs.filter_label.clicked(actions) {
+                if let Some(value) = refs.filter.reset_to_default(cx) {
+                    let cmds = self.decks.set_filter(deck, value as f32);
+                    self.run_deck_cmds(cx, cmds);
+                }
+            }
+            for (band, label) in refs.eq_labels.iter().enumerate() {
+                if label.clicked(actions) {
+                    if let Some(value) = refs.eq_knobs[band].reset_to_default(cx) {
+                        let cmds = self.decks.set_eq(deck, band, value as f32);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+            }
+            for (stem, label) in refs.stem_labels.iter().enumerate() {
+                if label.clicked(actions) {
+                    if let Some(value) = refs.stem_knobs[stem].reset_to_default(cx) {
+                        let cmds = self.decks.set_stem(deck, stem, value as f32);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+            }
             self.music_refs.decks[deck.index()] = refs;
         }
         if self.music_refs.auto_sync.clicked(actions) {
@@ -13701,21 +16367,48 @@ p2 {}
         self.handle_wave_input(cx);
     }
 
+    /// Arm the surface to follow a timed crossfade to `target`.
+    fn start_crossfade_tracking(&mut self, cx: &mut Cx, target: f32) {
+        self.xfade_target = Some(target);
+        // A fade with both decks paused still has to animate, and the music
+        // pump only runs for a moving deck — so ask for the first frame here.
+        self.music_pump = cx.new_next_frame();
+    }
+
+    /// Mirror the mixer's real fader onto the deck surface while a timed
+    /// fade runs, and let go once it lands.
+    ///
+    /// The mixer owns the ramp because it rides the audio device clock; the
+    /// surface only reports it. That is what makes the on-screen fader agree
+    /// with what is actually audible, second for second.
+    fn track_crossfade(&mut self, cx: &mut Cx) {
+        let Some(target) = self.xfade_target else { return };
+        let position = self.mixer.crossfader_position();
+        self.decks.crossfader = position;
+        self.ui.slider(cx, ids!(xfader)).set_value(cx, position as f64);
+        if (position - target).abs() <= 1e-4 {
+            self.decks.crossfader = target;
+            self.xfade_target = None;
+        }
+    }
+
     /// One display frame of the deck surface: fresh playheads into the
     /// lanes and nothing else. Scheduled while a deck is playing or a hand
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
         self.push_wave_positions(cx);
+        self.track_crossfade(cx);
         self.schedule_music_frame(cx);
     }
 
     /// Ask for another frame while anything on the surface is moving.
     fn schedule_music_frame(&mut self, cx: &mut Cx) {
-        let moving = [DeckId::A, DeckId::B].iter().any(|deck| {
-            let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
-            playing || scratching
-        });
+        let moving = self.xfade_target.is_some()
+            || [DeckId::A, DeckId::B].iter().any(|deck| {
+                let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
+                playing || scratching
+            });
         if moving {
             self.music_pump = cx.new_next_frame();
             // Karaoke lives on the PROGRAM, which normally only redraws when
@@ -13826,6 +16519,14 @@ p2 {}
                 self.local_tracks = wave_analysis::list_local_audio(&Self::local_music_dir());
             }
             self.music_rows.clear();
+            // Search/More/category are catalog controls; the local listing
+            // has no use for them.
+            self.ui
+                .view(cx, ids!(music_catalog))
+                .set_visible(cx, !self.music_local);
+        }
+        if self.ui.button(cx, ids!(music_import)).clicked(actions) {
+            self.open_import_picker(cx);
         }
         if self.music_refs.queue_clear.clicked(actions) {
             self.decks.clear_queue();
@@ -13938,11 +16639,21 @@ p2 {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.status_text = "starting…".to_string();
+        // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
+        // compiled in, so its art is generated here — ahead of any store,
+        // any socket, any listing.
+        self.build_fx_prefab_art(cx);
         self.midi_status = "APC40: scanning…".to_string();
         self.midi_input = cx.midi_input();
         self.midi_output = cx.midi_output();
         self.start_lighting();
         self.sync_lighting_controls_ui(cx);
+        // LIVECODING: tap the app's own error reporting before anything can
+        // load a document, so a shader that fails to compile reaches
+        // whoever just saved the file. Installed whether or not THIS
+        // process observes the origins — the answers are written by
+        // whichever process actually renders the document.
+        livecode::install();
         // STANDALONE BY DEFAULT. The VJ hosts its own Asset Server on
         // loopback unless an external one is reachable (or pinned) — see
         // `local_store::resolve`. Either way everything above this line is a
@@ -14029,6 +16740,11 @@ impl MatchEvent for App {
         self.load_midi_map();
         self.sync_midi_learn_ui(cx);
         self.sync_slot_controls_ui(cx);
+        // First paint of the fx slot strips: an app that starts with empty
+        // slots must already wear the empty-state dim (SPD/×/dials).
+        for kind in FxSlotKind::ALL {
+            self.sync_fx_slot_knobs(cx, kind);
+        }
         self.sync_pads();
         self.grids_dirty = true;
         self.sync_gen_profiles(cx);
@@ -14503,8 +17219,8 @@ impl MatchEvent for App {
                 .unwrap_or(VideoAction::None);
             match action {
                 VideoAction::TogglePlay => {
-                    let paused = self.players[i].as_ref().is_some_and(|p| !p.is_paused());
-                    self.set_slot_paused(cx, slot, paused);
+                    let playing = self.slot_is_playing(cx, slot);
+                    self.set_slot_paused(cx, slot, playing);
                 }
                 VideoAction::Restart => {
                     if self.flow_active(i) {
@@ -14575,11 +17291,9 @@ impl MatchEvent for App {
                 continue;
             }
             {
-                let path: &[LiveId] = match slot {
-                    SlotId::A => ids!(deck_a_scratch),
-                    SlotId::B => ids!(deck_b_scratch),
-                };
-                let uid = self.ui.widget(cx, path).widget_uid();
+                // The JOG WHEEL is the scratch hand now (same sprung
+                // Scratch(0.0)-settles-home protocol the shuttle spoke).
+                let uid = self.ui.widget(cx, Self::deck_wheel_path(slot)).widget_uid();
                 let mut scratch = None;
                 for action in actions.iter() {
                     if let Some(wa) = action.as_widget_action() {
@@ -14597,9 +17311,14 @@ impl MatchEvent for App {
             if self.ui.button(cx, Self::deck_eject_path(slot)).clicked(actions) {
                 self.unslot_deck(cx, slot);
             }
-            if self.ui.button(cx, Self::deck_play_path(slot)).clicked(actions) {
-                let paused = self.players[i].as_ref().is_some_and(|p| !p.is_paused());
-                self.set_slot_paused(cx, slot, paused);
+            // ONE toggle, two faces: whichever face is visible, a click
+            // flips the transport (and the faces swap on the next mirror).
+            if self.ui.button(cx, Self::deck_play_path(slot)).clicked(actions)
+                || self.ui.button(cx, Self::deck_pause_path(slot)).clicked(actions)
+            {
+                let playing = self.slot_is_playing(cx, slot);
+                self.set_slot_paused(cx, slot, playing);
+                self.sync_slot_controls_ui(cx);
             }
             if self.ui.button(cx, Self::deck_rw_path(slot)).clicked(actions) {
                 // Rewind: the IN point (frame 0 untrimmed) — for a
@@ -14613,15 +17332,53 @@ impl MatchEvent for App {
                 }
                 self.video_pump = cx.new_next_frame();
             }
-            if self.ui.button(cx, Self::deck_loop2_path(slot)).clicked(actions) {
-                self.slot_loop[i] = !self.slot_loop[i];
+            // THE MODE PICKER — Forward / Reverse / Bounce / Single, one
+            // exclusive choice mapped onto the loop/pingpong/reverse flags.
+            if let Some(index) = self
+                .ui
+                .drop_down(cx, Self::deck_mode_path(slot))
+                .selected(actions)
+            {
+                self.apply_mode_index(i, index);
                 let mode = self.slot_play_mode(i);
                 if let Some(player) = self.players[i].as_mut() {
                     player.set_mode(mode);
                 }
-                self.paint_icon_button(cx, Self::deck_loop2_path(slot), self.slot_loop[i]);
                 self.sync_slot_controls_ui(cx);
                 self.save_clip_profile(slot);
+                self.video_pump = cx.new_next_frame();
+            }
+            // THE TWEEN PICKER — OFF / XF / FL / AI1 / AI2 / AI3: how the deck fills
+            // time between source frames, stored with the clip like the
+            // trim range. The pump reads the mode every frame; all this
+            // does is record and persist it.
+            if let Some(index) = self
+                .ui
+                .drop_down(cx, Self::deck_tween_path(slot))
+                .selected(actions)
+            {
+                self.slot_tween_mode[i] = (index as u8).min(TWEEN_AI3);
+                let status = if self.slot_tween_mode[i] == TWEEN_AI3 {
+                    "AI3 FL"
+                } else {
+                    ""
+                };
+                self.ui
+                    .label(cx, Self::deck_ai3_status_path(slot))
+                    .set_text(cx, status);
+                self.save_clip_profile(slot);
+                self.video_pump = cx.new_next_frame();
+            }
+            // INSTANT REVERSE — the live mirror of the play mode
+            // (Loop↔Reverse; a Once flips into a backwards loop). Never
+            // persisted: it is a hand on the deck, not a setting.
+            if self.ui.button(cx, Self::deck_rev_path(slot)).clicked(actions) {
+                self.slot_flip[i] = !self.slot_flip[i];
+                let mode = self.slot_play_mode(i);
+                if let Some(player) = self.players[i].as_mut() {
+                    player.set_mode(mode);
+                }
+                self.paint_icon_button(cx, Self::deck_rev_path(slot), self.slot_flip[i]);
                 self.video_pump = cx.new_next_frame();
             }
             // THE BEATS DROPDOWN — the number IS the beats one sweep
@@ -14655,24 +17412,13 @@ impl MatchEvent for App {
                     self.video_pump = cx.new_next_frame();
                 }
             }
-            // BOUNCE (ping-pong) — the same latch the strip's pp button flips.
-            if self.ui.button(cx, Self::deck_bounce_path(slot)).clicked(actions) {
-                self.slot_pingpong[i] = !self.slot_pingpong[i];
-                let mode = self.slot_play_mode(i);
-                if let Some(player) = self.players[i].as_mut() {
-                    player.set_mode(mode);
-                }
-                self.paint_icon_button(cx, Self::deck_bounce_path(slot), self.slot_pingpong[i]);
-                self.save_clip_profile(slot);
-                self.video_pump = cx.new_next_frame();
-            }
-
             if self.ui.button(cx, Self::deck_mute_path(slot)).clicked(actions) {
                 self.slot_video_muted[i] = !self.slot_video_muted[i];
+                // Lit = audio LIVE (see sync_slot_controls_ui).
                 if let Some(player) = self.players[i].as_mut() {
                     player.set_muted(self.slot_video_muted[i]);
                 }
-                self.paint_icon_button(cx, Self::deck_mute_path(slot), self.slot_video_muted[i]);
+                self.paint_icon_button(cx, Self::deck_mute_path(slot), !self.slot_video_muted[i]);
                 self.save_clip_profile(slot);
             }
         }
@@ -14706,6 +17452,9 @@ impl MatchEvent for App {
         }
         self.handle_deck_controls(cx, actions);
         if let Some(v) = self.ui.slider(cx, ids!(xfader)).slided(actions) {
+            // A hand on the fader outranks a running fade, exactly as it
+            // does for the visual AUTOFADE.
+            self.xfade_target = None;
             let cmds = self.decks.set_crossfader(v as f32);
             self.run_deck_cmds(cx, cmds);
         }
@@ -14992,13 +17741,13 @@ impl MatchEvent for App {
             let secs = self.xfade_secs;
             let cmds = self.decks.fade_to(DeckId::A, secs);
             self.run_deck_cmds(cx, cmds);
-            self.ui.slider(cx, ids!(xfader)).set_value(cx, 0.0);
+            self.start_crossfade_tracking(cx, 0.0);
         }
         if self.ui.button(cx, ids!(fade_to_b)).clicked(actions) {
             let secs = self.xfade_secs;
             let cmds = self.decks.fade_to(DeckId::B, secs);
             self.run_deck_cmds(cx, cmds);
-            self.ui.slider(cx, ids!(xfader)).set_value(cx, 1.0);
+            self.start_crossfade_tracking(cx, 1.0);
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(xcurve)).selected(actions) {
             let curve = if index == 1 { FadeCurve::Linear } else { FadeCurve::EqualPower };
@@ -15051,6 +17800,55 @@ impl MatchEvent for App {
             } else {
                 self.open_import_picker(cx);
             }
+        }
+        // ---- REMOVE: the orange-selected tile leaves the library --------
+        // Retire, behind a yes/no — the store drops the asset (its rows and
+        // aliases; a referenced file on disk is untouched), the catalog
+        // event clears the grids. The cleanup half of drag-and-drop import.
+        if self.ui.button(cx, ids!(remove_asset)).clicked(actions) {
+            if let Some(asset) = self.last_clicked {
+                let title = self
+                    .video_model
+                    .tile(&asset)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| "this item".to_string());
+                self.ui
+                    .label(cx, ids!(remove_title))
+                    .set_text(cx, &format!("Remove \"{title}\"?"));
+                self.ui.modal(cx, ids!(remove_modal)).open(cx);
+                self.ui.redraw(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(remove_no)).clicked(actions) {
+            self.ui.modal(cx, ids!(remove_modal)).close(cx);
+            self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(remove_yes)).clicked(actions) {
+            self.ui.modal(cx, ids!(remove_modal)).close(cx);
+            if let (Some(asset), Some(up)) = (self.last_clicked.take(), self.up.as_mut()) {
+                match up.catalog.submit(ClientRequest::RetireAsset { id: asset }) {
+                    Ok(_) => {
+                        log!("remove: retiring {asset}");
+                        // OPTIMISTIC removal: the server retires it (and its
+                        // listing drops it) but the retire EVENT does not
+                        // reliably reach the subscriber (a cleared annotation
+                        // publishes kind None and the removes_content arm
+                        // never fires) — the operator watched the tile sit
+                        // there. The submit succeeded; drop the tile NOW,
+                        // exactly as the event arm would.
+                        self.video_model.event_remove(asset);
+                        self.music_model.event_remove(asset);
+                        self.sfx_model.event_remove(asset);
+                        self.mesh_model.event_remove(asset);
+                        self.grids_dirty = true;
+                        // …and the grid closes up NOW, not on a debounce:
+                        // the operator watches the tile leave on confirm.
+                        self.rebuild_grids_if_dirty(cx);
+                    }
+                    Err(error) => log!("remove: retire {asset} refused: {error}"),
+                }
+            }
+            self.ui.redraw(cx);
         }
         // STOP on the mini-panel: the proper way out mid-run.
         if self.ui.button(cx, ids!(import_stop)).clicked(actions) {
@@ -15153,6 +17951,8 @@ impl AppMain for App {
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::flow_warp::script_mod(vm);
+        crate::nv12_view::script_mod(vm);
+        crate::flow_tween::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);
@@ -15277,6 +18077,65 @@ impl AppMain for App {
         }
         // Drag inside a cue well orbits that slot's model / splat camera.
         match event {
+            Event::Drag(de) => {
+                // Answer the hover, or macOS never allows the drop at all:
+                // a file drag over the window shows Copy when the payload is
+                // something some page here can import.
+                let acceptable = de.items.iter().any(|item| {
+                    let DragItem::FilePath { path, .. } = item else { return false };
+                    let ext = std::path::Path::new(path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    matches!(
+                        ext.as_str(),
+                        "jpg" | "jpeg" | "png" | "mp4" | "mov" | "mp3" | "ogg" | "wav" | "flac"
+                    )
+                });
+                if acceptable {
+                    *de.response.lock().unwrap() = DragResponse::Copy;
+                }
+            }
+            Event::Drop(de) => {
+                *de.handled.lock().unwrap() = true;
+                // Finder drops import BY REFERENCE — the store records the
+                // path, the bytes stay where they live. What a page accepts
+                // is what it plays: pictures/video on the VJ surface, audio
+                // on the DJ decks — a wrong-page drop says so instead of
+                // silently importing into a lane the operator is not on.
+                for item in de.items.iter() {
+                    let DragItem::FilePath { path, .. } = item else { continue };
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let ext = std::path::Path::new(path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    let audio = matches!(ext.as_str(), "mp3" | "ogg" | "wav" | "flac");
+                    // Only formats the catalog actually publishes — webp/gif
+                    // are on the importer's skip list (no decoder yet), and
+                    // an accepted hover that ends in a skip reads as a bug.
+                    let visual = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "mp4" | "mov");
+                    let on_music = self.apc.surface == ApcSurface::Music;
+                    let accept = (audio && on_music) || (visual && !on_music);
+                    if !accept {
+                        let want = if audio { "the DJ page" } else { "the VJ page" };
+                        self.import.status = format!("drop {ext} files on {want}");
+                        self.sync_import_ui(cx);
+                        continue;
+                    }
+                    self.import.path = path.clone();
+                    // By reference, always: a drop is "use this file", never
+                    // "re-encode this file".
+                    self.import.convert_video = false;
+                    self.start_import(cx);
+                    // One import at a time — the worker refuses overlap.
+                    break;
+                }
+            }
             Event::MouseDown(me) => {
                 for (slot, well) in [(SlotId::A, ids!(preview_a)), (SlotId::B, ids!(preview_b))] {
                     let area = self.ui.widget(cx, well).area();
@@ -15324,6 +18183,7 @@ impl AppMain for App {
         if let Event::Startup = event {
             if !self.started {
                 self.started = true;
+                self.app_start_instant = Some(Instant::now());
             }
         }
         if self.poll_timer.is_event(event).is_some() {
@@ -15355,7 +18215,15 @@ impl AppMain for App {
                 if self.slot_beat_sync[slot.index()] {
                     self.apply_slot_beat_sync(slot);
                 }
+                // EMPTY-STATE REASSERT: the boot-time ghost paint can be
+                // clobbered when async resources land and re-apply widget
+                // defaults over it — an empty deck re-stamps its dim every
+                // second so "disabled from frame one" is never a race.
+                if self.slot_media[slot.index()] == SlotMedia::Empty {
+                    self.strip_shape[slot.index()] = None;
+                }
             }
+            self.sync_slot_controls_ui(cx);
             for surface in SURFACES {
                 // Event-driven refreshes are rate-limited: an import streams
                 // hundreds of publish events, and re-listing every second
@@ -15384,8 +18252,8 @@ impl AppMain for App {
         if self.decode_pump.is_event(event).is_some() {
             self.pump_fill(cx);
         }
-        if self.video_pump.is_event(event).is_some() {
-            self.pump_video(cx);
+        if let Some(ne) = self.video_pump.is_event(event) {
+            self.pump_video(cx, ne.time);
         }
         if self.music_pump.is_event(event).is_some() {
             self.pump_music_frame(cx);
@@ -15403,6 +18271,26 @@ impl Drop for App {
             lighting.set_power(false);
             drop(lighting);
         }
+    }
+}
+
+#[cfg(test)]
+mod tween_tier_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_tween_codes_stay_stable_and_parsing_admits_ai3() {
+        assert_eq!(TWEEN_NONE, 0);
+        assert_eq!(TWEEN_FADE, 1);
+        assert_eq!(TWEEN_FLOW, 2);
+        assert_eq!(TWEEN_AI, 3, "existing AI profiles are AI1");
+        assert_eq!(TWEEN_AI2, 4);
+        assert_eq!(TWEEN_AI3, 5);
+        assert_eq!(parse_tween_mode("3"), TWEEN_AI);
+        assert_eq!(parse_tween_mode("4"), TWEEN_AI2);
+        assert_eq!(parse_tween_mode("5"), TWEEN_AI3);
+        assert_eq!(parse_tween_mode("255"), TWEEN_AI3);
+        assert_eq!(parse_tween_mode("broken"), TWEEN_FLOW);
     }
 }
 

@@ -83,7 +83,10 @@ pub fn default_store_root() -> PathBuf {
     if let Ok(root) = std::env::var("VJ_ASSET_ROOT") {
         return PathBuf::from(root);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/asset-server")
+    // `local/vjassets` (moved from `local/vj/asset-server` 2026-08-23): a
+    // fresh default root, so a build with the new store layout simply seeds
+    // a new store here and never has to migrate an old one.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vjassets")
 }
 
 /// A locally hosted server binds loopback; reach it there. (Kept for the
@@ -171,7 +174,38 @@ fn external_store_reachable(config: &SessionConfig) -> bool {
         }
     }
     // Ports move every asset-ui launch; the beacon does not.
-    beacon_heard(2_400)
+    if beacon_heard(2_400) {
+        return true;
+    }
+    // THE USER'S MAIN STORE IS ALIVE BUT NOT ANSWERING YET (a succession
+    // handover, a stale `listen` file, a beacon missed by a hair): the
+    // lock holder is proof it exists. Self-hosting here would SILENTLY
+    // put this VJ on a private empty store — "no videos in the grid",
+    // four times in one day — so treat a held lock as reachable and let
+    // the attach path keep discovering; it retries on its own.
+    main_store_lock_held()
+}
+
+/// True when another process holds the main (asset-ui) store's server
+/// lock — i.e. the user's library is hosted right now, whatever its ports.
+fn main_store_lock_held() -> bool {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../local/asset-ui/asset-server");
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("server.lock"))
+    else {
+        return false;
+    };
+    // The SAME advisory lock the store takes (File::try_lock): if we can
+    // take it, nobody serves that root; the file drop releases it.
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 /// The in-process server, held for as long as the VJ runs.
