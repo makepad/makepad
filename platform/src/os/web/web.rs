@@ -33,6 +33,19 @@ impl Cx {
         None
     }
 
+    /// Renderer-owned texture capture (see the metal backend): not
+    /// implemented here — callers fall back to `debug_read_render_texture`.
+    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
+        false
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn take_render_texture_captures(
+        &mut self,
+    ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        Vec::new()
+    }
+
     fn normalize_web_pathname(pathname: &str) -> String {
         let trimmed = pathname.trim();
         if trimmed.is_empty() {
