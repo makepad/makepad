@@ -44,7 +44,7 @@ script_mod! {
             border_color: #xffffff26
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 5.0)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, theme.corner_radius)
                 sdf.fill(self.color.mix(self.color_hover, max(self.hover, self.open)))
                 sdf.stroke(self.border_color, 1.0)
                 return sdf.result
@@ -64,7 +64,7 @@ script_mod! {
             border_color: #xffffff2e
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 6.0)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, theme.corner_radius)
                 sdf.fill(self.color)
                 sdf.stroke(self.border_color, 1.0)
                 return sdf.result
