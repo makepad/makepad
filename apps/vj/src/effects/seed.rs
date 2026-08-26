@@ -6,19 +6,20 @@
 //! alias exists and leaves it alone).
 //!
 //! Flow (idempotent, run on a worker after the store session is up):
-//!   for each bundled preset:
-//!     alias = "vjfx/<name>"
-//!     if client.resolve_alias(alias) succeeds -> skip (present, maybe edited)
-//!     else publish_bundle(kind = VjEffect, files = [Source/Text bytes],
-//!                         thumbnail = procedural placeholder JPEG,
-//!                         rights = generated_cc0, alias, tags)
+//!   ONE alias_status batch answers "present / ours / source current" for
+//!   the whole library; presets owed a publish then land through
+//!   `publish_bundles` in pages — one bulk blob upload + one batch publish
+//!   + ONE catalog transaction per page (kind = VjEffect, files =
+//!   [Source/Text bytes], thumbnail = procedural placeholder JPEG,
+//!   rights = generated_cc0, alias, tags), heads streaming to the bake as
+//!   each page commits.
 //!
 //! Thumbnails are deliberately modest placeholders (a per-preset colored
 //! pattern, never flat black): the VJ replaces them with lazily rendered
 //! ANIMATED thumbnails from the effect runtime (see CONTRACT.md).
 
 use makepad_asset_client::{
-    AssetClient, ClientError, PublishBundle, PublishBundleFile, PublishRights, PublishThumbnail,
+    AssetClient, PublishBundle, PublishBundleFile, PublishRights, PublishThumbnail,
 };
 use makepad_asset_data::{AssetKind, DeviceTier, FileRole, MediaType, ThumbnailMedia};
 
@@ -145,6 +146,156 @@ pub fn bundled_presets() -> &'static [(&'static str, &'static str)] {
     ("111_trans_pip", include_str!("../../resources/effects/111_trans_pip.splash")),
     ("112_trans_screenmix", include_str!("../../resources/effects/112_trans_screenmix.splash")),
     ("113_scan_sermon", include_str!("../../resources/effects/113_scan_sermon.splash")),
+    ("114_trans_barn_doors_h", include_str!("../../resources/effects/114_trans_barn_doors_h.splash")),
+    ("115_trans_barn_doors_v", include_str!("../../resources/effects/115_trans_barn_doors_v.splash")),
+    ("116_trans_doors_h", include_str!("../../resources/effects/116_trans_doors_h.splash")),
+    ("117_trans_doors_v", include_str!("../../resources/effects/117_trans_doors_v.splash")),
+    ("118_trans_slat_sweep_u", include_str!("../../resources/effects/118_trans_slat_sweep_u.splash")),
+    ("119_trans_slat_sweep_d", include_str!("../../resources/effects/119_trans_slat_sweep_d.splash")),
+    ("120_trans_slat_sweep_l", include_str!("../../resources/effects/120_trans_slat_sweep_l.splash")),
+    ("121_trans_slat_sweep_r", include_str!("../../resources/effects/121_trans_slat_sweep_r.splash")),
+    ("122_trans_bar_curtain_h", include_str!("../../resources/effects/122_trans_bar_curtain_h.splash")),
+    ("123_trans_bar_curtain_v", include_str!("../../resources/effects/123_trans_bar_curtain_v.splash")),
+    ("124_trans_jaws_h", include_str!("../../resources/effects/124_trans_jaws_h.splash")),
+    ("125_trans_jaws_v", include_str!("../../resources/effects/125_trans_jaws_v.splash")),
+    ("126_trans_brickwork", include_str!("../../resources/effects/126_trans_brickwork.splash")),
+    ("127_trans_checker_tiles", include_str!("../../resources/effects/127_trans_checker_tiles.splash")),
+    ("128_trans_checker_bricks", include_str!("../../resources/effects/128_trans_checker_bricks.splash")),
+    ("129_trans_checker_sweep", include_str!("../../resources/effects/129_trans_checker_sweep.splash")),
+    ("130_trans_ring_bloom", include_str!("../../resources/effects/130_trans_ring_bloom.splash")),
+    ("131_trans_clock_sweep", include_str!("../../resources/effects/131_trans_clock_sweep.splash")),
+    ("132_trans_honeycomb", include_str!("../../resources/effects/132_trans_honeycomb.splash")),
+    ("133_trans_hex_field", include_str!("../../resources/effects/133_trans_hex_field.splash")),
+    ("134_trans_square_field", include_str!("../../resources/effects/134_trans_square_field.splash")),
+    ("135_trans_tri_field", include_str!("../../resources/effects/135_trans_tri_field.splash")),
+    ("136_trans_rect_field", include_str!("../../resources/effects/136_trans_rect_field.splash")),
+    ("137_trans_box_iris", include_str!("../../resources/effects/137_trans_box_iris.splash")),
+    ("138_trans_grain_dissolve", include_str!("../../resources/effects/138_trans_grain_dissolve.splash")),
+    ("139_trans_pinwheel", include_str!("../../resources/effects/139_trans_pinwheel.splash")),
+    ("140_trans_ripple_wipe", include_str!("../../resources/effects/140_trans_ripple_wipe.splash")),
+    ("141_trans_panel_wipe", include_str!("../../resources/effects/141_trans_panel_wipe.splash")),
+    ("142_trans_press_wipe", include_str!("../../resources/effects/142_trans_press_wipe.splash")),
+    ("143_trans_roto_wipe", include_str!("../../resources/effects/143_trans_roto_wipe.splash")),
+    ("144_trans_shift_wipe", include_str!("../../resources/effects/144_trans_shift_wipe.splash")),
+    ("145_trans_multiply", include_str!("../../resources/effects/145_trans_multiply.splash")),
+    ("146_trans_multiply_invert", include_str!("../../resources/effects/146_trans_multiply_invert.splash")),
+    ("147_trans_add_invert", include_str!("../../resources/effects/147_trans_add_invert.splash")),
+    ("148_trans_hard_multiply", include_str!("../../resources/effects/148_trans_hard_multiply.splash")),
+    ("149_trans_dither_fade", include_str!("../../resources/effects/149_trans_dither_fade.splash")),
+    ("150_trans_dither_multiply", include_str!("../../resources/effects/150_trans_dither_multiply.splash")),
+    ("151_trans_add_fade", include_str!("../../resources/effects/151_trans_add_fade.splash")),
+    ("152_trans_colour_key", include_str!("../../resources/effects/152_trans_colour_key.splash")),
+    ("153_trans_tint_blend", include_str!("../../resources/effects/153_trans_tint_blend.splash")),
+    ("154_trans_overlay", include_str!("../../resources/effects/154_trans_overlay.splash")),
+    ("155_trans_alpha_layer", include_str!("../../resources/effects/155_trans_alpha_layer.splash")),
+    ("156_pixel_drift", include_str!("../../resources/effects/156_pixel_drift.splash")),
+    ("157_pixel_burst", include_str!("../../resources/effects/157_pixel_burst.splash")),
+    ("158_pixel_walls", include_str!("../../resources/effects/158_pixel_walls.splash")),
+    ("159_pixel_helix", include_str!("../../resources/effects/159_pixel_helix.splash")),
+    ("160_pixel_swell", include_str!("../../resources/effects/160_pixel_swell.splash")),
+    ("161_pixel_orbit", include_str!("../../resources/effects/161_pixel_orbit.splash")),
+    ("162_pixel_jitter", include_str!("../../resources/effects/162_pixel_jitter.splash")),
+    ("163_pixel_hop", include_str!("../../resources/effects/163_pixel_hop.splash")),
+    ("164_stretch", include_str!("../../resources/effects/164_stretch.splash")),
+    ("165_edge_stretch", include_str!("../../resources/effects/165_edge_stretch.splash")),
+    ("166_bend", include_str!("../../resources/effects/166_bend.splash")),
+    ("167_rotozoom", include_str!("../../resources/effects/167_rotozoom.splash")),
+    ("168_roto_bounce", include_str!("../../resources/effects/168_roto_bounce.splash")),
+    ("169_roto_slide", include_str!("../../resources/effects/169_roto_slide.splash")),
+    ("170_pan_scale", include_str!("../../resources/effects/170_pan_scale.splash")),
+    ("171_crop", include_str!("../../resources/effects/171_crop.splash")),
+    ("172_multi_crop", include_str!("../../resources/effects/172_multi_crop.splash")),
+    ("173_tile", include_str!("../../resources/effects/173_tile.splash")),
+    ("174_nested_zoom", include_str!("../../resources/effects/174_nested_zoom.splash")),
+    ("175_layer_stack", include_str!("../../resources/effects/175_layer_stack.splash")),
+    ("176_split", include_str!("../../resources/effects/176_split.splash")),
+    ("177_split_screen", include_str!("../../resources/effects/177_split_screen.splash")),
+    ("178_edge_clone", include_str!("../../resources/effects/178_edge_clone.splash")),
+    ("179_strip", include_str!("../../resources/effects/179_strip.splash")),
+    ("180_slat_field", include_str!("../../resources/effects/180_slat_field.splash")),
+    ("181_shuffle_h", include_str!("../../resources/effects/181_shuffle_h.splash")),
+    ("182_shuffle_v", include_str!("../../resources/effects/182_shuffle_v.splash")),
+    ("183_mirror_strip", include_str!("../../resources/effects/183_mirror_strip.splash")),
+    ("184_mirror_rotate_a", include_str!("../../resources/effects/184_mirror_rotate_a.splash")),
+    ("185_mirror_rotate_b", include_str!("../../resources/effects/185_mirror_rotate_b.splash")),
+    ("186_mirror_quad", include_str!("../../resources/effects/186_mirror_quad.splash")),
+    ("187_wave", include_str!("../../resources/effects/187_wave.splash")),
+    ("188_warper", include_str!("../../resources/effects/188_warper.splash")),
+    ("189_vortex", include_str!("../../resources/effects/189_vortex.splash")),
+    ("190_suck", include_str!("../../resources/effects/190_suck.splash")),
+    ("191_zigzag_twirl", include_str!("../../resources/effects/191_zigzag_twirl.splash")),
+    ("192_bar_magnifier", include_str!("../../resources/effects/192_bar_magnifier.splash")),
+    ("193_circle_magnifier", include_str!("../../resources/effects/193_circle_magnifier.splash")),
+    ("194_fresnel", include_str!("../../resources/effects/194_fresnel.splash")),
+    ("195_refraction", include_str!("../../resources/effects/195_refraction.splash")),
+    ("196_rays", include_str!("../../resources/effects/196_rays.splash")),
+    ("197_petal_fold", include_str!("../../resources/effects/197_petal_fold.splash")),
+    ("198_disc", include_str!("../../resources/effects/198_disc.splash")),
+    ("199_bug_eye", include_str!("../../resources/effects/199_bug_eye.splash")),
+    ("200_maze", include_str!("../../resources/effects/200_maze.splash")),
+    ("201_hue_cycle", include_str!("../../resources/effects/201_hue_cycle.splash")),
+    ("202_channel_contrast", include_str!("../../resources/effects/202_channel_contrast.splash")),
+    ("203_duotone", include_str!("../../resources/effects/203_duotone.splash")),
+    ("204_tint", include_str!("../../resources/effects/204_tint.splash")),
+    ("205_strobe", include_str!("../../resources/effects/205_strobe.splash")),
+    ("206_channel_offset", include_str!("../../resources/effects/206_channel_offset.splash")),
+    ("207_keyed_trails", include_str!("../../resources/effects/207_keyed_trails.splash")),
+    ("208_trail_add", include_str!("../../resources/effects/208_trail_add.splash")),
+    ("209_dual_blend", include_str!("../../resources/effects/209_dual_blend.splash")),
+    ("210_perspective", include_str!("../../resources/effects/210_perspective.splash")),
+    ("211_trans_turn_away", include_str!("../../resources/effects/211_trans_turn_away.splash")),
+    ("212_trans_tumble_away", include_str!("../../resources/effects/212_trans_tumble_away.splash")),
+    ("213_trans_zoom_in", include_str!("../../resources/effects/213_trans_zoom_in.splash")),
+    ("214_trans_zoom_out", include_str!("../../resources/effects/214_trans_zoom_out.splash")),
+    ("215_trans_barn_doors_rotating", include_str!("../../resources/effects/215_trans_barn_doors_rotating.splash")),
+    ("216_trans_card_flip", include_str!("../../resources/effects/216_trans_card_flip.splash")),
+    ("217_butterfly", include_str!("../../resources/effects/217_butterfly.splash")),
+    // Tiles: the per-tile vertex hooks + luma relief.
+    ("218_extrude", include_str!("../../resources/effects/218_extrude.splash")),
+    ("219_tile_jitter", include_str!("../../resources/effects/219_tile_jitter.splash")),
+    ("220_plane_grid", include_str!("../../resources/effects/220_plane_grid.splash")),
+    ("221_card_grid", include_str!("../../resources/effects/221_card_grid.splash")),
+    // The `hold` stage: one latched frame, indexed by position.
+    ("222_freeze", include_str!("../../resources/effects/222_freeze.splash")),
+    ("223_time_slice", include_str!("../../resources/effects/223_time_slice.splash")),
+    ("224_strip_delay", include_str!("../../resources/effects/224_strip_delay.splash")),
+    // The tunnel wall drape.
+    ("225_video_tunnel", include_str!("../../resources/effects/225_video_tunnel.splash")),
+    ("226_video_torus", include_str!("../../resources/effects/226_video_torus.splash")),
+    ("227_spin_cube", include_str!("../../resources/effects/227_spin_cube.splash")),
+    ("228_inside_cube", include_str!("../../resources/effects/228_inside_cube.splash")),
+    ("229_cube_grid", include_str!("../../resources/effects/229_cube_grid.splash")),
+    ("230_video_box", include_str!("../../resources/effects/230_video_box.splash")),
+    ("231_mirror_ball", include_str!("../../resources/effects/231_mirror_ball.splash")),
+    ("232_video_torus_3d", include_str!("../../resources/effects/232_video_torus_3d.splash")),
+    ("233_star_prism", include_str!("../../resources/effects/233_star_prism.splash")),
+    ("234_octa_star", include_str!("../../resources/effects/234_octa_star.splash")),
+    ("235_octa_ring", include_str!("../../resources/effects/235_octa_ring.splash")),
+    ("236_corridor", include_str!("../../resources/effects/236_corridor.splash")),
+    ("237_maze_run", include_str!("../../resources/effects/237_maze_run.splash")),
+    ("238_blimp", include_str!("../../resources/effects/238_blimp.splash")),
+    ("239_sphere_relief", include_str!("../../resources/effects/239_sphere_relief.splash")),
+    ("240_beam_fan", include_str!("../../resources/effects/240_beam_fan.splash")),
+    ("241_slat_depth", include_str!("../../resources/effects/241_slat_depth.splash")),
+    ("242_trans_ball", include_str!("../../resources/effects/242_trans_ball.splash")),
+    // ---- THE AUDIO VISUALISERS (260-279) ------------------------------
+    // Every one of these reads the live AUDIO PICTURE (effects/audio_tex.rs)
+    // through the shader helpers `audio_fft(f, age)` / `audio_wave(t)` and
+    // the `audio_env` uniform, and every one carries an idle figure so a
+    // silent rig still performs.
+    ("260_spectrum_bar_field", include_str!("../../resources/effects/260_spectrum_bar_field.splash")),
+    ("261_radial_spectrum_bloom", include_str!("../../resources/effects/261_radial_spectrum_bloom.splash")),
+    ("262_oscilloscope_ribbon", include_str!("../../resources/effects/262_oscilloscope_ribbon.splash")),
+    ("263_waveform_tunnel", include_str!("../../resources/effects/263_waveform_tunnel.splash")),
+    ("264_spectrum_sea", include_str!("../../resources/effects/264_spectrum_sea.splash")),
+    ("265_level_pulse_rings", include_str!("../../resources/effects/265_level_pulse_rings.splash")),
+    ("266_spectro_kaleido", include_str!("../../resources/effects/266_spectro_kaleido.splash")),
+    ("267_bass_warp_drape", include_str!("../../resources/effects/267_bass_warp_drape.splash")),
+    ("268_spectrogram_curtain", include_str!("../../resources/effects/268_spectrogram_curtain.splash")),
+    ("269_band_lattice", include_str!("../../resources/effects/269_band_lattice.splash")),
+    ("270_harmonic_petals", include_str!("../../resources/effects/270_harmonic_petals.splash")),
+    ("271_scope_horizon", include_str!("../../resources/effects/271_scope_horizon.splash")),
+    ("272_test_sine_rect", include_str!("../../resources/effects/272_test_sine_rect.splash")),
     ]
 }
 
@@ -176,6 +327,39 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "104_trans_iris",
     "105_trans_push",
     "106_trans_blinds",
+    // Geometric mask wipes.
+    "114_trans_barn_doors_h",
+    "115_trans_barn_doors_v",
+    "116_trans_doors_h",
+    "117_trans_doors_v",
+    "118_trans_slat_sweep_u",
+    "119_trans_slat_sweep_d",
+    "120_trans_slat_sweep_l",
+    "121_trans_slat_sweep_r",
+    "122_trans_bar_curtain_h",
+    "123_trans_bar_curtain_v",
+    "124_trans_jaws_h",
+    "125_trans_jaws_v",
+    "126_trans_brickwork",
+    "127_trans_checker_tiles",
+    "128_trans_checker_bricks",
+    "129_trans_checker_sweep",
+    "130_trans_ring_bloom",
+    "131_trans_clock_sweep",
+    "137_trans_box_iris",
+    "138_trans_grain_dissolve",
+    "132_trans_honeycomb",
+    "133_trans_hex_field",
+    "134_trans_square_field",
+    "135_trans_tri_field",
+    "136_trans_rect_field",
+    "139_trans_pinwheel",
+    // Pattern wipes.
+    "140_trans_ripple_wipe",
+    "141_trans_panel_wipe",
+    "142_trans_press_wipe",
+    "143_trans_roto_wipe",
+    "144_trans_shift_wipe",
     // MX50 keys / overlays.
     "107_trans_lumakey",
     "108_trans_chromakey",
@@ -183,6 +367,18 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "110_trans_negative",
     "111_trans_pip",
     "112_trans_screenmix",
+    // Blend / combine modes.
+    "145_trans_multiply",
+    "146_trans_multiply_invert",
+    "147_trans_add_invert",
+    "148_trans_hard_multiply",
+    "149_trans_dither_fade",
+    "150_trans_dither_multiply",
+    "151_trans_add_fade",
+    "152_trans_colour_key",
+    "153_trans_tint_blend",
+    "154_trans_overlay",
+    "155_trans_alpha_layer",
     // Art transitions, rarest last.
     "17_video_trails",
     "18_video_tiltshift",
@@ -198,6 +394,15 @@ pub const TRANSITION_PRESETS: &[&str] = &[
     "80_bar_shatter",
     "81_conveyor_wall",
     "89_beat_lens",
+    // Plane-in-3D: the picture as a card in a room.
+    "211_trans_turn_away",
+    "212_trans_tumble_away",
+    "213_trans_zoom_in",
+    "214_trans_zoom_out",
+    "215_trans_barn_doors_rotating",
+    "216_trans_card_flip",
+    // The two-deck videomesh art transition (video shell off a sphere).
+    "242_trans_ball",
 ];
 
 pub fn is_transition_preset(name: &str) -> bool {
@@ -239,133 +444,170 @@ pub struct SeedReport {
 /// Publish-if-absent every bundled preset. Blocking (network) — run from a
 /// worker thread, never the UI thread. Errors on one preset never stop the
 /// rest.
-pub fn seed_presets(client: &mut AssetClient) -> SeedReport {
+///
+/// THE STATUS PASS IS ONE REQUEST. Deciding what to do about a preset needs
+/// three facts — is there a head, is its Source blob still the file we ship,
+/// does it carry our `builtin` (and `transition`) tag — and asking those
+/// alias by alias was five-hundred-odd sequential round trips for the shipped
+/// library: a full minute on LOOPBACK, all of it latency. The batch route
+/// (`AssetClient::alias_status`) answers the whole library on one consistent
+/// snapshot, so what is left is the publishes that are actually needed —
+/// none at all on a warm store.
+///
+/// The `builtin` tag is what marks a head as OURS: a user edit republished
+/// under the same alias does not carry it, and is never touched.
+const BUILTIN_TAG: &str = "builtin";
+
+/// Presets per batched publish page. Each page is TWO round trips — one bulk
+/// blob upload, one batch publish — and ONE catalog transaction, however
+/// many presets it carries; the bake feed receives the page's heads the
+/// moment it commits. Sized so a page's JSON body sits well under the
+/// server's cap and the first tiles exist within the first fraction of a
+/// second on a virgin store.
+const SEED_PUBLISH_PAGE: usize = 32;
+
+/// One publish this seeding pass owes the store.
+struct PublishJob {
+    name: &'static str,
+    source: &'static str,
+    alias_str: String,
+    reuse: Option<makepad_asset_data::AssetId>,
+    /// Self-healing republish of our own head (counts as `updated`).
+    update: bool,
+}
+
+pub fn seed_presets(
+    client: &mut AssetClient,
+    heads: &std::sync::mpsc::Sender<Vec<BundleHead>>,
+) -> SeedReport {
+    let presets = bundled_presets();
     let mut report = SeedReport::default();
-    // Lazily-built tag sets for the retag pass (one search each, first time
-    // a present transition preset needs the check).
-    let mut tagged = RetagSets::default();
-    for (name, source) in bundled_presets() {
+    let mut entries = Vec::with_capacity(presets.len());
+    for (name, source) in presets {
         let alias_str = preset_alias(name);
-        let Ok(alias) = alias_str.parse() else {
-            report.failed.push((alias_str, "bad alias".to_string()));
+        match alias_str.parse() {
+            Ok(alias) => entries.push((
+                alias,
+                Some(makepad_asset_data::BlobId::hash_of(source.as_bytes())),
+            )),
+            Err(_) => report.failed.push((alias_str, "bad alias".to_string())),
+        }
+    }
+    if entries.len() != presets.len() {
+        return report;
+    }
+    let tags = vec![BUILTIN_TAG.to_string(), TRANSITION_TAG.to_string()];
+    let rows = match client.alias_status(&entries, &tags) {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Transport trouble on the status pass: publishing blind would
+            // duplicate, so record it and let the next launch retry.
+            report.failed.push(("vjfx/*".to_string(), e.to_string()));
+            return report;
+        }
+    };
+    // One pass over the snapshot: heads that already match stream out
+    // immediately (the warm-store case is ONE round trip and the bake has
+    // its whole feed before a single publish happens); everything owed a
+    // publish becomes a job for the batched pages below.
+    let mut jobs: Vec<PublishJob> = Vec::new();
+    let mut retags: Vec<(&'static str, &'static str, makepad_asset_data::AssetId)> = Vec::new();
+    let mut present_heads: Vec<BundleHead> = Vec::new();
+    for ((name, source), row) in presets.iter().zip(rows) {
+        let alias_str = preset_alias(name);
+        if !row.present {
+            jobs.push(PublishJob { name, source, alias_str, reuse: None, update: false });
             continue;
-        };
-        match client.resolve_alias(&alias) {
-            Ok(dto) => {
-                // Present. SELF-HEALING: a head WE seeded (builtin-tagged)
-                // whose bundled source has since changed on disk is
-                // republished as a NEW REVISION of the same asset — that is
-                // how dial-declaration and other doc backfills reach
-                // existing stores. A user-edited head (no builtin tag) is
-                // NEVER touched; a merely-untagged transition preset gets
-                // its annotation updated in place.
-                report.present += 1;
-                match head_matches_bundle(client, &dto, source, &mut tagged) {
-                    Ok(HeadState::Theirs) | Ok(HeadState::Current) => {}
-                    Ok(HeadState::Stale) => {
-                        match seed_one(client, name, source, &alias_str, Some(dto.asset_id)) {
-                            Ok(()) => {
-                                report.updated += 1;
-                                continue;
-                            }
-                            Err(e) => {
-                                report.failed.push((alias_str, format!("update: {e}")));
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        report.failed.push((alias_str.clone(), format!("head check: {e}")));
-                        continue;
-                    }
-                }
-                if is_transition_preset(name) {
-                    match retag_transition(client, &dto, name, source, &mut tagged) {
-                        Ok(true) => report.retagged += 1,
-                        Ok(false) => {}
-                        Err(e) => report.failed.push((alias_str, format!("retag: {e}"))),
-                    }
-                }
-                continue;
-            }
-            Err(ClientError::NotFound { .. }) => {}
-            Err(e) => {
-                // Transport trouble on the lookup: publishing blind could
-                // duplicate, so record and move on; the next launch retries.
-                report.failed.push((alias_str, e.to_string()));
-                continue;
+        }
+        report.present += 1;
+        let ours = row.tags.iter().any(|t| t == "builtin");
+        // A user-edited head under our alias is never touched — and never
+        // fed to the bake as bundled bytes; the store path bakes it.
+        if !ours {
+            continue;
+        }
+        if !row.source_matches {
+            // SELF-HEALING: our head, but the bundled source changed on
+            // disk — republish it as a new revision of the same asset.
+            jobs.push(PublishJob { name, source, alias_str, reuse: row.asset_id, update: true });
+            continue;
+        }
+        if let (Some(asset), Some(revision)) = (row.asset_id, row.head_revision) {
+            present_heads.push(BundleHead { name, source, asset, revision });
+        }
+        // Stores seeded before the transition tag existed get their search
+        // annotation brought up to date in place (content is immutable).
+        if is_transition_preset(name) && !row.tags.iter().any(|t| t == TRANSITION_TAG) {
+            if let Some(asset_id) = row.asset_id {
+                retags.push((name, source, asset_id));
             }
         }
-        match seed_one(client, name, source, &alias_str, None) {
-            Ok(()) => report.published += 1,
-            Err(e) => report.failed.push((alias_str, e)),
+    }
+    if !present_heads.is_empty() {
+        let _ = heads.send(present_heads);
+    }
+    // The publishes, in registry order, in pages of [`SEED_PUBLISH_PAGE`]:
+    // one bulk blob upload + one batch publish per page, ONE catalog
+    // transaction each — the whole virgin library is a handful of round
+    // trips instead of ten per preset. Each page streams its heads to the
+    // bake the moment it commits, so the thumbnail bake runs right behind
+    // the seeder instead of after it. A failed page fails its presets and
+    // never stops the rest.
+    for page in jobs.chunks(SEED_PUBLISH_PAGE) {
+        let bundles: Vec<PublishBundle> =
+            page.iter().map(|job| seed_bundle(job.name, job.source, &job.alias_str, job.reuse)).collect();
+        match client.publish_bundles(&bundles) {
+            Ok(published) => {
+                let mut batch = Vec::with_capacity(page.len());
+                for (job, done) in page.iter().zip(&published) {
+                    if job.update {
+                        report.updated += 1;
+                    } else {
+                        report.published += 1;
+                    }
+                    batch.push(BundleHead {
+                        name: job.name,
+                        source: job.source,
+                        asset: done.asset_id,
+                        revision: done.revision,
+                    });
+                }
+                let _ = heads.send(batch);
+            }
+            Err(e) => {
+                for job in page {
+                    let what = if job.update { format!("update: {e}") } else { e.to_string() };
+                    report.failed.push((job.alias_str.clone(), what));
+                }
+            }
+        }
+    }
+    for (name, source, asset_id) in retags {
+        match put_preset_annotation(client, &asset_id, name, source) {
+            Ok(()) => report.retagged += 1,
+            Err(e) => report.failed.push((preset_alias(name), format!("retag: {e}"))),
         }
     }
     report
 }
 
-/// Which assets carry `tag`, from ONE tag-filtered search (paged; bounded).
-fn assets_with_tag(
-    client: &mut AssetClient,
-    tag: &str,
-) -> Result<std::collections::HashSet<makepad_asset_data::AssetId>, String> {
-    let mut out = std::collections::HashSet::new();
-    let mut query = makepad_asset_client::CatalogQuery::browse(100);
-    query.kind = Some(AssetKind::VjEffect);
-    query.tag = Some(tag.to_string());
-    let mut cursor = None;
-    for _ in 0..8 {
-        let page = client
-            .catalog_search(&query, cursor.as_ref())
-            .map_err(|e| e.to_string())?;
-        out.extend(page.hits.iter().map(|hit| hit.asset_id));
-        match page.next {
-            Some(next) => cursor = Some(next),
-            None => break,
-        }
-    }
-    Ok(out)
-}
-
-/// What the alias head is, relative to the bundled preset dir.
-enum HeadState {
-    /// A user-edited head (not builtin-tagged): never touched.
-    Theirs,
-    /// Our head, content identical to the bundled file.
-    Current,
-    /// Our head, but the bundled source changed: republish it.
-    Stale,
-}
-
-/// Compare the alias head against the bundled source by CONTENT DIGEST
-/// (the manifest's Source blob id is the payload's sha256).
-fn head_matches_bundle(
-    client: &mut AssetClient,
-    dto: &makepad_asset_client::AliasDto,
-    source: &str,
-    sets: &mut RetagSets,
-) -> Result<HeadState, String> {
-    if sets.builtin.is_none() {
-        sets.builtin = Some(assets_with_tag(client, "builtin")?);
-    }
-    if !sets.builtin.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
-        return Ok(HeadState::Theirs);
-    }
-    let manifest = client
-        .fetch_asset_manifest(&dto.head_revision)
-        .map_err(|e| e.to_string())?;
-    let head_blob = manifest
-        .files
-        .iter()
-        .find(|f| f.role == FileRole::Source)
-        .map(|f| f.blob)
-        .ok_or_else(|| "head has no Source file".to_string())?;
-    let bundled = makepad_asset_data::BlobId::hash_of(source.as_bytes());
-    if head_blob == bundled {
-        Ok(HeadState::Current)
-    } else {
-        Ok(HeadState::Stale)
-    }
+/// One bundled preset whose head in the store IS the compiled-in bytes —
+/// the up-front feed for the animated-thumbnail bake (fx_thumbs).
+///
+/// The bake pipeline holds the complete (revision, source) pair without
+/// waiting for the catalog to page the tile in and resolve its manifest —
+/// which is what used to trickle the whole library through one lane.
+/// [`seed_presets`] STREAMS these while it works: the already-present
+/// library lands as one batch straight off the status snapshot, and every
+/// fresh publish follows the moment it commits, so on a virgin store the
+/// bake overlaps the seeding instead of waiting behind it. A head that
+/// does NOT match the bundled bytes (a user/livecoded edit under our
+/// alias) is never emitted — it bakes via the store fetch path.
+pub struct BundleHead {
+    pub name: &'static str,
+    pub source: &'static str,
+    pub asset: makepad_asset_data::AssetId,
+    pub revision: makepad_asset_data::AssetRevisionId,
 }
 
 /// Post-seed acceptance count: how many vjeffect rows the store actually
@@ -379,39 +621,14 @@ pub fn library_check(client: &mut AssetClient) -> Result<(u64, usize), String> {
     Ok((page.total, bundled_presets().len()))
 }
 
-/// The two lazily-built ownership/state sets the retag pass consults.
-#[derive(Default)]
-struct RetagSets {
-    /// Assets already carrying the transition tag (nothing to do).
-    transition: Option<std::collections::HashSet<makepad_asset_data::AssetId>>,
-    /// Assets carrying the `builtin` tag — OUR seeds. A user edit publishes
-    /// a fresh asset under the alias without it, and is never touched.
-    builtin: Option<std::collections::HashSet<makepad_asset_data::AssetId>>,
-}
-
-/// Add the transition tag to an already-seeded preset's search annotation.
-/// Manifest CONTENT is immutable and untouched — annotations are updatable
-/// in place, and only a `builtin`-tagged (seeded-by-us) head is rewritten.
-/// Returns whether a write happened.
-fn retag_transition(
+/// Rewrite one seeded preset's search annotation (title/description/tags).
+/// Manifest CONTENT is immutable and untouched; annotations are updatable.
+fn put_preset_annotation(
     client: &mut AssetClient,
-    dto: &makepad_asset_client::AliasDto,
+    asset_id: &makepad_asset_data::AssetId,
     name: &str,
     source: &str,
-    sets: &mut RetagSets,
-) -> Result<bool, String> {
-    if sets.transition.is_none() {
-        sets.transition = Some(assets_with_tag(client, TRANSITION_TAG)?);
-    }
-    if sets.transition.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
-        return Ok(false);
-    }
-    if sets.builtin.is_none() {
-        sets.builtin = Some(assets_with_tag(client, "builtin")?);
-    }
-    if !sets.builtin.as_ref().is_some_and(|set| set.contains(&dto.asset_id)) {
-        return Ok(false);
-    }
+) -> Result<(), String> {
     let ann = makepad_asset_client::AnnotationUpload {
         title: title_of(source, name),
         description: description_of(source),
@@ -426,21 +643,18 @@ fn retag_transition(
         provenance: "bundled preset library (apps/vj/resources/effects)".to_string(),
         private: false,
     };
-    client
-        .put_annotation(&dto.asset_id, &ann)
-        .map_err(|e| e.to_string())?;
-    Ok(true)
+    client.put_annotation(asset_id, &ann).map_err(|e| e.to_string())
 }
 
-/// Publish one bundled preset. `reuse` republishes as a new revision of an
-/// EXISTING asset (the self-healing update path); `None` mints a fresh one.
-fn seed_one(
-    client: &mut AssetClient,
+/// The complete publication one bundled preset owes the store. `reuse`
+/// republishes as a new revision of an EXISTING asset (the self-healing
+/// update path); `None` lets the batch mint a fresh identity.
+fn seed_bundle(
     name: &str,
     source: &str,
     alias_str: &str,
     reuse: Option<makepad_asset_data::AssetId>,
-) -> Result<(), String> {
+) -> PublishBundle {
     let title = title_of(source, name);
     let description = description_of(source);
     let (jpeg, w, h) = placeholder_thumbnail(name);
@@ -466,10 +680,7 @@ fn seed_one(
     bundle.tags = preset_tags(name);
     bundle.generator = "makepad-vj effects".to_string();
     bundle.provenance = "bundled preset library (apps/vj/resources/effects)".to_string();
-    client
-        .publish_bundle(&bundle)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    bundle
 }
 
 /// `name:` from the document (first occurrence), else the file stem.
@@ -507,34 +718,65 @@ fn description_of(source: &str) -> String {
 }
 
 /// A modest but never-flat placeholder: a per-name colored diagonal weave
-/// with a bright diagonal band, 256x256 JPEG. The VJ's lazy animated
+/// with a bright diagonal band, as a JPEG. The VJ's lazy animated
 /// thumbnail replaces it on first sight.
 fn placeholder_thumbnail(name: &str) -> (Vec<u8>, u32, u32) {
-    const W: usize = 256;
-    let mut h: u32 = 2166136261;
+    // 16:10, matching both the boot-grid prefab art and the animated bake
+    // sheets — three phases of one tile must not change shape underfoot
+    // (the tile paint enforces this too: effect tiles always draw full-
+    // bleed cover, so even an old store's square placeholder cannot move
+    // the picture). BOTH axes must clear the publish contract's 256px
+    // thumbnail floor — 256x160 was refused by every publish
+    // ("invalid input: publish thumbnail dims"), which silently killed
+    // seeding on any store the livecode observer wasn't watching.
+    const W: usize = 512;
+    const H: usize = 320;
+    let bgra = placeholder_bgra(name, W, H);
+    let jpeg = encode_jpeg_bgra(&bgra, W, H);
+    (jpeg, W as u32, H as u32)
+}
+
+/// THE PLACEHOLDER ART ITSELF, at any size, as opaque BGRA words.
+///
+/// This is what a seeded preset publishes as its thumbnail — AND what the
+/// grid paints for a preset it has not heard back about yet. The VJ boots
+/// with the whole compiled-in library on screen by generating this locally
+/// for every bundled name, so a fresh store shows a COMPLETE grid in the
+/// first frame instead of trickling tiles in as publishes land. Because
+/// both paths run the same weave, the moment the real row arrives the
+/// picture does not change: the animated bake is the only thing that ever
+/// visibly replaces it.
+pub fn placeholder_bgra(name: &str, w: usize, h: usize) -> Vec<u32> {
+    let mut hash: u32 = 2166136261;
     for b in name.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16777619);
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619);
     }
-    let hue = (h % 360) as f32 / 360.0;
+    let hue = (hash % 360) as f32 / 360.0;
     let hue2 = (hue + 0.33).fract();
-    let mut bgra = vec![0u32; W * W];
-    for y in 0..W {
-        for x in 0..W {
-            let u = x as f32 / W as f32;
-            let v = y as f32 / W as f32;
+    let mut bgra = vec![0u32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let u = x as f32 / w as f32;
+            let v = y as f32 / h as f32;
             let t = (u * 0.7 + v * 0.3 + ((u * 9.0).sin() * 0.03)).fract();
             let hh = hue + (hue2 - hue) * t;
             let band = 1.0 - ((u + v - 1.0).abs() * 2.5).min(1.0);
             let (r, g, b) = hsv(hh, 0.75, 0.28 + 0.62 * band);
-            bgra[y * W + x] = 0xff00_0000
+            bgra[y * w + x] = 0xff00_0000
                 | (((r * 255.0) as u32) << 16)
                 | (((g * 255.0) as u32) << 8)
                 | ((b * 255.0) as u32);
         }
     }
-    let jpeg = encode_jpeg_bgra(&bgra, W, W);
-    (jpeg, W as u32, W as u32)
+    bgra
+}
+
+/// The display name a bundled preset seeds under — its `name:` line, or the
+/// file stem. The grid's prefill labels its tiles with exactly this, so a
+/// prefab tile carries the same title the catalog row will.
+pub fn preset_title(name: &str, source: &str) -> String {
+    title_of(source, name)
 }
 
 fn hsv(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
@@ -590,7 +832,12 @@ mod tests {
     fn placeholder_thumbnails_are_real_jpegs_and_differ_by_name(){
         let (a, w, h) = placeholder_thumbnail("01_fireworks");
         let (b, _, _) = placeholder_thumbnail("09_synthwave");
-        assert_eq!((w, h), (256, 256));
+        // 16:10, the one tile aspect all three thumb phases share — and
+        // BOTH axes at or above the publish contract's 256px thumbnail
+        // floor, or every seed publish is refused ("publish thumbnail
+        // dims") and a fresh store boots with an empty effect library.
+        assert_eq!((w, h), (512, 320));
+        assert!(w >= 256 && h >= 256, "publish contract floor");
         assert!(a.len() > 500, "suspiciously small jpeg");
         assert!(a.starts_with(&[0xff, 0xd8]), "not a jpeg");
         assert_ne!(a, b, "two presets must not share a placeholder");
@@ -684,6 +931,16 @@ mod registry_tests {
     /// the two seconds a gallery capture ever runs and a BLACK FRAME on
     /// the deck, and that is what this list exists to stop repeating.
     ///
+    /// BOUNDING THE OUTPUT IS ONLY HALF OF IT. `fract(uv + time * k)` is
+    /// bounded and still wrong: the huge term is formed FIRST, so the uv
+    /// it is added to loses every bit the exponent has moved past, and the
+    /// picture bands and shimmers hours in even though nothing ever left
+    /// 0..1. Wrap the CLOCK TERM at the consuming expression's own period
+    /// before it meets anything spatial — `fract(uv + fract(time * k))`,
+    /// `modf(time * k, period)` — which is the same phase, taken on a
+    /// small number. A dial multiplied straight into the raw beat count is
+    /// the same bug wearing a knob (158_pixel_walls shipped that way).
+    ///
     /// Sound analysis of "is this use bounded?" needs dataflow we do not
     /// have here, so this is a REVIEW GATE, not a checker: a preset that
     /// reaches for the beat count must be named here, and naming it means
@@ -697,7 +954,22 @@ mod registry_tests {
         const REVIEWED: &[(&str, &str)] = &[
             ("15_acid_bloom", "sine phase — the term only ever enters sin()"),
             ("86_fractal_descent", "two slow sines + clamp into the live band"),
-            ("87_molten_glass", "fract() — a material band index"),
+            ("87_molten_glass", "fract()-wrapped term into a material band index"),
+            // The 2026-08-23 batch, swept at t = 0/600/3600 via the gallery
+            // capture — no flat/black frames, means 30-163, sd 48-62.
+            ("158_pixel_walls", "modf(beat*rate, 8) — one wrapped cosine period"),
+            ("162_pixel_jitter", "floor()-quantised hash seed"),
+            ("163_pixel_hop", "floor()-quantised hop seed"),
+            ("181_shuffle_h", "floor()-quantised per-strip shuffle seed"),
+            ("182_shuffle_v", "floor()-quantised per-strip shuffle seed"),
+            ("185_mirror_rotate_b", "sine phase on the mirror axis"),
+            ("187_wave", "sine phase on the displacement"),
+            ("191_zigzag_twirl", "fract()-wrapped term into the zigzag ramp"),
+            ("196_rays", "slow sine phase on the ray origin"),
+            ("197_petal_fold", "modf() into the sector fold — one wrapped sector"),
+            ("198_disc", "modf(.., 1) into the annulus angle — one wrapped turn"),
+            ("200_maze", "beat-quantised maze re-roll via fract()"),
+            ("205_strobe", "floor()-quantised gate hash + pulse envelope"),
         ];
         let mut unreviewed = Vec::new();
         for (name, source) in bundled_presets() {
@@ -724,6 +996,129 @@ mod registry_tests {
                  reviewed list"
             );
         }
+    }
+
+    /// THE VECTOR-CLAMP TRIPWIRE.
+    ///
+    /// `clamp(v, 0.0, 1.0)` on a vector is legal GLSL and is NOT legal here:
+    /// the shader compiler wants all three arguments the same type, and a
+    /// mismatched one takes the WHOLE draw shader down —
+    /// "draw shader 'DrawVjFxDuo' failed to compile and will NOT be drawn".
+    /// Four transition presets shipped that way, and because a family shares
+    /// one shader, those four killed the shader for every transition
+    /// document: seventy tiles baked BLACK. It costs nothing to check, and
+    /// the failure it catches is silent until someone looks at a thumbnail.
+    #[test]
+    fn no_preset_clamps_a_vector_between_scalars() {
+        let mut bad = Vec::new();
+        for (name, source) in bundled_presets() {
+            for (n, line) in source.lines().enumerate() {
+                let Some(at) = line.find("clamp(") else { continue };
+                let rest = &line[at + "clamp(".len()..];
+                // The first argument, up to the top-level comma.
+                let mut depth = 0i32;
+                let mut first = "";
+                for (i, c) in rest.char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        ',' if depth == 0 => {
+                            first = &rest[..i];
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                // `dot`/`length`/`distance` REDUCE a vector to a scalar, so
+                // what is inside them says nothing about the clamp's type.
+                let reduced = strip_reducers(first);
+                let vectorish = reduced.contains(".xyz")
+                    || reduced.contains(".xy ")
+                    || reduced.contains("vec2(")
+                    || reduced.contains("vec3(")
+                    || reduced.contains("vec4(");
+                // Scalar bounds look like `, 0.0, 1.0)` — no vec in them.
+                let bounds = &rest[first.len()..];
+                let scalar_bounds = !bounds.contains("vec");
+                if vectorish && scalar_bounds {
+                    bad.push(format!("{name}:{}", n + 1));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these presets clamp a VECTOR between scalars, which fails the \
+             shader compiler and takes the whole family's draw shader with \
+             it — spell the bounds as vectors \
+             (`clamp(v, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))`): {bad:?}"
+        );
+    }
+
+    /// Blank out every `dot(…)` / `length(…)` / `distance(…)` span: those
+    /// return a scalar whatever went in, so their contents must not make an
+    /// expression look vector-typed.
+    fn strip_reducers(expr: &str) -> String {
+        let mut out = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let mut i = 0usize;
+        'outer: while i < bytes.len() {
+            for name in ["dot(", "length(", "distance("] {
+                if expr[i..].starts_with(name) {
+                    let mut depth = 0i32;
+                    let mut j = i + name.len() - 1;
+                    while j < bytes.len() {
+                        match bytes[j] {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    out.push('0');
+                    i = (j + 1).min(bytes.len());
+                    continue 'outer;
+                }
+            }
+            out.push(expr[i..].chars().next().unwrap());
+            i += expr[i..].chars().next().unwrap().len_utf8();
+        }
+        out
+    }
+
+    /// THE BEAT-EDGE TRIPWIRE.
+    ///
+    /// `if fx.phase < fx.dt * 2.0` reads as "the beat just landed" and is a
+    /// SINGLE-FRAME RACE: on a fixed-step clock whose per-frame phase step
+    /// equals the window — the thumbnail bake runs 30fps at 120bpm, which
+    /// is exactly `dt * 2` of phase per frame — the sampling can align so
+    /// no frame ever lands inside it, and an emitters doc whose only light
+    /// is that spawn bakes BLACK (54_beat_salvo did, nondeterministically,
+    /// depending on the lane clock's float drift). The robust idiom is a
+    /// floored window plus a per-beat `slot` so the extra frame a wider
+    /// window sometimes catches REPLACES the spawn instead of doubling it:
+    ///     if fx.phase < max(fx.dt * 2.0, 0.075) { ... slot: base + modf(floor(fx.beat), k) ... }
+    #[test]
+    fn no_frame_tick_gates_a_spawn_on_a_single_frame_phase_window() {
+        let mut bad = Vec::new();
+        for (name, source) in bundled_presets() {
+            for (i, line) in source.lines().enumerate() {
+                let flat: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+                if flat.replace(' ', "").contains("fx.phase<fx.dt") {
+                    bad.push(format!("{name}:{}", i + 1));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these frame ticks gate a spawn on the raced single-frame \
+             window `fx.phase < fx.dt * …` — use the floored window + \
+             per-beat slot idiom (see this test's doc comment): {bad:?}"
+        );
     }
 
     #[test]

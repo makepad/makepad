@@ -1,0 +1,87 @@
+// OSCILLOSCOPE RIBBON — the raw waveform drawn as a lit ribbon across the
+// frame, with two older copies of the SAME window trailing behind it.
+//
+// This is the `audio_wave(t)` demo. `t` runs 0..1 across the stored window
+// (about 1.4 s); 1 is the newest sample. Sliding the read window is how a
+// scope "scrolls" here — the trail copies read the same texture at an
+// offset instead of keeping a history buffer of their own.
+{
+    name: "Oscilloscope Ribbon"
+    engine: "screen"
+    seed: 21
+
+    speed: 1.0
+    beat_pulse: 0.45
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.1
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "AMP", bind: "p0", default: 0.5},
+        {name: "SPAN", bind: "p1", default: 0.5},
+        {name: "TRAIL", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x02060a
+    color_a: #x44ffc8
+    color_b: #x3aa0ff
+    color_c: #xffffff
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.3, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // Trace height at screen x for a window ending `lag` back.
+        trace: fn(x: float, lag: float, amp: float) -> float {
+            // SPAN squeezes the read window: a short span is a slow, fat
+            // wave; a long one packs seconds of audio into the frame.
+            let span = 0.10 + 0.85 * clamp(self.user.y, 0.0, 1.0)
+            let t = clamp(1.0 - lag - span * (1.0 - clamp(x, 0.0, 1.0)), 0.0, 1.0)
+            let w = self.audio_wave(t)
+            // IDLE: silence is a flat zero, so add a small travelling sine
+            // that the real signal instantly swamps.
+            let idle = 0.055 * sin(x * 24.0 - self.time_beat.x * 3.1)
+                * (1.0 + self.time_beat.w)
+            return 0.5 - (w * amp + idle) * 0.5
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let amp = 0.5 + 1.4 * clamp(self.user.x, 0.0, 1.0)
+            let trail = clamp(self.user.z, 0.0, 1.0)
+
+            let y0 = self.trace(uv.x, 0.0, amp)
+            let y1 = self.trace(uv.x, 0.02 + 0.10 * trail, amp)
+            let y2 = self.trace(uv.x, 0.05 + 0.24 * trail, amp)
+
+            // A line is a distance field: thin core, wide glow.
+            let d0 = abs(uv.y - y0)
+            let d1 = abs(uv.y - y1)
+            let d2 = abs(uv.y - y2)
+            let core = exp(0.0 - d0 * 460.0)
+            let glow = exp(0.0 - d0 * 55.0)
+            let g1 = exp(0.0 - d1 * 70.0) * 0.42
+            let g2 = exp(0.0 - d2 * 90.0) * 0.22
+
+            // The RIBBON: fill between the live trace and the oldest trail
+            // copy, so the scope reads as a band and not three hairlines.
+            let lo = min(y0, y2)
+            let hi = max(y0, y2)
+            let band = smoothstep(0.0, 0.004, uv.y - lo)
+                * smoothstep(0.0, 0.004, hi - uv.y) * 0.22
+
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, clamp(uv.x, 0.0, 1.0))
+            let mut rgb = self.col_bg.xyz
+            // Graticule: a faint scope grid so the frame is never empty.
+            let grid = smoothstep(0.985, 1.0, max(
+                abs(sin(uv.x * 25.1327)),
+                abs(sin(uv.y * 25.1327))
+            ))
+            rgb = rgb + self.col_b.xyz * (grid * 0.05)
+            rgb = rgb + tint * (band + g1 + g2 + glow * 0.35)
+            rgb = rgb + self.col_c.xyz * (core * 0.9)
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

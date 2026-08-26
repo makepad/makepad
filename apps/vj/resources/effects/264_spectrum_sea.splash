@@ -1,0 +1,112 @@
+// SPECTRUM SEA — the whole audio texture read as a LANDSCAPE. Frequency
+// runs left-right, TIME runs away toward the horizon, and the height of
+// the ground is the magnitude that was there: the last five seconds of
+// spectrum as ridges rolling out to the vanishing line.
+//
+// This is the preset that shows why the texture keeps HISTORY. A single
+// instantaneous FFT can only ever be a line; the ring gives a surface.
+//
+// Lighting is analytic, not marched: the surface normal comes from three
+// extra texture reads (a central difference in ground space), so the sea
+// is lit and shaded at four samples per pixel and never self-occludes.
+{
+    name: "Spectrum Sea"
+    engine: "screen"
+    seed: 17
+
+    speed: 1.0
+    beat_pulse: 0.5
+    beat_rate: 1.0
+    bar_beats: 4
+    fog: 0.05
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SWELL", bind: "p0", default: 0.5},
+        {name: "SPREAD", bind: "p1", default: 0.5},
+        {name: "HAZE", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x060714
+    color_a: #x36e0c8
+    color_b: #x8a3cff
+    color_c: #xffd489
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 0.95, levels: 3}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // Ground height at a point on the plane. `gx` is lateral (mapped to
+        // frequency, symmetric about the centre line so bass sits under the
+        // camera); `age` is how far back in time this ground is.
+        ground: fn(gx: float, age: float) -> float {
+            let f = clamp(abs(gx), 0.0, 1.0)
+            let h = self.audio_fft(f, clamp(age, 0.0, 1.0))
+            // The swell that keeps a silent sea alive: two slow crossing
+            // waves, small enough that any real spectrum buries them.
+            let idle = 0.05
+                + 0.035 * sin(gx * 7.0 + self.time_beat.x * 0.9)
+                + 0.025 * sin(age * 19.0 - self.time_beat.x * 1.4)
+            return max(h, idle)
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let hor = 0.40
+            let below = uv.y - hor
+
+            // ---- SKY (above the horizon) --------------------------------
+            if below <= 0.0 {
+                let sky = clamp((hor - uv.y) / hor, 0.0, 1.0)
+                let mut s = self.col_bg.xyz.mix(self.col_b.xyz * 0.35, sky)
+                // A lamp on the horizon that swells with the low end.
+                let d = length(vec2((uv.x - 0.5) * aspect, (uv.y - hor) * 1.9))
+                s = s + self.col_c.xyz
+                    * (exp(0.0 - d * 5.5) * (0.15 + 0.8 * self.audio_env.x))
+                // Sparse stars, fixed by a hash — no motion, no cost.
+                let star = fract(sin(floor(uv.x * 420.0) * 12.9898
+                    + floor(uv.y * 420.0) * 78.233) * 43758.5453)
+                s = s + vec3(1.0, 1.0, 1.0) * (step(0.9985, star) * sky * 0.7)
+                return vec4(s * self.fog.y, 1.0)
+            }
+
+            // ---- GROUND -------------------------------------------------
+            // Perspective: screen rows below the horizon are distances.
+            let dist = 0.30 / max(below, 0.0015)
+            let spread = 0.5 + 1.6 * clamp(self.user.y, 0.0, 1.0)
+            let gx = (uv.x - 0.5) * aspect * dist * spread * 0.34
+            // Distance becomes AGE: the horizon is the oldest row kept.
+            let age = clamp(dist * 0.055, 0.0, 1.0)
+
+            let swell = 0.25 + 1.5 * clamp(self.user.x, 0.0, 1.0)
+            let h = self.ground(gx, age) * swell
+
+            // Normal by central difference, in ground units.
+            let e = 0.05 + dist * 0.006
+            let hx = (self.ground(gx + e, age) - self.ground(gx - e, age)) * swell
+            let hz = (self.ground(gx, age + 0.012)
+                - self.ground(gx, max(age - 0.012, 0.0))) * swell
+            let n = normalize(vec3(0.0 - hx, e * 3.0, 0.0 - hz * 0.35))
+
+            let lightd = normalize(vec3(0.45, 0.75, 0.42))
+            let lam = clamp(dot(n, lightd), 0.0, 1.0)
+            let rim = pow(1.0 - clamp(n.y, 0.0, 1.0), 2.0)
+
+            // Colour by height: troughs cold, crests hot.
+            let t = clamp(h * 1.25, 0.0, 1.0)
+            let body = self.col_a.xyz.mix(self.col_b.xyz, t)
+            let mut rgb = body * (0.18 + 0.9 * lam) + self.col_c.xyz * (rim * 0.35 * t)
+
+            // A grid of contour lines so the surface reads as a surface.
+            let lines = smoothstep(0.86, 1.0, abs(sin(h * 46.0)))
+            rgb = rgb + self.col_c.xyz * (lines * 0.10 * (1.0 - age))
+
+            // Haze toward the horizon: the far rows dissolve into the sky.
+            let haze = clamp(age * (0.6 + 1.4 * clamp(self.user.z, 0.0, 1.0)), 0.0, 1.0)
+            rgb = rgb.mix(self.col_bg.xyz.mix(self.col_b.xyz * 0.35, 1.0), haze)
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

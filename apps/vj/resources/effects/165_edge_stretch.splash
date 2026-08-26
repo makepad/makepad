@@ -1,0 +1,31 @@
+// EDGE STRETCH — each pair of opposing edges gamma-warps independently:
+// SIDES pulls content toward the left or right edge, ENDS toward top or
+// bottom, CURVE shapes how hard the pull bites near the border.
+{
+    name: "Edge Stretch"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SIDES", bind: "p0", default: 0.5},
+        {name: "ENDS", bind: "p1", default: 0.5},
+        {name: "CURVE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let lr = (self.user.x - 0.5) * 1.6
+            let tb = (self.user.y - 0.5) * 1.6
+            let curve = 0.4 + 1.4 * self.user.z
+            let wx = pow(clamp(uv.x, 0.0001, 0.9999), 1.0 + lr * curve * 0.6)
+            let wy = pow(clamp(uv.y, 0.0001, 0.9999), 1.0 + tb * curve * 0.6)
+            let tex = self.tex0.sample_as_bgra(clamp(vec2(wx, wy), vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

@@ -109,3 +109,40 @@ fullscreen shader looks like.
 | 99_amber_exchange | Amber Exchange | stockcharts | after-hours amber terminal drifting in 3D, two candles |
 | 100_flash_crash | Flash Crash | stockcharts | the red panic: bar-armed crash cascades + a pulse-driven |
 | 113_scan_sermon | Scan Sermon | screen/doc-shader | THE PURE-DOCUMENT EFFECT: no engine geometry at all, a
+| 218_extrude | Extrude | tiles/relief | the picture stands off the wall: each tile pushed by its own |
+| 219_tile_jitter | Tile Jitter | tiles/hook | beat-quantised hashed throw and spin that settles before the |
+| 220_plane_grid | Plane Grid | tiles/hook | a wall of big planes, each turning on its own hashed axis at |
+| 221_card_grid | Card Grid | tiles/hook | a rack of cards; once a bar a staggered wave of half-turns |
+| 222_freeze | Freeze | screen/hold | the frame stops dead and re-grabs every two beats; GRAB is a |
+| 223_time_slice | Time Slice | screen/hold | scanline bands each on their own delay, the boundary raking |
+| 224_strip_delay | Strip Delay | screen/hold | vertical strips catching up in hashed order — the picture |
+| 225_video_tunnel | Video Tunnel | tunnel/drape | the clip IS the bore wall, mirrored around the seam, beat |
+| 226_video_torus | Video Torus | tunnel/drape | the same drape on a plain ring; the clip comes round again |
+| 260_spectrum_bar_field | Spectrum Bar Field | screen/audio | THE AUDIO REFERENCE: log-frequency bars from audio_fft,
+| 261_radial_spectrum_bloom | Radial Spectrum Bloom | screen/audio | the bar field bent into a circle; the ghost rings behind
+| 262_oscilloscope_ribbon | Oscilloscope Ribbon | screen/audio | audio_wave as a lit ribbon; the trail copies read the
+| 263_waveform_tunnel | Waveform Tunnel | screen/audio | radius IS time: rings of older audio flying out past the
+| 264_spectrum_sea | Spectrum Sea | screen/audio | the spectrogram HISTORY as a lit landscape — frequency
+| 265_level_pulse_rings | Level Pulse Rings | screen/audio | every kick of the last five seconds still travelling; the
+| 266_spectro_kaleido | Spectro Kaleido | screen/audio | the audio texture read on BOTH axes and folded into a
+| 267_bass_warp_drape | Bass Warp Drape | screen/audio | THE CONTENT ONE: live deck video pumped by the low end,
+| 268_spectrogram_curtain | Spectrogram Curtain | screen/audio | the analysis shown almost raw — the waterfall it is,
+| 269_band_lattice | Band Lattice | screen/audio | a wall of level lamps: across = band, down = how long
+| 270_harmonic_petals | Harmonic Petals | screen/audio | a flower whose outline IS the spectrum, with four older
+| 271_scope_horizon | Scope Horizon | screen/audio | the waveform as a coastline with its own reflection,
+| 227_spin_cube | Spin Cube | videomesh/box | the live video wrapped onto one big tumbling cube, edges flashing on the beat. |
+| 228_inside_cube | Inside Cube | videomesh/box | the camera INSIDE a video room: six walls play the clip, seams glow in tempo. |
+| 229_cube_grid | Cube Grid | videomesh/box | a 6x6 wall of cubes, each carrying its cell of the picture; a staggered flip wave runs once a bar. |
+| 230_video_box | Video Box | videomesh/box | five video-faced boxes on a slow carousel, each tumbling at its own hashed rate. |
+| 231_mirror_ball | Mirror Ball | videomesh/sphere | the clip quantised into facet tiles on a revolving ball, glitter re-rolled on quantised time. |
+| 232_video_torus_3d | Video Torus 3D | videomesh/torus | the clip wrapped around a fat revolving ring, a hot highlight chasing it once per beat. |
+| 233_star_prism | Star Prism | videomesh/star_prism | a five-point star slab: both faces play the clip, the side band runs beat-pumped neon. |
+| 234_octa_star | Octa Star | videomesh/octahedron | eight flat video facets meeting at hard edges, per-face palette tints, nose-over wobble. |
+| 235_octa_ring | Octa Ring | videomesh/octahedron | ten small video octahedra on a carousel, tumbling on hashed axes. |
+| 236_corridor | Corridor | videomesh/corridor | endless flight down a square video duct; a light-line sweeps each segment in beat time. |
+| 237_maze_run | Maze Run | videomesh/corridor | the corridor with every segment rolled a hashed quarter-turn — a twisting funhouse run. |
+| 238_blimp | Blimp | videomesh/capsule | a fat video airship cruising a bounded figure, clip wrapped end to end. |
+| 239_sphere_relief | Sphere Relief | videomesh/sphere | the clip EXTRUDED off a globe: bright passages grow mountains (vertex luma relief), PUMP gains it. |
+| 240_beam_fan | Beam Fan | videomesh/grid | twelve thin video beams fanning through one centre, each carrying its band of the clip. |
+| 241_slat_depth | Slat Depth | videomesh/grid | the picture sliced into sixteen slats that swim in depth on a travelling wave, image kept readable. |
+| 242_trans_ball | Ball | videomesh/sphere | TWO-DECK transition: the outgoing picture curls into a ball and rolls away while deck B dissolves in underneath. |

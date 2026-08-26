@@ -1,0 +1,60 @@
+// MIRROR BALL — the live video quantised into the facet tiles of a slowly
+// revolving ball: every tile holds one frozen texel of the clip, tile seams
+// stay dark, and a hashed sprinkle of facets catches the light each half
+// second like glitter. Pattern taught here: a pixel hook that re-samples
+// tex0 at the tile CENTRE (self.tex0 + self.v_uv are in scope inside a
+// hook), and a time-quantised hash for the sparkle — bounded because only
+// floor() enters the hash.
+{
+    name: "Mirror Ball"
+    engine: "videomesh"
+    shape: "sphere"
+    seed: 4
+
+    detail: 40
+    size: 3.4
+    fly: 0.55
+    alt: 0.8
+
+    beat_pulse: 0.4
+    input0: "test"
+
+    color_bg: #x05040c
+    color_a: #x8090c0
+    color_b: #x4050a0
+    color_c: #xffffff
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.65, strength: 1.0, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE — the facet fragment: tile grid over the
+    // sphere's uv, per-tile texel, glitter re-rolled on quantised time.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.06, 1.0, 0.0)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 0.0, t * 0.5 * (1.0 + clamp(self.user.x, 0.0, 4.0)))
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let g = vec2(28.0, 14.0)
+            let cell = floor(self.v_uv * g)
+            let fc = fract(self.v_uv * g)
+            let cuv = (cell + vec2(0.5, 0.5)) / g
+            let tx = self.tex0.sample_as_bgra(cuv)
+            let e = min(min(fc.x, 1.0 - fc.x), min(fc.y, 1.0 - fc.y))
+            let line = smoothstep(0.02, 0.10, e)
+            let gl = fract(sin(cell.x * 12.9898 + cell.y * 78.233
+                + floor(self.time_beat.x * 2.0) * 3.7) * 43758.5453)
+            let spark = step(0.93, gl) * (0.6 + self.time_beat.w * 1.2)
+            return vec4(
+                (tx.xyz * (t * 1.05) * line + self.col_c.xyz * spark * line) * self.fog.y,
+                1.0
+            )
+        }
+    }
+}

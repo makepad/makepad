@@ -79,6 +79,11 @@ pub struct App {
     /// (without it, effects run standalone on the animated fallback).
     #[rust]
     input_tex: Option<Texture>,
+    /// Deck stand-ins for transition docs: [deck A, deck B, premix]. A
+    /// transition rendered with nothing bound is a BLACK frame — and a
+    /// black gallery grab reads as a broken document.
+    #[rust]
+    trans_tex: [Option<Texture>; 3],
     /// `VJFX_SWEEP=<dir>`: the parity sweep — grab every document once at
     /// the pinned clock, then quit. See [`Sweep`].
     #[rust]
@@ -278,6 +283,34 @@ impl App {
                 view.set_input_texture(0, Some(tex.clone()));
             }
         }
+        // THE DIAL LEVER (`VJFX_DIALS=p0,p1,p2,p3`, each a 0..1 float or
+        // `-` to leave that dial at the document's default): pins the user
+        // dials for this run, so a capture sweep can photograph one dial at
+        // its extremes and JUDGE whether the range is a real creative
+        // spectrum or a nothing-to-slow shrug.
+        if let Ok(spec) = std::env::var("VJFX_DIALS") {
+            let mut over = [None; 4];
+            for (i, part) in spec.split(',').take(4).enumerate() {
+                if let Ok(v) = part.trim().parse::<f32>() {
+                    over[i] = Some(v.clamp(0.0, 1.0));
+                }
+            }
+            view.set_user_override(over);
+        }
+        // Transition docs render BLACK with nothing bound — give them the
+        // same two distinct deck stand-ins the thumbnail renderer uses, so
+        // the gallery (and any sweep grab) shows the transition working.
+        // Two-deck docs get separate inputs and the default mid fader;
+        // premix transitions get one mid-dissolve frame on input 0.
+        if view.wants_deck_inputs() {
+            let a = gallery_deck_pattern(cx, &mut self.trans_tex[0], 0.0);
+            let b = gallery_deck_pattern(cx, &mut self.trans_tex[1], 1.0);
+            view.set_input_texture(0, Some(a));
+            view.set_input_texture(1, Some(b));
+        } else if effects::seed::is_transition_preset(&key) && self.input_tex.is_none() {
+            let premix = gallery_deck_pattern(cx, &mut self.trans_tex[2], 0.5);
+            view.set_input_texture(0, Some(premix));
+        }
         // Otherwise texture-input docs get the runtime's built-in animated
         // fallback automatically — the gallery binds nothing.
         let (title, status) = match result {
@@ -293,6 +326,41 @@ impl App {
         self.ui.label(cx, ids!(fx_status)).set_text(cx, &status);
         self.ui.redraw(cx);
     }
+}
+
+/// Two visibly different deck stand-ins, dissolved by `m`: a dim warm slate
+/// with a soft disc (m = 0, "deck A") and a dim cool slate ruled by a grid
+/// and a bar (m = 1, "deck B"). The pixel math is the SHARED one
+/// (`effects::deck_pattern`), so what the gallery previews is exactly what
+/// the thumbnail bank bakes; only the drift is dropped, so capture sweeps
+/// stay deterministic.
+fn gallery_deck_pattern(cx: &mut Cx, slot: &mut Option<Texture>, m: f32) -> Texture {
+    use effects::deck_pattern;
+    const W: usize = deck_pattern::W;
+    const H: usize = deck_pattern::H;
+    if let Some(tex) = slot {
+        return tex.clone();
+    }
+    let mut data = vec![0u32; W * H];
+    for y in 0..H {
+        let v = y as f32 / H as f32;
+        for x in 0..W {
+            let u = x as f32 / W as f32;
+            // Frozen drift/bar: a still frame of the same two pictures.
+            data[y * W + x] = deck_pattern::texel_bgra(u, v, m, (0.12, -0.10), 0.30);
+        }
+    }
+    let tex = Texture::new_with_format(
+        cx,
+        TextureFormat::VecBGRAu8_32 {
+            width: W,
+            height: H,
+            data: Some(data),
+            updated: TextureUpdated::Full,
+        },
+    );
+    *slot = Some(tex.clone());
+    tex
 }
 
 impl MatchEvent for App {}

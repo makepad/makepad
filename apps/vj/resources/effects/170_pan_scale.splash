@@ -1,0 +1,35 @@
+// PAN SCALE — a slow lissajous pan across the frame under a gentle zoom
+// and a shallow rotate: a hand-held reframe rather than a hard cut.
+{
+    name: "Pan Scale"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PAN", bind: "p0", default: 0.5},
+        {name: "ZOOM", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let tau = 6.2831853
+            let panx = sin(self.sig.x * tau * 0.5) * 0.16 * (0.2 + 1.6 * self.user.x)
+            let pany = cos(self.sig.x * tau * 0.33) * 0.10 * (0.2 + 1.6 * self.user.x)
+            let zoom = 0.55 + 1.2 * self.user.y
+            let ang = sin(self.sig.x * tau * 0.2) * 0.05 * (0.2 + 1.6 * self.user.z)
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let c = uv - vec2(0.5, 0.5)
+            let r = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs) / zoom
+            let w = r + vec2(0.5 + panx, 0.5 + pany)
+            let tex = self.tex0.sample_as_bgra(clamp(w, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

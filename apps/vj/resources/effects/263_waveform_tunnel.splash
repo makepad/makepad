@@ -1,0 +1,86 @@
+// WAVEFORM TUNNEL — the scope wrapped around the viewer. Radius is TIME:
+// the ring at the centre is the sound of a second ago and it is flying
+// out past you, its wall dented by the waveform of that instant.
+//
+// Pattern taught: mapping a texture ring to DEPTH. Nothing moves because
+// something integrated a position — the ring at radius r simply reads the
+// window at age r, so the whole tunnel is a pure function of the texture.
+{
+    name: "Waveform Tunnel"
+    engine: "screen"
+    seed: 8
+
+    speed: 1.0
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.0
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DENT", bind: "p0", default: 0.5},
+        {name: "RINGS", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x04030a
+    color_a: #x2ad4ff
+    color_b: #xff6a2a
+    color_c: #xfff4d8
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.15, levels: 3},
+        {kind: "chroma", p1: 0.35, p2: 0.5}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = max(length(p), 0.0015)
+            let spin = (clamp(self.user.z, 0.0, 1.0) - 0.5) * 1.6
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * spin, 1.0)
+
+            // Tunnel coordinate: 1/r puts the far end at the centre. The
+            // scroll is the tunnel flying past.
+            let rings = 4.0 + 16.0 * clamp(self.user.y, 0.0, 1.0)
+            // BOUNDED SCROLL. The ring INDEX only ever seeds hashes, so it
+            // keeps counting; the position INSIDE the ring comes off the
+            // wrapped scroll, or an hours-old clock swallows the 1/r
+            // perspective term and the rings band.
+            let scroll = self.time_beat.x * 0.5 * rings * 0.25
+            let dz = 0.16 / r * rings * 0.25 + fract(scroll)
+            let band = fract(dz)
+            let ringid = floor(dz) + floor(scroll)
+
+            // Age of THIS ring: the further down the tunnel, the older the
+            // audio it is made of. Wrapped so the tunnel never runs out.
+            let age = clamp(fract(ringid * 0.081 + 0.5) * 0.9, 0.0, 1.0)
+            // The wall dent: the waveform of that moment, read around the
+            // ring so the dent has an angular shape.
+            let t = clamp(1.0 - age * 0.85 - fract(ang) * 0.08, 0.0, 1.0)
+            let dent = self.audio_wave(t) * (0.35 + 1.1 * clamp(self.user.x, 0.0, 1.0))
+            // Idle figure so a silent tunnel still has a wall texture.
+            let idle = 0.10 * sin(fract(ang) * 25.1327 + ringid * 1.7)
+
+            // The ring wall: a soft shell at band position, pushed by dent.
+            let wall = exp(0.0 - abs(band - 0.5 - (dent + idle) * 0.22) * 12.0)
+            // Perspective fade: the far end goes dark, the mouth is bright.
+            let near = clamp(r * 2.4, 0.0, 1.0)
+            let hue = fract(ringid * 0.137 + self.audio_env.y * 0.4)
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, hue)
+
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + tint * (wall * near * 0.9)
+            // Spokes: the frequency content painted around the bore.
+            let spoke = self.audio_fft(1.0 - abs(fract(ang) * 2.0 - 1.0), age)
+            rgb = rgb + self.col_c.xyz * (spoke * wall * near * 0.8)
+            // The far mouth: a lamp on the broadband level so the vanishing
+            // point never becomes a dead black dot.
+            rgb = rgb + self.col_a.xyz
+                * (exp(0.0 - r * 22.0) * (0.25 + 0.9 * self.audio_env.w))
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

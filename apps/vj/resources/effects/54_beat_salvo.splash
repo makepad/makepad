@@ -28,8 +28,17 @@
 
     frame: fn(fx) {
         let out = []
-        if fx.phase < fx.dt * 2.0 {
-            let side = modf(fx.beat, 2.0) * 2.0 - 1.0
+        // BEAT EDGE, robustly. A bare `phase < dt*2` reads as "the beat
+        // just landed" but is a single-frame race: on a fixed-step clock
+        // whose per-frame phase step EQUALS the window (the thumbnail
+        // bake's 30fps at 120bpm) the sampling can align to catch no frame
+        // at all — this doc baked BLACK. Floor the window wider than one
+        // phase step, and key the spawn to the BEAT NUMBER via `slot`: the
+        // extra frame the wider window sometimes catches then REPLACES the
+        // burst (same slot, same params) instead of doubling it.
+        if fx.phase < max(fx.dt * 2.0, 0.075) {
+            let n = floor(fx.beat)
+            let side = modf(n, 2.0) * 2.0 - 1.0
             let col = #x00ffcc
             let col2 = #x0066ff
             if side > 0.0 {
@@ -38,6 +47,7 @@
             }
             out.push({
                 kind: "burst"
+                slot: 10.0 + modf(n, 4.0)
                 pos: vec3(side * 4.0, 1.0, 0.0)
                 life: 1.1
                 // BURST dial: slam reach + spark size ride fx.p0.
@@ -46,7 +56,7 @@
                 gravity: 0.4
                 color: col
                 color2: col2
-                seed: fx.beat * 1.3
+                seed: n * 1.3
             })
         }
         return out

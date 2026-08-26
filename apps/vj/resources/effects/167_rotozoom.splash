@@ -1,0 +1,34 @@
+// ROTOZOOM — the classic demo-effect spin: the frame rotates and zooms
+// continuously about its centre, wrapped so the picture tiles outward.
+{
+    name: "Rotozoom"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPIN", bind: "p0", default: 0.5},
+        {name: "ZOOM", bind: "p1", default: 0.5},
+        {name: "TILE", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let spin = 0.28 * (0.2 + 1.6 * self.user.x)
+            let ang = self.time_beat.x * spin
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let zoom = 0.2 + 1.6 * self.user.y
+            let tiles = 0.8 + 2.4 * self.user.z
+            let c = uv - vec2(0.5, 0.5)
+            let r = vec2(c.x * cs - c.y * sn, c.x * sn + c.y * cs) / zoom
+            let w = fract(r * tiles + vec2(0.5, 0.5))
+            let tex = self.tex0.sample_as_bgra(w)
+            return vec4(tex.xyz, 1.0)
+        }
+    }
+}

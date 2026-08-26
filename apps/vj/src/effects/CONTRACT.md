@@ -3,6 +3,15 @@
 This file is the coordination contract for agents working on the VJ effect
 renderstack in parallel. Read it top to bottom before touching anything.
 
+**Editing documents while the VJ runs:** `apps/vj/LIVECODING.md`. Drop a
+`.splash` into `local/vjfx/` (or edit one in `resources/effects/`) and the
+store publishes a new revision of `vjfx/<file-stem>` without copying the
+file; the grid tile, its animated thumbnail and any slot RUNNING that
+document all follow within a second, and the compile verdict —
+`compile ok` or the shader compiler's own error text — lands in
+`local/vjfx/status/<stem>.status`. This file still owns what a document
+IS; that one owns the edit → live cycle.
+
 ## THE FIRST THING TO KNOW: a document carries its own shader
 
 **A `.splash` effect document is a complete, forkable unit. The pixel math
@@ -152,7 +161,16 @@ Reading is forgiving: missing key = default, wrong type = default + warning
         {kind: "feedback", amount: "0.7 + pulse * 0.25", zoom: 1.012,
          rotate: 0.004, dim: 0.97},
         {kind: "tiltshift", focus: 0.55, width: 0.22, levels: 3},
-        {kind: "kaleido", p1: 0.7, p2: "0.2 + pulse"}
+        {kind: "kaleido", p1: 0.7, p2: "0.2 + pulse"},
+        // FRAME LATCH. Grabs the incoming frame every `beats` (0 = never on
+        // the clock) and on the RISING EDGE of `trigger` above 0.5, then
+        // shows it back over the live frame at `mix`. `bands` > 1 indexes
+        // the hold by position — band n releases to live when the beat
+        // phase passes n/bands — which is a scanline (`axis: "h"`) or strip
+        // (`axis: "v"`) delay off ONE stored frame; `stagger` 0 releases in
+        // order, 1 in hashed order.
+        {kind: "hold", beats: 2, trigger: "step(0.55, p1)", mix: 1.0,
+         bands: 1, stagger: 0.0, axis: "h"}
     ]
 
     // THE LOOK — a SUBCLASS of the engine's draw shader (never a plain
@@ -206,6 +224,44 @@ subclasses can always read them, no ceremony:
 - `self.col_a/col_b/col_c/col_bg`, `self.fog` = (density, glow, CONTENT
   MIX, 0)
 
+### THE AUDIO — the live show's sound, sampleable
+
+Every fx draw shader ALSO carries the audio picture: one float texture
+rewritten every frame from exactly the stream the beat-sync analysis is
+listening to (`effects/audio_tex.rs` owns it, and the tap is read-only —
+beat sync stays the single authority over its ring). There is no source
+picker: whatever beat sync hears, a look sees.
+
+Two helpers, in scope in every hook of every family:
+
+- **`self.audio_fft(f, age) -> float`** — spectrum magnitude 0..1. `f` is
+  log frequency 0..1 (0 = 30 Hz, 1 = 16 kHz); `age` is how far back in
+  time 0..1 (0 = now, 1 ≈ 5.5 s ago). 0 = −72 dBFS, 1 = 0 dBFS.
+- **`self.audio_wave(t) -> float`** — the waveform, −1..1. `t` runs 0..1
+  across the stored window (≈1.4 s); 1 is the newest sample.
+- **`self.audio_env`** = (bass, mid, high, rms), already smoothed 0..1 —
+  a level with no texture read at all.
+
+The texture is a pair of RINGS (256 log bins × 256 spectrum rows + 64
+waveform rows, one row of each per ~21 ms hop), and the helpers do the
+unwrap from the write cursors for you. **Sample it through the helpers**;
+the raw uniforms (`audio_dim`, `audio_meta`, `audio_tex`) exist so an
+exotic look can, but a hand-rolled ring read is a bug waiting to happen.
+
+Because `age` is an axis, a look can draw the last several seconds of
+sound at once — a spectrogram landscape, a tunnel whose depth is time,
+rings that are old kicks still travelling (see 264_spectrum_sea,
+263_waveform_tunnel, 265_level_pulse_rings). That is the whole point of
+keeping history rather than one FFT frame.
+
+**THE IDLE LAW.** With nothing playing every helper reads 0 — and that is
+also what an unbound texture slot reads, so a look can never tell "no
+analysis" from "silence", and neither can go to a false full scale. A
+preset that draws the reading raw would therefore go BLACK on a silent
+rig, which is dead air. Every shipped visualiser floors its level with a
+small figure off the free-running beat clock: loud audio always wins,
+silence still performs.
+
 ### The shader hooks — one look function per family
 
 Every family exposes a named entry point the document replaces. The style
@@ -232,7 +288,7 @@ content coupling lives:
 | …with `wind_field:` | `DrawVjFxMeshField` | same two, same meaning (the wind comes from a sim field instead of the analytic sway) |
 | heightmap | `DrawVjFxTerrain` | pixel: `fx_color(t = height 0..1, attr = (slope shade, grid line, grid uv.x, grid uv.y), content = drape texel, cmix)` |
 | ribbons | `DrawVjFxRibbon` | vertex: `fx_color(t = trail age 0..1, attr, normal = tangent, wpos)` |
-| tunnel | `DrawVjFxTunnel` | vertex: `fx_color(t = along the bore 0..1, attr, normal = inward, wpos)` |
+| tunnel | `DrawVjFxTunnel` | vertex: `fx_color(t = along the bore 0..1, attr, normal = inward, wpos, content = the wall texel at this vertex, cmix)`; pixel: `fx_wall(uv = the wall uv, content, cmix, ring = this fragment's beat-ring intensity) -> vec3` — THE DRAPE. At `content: 1` the engine mixes the wall entirely to what `fx_wall` returns, so that hook owns every wall pixel; its default is the stock papered bore |
 | particles | `DrawVjFxParticles` | vertex: `fx_center(mode, id, dir, t01, cyc, r0, r1) -> vec3` (the MOTION program), `fx_color(t = life 0..1, attr, dir, wpos)`; pixel: `fx_sprite(uv, tint)` |
 | emitters | `DrawVjFxEmitter` | vertex: `fx_color(t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd), content, cmix)`; pixel: `fx_sprite(uv, tint)` |
 | firefly | `DrawVjFxFirefly` | vertex: `fx_color(t, attr, content, cmix)` — ONE hook for both kinds, `attr.y < 1.5` a grass blade (t = along), `>= 2` a fly (t = blink brightness); pixel: `fx_sprite(uv, tint)` |
@@ -240,7 +296,9 @@ content coupling lives:
 | domino | `DrawVjFxDomino` | vertex: `fx_color(t = topple ease 0..1, attr, normal, wpos)` |
 | forge | `DrawVjFxForge` | vertex: `fx_color(t = flight heat 0..1, attr, normal, wpos)` |
 | copperbars | `DrawVjFxCopper` | pixel: `fx_color(t = bar gradient axis 0..1, attr, normal, wpos)` |
+| tiles | `DrawVjFxTiles` | pixel: `fx_color(t = mode highlight drive, attr = (tile shade, edge 0..1, stagger rnd, tumble rnd), content = this tile's texel, cmix)`; vertex: `fx_tile(id, grid = this tile's (gx, gy), uv_window = (u0, v0, u1, v1), t = doc time) -> (dx, dy, dz, scale)` and `fx_tile_spin(same args) -> (axis.xyz, angle)` — the per-tile MOTION, applied on top of the mode's own (so `mode: "hook"`, which moves nothing, hands the whole choreography to the document). Both may read input0 with `sample_nearest(uv, 0.0)` — the vertex-legal sampler — which is how a doc lights its own relief |
 | tiles | `DrawVjFxTiles` | pixel: `fx_color(t = mode highlight drive, attr = (tile shade, edge 0..1, stagger rnd, tumble rnd), content = this tile's texel, cmix)` |
+| videomesh | `DrawVjFxVideomesh` | vertex: `fx_place(id, hash, t) -> vec4` (instance position + w = spin angle), `fx_axis(id, hash) -> vec3` (spin axis), `fx_scale(id, hash, t) -> float`; pixel: `fx_color(t = light drive, attr = (instance hash, face id, edge 0..1, instance id), content = input0 at the surface uv, cmix)`, `fx_backdrop(uv, t = crossfader) -> vec4` (the optional full-frame quad, `backdrop: 1`). `self.deck_a(uv)` / `self.deck_b(uv)` sample tex0/tex1 (pixel stage) — a `decks: 2` doc is a two-deck transition, p3 = the crossfader |
 | flock | `DrawVjFxFlock` | vertex: `fx_color(t = speed 0..1, attr, normal = banked up, wpos)` |
 | mountainjet | `DrawVjFxJet` | pixel: `fx_color(t = element look parameter, attr = (class 0 land / 1 jet / 2 burner, same parameter, secondary, distance), content = drape texel, cmix)`, plus the hull-only `fx_jet_color(shade, part, edge)` |
 | city | `DrawVjFxCity` | vertex: `fx_color(t = height 0..1, attr = (class, id, hash, height/phase), normal, wpos)` |
@@ -342,9 +400,34 @@ never leave a window on the user's screen.
 
 Two sweeps of two builds compare pixel for pixel. The floor is ±1 LSB:
 feedback stages accumulate in float and a run can differ from itself by
-one unit in the last place. **A document's frame also depends on which
-document was shown before it** (the post chain keeps its textures across
-loads), so compare sweeps taken in the SAME order.
+one unit in the last place.
+
+A document's frame used to depend on which document was shown BEFORE it:
+`PostChain::configure` re-allocates its stage textures out of the platform
+texture pool and cannot clear them, so the first frames of a `feedback`
+chain re-projected the outgoing document's picture. Fixed by the COLD-START
+LAW (post.rs): a stage that samples its own texture across frames carries a
+`ColdStart`, and while it is cold it does not read that texture at all —
+feedback binds the live frame in its place with the trail amount forced to
+zero, `hold` takes a fresh grab first. `ColdStart::new` is the only
+constructor and it starts cold, so a stage added later cannot forget.
+**Any new self-sampling stage must take one.**
+
+Measured with `VJFX_CAPTURE=1` (the grab IS the first frame after the load,
+where the leak used to live), each document run twice with a DIFFERENT
+document ahead of it: `47_hyperdrive` (no self-sampling stage) and
+`222_freeze` (the `hold` stage, whose frame at `mix: 1` is nothing but the
+latched texture — so a leak would be the whole picture) both come back
+BIT-IDENTICAL. Repeating a run is bit-identical too, so the harness itself
+is deterministic.
+
+What is still order-sensitive at a ONE-frame capture is trail depth, not
+content: a frozen frame can be re-drawn a varying number of times before the
+grab, and each redraw is another feedback iteration (or another
+latch-versus-live blend). The diffs are the document's own structure at a
+different trail depth — no trace of the previous document's picture. This is
+the same float-accumulation caveat as above; take parity grabs at the normal
+budget.
 
 ### Content coupling (every engine PLAYS the video, it does not tint with it)
 
@@ -429,6 +512,7 @@ family actually puts on screen:
 | harmonograph | strand idx | curve t 0..1 | strand rnd | side ±1 | (t, strand01) | strand seed vec |
 | domino | branch id | arc index (dominoes) | tile hash | yaw (rad) | GROUND PIVOT (x, z) | LOCAL face normal (pos = LOCAL corner) |
 | tiles | tile index (grid coords + uv window derive from it) | radial 0..1 from plane centre | rnd (stagger/shade) | rnd (tumble) | corner 0/1 (tile-local uv) | SHATTER FLIGHT VECTOR (unit dir × flight distance, baked; pos = rest centre) |
+| videomesh | instance id | face id (-1 = the backdrop quad, clip-space) | per-instance hash | per-face hash | surface uv (windowed per instance by `uv_split`) | LOCAL surface normal (pos = LOCAL shape coords; the doc's fx_place/fx_axis/fx_scale place the instance) |
 | flock | bird id | speed01 (2.0 = the content-backdrop quad, clip-space, screen uv) | hue | FLAP AMPLITUDE at this vertex (0 spine, wingspan at tips) | (along-body 0..1, flap phase hash) | banked UP vector (the flap axis) |
 | city | tower/trail id | CLASS: 0 tower 1 ground 2 sky 3 trail | tower hash / trail hue | tower height / trail phase | tower: facade uv in WINDOW units; ground: world xz; sky: (azimuth01, h01); trail: (arc01, h01) | face normal |
 | pipes | pipe id | birth order 0..1 (THE growth axis) | pipe hue | local radius (balls bulged) | (around01, along/elevation) | radial outward |
@@ -453,6 +537,11 @@ murmuration of gliders, engines_flock.rs), `city` (flyover:
 night/retro/tron styles + light-cycle trails, engines_city.rs), `pipes`
 (the 3D-pipes lattice, growth replayed on the beat, engines_pipes.rs),
 `stockcharts` (beat-clocked candlestick terminal, engines_charts.rs),
+`videomesh` (live video on parametric 3D shapes — box/sphere/torus/disc/
+cylinder/capsule/octahedron/star_prism/facets/grid/corridor — instances
+placed by DOC vertex hooks, per-instance uv windows, luma relief, orbit/
+inside/corridor rigs; tex1 bound too, `decks: 2` = a two-deck transition —
+engines_videomesh.rs),
 `raymarch` (fullscreen SDF marcher; the scene is a `scene_sdf` shader
 SUBCLASS — engines_raymarch.rs documents the contract + SDF toolkit),
 `mountainjet` (endless range + view-space fighter jet, three looks,

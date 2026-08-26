@@ -34,12 +34,20 @@
 
     frame: fn(fx) {
         let out = []
+        // BEAT EDGE, robustly: a bare `phase < dt*2` is a single-frame
+        // window a fixed-step clock can straddle forever (the thumbnail
+        // bake's 30fps at 120bpm steps phase by exactly dt*2). Floor the
+        // window wider than one step and key each spawn to the BEAT
+        // NUMBER via `slot`, so an extra frame in the window replaces the
+        // spawn instead of doubling it.
+        let edge = fx.phase < max(fx.dt * 2.0, 0.075)
+        let n = floor(fx.beat)
         // One shell per beat, launched RIGHT after the beat lands.
-        if fx.phase < fx.dt * 2.0 {
-            let lane = modf(fx.beat, 5.0) - 2.0
+        if edge {
+            let lane = modf(n, 5.0) - 2.0
             out.push({
                 kind: "jet"
-                slot: 90 + modf(fx.beat, 2.0)
+                slot: 90 + modf(n, 2.0)
                 pos: vec3(lane * 4.0, -8.0, 0.0)
                 vel: vec3(0.0 - lane * 0.4, 11.0, 0.0)
                 life: 1.1
@@ -48,13 +56,13 @@
                 fraction: 0.12
                 color: #xffe0b0
                 color2: #xff8030
-                seed: fx.beat
+                seed: n
             })
         }
         // The pop: a burst where the shell arrived, one beat later.
-        if fx.phase < fx.dt * 2.0 {
-            let lane2 = modf(fx.beat - 1.0, 5.0) - 2.0
-            let hue = modf(fx.beat, 3.0)
+        if edge {
+            let lane2 = modf(n - 1.0, 5.0) - 2.0
+            let hue = modf(n, 3.0)
             let col = #x66aaff
             let col2 = #x2244aa
             if hue < 0.5 {
@@ -66,6 +74,7 @@
             }
             out.push({
                 kind: "burst"
+                slot: 80 + modf(n, 6.0)
                 pos: vec3(lane2 * 4.0 - lane2 * 0.4, 3.0, 0.0)
                 vel: vec3(0.0, 0.6, 0.0)
                 life: 2.6
@@ -76,12 +85,13 @@
                 stagger: 0.05
                 color: col
                 color2: col2
-                seed: fx.beat * 1.7
+                seed: n * 1.7
             })
             // A crackle ring under the big break, every other beat.
-            if modf(fx.beat, 2.0) < 0.5 {
+            if modf(n, 2.0) < 0.5 {
                 out.push({
                     kind: "ring"
+                    slot: 70 + modf(n * 0.5, 2.0)
                     pos: vec3(lane2 * 4.0, 3.0, 0.0)
                     life: 1.2
                     speed: 4.0
@@ -89,7 +99,7 @@
                     fraction: 0.4
                     color: #xffffff
                     color2: #x8899ff
-                    seed: fx.beat * 3.1
+                    seed: n * 3.1
                 })
             }
         }

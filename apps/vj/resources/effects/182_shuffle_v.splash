@@ -1,0 +1,39 @@
+// SHUFFLE V — vertical strips shuffle up and down at a per-strip speed
+// drawn fresh from a hash every beat; the same scramble, turned 90.
+// The speed is quantised on floor(beat), never a running accumulator:
+// each strip's speed is fixed for the whole beat and the shift resets
+// to zero at the top of the next one.
+{
+    name: "Shuffle V"
+    engine: "screen"
+    input0: "test"
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "COUNT", bind: "p0", default: 0.5},
+        {name: "SPEED", bind: "p1", default: 0.5},
+        {name: "AMOUNT", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "bloom", threshold: 0.6, strength: 1.05, levels: 2}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let strips = mix(6.0, 24.0, self.user.x)
+            let idx = floor(uv.x * strips)
+            let beat_id = floor(self.time_beat.y)
+            let bphase = fract(self.time_beat.y)
+            let h = fract(sin(idx * 12.9898 + beat_id * 3.713 + 5.0) * 43758.5453)
+            let speed = (h - 0.5) * 2.0 * (0.3 + 1.4 * self.user.y)
+            let shift = speed * bphase
+            let w = vec2(uv.x, fract(uv.y + shift))
+            let tex = self.tex0.sample_as_bgra(w)
+            let base = self.tex0.sample_as_bgra(uv)
+            let amount = 0.3 + 0.7 * self.user.z
+            let out = base.xyz.mix(tex.xyz, amount)
+            return vec4(out, 1.0)
+        }
+    }
+}

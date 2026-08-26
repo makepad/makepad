@@ -1,0 +1,64 @@
+// PIXEL HOP — every particle carries one texel of input0 and hops from
+// its home cell to a freshly hashed spot every few beats, arcing up and
+// settling back down — a slower, weightier cousin of the jitter shuffle.
+{
+    name: "Pixel Hop"
+    engine: "particles"
+    mode: "image"
+    seed: 163
+    input0: "test"
+
+    count: 12100
+    spread: 6.0
+    size: 0.09
+    rate: 0.0
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "DISTANCE", bind: "p0", default: 0.5},
+        {name: "HANG", bind: "p1", default: 0.5},
+        {name: "ARC", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.55, strength: 1.1, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program. The
+    // hop event is QUANTISED on floor(beat / beats-per-hop) — never the
+    // raw clock — so every particle holds its landing spot for the whole
+    // hang window before the next hash fires. Params: mode/id/dir/t01/cyc/r0/r1.
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let w = self.shape.w
+            let gx = modf(id, w)
+            let gy = floor(id / w)
+            let home = vec3((gx / w - 0.5) * spread * 1.2, (0.5 - gy / w) * spread * 1.2, 0.0)
+            let beats_per_hop = 2.0 + 6.0 * clamp(self.user.y, 0.0, 1.0)
+            let hop_i = floor(self.time_beat.y / beats_per_hop)
+            let phase = fract(self.time_beat.y / beats_per_hop)
+            let hx = fract(sin(id * 17.13 + hop_i * 41.7) * 39812.51)
+            let hy = fract(sin(id * 5.37 + hop_i * 91.3) * 27431.9)
+            let dist = spread * (0.1 + 0.5 * self.user.x)
+            let target = home + (vec3(hx, hy, 0.0) - vec3(0.5, 0.5, 0.0)) * 2.0 * dist
+            let settle = smoothstep(0.0, 0.35, phase)
+            let pos = home.mix(target, settle)
+            let arc = spread * (0.05 + 0.35 * self.user.z) * sin(clamp(phase, 0.0, 1.0) * 3.14159265)
+            return pos + vec3(0.0, arc, 0.0)
+        }
+    }
+}
