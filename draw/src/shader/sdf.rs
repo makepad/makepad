@@ -131,9 +131,11 @@ script_mod! {
             }
 
             hsv2rgb: fn(c: vec4) -> vec4 { //http://gamedev.stackexchange.com/questions/59797/glsl-shader-change-hue-saturation-brightness
+                // clamp/mix take matching vector args here: the script
+                // shader's builtins (and WGSL) do not splat scalar bounds.
                 let K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
                 let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-                return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y), c.w);
+                return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, vec3(0.0), vec3(1.0)), c.y), c.w);
             }
 
             rgb2hsv: fn(c: vec4) -> vec4 {

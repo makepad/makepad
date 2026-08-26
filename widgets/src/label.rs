@@ -14,6 +14,11 @@ script_mod! {
         padding: theme.mspace_1
 
         draw_text +: {
+            // A label is a box with text in it, and the boxes apps put labels
+            // in are centered by their align, not by their baselines: center
+            // the ink, so a label reads as centered when its parent says it is.
+            ink_centered: true
+
             color_dither: uniform(1.0)
             color: theme.color_label_outer
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
@@ -196,6 +201,10 @@ script_mod! {
     mod.widgets.IconSet = mod.widgets.Label{
         width: Fit
         draw_text +: {
+            // An icon font's cap height describes a capital nobody is drawing:
+            // these glyphs are pictures placed in their own box, so leave them
+            // on the baseline the font asks for.
+            ink_centered: false
             text_style: theme.font_icons{
                 line_spacing: theme.font_wdgt_line_spacing
                 font_size: 100.

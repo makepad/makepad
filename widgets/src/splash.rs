@@ -181,11 +181,28 @@ impl Splash {
             if !value.is_err() && !value.is_nil() {
                 Some(View::script_from_value(vm, value))
             } else {
+                // A body that fails to evaluate leaves the Splash showing
+                // its previous view — or nothing at all. Say so: a silent
+                // blank widget is the hardest bug in this file to find.
+                if value.is_err() {
+                    for e in vm.take_errors() {
+                        log!("splash: {}", e);
+                    }
+                } else {
+                    log!("splash: script body evaluated to nothing (no root view)");
+                }
                 None
             }
         });
 
-        if let Some(view) = new_view {
+        if let Some(mut view) = new_view {
+            // The HOST owns this widget's slot in its tree: `Splash{width: Fill
+            // height: Fill}` is a promise about the space the Splash occupies,
+            // and rebuilding the body from script must not silently take it
+            // away. Without this the freshly-minted view arrives with the
+            // Splash type-default walk (Fill/Fit) and a host asking for a
+            // full-height Splash gets a zero-height one that draws nothing.
+            view.walk = self.view.walk;
             // Cache the body index for host->script calls (call_script_fn etc).
             self.body_id = cx.with_script_vm_id(vm_id, |vm| {
                 let bodies = vm.bx.code.bodies.borrow();

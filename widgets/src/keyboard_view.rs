@@ -23,7 +23,19 @@ pub struct KeyboardView {
     source: ScriptObjectRef,
     #[deref]
     view: View,
-    #[redraw]
+    /// The outer turtle's area (set by `end`). Deliberately NOT marked
+    /// `#[redraw]`: the derive gives a `#[redraw]` field priority over the
+    /// deref when it generates `WidgetNode::redraw`, and `area.redraw(cx)`
+    /// only marks the draw list this widget is encoded in — it never recurses
+    /// into `view`'s children. Since KeyboardView is the window's `body`,
+    /// that severed every app-level `ui.redraw()` from the whole widget tree:
+    /// retained draw lists below (dock tab contents, viewports) were never
+    /// marked and kept presenting stale pixels until something else marked
+    /// them (e.g. a hover calling `redraw_all`). Without the attribute the
+    /// derive falls back to `self.view.redraw(cx)` = `View::redraw`, which
+    /// marks the view and recurses the subtree — the documented redraw
+    /// contract (a widget redraws everything it shows). `WidgetNode::area()`
+    /// is unaffected: the derive already preferred the deref view for it.
     #[rust]
     area: Area,
     #[live]
