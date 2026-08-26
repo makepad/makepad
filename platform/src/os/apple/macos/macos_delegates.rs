@@ -16,7 +16,7 @@ use {
             },
             cx_native::EventFlow,
             macos::{
-                macos_app::{with_macos_app, MacosApp},
+                macos_app::{try_with_macos_app, with_macos_app, MacosApp},
                 macos_event::MacosEvent,
                 macos_window::get_cocoa_window,
             },
@@ -94,6 +94,23 @@ pub fn define_macos_timer_delegate() -> *const Class {
         }));
     }
 
+    extern "C" fn received_display_link(_this: &Object, _: Sel, link: ObjcId) {
+        shielded("display-link", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_display_link_fired(link);
+        }));
+    }
+
+    extern "C" fn metal_display_link_needs_update(
+        _this: &Object,
+        _: Sel,
+        link: ObjcId,
+        update: ObjcId,
+    ) {
+        shielded("metal-display-link", std::panic::AssertUnwindSafe(|| {
+            MacosApp::send_metal_display_link_update(link, update);
+        }));
+    }
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
 
@@ -106,6 +123,15 @@ pub fn define_macos_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedLiveResize:),
             received_live_resize as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedDisplayLink:),
+            received_display_link as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(metalDisplayLink:needsUpdate:),
+            metal_display_link_needs_update
+                as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
@@ -673,25 +699,37 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn reset_cursor_rects(this: &Object, _sel: Sel) {
-        unsafe {
-            let current_cursor = with_macos_app(|app| app.current_cursor.clone());
-            let cursor_id = with_macos_app(|app| {
-                *app.cursors
-                    .entry(current_cursor.clone())
-                    .or_insert_with(|| load_mouse_cursor(current_cursor.clone()))
-            });
+        // AppKit fires this from the display cycle (tracking-area update), often
+        // re-entrantly while our own handler holds the app borrow. Two hard rules:
+        // never panic across this ObjC frame (that is a nounwind abort — the
+        // 'crashed when clicking About' report), and never hand AppKit a cursor
+        // object we do not own — the cache holds retained ids for that reason.
+        let call = std::panic::AssertUnwindSafe(|| unsafe {
+            let Some(current_cursor) = try_with_macos_app(|app| app.current_cursor.clone()) else { return };
+            let Some(cursor_id) = try_with_macos_app(|app| {
+                *app.cursors.entry(current_cursor.clone()).or_insert_with(|| {
+                    let id = load_mouse_cursor(current_cursor.clone());
+                    if !id.is_null() {
+                        let _: ObjcId = msg_send![id, retain];
+                    }
+                    id
+                })
+            }) else { return };
+            if cursor_id.is_null() {
+                return;
+            }
             let bounds: NSRect = msg_send![this, bounds];
             if let MouseCursor::Hidden = current_cursor {
-                let _: () = msg_send![
-                    cursor_id,
-                    setHiddenUntilMouseMoves: true
-                ];
+                // +[NSCursor setHiddenUntilMouseMoves:] is a CLASS method. Sending it to
+                // the cursor instance raised NSInvalidArgumentException inside this
+                // callback, and a foreign exception crossing the shield below is a
+                // hard abort — every entry into walk mode died here.
+                let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: true];
             }
-            let _: () = msg_send![
-                this,
-                addCursorRect: bounds
-                cursor: cursor_id
-            ];
+            let _: () = msg_send![this, addCursorRect: bounds cursor: cursor_id];
+        });
+        if std::panic::catch_unwind(call).is_err() {
+            eprintln!("makepad: PANIC contained at the resetCursorRects callback boundary; cursor rects skipped this round");
         }
     }
 
@@ -998,6 +1036,32 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.end_live_resize();
     }
 
+    /// Decode %XX escapes into their bytes; the result is the UTF-8 path the
+    /// filesystem actually knows. Invalid escapes pass through untouched.
+    fn percent_decode_path(encoded: &str) -> String {
+        let bytes = encoded.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).unwrap_or_else(|_| encoded.to_string())
+    }
+
     fn get_drag_items_from_pasteboard(
         this: &Object,
         sender: ObjcId,
@@ -1052,7 +1116,11 @@ pub fn define_cocoa_view_class() -> *const Class {
                         path: if path == "makepad_internal_empty" {
                             "".to_string()
                         } else {
-                            path
+                            // `absoluteString` is percent-ENCODED — a Finder
+                            // drop of "My File.png" arrived as My%20File.png
+                            // and every consumer then failed to find it. A
+                            // FilePath item carries a filesystem path.
+                            percent_decode_path(&path)
                         },
                     });
                 }
