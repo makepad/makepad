@@ -281,6 +281,29 @@ impl ActorDef {
         self.height = height;
         self
     }
+
+    /// This def with every LINEAR quantity — body, speed, sight, attack
+    /// reach, projectile speed — multiplied by `scale`.
+    ///
+    /// The table's metres are written for a world whose people stand
+    /// [`person_height`] tall. A map declares its own people (its walker
+    /// body), and a map whose people are half that height is a world drawn
+    /// at half the metre: the same creature must be half as tall, half as
+    /// wide, half as fast and half as far-sighted there, or its body wedges
+    /// under the map's ceilings (drawn feet-underground) and its gunfire
+    /// crosses the whole level. Scalars — hit points, damage, rates, pain,
+    /// spread angles — are not lengths and do not scale.
+    pub fn scaled(mut self, scale: f32) -> ActorDef {
+        self.speed *= scale;
+        self.radius *= scale;
+        self.height *= scale;
+        self.sight_range *= scale;
+        if let Some(attack) = &mut self.attack {
+            attack.range *= scale;
+            attack.speed *= scale;
+        }
+        self
+    }
 }
 
 /// A weapon the PLAYER can hold. Same shape as an attack plus the magazine,
@@ -1131,6 +1154,20 @@ pub fn family_of(source: &str) -> ActorFamily {
         ActorFamily::Doom
     } else {
         ActorFamily::Unknown
+    }
+}
+
+/// How tall this family's own PLAYER stands in the metres the behaviour
+/// table is written in — the yardstick every linear number in the table
+/// shares. A runtime whose map declares people of a different height scales
+/// each def by `map_person_height / person_height(source)` (see
+/// [`ActorDef::scaled`]) at the one place the table becomes bodies.
+pub fn person_height(source: &str) -> f32 {
+    match family_of(source) {
+        // The source player is 56 units tall and the table's metres put
+        // that at 1.75.
+        ActorFamily::Doom => 1.75,
+        ActorFamily::Unknown => 1.75,
     }
 }
 
