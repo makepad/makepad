@@ -1324,6 +1324,29 @@ script_mod! {
 
 }
 
+/// Value delta for one scroll event: notch count (Windows wheels send 120
+/// units per notch; trackpads send smaller deltas that accumulate over the
+/// gesture) times the step fraction, scaled by the modifier ladder —
+/// Shift fine (x0.2), plain (x1), Ctrl coarse (x4), Ctrl+Shift (x10).
+/// Scroll up (negative y) raises the value; a zero step disables wheel input.
+pub(crate) fn wheel_value_delta(
+    scroll: Vec2d,
+    modifiers: &KeyModifiers,
+    scroll_step: f64,
+) -> f64 {
+    if scroll_step == 0.0 {
+        return 0.0;
+    }
+    let axis = if scroll.y != 0.0 { -scroll.y } else { -scroll.x };
+    let ladder = match (modifiers.control, modifiers.shift) {
+        (true, true) => 10.0,
+        (true, false) => 4.0,
+        (false, true) => 0.2,
+        (false, false) => 1.0,
+    };
+    (axis / 120.0) * scroll_step * ladder
+}
+
 #[derive(Copy, Clone, Debug, Script, ScriptHook)]
 pub enum DragAxis {
     #[pick]
@@ -1388,6 +1411,11 @@ pub struct Slider {
     step: f64,
     #[live]
     default: f64,
+
+    /// Fraction of the value range one scroll-wheel notch moves while the
+    /// pointer hovers this slider. 0.0 (the default) disables wheel input.
+    #[live]
+    scroll_step: f64,
 
     #[live]
     bind: String,
@@ -1497,6 +1525,13 @@ impl Slider {
             self.update_text_input(cx);
         }
     }
+
+    /// Snap back to the DSL `default:` value, as a title-click reset does.
+    pub fn reset_to_default(&mut self, cx: &mut Cx) {
+        self.set_internal(self.default);
+        self.update_text_input(cx);
+        self.draw_bg.redraw(cx);
+    }
 }
 
 impl Widget for Slider {
@@ -1588,6 +1623,19 @@ impl Widget for Slider {
             }
             Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Grab);
+            }
+            Hit::FingerScroll(e) => {
+                if self.scroll_step > 0.0 && !self.animator_in_state(cx, ids!(disabled.on)) {
+                    let delta = wheel_value_delta(e.scroll, &e.modifiers, self.scroll_step);
+                    if delta != 0.0 && self.dragging.is_none() {
+                        self.relative_value = (self.relative_value + delta).max(0.0).min(1.0);
+                        self.set_internal(self.to_external());
+                        self.draw_bg.redraw(cx);
+                        self.update_text_input(cx);
+                        cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                        cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                    }
+                }
             }
             Hit::FingerDown(FingerDownEvent {
                 // abs,
@@ -1689,6 +1737,14 @@ impl SliderRef {
         }
     }
 
+    /// Reset to the DSL default and return the value now in effect, so the
+    /// caller can push it into whatever the slider is bound to.
+    pub fn reset_to_default(&self, cx: &mut Cx) -> Option<f64> {
+        let mut inner = self.borrow_mut()?;
+        inner.reset_to_default(cx);
+        Some(inner.to_external())
+    }
+
     pub fn slided(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
@@ -1729,5 +1785,43 @@ impl SliderRef {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    fn mods(control: bool, shift: bool) -> KeyModifiers {
+        KeyModifiers { control, shift, alt: false, logo: false }
+    }
+
+    #[test]
+    fn wheel_ladder() {
+        // One Windows notch is scroll.y = -120 (wheel up) -> value moves UP.
+        let up = Vec2d { x: 0.0, y: -120.0 };
+        assert!((wheel_value_delta(up, &mods(false, false), 0.025) - 0.025).abs() < 1e-12);
+        assert!((wheel_value_delta(up, &mods(false, true), 0.025) - 0.005).abs() < 1e-12);
+        assert!((wheel_value_delta(up, &mods(true, false), 0.025) - 0.10).abs() < 1e-12);
+        assert!((wheel_value_delta(up, &mods(true, true), 0.025) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn wheel_down_decreases() {
+        let down = Vec2d { x: 0.0, y: 120.0 };
+        assert!((wheel_value_delta(down, &mods(false, false), 0.025) + 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn horizontal_axis_fallback() {
+        // Tilt wheels / horizontal trackpad gestures land on x when y is 0.
+        let tilt = Vec2d { x: -120.0, y: 0.0 };
+        assert!((wheel_value_delta(tilt, &mods(false, false), 0.025) - 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zero_step_disables() {
+        let up = Vec2d { x: 0.0, y: -120.0 };
+        assert_eq!(wheel_value_delta(up, &mods(true, true), 0.0), 0.0);
     }
 }

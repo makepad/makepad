@@ -27,6 +27,8 @@ script_mod! {
             focus: instance(0.0)
             disabled: instance(0.0)
 
+            ink_centered: true
+
             color_dither: uniform(1.0)
             gradient_fill_horizontal: uniform(0.0)
 
