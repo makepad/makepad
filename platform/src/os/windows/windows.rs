@@ -66,10 +66,12 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        // the signal poll timer
-        with_win32_app(|app| app.start_timer(0, 0.008, true));
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
+        // The 8 ms signal-poll heartbeat. This used to be armed TWICE — once as
+        // `start_timer(0, 0.008, true)` (which maps id 0 onto a SignalPoll timer)
+        // and once here — so every idle tick ran the whole signal/action/network
+        // drain twice and posted two WM_TIMERs.
         with_win32_app(|app| app.start_signal_poll());
         Win32App::event_loop();
     }
@@ -136,18 +138,16 @@ impl Cx {
 
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
-                    // redraw just this windows root draw list (size or DPI — DPI-only
-                    // changes still need a pass rebuild at the new physical scale)
-                    if re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                    {
-                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                            self.redraw_pass_and_child_passes(main_pass_id);
-                        }
-                    }
                 }
-                // ok lets not redraw all, just this window
-                self.redraw_all();
+                // Redraw just this window's pass tree (size or DPI — a DPI-only
+                // change still needs a pass rebuild at the new physical scale).
+                // This used to be followed by an unconditional `redraw_all()`,
+                // which rebuilt every OTHER window's whole widget tree on every
+                // WM_SIZE/WM_MOVE of one of them — during a drag-resize that is a
+                // full re-layout of the entire app per mouse sample.
+                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                    self.redraw_pass_and_child_passes(main_pass_id);
+                }
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
             Win32Event::WindowClosed(wc) => {
@@ -177,9 +177,23 @@ impl Cx {
                         d3d11_windows.remove(index);
                     }
                 }
+                // `close_window` (behind `CxOsOp::CloseWindow`) clears
+                // `is_created` *before* calling `DestroyWindow`, so a window
+                // still marked created at this point was torn down by
+                // something other than the app — combined with the WM_CLOSE
+                // accept above, that is the human dismissing it. Say so on
+                // stdout so an agent tailing the log does not read a
+                // deliberate close as an unexplained death (mirrors
+                // macos.rs's `MacosEvent::WindowClosed` handling).
+                let user_closed = crate::remote::take_window_close_requested(window_id.id())
+                    || self.windows[window_id].is_created;
+                let title = self.windows[window_id].create_title.clone();
                 self.call_event_handler(&Event::WindowClosed(wc));
                 // Remove the window; tolerate CxOsOp::CloseWindow having removed it already.
                 self.windows[window_id].is_created = false;
+                if user_closed {
+                    crate::remote::note_user_closed_window(window_id.id(), &title);
+                }
                 if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id) {
                     d3d11_windows.remove(index);
                 }
@@ -204,131 +218,68 @@ impl Cx {
                         )
                     })
                 {
+                    if user_closed {
+                        crate::remote::note_user_closed_last_window();
+                    }
                     self.call_event_handler(&Event::Shutdown);
                     return EventFlow::Exit;
                 }
             }
-            Win32Event::Paint => {
-                // Poll video players for new frames
-                if !self.os.video_players.is_empty() {
-                    let mut players = std::mem::take(&mut self.os.video_players);
-                    let mut video_events = Vec::new();
-                    for (_id, player) in players.iter_mut() {
-                        player.sync_worker();
-                        match player.check_prepared() {
-                            Some(Ok(crate::media_plugin::PlaybackPrepared {
-                                width,
-                                height,
-                                duration_ms: duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            })) => {
-                                video_events.push(Event::VideoPlaybackPrepared(
-                                    VideoPlaybackPreparedEvent {
-                                        video_id: player.video_id,
-                                        video_width: width,
-                                        video_height: height,
-                                        duration,
-                                        is_seekable,
-                                        video_tracks,
-                                        audio_tracks,
-                                    },
-                                ));
-                            }
-                            Some(Err(err)) => {
-                                video_events.push(Event::VideoDecodingError(
-                                    VideoDecodingErrorEvent {
-                                        video_id: player.video_id,
-                                        error: err,
-                                    },
-                                ));
-                            }
-                            None => {}
-                        }
-                        if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(
-                                VideoTextureUpdatedEvent {
-                                    video_id: player.video_id,
-                                    current_position_ms: player.current_position_ms(),
-                                    yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.uses_yuv(),
-                                        matrix: player.yuv_matrix(),
-                                        biplanar: player.yuv_biplanar(),
-                                        full_range: player.yuv_full_range(),
-                                        rotation_steps: 0.0,
-                                        external: false,
-                                        array: player.yuv_array(),
-                                    },
-                                rgba_gl_2d: false,
-                                },
-                            ));
-                        }
-                        if player.check_eos() {
-                            video_events.push(Event::VideoPlaybackCompleted(
-                                VideoPlaybackCompletedEvent {
-                                    video_id: player.video_id,
-                                },
-                            ));
-                        }
-                    }
-                    let needs_repaint = players.values().any(|p| p.keep_polling());
-                    self.os.video_players = players;
-                    for event in video_events {
-                        self.call_event_handler(&event);
-                    }
-                    // Keep the paint loop alive while preparing or playing.
-                    // Arm *before* next-frame dispatch so widgets can observe it, then
-                    // re-arm *after* — `call_next_frame_event` consumes the set, and without
-                    // a re-arm a 30fps stream on a 60Hz display drops into `EventFlow::Wait`
-                    // on the empty half of the ticks. Wait mode skips Paint on the 8ms
-                    // signal-poll timer, so the video freezes until the next mouse/input
-                    // message wakes GetMessageW.
-                    if needs_repaint {
-                        self.new_next_frame();
-                    }
-                }
-
-                let time_now = with_win32_app(|app| app.time_now());
-                if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(time_now);
-                }
-                if self.os.video_players.values().any(|p| p.keep_polling()) {
-                    self.new_next_frame();
-                }
-                if self.need_redrawing() {
-                    self.call_draw_event(time_now);
-                    self.hlsl_compile_shaders(&d3d11_cx);
-                }
-                // ok here we send out to all our childprocesses
-
-                let presented = self.handle_repaint(d3d11_windows, d3d11_cx);
-                // A presenting pass blocks in the frame-latency wait or Present, pacing
-                // the Poll loop to the display. A pass that presents nothing has no
-                // blocking call at all, so a NextFrame listener that re-arms without
-                // dirtying a pass (e.g. a video player polling between decoded frames)
-                // would spin the loop at full speed; sleep briefly to cap that.
-                // `any_passes_dirty` also paces a popup's waitless dropped-present retry.
-                // While video is preparing/playing we keep re-arming NextFrame so Poll
-                // does not drop into Wait; pace that like the 8 ms signal-poll timer.
-                if !presented {
-                    let video_pacing = self.os.video_players.values().any(|p| p.keep_polling());
-                    if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing
-                    {
-                        let ms = if video_pacing { 8 } else { 1 };
-                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                    }
-                }
-
-                // Run script-VM garbage collection at a safe point after paint, matching
-                // the macOS backend, so the script object heap doesn't grow without bound:
-                // every `eval` / `script_apply_eval!` allocates script objects that are
-                // only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
-                self.with_vm(|vm| {
-                    if vm.heap().needs_gc() {
-                        vm.gc();
-                    }
+            Win32Event::Beat {
+                window_id,
+                time,
+                primary,
+            } => {
+                // One window's frame-latency waitable fired: the compositor retired
+                // a present and is ready for that window's next frame. Aim the tick
+                // at the flip it will actually be shown on, not at "now" — that is
+                // what makes animation advance in even steps instead of by however
+                // long this particular tick happened to take.
+                let flip_time = d3d11_windows
+                    .iter_mut()
+                    .find(|w| w.window_id == window_id)
+                    .map(|w| w.target_present_time(time))
+                    .unwrap_or(time);
+                // The primary window owns the app clock. If it can no longer beat
+                // (minimized, occluded, device lost) its tick would simply never
+                // run, and every animation would freeze while a secondary window
+                // keeps flipping — so hand the full tick to whoever is still
+                // beating.
+                let primary_window =
+                    with_win32_app(|app| app.beat_handles.first().map(|b| b.window_id));
+                let primary_alive = primary_window.is_some_and(|pid| {
+                    pid == window_id
+                        || d3d11_windows.iter().any(|w| {
+                            w.window_id == pid
+                                && !w.device_lost
+                                && w.occluded_since.is_none()
+                                && !w.win32_window.is_iconic()
+                        })
                 });
+                let primary = primary || !primary_alive;
+                self.os.link_scope = Some(window_id);
+                self.os.link_flip_time = Some(flip_time);
+                // The primary window's beat drives the WHOLE tick (video, next
+                // frames, draw, paint) — the same work as the unscoped Paint, just
+                // clocked by the flip. A secondary window's beat paints only its own
+                // pass tree: advancing the animation clock once per window per
+                // refresh would double-step every animation in a multi-window app.
+                self.paint_tick(flip_time, primary, d3d11_cx, d3d11_windows);
+                self.os.link_scope = None;
+                self.os.link_flip_time = None;
+                // If nothing was painted for this window (its pass was clean, or it
+                // is occluded) the credit taken by the wait stays held: the beat
+                // simply drops out of the wait list until a frame is presented,
+                // since the compositor is already waiting for one. See
+                // `BeatSource::credit_held` — the credit cannot be handed back.
+            }
+            Win32Event::Paint => {
+                // The unscoped tick: no window flip is driving it (a resize/drag
+                // heartbeat, a geometry echo, or the beat's wait timing out because
+                // nothing is being composited). Paint every dirty pass and stamp the
+                // frame with wall-now.
+                let time_now = with_win32_app(|app| app.time_now());
+                self.paint_tick(time_now, true, d3d11_cx, d3d11_windows);
             }
             Win32Event::MouseDown(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
@@ -364,7 +315,20 @@ impl Cx {
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
             Win32Event::WindowCloseRequested(e) => {
-                self.call_event_handler(&Event::WindowCloseRequested(e))
+                // WM_CLOSE only ever reaches here for a native close (the
+                // close button, Alt-F4, or the system menu) — `close_window`
+                // (behind `CxOsOp::CloseWindow`) calls `DestroyWindow`
+                // directly and never sends WM_CLOSE. So an accepted request
+                // here is the human dismissing the window; remember it, and
+                // report it when the close actually lands (mirrors
+                // macos.rs's `windowShouldClose:` handling — see
+                // `note_window_close_requested`).
+                let window_id = e.window_id;
+                let accept_close = e.accept_close.clone();
+                self.call_event_handler(&Event::WindowCloseRequested(e));
+                if accept_close.get() {
+                    crate::remote::note_window_close_requested(window_id.id());
+                }
             }
             Win32Event::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             Win32Event::Drag(window_id, mut e) => {
@@ -414,6 +378,13 @@ impl Cx {
                     self.handle_action_receiver();
                 }
                 self.poll_control_channel();
+                // A `--remote` grab arrives here (the control channel is polled on
+                // this tick) and can only be answered by a pass that renders. Dirty
+                // the window passes so the next tick paints one — the same thing the
+                // macOS timer handler does for `screenshot_requests`.
+                if !self.screenshot_requests.is_empty() {
+                    self.repaint_windows();
+                }
 
                 self.run_live_edit_if_needed("windows");
                 self.handle_networking_events();
@@ -444,6 +415,7 @@ impl Cx {
                 if self.any_passes_dirty()
                     || self.need_redrawing()
                     || self.new_next_frames.len() != 0
+                    || !self.screenshot_requests.is_empty()
                     || self.os.video_players.values().any(|p| p.keep_polling())
                 {
                     return EventFlow::Poll;
@@ -465,11 +437,166 @@ impl Cx {
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
+            // A pending screenshot must never be left asleep in `GetMessageW`:
+            // nothing else would wake the loop to render the frame it needs.
+            || !self.screenshot_requests.is_empty()
             || self.os.video_players.values().any(|p| p.keep_polling())
         {
             EventFlow::Poll
         } else {
             EventFlow::Wait
+        }
+    }
+
+    /// One paint tick: advance the frame, redraw what is dirty, and present.
+    ///
+    /// `time_now` is the timestamp the WHOLE frame is stamped with — the beat
+    /// passes the flip this frame is aimed at, the unscoped fallbacks pass
+    /// wall-now. `full` distinguishes the tick that owns the app clock (video
+    /// polling and the NextFrame advance) from a secondary window's beat, which
+    /// only redraws and presents its own pass tree.
+    fn paint_tick(
+        &mut self,
+        time_now: f64,
+        full: bool,
+        d3d11_cx: &mut D3d11Cx,
+        d3d11_windows: &mut Vec<D3d11Window>,
+    ) {
+        // Poll video players for new frames
+        if full && !self.os.video_players.is_empty() {
+            let mut players = std::mem::take(&mut self.os.video_players);
+            let mut video_events = Vec::new();
+            for (_id, player) in players.iter_mut() {
+                player.sync_worker();
+                match player.check_prepared() {
+                    Some(Ok(crate::media_plugin::PlaybackPrepared {
+                        width,
+                        height,
+                        duration_ms: duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    })) => {
+                        video_events.push(Event::VideoPlaybackPrepared(
+                            VideoPlaybackPreparedEvent {
+                                video_id: player.video_id,
+                                video_width: width,
+                                video_height: height,
+                                duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            },
+                        ));
+                    }
+                    Some(Err(err)) => {
+                        video_events.push(Event::VideoDecodingError(
+                            VideoDecodingErrorEvent {
+                                video_id: player.video_id,
+                                error: err,
+                            },
+                        ));
+                    }
+                    None => {}
+                }
+                if player.poll_frame(&mut self.textures) {
+                    video_events.push(Event::VideoTextureUpdated(
+                        VideoTextureUpdatedEvent {
+                            video_id: player.video_id,
+                            current_position_ms: player.current_position_ms(),
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: player.uses_yuv(),
+                                matrix: player.yuv_matrix(),
+                                biplanar: player.yuv_biplanar(),
+                                full_range: player.yuv_full_range(),
+                                rotation_steps: 0.0,
+                                external: false,
+                                array: player.yuv_array(),
+                            },
+                        rgba_gl_2d: false,
+                        },
+                    ));
+                }
+                if player.check_eos() {
+                    video_events.push(Event::VideoPlaybackCompleted(
+                        VideoPlaybackCompletedEvent {
+                            video_id: player.video_id,
+                        },
+                    ));
+                }
+            }
+            let needs_repaint = players.values().any(|p| p.keep_polling());
+            self.os.video_players = players;
+            for event in video_events {
+                self.call_event_handler(&event);
+            }
+            // Keep the paint loop alive while preparing or playing.
+            // Arm *before* next-frame dispatch so widgets can observe it, then
+            // re-arm *after* — `call_next_frame_event` consumes the set, and without
+            // a re-arm a 30fps stream on a 60Hz display drops into `EventFlow::Wait`
+            // on the empty half of the ticks. Wait mode skips Paint on the 8ms
+            // signal-poll timer, so the video freezes until the next mouse/input
+            // message wakes GetMessageW.
+            if needs_repaint {
+                self.new_next_frame();
+            }
+        }
+        // Only the tick that owns the app clock advances animations: a secondary
+        // window's beat fires once per ITS refresh, and stepping NextFrame there
+        // too would run every animation at N× speed in a multi-window app.
+        if full {
+            if self.new_next_frames.len() != 0 {
+                self.call_next_frame_event(time_now);
+            }
+            if self.os.video_players.values().any(|p| p.keep_polling()) {
+                self.new_next_frame();
+            }
+        }
+        if self.need_redrawing() {
+            self.call_draw_event(time_now);
+            self.hlsl_compile_shaders(&d3d11_cx);
+        }
+        // ok here we send out to all our childprocesses
+
+        let presented = self.handle_repaint(d3d11_windows, d3d11_cx);
+        // A presenting pass blocks in the frame-latency wait or Present, pacing
+        // the Poll loop to the display. A pass that presents nothing has no
+        // blocking call at all, so a NextFrame listener that re-arms without
+        // dirtying a pass (e.g. a video player polling between decoded frames)
+        // would spin the loop at full speed; sleep briefly to cap that.
+        // `any_passes_dirty` also paces a popup's waitless dropped-present retry.
+        // While video is preparing/playing we keep re-arming NextFrame so Poll
+        // does not drop into Wait; pace that like the 8 ms signal-poll timer.
+        if !presented {
+            let video_pacing = self.os.video_players.values().any(|p| p.keep_polling());
+            if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing {
+                let ms = if video_pacing { 8 } else { 1 };
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
+        // Tell the beat how long it may block. The frame-latency waitable is a
+        // credit semaphore refilled by retired presents, so a stretch of ticks
+        // that present nothing would leave it unsignaled and the beat would sit
+        // out its full timeout; drop to the 8 ms heartbeat rate for those, which
+        // is exactly the cadence this work had before the beat existed.
+        with_win32_app(|app| {
+            app.beat_timeout_ms = if presented {
+                BEAT_TIMEOUT_PRESENTED_MS
+            } else {
+                BEAT_TIMEOUT_IDLE_MS
+            };
+        });
+
+        // Run script-VM garbage collection at a safe point after paint, matching
+        // the macOS backend, so the script object heap doesn't grow without bound:
+        // every `eval` / `script_apply_eval!` allocates script objects that are
+        // only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
+        if full {
+            self.with_vm(|vm| {
+                if vm.heap().needs_gc() {
+                    vm.gc();
+                }
+            });
         }
     }
 
@@ -485,14 +612,82 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        // ONE timestamp for the whole frame: the flip this beat is aimed at, or
+        // wall-now for an unscoped tick. It used to be sampled per pass, so an
+        // offscreen pass and the window pass that consumed it were stamped
+        // milliseconds apart and any animation split across them sheared.
+        let time_now = self
+            .os
+            .link_flip_time
+            .unwrap_or_else(|| with_win32_app(|app| app.time_now())) as f32;
+        let scope = self.os.link_scope;
+        // Which windows have a beat of their own. Only those are held back during
+        // someone else's beat — a popup (no frame-latency waitable) or a window in
+        // a live resize has no beat coming, so holding its pass back would freeze
+        // it for as long as another window keeps flipping.
+        let paced: Vec<WindowId> = if scope.is_some() {
+            with_win32_app(|app| app.beat_handles.iter().map(|b| b.window_id).collect())
+        } else {
+            Vec::new()
+        };
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
+            // Per-window pacing: during a beat only the flipping window's pass
+            // tree paints; everything else stays dirty for its OWN beat.
+            if let Some(scope) = scope {
+                if let Some(window_id) = self.pass_root_window(*draw_pass_id) {
+                    // ...unless a capture is waiting on that window. Its own beat
+                    // may never come (an occluded window's presents are not
+                    // retired), and holding the pass back while another window
+                    // keeps flipping would leave the grab unanswered forever.
+                    if window_id != scope
+                        && paced.contains(&window_id)
+                        && !self.has_pending_window_screenshot(window_id)
+                    {
+                        self.repaint_pass(*draw_pass_id);
+                        continue;
+                    }
+                }
+            }
+            self.passes[*draw_pass_id].set_time(time_now);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
+                        // The device is gone; presenting can never succeed again, so
+                        // do not re-dirty the pass — that is what would otherwise keep
+                        // the loop spinning on a dead swap chain forever.
+                        if window.device_lost {
+                            continue;
+                        }
+                        // A minimized window gets no compositor vsync, and a window
+                        // that reported DXGI_STATUS_OCCLUDED is not reaching glass:
+                        // painting either is pure waste and its frame-latency waitable
+                        // will not signal. Skip and keep the pass dirty — but only for
+                        // so long, since both flags can stick on "hidden" while the
+                        // window is really on screen (same probe the macOS backend runs
+                        // against `occlusionState`).
+                        // A pending `/g` grab overrides that skip: a capture is only
+                        // ever produced by a pass that renders, and an app is just as
+                        // grabbable behind another window as in front of it.
+                        let capture_pending = self.has_pending_window_screenshot(window_id);
+                        if window.win32_window.is_iconic() || window.occluded_since.is_some() {
+                            let now = Instant::now();
+                            let since = *window.occluded_since.get_or_insert(now);
+                            if now.duration_since(since) < D3d11Window::OCCLUSION_PROBE_INTERVAL {
+                                if !capture_pending {
+                                    self.repaint_pass(*draw_pass_id);
+                                    continue;
+                                }
+                                // Rendered for the grab, not as a probe: leave the
+                                // probe clock alone so it still fires on schedule.
+                            } else {
+                                // Fall through and paint one probe frame: if the flag is
+                                // stale we recover, if it is honest we spent one frame.
+                                window.occluded_since = Some(now);
+                            }
+                        }
                         //let dpi_factor = window.window_geom.dpi_factor;
                         if window.is_in_resize {
                             window.sync_background_color(self.passes[*draw_pass_id].clear_color);
@@ -733,6 +928,13 @@ impl Cx {
                         window.win32_window.set_topmost(is_topmost);
                     }
                 }
+                CxOsOp::SetChromelessWhenMaximized(window_id, chromeless) => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.win32_window.set_chromeless_when_maximized(chromeless);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -750,6 +952,11 @@ impl Cx {
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::SetCursor(cursor) => {
                     with_win32_app(|app| app.set_mouse_cursor(cursor));
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    // Runs on its own STA thread; the answer arrives as a
+                    // FileDialogAction, same contract as macOS.
+                    super::file_dialog::open_select_folder_dialog(settings);
                 }
                 CxOsOp::StartTimer {
                     timer_id,
@@ -1211,6 +1418,12 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
+    /// While a beat runs: paint ONLY passes rooted in this window, and stamp them
+    /// with `link_flip_time` — the app time of the flip the frame is aimed at.
+    /// None = an unscoped tick (heartbeat / resize / geometry echo): paint
+    /// everything, stamp wall-now. Twin of the macOS backend's link_scope.
+    pub(crate) link_scope: Option<WindowId>,
+    pub(crate) link_flip_time: Option<f64>,
     pub(crate) start_time: Option<Instant>,
     pub(crate) media: CxWindowsMedia,
     pub(crate) d3d11_device: Option<ID3D11Device>,

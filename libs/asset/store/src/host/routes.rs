@@ -12,6 +12,7 @@ use super::http::{BodyError, Conn, Head, Method, Resp};
 use super::state::{StateCtx, StateHandle};
 use super::util::log;
 use crate::{ServerError, ServerResult};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
@@ -34,6 +35,10 @@ pub enum Outcome {
 /// Everything a route handler may reach, shared per worker thread.
 #[derive(Clone)]
 pub struct RouteCtx {
+    /// Requests served on this plane since start. Paired with the accept
+    /// counter it shows what a client's transport really costs: 30 blobs as
+    /// 30 requests over 30 connections, or as 2 requests over 1.
+    pub requests: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub state: StateHandle,
     pub cfg: std::sync::Arc<ServerConfig>,
     pub server_id: [u8; 16],
@@ -48,6 +53,20 @@ pub struct RouteCtx {
     /// then refuse with 503 rather than inventing a session.
     pub chat: Option<super::chat::ChatHandle>,
     pub chat_event_waiters: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Live worker announcements of what the GPU fleet can execute NOW,
+    /// merged over `cfg.job_profiles` by `GET /v1/job-profiles`.
+    pub profiles: std::sync::Arc<super::profiles::ProfileRegistry>,
+    /// Live game rooms — who is playing what, right now, and how to reach
+    /// them. In memory and leased: a room is a process on somebody's desk,
+    /// not a catalog entry.
+    pub rooms: std::sync::Arc<super::rooms::RoomRegistry>,
+    /// Direct CAS handle for data-plane bulk writes: pure path/budget config
+    /// over the same `<root>/cas` the core owns, so connection threads can
+    /// hash, fsync and rename object files WITHOUT occupying the state
+    /// thread. Catalog rows for those objects still commit on the state
+    /// thread, after the bytes are durable — the admission ordering law is
+    /// unchanged.
+    pub cas: std::sync::Arc<crate::cas::Cas>,
 }
 
 /// Serve one parsed request head to completion.
@@ -109,13 +128,32 @@ pub fn body_err_outcome(e: BodyError) -> Outcome {
 
 /// Read a whole bounded request body, mapping framing violations to their
 /// refusal outcomes.
+///
+/// On `TooLarge` specifically, drains whatever the client declared is still
+/// coming before returning the refusal: the caller is about to answer 413
+/// and close, and closing over an unread declared remainder risks an
+/// abortive RST that can drop the 413 response itself — see
+/// [`Conn::drain_remaining`]. The drain gets its own copy of `deadline_ms`
+/// rather than whatever was left of the read attempt's budget: the read
+/// side of an oversized body typically fails near-instantly (the length is
+/// known from the declared Content-Length, before a single body byte is
+/// read), so a shared budget would leave almost nothing to drain with.
 pub fn read_body(
     conn: &mut Conn,
     head: &mut Head,
     max: u64,
     deadline_ms: u64,
 ) -> Result<Vec<u8>, Outcome> {
-    conn.read_body_full(head, max, deadline_ms).map_err(body_err_outcome)
+    match conn.read_body_full(head, max, deadline_ms) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            if matches!(e, BodyError::TooLarge) {
+                let deadline = Instant::now() + Duration::from_millis(deadline_ms.max(1));
+                conn.drain_remaining(head, deadline);
+            }
+            Err(body_err_outcome(e))
+        }
+    }
 }
 
 /// Capability check with ROOT BYPASS: the transport-recorded bootstrap

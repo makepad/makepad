@@ -23,11 +23,32 @@ makepad-xr = { path = "../../xr" }
 # retry), catalog runtimes, committed-event subscriber, verified cache. The
 # VJ worker owns these crates; this app consumes the public API only.
 makepad-asset-client = { path = "../../libs/asset/client" }
+# Shared preview/viewer widgets: the pool every host draws catalog content
+# with (VJ and the DJ surface adopt the same set).
+# The renderer feature brings the 3D faces (mesh turntable, world walker).
+makepad-asset-widgets = { path = "../../libs/asset/widgets", features = ["renderer"] }
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-chat = { path = "../../libs/asset/chat" }
+# The chat pane itself — ONE component, shared with the game sandbox: the
+# broker session + its worker channel, the transcript with its tool chips
+# and rate meter, and the list widget. This app supplies the personality
+# (namespace `gen`, client profile `gen`, its own client-executed tools).
+makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
 # Embedded catalog/chat broker for now: the app starts the real Asset
 # Server in-process instead of waiting for a LAN beacon.
 makepad-asset-store = { path = "../../libs/asset/store" }
 # Local licensed-pack compiler (Kenney Import). Same fail-closed walk as
 # `makepad-asset-importer --import-pack`; no network fetch.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
+# The library is 241 MP3s and 4 WAVs: the transport has to be able to play
+# what the catalog actually holds, and the container has to be knowable from
+# the bytes when a digest-named cache object has no name to read. Zero
+# dependencies, and the same decoder the preview well draws with.
+makepad-audio-decode = { path = "../../libs/audio_decode" }
+# "Split audio layers": the analysis bake. Separation (BS-RoFormer on the
+# ggml Metal runtime), the word-aligned lyrics bake, and the ONE shared
+# encode/publish of both as typed side-channel files — the same crate the VJ
+# calls, so a track analysed here is a track a deck never has to separate.
+makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
+makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }

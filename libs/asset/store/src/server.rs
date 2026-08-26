@@ -16,9 +16,12 @@ use crate::cas::{BlobCommit, BlobWriter, Cas};
 use crate::catalog::{Catalog, CandidateState, CATALOG_SCHEMA};
 use crate::error::{io_err, ServerError, ServerResult};
 use crate::jobs::{Jobs, JOBS_SCHEMA};
+use crate::search::AssetAnnotation;
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
-use makepad_asset_data::{AssetRevisionRef, BlobId};
+use makepad_asset_data::{
+    AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
+};
 use std::path::Path;
 
 /// The catalog schema version this build reads and writes, stored in
@@ -39,10 +42,29 @@ use std::path::Path;
 /// - v5: typed asset operations — owner-scoped durable operation rows with
 ///   idempotency, per-operation event logs, and the worker-liveness table
 ///   behind truthful operation availability.
+/// - v6: the search kind CHECK accepts `billboard`.
+/// - v7: the search kind CHECK accepts `game` (playable splash sources).
+/// - v8: scale retrofit — the reverse alias indices, the browse-order index,
+///   and the CAS two-level hash path (`objects/ab/cd/<64-hex>`). Existing
+///   objects move out of the one-level layout in this step.
+/// - v9: deletion — asset/revision retirement (`assets.retired_ms`,
+///   `candidates.retired_ms`), the per-asset revision index those walk,
+///   the dedup-recency column blob GC's grace horizon reads
+///   (`blobs.last_ref_ms`), and the incremental blob-GC tables. Every part
+///   is an `ALTER TABLE ADD COLUMN` or a `CREATE ... IF NOT EXISTS`, so the
+///   step costs one index build and no table rewrite however large the
+///   store is.
+/// - v10: reference blobs (`blob_refs`) — catalogued content whose bytes stay
+///   at an external path the store reads but never owns, writes or deletes.
+///   One `CREATE TABLE IF NOT EXISTS` and one index; no existing table is
+///   touched and no row is rewritten, so the step is free on any store.
+/// - v11: the search kind CHECK accepts `vjeffect` (the VJ's effect
+///   documents are catalog content like anything else). Same copy+rename
+///   retrofit v6 and v7 used — SQLite cannot ALTER a CHECK.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 6;
+pub const SERVER_SCHEMA_VERSION: i64 = 11;
 
 pub struct AssetServerCore {
     db: Db,
@@ -82,7 +104,7 @@ fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
 /// openers serialize on the writer lock and every step applies exactly once;
 /// a crash between steps leaves a valid older version that the next open
 /// finishes migrating. Unknown versions (newer builds, corruption) refuse.
-fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
+fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
     loop {
         let version = user_version(db)?;
         if version == SERVER_SCHEMA_VERSION {
@@ -131,6 +153,7 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
                         )?;
                     }
                     db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
+                    db.exec("create canon index", crate::search::SEARCH_CANON_INDEX_SQL)?;
                     crate::search::backfill_alias_index(db, budgets)?;
                 }
                 // v4: import + derived-variant tables. Purely additive; no
@@ -148,7 +171,64 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
                     )?;
                 }
                 // v6: kind CHECK accepts billboard (sprite/billboard content).
-                5 => {
+                // v7: kind CHECK accepts game. Both rebuild the table with
+                // this build's CHECK, so a v5 root passes through v6 already
+                // carrying the v7 list and the v7 step is a no-op rebuild.
+                5 | 6 => {
+                    if table_exists(db, "search_annotations")? {
+                        db.exec(
+                            "rebuild search_annotations kind check",
+                            crate::search::KIND_CHECK_REBUILD_SQL,
+                        )?;
+                    }
+                    db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
+                }
+                // v8: the scale retrofit. Both schema strings are made
+                // entirely of IF NOT EXISTS statements, so re-running them
+                // only adds the indices this version introduced; the CAS
+                // move is idempotent for the same reason. Doing the move
+                // inside the migration transaction is deliberate: the
+                // writer lock is what stops two openers migrating at once,
+                // and an interrupted move leaves objects readable at both
+                // paths for the next attempt.
+                7 => {
+                    db.exec("create catalog schema", CATALOG_SCHEMA)?;
+                    db.exec("create canon index", crate::search::SEARCH_CANON_INDEX_SQL)?;
+                    cas.migrate_shards()?;
+                }
+                // v9: retirement + blob GC. The three columns are added with
+                // ALTER TABLE (SQLite records them in the schema without
+                // touching a single row), the rest is IF NOT EXISTS DDL, and
+                // the one real cost is building the per-asset revision index
+                // once.
+                8 => {
+                    for (table, column, ddl) in [
+                        ("assets", "retired_ms", "ALTER TABLE assets ADD COLUMN retired_ms INTEGER"),
+                        (
+                            "candidates",
+                            "retired_ms",
+                            "ALTER TABLE candidates ADD COLUMN retired_ms INTEGER",
+                        ),
+                        ("blobs", "last_ref_ms", "ALTER TABLE blobs ADD COLUMN last_ref_ms INTEGER"),
+                    ] {
+                        if table_exists(db, table)? && !table_has_column(db, table, column)? {
+                            db.exec("add retirement column", ddl)?;
+                        }
+                    }
+                    db.exec("create catalog schema", CATALOG_SCHEMA)?;
+                    db.exec("create gc schema", crate::gc::GC_SCHEMA)?;
+                }
+                // v10: reference blobs. One new table and one index, both
+                // IF NOT EXISTS, and nothing existing is read or rewritten:
+                // this step costs the same on an empty root and a ten-
+                // million-object one.
+                9 => {
+                    db.exec("create blob ref schema", crate::blobrefs::BLOBREF_SCHEMA)?;
+                }
+                // v11: the kind CHECK gains `vjeffect`. Identical retrofit to
+                // v6/v7: rebuild the table with this build's CHECK, which is
+                // idempotent and carries every kind the current list names.
+                10 => {
                     if table_exists(db, "search_annotations")? {
                         db.exec(
                             "rebuild search_annotations kind check",
@@ -164,9 +244,54 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
     }
 }
 
+/// What admitting a file by reference did. `deduped` means the catalog
+/// already knew this digest; `owned` means the store holds the bytes in its
+/// own CAS, so no reference was recorded and the external file is incidental.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefCommit {
+    pub blob_id: BlobId,
+    pub size: u64,
+    pub deduped: bool,
+    pub owned: bool,
+    /// The absolute path recorded (or, when `owned`, the path that was read).
+    pub path: std::path::PathBuf,
+}
+
+/// One bounded page of a reference re-scan.
+#[derive(Clone, Debug, Default)]
+pub struct RefRescanPage {
+    pub entries: Vec<(crate::blobrefs::BlobRef, crate::blobrefs::RefState)>,
+    /// Resume key: pass as `after` for the next page. `None` = finished.
+    pub next: Option<BlobId>,
+}
+
+/// One asset of a batch publication: the complete publish an asset needs —
+/// canonical manifest bytes (already carrying its asset id and blob refs),
+/// its searchable annotation, and an optional alias head.
+#[derive(Clone, Debug)]
+pub struct PublishBatchItem {
+    pub namespace: String,
+    pub manifest_bytes: Vec<u8>,
+    pub annotation: AssetAnnotation,
+    pub alias: Option<AssetAlias>,
+}
+
+/// What one batch item became.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublishBatchOutcome {
+    pub asset_id: AssetId,
+    pub revision: AssetRevisionId,
+    /// The revision was already published (a replayed page); annotation and
+    /// alias were refreshed idempotently.
+    pub already_published: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoverReport {
     pub cas_temps_removed: u64,
+    /// Blob delete intents left by a crash mid-sweep that this start
+    /// resolved (unlinked, or kept because the bytes were re-uploaded).
+    pub gc_deletes_resolved: u64,
     pub leases_expired: u64,
 }
 
@@ -201,17 +326,20 @@ impl AssetServerCore {
         db.exec("set synchronous", "PRAGMA synchronous=FULL")?;
         db.exec("set foreign keys", "PRAGMA foreign_keys=ON")?;
 
-        migrate(&db, &budgets)?;
+        migrate(&db, &cas, &budgets)?;
         Ok(Self { db, cas, budgets })
     }
 
-    /// Restart recovery: purge orphan CAS temp files and tear down expired
-    /// worker leases (re-queueing or failing their jobs).
+    /// Restart recovery: purge orphan CAS temp files, finish or abandon blob
+    /// delete intents a crash left mid-sweep, and tear down expired worker
+    /// leases (re-queueing or failing their jobs).
     pub fn recover(&self, now_ms: u64) -> ServerResult<RecoverReport> {
         let cas_temps_removed = self.cas.recover()?;
+        let gc_deletes_resolved = self.gc().recover_pending(&self.cas)?;
         let leases_expired = self.jobs().expire_leases(now_ms)?;
         Ok(RecoverReport {
             cas_temps_removed,
+            gc_deletes_resolved,
             leases_expired,
         })
     }
@@ -252,6 +380,49 @@ impl AssetServerCore {
         &self.cas
     }
 
+    pub fn blob_refs(&self) -> crate::blobrefs::BlobRefs<'_> {
+        crate::blobrefs::BlobRefs { db: &self.db, budgets: &self.budgets }
+    }
+
+    pub fn gc(&self) -> crate::gc::Gc<'_> {
+        crate::gc::Gc { db: &self.db, budgets: &self.budgets }
+    }
+
+    // ---- blob garbage collection -------------------------------------------
+
+    /// Start a GC run (see [`crate::gc`]). Refuses while one is active.
+    pub fn gc_begin(&self, cfg: crate::gc::GcConfig, now_ms: u64) -> ServerResult<crate::gc::GcStatus> {
+        self.gc().begin(cfg, now_ms)
+    }
+
+    /// Advance the active run by at most `max_steps` bounded steps. Every
+    /// step is one transaction over one batch, so this call's cost is
+    /// chosen by the caller, not by the size of the store.
+    pub fn gc_advance(&self, max_steps: u32, now_ms: u64) -> ServerResult<Option<crate::gc::GcStatus>> {
+        self.gc().advance(&self.cas, max_steps, now_ms)
+    }
+
+    pub fn gc_status(&self) -> ServerResult<Option<crate::gc::GcStatus>> {
+        self.gc().status()
+    }
+
+    pub fn gc_cancel(&self, now_ms: u64) -> ServerResult<bool> {
+        self.gc().cancel(now_ms)
+    }
+
+    /// Convenience for tests and one-shot operators: begin a run and drive
+    /// it to completion, up to `max_steps` steps.
+    pub fn gc_run(
+        &self,
+        cfg: crate::gc::GcConfig,
+        max_steps: u32,
+        now_ms: u64,
+    ) -> ServerResult<crate::gc::GcStatus> {
+        self.gc_begin(cfg, now_ms)?;
+        let status = self.gc_advance(max_steps, now_ms)?;
+        status.ok_or(ServerError::NotFound { what: "gc run" })
+    }
+
     // ---- blob admission (CAS + catalog in the required order) --------------
 
     pub fn begin_blob(&self) -> ServerResult<BlobWriter> {
@@ -278,13 +449,239 @@ impl AssetServerCore {
         self.commit_blob(w, None, now_ms)
     }
 
+    /// Record MANY already-CAS-committed blobs in ONE catalog transaction —
+    /// one WAL commit for the lot instead of one per blob. The caller
+    /// guarantees the bytes are durable in the CAS first (the admission
+    /// ordering law); a crash before this lands leaves only unrecorded
+    /// objects a retry dedups against.
+    pub fn record_blobs(&self, blobs: &[(BlobId, u64)], now_ms: u64) -> ServerResult<()> {
+        self.db.tx(|_| {
+            for (blob_id, size) in blobs {
+                self.catalog().record_blob(blob_id, *size, now_ms)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Read a blob the catalog knows about, verifying its digest. Unrecorded
     /// objects are invisible: catalog first, then CAS, both fail closed.
+    ///
+    /// A blob the CAS does not hold may still be a REFERENCE (see
+    /// [`crate::blobrefs`]): bytes the store catalogued where they already
+    /// lay. Those are read from their external path and verified exactly as
+    /// hard as a CAS object — same length check, same full-digest check
+    /// before a single byte is returned. The CAS is tried first so a blob
+    /// that exists both ways is served from the copy the store owns.
     pub fn read_blob(&self, blob_id: &BlobId) -> ServerResult<Vec<u8>> {
         if !self.catalog().has_blob(blob_id)? {
             return Err(ServerError::NotFound { what: "blob record" });
         }
+        if self.cas.contains(blob_id) {
+            return self.cas.read_verified(blob_id);
+        }
+        if let Some(entry) = self.blob_refs().lookup(blob_id)? {
+            return crate::blobrefs::read_verified(&entry, &self.budgets);
+        }
+        // Recorded, not in the CAS, not referenced: the object is gone.
+        // `read_verified` produces the established NotFound for that.
         self.cas.read_verified(blob_id)
+    }
+
+    /// Is this blob held as a reference rather than owned bytes? Callers that
+    /// must plan a response length before reading (the batch pull) ask this
+    /// so they can cheaply re-stat the external file first.
+    pub fn blob_ref_of(&self, blob_id: &BlobId) -> ServerResult<Option<crate::blobrefs::BlobRef>> {
+        if self.cas.contains(blob_id) {
+            return Ok(None);
+        }
+        self.blob_refs().lookup(blob_id)
+    }
+
+    // ---- reference blobs (bytes the store catalogues but does not copy) ----
+
+    /// Admit a file WHERE IT LIES: hash it in place, record the `blobs` row,
+    /// then the `blob_refs` row. Nothing is copied and nothing is written to
+    /// the file.
+    ///
+    /// Ordering mirrors the CAS admission law (hash first, catalog second):
+    /// a crash between the two steps leaves a `blobs` row whose bytes cannot
+    /// be found, which every read refuses loudly, and never a reference row
+    /// for a blob the catalog does not know.
+    ///
+    /// Idempotent. Re-importing an unchanged file re-derives the same digest
+    /// and reports `deduped`. If the store ALREADY OWNS these bytes in its
+    /// CAS, no reference is recorded at all: owned bytes are strictly better
+    /// than a promise about someone else's file.
+    pub fn put_blob_ref(&self, path: &Path, now_ms: u64) -> ServerResult<BlobRefCommit> {
+        let scan = crate::blobrefs::scan_file(path, &self.budgets)?;
+        let already = self.catalog().has_blob(&scan.blob_id)?;
+        self.catalog().record_blob(&scan.blob_id, scan.size, now_ms)?;
+        let owned = self.cas.contains(&scan.blob_id);
+        if !owned {
+            self.blob_refs()
+                .record(&scan.blob_id, &scan.path, scan.size, scan.mtime_ms, now_ms)?;
+        }
+        Ok(BlobRefCommit {
+            blob_id: scan.blob_id,
+            size: scan.size,
+            deduped: already,
+            owned,
+            path: scan.path,
+        })
+    }
+
+    /// What a reference looks like on disk right now, without producing
+    /// bytes. `None` when the blob is not a reference at all.
+    pub fn verify_blob_ref(
+        &self,
+        blob_id: &BlobId,
+    ) -> ServerResult<Option<crate::blobrefs::RefState>> {
+        Ok(self
+            .blob_refs()
+            .lookup(blob_id)?
+            .map(|entry| crate::blobrefs::verify(&entry, &self.budgets)))
+    }
+
+    /// One bounded page of a whole-library re-scan: verify up to `limit`
+    /// references in digest order and report each one's state. The caller
+    /// chooses the cost per call and resumes with `next`.
+    pub fn rescan_blob_refs(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ServerResult<RefRescanPage> {
+        let entries = self.blob_refs().list(after, limit)?;
+        let next = entries.last().map(|e| e.blob_id);
+        let mut states = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let state = crate::blobrefs::verify(&entry, &self.budgets);
+            states.push((entry, state));
+        }
+        Ok(RefRescanPage { entries: states, next })
+    }
+
+    // ---- batch publication ---------------------------------------------------
+
+    /// Publish MANY complete assets in ONE catalog transaction: for every
+    /// item, register the identity, stage its canonical manifest, publish
+    /// it, write its search annotation, and point its alias — all-or-nothing
+    /// under a single WAL commit (one fsync for the lot). This is the bulk
+    /// lane behind `POST /v1/publish/batch`; the referenced blobs must
+    /// already be admitted (the stage step refuses otherwise), so the
+    /// admission ordering law holds for the whole batch exactly as it does
+    /// for one publish.
+    ///
+    /// Idempotent per item the way the split flow is as a sequence: an item
+    /// whose revision is already published only refreshes its annotation and
+    /// alias (a replayed page after a lost response), a quarantined or
+    /// retired revision refuses the batch, and the rights-immutability guard
+    /// refuses a re-publication that would change an existing asset's terms.
+    pub fn publish_batch(
+        &self,
+        items: &[PublishBatchItem],
+        now_ms: u64,
+    ) -> ServerResult<Vec<PublishBatchOutcome>> {
+        // Decode + guard EVERYTHING before the first mutation, so a bad item
+        // refuses the batch without a rollback ever being needed.
+        let mut decoded: Vec<(AssetManifest, AssetRevisionId)> = Vec::with_capacity(items.len());
+        for item in items {
+            if item.manifest_bytes.len() as u64 > self.budgets.max_manifest_bytes {
+                return Err(ServerError::OverBudget {
+                    what: "asset manifest bytes",
+                    limit: self.budgets.max_manifest_bytes,
+                    found: item.manifest_bytes.len() as u64,
+                });
+            }
+            let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
+            let revision = AssetRevisionId::hash_of(&item.manifest_bytes);
+            if let Some(alias) = &item.alias {
+                if alias.namespace() != item.namespace {
+                    return Err(ServerError::Conflict { what: "alias namespace" });
+                }
+            }
+            // Rights immutability: re-publishing an existing asset must not
+            // change its terms. Compared against the latest published head's
+            // immutable manifest; same-revision replays trivially pass.
+            let candidates = self.catalog().asset_candidates(&manifest.asset_id, 512)?;
+            let prev = candidates
+                .iter()
+                .filter(|c| c.state == CandidateState::Published && c.revision != revision)
+                .max_by_key(|c| c.published_ms.unwrap_or(0))
+                .map(|c| c.revision);
+            if let Some(prev) = prev {
+                if let Some(bytes) = self.catalog().asset_revision_manifest(&prev)? {
+                    if let Ok(previous) = AssetManifest::from_canonical_bytes(&bytes) {
+                        if previous.rights != manifest.rights {
+                            return Err(ServerError::Conflict {
+                                what: "published asset rights would change",
+                            });
+                        }
+                    }
+                }
+            }
+            decoded.push((manifest, revision));
+        }
+        let catalog = self.catalog();
+        let search = self.search();
+        self.db.tx(|db| {
+            let mut out = Vec::with_capacity(items.len());
+            for (item, (manifest, revision)) in items.iter().zip(&decoded) {
+                catalog.register_asset(&manifest.asset_id, &item.namespace, now_ms)?;
+                let already = match catalog.asset_candidate_state(&manifest.asset_id, revision)? {
+                    Some(CandidateState::Published) => true,
+                    Some(CandidateState::Quarantined) => {
+                        return Err(ServerError::InvalidState {
+                            what: "publish batch revision",
+                            state: "quarantined",
+                        });
+                    }
+                    Some(CandidateState::Staged) => {
+                        catalog.transition_in_tx(
+                            db,
+                            "asset",
+                            manifest.asset_id.as_bytes(),
+                            revision.as_bytes(),
+                            &[CandidateState::Staged],
+                            CandidateState::Published,
+                            now_ms,
+                        )?;
+                        false
+                    }
+                    None => {
+                        let staged = catalog.stage_asset_revision_in_tx(
+                            db,
+                            &item.manifest_bytes,
+                            now_ms,
+                        )?;
+                        catalog.transition_in_tx(
+                            db,
+                            "asset",
+                            manifest.asset_id.as_bytes(),
+                            staged.as_bytes(),
+                            &[CandidateState::Staged],
+                            CandidateState::Published,
+                            now_ms,
+                        )?;
+                        false
+                    }
+                };
+                search.set_annotation_in_tx(db, &manifest.asset_id, &item.annotation, now_ms)?;
+                if let Some(alias) = &item.alias {
+                    catalog.set_asset_alias_in_tx(
+                        db,
+                        alias,
+                        &AssetRevisionRef { asset_id: manifest.asset_id, revision: *revision },
+                        now_ms,
+                    )?;
+                }
+                out.push(PublishBatchOutcome {
+                    asset_id: manifest.asset_id,
+                    revision: *revision,
+                    already_published: already,
+                });
+            }
+            Ok(out)
+        })
     }
 
     // ---- deterministic stock seeding ---------------------------------------

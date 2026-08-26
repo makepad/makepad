@@ -1,0 +1,77 @@
+[package]
+name = "makepad-ai-llm"
+version = "0.1.0"
+edition = "2021"
+description = "GGUF LLM family (Qwen). Graph builders + Metal/CUDA exec. Was libs/llama (aiarch.md §1)."
+license = "MIT"
+
+[dependencies]
+# Bake the metallib at build time. Without this, MetalRuntime::new() compiles
+# the 13k-line shader source on the GPU and can stall WindowServer.
+makepad-ai-loader = { path = "../loader" }
+makepad-ai-cuda = { path = "../cuda" }
+makepad-ai-metal = { path = "../metal", features = ["metal-precompile"] }
+
+[[bin]]
+name = "llama-load"
+path = "src/bin/llama_load.rs"
+
+[[bin]]
+name = "llama-load-time"
+path = "src/bin/llama_load_time.rs"
+
+[[bin]]
+name = "llama-graph-census"
+path = "src/bin/llama_graph_census.rs"
+
+[[bin]]
+name = "llama-cuda-canary"
+path = "src/bin/llama_cuda_canary.rs"
+
+[[bin]]
+name = "llama-compare"
+path = "src/bin/llama_compare.rs"
+
+[[bin]]
+name = "llama-generate"
+path = "src/bin/llama_generate.rs"
+
+[[bin]]
+name = "llama-tokenize"
+path = "src/bin/llama_tokenize.rs"
+
+[[bin]]
+name = "llama-slot-probe"
+path = "src/bin/llama_slot_probe.rs"
+
+[[bin]]
+name = "llama-lane-spec-probe"
+path = "src/bin/llama_lane_spec_probe.rs"
+
+[[bin]]
+name = "llama-batch-probe"
+path = "src/bin/llama_batch_probe.rs"
+
+# The decode column-cost curve: what an extra batch column actually costs,
+# which is what sets how many chats one card can serve.
+[[bin]]
+name = "llama-batch-bench"
+path = "src/bin/llama_batch_bench.rs"
+
+[[bin]]
+name = "vlm-vision-probe"
+path = "src/bin/vlm_vision_probe.rs"
+
+[[bin]]
+name = "vlm-probe"
+path = "src/bin/vlm_probe.rs"
+
+# Batch executor for the asset-annotation pass (libs/asset/annotate): one
+# resident model, many sheets, line-oriented job/result files.
+[[bin]]
+name = "vlm-annotate"
+path = "src/bin/vlm_annotate.rs"
+
+[[bin]]
+name = "llama-reset-probe"
+path = "src/bin/llama_reset_probe.rs"

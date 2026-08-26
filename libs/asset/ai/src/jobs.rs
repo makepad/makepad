@@ -3,11 +3,11 @@
 //! threads); `SharedJobs` wraps it in Mutex+Condvar for the single worker
 //! thread the server spawns.
 
-use crate::backend::{CancelToken, GenerateParams};
+use crate::backend::{CancelToken, GenerateParams, LiveParams};
 use crate::error::AssetAiError;
 use crate::protocol::{
-    ArtifactRefJson, JobStatusJson, JOB_STATE_CANCELLED, JOB_STATE_DONE, JOB_STATE_ERROR,
-    JOB_STATE_QUEUED, JOB_STATE_RUNNING,
+    ArtifactRefJson, JobStatusJson, LiveStatusJson, JOB_STATE_CANCELLED, JOB_STATE_DONE,
+    JOB_STATE_ERROR, JOB_STATE_LIVE, JOB_STATE_QUEUED, JOB_STATE_RUNNING,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -59,11 +59,45 @@ impl QueuePolicy {
 pub enum JobState {
     Queued,
     Running { stage: String, progress: f64 },
+    /// A live/realtime session running (see `JOB_STATE_LIVE`). `stage` is
+    /// informational ("live"); `frames_in`/`frames_out`/`fps` are the same
+    /// counters `crate::realtime::RealtimeSession` tracks, mirrored here at
+    /// up to 10 Hz so a poller that never opens the websocket still sees
+    /// the session is alive.
+    Live {
+        stage: String,
+        frames_in: u64,
+        frames_out: u64,
+        fps: f64,
+    },
     Done { artifacts: Vec<ArtifactRefJson> },
     Error { message: String },
     /// Cancelled — either dropped from the queue, or the running worker
     /// noticed the raised cancel flag and unwound.
     Cancelled,
+}
+
+/// What a job carries into the worker: an ordinary one-shot generation, or a
+/// live session's initial config. `JobStore` only needs to tell the two
+/// apart (`take_next` picks the right initial `JobState`; `is_live` lets
+/// `server::worker_loop` dispatch to `execute_job` vs `execute_live_job`) —
+/// everything else is opaque to it.
+pub enum JobParams {
+    Generate(GenerateParams),
+    Live(LiveParams),
+}
+
+impl JobParams {
+    pub fn model(&self) -> &str {
+        match self {
+            JobParams::Generate(params) => &params.model,
+            JobParams::Live(params) => &params.model,
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        matches!(self, JobParams::Live(_))
+    }
 }
 
 /// Result of a cancel request (`POST /job/<id>/cancel`).
@@ -86,7 +120,7 @@ pub struct JobRecord {
     /// the worker takes it out exactly once instead of cloning and retaining
     /// it for the finished-job lifetime.
     pub model: String,
-    pub params: Option<GenerateParams>,
+    pub params: Option<JobParams>,
     pub state: JobState,
     /// Shared cancel flag: raised by POST /job/<id>/cancel, checked by the
     /// backend between steps/tiles/load components.
@@ -97,6 +131,9 @@ pub struct JobRecord {
     pub finished_ms: Option<u64>,
     /// Assistant text for chat/LLM jobs; surfaced as `JobStatusJson.partial_text`.
     pub partial_text: Option<String>,
+    /// Chat serving facts (warmth, think/visible split), surfaced as
+    /// `JobStatusJson.serving`. Set by the backend as the turn runs.
+    pub serving: Option<crate::protocol::ServingStatusJson>,
     /// Bounded stage-transition log, oldest first (see [`LOG_CAP`]).
     log: Vec<String>,
     /// Non-numeric prefix of the last logged stage (throttling key).
@@ -136,11 +173,40 @@ pub struct EvictedJob {
     pub artifact_ids: Vec<String>,
 }
 
+/// Which admission class a job belongs to.
+///
+/// The box has one GPU and two very different kinds of work on it. A heavy
+/// generation owns the device for tens of seconds; a chat turn is a handful of
+/// milliseconds per token against a model that is already resident and that
+/// serves several conversations from one copy of its weights.
+///
+/// Running them under one "one GPU, one job" rule makes the second kind wait
+/// for the first, which on a shared box means a chat turn can sit behind a
+/// video generation — and it means the lane machinery underneath chat can
+/// never see more than one conversation, so the lanes do nothing at all.
+///
+/// The class is decided by the CALLER, from the registry, because the store
+/// has no registry and should not grow one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobClass {
+    /// Served by the lane worker: many turns share one resident model.
+    Chat,
+    /// Everything else. One at a time, as before.
+    Heavy,
+}
+
 pub struct JobStore {
     next_id: u64,
     jobs: HashMap<String, JobRecord>,
     queue: VecDeque<String>,
-    running: Option<String>,
+    class: HashMap<String, JobClass>,
+    /// The one heavy job that owns the device.
+    running_heavy: Option<String>,
+    /// Chat turns in flight, bounded by [`Self::chat_slots`].
+    running_chat: Vec<String>,
+    /// Chat turns admitted at once. **1 is exactly today's behaviour** for the
+    /// chat class itself; the lane count is what makes it worth raising.
+    chat_slots: usize,
     /// Finished job ids in finish order (retention ring).
     finished: VecDeque<String>,
     queue_limit: usize,
@@ -152,7 +218,10 @@ impl Default for JobStore {
             next_id: 0,
             jobs: HashMap::new(),
             queue: VecDeque::new(),
-            running: None,
+            class: HashMap::new(),
+            running_heavy: None,
+            running_chat: Vec::new(),
+            chat_slots: 1,
             finished: VecDeque::new(),
             queue_limit: DEFAULT_QUEUE_LIMIT,
         }
@@ -175,20 +244,51 @@ impl JobStore {
         self.queue_limit
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.running.is_some() || !self.queue.is_empty()
+    /// Chat turns that may run at once. Set from the box's lane count, so the
+    /// store admits exactly as many conversations as the session can decode in
+    /// one batch — no more, because a turn with no lane to sit in would queue
+    /// inside the worker where the job protocol cannot see it.
+    ///
+    /// A zero is refused into 1: a class that can admit nothing would strand
+    /// every chat turn forever.
+    pub fn set_chat_slots(&mut self, slots: usize) {
+        self.chat_slots = slots.max(1);
     }
 
-    /// Jobs queued plus the running one — the `/health` `jobs_pending` value
+    pub fn chat_slots(&self) -> usize {
+        self.chat_slots
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.running_heavy.is_some() || !self.running_chat.is_empty() || !self.queue.is_empty()
+    }
+
+    /// Jobs queued plus the running ones — the `/health` `jobs_pending` value
     /// fleet schedulers use as an affinity tiebreak.
     pub fn pending_count(&self) -> u64 {
-        self.queue.len() as u64 + self.running.is_some() as u64
+        self.queue.len() as u64
+            + self.running_heavy.is_some() as u64
+            + self.running_chat.len() as u64
     }
 
     pub fn submit(
         &mut self,
-        params: GenerateParams,
+        params: JobParams,
         policy: QueuePolicy,
+    ) -> Result<String, AssetAiError> {
+        self.submit_as(params, policy, JobClass::Heavy)
+    }
+
+    /// Submit into a named admission class.
+    ///
+    /// `QueuePolicy::Reject` still means "refuse if the box is doing anything
+    /// at all". It is a caller's explicit request not to wait, and softening
+    /// it per class would change what an existing caller asked for.
+    pub fn submit_as(
+        &mut self,
+        params: JobParams,
+        policy: QueuePolicy,
+        class: JobClass,
     ) -> Result<String, AssetAiError> {
         if policy == QueuePolicy::Reject && self.is_busy() {
             return Err(AssetAiError::Busy);
@@ -198,7 +298,7 @@ impl JobStore {
         }
         self.next_id += 1;
         let id = format!("job-{}", self.next_id);
-        let model = params.model.clone();
+        let model = params.model().to_string();
         self.jobs.insert(
             id.clone(),
             JobRecord {
@@ -211,38 +311,127 @@ impl JobStore {
                 started_ms: None,
                 finished_ms: None,
                 partial_text: None,
+                serving: None,
                 log: Vec::new(),
                 log_phase: String::new(),
                 log_at_ms: 0,
             },
         );
+        self.class.insert(id.clone(), class);
         self.queue.push_back(id.clone());
         Ok(id)
     }
 
-    /// Pops the next queued job and marks it running. Returns None while a
-    /// job is already running (one GPU = one job) or the queue is empty.
+    /// Models with a job RUNNING on them right now, in either class.
+    ///
+    /// Eviction reads this and refuses. With one admission class it could not
+    /// happen — the only running job was the one asking to load. With two, a
+    /// heavy job admitting itself can otherwise tear down the model a chat
+    /// turn is decoding through, and the turn dies with "llm worker dropped
+    /// the reply" for a reason that has nothing to do with it.
+    pub fn running_models(&self) -> Vec<String> {
+        self.running_heavy
+            .iter()
+            .chain(self.running_chat.iter())
+            .filter_map(|id| self.jobs.get(id).map(|job| job.model.clone()))
+            .collect()
+    }
+
+    /// The admission class a job was submitted into.
+    pub fn class_of(&self, id: &str) -> JobClass {
+        self.class.get(id).copied().unwrap_or(JobClass::Heavy)
+    }
+
+    /// Pops the next queued HEAVY job and marks it running. Returns `None`
+    /// while a heavy job is already running (one GPU, one heavy job) or no
+    /// heavy job is queued.
     pub fn take_next(&mut self) -> Option<String> {
-        if self.running.is_some() {
-            return None;
+        self.take_next_of(JobClass::Heavy)
+    }
+
+    /// Pops the next queued job of `class` and marks it running.
+    ///
+    /// Each class holds its own device budget, so a chat turn is never behind
+    /// a running video generation and a video generation is never behind a
+    /// chat turn. FIFO is preserved WITHIN a class; across classes there is no
+    /// single order to preserve, because they are no longer competing for one
+    /// slot.
+    pub fn take_next_of(&mut self, class: JobClass) -> Option<String> {
+        match class {
+            JobClass::Heavy => {
+                if self.running_heavy.is_some() {
+                    return None;
+                }
+            }
+            JobClass::Chat => {
+                if self.running_chat.len() >= self.chat_slots {
+                    return None;
+                }
+            }
         }
-        let id = self.queue.pop_front()?;
+        let at = self
+            .queue
+            .iter()
+            .position(|id| self.class_of(id) == class)?;
+        let id = self.queue.remove(at)?;
         if let Some(job) = self.jobs.get_mut(&id) {
-            job.state = JobState::Running {
-                stage: "starting".to_string(),
-                progress: 0.0,
+            let is_live = job.params.as_ref().map(JobParams::is_live).unwrap_or(false);
+            job.state = if is_live {
+                JobState::Live {
+                    stage: "starting".to_string(),
+                    frames_in: 0,
+                    frames_out: 0,
+                    fps: 0.0,
+                }
+            } else {
+                JobState::Running {
+                    stage: "starting".to_string(),
+                    progress: 0.0,
+                }
             };
             job.started_ms = Some(now_ms());
         }
-        self.running = Some(id.clone());
+        match class {
+            JobClass::Heavy => self.running_heavy = Some(id.clone()),
+            JobClass::Chat => self.running_chat.push(id.clone()),
+        }
         Some(id)
+    }
+
+    /// Release whichever class slot `id` occupies. Called from every terminal
+    /// transition, so a job cannot finish and keep its slot.
+    fn release(&mut self, id: &str) {
+        if self.running_heavy.as_deref() == Some(id) {
+            self.running_heavy = None;
+        }
+        self.running_chat.retain(|running| running != id);
     }
 
     /// Moves the potentially large/sensitive request into the worker. A job
     /// has one execution attempt; retaining or cloning these bytes after it
     /// starts only wastes memory and keeps expired transfer tickets alive.
-    pub fn take_params(&mut self, id: &str) -> Option<GenerateParams> {
+    pub fn take_params(&mut self, id: &str) -> Option<JobParams> {
         self.jobs.get_mut(id)?.params.take()
+    }
+
+    /// Peeks whether a (still-queued-or-just-taken) job is a live session —
+    /// `server::worker_loop` uses this right after `wait_take_next` to pick
+    /// `execute_job` vs `execute_live_job`, before `take_params` moves the
+    /// params out.
+    pub fn is_live(&self, id: &str) -> bool {
+        self.jobs
+            .get(id)
+            .and_then(|job| job.params.as_ref())
+            .map(JobParams::is_live)
+            .unwrap_or(false)
+    }
+
+    /// The model ONE job runs on. `running_models` answers for the whole box
+    /// and so mixes the admission classes together; a worker that needs to
+    /// know what IT is about to run — to remember whose device caches it will
+    /// be filling — must ask about its own job and nothing else.
+    pub fn model_of(&self, id: &str) -> Option<String> {
+        self.jobs.get(id).map(|job| job.model.clone())
     }
 
     /// Cancels a job. Queued: dropped from the FIFO immediately. Running:
@@ -264,7 +453,7 @@ impl JobStore {
         match self.jobs.get(id) {
             None => CancelOutcome::Unknown,
             Some(job) => match job.state {
-                JobState::Running { .. } => {
+                JobState::Running { .. } | JobState::Live { .. } => {
                     job.cancel.cancel();
                     CancelOutcome::Cancelling
                 }
@@ -286,14 +475,36 @@ impl JobStore {
             job.finished_ms = Some(now_ms());
         }
         self.finished.push_back(id.to_string());
-        if self.running.as_deref() == Some(id) {
-            self.running = None;
-        }
+        self.release(id);
     }
 
     pub fn set_partial_text(&mut self, id: &str, text: String) {
         if let Some(job) = self.jobs.get_mut(id) {
             job.partial_text = Some(text);
+        }
+    }
+
+    /// Merge chat serving facts. Fields arrive at different moments — warmth
+    /// at prefill, the think split as the reply grows — so each update fills
+    /// only what it knows and leaves the rest alone. Overwriting wholesale
+    /// would blank the warmth the moment the first token lands.
+    pub fn update_serving(
+        &mut self,
+        id: &str,
+        update: impl FnOnce(&mut crate::protocol::ServingStatusJson),
+    ) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            let mut serving = job.serving.take().unwrap_or(
+                crate::protocol::ServingStatusJson {
+                    prefix_ingested: None,
+                    prefix_resumed: None,
+                    think_tokens: None,
+                    visible_tokens: None,
+                    gen_tokens: None,
+                },
+            );
+            update(&mut serving);
+            job.serving = Some(serving);
         }
     }
 
@@ -309,15 +520,32 @@ impl JobStore {
         }
     }
 
+    /// Live-session counters, updated by `crate::realtime::run_live` through
+    /// `server::execute_live_job`'s progress closure (throttled to ~10 Hz
+    /// there — this only writes when the job is still `Live`, so a stray
+    /// late update after cancel/finish is silently ignored, same convention
+    /// as `set_progress`).
+    pub fn set_live_progress(&mut self, id: &str, stage: &str, frames_in: u64, frames_out: u64, fps: f64) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            if matches!(job.state, JobState::Live { .. }) {
+                job.state = JobState::Live {
+                    stage: stage.to_string(),
+                    frames_in,
+                    frames_out,
+                    fps,
+                };
+                job.log_stage(stage, 0.0);
+            }
+        }
+    }
+
     pub fn finish(&mut self, id: &str, artifacts: Vec<ArtifactRefJson>) {
         if let Some(job) = self.jobs.get_mut(id) {
             job.state = JobState::Done { artifacts };
             job.finished_ms = Some(now_ms());
         }
         self.finished.push_back(id.to_string());
-        if self.running.as_deref() == Some(id) {
-            self.running = None;
-        }
+        self.release(id);
     }
 
     pub fn fail(&mut self, id: &str, message: String) {
@@ -326,9 +554,7 @@ impl JobStore {
             job.finished_ms = Some(now_ms());
         }
         self.finished.push_back(id.to_string());
-        if self.running.as_deref() == Some(id) {
-            self.running = None;
-        }
+        self.release(id);
     }
 
     /// Retention: keeps the newest [`FINISHED_RETAIN`] finished records and
@@ -361,20 +587,49 @@ impl JobStore {
     /// What the box is busy with while a queued job waits: queue position
     /// plus the running job's live stage, so a queued client can tell a
     /// working box from a hung one ("2 ahead; box: denoise 32/100").
+    ///
+    /// "Ahead" counts only jobs of the SAME class, because those are the only
+    /// ones this job is actually waiting for. Counting a chat turn as being
+    /// ahead of a video generation would be a number that never goes down for
+    /// the reason it claims.
     fn queued_detail(&self, id: &str) -> String {
-        let ahead = self.queue.iter().take_while(|q| *q != id).count();
-        let busy = self.running.as_ref().and_then(|r| {
-            self.jobs.get(r).and_then(|job| match &job.state {
-                JobState::Running { stage, progress } => {
-                    Some(format!("{stage} {:.0}%", progress * 100.0))
-                }
-                _ => None,
-            })
-        });
+        let class = self.class_of(id);
+        let ahead = self
+            .queue
+            .iter()
+            .take_while(|q| *q != id)
+            .filter(|q| self.class_of(q) == class)
+            .count();
+        let busy = self
+            .running_heavy
+            .iter()
+            .chain(self.running_chat.iter())
+            .find_map(|r| {
+                self.jobs.get(r).and_then(|job| match &job.state {
+                    JobState::Running { stage, progress } => {
+                        Some(format!("{stage} {:.0}%", progress * 100.0))
+                    }
+                    JobState::Live { stage, frames_out, .. } => {
+                        Some(format!("{stage} (live session, {frames_out} frames out)"))
+                    }
+                    _ => None,
+                })
+            });
         match busy {
             Some(busy) => format!("{ahead} ahead; box: {busy}"),
             None => format!("{ahead} ahead"),
         }
+    }
+
+    /// Running jobs first, then the queue in FIFO order — the live picture
+    /// `GET /jobs` serves (finished jobs stay reachable by id only).
+    pub fn active_status_json(&self) -> Vec<JobStatusJson> {
+        self.running_heavy
+            .iter()
+            .chain(self.running_chat.iter())
+            .chain(self.queue.iter())
+            .filter_map(|id| self.status_json(id))
+            .collect()
     }
 
     pub fn status_json(&self, id: &str) -> Option<JobStatusJson> {
@@ -396,6 +651,8 @@ impl JobStore {
                 Some(job.log.clone())
             },
             partial_text: job.partial_text.clone(),
+            live: None,
+            serving: job.serving.clone(),
         };
         match &job.state {
             JobState::Queued => {
@@ -406,6 +663,15 @@ impl JobStore {
                 status.state = JOB_STATE_RUNNING.to_string();
                 status.stage = Some(stage.clone());
                 status.progress = Some(*progress);
+            }
+            JobState::Live { stage, frames_in, frames_out, fps } => {
+                status.state = JOB_STATE_LIVE.to_string();
+                status.stage = Some(stage.clone());
+                status.live = Some(LiveStatusJson {
+                    frames_in: *frames_in,
+                    frames_out: *frames_out,
+                    fps: *fps,
+                });
             }
             JobState::Done { artifacts } => {
                 status.state = JOB_STATE_DONE.to_string();
@@ -445,29 +711,63 @@ impl SharedJobs {
 
     pub fn submit(
         &self,
-        params: GenerateParams,
+        params: JobParams,
         policy: QueuePolicy,
     ) -> Result<String, AssetAiError> {
-        self.with(|store| store.submit(params, policy))
+        self.submit_as(params, policy, JobClass::Heavy)
+    }
+
+    pub fn submit_as(
+        &self,
+        params: JobParams,
+        policy: QueuePolicy,
+        class: JobClass,
+    ) -> Result<String, AssetAiError> {
+        self.with(|store| store.submit_as(params, policy, class))
     }
 
     /// Blocks (with a timeout so the worker stays responsive to process
-    /// shutdown) until a job can start.
+    /// shutdown) until a HEAVY job can start.
     pub fn wait_take_next(&self, timeout: Duration) -> Option<String> {
+        self.wait_take_next_of(JobClass::Heavy, timeout)
+    }
+
+    /// Blocks (with a timeout) until a job of `class` can start.
+    ///
+    /// One waiter per class, so a worker never wakes for work it cannot take.
+    /// `notify_all` in `with` is what makes that safe: every terminal
+    /// transition wakes every class, and each re-checks its own budget.
+    pub fn wait_take_next_of(&self, class: JobClass, timeout: Duration) -> Option<String> {
         let mut store = self.inner.0.lock().unwrap();
-        if let Some(id) = store.take_next() {
+        if let Some(id) = store.take_next_of(class) {
             return Some(id);
         }
         let (mut store, _timed_out) = self.inner.1.wait_timeout(store, timeout).unwrap();
-        store.take_next()
+        store.take_next_of(class)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn params(model: &str) -> GenerateParams {
+    fn params(model: &str) -> JobParams {
+        JobParams::Generate(generate_params(model))
+    }
+
+    fn live_params(model: &str) -> JobParams {
+        JobParams::Live(LiveParams {
+            model: model.to_string(),
+            config: crate::backend::LiveConfig::default(),
+            loop_mode: crate::backend::LoopMode::Feed,
+            input_encoding: crate::backend::OutputEncoding::Raw,
+            output_encoding: crate::backend::OutputEncoding::Raw,
+            max_fps: 0.0,
+            idle_timeout_s: 30,
+        })
+    }
+
+    pub(crate) fn generate_params(model: &str) -> GenerateParams {
         GenerateParams {
             model: model.to_string(),
             prompt: "p".to_string(),
@@ -476,14 +776,19 @@ mod tests {
             height: Some(64),
             seed: 1,
             steps: Some(1),
-            guidance: 1.0,
+            guidance: Some(1.0),
             delay_ms: 0,
             inputs: Vec::new(),
+            strength: None,
             pull_only: false,
             input_bytes: Vec::new(),
             input_content_type: String::new(),
             frames: None,
             codec: String::new(),
+            audio: None,
+            interpolate: None,
+            upscale: None,
+            flow_map: false,
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),
@@ -500,9 +805,175 @@ mod tests {
             texture: None,
             decimation_target: None,
             texture_size: None,
+            gaussians: None,
+            motion_mode: None,
+            canny_low: None,
+            canny_high: None,
+            loras: Vec::new(),
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
         }
+    }
+
+    /// The whole point of the split: a chat turn is not stuck behind a video.
+    #[test]
+    fn a_chat_turn_does_not_wait_for_a_running_heavy_job() {
+        let mut store = JobStore::new();
+        let heavy = store
+            .submit_as(params("h3"), QueuePolicy::Queue, JobClass::Heavy)
+            .unwrap();
+        let chat = store
+            .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+            .unwrap();
+
+        assert_eq!(store.take_next_of(JobClass::Heavy).as_deref(), Some(&*heavy));
+        assert_eq!(
+            store.take_next_of(JobClass::Chat).as_deref(),
+            Some(&*chat),
+            "a chat turn must start while the heavy job is still running"
+        );
+        assert_eq!(store.status_json(&heavy).unwrap().state, "running");
+        assert_eq!(store.status_json(&chat).unwrap().state, "running");
+    }
+
+    /// And the converse, which is just as important on a shared box: a queue
+    /// full of chat must not starve the heavy class.
+    #[test]
+    fn a_heavy_job_does_not_wait_for_running_chat() {
+        let mut store = JobStore::new();
+        store.set_chat_slots(2);
+        for _ in 0..2 {
+            let id = store
+                .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+                .unwrap();
+            assert_eq!(store.take_next_of(JobClass::Chat).as_deref(), Some(&*id));
+        }
+        let heavy = store
+            .submit_as(params("h3"), QueuePolicy::Queue, JobClass::Heavy)
+            .unwrap();
+        assert_eq!(store.take_next_of(JobClass::Heavy).as_deref(), Some(&*heavy));
+    }
+
+    #[test]
+    fn chat_admits_up_to_its_slot_count_and_no_further() {
+        let mut store = JobStore::new();
+        store.set_chat_slots(3);
+        let ids: Vec<String> = (0..5)
+            .map(|_| {
+                store
+                    .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+                    .unwrap()
+            })
+            .collect();
+        for expected in ids.iter().take(3) {
+            assert_eq!(
+                store.take_next_of(JobClass::Chat).as_deref(),
+                Some(&**expected),
+                "chat is FIFO within its own class"
+            );
+        }
+        assert!(
+            store.take_next_of(JobClass::Chat).is_none(),
+            "the fourth turn waits: a turn with no lane to sit in would queue \
+             inside the worker where the job protocol cannot see it"
+        );
+        store.finish(&ids[0], Vec::new());
+        assert_eq!(
+            store.take_next_of(JobClass::Chat).as_deref(),
+            Some(&*ids[3]),
+            "a finished turn frees its slot for the next one"
+        );
+    }
+
+    #[test]
+    fn a_slot_count_of_zero_would_strand_every_turn_so_it_is_refused() {
+        let mut store = JobStore::new();
+        store.set_chat_slots(0);
+        assert_eq!(store.chat_slots(), 1);
+    }
+
+    #[test]
+    fn every_terminal_transition_frees_the_slot_it_held() {
+        for (label, terminate) in [
+            ("finish", 0usize),
+            ("fail", 1),
+            ("cancelled", 2),
+        ] {
+            let mut store = JobStore::new();
+            let chat = store
+                .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+                .unwrap();
+            store.take_next_of(JobClass::Chat).unwrap();
+            let heavy = store
+                .submit_as(params("h3"), QueuePolicy::Queue, JobClass::Heavy)
+                .unwrap();
+            store.take_next_of(JobClass::Heavy).unwrap();
+            match terminate {
+                0 => {
+                    store.finish(&chat, Vec::new());
+                    store.finish(&heavy, Vec::new());
+                }
+                1 => {
+                    store.fail(&chat, "boom".to_string());
+                    store.fail(&heavy, "boom".to_string());
+                }
+                _ => {
+                    store.cancelled(&chat);
+                    store.cancelled(&heavy);
+                }
+            }
+            let next_chat = store
+                .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+                .unwrap();
+            let next_heavy = store
+                .submit_as(params("h3"), QueuePolicy::Queue, JobClass::Heavy)
+                .unwrap();
+            assert_eq!(
+                store.take_next_of(JobClass::Chat).as_deref(),
+                Some(&*next_chat),
+                "{label} must free the chat slot"
+            );
+            assert_eq!(
+                store.take_next_of(JobClass::Heavy).as_deref(),
+                Some(&*next_heavy),
+                "{label} must free the heavy slot"
+            );
+        }
+    }
+
+    /// `pending_count` feeds `/health`'s affinity tiebreak. Missing a class
+    /// would advertise a busy box as free.
+    #[test]
+    fn pending_counts_both_classes() {
+        let mut store = JobStore::new();
+        store.set_chat_slots(2);
+        let heavy = store
+            .submit_as(params("h3"), QueuePolicy::Queue, JobClass::Heavy)
+            .unwrap();
+        let chat = store
+            .submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat)
+            .unwrap();
+        assert_eq!(store.pending_count(), 2);
+        store.take_next_of(JobClass::Heavy).unwrap();
+        store.take_next_of(JobClass::Chat).unwrap();
+        assert_eq!(store.pending_count(), 2, "running still counts as pending");
+        assert!(store.is_busy());
+        store.finish(&heavy, Vec::new());
+        store.finish(&chat, Vec::new());
+        assert_eq!(store.pending_count(), 0);
+        assert!(!store.is_busy());
+    }
+
+    /// Default construction must behave exactly as it did before the split:
+    /// one class, one job.
+    #[test]
+    fn the_default_store_is_still_one_job_at_a_time() {
+        let mut store = JobStore::new();
+        let a = store.submit(params("m"), QueuePolicy::Queue).unwrap();
+        let b = store.submit(params("m"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_deref(), Some(&*a));
+        assert!(store.take_next().is_none());
+        assert_eq!(store.class_of(&b), JobClass::Heavy);
     }
 
     #[test]
@@ -699,5 +1170,81 @@ mod tests {
         let started = done.started_ms.expect("started_ms");
         let finished = done.finished_ms.expect("finished_ms");
         assert!(done.queued_ms.unwrap() <= started && started <= finished);
+    }
+
+    #[test]
+    fn live_session_queued_to_live_to_done() {
+        let mut store = JobStore::new();
+        let id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.status_json(&id).unwrap().state, "queued");
+
+        assert_eq!(store.take_next().as_deref(), Some(id.as_str()));
+        let live = store.status_json(&id).unwrap();
+        assert_eq!(live.state, "live");
+        let counters = live.live.expect("live counters present");
+        assert_eq!((counters.frames_in, counters.frames_out), (0, 0));
+
+        // A second job stays queued behind the live session — the box is
+        // dedicated to the live feed until it stops.
+        let queued = store.submit(params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.status_json(&queued).unwrap().state, "queued");
+        assert!(store.take_next().is_none());
+
+        store.set_live_progress(&id, "live", 12, 11, 30.5);
+        let live = store.status_json(&id).unwrap();
+        let counters = live.live.expect("live counters present");
+        assert_eq!((counters.frames_in, counters.frames_out), (12, 11));
+        assert_eq!(counters.fps, 30.5);
+        // Ordinary set_progress must not touch a Live job's state.
+        store.set_progress(&id, "denoise", 0.5);
+        assert_eq!(store.status_json(&id).unwrap().state, "live");
+
+        // "stop"/idle-timeout ends a live session as an ordinary finish
+        // (done, no artifacts) — the worker calls this exactly like any
+        // other job, just with an empty artifact list.
+        store.finish(&id, vec![]);
+        assert_eq!(store.status_json(&id).unwrap().state, "done");
+        // The worker slot is free again: the queued job can now start.
+        assert_eq!(store.pending_count(), 1);
+        assert_eq!(store.take_next().as_deref(), Some(queued.as_str()));
+    }
+
+    #[test]
+    fn live_session_cancel_raises_flag_like_running() {
+        let mut store = JobStore::new();
+        let id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_deref(), Some(id.as_str()));
+        assert!(matches!(store.status_json(&id).unwrap().state.as_str(), "live"));
+
+        let token = store.cancel_token(&id).unwrap();
+        assert!(!token.is_cancelled());
+        assert_eq!(store.cancel(&id), CancelOutcome::Cancelling);
+        assert!(token.is_cancelled());
+
+        // The worker sees AssetAiError::Cancelled and reports it exactly
+        // like an ordinary job's cancellation.
+        store.cancelled(&id);
+        assert_eq!(store.status_json(&id).unwrap().state, "cancelled");
+        assert_eq!(store.cancel(&id), CancelOutcome::NotCancellable);
+    }
+
+    #[test]
+    fn is_live_reports_before_and_after_take_next() {
+        let mut store = JobStore::new();
+        let live_id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        let gen_id = store.submit(params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert!(store.is_live(&live_id));
+        assert!(!store.is_live(&gen_id));
+        assert!(!store.is_live("job-999"));
+
+        assert_eq!(store.take_next().as_deref(), Some(live_id.as_str()));
+        // Still live after take_next moved it to Running/Live state (params
+        // still present — take_params has not been called yet).
+        assert!(store.is_live(&live_id));
+        let taken = store.take_params(&live_id).unwrap();
+        assert!(taken.is_live());
+        // Once taken, params is None: is_live reports false (nothing left
+        // to peek), matching take_params's one-shot contract.
+        assert!(!store.is_live(&live_id));
     }
 }

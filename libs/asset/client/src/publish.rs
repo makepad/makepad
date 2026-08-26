@@ -24,6 +24,7 @@
 
 use crate::api::AnnotationUpload;
 use crate::client::AssetClient;
+use std::path::PathBuf;
 use crate::dto::CandidateStateDto;
 use crate::error::{ClientError, ClientResult};
 use crate::wire;
@@ -35,7 +36,7 @@ use makepad_asset_data::{
     Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
     AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
     DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
-    Rights, ThumbnailMedia, ThumbnailMeta, Vec3,
+    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 
 /// The playable media file being published.
@@ -78,12 +79,32 @@ pub struct PublishProvenance {
 }
 
 /// The mandatory preview image (PNG or JPEG, 256–4096 px per side).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// One picture. [`views`](Self::views) declares what its regions ARE — the
+/// spectrogram and wave halves of an audio composite, the packed cell layout
+/// of a sprite sheet — so consumers read the layout off the manifest instead
+/// of measuring pixels. A producer that has nothing to declare leaves it
+/// empty, which is what every publication meant before the field existed.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PublishThumbnail {
     pub bytes: Vec<u8>,
     pub media: ThumbnailMedia,
     pub width: u32,
     pub height: u32,
+    pub views: Vec<ThumbnailView>,
+}
+
+impl PublishThumbnail {
+    /// A picture with nothing declared about its regions.
+    pub fn plain(bytes: Vec<u8>, media: ThumbnailMedia, width: u32, height: u32) -> Self {
+        Self { bytes, media, width, height, views: Vec::new() }
+    }
+
+    /// The same picture, declaring what its regions are.
+    pub fn with_views(mut self, views: Vec<ThumbnailView>) -> Self {
+        self.views = views;
+        self
+    }
 }
 
 /// The explicit typed rights declaration of a publication — the COMPLETE
@@ -238,7 +259,7 @@ impl PublishRights {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PublishRequest {
     pub namespace: String,
     pub kind: AssetKind,
@@ -366,6 +387,7 @@ impl PublishRequest {
                 width: self.thumbnail.width,
                 height: self.thumbnail.height,
                 byte_len: self.thumbnail.bytes.len() as u64,
+                views: self.thumbnail.views.clone(),
             }),
             metrics: Metrics {
                 total_bytes: self.artifact.bytes.len() as u64
@@ -450,7 +472,7 @@ pub struct Published {
 // ---- multi-file bundle publication -------------------------------------------
 
 /// One typed file slot of a multi-file publication: exact role, device tier,
-/// LOD index, media type, bytes, and (for images) mandatory dimensions.
+/// LOD index, media type, payload, and (for images) mandatory dimensions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishBundleFile {
     pub role: FileRole,
@@ -458,9 +480,61 @@ pub struct PublishBundleFile {
     /// LOD index within the role, `0..=MAX_LOD`.
     pub lod: u8,
     pub media: MediaType,
+    /// The payload, when the client holds it. EMPTY exactly when
+    /// `reference` is set — a referenced file's bytes are never read here.
     pub bytes: Vec<u8>,
+    /// Publish this slot BY REFERENCE instead of by upload: a path on the
+    /// SERVER's filesystem that the store will hash in place and catalogue
+    /// without copying.
+    ///
+    /// Only sound when client and store share a filesystem, which in
+    /// practice means an app hosting its own store on loopback. The digest
+    /// and byte length in the manifest then come from the server's own
+    /// measurement, so the manifest is indistinguishable from an uploaded
+    /// one — everything downstream (dedup, search, playback, other clients)
+    /// is untouched.
+    ///
+    /// A server without reference support answers 404 and the publish
+    /// refuses rather than silently uploading a file the caller asked not to
+    /// copy.
+    pub reference: Option<PathBuf>,
     /// Pixel dimensions — REQUIRED for PNG/JPEG, refused for other media.
     pub dims: Option<(u32, u32)>,
+}
+
+impl PublishBundleFile {
+    /// A slot whose bytes the caller holds.
+    pub fn bytes(
+        role: FileRole,
+        media: MediaType,
+        bytes: Vec<u8>,
+        dims: Option<(u32, u32)>,
+    ) -> Self {
+        Self { role, tier: DeviceTier::Any, lod: 0, media, bytes, reference: None, dims }
+    }
+
+    /// A slot the store should catalogue in place, at `path`, without
+    /// copying. `path` is interpreted by the SERVER.
+    pub fn reference(
+        role: FileRole,
+        media: MediaType,
+        path: PathBuf,
+        dims: Option<(u32, u32)>,
+    ) -> Self {
+        Self {
+            role,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media,
+            bytes: Vec::new(),
+            reference: Some(path),
+            dims,
+        }
+    }
+
+    pub fn is_reference(&self) -> bool {
+        self.reference.is_some()
+    }
 }
 
 /// A canonical bounded multi-file publication: one request that uploads and
@@ -596,15 +670,43 @@ impl PublishBundle {
         }
         let mut total: u64 = 0;
         for file in &self.files {
-            if file.bytes.is_empty() {
-                return Err(ClientError::InvalidInput { what: "publish bundle empty file" });
-            }
-            if file.bytes.len() as u64 > MAX_FILE_BYTES {
-                return Err(ClientError::OverBudget {
-                    what: "publish bundle file bytes",
-                    limit: MAX_FILE_BYTES,
-                    found: file.bytes.len() as u64,
-                });
+            match &file.reference {
+                // A referenced slot's length is not knowable here — only the
+                // server can measure a file only the server can see — so the
+                // budget check for it happens after admission, against the
+                // size the store reports.
+                Some(path) => {
+                    if !file.bytes.is_empty() {
+                        return Err(ClientError::InvalidInput {
+                            what: "publish bundle reference carries bytes",
+                        });
+                    }
+                    let text = path.to_str().unwrap_or_default();
+                    if text.is_empty() || text.len() > wire::MAX_BLOB_REF_PATH_BYTES {
+                        return Err(ClientError::InvalidInput {
+                            what: "publish bundle reference path",
+                        });
+                    }
+                    if !path.is_absolute() {
+                        return Err(ClientError::InvalidInput {
+                            what: "publish bundle reference path not absolute",
+                        });
+                    }
+                }
+                None => {
+                    if file.bytes.is_empty() {
+                        return Err(ClientError::InvalidInput {
+                            what: "publish bundle empty file",
+                        });
+                    }
+                    if file.bytes.len() as u64 > MAX_FILE_BYTES {
+                        return Err(ClientError::OverBudget {
+                            what: "publish bundle file bytes",
+                            limit: MAX_FILE_BYTES,
+                            found: file.bytes.len() as u64,
+                        });
+                    }
+                }
             }
             if file.lod > MAX_LOD {
                 return Err(ClientError::InvalidInput { what: "publish bundle file lod" });
@@ -661,19 +763,31 @@ impl PublishBundle {
     /// The ONE deterministic canonical manifest for this bundle under
     /// `asset_id`, plus the exact per-file refs it pins. Canonicalization
     /// makes the revision identity independent of the caller's file order.
-    fn manifest(
+    ///
+    /// `resolved` carries one `(digest, byte_len)` per file in `self.files`
+    /// order. For a byte-carrying slot that is simply the hash of its bytes;
+    /// for a REFERENCED slot it is what the store measured when it hashed
+    /// the file in place, because the client never saw those bytes. Both
+    /// produce the same manifest shape — which is exactly why nothing
+    /// downstream needs to know the difference.
+    fn manifest_with(
         &self,
         asset_id: AssetId,
+        resolved: &[(BlobId, u64)],
     ) -> ClientResult<(Vec<u8>, AssetRevisionId, Vec<PublishedFile>)> {
+        if resolved.len() != self.files.len() {
+            return Err(ClientError::InvalidInput { what: "publish bundle resolution width" });
+        }
         let refs: Vec<PublishedFile> = self
             .files
             .iter()
-            .map(|f| PublishedFile {
+            .zip(resolved)
+            .map(|(f, (blob, byte_len))| PublishedFile {
                 role: f.role,
                 tier: f.tier,
                 lod: f.lod,
-                blob: BlobId::hash_of(&f.bytes),
-                byte_len: f.bytes.len() as u64,
+                blob: *blob,
+                byte_len: *byte_len,
             })
             .collect();
         let files: Vec<AssetFile> = self
@@ -710,6 +824,7 @@ impl PublishBundle {
                 width: self.thumbnail.width,
                 height: self.thumbnail.height,
                 byte_len: self.thumbnail.bytes.len() as u64,
+                views: self.thumbnail.views.clone(),
             }),
             metrics: Metrics {
                 total_bytes,
@@ -774,6 +889,10 @@ pub enum PublishStage {
     /// Uploading one deduplicated blob (`index` is 1-based out of `of`
     /// unique blobs; `bytes` is that blob's size).
     UploadingBlob { index: usize, of: usize, bytes: u64 },
+    /// Having the store hash a file in place instead of copying it. The cost
+    /// is a full read of that file ON THE SERVER, so it deserves its own
+    /// visible stage rather than hiding inside "validating".
+    ReferencingFile { index: usize, of: usize },
     Annotating,
     Staging,
     Publishing,
@@ -789,6 +908,9 @@ impl std::fmt::Display for PublishStage {
             Self::RegisteringAsset => write!(f, "registering-asset"),
             Self::UploadingBlob { index, of, bytes } => {
                 write!(f, "uploading-blob {index}/{of} ({bytes} bytes)")
+            }
+            Self::ReferencingFile { index, of } => {
+                write!(f, "referencing-file {index}/{of}")
             }
             Self::Annotating => write!(f, "annotating"),
             Self::Staging => write!(f, "staging"),
@@ -839,7 +961,26 @@ impl AssetClient {
         if prev.revision == *new_revision {
             return Ok(());
         }
-        let previous = self.fetch_asset_manifest(&prev.revision)?;
+        let previous = match self.fetch_asset_manifest(&prev.revision) {
+            Ok(previous) => previous,
+            // The predecessor cannot be read under today's contract — a
+            // schema bump. The guard exists to stop a SILENT downgrade, and
+            // a schema bump is not a silent anything: it is a deliberate,
+            // announced, whole-catalog event, and the re-import that carries
+            // the catalog across it is the only way the head becomes legible
+            // again. Refusing here would make the catalog permanently
+            // un-migratable, which is a worse failure than not being able to
+            // compare one field. It is said out loud rather than passed over.
+            Err(error) if error.is_unreadable_stored_document() => {
+                eprintln!(
+                    "[publish] rights guard: the published head of this asset cannot be read \
+                     under content schema v{} ({error}) — republishing without comparing terms",
+                    makepad_asset_data::CONTENT_SCHEMA_VERSION
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if previous.rights != *new_rights {
             return Err(ClientError::RightsConflict {
                 what: "published asset rights would change",
@@ -895,7 +1036,10 @@ impl AssetClient {
             Some(CandidateStateDto::Published) => {
                 // Already durable; continue to the idempotent alias write.
             }
-            Some(CandidateStateDto::Quarantined) => {
+            Some(CandidateStateDto::Quarantined) | Some(CandidateStateDto::Retired) => {
+                // Pulled or deleted content is never re-published under the
+                // same immutable revision; a caller that wants it back
+                // publishes new content.
                 return Err(ClientError::InvalidInput {
                     what: "publish revision quarantined",
                 });
@@ -918,6 +1062,123 @@ impl AssetClient {
     /// [`Self::publish_bundle_with`] from a worker that must heartbeat.
     pub fn publish_bundle(&mut self, request: &PublishBundle) -> ClientResult<PublishedBundle> {
         self.publish_bundle_with(request, None, &|| false)
+    }
+
+    /// Publish MANY bundles in one batched exchange: every unique blob goes
+    /// up in bulk (`POST /v1/blobs/batch`, one catalog transaction), then the
+    /// whole page publishes through `POST /v1/publish/batch` — ONE
+    /// state-thread visit and ONE catalog transaction for every asset,
+    /// annotation and alias in it, all-or-nothing.
+    ///
+    /// This is the bulk lane the split [`Self::publish_bundle`] ceremony is
+    /// not: two round trips a page instead of ~ten per asset. At most
+    /// [`wire::MAX_PUBLISH_BATCH_ITEMS`] bundles per call — callers page
+    /// larger sets and stream results between pages. Bundles must carry
+    /// their bytes (a `reference` slot needs the split flow), and a bundle
+    /// without an `asset_id` has one minted locally.
+    ///
+    /// Idempotent per page: replaying a landed page re-uploads nothing (the
+    /// CAS dedups) and re-publishing an identical revision refreshes its
+    /// annotation and alias without minting anything new.
+    pub fn publish_bundles(
+        &mut self,
+        requests: &[PublishBundle],
+    ) -> ClientResult<Vec<PublishedBundle>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requests.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
+            return Err(ClientError::OverBudget {
+                what: "publish batch bundles",
+                limit: wire::MAX_PUBLISH_BATCH_ITEMS as u64,
+                found: requests.len() as u64,
+            });
+        }
+        for request in requests {
+            request.validate()?;
+            if request.files.iter().any(PublishBundleFile::is_reference) {
+                return Err(ClientError::InvalidInput {
+                    what: "publish batch reference slot",
+                });
+            }
+        }
+        // Build every manifest locally first — identity before any byte
+        // moves — and collect the unique blobs per namespace.
+        let mut items: Vec<crate::api::PublishBatchWireItem> = Vec::with_capacity(requests.len());
+        let mut results: Vec<PublishedBundle> = Vec::with_capacity(requests.len());
+        let mut per_ns: Vec<(String, Vec<(BlobId, &[u8])>)> = Vec::new();
+        for request in requests {
+            let asset_id = match request.asset_id {
+                Some(id) => id,
+                None => mint_asset_id(),
+            };
+            let resolved: Vec<(BlobId, u64)> = request
+                .files
+                .iter()
+                .map(|f| (BlobId::hash_of(&f.bytes), f.bytes.len() as u64))
+                .collect();
+            let (canonical, revision, file_refs) = request.manifest_with(asset_id, &resolved)?;
+            let thumbnail_blob = BlobId::hash_of(&request.thumbnail.bytes);
+            let ns_blobs = match per_ns.iter_mut().find(|(ns, _)| *ns == request.namespace) {
+                Some((_, blobs)) => blobs,
+                None => {
+                    per_ns.push((request.namespace.clone(), Vec::new()));
+                    &mut per_ns.last_mut().expect("just pushed").1
+                }
+            };
+            for (file, (blob, _)) in request.files.iter().zip(&resolved) {
+                if !ns_blobs.iter().any(|(b, _)| b == blob) {
+                    ns_blobs.push((*blob, &file.bytes));
+                }
+            }
+            if !ns_blobs.iter().any(|(b, _)| *b == thumbnail_blob) {
+                ns_blobs.push((thumbnail_blob, &request.thumbnail.bytes));
+            }
+            items.push(crate::api::PublishBatchWireItem {
+                namespace: request.namespace.clone(),
+                manifest: canonical,
+                alias: request.alias.clone(),
+                annotation: request.annotation(),
+            });
+            results.push(PublishedBundle {
+                asset_id,
+                revision,
+                alias: request.alias.clone(),
+                files: file_refs,
+                thumbnail_blob,
+            });
+        }
+        // Bytes before catalog rows, in bounded pages per namespace. The
+        // page budget stays under the server's batch byte cap.
+        const UPLOAD_PAGE_BYTES: usize = 8 * 1024 * 1024;
+        for (ns, blobs) in &per_ns {
+            let mut page: Vec<&[u8]> = Vec::new();
+            let mut page_bytes = 0usize;
+            for (_, bytes) in blobs {
+                if !page.is_empty()
+                    && (page.len() >= wire::MAX_UPLOAD_BATCH_ITEMS
+                        || page_bytes + bytes.len() > UPLOAD_PAGE_BYTES)
+                {
+                    self.api().upload_blob_batch(ns, &page)?;
+                    page.clear();
+                    page_bytes = 0;
+                }
+                page.push(bytes);
+                page_bytes += bytes.len();
+            }
+            if !page.is_empty() {
+                self.api().upload_blob_batch(ns, &page)?;
+            }
+        }
+        // One request publishes the page; echoed identities must match the
+        // locally computed ones.
+        let outcomes = self.api().publish_batch(&items)?;
+        for ((asset_id, revision, _already), local) in outcomes.iter().zip(&results) {
+            if *asset_id != local.asset_id || *revision != local.revision {
+                return Err(ClientError::Protocol { what: "publish batch identity mismatch" });
+            }
+        }
+        Ok(results)
     }
 
     /// As [`Self::publish_bundle`], with explicit operation-stage progress
@@ -967,17 +1228,53 @@ impl AssetClient {
                 Err(e) => return Err(e),
             },
         };
-        let (canonical, revision, file_refs) = request.manifest(asset_id)?;
+        // Resolve every slot to (digest, length) BEFORE the manifest exists,
+        // because a referenced slot's digest is the server's measurement of
+        // a file this process never opened. Reference admission is therefore
+        // the first thing that touches bytes — and it is idempotent, so a
+        // retried publish re-measures rather than duplicating anything.
+        let mut resolved: Vec<(BlobId, u64)> = Vec::with_capacity(request.files.len());
+        let reference_count = request.files.iter().filter(|f| f.is_reference()).count();
+        let mut referenced_done = 0usize;
+        for file in &request.files {
+            match &file.reference {
+                None => resolved.push((BlobId::hash_of(&file.bytes), file.bytes.len() as u64)),
+                Some(path) => {
+                    gate()?;
+                    referenced_done += 1;
+                    emit(PublishStage::ReferencingFile {
+                        index: referenced_done,
+                        of: reference_count,
+                    });
+                    let text = path.to_str().ok_or(ClientError::InvalidInput {
+                        what: "publish bundle reference path encoding",
+                    })?;
+                    let admission = self.api().admit_blob_ref(&ns, text)?;
+                    if admission.size > MAX_FILE_BYTES {
+                        return Err(ClientError::OverBudget {
+                            what: "publish bundle reference bytes",
+                            limit: MAX_FILE_BYTES,
+                            found: admission.size,
+                        });
+                    }
+                    resolved.push((admission.blob, admission.size));
+                }
+            }
+        }
+        let (canonical, revision, file_refs) = request.manifest_with(asset_id, &resolved)?;
         let thumbnail_blob = BlobId::hash_of(&request.thumbnail.bytes);
 
         // Upload every unique blob once (bytes before catalog rows). A blob
         // the server already holds at the exact size — a dedupe hit or a
         // resumed retry — is skipped without moving its bytes again.
+        // Referenced slots are already admitted and carry no bytes to move.
         let mut unique: Vec<(BlobId, &[u8])> = Vec::new();
-        for file in &request.files {
-            let blob = BlobId::hash_of(&file.bytes);
-            if !unique.iter().any(|(b, _)| *b == blob) {
-                unique.push((blob, &file.bytes));
+        for (file, (blob, _)) in request.files.iter().zip(&resolved) {
+            if file.is_reference() {
+                continue;
+            }
+            if !unique.iter().any(|(b, _)| b == blob) {
+                unique.push((*blob, &file.bytes));
             }
         }
         if !unique.iter().any(|(b, _)| *b == thumbnail_blob) {
@@ -1035,7 +1332,10 @@ impl AssetClient {
             Some(CandidateStateDto::Published) => {
                 // Already durable; continue to the idempotent alias write.
             }
-            Some(CandidateStateDto::Quarantined) => {
+            Some(CandidateStateDto::Quarantined) | Some(CandidateStateDto::Retired) => {
+                // Pulled or deleted content is never re-published under the
+                // same immutable revision; a caller that wants it back
+                // publishes new content.
                 return Err(ClientError::InvalidInput {
                     what: "publish revision quarantined",
                 });
@@ -1057,6 +1357,31 @@ impl AssetClient {
     }
 }
 
+/// Mint a fresh 16-byte asset identity locally, so a batch page never pays a
+/// per-asset register round trip. Entropy comes from the OS-seeded standard
+/// hasher keys mixed with time and a process-wide counter — the same class
+/// of uniqueness the server's own minting provides, and a true collision is
+/// caught by the namespace-conflict check at registration.
+fn mint_asset_id() -> AssetId {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(now);
+        hasher.write_u64(nonce);
+        hasher.write_u64(std::process::id() as u64);
+        hasher.write_u64(i as u64);
+        chunk.copy_from_slice(&hasher.finish().to_be_bytes());
+    }
+    AssetId::from_bytes(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1392,7 @@ mod tests {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         }
     }
 
@@ -1189,7 +1515,21 @@ mod tests {
 
     fn bundle_file(role: FileRole, media: MediaType, byte: u8, len: usize) -> PublishBundleFile {
         let dims = matches!(media, MediaType::Png | MediaType::Jpeg).then_some((512, 512));
-        PublishBundleFile { role, tier: DeviceTier::Any, lod: 0, media, bytes: vec![byte; len], dims }
+        PublishBundleFile { role, tier: DeviceTier::Any, lod: 0, media, bytes: vec![byte; len], reference: None, dims }
+    }
+
+    /// Byte-carrying bundles resolve every slot from their own bytes; the
+    /// tests exercise the manifest through that path.
+    fn manifest_of(
+        b: &PublishBundle,
+        asset: AssetId,
+    ) -> ClientResult<(Vec<u8>, AssetRevisionId, Vec<PublishedFile>)> {
+        let resolved: Vec<(BlobId, u64)> = b
+            .files
+            .iter()
+            .map(|f| (BlobId::hash_of(&f.bytes), f.bytes.len() as u64))
+            .collect();
+        b.manifest_with(asset, &resolved)
     }
 
     /// A prop with the full derived PBR set: render mesh + base color +
@@ -1327,14 +1667,14 @@ mod tests {
     fn bundle_manifest_is_deterministic_and_order_independent() {
         let b = bundle();
         let asset = AssetId::from_bytes([3; 16]);
-        let (bytes_a, rev_a, refs_a) = b.manifest(asset).unwrap();
-        let (bytes_b, rev_b, _) = b.manifest(asset).unwrap();
+        let (bytes_a, rev_a, refs_a) = manifest_of(&b, asset).unwrap();
+        let (bytes_b, rev_b, _) = manifest_of(&b, asset).unwrap();
         assert_eq!(bytes_a, bytes_b);
         assert_eq!(rev_a, rev_b);
         // Caller file order does not change the identity…
         let mut shuffled = b.clone();
         shuffled.files.reverse();
-        let (bytes_c, rev_c, refs_c) = shuffled.manifest(asset).unwrap();
+        let (bytes_c, rev_c, refs_c) = manifest_of(&shuffled, asset).unwrap();
         assert_eq!(bytes_a, bytes_c);
         assert_eq!(rev_a, rev_c);
         // …while the returned refs stay in the caller's order.
@@ -1343,7 +1683,7 @@ mod tests {
         // Any byte change is a different revision.
         let mut changed = b.clone();
         changed.files[3].bytes[0] ^= 0xff;
-        let (_, rev_d, _) = changed.manifest(asset).unwrap();
+        let (_, rev_d, _) = manifest_of(&changed, asset).unwrap();
         assert_ne!(rev_a, rev_d);
     }
 
@@ -1380,7 +1720,7 @@ mod tests {
             params_digest: Some([5; 32]),
         });
         let asset = AssetId::from_bytes([4; 16]);
-        let (bytes, rev, refs) = b.manifest(asset).unwrap();
+        let (bytes, rev, refs) = manifest_of(&b, asset).unwrap();
         let decoded = AssetManifest::from_canonical_bytes(&bytes).unwrap();
         assert_eq!(decoded.asset_id, asset);
         assert_eq!(decoded.kind, AssetKind::Prop);
@@ -1442,13 +1782,13 @@ mod tests {
         b.files.retain(|f| f.role != FileRole::RenderGlb);
         assert!(b.validate().is_ok(), "local checks are shape-only");
         assert!(matches!(
-            b.manifest(AssetId::from_bytes([1; 16])).unwrap_err(),
+            manifest_of(&b, AssetId::from_bytes([1; 16])).unwrap_err(),
             ClientError::Content(_)
         ));
         // Mesh metrics must be measured, never zero.
         let mut b = bundle();
         b.stats.triangles = 0;
-        assert!(b.manifest(AssetId::from_bytes([1; 16])).is_err());
+        assert!(manifest_of(&b, AssetId::from_bytes([1; 16])).is_err());
     }
 
     #[test]

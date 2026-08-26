@@ -45,9 +45,9 @@ pub struct CsmCascade {
     pub rz: Vec4f,
     /// World units one shadow texel covers (receiver-side bias input).
     pub texel_world: f32,
-    /// Depth bias in z01 units: texel footprint x 1.5 + 5mm, the bake
-    /// depth passes' tolerance (raster error only — anything fatter reads
-    /// kit detail sheets as lit).
+    /// Depth bias in z01 units: three quarters of a texel plus 2 mm. The
+    /// receiver shader adds a normal/slope offset at grazing angles; keeping
+    /// this base small preserves crisp roof/wall contact without acne.
     pub bias01: f32,
 }
 
@@ -61,10 +61,17 @@ pub struct CsmFrame {
 /// corners (unprojected clip corners at z = far, which both depth
 /// conventions put at +w). `None` at the call site (XR — the runtime owns
 /// the eye matrices) falls back to view-independent rings around the eye.
+///
+/// `focus_distance` is the look-at depth along the view axis (orbit zoom,
+/// metres). When it is > 0, cascade 0 is fitted to a tight slab around that
+/// plane so one shadow texel stays about one screen pixel as the camera
+/// zooms. 0 keeps the village-scale `[0, range]` ladder (first-person walk,
+/// XR rings).
 #[derive(Clone, Copy, Debug)]
 pub struct CsmView {
     pub cam: Vec3f,
     pub far_corners: [Vec3f; 4],
+    pub focus_distance: f32,
 }
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
@@ -92,6 +99,29 @@ fn slice_sphere(view: &CsmView, f0: f32, f1: f32) -> (Vec3f, f32) {
         r = r.max((*p - c).length());
     }
     (c, r.max(0.5))
+}
+
+/// View-axis far (camera → centre of the far plane). Focus depths are
+/// measured along this axis (orbit `look.distance`), not along a corner ray.
+fn view_far(view: &CsmView) -> f32 {
+    let mut mid = v3(0.0, 0.0, 0.0);
+    for fc in &view.far_corners {
+        mid = mid + *fc;
+    }
+    mid = mid * 0.25;
+    (mid - view.cam).length().max(1.0)
+}
+
+/// Cascade-0 depth window around `focus`, as fractions of the far plane.
+///
+/// Slack is half the focus so a subject that fills the view stays inside
+/// the tight cascade, with a 0.9 m floor so a close zoom still covers a
+/// fitted Kenney prop (~1.75 units).
+fn focus_window(focus: f32, far: f32) -> (f32, f32) {
+    let slack = (focus * 0.5).max(0.9);
+    let z0 = (focus - slack).max(0.05);
+    let z1 = (focus + slack).min(far);
+    ((z0 / far).clamp(0.0, 1.0), (z1 / far).clamp(0.0, 1.0))
 }
 
 /// Fit one cascade around a sphere: ortho extents = radius, origin snapped
@@ -141,7 +171,7 @@ fn fit_cascade(
     let z0 = z_min - 0.5;
     let z1 = cf + radius + 0.5;
     let zr = (z1 - z0).max(0.01);
-    let bias_world = texel * 1.5 + 0.005;
+    let bias_world = texel * 0.75 + 0.002;
     CsmCascade {
         rx: Vec4f {
             x: right.x / ex,
@@ -188,6 +218,33 @@ pub fn fit_cascades(
 ) -> CsmFrame {
     let mut frame = CsmFrame::default();
     match view {
+        Some(view) if view.focus_distance > 0.0 => {
+            // Pixel-stable orbit: cascade 0 is a tight slab around the
+            // look-at so its texel footprint tracks the screen as the
+            // camera zooms. Cascade 1 is a 2× nest; cascade 2 keeps the
+            // configured reach for ground that is still in frame.
+            let far = view_far(view);
+            let (lo, hi) = focus_window(view.focus_distance, far);
+            let mid = (lo + hi) * 0.5;
+            let half = (hi - lo) * 0.5;
+            let far_d = {
+                let mut m = 0.0f32;
+                for fc in &view.far_corners {
+                    m = m.max((*fc - view.cam).length());
+                }
+                m.max(1.0)
+            };
+            let scale = (range / far_d).min(1.0);
+            let windows = [
+                (lo, hi),
+                ((mid - 2.0 * half).max(0.0), (mid + 2.0 * half).min(1.0)),
+                (0.0, scale),
+            ];
+            for (i, (f0, f1)) in windows.iter().enumerate() {
+                let (c, r) = slice_sphere(view, *f0, *f1);
+                frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, res);
+            }
+        }
         Some(view) => {
             // Rescale the far corners so the ladder covers `range` rather
             // than the projection's own far plane.
@@ -240,6 +297,7 @@ mod tests {
                 cam + v3(-58.0, 40.0, 100.0),
                 cam + v3(58.0, 40.0, 100.0),
             ],
+            focus_distance: 0.0,
         }
     }
 
@@ -363,6 +421,7 @@ mod tests {
                     view.far_corners[2] + cam_off,
                     view.far_corners[3] + cam_off,
                 ],
+                focus_distance: 0.0,
             };
             fit_cascades(
                 Some(&moved),
@@ -419,6 +478,85 @@ mod tests {
             let n = cascade_project(c, sun_most);
             assert!(n.z >= 0.0, "cascade {i} clips the sun-most scene corner");
         }
+    }
+
+    /// A focused orbit camera must put the look-at plane inside cascade 0
+    /// and shrink that cascade's texel when the camera zooms in, so shadow
+    /// resolution stays roughly constant in pixel space instead of blowing
+    /// up into unfiltered blocks.
+    #[test]
+    fn focus_tightens_cascade0_and_tracks_zoom() {
+        let base = test_view();
+        let scene_min = v3(-60.0, 0.0, -60.0);
+        let scene_max = v3(60.0, 12.0, 60.0);
+        let fit = |focus: f32| {
+            let view = CsmView {
+                focus_distance: focus,
+                ..base
+            };
+            fit_cascades(
+                Some(&view),
+                view.cam,
+                sun(),
+                scene_min,
+                scene_max,
+                80.0,
+                2048.0,
+            )
+        };
+        // Mid-plane of the default test view is ~100 units out; pick a
+        // preview-scale focus well inside that.
+        let wide = fit(4.2);
+        let tight = fit(1.0);
+        let axis = {
+            let mut mid = v3(0.0, 0.0, 0.0);
+            for fc in &base.far_corners {
+                mid = mid + *fc;
+            }
+            (mid * 0.25 - base.cam).normalize()
+        };
+        let probe = |focus: f32| base.cam + axis * focus;
+        for focus in [4.2, 1.0] {
+            let frame = fit(focus);
+            let n = cascade_project(&frame.cascades[0], probe(focus));
+            assert!(
+                n.x.abs() <= 1.0 && n.y.abs() <= 1.0 && (0.0..=1.0).contains(&n.z),
+                "cascade 0 must cover the look-at at focus {focus}: {n:?}"
+            );
+        }
+        assert!(
+            tight.cascades[0].texel_world < wide.cascades[0].texel_world * 0.55,
+            "zooming in 4.2 → 1.0 must shrink cascade 0 texels (wide {}, tight {})",
+            wide.cascades[0].texel_world,
+            tight.cascades[0].texel_world
+        );
+        // Screen-space stability: texel / focus is the pixel footprint of
+        // one shadow texel at the look-at. It must stay in the same band
+        // across a 4× zoom (not grow like the unfocused 80 m ladder).
+        let wide_px = wide.cascades[0].texel_world / 4.2;
+        let tight_px = tight.cascades[0].texel_world / 1.0;
+        let ratio = tight_px / wide_px;
+        assert!(
+            (0.4..=2.5).contains(&ratio),
+            "pixel-space texel drifted under zoom: wide {wide_px}, tight {tight_px}, ratio {ratio}"
+        );
+        // Unfocused fitting must NOT shrink with a focus we didn't set —
+        // the village ladder is independent of look-at depth.
+        let unfocused = fit_cascades(
+            Some(&base),
+            base.cam,
+            sun(),
+            scene_min,
+            scene_max,
+            80.0,
+            2048.0,
+        );
+        assert!(
+            wide.cascades[0].texel_world < unfocused.cascades[0].texel_world,
+            "focused cascade 0 ({}) must be finer than village cascade 0 ({})",
+            wide.cascades[0].texel_world,
+            unfocused.cascades[0].texel_world
+        );
     }
 
     /// The ring fallback (no view) still produces nested cascades centered

@@ -1,0 +1,61 @@
+// ACID BLOOM — the shader-hook demo: an L-system dome whose look comes
+// from a custom fx_color IN THIS DOCUMENT, compiled into the draw shader
+// at load. Iridescent bands cycle along the birth order with the beat.
+{
+    name: "Acid Bloom"
+    engine: "lsystem"
+    seed: 19
+
+    axiom: "X"
+    rules: ["X=F[/+X][\\-X]F[^X]X", "F=FF"]
+    iterations: 5
+    angle: 22.0
+    step: 0.13
+    radius: 0.06
+    sides: 6
+    copies: 3
+
+    grow: "loop"
+    grow_beats: 12
+    sway: "0.9 * (0.25 + 1.5*p0)"
+    sway_freq: 0.8
+    beat_pulse: "0.55 * (0.2 + 1.6*p1)"
+    beat_rate: 1.0
+    glow: "0.25 + 1.5*p2"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WIND", bind: "p0", default: 0.5},
+        {name: "PUMP", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x060010
+    color_a: #x40ff80
+    color_b: #xff4080
+    color_c: #xffffff
+
+    cam_orbit: 0.14
+    fog: 0.035
+
+    stages: [
+        {kind: "bloom", threshold: 0.35, strength: 1.7, levels: 3}
+    ]
+
+    // Shader hooks SUBCLASS the engine's draw shader (that is what keeps
+    // the vertex/pixel structure intact — a plain {} would replace it).
+    shader: draw.DrawVjFxMesh {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            // Iridescent bands: hue cycles along the arc and the beat
+            // (cosine-palette technique, own constants).
+            let ph = t * 14.0 + self.time_beat.y * 0.5 + attr.z * 3.0
+            let rgb = vec3(
+                0.5 + 0.5 * sin(ph),
+                0.5 + 0.5 * sin(ph + 2.094),
+                0.5 + 0.5 * sin(ph + 4.188)
+            )
+            let flash = self.time_beat.w * 0.7
+            return vec4(rgb + vec3(flash, flash, flash), 1.0)
+        }
+    }
+}

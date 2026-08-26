@@ -46147,6 +46147,7 @@ pub struct MF_STREAM_STATE(pub i32);
 pub struct MF_TOPOLOGY_TYPE(pub i32);
 pub const MF_TRANSCODE_CONTAINERTYPE: windows_core::GUID = windows_core::GUID::from_u128(0x150ff23f_4abc_478b_ac4f_e1916fba1cca);
 pub const MF_VERSION: u32 = 131184u32;
+pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct eAVEncH264VProfile(pub i32);

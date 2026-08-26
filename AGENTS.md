@@ -1,122 +1,173 @@
-# Studio Remote Runbook
+# Makepad Agent Runbook
+
+> **Driving a running app: use `--remote`.** Every makepad app started with
+> `--remote` serves a tiny localhost HTTP control surface: window list, PNG
+> grabs, real mouse/key/text injection, widget rects, log tail, graceful quit.
+> It replaces `screencapture -l`, `winid.swift`, CGEvent scripting and the
+> studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
 
 ## Execution Policy
-- Use the Makepad Studio remote protocol by default when the agent needs to
-  inspect or automate a visual UI program. If the user explicitly asks for a
-  standalone/native run, honor that request and launch the release executable
-  directly from the relevant checkout instead.
-- Always use release builds for runtime validation, profiling, benchmarks, timing checks, or any performance-sensitive command. Use `--release` unless the user explicitly asks for a debug build.
-- Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
-- Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when using the Studio flow. For an explicitly requested standalone run, build with `cargo build --release` and launch the resulting executable from that checkout so its provenance is unambiguous.
-- Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
-- For UI runnable targets, do not prebuild or precheck the app from the shell before launching it in Studio. Let the Studio `RunItem` build be the single build path so Cargo fingerprints, env vars, target dirs, and flags stay identical.
-- Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
-- `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
-- Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
-- Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
-- Prefer Studio remote control for automated widget queries, clicks, typing, or runtime UI inspection unless the user asks for standalone execution. A standalone app's built-in screenshot/capture hook is valid for visual inspection.
-- Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
-- When adding a new example crate, update both the Cargo workspace and `makepad.splash` so Studio exposes the new example as a runnable item.
-
-## Assumptions
-- Studio is started manually by the user.
-- Studio remote target is `ip:port` only (no `http://`, no `ws://`), normally `127.0.0.1:8001`.
-  - Use `127.0.0.1:8002` only if Studio reports fallback because `8001` is occupied.
-- Keep one persistent studio remote process for the whole interaction.
+- Launch UI programs as standalone release binaries from this checkout. Do
+  not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
+  `cargo-makepad studio` websocket client.
+- Launch with `--remote` whenever you intend to look at or drive the app,
+  and finish with `GET /gq`. **Nothing of yours may outlive your task** —
+  never leave a test window on the user's screen.
+- Always use release builds for runtime validation, profiling, benchmarks,
+  timing checks, or any performance-sensitive command. Use `--release`
+  unless the user explicitly asks for a debug build.
+- Build with `cargo build --release -p <package>`, then launch the
+  resulting executable so its provenance is unambiguous. Do not use raw
+  `cargo run` / `cargo makepad` to start a UI you will keep inspecting.
+- Stop or replace an older standalone instance of the same target before
+  launching a freshly built one.
+- Keep an interactive standalone app running when the user asks to play
+  with it. Use a separate self-terminating capture run only when a
+  screenshot is also needed.
+- `cargo check` or `cargo build` never counts as UI verification. After
+  changing UI/runtime code, rebuild and relaunch before trusting what you
+  see. Do not keep inspecting an older already-running binary.
+- Command-line-only tasks (builds, tests, linting, file ops, grep, etc.)
+  can be run directly in the shell.
+- A standalone app's built-in screenshot/capture hook is valid for visual
+  inspection.
+- When adding a new example crate, update both the Cargo workspace and
+  `makepad.splash`.
 
 ## Standalone Launch
-- A direct user request for a standalone/native app overrides the default Studio launch flow for that run.
-- Build the requested app in release mode from the exact checkout being tested, then run its resulting executable directly.
-- Stop or replace an older standalone instance of the same target before launching a freshly built one.
-- Keep an interactive standalone app running when the user asks to play with it; use a separate self-terminating capture run only when a screenshot is also needed.
+1. `cargo build --release -p <package>` from this checkout.
+2. Kill any older process of that same executable.
+3. Run `target/release/<bin> --remote` from the repo root (so resource paths
+   resolve), parse the port from the startup line, drive it over HTTP.
+4. After code changes, repeat 1–3 before drawing conclusions.
+5. `GET /gq` when you are done. Always.
 
-## Start Studio Remote
-- Command:
-  - `target/release/cargo-makepad studio --studio=127.0.0.1:8001`
-- Send newline-delimited JSON requests on stdin.
-- Read newline-delimited JSON responses on stdout.
-- Protocol shape is raw `ClientToHub` requests on stdin and filtered `HubToClient` responses on stdout.
-- Do not send `ObserveMount` from the bridge. It can take `primary` UI ownership for the mount and divert RunView/framebuffer traffic away from Studio desktop.
+## App Remote Control (`--remote`)
 
-## Request Protocol (JSON Lines)
-- `{"ListBuilds":[]}`
-- `{"ClearBuild":{"build_id":[6]}}` stops a running build and immediately clears its Studio UI tabs; use this before rerunning the same app.
-- `{"StopBuild":{"build_id":[6]}}` stops/kills a running build but does not clear Studio tabs.
-- `{"RunItem":{"mount":"makepad","name":"makepad-example-todo"}}`
-- `{"RunItem":{"mount":"makepad","name":"makepad-example-xr-quest"}}`
-- `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::","is_regex":false,"glob":null,"max_results":200}}`
-- `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
-- `{"ReadTextRange":{"path":"makepad/studio/backend/src/dispatch.rs","start_line":640,"end_line":720}}`
-- `{"WidgetTreeDump":{"build_id":[6]}}`
-- `{"WidgetQuery":{"build_id":[6],"query":"id:todo_input"}}`
-- `{"Screenshot":{"build_id":[6],"kind_id":0}}` (`kind_id` optional; defaults to `0`)
-- `{"Click":{"build_id":[6],"x":1274,"y":342}}`
-- `{"TypeText":{"build_id":[6],"text":"hello"}}`
-- `{"Return":{"build_id":[6],"auto_dump":false}}`
-- `{"ForwardToApp":{"build_id":[6],"msg_bin":[...]}}` (advanced; binary payload)
+Any makepad app launched with `--remote` runs a localhost HTTP server inside
+the process and prints one line before the UI appears:
 
-## `StudioToApp` API (Updated)
-- The studio remote bridge supports raw app event passthrough via `UIToStudio::ForwardToApp`.
-- Current `StudioToApp` variants include:
-  - `Screenshot`, `WidgetTreeDump`, `KeepAlive`, `LiveChange`, `Swapchain`, `WindowGeomChange`, `Tick`
-  - `MouseDown`, `MouseUp`, `MouseMove`, `Scroll`
-  - `KeyDown`, `KeyUp`, `TextInput`, `TextCopy`, `TextCut`
-  - `None`, `Kill`
-- Use direct studio remote requests (`Screenshot`, `WidgetTreeDump`, `Click`, `TypeText`, `Return`) for normal automation.
-- Use raw `StudioToApp` only for low-level event injection/debugging.
+```
+[makepad-remote] listening on 127.0.0.1:53412 pid=9931 app=makepad-example-splash grabs=/var/folders/…/T/makepad-remote/makepad-example-splash-9931
+```
 
-## Response Notes (Current)
-- Bridge stdout is filtered to: `Hello`, `Error`, `TextFileRead`, `TextFileRange`, `FindFileResults`, `SearchFileResults`, `Builds`, `RunItems`, `BuildStarted`, `BuildStopped`, `BuildCleared`, `AppStarted`, `RunViewCreated`, `QueryLogResults`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
-- `BuildCleared` is a Studio frontend cleanup signal routed to the primary UI for the build's mount; bridge clients should not wait for it before starting the next run.
-- `RunViewFrame` and the terminal stream are not exposed by the bridge.
-- `Screenshot` responses include file metadata (`path`, `width`, `height`) and not inline PNG bytes.
-- `WidgetTreeDump` responses include text dump content keyed by `request_id`.
-- `FindInFiles` responds as `SearchFileResults` with concise entries (`path`, `line`, `column`, `line_text`) and `done`.
-- `FindInFiles` defaults to searching only `.rs`, `.md`, `.toml` files unless `glob` is provided.
-- `ReadTextRange` responds as `TextFileRange` with `path`, requested `start_line`/`end_line`, `total_lines`, and `content`.
-- Query-scoped responses are lane-filtered by `query_id.client_id`; only this bridge client's query results are emitted.
-- Build ids and query ids are `QueryId` tuple structs, so JSON encodes them as one-element arrays like `[6]`.
-- `FindInFiles`/`SearchFiles` execution is worker-pooled in backend (not main dispatch thread).
+Port, pid, app name and the grab directory — everything needed to drive and
+clean up the instance, with no discovery step. `--remote=PORT` pins the port;
+`MAKEPAD_REMOTE=1` (or `=PORT`) does the same via the environment. No app code
+is involved: it lives in `app_main!`, so every app gets it for free.
 
-## Recommended Control Flow
-1. Start studio remote process once.
-2. Determine the target runnable item name locally from the repo or from the user request.
-3. Call `ListBuilds` and find any existing build for the same runnable item.
-4. Send `ClearBuild` for that old `build_id`; do not wait for an acknowledgment before the next launch.
-5. Start the new UI app through `RunItem`, and wait for `BuildStarted` and `AppStarted`.
-6. After any code change that affects runtime/UI behavior, repeat steps 3-5 before doing screenshots, widget dumps, clicks, or visual conclusions.
-7. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
-8. Use direct shell cargo commands for non-launch tasks such as `check`, `build`, `test`, or `bench`.
-9. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
-10. For text input, click field first, then send text, then return.
-11. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+### Cheat sheet
 
-## `RunItem` Launch
-- `RunItem` executes a Studio-defined runnable item by name.
-- Use the runnable item name shown in Studio, not a Cargo package name.
-- `RunItem` does not implicitly replace an older build tab; agents should clear the old build themselves first with `ClearBuild`.
+Every route is a plain `GET`. Every answer is **one line of JSON** with short
+keys and real numbers. Errors are `{"err":"..."}` with HTTP 404.
+`GET /` returns this table as plain text, so an agent that finds the port
+learns the whole API in one request.
 
-## One-Flow Input Burst
-- Send this as one stdin write (multiple JSON lines, no sleeps):
-  - `Click` (input field center)
-  - `TypeText`
-  - `Return`
-- Then request `WidgetTreeDump` or `Screenshot` to confirm.
+| Route | Answer | Notes |
+|---|---|---|
+| `/` `/help` | plain-text cheat sheet | self-describing; read this first |
+| `/s` `?w=ID` | `{"app":…,"pid":…,"w":[{"i":0,"t":"Title","sz":[w,h],"px":[w,h],"dpi":2,"pos":[x,y]}]}` | `sz` = layout points, `px` = physical pixels |
+| `/g` `?w=&scale=&raw=` | `{"png":"/abs/path.png","w":0,"sz":[w,h]}` | writes a file and returns the **path** (agents read images as files). `raw=1` sends `image/png` bytes instead. `scale=0.5` halves it |
+| `/gq` `?w=&scale=` | `{"png":[paths…],"quit":1}` | **grab every window, then quit.** The canonical last call of a session |
+| `/m` `?k=&x=&y=&w=&b=&dx=&dy=&wait=` | `{"ok":1,"f":frame}` | `k=move\|down\|up\|click\|scroll`; `b=0` left, `1` right, `2` middle |
+| `/click` `?x=&y=&w=&wait=` | `{"ok":1}` | alias for `/m?k=click` (move + down + up) |
+| `/k` `?t=TEXT` or `?k=down\|up\|press&c=CODE` | `{"ok":1}` | `t=` goes through the IME text path; `c=` takes `KeyA`/`a`/`enter`/`Escape`/`ArrowLeft`/`F1`/`Key1`… plus `&shift=1&ctrl=1&alt=1&cmd=1` |
+| `/t` `?t=TEXT` | `{"ok":1}` | same as `/k?t=` |
+| `/snap` `?q=&w=&all=` | `{"s":[{"i":"id","ty":"Button","r":[x,y,w,h],"w":0,"t":"Click me"}]}` | **how you find things to click.** `q=` filters id/type/text; rects are window-local, ready to feed to `/click` |
+| `/d` `/dump` | plain text widget tree | one indented line per widget, ending `x y w h` |
+| `/log` `?n=50&since=N` | `{"n":lastseq,"l":["[E] …"]}` | ring buffer of the app's own log output — see errors without owning stdout |
+| `/close` `?w=ID` | `{"ok":1}` | closes one window the normal way |
+| `/quit` | `{"ok":1}` | graceful shutdown, no final grab |
 
-## Coordinates
-- Use coordinates from dump as-is.
-- `W3` dump uses integer pixel coordinates in the same space expected by `Click`.
-- Do not apply extra DPI math in the agent loop.
+Add `&wait=1` to any input route to have it answer only **after the next frame
+is drawn**, so a following `/g` sees the result with no `sleep`.
+Add `&w=ID` to target a window; omit it for the first one.
+`POST` the same routes with a flat JSON body (`{"x":10,"y":20}`) when quoting a
+query string is painful; the key names are the long ones (`window`, `kind`,
+`button`, `text`, `code`).
 
-## Reliability Notes
-- `Screenshot` can arrive before visible redraw after rapid input bursts.
-  - If screenshot looks stale, request a follow-up `WidgetTreeDump`/`Screenshot`.
-- If input does nothing:
-  - Verify `build_id` with `ListBuilds`.
-  - Refresh dump and retry click on input before typing.
-- If request errors with no active websocket:
-  - app is not connected yet; wait for startup completion and retry.
+### The standard pattern
 
+```bash
+cargo build --release -p makepad-example-splash
+./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
+sleep 4
+P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
+
+curl -s "http://127.0.0.1:$P/s"                      # {"app":…,"w":[{"i":0,…}]}
+curl -s "http://127.0.0.1:$P/snap?q=press_demo"      # find the button's rect
+curl -s "http://127.0.0.1:$P/click?x=352&y=472&wait=1"
+curl -s "http://127.0.0.1:$P/snap?q=press_status"    # assert the app reacted
+curl -s "http://127.0.0.1:$P/log?n=20"               # any errors?
+curl -s "http://127.0.0.1:$P/gq?scale=0.5"           # final PNGs + quit
+```
+
+Read the returned `png` path with your image tool. `tools/remote_smoke.sh` is
+this pattern as an executable end-to-end test across three example apps.
+
+### Rules
+
+- **Close what you open.** When you are done with an instance you launched,
+  `GET /gq` (or `/close` each window, then `/quit`). Never leave test windows
+  on the user's screen, and never `pkill` when the protocol is available.
+- **Never touch an instance the user is running.** Launch your own.
+- **A vanished window or app with `[makepad-remote] user closed …` in the log
+  means the human dismissed it — it was in their way.** Do **not** treat that
+  as a crash and do **not** relaunch it. The app prints
+  `[makepad-remote] user closed window 1 ("Inspector Panel")` and, when that
+  was the last window, `[makepad-remote] app exit: user closed the last
+  window`. Both lines go to stdout with or without `--remote`, and into the
+  `/log` ring. While the app lives, `/s?w=1` on such a window answers
+  `{"err":"window 1 closed by user"}` rather than "no window 1".
+- **`--remote` windows are tagged.** Their title gets a ` [remote]` suffix
+  (both the OS title bar and makepad's own caption bar) so a human who finds
+  one lingering knows it is an agent instance and can close it guilt-free.
+  `--remote-title-tag=NAME` changes the tag; `--remote-title-tag=off` removes
+  it.
+
+### Semantics worth knowing
+
+- **Coordinates** are layout points, window-local, y down — the same space
+  `MouseDownEvent.abs` uses, and the same space `/snap` reports rects in. No
+  dpi maths: a rect from `/snap` goes straight into `/click`.
+- **Window ids** are stable `usize` slots (`/s` `"i"`). Every window-targeting
+  route takes `w=`; omitting it means the first created window. A request for
+  a window that never existed 404s with `{"err":"no window 3"}`.
+- **Input takes the real path.** Events are injected through
+  `Cx::dispatch_studio_msg`, the same function the studio bridge uses, with
+  the same `fingers` bookkeeping — so hits, capture, tap counts and gestures
+  behave exactly as they do for a human. `/click` sends move + down + up so
+  hover-dependent widgets see what they expect.
+- **Grabs are real frames**, read back from the window's own presented
+  drawable on the frame after the request (the studio screenshot pipeline,
+  extended with per-window targeting). The UI thread is never blocked; the
+  HTTP thread waits. Grabs are written to
+  `$TMPDIR/makepad-remote/<app>-<pid>/grab-w<window>-<seq>.png`, monotonically
+  numbered, with the last 32 per window retained.
+- **Backends:** macOS/Metal is fully supported. Linux GL and Vulkan support
+  grabs too. Windows/D3D11 has no screenshot readback yet, so `/g` there times
+  out with `{"err":"grab timeout …"}` while every other route works. Android,
+  OHOS and wasm compile to a no-op.
+- **Cost when idle is zero.** The event loop only upshifts its paint clock
+  while a remote request is in flight.
+
+### Studio remote bridge (the older path)
+
+The studio (`studio/desktop` + `studio/hub`) drives a hosted app over a
+websocket with the `StudioToApp` / `AppToStudio` protocol
+(`platform/studio/src/studio.rs`): `MouseDown/Up/Move/Scroll`, `KeyDown/Up`,
+`TextInput`, `TextCopy/Cut`, `GameInput`, `Screenshot`, `RunViewFrameRequest`,
+`WidgetTreeDump`, `WidgetQuery`, `WidgetSnapshot`, `LiveChange`, `Custom`,
+`Kill`, plus the shared-swapchain messages `Swapchain` / `WindowGeomChange` /
+`Tick`. `libs/makepad_test` is the programmatic client for it
+(`TestApp::try_click_center`, `try_type_text`, `try_screenshot`, …) and
+`examples/*/tests/ui.rs` are its test suites.
+
+`--remote` reuses that vocabulary — the same message types, the same injection
+function, the same screenshot pipeline — but exposes it as HTTP on the app
+itself, with no studio, no hub, no build ids, and with per-window targeting
+that the studio path lacks. Use `--remote` for agent work; the studio bridge
+remains for the studio and for `libs/makepad_test`.
 
 ## CLAUDE.md Body
 The following is the current body of CLAUDE.md included verbatim for agent guidance parity.
@@ -136,19 +187,35 @@ grep -r "texture_2d" widgets/src/
 
 ## Running UI Programs
 
-Use the Studio bridge runnable-item flow instead of launching UI apps directly from the shell:
+Launch UI apps as standalone release binaries from this checkout. Do not
+use the Studio remote bridge.
 
-1. Start the Studio remote bridge once.
-2. Determine the runnable item name locally.
-3. If an older instance is still running, clear it with `{"ClearBuild":{"build_id":[N]}}` and launch the replacement immediately without waiting for an acknowledgment.
-4. Launch it with `{"RunItem":{"mount":"makepad","name":"<runnable-name>"}}`.
-5. After editing UI/runtime code, do not inspect the previously running build. Always verify against the newly started build id from step 4.
+```bash
+cargo build --release -p makepad-app-asset-ui
+# stop any older instance of the same binary, then:
+./target/release/makepad-app-asset-ui
+```
 
-Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
+For one-shot visual smoke of a small example:
 
-Use direct shell cargo commands only for non-UI tasks such as library checks, tests, and file/search operations. Do not run shell `cargo check`, `cargo build`, or `cargo run` for UI runnable targets that will be launched via Studio.
+```bash
+RUST_BACKTRACE=1 cargo run -p makepad-example-splash --release & PID=$!; sleep 15; kill $PID 2>/dev/null; echo "Process $PID killed"
+```
 
-When those non-UI tasks are used for runtime behavior or performance measurements, prefer their release variants (`cargo run --release`, `cargo test --release`, `cargo build --release`).
+To look at or drive a running app, add `--remote`: the app serves a localhost
+HTTP control surface (window list, PNG grabs, real mouse/key/text injection,
+widget rects, log tail) and prints its port on startup. Finish every session
+with `GET /gq`, which grabs each window and quits — never leave a test window
+on screen. Full protocol: repo-root `AGENTS.md`.
+
+```bash
+./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
+P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
+curl -s "http://127.0.0.1:$P/"          # cheat sheet
+curl -s "http://127.0.0.1:$P/gq"        # final grab + quit
+```
+
+When measuring runtime or performance, prefer `--release`.
 
 ## Cargo.toml Setup
 

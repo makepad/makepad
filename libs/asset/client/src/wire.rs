@@ -1,6 +1,6 @@
 //! The Asset Server wire contract as this client speaks it, in one place.
 //!
-//! Everything here mirrors the server transport (`libs/game/asset-store`): the
+//! Everything here mirrors the server transport (`libs/asset/store`): the
 //! UDP discovery beacon layout, the bearer-token shape, the v1 route paths,
 //! and the request-target charset the server accepts (no percent-encoding, no
 //! dot segments, restricted bytes). Centralizing it means a server-side route
@@ -20,6 +20,10 @@ use makepad_asset_data::{
 };
 
 // ---- discovery beacon ------------------------------------------------------
+
+/// Catalog-event vocabulary this build speaks (see [`path_events`]). v1 is
+/// the original kind set; v2 adds `asset_retired` / `revision_retired`.
+pub const EVENT_VOCABULARY: u32 = 2;
 
 pub const DISCOVERY_MAGIC: [u8; 8] = *b"MPASDIS1";
 pub const BEACON_LEN: usize = 36;
@@ -101,6 +105,19 @@ pub fn path_alias(alias: &AssetAlias) -> String {
     format!("/v1/aliases/{alias}")
 }
 
+/// Batch alias status in ONE request (see the server's
+/// `alias_status_batch`): what the store already holds under a list of
+/// aliases, whether each head's Source blob is the one the caller has, and
+/// which of a requested tag set each carries. Absent on older servers, which
+/// answer 404 — callers fall back to per-alias resolves.
+pub fn path_alias_status() -> String {
+    "/v1/aliases/status".to_string()
+}
+
+/// Most entries this client will put in one alias-status request. The server
+/// enforces its own ceiling; this is the one we promise not to exceed.
+pub const MAX_ALIAS_STATUS_ITEMS: usize = 512;
+
 pub fn path_revision(rev: &AssetRevisionId) -> String {
     format!("/v1/revisions/{rev}")
 }
@@ -133,8 +150,81 @@ pub fn path_blob(blob: &BlobId) -> String {
 
 /// Content-addressed blob upload on the DATA plane; the namespace names the
 /// authorization context, the body is the bytes.
+/// Ordered batch pull of many blobs in ONE request (see the server's
+/// `blob_batch`). Absent on older servers, which answer 404 — callers fall
+/// back to single GETs.
+pub fn path_blobs_batch() -> String {
+    "/v1/blobs/fetch".to_string()
+}
+
+/// Media type of the framed batch body. A response that does not carry
+/// EXACTLY this type is not parsed as frames.
+pub const BLOB_BATCH_CONTENT_TYPE: &str = "application/vnd.makepad.blob-batch.v1";
+
+/// Fixed frame header: status(1) + digest(32) + length(8, big-endian).
+pub const BLOB_BATCH_FRAME_HEADER: usize = 41;
+
+/// Ceilings this client accepts from a batch response, independent of what
+/// the server claims: most frames it will parse, and the largest single item
+/// it will buffer.
+pub const MAX_BLOB_BATCH_ITEMS: usize = 64;
+pub const MAX_BLOB_BATCH_ITEM_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_BLOB_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn path_blob_upload(ns: &str) -> String {
     format!("/v1/blobs?ns={ns}")
+}
+
+/// Bulk blob admission: many blobs in one request, one catalog transaction
+/// (see the server's `blob_upload_batch`). Body framing is
+/// `length(8, big-endian) | bytes` per item.
+pub fn path_blob_upload_batch(ns: &str) -> String {
+    format!("/v1/blobs/batch?ns={ns}")
+}
+
+/// Batch publication: N complete assets in one request, one state-thread
+/// visit, one catalog transaction.
+pub fn path_publish_batch() -> String {
+    "/v1/publish/batch".to_string()
+}
+
+/// Most blobs one upload batch may carry (mirrors the server cap).
+pub const MAX_UPLOAD_BATCH_ITEMS: usize = 64;
+
+/// Default byte budget a caller should aim for when SIZING an upload batch
+/// request, chosen to match the store's compiled-in default
+/// (`ServerConfig::new(..).batch_max_bytes`,
+/// libs/asset/store/src/host/config.rs — tied to this constant by
+/// `libs/asset/store/tests/publish_batch_http.rs::
+/// client_batch_budget_never_assumes_more_than_the_servers_default`, which
+/// fails the moment the two drift). Deliberately BELOW
+/// [`MAX_BLOB_BATCH_BYTES`] — that ceiling is what a FETCH batch response is
+/// allowed to weigh, unrelated to how big an upload request should be built.
+/// This is only a target for the common case: a server configured smaller
+/// still is handled by `Api::upload_blob_batch_with_digests` splitting the
+/// batch and retrying on a 413, so undershooting this budget is never a
+/// correctness requirement, only a latency one (fewer round trips).
+pub const UPLOAD_BATCH_SAFE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Most items one publish batch may carry (mirrors the server cap).
+pub const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
+
+/// Admit a SERVER-LOCAL file by reference: the store hashes it where it lies
+/// and catalogues it without copying (see the server's `blob_ref_admit`).
+///
+/// Only meaningful when the client and the store share a filesystem — the
+/// path travels, the bytes do not. Servers with the policy off answer 404,
+/// which is the caller's signal to fall back to a real upload.
+pub fn path_blob_ref(ns: &str) -> String {
+    format!("/v1/blobs/ref?ns={ns}")
+}
+
+/// Re-scan reference blobs (admin). Bounded page; `after` resumes.
+pub fn path_blob_refs(after: Option<&BlobId>, limit: u32) -> String {
+    match after {
+        Some(a) => format!("/v1/blob-refs?after={a}&limit={limit}"),
+        None => format!("/v1/blob-refs?limit={limit}"),
+    }
 }
 
 pub fn path_asset_register() -> String {
@@ -152,6 +242,71 @@ pub fn path_asset_publish(asset: &AssetId, rev: &AssetRevisionId) -> String {
 pub fn path_annotation(asset: &AssetId) -> String {
     format!("/v1/assets/{asset}/annotation")
 }
+
+// ---- deletion --------------------------------------------------------------
+
+/// Retire (delete) a whole asset: every revision leaves the catalog's
+/// listings, aliases and search index, and its bytes become collectable.
+pub fn path_asset_retire(asset: &AssetId) -> String {
+    format!("/v1/assets/{asset}/retire")
+}
+
+/// Retire one revision (a superseded one, typically); the asset stays live.
+pub fn path_revision_retire(asset: &AssetId, rev: &AssetRevisionId) -> String {
+    format!("/v1/assets/{asset}/revisions/{rev}/retire")
+}
+
+/// Blob garbage collection: POST advances a run (starting one if needed),
+/// GET reports the newest run, and the cancel path abandons an active one.
+pub fn path_gc() -> String {
+    "/v1/gc".to_string()
+}
+
+pub fn path_gc_cancel() -> String {
+    "/v1/gc/cancel".to_string()
+}
+
+// ---- live game rooms (LAN rendezvous) --------------------------------------
+//
+// Players' machines talk to each other over direct sockets; this server is
+// only where they find each other, because it is the one thing both of them
+// are already attached to. Rooms are leased, in-memory and never catalog
+// assets — see `store/src/host/rooms.rs`.
+
+/// Live rooms, optionally narrowed to the game a player just pressed Play
+/// on. `game` must already be query-charset safe (an asset-id spelling is).
+pub fn path_rooms(game: Option<&str>) -> String {
+    match game {
+        Some(g) => format!("/v1/rooms?game={g}"),
+        None => "/v1/rooms".to_string(),
+    }
+}
+
+/// Ask for a game's claim and learn who holds it — one call, because asking
+/// and taking must be the same atomic act.
+pub fn path_rooms_claim() -> String {
+    "/v1/rooms".to_string()
+}
+
+/// `room` is the canonical `room_<16 lowercase hex>` spelling.
+pub fn path_room_heartbeat(room: &str) -> String {
+    format!("/v1/rooms/{room}/heartbeat")
+}
+
+pub fn path_room_retire(room: &str) -> String {
+    format!("/v1/rooms/{room}/retire")
+}
+
+/// Room-field ceilings, mirroring the server's own (`host::rooms`). A value
+/// over budget is refused here rather than sent and 400'd.
+pub const MAX_ROOM_GAME_BYTES: usize = 64;
+pub const MAX_ROOM_INVITE_BYTES: usize = 200;
+pub const MAX_ROOM_HOST_BYTES: usize = 64;
+/// Lease bounds a room claim or heartbeat may ask for.
+pub const MIN_ROOM_TTL_MS: u64 = 5_000;
+pub const MAX_ROOM_TTL_MS: u64 = 10 * 60 * 1000;
+/// Most rooms one listing may carry — the server caps at 64 games.
+pub const MAX_ROOMS_PAGE: usize = 64;
 
 // ---- jobs (generation scheduling) ------------------------------------------
 
@@ -197,7 +352,11 @@ pub fn path_events(
     limit: u32,
     kind: Option<&str>,
 ) -> String {
-    let mut p = format!("/v1/events?wait={wait_ms}&limit={limit}");
+    // `ev` is the event VOCABULARY this build understands. A server that
+    // only speaks v1 ignores it; a newer server uses it to decide whether it
+    // may send kinds this client knows (retirement), and downgrades them to
+    // their v1 spelling for clients that do not ask.
+    let mut p = format!("/v1/events?wait={wait_ms}&limit={limit}&ev={EVENT_VOCABULARY}");
     if let Some(k) = kind {
         p.push_str("&kind=");
         p.push_str(k);
@@ -272,6 +431,10 @@ pub fn path_chat_events(id: &str, after: u64, wait_ms: u64, limit: u32) -> Strin
 
 pub fn path_chat_cancel(id: &str) -> String {
     format!("/v1/chat/sessions/{id}/cancel")
+}
+
+pub fn path_chat_tool_result(id: &str) -> String {
+    format!("/v1/chat/sessions/{id}/tool-result")
 }
 
 pub const MAX_CHAT_WAIT_MS: u64 = 30_000;
@@ -389,6 +552,9 @@ pub const MAX_PAGE_ENTRIES: usize = 512;
 pub const MAX_CURSOR_BYTES: usize = 1024;
 /// Longest namespace string accepted in a DTO.
 pub const MAX_NAMESPACE_BYTES: usize = 64;
+/// Longest server-local path a reference admission may name. Matches the
+/// store's own bound so a refusal happens here, before a round trip.
+pub const MAX_BLOB_REF_PATH_BYTES: usize = 4096;
 /// Longest title accepted in a DTO.
 pub const MAX_TITLE_BYTES: usize = 512;
 /// Longest snippet accepted in a DTO (server budget is 320).

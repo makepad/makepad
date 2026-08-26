@@ -1,0 +1,51 @@
+// BLIMP — a fat video airship cruising a slow bounded figure through the
+// frame: a horizontal capsule whose hull wraps the clip end to end, drifting
+// on three detuned sines with a gentle nose wobble, the beat breathing a
+// little extra light along the belly. Pattern taught here: a fixed axis
+// spin (quarter-turn about z lays the capsule flat) composed with a wobble,
+// and a drift path that is three sines — bounded forever.
+{
+    name: "Blimp"
+    engine: "videomesh"
+    shape: "capsule"
+    seed: 15
+
+    detail: 32
+    size: 2.3
+    aspect: 1.9
+    fly: 0.6
+
+    beat_pulse: 0.35
+    input0: "test"
+
+    color_bg: #x05070f
+    color_a: #x88b0e0
+    color_b: #x304a80
+    color_c: #xf0f6ff
+
+    fog: 0.02
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.75, strength: 0.6, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — the drifting hull, clip wrapped around it.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.0, 0.0, 1.0)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let x = 2.3 * sin(t * 0.19)
+            let y = 0.55 * sin(t * 0.31)
+            let z = 0.8 * sin(t * 0.11)
+            return vec4(x, y, z, 1.5707963 + 0.08 * sin(t * 0.45))
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let lit = content.xyz * t
+            let belly = self.col_c.xyz * (1.0 - attr.z)
+                * (0.2 + self.time_beat.w * 0.7 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + belly) * self.fog.y, 1.0)
+        }
+    }
+}

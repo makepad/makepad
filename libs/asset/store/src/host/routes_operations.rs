@@ -796,6 +796,7 @@ fn output_facts_of(name: &str, v: &Value) -> RouteResult<OperationOutputFacts> {
             width: body_u64(t, "width").ok_or(Fail::Http(400, "malformed thumbnail"))? as u32,
             height: body_u64(t, "height").ok_or(Fail::Http(400, "malformed thumbnail"))? as u32,
             byte_len: body_u64(t, "byte_len").ok_or(Fail::Http(400, "malformed thumbnail"))?,
+            views: Vec::new(),
         }),
     };
     let metrics = metrics_of(v)?;
@@ -871,8 +872,6 @@ pub fn operation_finalize(
         // order equals commit order (the same convention as every other
         // publishing route).
         ctx.asset_index_insert(asset.as_bytes(), &meta.ns, now)?;
-        ctx.asset_rev_insert(asset.as_bytes(), revision.as_bytes(), now)?;
-        ctx.asset_rev_mark(asset.as_bytes(), revision.as_bytes(), true, now)?;
         let attempt = ctx
             .core
             .jobs()

@@ -1,0 +1,166 @@
+// VECTOR PATROL — Battlezone energy: the mountain-jet in wireframe. Grid
+// lines only over near-black terrain, the jet reduced to glowing face
+// edges, plume stabbing on the beat. Pattern taught: the `look: "wire"`
+// branch of the mountainjet shader — same stream, vector-monitor material.
+{
+    name: "Vector Patrol"
+    engine: "mountainjet"
+
+    res: 130
+    size: 34.0
+    height: 4.4
+    noise_scale: 0.20
+    scroll: 6.0
+    ridged: 0.85
+    cells: 34
+    look: "wire"
+    jet_size: 1.05
+    weave: 1.4
+
+    beat_pulse: 0.6
+    beat_rate: 1.0
+    p0: "0.3 + 1.2 * pulse"
+
+    // PERFORMANCE DIALS — the engine's own p-levers: BURNER holds the
+    // plume binding above when touched, WEAVE speeds the flight weave,
+    // GLOW gains the wire light.
+    dials: [
+        {name: "BURNER", bind: "p0", default: 0.5},
+        {name: "WEAVE", bind: "p1", default: 0.0},
+        {name: "GLOW", bind: "p2", default: 0.0}
+    ]
+
+    color_bg: #x020803
+    color_a: #x30ff70
+    color_b: #xa0ffc0
+    color_c: #xe8fff0
+
+    cam_fov: 70.0
+    cam_height: 3.6
+    cam_orbit: 0.0
+    fog: 0.045
+    glow: 1.2
+
+    stages: [
+        {kind: "bloom", threshold: 0.5, strength: 1.3, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = the element look parameter, attr.x = class 0 land 1 jet 2 burner.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxJet {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let fam = attr.x
+            let look = self.flow.y
+            let gain = self.fog.y * (1.0 + self.user.z)
+            let mut rgb = vec3(0.0, 0.0, 0.0)
+            if fam < 0.5 {
+                // ---- TERRAIN ----
+                let h = t
+                let lit = attr.z
+                // Same NEGATIVE sign as `height_at`: grid, drape and land
+                // must travel together, toward the camera (see the scroll
+                // sign note there — the range used to fly backwards).
+                // BOUNDED SCROLL: grid and drape are periodic in whole uv
+                // units (cells is a whole number), so the wrap is the same
+                // picture taken on a small number — which is what stops the
+                // lines shimmering once the clock has run for hours.
+                let scroll = vec2(0.0,
+                    0.0 - modf(self.time_beat.x * self.flow.x * 0.06, 1.0))
+                let g = fract((self.v_uv + scroll) * self.shape.x)
+                let dg = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y))
+                let line = 1.0 - smoothstep(0.0, 0.11, dg)
+                let beat_glow = 1.0 + self.time_beat.w * 0.9
+                // CONTENT — THE DRAPE: the channel video is PAINTED ON THE
+                // RANGE, sampled by the SAME scrolled grid uv, so the clip
+                // streams toward the viewer with the land it lies on. It
+                // REPLACES the slope gradient rather than tinting it (a
+                // tint on a dark alpenglow ramp reads as a mood, never as
+                // a picture) and keeps the terrain's own lighting.
+                // fog.z = the pre-gated `content` strength.
+                let cm = cmix
+                let ttx = content
+                if look < 0.5 {
+                    // solid alpenglow: valleys col_a, peaks col_b, summits
+                    // catch col_c; a whisper of grid keeps the retro DNA.
+                    let grad = self.col_a.xyz.mix(self.col_b.xyz, clamp(h * 1.5 - 0.15, 0.0, 1.0))
+                        .mix(ttx.xyz * 1.35, clamp(cm * 1.25, 0.0, 1.0))
+                    let glow = self.col_c.xyz * pow(clamp(h, 0.0, 1.0), 3.0) * 0.85
+                    rgb = (grad * lit + glow + grad * line * 0.10) * gain
+                } else {
+                    if look < 1.5 {
+                        // Battlezone wire: lines only over near-black fill.
+                        // Content lights the wireframe AND washes the fill,
+                        // so the picture is continuous between the lines.
+                        let wl = self.col_a.xyz.mix(ttx.xyz * 1.15, clamp(cm * 1.2, 0.0, 1.0))
+                        let fill = self.col_a.xyz * 0.035
+                            + ttx.xyz * (cm * (0.35 + 0.65 * lit))
+                        rgb = (fill + wl * line * beat_glow
+                            + self.col_b.xyz * (line * h * 1.3)) * gain
+                    } else {
+                        // night vision: mono luminance ramp + grain. The
+                        // hash is INLINED: a helper fn bound to the vertex
+                        // stage (hash2 feeds height_at) cannot also be
+                        // called from the pixel stage. Content ghosts the
+                        // video's luminance through the mono ramp — the
+                        // clip becomes the thing the scope is looking at.
+                        let vl = dot(ttx.xyz, vec3(0.299, 0.587, 0.114))
+                        let lum = clamp(
+                            mix(0.14 + h * 0.9 * lit, vl * (0.35 + 0.75 * lit), clamp(cm, 0.0, 1.0))
+                                + line * 0.22,
+                            0.0, 1.0
+                        )
+                        let gv = floor(self.v_uv * 331.0)
+                            + vec2(fract(modf(self.time_beat.x, 1.0) * 17.0), 0.0)
+                        let grain = fract(sin(dot(gv, vec2(157.31, 113.97))) * 41739.613) * 0.10
+                        rgb = self.col_a.xyz * ((lum + grain) * beat_glow) * gain
+                    }
+                }
+                return vec4(rgb, 1.0)
+            }
+            if fam < 1.5 {
+                // ---- JET HULL ----
+                let edge_d = min(
+                    min(self.v_uv.x, 1.0 - self.v_uv.x),
+                    min(self.v_uv.y, 1.0 - self.v_uv.y)
+                )
+                let edge = 1.0 - smoothstep(0.0, 0.09, edge_d)
+                let shade = t
+                let part = attr.z
+                if look < 0.5 {
+                    let c = self.fx_jet_color(shade, part, edge)
+                    rgb = c.xyz * gain
+                } else {
+                    if look < 1.5 {
+                        // Battlezone: near-black silhouette body (the depth
+                        // test cuts it into the grid) + hot vector edges,
+                        // wider than the solid look so the outline reads
+                        // against the busy terrain.
+                        let we = 1.0 - smoothstep(0.0, 0.17, edge_d)
+                        rgb = (self.col_a.xyz * (we * 2.4)
+                            + self.col_c.xyz * (we * 0.5)
+                            + self.col_a.xyz * 0.02) * gain
+                    } else {
+                        rgb = self.col_a.xyz * ((0.10 + shade * 0.55 + edge * 0.35)) * gain
+                    }
+                }
+                return vec4(rgb, 1.0)
+            }
+            // ---- BURNER ----
+            let along = self.v_uv.y
+            let across = abs(self.v_uv.x - 0.5) * 2.0
+            let core = pow(clamp(1.0 - along, 0.0, 1.0), 1.5)
+                * clamp(1.0 - across, 0.0, 1.0)
+            let heat = self.col_c.xyz.mix(self.col_b.xyz, along)
+            let flick = 0.9 + 0.25 * sin(self.time_beat.x * 43.0 + attr.z * 61.0)
+            rgb = heat * (core * (0.8 + t * 1.6) * flick) * self.fog.y
+            return vec4(rgb, 1.0)
+        }
+    }
+}

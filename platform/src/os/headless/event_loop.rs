@@ -138,6 +138,12 @@ impl Cx {
             if SignalToUI::check_and_clear_action_signal() {
                 self.handle_action_receiver();
             }
+            // The `--remote` HTTP control surface and the studio control
+            // channel: every windowed backend services them from its event
+            // loop; the bounded headless loop must too, or a headless
+            // `--remote` session answers its metadata routes and then times
+            // out on anything that needs the app (snap, click, grab).
+            self.poll_control_channel();
             self.dispatch_network_runtime_events();
 
             let timer_events = self.os.stdin_timers.get_dispatch();
@@ -469,34 +475,59 @@ impl Cx {
     ) -> bool {
         let output_dir = self.headless_output_dir();
         let mut rendered_any = false;
+        // `MAKEPAD_HEADLESS_FRAMES=off` skips the per-frame PNG files — a
+        // long-lived `--remote` sweep instance redraws continuously and the
+        // per-frame encode+write is a disk flood; grabs (below) still work.
+        // Default keeps every frame on disk, which is what the UI render
+        // suites read.
+        let write_files =
+            !matches!(std::env::var("MAKEPAD_HEADLESS_FRAMES").as_deref(), Ok("off"));
 
         // Render all passes using the real draw tree + JIT shaders
         let framebuffers = self.headless_render_all_passes(time_now);
 
-        for (window_id, fb) in framebuffers {
+        for window_id in framebuffers {
             // Skip if we don't have a window state for this window
             if window_id >= windows.len() {
                 continue;
             }
+            let Some((width, height)) = self
+                .os
+                .window_framebuffers
+                .get(&window_id)
+                .map(|fb| (fb.width as u32, fb.height as u32))
+            else {
+                continue;
+            };
             let state = &mut windows[window_id];
             if !state.created {
                 state.created = true;
                 state.ensure_size_defaults();
             }
 
-            let width = fb.width as u32;
-            let height = fb.height as u32;
-
-            let request_ids = if send_protocol {
-                self.take_studio_screenshot_request_ids(0)
-            } else {
-                Vec::new()
-            };
+            // Pending grabs: the studio protocol drains them below; a plain
+            // headless run answers `--remote` /g requests right here — the
+            // windowed backends do this from their GPU completion path, and
+            // without it a headless /g hangs forever.
+            let request_ids =
+                self.take_studio_screenshot_request_ids_for_window(0, Some(window_id));
             if send_protocol && request_ids.is_empty() {
                 continue;
             }
+            if !write_files && request_ids.is_empty() {
+                state.frame_id += 1;
+                rendered_any = true;
+                continue;
+            }
 
-            let rgba = fb.to_rgba8();
+            let Some(rgba) = self
+                .os
+                .window_framebuffers
+                .get(&window_id)
+                .map(|fb| fb.to_rgba8())
+            else {
+                continue;
+            };
             let png = match encode_png_rgba(width, height, &rgba) {
                 Ok(png) => png,
                 Err(err) => {
@@ -510,17 +541,36 @@ impl Cx {
                 }
             };
 
-            let png_path = output_dir.join(format!(
-                "window_{window_id}_frame_{:06}.png",
-                state.frame_id
-            ));
-            if let Err(err) = std::fs::write(&png_path, &png) {
-                crate::error!(
-                    "headless frame write failed for `{}`: {}",
-                    png_path.display(),
-                    err
+            if !send_protocol && !request_ids.is_empty() {
+                Self::send_studio_screenshot_response(
+                    request_ids.clone(),
+                    width,
+                    height,
+                    png.clone(),
                 );
-                continue;
+            }
+
+            if write_files {
+                let png_path = output_dir.join(format!(
+                    "window_{window_id}_frame_{:06}.png",
+                    state.frame_id
+                ));
+                if let Err(err) = std::fs::write(&png_path, &png) {
+                    crate::error!(
+                        "headless frame write failed for `{}`: {}",
+                        png_path.display(),
+                        err
+                    );
+                    continue;
+                }
+                if !send_protocol {
+                    crate::log!(
+                        "headless frame written: {} ({}x{})",
+                        png_path.display(),
+                        width,
+                        height
+                    );
+                }
             }
 
             if send_protocol {
@@ -543,13 +593,6 @@ impl Cx {
                     width,
                     height,
                 }));
-            } else {
-                crate::log!(
-                    "headless frame written: {} ({}x{})",
-                    png_path.display(),
-                    width,
-                    height
-                );
             }
 
             state.frame_id += 1;

@@ -1,0 +1,59 @@
+// WORMHOLE — a (3,2) torus-knot tube flown from the inside; neon rings
+// sweep toward you ON THE BEAT (the ring phase rides beat position, not
+// wall time, so a tempo change changes the flight).
+{
+    name: "Wormhole"
+    engine: "tunnel"
+
+    knot_p: 3.0
+    knot_q: 2.0
+    major: 7.0
+    tube: 1.5
+    rings: 900
+    sides: 24
+    fly: 4.0
+    bands: 110.0
+
+    beat_pulse: "0.7 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "PUMP", bind: "p0", default: 0.5},
+        {name: "GLOW", bind: "p1", default: 0.5},
+        {name: "TRAIL", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x030014
+    color_a: #x8040ff
+    color_b: #x30f0ff
+    color_c: #xff40a0
+
+    fog: 0.10
+    glow: "1.3 * (0.25 + 1.5*p1)"
+
+    stages: [
+        {kind: "bloom", threshold: 0.4, strength: 1.6, levels: 3},
+        {kind: "feedback", amount: "min(0.45 + (p2-0.5)*0.8, 0.97)", zoom: 1.015, rotate: 0.0, dim: 0.94}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash,
+    // radius), content = the wall texel at this vertex, cmix = the
+    // pre-gated content strength (0 without real channel video). The
+    // wall DRAPE has its own pixel hook, `fx_wall` — this tunnel keeps
+    // the stock one.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3,
+                     content: vec4, cmix: float) -> vec4 {
+            return self.col_a.mix(self.col_b, t)
+        }
+    }
+}

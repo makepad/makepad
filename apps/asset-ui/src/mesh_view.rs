@@ -619,6 +619,8 @@ pub struct MeshView {
     #[new]
     draw_list: DrawList,
     #[new]
+    pass_list: DrawList,
+    #[new]
     color_texture: Texture,
     #[new]
     depth_texture: Texture,
@@ -634,6 +636,22 @@ pub struct MeshView {
     look: PreviewLook,
     #[rust(true)]
     show_ground: bool,
+    /// Cascaded sun shadows. Off is a full-sun debug view (no CSM, no SDF
+    /// quads) and does not kick an OnChange atlas bake.
+    #[rust(true)]
+    shadows_enabled: bool,
+    /// Dark backdrop: near-black ground + sky; the model stays fully lit.
+    #[rust(false)]
+    dark_enabled: bool,
+    /// Studio light for the PBR lane: softbox environment (bright boxes
+    /// for metals and gloss to reflect) + a strong warm key. Off = the
+    /// procedural sky environment and the neutral rig.
+    #[rust(true)]
+    studio_enabled: bool,
+    /// The studio rig is (re)installed on the next PBR draw when this is
+    /// set — on toggle and after every model load (load clears the rig).
+    #[rust(true)]
+    studio_dirty: bool,
     /// Bytes handed in by the pipeline, loaded on the next draw (needs Cx).
     #[rust]
     pending: Option<PendingModel>,
@@ -745,6 +763,11 @@ fn walk_rig(eye: Vec3f, yaw: f32, pitch: f32) -> (Vec3f, f32) {
 }
 
 /// yaw-rotation * uniform scale, translated (the sandbox villager idiom).
+/// The studio camera every fresh statue/PBR load starts from; also the fixed
+/// camera of the PBR turntable.
+const STUDIO_YAW: f32 = 0.6;
+const STUDIO_PITCH: f32 = -0.22;
+
 fn trs_yaw(pos: Vec3f, yaw: f32, scale: f32) -> Mat4f {
     let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
     for k in [0usize, 1, 2, 4, 5, 6, 8, 9, 10] {
@@ -923,8 +946,8 @@ impl MeshView {
     /// World walk leaves `cam_distance` at 0.5 and a look-down pitch; a
     /// Kenney prop then sits off-frame (empty slab). Restore the statue rig.
     fn reset_studio_camera(&mut self) {
-        self.orbit_yaw = 0.6;
-        self.orbit_pitch = -0.22;
+        self.orbit_yaw = STUDIO_YAW;
+        self.orbit_pitch = STUDIO_PITCH;
         self.look.target = vec3f(0.0, 0.9, 0.0);
         self.look.distance = 4.2;
         self.look.fov = 45.0;
@@ -999,6 +1022,7 @@ impl MeshView {
                 transform: trs_yaw(spec.pos, spec.yaw, 1.0),
                 dynamic: true,
                 depth_order: 0.0,
+                part_poses: Vec::new(),
             });
         }
     }
@@ -1036,7 +1060,10 @@ impl MeshView {
 
     fn sync_stage(&mut self) {
         if self.walk_cam.is_some() {
-            self.show_ground = false;
+            // Keep the statue slab + sky. Walk used to flip this off and
+            // PreviewStage::empty() killed the ground *and* the sky, which
+            // left maps in a black void.
+            self.show_ground = true;
             self.apply_walk_camera();
         } else if !self.show_ground && self.world_built {
             self.world_built = false;
@@ -1093,6 +1120,87 @@ impl MeshView {
         self.pbr.status.as_ref()
     }
 
+    pub fn shadows_enabled(&self) -> bool {
+        self.shadows_enabled
+    }
+
+    pub fn set_shadows_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.shadows_enabled == on {
+            return;
+        }
+        self.shadows_enabled = on;
+        self.apply_shadow_mode();
+        self.area.redraw(cx);
+    }
+
+    pub fn dark_enabled(&self) -> bool {
+        self.dark_enabled
+    }
+
+    pub fn set_dark_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.dark_enabled == on {
+            return;
+        }
+        self.dark_enabled = on;
+        self.area.redraw(cx);
+    }
+
+    pub fn studio_enabled(&self) -> bool {
+        self.studio_enabled
+    }
+
+    /// PBR inspection view (lit / albedo / normals / metallic / roughness /
+    /// clay / wireframe). Only the PBR lane honours it.
+    pub fn set_pbr_view_mode(&mut self, cx: &mut Cx, mode: pbr_preview::PbrViewMode) {
+        if self.pbr.view_mode == mode {
+            return;
+        }
+        self.pbr.view_mode = mode;
+        self.area.redraw(cx);
+    }
+
+    /// Direct + environment speculars on the PBR lane.
+    pub fn set_pbr_speculars(&mut self, cx: &mut Cx, on: bool) {
+        if self.pbr.speculars_off == !on {
+            return;
+        }
+        self.pbr.speculars_off = !on;
+        self.area.redraw(cx);
+    }
+
+    pub fn set_studio_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.studio_enabled == on {
+            return;
+        }
+        self.studio_enabled = on;
+        self.studio_dirty = true;
+        self.area.redraw(cx);
+    }
+
+    /// Install the studio (or neutral) environment + rig on the PBR branch.
+    /// Cheap when nothing changed; the env cube itself is rebuilt by DrawPbr
+    /// only when the equirect actually swaps.
+    fn apply_studio(&mut self) {
+        if !std::mem::take(&mut self.studio_dirty) {
+            return;
+        }
+        if self.studio_enabled {
+            self.pbr.controls = PbrDisplayControls::studio();
+            self.pbr.set_env_equirect(pbr_preview::studio_equirect_png());
+        } else {
+            self.pbr.controls = PbrDisplayControls::default();
+            self.pbr.clear_env();
+        }
+    }
+
+    fn apply_shadow_mode(&mut self) {
+        self.renderer.set_gpu_lightmap_mode(if self.shadows_enabled {
+            GpuLightmapMode::Realtime
+        } else {
+            GpuLightmapMode::Off
+        });
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
@@ -1122,8 +1230,7 @@ impl MeshView {
         cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
         // Same fast-GPU contract as the sandbox F8 / settings toggle:
         // per-frame cascaded shadows, every dynamic caster in the sun.
-        self.renderer
-            .set_gpu_lightmap_mode(GpuLightmapMode::Realtime);
+        self.apply_shadow_mode();
         // The fixed-step chain is armed by draw_walk once a character is
         // actually visible (pump_parked starts true), never here.
     }
@@ -1163,16 +1270,25 @@ impl MeshView {
                 // the atlas as base color at authored metres.
                 self.load_statue(cx, pending)
             }
-            _ => {
-                // DrawPbr in this pass currently composites as empty sky
-                // (worlds AND small Kenney props). Renderer is what
-                // the thumbnailer already proves; use it for the hero mesh.
-                let mut pending = pending;
-                if pending.png.is_none() {
-                    pending.png = extract_base_color(&pending.glb);
+            _ => match pbr_preview::parse_material_bearing_glb(&pending.glb) {
+                // Paint output / textured Kenney: real materials (base color,
+                // metallic-roughness, normal, occlusion, emissive) through
+                // DrawPbr. Draws inside the pass's own draw list — see
+                // `pass_list` in draw_walk; before that the PBR hero landed
+                // in the host window's list and this lane looked empty.
+                Some(gltf) => {
+                    let png = pending.png.clone();
+                    self.load_pbr(cx, gltf, &pending.glb, png)
                 }
-                self.load_statue(cx, pending)
-            }
+                // Bare TRELLIS hull / factors-only: the base-color statue.
+                None => {
+                    let mut pending = pending;
+                    if pending.png.is_none() {
+                        pending.png = extract_base_color(&pending.glb);
+                    }
+                    self.load_statue(cx, pending)
+                }
+            },
         }
         self.sync_stage();
         self.area.redraw(cx);
@@ -1192,6 +1308,7 @@ impl MeshView {
     ) {
         match self.pbr.load(&mut self.draw_pbr, cx, gltf, self.generation) {
             Ok(()) => {
+                self.studio_dirty = true;
                 if self.walk_cam.is_some() {
                     self.pbr.set_fit(Mat4f::identity());
                     self.status = format!("{} · WASD walk, drag look", self.pbr.summary());
@@ -1378,6 +1495,7 @@ impl MeshView {
                         transform: Mat4f::identity(),
                         dynamic: true,
                         depth_order: 0.0,
+                        part_poses: Vec::new(),
                     });
                     self.status = format!("{triangles} tris{ao_note} · CSM · WASD walk, drag look");
                 } else {
@@ -1396,6 +1514,7 @@ impl MeshView {
                         // Realtime CSM only collects `dynamic` movers.
                         dynamic: true,
                         depth_order: 0.0,
+                        part_poses: Vec::new(),
                     });
                     self.status =
                         format!("{triangles} tris, fit scale {scale:.2}{ao_note} · CSM");
@@ -1610,40 +1729,43 @@ impl Widget for MeshView {
             _ => {}
         }
 
-        match event {
-            Event::MouseDown(me)
-                if self.view_rect.contains(me.abs) && me.button.is_primary() =>
-            {
-                self.orbit_last_abs = Some(me.abs);
+        // Raw mouse only while orbit-dragging: the pointer can leave the
+        // pane and must keep moving the camera. Never listen to raw
+        // MouseDown — that steals clicks from dropdowns and other widgets.
+        if self.orbit_last_abs.is_some() {
+            match event {
+                Event::MouseMove(me) => {
+                    if let Some(last) = self.orbit_last_abs {
+                        let delta = me.abs - last;
+                        self.orbit_yaw -= delta.x as f32 * 0.01;
+                        self.orbit_pitch =
+                            (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
+                        if let Some(w) = self.walk_cam.as_mut() {
+                            w.yaw = self.orbit_yaw;
+                            w.pitch = self.orbit_pitch;
+                        }
+                        self.apply_walk_camera();
+                        self.orbit_last_abs = Some(me.abs);
+                        self.area.redraw(cx);
+                    }
+                }
+                Event::MouseUp(me) if me.button.is_primary() => {
+                    self.orbit_last_abs = None;
+                }
+                _ => {}
+            }
+        }
+
+        match event.hits(cx, self.area) {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.orbit_last_abs = Some(fe.abs);
                 // Click claims key focus for play mode (and takes it away
                 // from the prompt TextInput so WASD doesn't type).
                 self.focused = true;
                 cx.set_key_focus(self.area);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
-            Event::MouseDown(me) if !self.view_rect.contains(me.abs) => {
-                self.focused = false;
-                self.keys.clear();
-            }
-            Event::MouseMove(me) => {
-                if let Some(last) = self.orbit_last_abs {
-                    let delta = me.abs - last;
-                    self.orbit_yaw -= delta.x as f32 * 0.01;
-                    self.orbit_pitch =
-                        (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
-                    if let Some(w) = self.walk_cam.as_mut() {
-                        w.yaw = self.orbit_yaw;
-                        w.pitch = self.orbit_pitch;
-                    }
-                    self.apply_walk_camera();
-                    self.orbit_last_abs = Some(me.abs);
-                    self.area.redraw(cx);
-                }
-            }
-            Event::MouseUp(me) if me.button.is_primary() => {
-                self.orbit_last_abs = None;
-            }
-            Event::Scroll(se) if self.view_rect.contains(se.abs) && self.walk_cam.is_none() => {
+            Hit::FingerScroll(se) if self.walk_cam.is_none() => {
                 let axis = if se.scroll.y.abs() > f64::EPSILON {
                     se.scroll.y
                 } else {
@@ -1655,6 +1777,13 @@ impl Widget for MeshView {
                         (self.look.distance * factor).clamp(1.0, 30.0);
                     self.area.redraw(cx);
                 }
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Grab);
+            }
+            Hit::KeyFocusLost(_) => {
+                self.focused = false;
+                self.keys.clear();
             }
             _ => {}
         }
@@ -1690,13 +1819,35 @@ impl Widget for MeshView {
 
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, None);
-        self.look.yaw = self.orbit_yaw;
-        self.look.pitch = self.orbit_pitch;
+        if self.pbr.bounds().is_some() && self.walk_cam.is_none() {
+            // PBR turntable: the studio camera, key and environment stay
+            // fixed; the drag spins/tilts the model instead, so highlights
+            // travel over the surface and speculars can be judged.
+            self.look.yaw = STUDIO_YAW;
+            self.look.pitch = STUDIO_PITCH;
+            self.pbr.turntable_yaw = -(self.orbit_yaw - STUDIO_YAW);
+            self.pbr.turntable_tilt = self.orbit_pitch - STUDIO_PITCH;
+            self.pbr.tilt_axis = vec3f(STUDIO_YAW.cos(), 0.0, STUDIO_YAW.sin());
+        } else {
+            self.look.yaw = self.orbit_yaw;
+            self.look.pitch = self.orbit_pitch;
+        }
+        // Orbit zoom must retighten cascade 0 around the look-at so
+        // shadow texels stay ~1 screen pixel. Walk keeps the 80 m ladder.
+        if self.walk_cam.is_some() {
+            self.renderer.set_csm_focus_distance(None);
+        } else {
+            self.renderer
+                .set_csm_focus_distance(Some(self.look.distance));
+        }
         let scene_state = preview_scene_state(self.look, rect, cx.time());
         if let Some(scene_state) = scene_state {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let now = cx.time();
             let cx3d = &mut Cx3d::new(cx.cx);
+            // Pass-level list: the scene renderer closes its own list, and
+            // the PBR hero drawn after it must still belong to THIS pass.
+            self.pass_list.begin_always(cx3d);
             let mut statue = match &self.instance {
                 Some(inst) => vec![inst.clone()],
                 None => Vec::new(),
@@ -1762,6 +1913,7 @@ impl Widget for MeshView {
                         texture: s.frames[i].clone(),
                         pos: vec4(s.pos.x, s.pos.y, s.pos.z, self.orbit_yaw),
                         size: vec4(s.width, s.height, 0.0, 0.0),
+                        uv: vec4(0.0, 0.0, 1.0, 1.0),
                     })
                 })
                 .collect();
@@ -1771,8 +1923,16 @@ impl Widget for MeshView {
                 sky: &mut self.draw_sky,
                 sky_analytic: None,
                 terrain: &mut self.draw_terrain,
-                shadow: Some(&mut self.draw_shadow),
-                shadow_sdf: Some(&mut self.draw_shadow_sdf),
+                shadow: if self.shadows_enabled {
+                    Some(&mut self.draw_shadow)
+                } else {
+                    None
+                },
+                shadow_sdf: if self.shadows_enabled {
+                    Some(&mut self.draw_shadow_sdf)
+                } else {
+                    None
+                },
                 firework: None,
                 flare: None,
                 water: None,
@@ -1780,11 +1940,12 @@ impl Widget for MeshView {
                 screen_instances: &screen_instances,
                 view_model: None,
             };
-            let stage = if self.show_ground {
+            let mut stage = if self.show_ground {
                 PreviewStage::statue()
             } else {
                 PreviewStage::empty()
             };
+            stage.dark = self.dark_enabled;
             self.renderer.draw_preview(
                 cx3d,
                 &mut self.draw_list,
@@ -1800,8 +1961,10 @@ impl Widget for MeshView {
             // buffer. A playable character never reaches here — the skinned
             // lane above stays the only character path.
             if self.character.is_none() {
+                self.apply_studio();
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
+            self.pass_list.end(cx3d);
         }
         cx.end_pass(&self.pass);
 

@@ -29,6 +29,7 @@ fn start() -> (AssetServer, String) {
     cfg.bootstrap_admin = true;
     cfg.log = false;
     cfg.chat = ChatConfig {
+        fleet: String::new(),
         fleet_bases: Vec::new(),
         max_sessions: 8,
         max_sessions_per_owner: 4,
@@ -47,11 +48,13 @@ fn start() -> (AssetServer, String) {
                     },
                     ScriptedTurn::Text("Here is the turret Grok drafted.".into()),
                 ],
+                ..Default::default()
             },
             openai: ScriptedLane {
                 available: false,
                 model: String::new(),
                 turns: Vec::new(),
+                ..Default::default()
             },
             grok: ScriptedLane {
                 available: true,
@@ -60,7 +63,9 @@ fn start() -> (AssetServer, String) {
                     ScriptedTurn::Text("fn spawn_turret() {}".into()),
                     ScriptedTurn::Text("Grok primary reply.".into()),
                 ],
+                ..Default::default()
             },
+            ..Default::default()
         }),
     };
     let server = AssetServer::start(cfg).expect("server start");
@@ -165,7 +170,7 @@ fn typed_client_can_choose_external_primary() {
     let text: String = events
         .iter()
         .filter_map(|e| match &e.body {
-            ChatEventBodyDto::Delta { text } => Some(text.as_str()),
+            ChatEventBodyDto::Delta { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();

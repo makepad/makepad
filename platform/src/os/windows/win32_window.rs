@@ -210,6 +210,11 @@ pub struct Win32Window {
     pub is_popup: bool,
     /// HWND was created with `WS_EX_NOREDIRECTIONBITMAP` for DirectComposition.
     pub is_direct_composition: bool,
+    /// See `CxOsOp::SetChromelessWhenMaximized`: drop the maximized-state
+    /// border/thickframe strip `extended_client_border_thickness` would
+    /// otherwise keep, so a maximized window is a clean fullscreen client
+    /// area rather than a decorated window pinned to the work area.
+    pub chromeless_when_maximized: bool,
     ime_saved_himc: HIMC,
 }
 
@@ -287,11 +292,17 @@ impl Win32Window {
     /// Resize is emulated via `WM_NCHITTEST` `HT*` returns instead.
     ///
     /// Maximized windows still keep border+thickframe insets so the client
-    /// matches the monitor work area.
+    /// matches the monitor work area — unless `chromeless_when_maximized`
+    /// is set, in which case maximized stays fully client-sized too, same
+    /// as restored: a projector output has nowhere for a work-area strip
+    /// to make sense.
     fn extended_client_border_thickness(&self) -> RECT {
         let style = self.get_style();
         let ex_style = self.get_ex_style();
-        if (style.0 & WS_CAPTION.0) == WS_CAPTION.0 && self.get_is_maximized() {
+        if (style.0 & WS_CAPTION.0) == WS_CAPTION.0
+            && self.get_is_maximized()
+            && !self.chromeless_when_maximized
+        {
             // Caption is drawn into the client; keep only border+thickframe for work-area.
             self.frame_border_thickness(
                 WINDOW_STYLE((style.0 & !WS_CAPTION.0) | WS_BORDER.0 | WS_THICKFRAME.0),
@@ -572,6 +583,7 @@ impl Win32Window {
             is_fullscreen,
             is_popup: false,
             is_direct_composition: direct_composition,
+            chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
     }
@@ -626,6 +638,7 @@ impl Win32Window {
             is_fullscreen: false,
             is_popup: true,
             is_direct_composition: false,
+            chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
     }
@@ -1268,6 +1281,15 @@ impl Win32Window {
         }
     }
 
+    /// Whether the window is minimized. A minimized window gets no compositor
+    /// vsync, so painting it is pure waste and its frame-latency waitable never
+    /// signals; the paint loop skips it (keeping the pass dirty) and re-probes.
+    /// `IsIconic` is not in the vendored bindings, so it is linked here.
+    pub fn is_iconic(&self) -> bool {
+        windows_core::link!("user32.dll" "system" fn IsIconic(hwnd: HWND) -> crate::windows::core::BOOL);
+        unsafe { IsIconic(self.hwnd).as_bool() }
+    }
+
     pub fn set_topmost(&self, topmost: bool) {
         unsafe {
             if topmost {
@@ -1294,6 +1316,14 @@ impl Win32Window {
                 .unwrap();
             }
         }
+    }
+
+    /// See `CxOsOp::SetChromelessWhenMaximized`. Forces a `WM_NCCALCSIZE`
+    /// pass so a currently-maximized window picks up the new insets right
+    /// away instead of waiting for its next resize/move.
+    pub fn set_chromeless_when_maximized(&mut self, chromeless: bool) {
+        self.chromeless_when_maximized = chromeless;
+        self.force_frame_change();
     }
 
     pub fn get_is_topmost(&self) -> bool {

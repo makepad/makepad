@@ -1,0 +1,57 @@
+// HYPERDRIVE — a (5,2) knot flown FAST, ice-blue, radial blur hammering
+// on the beat. The hard-techno tunnel.
+{
+    name: "Hyperdrive"
+    engine: "tunnel"
+
+    knot_p: 5.0
+    knot_q: 2.0
+    major: 7.5
+    tube: 1.3
+    rings: 1100
+    sides: 20
+    fly: 9.0
+    bands: 150.0
+
+    beat_pulse: "0.85 * (0.2 + 1.6*p2)"
+    glow: "(0.9 + env(phase) * 1.2) * (0.2 + 1.6*p1)"
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "WARP", bind: "p0", default: 0.5},
+        {name: "STROBE", bind: "p1", default: 0.5},
+        {name: "PUMP", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x020410
+    color_a: #x66ccff
+    color_b: #x2244cc
+    color_c: #xffffff
+
+    fog: 0.11
+
+    stages: [
+        {kind: "radial_blur", p1: "(0.15 + pulse * 0.6) * (0.2 + 1.6*p0)", p2: 0.5},
+        {kind: "bloom", threshold: 0.4, strength: 1.5, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = along the bore 0..1, attr = (around, along, ring hash,
+    // radius), content = the wall texel at this vertex, cmix = the
+    // pre-gated content strength (0 without real channel video). The
+    // wall DRAPE has its own pixel hook, `fx_wall` — this tunnel keeps
+    // the stock one.
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxTunnel {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3,
+                     content: vec4, cmix: float) -> vec4 {
+            return self.col_a.mix(self.col_b, t)
+        }
+    }
+}

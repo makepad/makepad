@@ -1,0 +1,15 @@
+[package]
+name = "makepad-audio-sidechannels"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Stems + lyrics as precomputed asset side-channels: the one bake/encode/publish implementation shared by asset-ui and the VJ"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-audio-encode = { path = "../audio_encode" }
+makepad-audio-decode = { path = "../audio_decode" }
+makepad-audio-lyrics = { path = "../audio_lyrics" }
+makepad-ai-stems = { path = "../ai/models/stems" }
+makepad-asset-data = { path = "../asset/data" }
+makepad-asset-client = { path = "../asset/client" }

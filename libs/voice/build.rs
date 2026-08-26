@@ -13,6 +13,16 @@ fn main() {
         .is_some_and(|configs| configs.split(['+', ',']).any(|config| config == "whisper"));
 
     println!("cargo:rustc-check-cfg=cfg(force_whisper)");
+    // `makepad-ai-cuda` sets `links = "makepad_ai_cuda"` and emits
+    // `cargo:kernels=1` only when nvcc actually built and archived its .cu
+    // objects. Cargo forwards that to us as DEP_MAKEPAD_AI_CUDA_KERNELS, which
+    // is the only honest signal that `src/cuda/backend.rs` can link against a
+    // CUDA runtime. Without it the CUDA backend compiles to stubs and
+    // `src/accel.rs` falls back to Metal (Apple) or the CPU.
+    println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
+    if env::var("DEP_MAKEPAD_AI_CUDA_KERNELS").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=makepad_ai_cuda_kernels");
+    }
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_VOICE_METAL_PRECOMPILE");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");

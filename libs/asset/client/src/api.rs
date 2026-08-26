@@ -25,6 +25,8 @@ use makepad_asset_data::{
     VariantSetId, VariantSetManifest, RESOLUTION_POLICY_V1,
 };
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 /// Longest refusal body this client will read for its `error` detail; larger
 /// refusal bodies are dropped unread.
@@ -40,6 +42,83 @@ pub struct ApiEndpoints {
     pub data: SocketAddr,
 }
 
+/// One item of an ordered batch pull. `max_bytes` is the caller's own cap —
+/// a thumbnail batch says "nothing over 512 KB here", and the server refuses
+/// (rather than streams) anything larger, so one mis-sized item cannot eat
+/// the batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchItem {
+    pub blob: BlobId,
+    pub max_bytes: Option<u64>,
+}
+
+/// What the server did with one batch item. Every requested item gets
+/// exactly one of these, in order — silence is never an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchFrame {
+    /// Bytes follow and are digest-verified by the caller.
+    Ok,
+    /// The store does not hold it.
+    Missing,
+    /// Over the caller's per-item cap.
+    OverItemCap,
+    /// The batch byte budget ran out before this item; ask again.
+    Skipped,
+}
+
+/// Whether to keep reading a batch response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchFlow {
+    Continue,
+    /// Abandon the rest — the caller's priorities changed.
+    Stop,
+}
+
+/// Read exactly `out.len()` body bytes, refusing a short body.
+fn read_exact_body(resp: &mut Response<'_>, out: &mut [u8]) -> ClientResult<()> {
+    let mut filled = 0usize;
+    while filled < out.len() {
+        let n = resp.read_chunk(&mut out[filled..])?;
+        if n == 0 {
+            return Err(ClientError::Protocol { what: "batch body truncated" });
+        }
+        filled += n;
+    }
+    Ok(())
+}
+
+/// One blob-garbage-collection request. Every field is optional policy; the
+/// server owns the batch sizes, so a client can never ask for an unbounded
+/// unit of work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcRequest {
+    /// Count what would be reclaimed; delete (and retire) nothing.
+    pub dry_run: bool,
+    /// Protect blobs recorded within this window of the run's start.
+    /// `None` = the server's configured default.
+    pub grace_ms: Option<u64>,
+    /// Also retire every revision of each asset except the newest `n` and
+    /// any revision an alias head still points at. `None` = keep all
+    /// revisions (the default: GC then only reclaims what is already
+    /// unreferenced).
+    pub retain_per_asset: Option<u32>,
+    /// How many bounded steps this ONE call may perform. `None` = the
+    /// server's per-request maximum.
+    pub max_steps: Option<u32>,
+}
+
+impl GcRequest {
+    /// Preview: no deletion, no retirement, exact byte accounting.
+    pub fn dry_run() -> Self {
+        Self { dry_run: true, ..Self::default() }
+    }
+
+    /// Collect what is already unreferenced.
+    pub fn collect() -> Self {
+        Self::default()
+    }
+}
+
 /// A validated catalog search. `text` empty = browse mode (filters only).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogQuery {
@@ -48,11 +127,19 @@ pub struct CatalogQuery {
     pub kind: Option<AssetKind>,
     pub category: Option<String>,
     pub tag: Option<String>,
+    /// Server-side exclusion: hits carrying this tag are dropped by the
+    /// server, so a page is never short of `page_size` for local reasons.
+    pub exclude_tag: Option<String>,
     pub creator: Option<String>,
     /// Only assets currently referenced by an alias head.
     pub live_only: bool,
     /// 1..=[`MAX_SEARCH_LIMIT`].
     pub page_size: u32,
+    /// Ask the server to count the labels of this result set and return the
+    /// top `facets` of them with the page; 0 (the default) asks for none.
+    /// The counts come out of the SAME snapshot as the hits, so a facet
+    /// list can never describe a different generation than the rows.
+    pub facets: u32,
 }
 
 impl CatalogQuery {
@@ -74,7 +161,7 @@ impl CatalogQuery {
         if self.text.chars().any(char::is_control) {
             return Err(ClientError::InvalidInput { what: "search text control chars" });
         }
-        for v in [&self.namespace, &self.category, &self.tag, &self.creator]
+        for v in [&self.namespace, &self.category, &self.tag, &self.exclude_tag, &self.creator]
             .into_iter()
             .flatten()
         {
@@ -103,6 +190,9 @@ impl CatalogQuery {
         if let Some(t) = &self.tag {
             pairs.push(("tag", json::s(t.clone())));
         }
+        if let Some(t) = &self.exclude_tag {
+            pairs.push(("exclude_tag", json::s(t.clone())));
+        }
         if let Some(c) = &self.creator {
             pairs.push(("creator", json::s(c.clone())));
         }
@@ -110,6 +200,9 @@ impl CatalogQuery {
             pairs.push(("live", Value::Bool(true)));
         }
         pairs.push(("limit", Value::Int(self.page_size as i64)));
+        if self.facets > 0 {
+            pairs.push(("facets", Value::Int(self.facets as i64)));
+        }
         if let Some(c) = cursor {
             pairs.push(("cursor", json::s(c)));
         }
@@ -123,6 +216,45 @@ pub struct BlobHead {
     pub size: u64,
     /// The strong ETag equalled the blob's canonical `sha256:<hex>` spelling.
     pub etag_matches: bool,
+}
+
+/// What admitting a server-local file BY REFERENCE reported.
+///
+/// The digest and length are the server's own measurement of the file — the
+/// client never read it. `owned` means the store already had those exact
+/// bytes in its own CAS, so nothing was referenced and the external file is
+/// incidental.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefAdmission {
+    pub blob: BlobId,
+    pub size: u64,
+    pub deduped: bool,
+    pub owned: bool,
+}
+
+/// One reference blob as a re-scan found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobRefRow {
+    pub blob: BlobId,
+    /// The path on the SERVER's filesystem. Shown to the operator, never
+    /// opened by the client.
+    pub path: String,
+    pub size: u64,
+    /// `present` / `missing` / `size_changed` / `content_changed` /
+    /// `unreadable`. A string rather than an enum so a newer server can name
+    /// a state this build has not heard of without becoming unparseable.
+    pub state: String,
+    pub ok: bool,
+}
+
+/// One bounded page of a reference re-scan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlobRefsPage {
+    /// How many references the store holds in total.
+    pub total: u64,
+    pub refs: Vec<BlobRefRow>,
+    /// Resume key for the next page; `None` = the walk is finished.
+    pub next: Option<BlobId>,
 }
 
 /// The searchable annotation written alongside a published artifact.
@@ -141,6 +273,18 @@ pub struct AnnotationUpload {
     pub prompt: String,
     pub provenance: String,
     pub private: bool,
+}
+
+/// One asset of a wire-level batch publication: canonical manifest bytes
+/// (carrying asset id and blob refs), the searchable annotation, and an
+/// optional alias head. See [`Api::publish_batch`].
+#[derive(Clone, Debug)]
+pub struct PublishBatchWireItem {
+    pub namespace: String,
+    /// Canonical manifest bytes; the revision identity is their SHA-256.
+    pub manifest: Vec<u8>,
+    pub alias: Option<AssetAlias>,
+    pub annotation: AnnotationUpload,
 }
 
 impl AnnotationUpload {
@@ -423,22 +567,37 @@ impl OperationFinalizeRequest {
 pub struct ChatCreateRequest {
     pub namespace: String,
     pub provider: crate::dto::ChatProviderKind,
+    /// Declared app profile ("game", "vj"); the broker selects the
+    /// session's taught context and tool surface from it. `None` = general.
+    pub client: Option<String>,
 }
 
 impl ChatCreateRequest {
     pub fn new(namespace: impl Into<String>, provider: crate::dto::ChatProviderKind) -> Self {
-        ChatCreateRequest { namespace: namespace.into(), provider }
+        ChatCreateRequest { namespace: namespace.into(), provider, client: None }
+    }
+
+    pub fn with_client(mut self, client: impl Into<String>) -> Self {
+        self.client = Some(client.into());
+        self
     }
 
     fn body(&self) -> ClientResult<Value> {
         if self.namespace.is_empty() || self.namespace.len() > wire::MAX_NAMESPACE_BYTES {
             return Err(ClientError::InvalidInput { what: "chat namespace" });
         }
-        Ok(json::obj(vec![
+        let mut pairs = vec![
             ("api_version", Value::Int(1)),
             ("namespace", json::s(self.namespace.clone())),
             ("provider", json::s(self.provider.as_str())),
-        ]))
+        ];
+        if let Some(client) = &self.client {
+            if client.is_empty() || client.len() > 32 {
+                return Err(ClientError::InvalidInput { what: "chat client profile" });
+            }
+            pairs.push(("client", json::s(client.clone())));
+        }
+        Ok(json::obj(pairs))
     }
 }
 
@@ -497,23 +656,82 @@ pub struct SourceCollectionRegistered {
     pub digest: SourceCollectionId,
 }
 
-#[derive(Clone)]
 pub struct Api {
     pub endpoints: ApiEndpoints,
     pub limits: HttpLimits,
     /// Full validated bearer token (`mpat_…`), attached to every request.
     token: Option<String>,
+    /// Keep-alive sockets belonging to THIS handle. A connect per request is
+    /// pure overhead against a server on localhost — for a grid of small
+    /// thumbnails the handshake costs more than the payload. Every clone
+    /// gets its own pool (see `Clone` below), so a socket is only ever used
+    /// by one worker at a time.
+    pool: http::ConnPool,
+    /// Connection reuse switch. `false` restores one-request-per-connection
+    /// (`Connection: close`), which is what the pre-keep-alive client did.
+    keep_alive: bool,
+    /// Whether this server has the batch-fetch route: 0 unknown, 1 yes,
+    /// 2 no. Shared across clones — it is a fact about the server, learned
+    /// once, so an older server costs exactly one 404 for the whole client.
+    batch_route: Arc<AtomicU8>,
+}
+
+const BATCH_UNKNOWN: u8 = 0;
+const BATCH_PRESENT: u8 = 1;
+const BATCH_ABSENT: u8 = 2;
+
+impl Clone for Api {
+    /// A clone is another WORKER's handle: same server, same credentials,
+    /// its own keep-alive sockets. Sharing a socket across threads would
+    /// interleave two requests on one connection.
+    fn clone(&self) -> Api {
+        Api {
+            endpoints: self.endpoints,
+            limits: self.limits,
+            token: self.token.clone(),
+            pool: http::ConnPool::default(),
+            keep_alive: self.keep_alive,
+            batch_route: self.batch_route.clone(),
+        }
+    }
 }
 
 impl Api {
     pub fn new(endpoints: ApiEndpoints, limits: HttpLimits, token: Option<String>) -> ClientResult<Api> {
+        Self::with_keep_alive(endpoints, limits, token, true)
+    }
+
+    /// As [`Api::new`] with connection reuse explicitly on or off.
+    pub fn with_keep_alive(
+        endpoints: ApiEndpoints,
+        limits: HttpLimits,
+        token: Option<String>,
+        keep_alive: bool,
+    ) -> ClientResult<Api> {
         limits.validate()?;
         if let Some(t) = &token {
             if !wire::token_shape_ok(t) {
                 return Err(ClientError::InvalidInput { what: "bearer token shape" });
             }
         }
-        Ok(Api { endpoints, limits, token })
+        Ok(Api {
+            endpoints,
+            limits,
+            token,
+            pool: http::ConnPool::default(),
+            keep_alive,
+            batch_route: Arc::new(AtomicU8::new(BATCH_UNKNOWN)),
+        })
+    }
+
+    /// The pool a call should use: `None` disables reuse for this handle.
+    fn pool(&self) -> Option<&http::ConnPool> {
+        self.keep_alive.then_some(&self.pool)
+    }
+
+    /// Idle keep-alive sockets parked on this handle (diagnostics/tests).
+    pub fn idle_connections(&self) -> usize {
+        self.pool.idle_len()
     }
 
     pub fn has_token(&self) -> bool {
@@ -554,7 +772,7 @@ impl Api {
         allowed: &[u16],
         max_body: u64,
     ) -> ClientResult<(u16, Value)> {
-        let resp = http::http_call(addr, &req, &self.limits)?;
+        let resp = http::http_call_pooled(addr, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, allowed)?;
         let status = resp.head().status;
         if resp.head().content_length > max_body {
@@ -572,7 +790,7 @@ impl Api {
 
     /// Enforce an allowed status set; anything else becomes a typed refusal
     /// (with a bounded, sanitized detail when the body offers one).
-    fn accept(&self, resp: Response, allowed: &[u16]) -> ClientResult<Response> {
+    fn accept<'a>(&self, resp: Response<'a>, allowed: &[u16]) -> ClientResult<Response<'a>> {
         let status = resp.head().status;
         if allowed.contains(&status) {
             return Ok(resp);
@@ -666,6 +884,80 @@ impl Api {
         Ok(detail)
     }
 
+    /// BATCH ALIAS STATUS — a whole bundled library's worth of "do you
+    /// already have this, and is it current?" in ONE round trip.
+    ///
+    /// `entries` pairs each alias with the Source blob the caller holds
+    /// (`None` = do not compare); `tags` names the annotation tags the
+    /// caller wants reported back per entry, which is how an ownership
+    /// convention like `builtin` is checked without a search per asset.
+    ///
+    /// Answers come back in request order and each echoes its own alias, so
+    /// nobody has to trust an ordinal alone.
+    pub fn alias_status(
+        &self,
+        entries: &[(AssetAlias, Option<BlobId>)],
+        tags: &[String],
+    ) -> ClientResult<Vec<dto::AliasStatusDto>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if entries.len() > wire::MAX_ALIAS_STATUS_ITEMS {
+            return Err(ClientError::InvalidInput { what: "alias status batch size" });
+        }
+        let items: Vec<json::Value> = entries
+            .iter()
+            .map(|(alias, source)| {
+                let mut pairs = vec![("alias", json::Value::Str(alias.as_str().to_string()))];
+                if let Some(blob) = source {
+                    pairs.push(("source", json::Value::Str(blob.to_string())));
+                }
+                json::obj(pairs)
+            })
+            .collect();
+        let body = json::obj(vec![
+            (
+                "tags",
+                json::Value::Arr(
+                    tags.iter().map(|t| json::Value::Str(t.clone())).collect(),
+                ),
+            ),
+            ("entries", json::Value::Arr(items)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_alias_status();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let resp = http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        let resp = self.accept(resp, &[200])?;
+        // A whole library's statuses is a bigger answer than an ordinary
+        // JSON route's, and it is all small fixed fields.
+        let max_body = wire::MAX_JSON_RESPONSE_BYTES * 4;
+        if resp.head().content_length > max_body {
+            return Err(ClientError::OverBudget {
+                what: "alias status body",
+                limit: max_body,
+                found: resp.head().content_length,
+            });
+        }
+        let bytes = resp.read_full(max_body)?;
+        let value = json::parse(&bytes)
+            .map_err(|_| ClientError::Protocol { what: "malformed json body" })?;
+        let rows = dto::parse_alias_status(&value)?;
+        if rows.len() != entries.len() {
+            return Err(ClientError::Protocol { what: "alias status entry count" });
+        }
+        // Positional identity, and the entry says its own alias: both have
+        // to agree or the answer describes something else.
+        for (row, (alias, _)) in rows.iter().zip(entries) {
+            if &row.alias != alias {
+                return Err(ClientError::Protocol { what: "alias status order" });
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn resolve_alias(&self, alias: &AssetAlias) -> ClientResult<AliasDto> {
         let path = wire::path_alias(alias);
         let mut req = Request::get(&path);
@@ -721,6 +1013,109 @@ impl Api {
         dto::parse_events_page(&v)
     }
 
+    /// Pull many blobs in ONE request, in the order given, streaming each
+    /// item to `on_frame` as it arrives.
+    ///
+    /// The order is the contract: frame *i* carries item *i*'s digest, and a
+    /// response that reorders or substitutes digests is refused as a protocol
+    /// violation. That is what lets a caller prioritise — ask for the visible
+    /// thumbnails first, and they are the first bytes on the wire.
+    ///
+    /// `on_frame` returns whether to keep reading; answering `Stop` abandons
+    /// the rest of the response (the socket is dropped, never pooled), which
+    /// is exactly how a UI re-prioritises mid-stream: everything already
+    /// handed to `on_frame` is already yours.
+    ///
+    /// A server without the route answers 404; this reports
+    /// [`ClientError::NotFound`] and remembers, so the whole client falls
+    /// back to single GETs after one refusal.
+    pub fn fetch_blob_batch(
+        &self,
+        items: &[BatchItem],
+        body_deadline_ms: u64,
+        on_frame: &mut dyn FnMut(BlobId, BatchFrame, &[u8]) -> BatchFlow,
+    ) -> ClientResult<()> {
+        if items.is_empty() {
+            return Err(ClientError::InvalidInput { what: "empty batch" });
+        }
+        if items.len() > wire::MAX_BLOB_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "batch too large" });
+        }
+        if self.batch_route.load(Ordering::Relaxed) == BATCH_ABSENT {
+            return Err(ClientError::NotFound { what: "blob batch route" });
+        }
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            let mut pairs: Vec<(&str, Value)> = vec![("blob", json::s(item.blob.to_string()))];
+            if let Some(max) = item.max_bytes {
+                pairs.push(("max_bytes", Value::Int(max.min(i64::MAX as u64) as i64)));
+            }
+            entries.push(json::obj(pairs));
+        }
+        let body = json::obj(vec![("blobs", Value::Arr(entries))]).to_json().into_bytes();
+        let path = wire::path_blobs_batch();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        req.body_deadline_ms = Some(body_deadline_ms.max(1));
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
+        if resp.head().status == 404 {
+            // Older server: stop trying on every later batch.
+            self.batch_route.store(BATCH_ABSENT, Ordering::Relaxed);
+            return Err(ClientError::NotFound { what: "blob batch route" });
+        }
+        let mut resp = self.accept(resp, &[200])?;
+        if resp.head().content_type.as_deref() != Some(wire::BLOB_BATCH_CONTENT_TYPE) {
+            return Err(ClientError::Protocol { what: "batch content type" });
+        }
+        if resp.head().content_length > wire::MAX_BLOB_BATCH_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "batch response body",
+                limit: wire::MAX_BLOB_BATCH_BYTES,
+                found: resp.head().content_length,
+            });
+        }
+        self.batch_route.store(BATCH_PRESENT, Ordering::Relaxed);
+
+        let mut header = [0u8; wire::BLOB_BATCH_FRAME_HEADER];
+        for item in items {
+            read_exact_body(&mut resp, &mut header)?;
+            let status = match header[0] {
+                0 => BatchFrame::Ok,
+                1 => BatchFrame::Missing,
+                2 => BatchFrame::OverItemCap,
+                3 => BatchFrame::Skipped,
+                _ => return Err(ClientError::Protocol { what: "batch frame status" }),
+            };
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&header[1..33]);
+            // Positional identity: frame i IS item i. Anything else and the
+            // caller could attribute bytes to the wrong request.
+            if &digest != item.blob.as_bytes() {
+                return Err(ClientError::Protocol { what: "batch frame order" });
+            }
+            let len = u64::from_be_bytes(header[33..41].try_into().expect("8 bytes"));
+            if status != BatchFrame::Ok && len != 0 {
+                return Err(ClientError::Protocol { what: "batch refusal with body" });
+            }
+            if len > wire::MAX_BLOB_BATCH_ITEM_BYTES {
+                return Err(ClientError::OverBudget {
+                    what: "batch item bytes",
+                    limit: wire::MAX_BLOB_BATCH_ITEM_BYTES,
+                    found: len,
+                });
+            }
+            let mut bytes = vec![0u8; len as usize];
+            read_exact_body(&mut resp, &mut bytes)?;
+            if on_frame(item.blob, status, &bytes) == BatchFlow::Stop {
+                // Dropping `resp` with body left closes the socket instead of
+                // pooling it: framing beyond this point is not our business.
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Canonical asset-manifest bytes, digest-verified against `rev` before
     /// they are returned. The caller decodes via the content contract.
     pub fn fetch_revision_bytes(&self, rev: &AssetRevisionId) -> ClientResult<Vec<u8>> {
@@ -743,7 +1138,7 @@ impl Api {
     ) -> ClientResult<Vec<u8>> {
         let mut req = Request::get(path);
         req.bearer = self.bearer();
-        let resp = http::http_call(addr, &req, &self.limits)?;
+        let resp = http::http_call_pooled(addr, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         if resp.head().content_length > wire::MAX_MANIFEST_RESPONSE_BYTES {
             return Err(ClientError::OverBudget {
@@ -771,11 +1166,145 @@ impl Api {
         let path = wire::path_blob(blob);
         let mut req = Request::head(&path);
         req.bearer = self.bearer();
-        let resp = http::http_call(self.endpoints.data, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         let head = resp.head();
         let etag_matches = head.etag.as_deref() == Some(&blob.to_string());
         Ok(BlobHead { size: head.content_length, etag_matches })
+    }
+
+    // ---- live game rooms ---------------------------------------------------
+
+    /// Who is playing what, right now. `game` narrows it to the one room a
+    /// player about to press Play cares about.
+    ///
+    /// A room is a running process on somebody's desk, so this list is a
+    /// snapshot and nothing else: by the time it is read, a host may already
+    /// have closed the lid. Callers must treat a failed dial as ordinary
+    /// (see `claim_room`'s `replacing`), never as an error to report.
+    pub fn rooms(&self, game: Option<&str>) -> ClientResult<Vec<crate::dto::RoomDto>> {
+        if let Some(g) = game {
+            if g.is_empty() || g.len() > wire::MAX_ROOM_GAME_BYTES || !wire::query_value_ok(g) {
+                return Err(ClientError::InvalidInput { what: "room game id" });
+            }
+        }
+        let path = wire::path_rooms(game);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_rooms(&v)
+    }
+
+    /// Take a game's claim, or learn who holds it — one atomic call, because
+    /// two people pressing Play in the same second must not both come away
+    /// believing they are the host.
+    ///
+    /// `replacing` names a room this caller actually tried to dial and could
+    /// not reach. It is the only way a live claim changes hands, and it is
+    /// what stops a stale room becoming a wall every later player runs into:
+    /// a failed join is always followed by a claim that names the room it
+    /// failed on, so the joiner hosts instead of retrying forever.
+    pub fn claim_room(
+        &self,
+        game: &str,
+        invite: &str,
+        host: &str,
+        ttl_ms: u64,
+        replacing: Option<&str>,
+    ) -> ClientResult<crate::dto::RoomClaimDto> {
+        let bounded = |text: &str, max: usize| {
+            !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+        };
+        if !bounded(game, wire::MAX_ROOM_GAME_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room game id" });
+        }
+        if !bounded(invite, wire::MAX_ROOM_INVITE_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room invite" });
+        }
+        if !bounded(host, wire::MAX_ROOM_HOST_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room host name" });
+        }
+        if !(wire::MIN_ROOM_TTL_MS..=wire::MAX_ROOM_TTL_MS).contains(&ttl_ms) {
+            return Err(ClientError::InvalidInput { what: "room ttl" });
+        }
+        let mut pairs: Vec<(&str, Value)> = vec![
+            ("game", json::s(game)),
+            ("invite", json::s(invite)),
+            ("host", json::s(host)),
+            ("ttl_ms", Value::Int(ttl_ms.min(i64::MAX as u64) as i64)),
+        ];
+        if let Some(room) = replacing {
+            if !bounded(room, 64) {
+                return Err(ClientError::InvalidInput { what: "replaced room id" });
+            }
+            pairs.push(("replacing", json::s(room)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_rooms_claim();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        // 201 the claim is mine, 200 somebody else holds it. Both are
+        // answers, not failures.
+        let v = self.call_json_accept(self.endpoints.control, req, &[200, 201])?;
+        dto::parse_room_claim(&v)
+    }
+
+    /// "Still here" — renew the room's lease. A [`ClientError::NotFound`]
+    /// means the claim moved on (it lapsed, or a joiner that could not reach
+    /// this host took it), and the answer is to claim again, not to retry.
+    pub fn room_heartbeat(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        let body = self.room_token_body(room, token, Some(ttl_ms))?;
+        let path = wire::path_room_heartbeat(room);
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_room_envelope(&v)
+    }
+
+    /// Give the claim up. Idempotent at the server: a room already gone
+    /// answers the same way, because a host that leaves and then exits runs
+    /// both paths and neither is wrong.
+    pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
+        let body = self.room_token_body(room, token, None)?;
+        let path = wire::path_room_retire(room);
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        req.allow_no_content = true;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        self.accept(resp, &[200, 204])?;
+        Ok(())
+    }
+
+    fn room_token_body(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        let bounded = |text: &str| {
+            !text.is_empty() && text.len() <= 64 && !text.chars().any(char::is_control)
+        };
+        if !bounded(room) || !wire::query_value_ok(room) {
+            return Err(ClientError::InvalidInput { what: "room id" });
+        }
+        if !bounded(token) {
+            return Err(ClientError::InvalidInput { what: "room token" });
+        }
+        let mut pairs: Vec<(&str, Value)> = vec![("token", json::s(token))];
+        if let Some(ttl_ms) = ttl_ms {
+            if !(wire::MIN_ROOM_TTL_MS..=wire::MAX_ROOM_TTL_MS).contains(&ttl_ms) {
+                return Err(ClientError::InvalidInput { what: "room ttl" });
+            }
+            pairs.push(("ttl_ms", Value::Int(ttl_ms.min(i64::MAX as u64) as i64)));
+        }
+        Ok(json::obj(pairs).to_json().into_bytes())
     }
 
     // ---- jobs (generation scheduling) --------------------------------------
@@ -794,6 +1323,83 @@ impl Api {
         req.bearer = self.bearer();
         let v = self.call_json(self.endpoints.control, req)?;
         dto::parse_job_profiles(&v)
+    }
+
+    /// Announce (or renew) what this worker can execute RIGHT NOW. The
+    /// server merges the announcement over its config advertisement and
+    /// lets it expire after `ttl_ms`, so a worker that dies stops
+    /// advertising by itself — call this on a cadence well inside the ttl.
+    ///
+    /// `domains` are the capability domains this worker covers. It is
+    /// authoritative for all of them: announcing a domain with no profile
+    /// in it withdraws the deployment's static profiles there, which is
+    /// exactly what "the fleet cannot run this today" has to mean.
+    pub fn announce_job_profiles(
+        &self,
+        worker: &str,
+        ns: &str,
+        ttl_ms: u64,
+        domains: &[String],
+        profiles: &[JobProfileDto],
+    ) -> ClientResult<()> {
+        if worker.is_empty() || worker.len() > 64 || worker.chars().any(char::is_control) {
+            return Err(ClientError::InvalidInput { what: "worker id" });
+        }
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "worker namespace" });
+        }
+        if profiles.len() > wire::MAX_JOB_PROFILES || domains.len() > 32 {
+            return Err(ClientError::InvalidInput { what: "profile announcement size" });
+        }
+        let rows: Vec<Value> = profiles
+            .iter()
+            .map(|p| {
+                json::obj(vec![
+                    ("id", json::s(p.id.clone())),
+                    ("domain", json::s(p.domain.clone())),
+                    ("label", json::s(p.label.clone())),
+                    ("kind", json::s(p.kind.clone())),
+                    ("namespace", json::s(p.namespace.clone())),
+                    ("defaults", p.defaults.clone()),
+                ])
+            })
+            .collect();
+        let body = json::obj(vec![
+            ("worker", json::s(worker.to_string())),
+            ("namespace", json::s(ns.to_string())),
+            ("ttl_ms", Value::Int(ttl_ms as i64)),
+            (
+                "domains",
+                Value::Arr(domains.iter().map(|d| json::s(d.clone())).collect()),
+            ),
+            ("profiles", Value::Arr(rows)),
+        ])
+        .to_json()
+        .into_bytes();
+        self.put_job_profiles(&body)
+    }
+
+    /// Withdraw this worker's announcement (clean shutdown).
+    pub fn retract_job_profiles(&self, worker: &str, ns: &str) -> ClientResult<()> {
+        let body = json::obj(vec![
+            ("worker", json::s(worker.to_string())),
+            ("namespace", json::s(ns.to_string())),
+            ("retract", Value::Bool(true)),
+        ])
+        .to_json()
+        .into_bytes();
+        self.put_job_profiles(&body)
+    }
+
+    fn put_job_profiles(&self, body: &[u8]) -> ClientResult<()> {
+        let path = wire::path_job_profiles(None);
+        let mut req = Request::put(&path, body);
+        req.bearer = self.bearer();
+        req.allow_no_content = true;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        self.accept(resp, &[200, 204])?;
+        Ok(())
     }
 
     /// Enqueue one job; the server picks the compute slot.
@@ -1068,15 +1674,34 @@ impl Api {
 
     /// Content-addressed upload to the data plane. The response identity
     /// must equal the locally computed digest — a server that answers with
-    /// another identity is refused.
+    /// another identity is refused. Hashes `bytes` once, on this call; a
+    /// caller that already knows (and has verified) the digest — e.g.
+    /// against an upload plan's expected digest — should call
+    /// [`Self::upload_blob_with_digest`] instead to avoid hashing the same
+    /// bytes a second time.
     pub fn upload_blob(&self, ns: &str, bytes: &[u8]) -> ClientResult<BlobId> {
+        let local = BlobId::hash_of(bytes);
+        self.upload_blob_with_digest(ns, bytes, local)
+    }
+
+    /// As [`Self::upload_blob`], but `digest` is supplied by the caller
+    /// instead of being (re)computed here. `digest` MUST be
+    /// `BlobId::hash_of(bytes)` — this only skips a redundant local hash
+    /// pass, it never weakens the identity guarantee: the server's echoed
+    /// blob id is still checked against `digest`, and a disagreement is
+    /// still refused.
+    pub fn upload_blob_with_digest(
+        &self,
+        ns: &str,
+        bytes: &[u8],
+        digest: BlobId,
+    ) -> ClientResult<BlobId> {
         if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
             return Err(ClientError::InvalidInput { what: "upload namespace" });
         }
         if bytes.is_empty() {
             return Err(ClientError::InvalidInput { what: "upload empty blob" });
         }
-        let local = BlobId::hash_of(bytes);
         let path = wire::path_blob_upload(ns);
         let mut req = Request::post(&path, bytes);
         req.body_content_type = "application/octet-stream";
@@ -1087,14 +1712,309 @@ impl Api {
             .and_then(Value::as_str)
             .and_then(|s| s.parse::<BlobId>().ok())
             .ok_or(ClientError::Protocol { what: "upload blob_id" })?;
-        if got != local {
+        if got != digest {
             return Err(ClientError::DigestMismatch {
                 what: "uploaded blob identity",
-                expected: *local.as_bytes(),
+                expected: *digest.as_bytes(),
                 found: *got.as_bytes(),
             });
         }
-        Ok(local)
+        Ok(digest)
+    }
+
+    /// Admit MANY blobs in ONE request: the server hashes and fsyncs every
+    /// object off its state thread, then records the whole set in ONE
+    /// catalog transaction. Every echoed digest is verified against the
+    /// locally computed one before it is trusted. Order is preserved.
+    /// Hashes every blob once, on this call; a caller that already knows
+    /// (and has verified) each digest should call
+    /// [`Self::upload_blob_batch_with_digests`] instead to avoid hashing the
+    /// same bytes a second time.
+    pub fn upload_blob_batch(&self, ns: &str, blobs: &[&[u8]]) -> ClientResult<Vec<BlobId>> {
+        let with_digests: Vec<(BlobId, &[u8])> =
+            blobs.iter().map(|bytes| (BlobId::hash_of(bytes), *bytes)).collect();
+        self.upload_blob_batch_with_digests(ns, &with_digests)
+    }
+
+    /// As [`Self::upload_blob_batch`], but each digest is supplied by the
+    /// caller instead of being (re)computed here — see
+    /// [`Self::upload_blob_with_digest`] for the same trade-off on a single
+    /// blob. Every echoed digest is still verified against the SUPPLIED
+    /// local one before it is trusted; a disagreement is still refused.
+    ///
+    /// This client does not assume the server's batch-byte budget matches
+    /// its own (see [`wire::UPLOAD_BATCH_SAFE_BYTES`]): a 413 ("body too
+    /// large") for the whole request is not fatal here. On a 413 the batch
+    /// is split in half and each half is retried, recursively, until every
+    /// half either fits or is down to one blob — the one shape a 413 there
+    /// cannot be worked around (that single blob alone is over the server's
+    /// per-request budget; see [`Self::upload_blob_with_digest`] for that
+    /// case, which this does not attempt to solve).
+    pub fn upload_blob_batch_with_digests(
+        &self,
+        ns: &str,
+        blobs: &[(BlobId, &[u8])],
+    ) -> ClientResult<Vec<BlobId>> {
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "upload namespace" });
+        }
+        if blobs.is_empty() || blobs.len() > wire::MAX_UPLOAD_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "upload batch size" });
+        }
+        for (_, bytes) in blobs {
+            if bytes.is_empty() {
+                return Err(ClientError::InvalidInput { what: "upload empty blob" });
+            }
+        }
+        self.upload_blob_batch_split(ns, blobs)
+    }
+
+    /// One `upload_blob_batch` request for `blobs`; on a 413 for more than
+    /// one blob, split in half and retry each half. Every split at least
+    /// halves the batch, so recursion depth is bounded by
+    /// log2(MAX_UPLOAD_BATCH_ITEMS).
+    fn upload_blob_batch_split(&self, ns: &str, blobs: &[(BlobId, &[u8])]) -> ClientResult<Vec<BlobId>> {
+        match self.upload_blob_batch_once(ns, blobs) {
+            Err(ClientError::Server { status: 413, .. }) if blobs.len() > 1 => {
+                let mid = blobs.len() / 2;
+                let (a, b) = blobs.split_at(mid);
+                let mut out = self.upload_blob_batch_split(ns, a)?;
+                out.extend(self.upload_blob_batch_split(ns, b)?);
+                Ok(out)
+            }
+            other => other,
+        }
+    }
+
+    /// Exactly one wire request for `blobs`, no retry, no splitting.
+    fn upload_blob_batch_once(&self, ns: &str, blobs: &[(BlobId, &[u8])]) -> ClientResult<Vec<BlobId>> {
+        let mut body: Vec<u8> = Vec::with_capacity(
+            blobs.iter().map(|(_, bytes)| bytes.len() + 8).sum::<usize>(),
+        );
+        for (_, bytes) in blobs {
+            body.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            body.extend_from_slice(bytes);
+        }
+        let path = wire::path_blob_upload_batch(ns);
+        let mut req = Request::post(&path, &body);
+        req.body_content_type = "application/octet-stream";
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.data, req, &[200, 201])?;
+        let rows = v
+            .get("blobs")
+            .and_then(Value::as_arr)
+            .ok_or(ClientError::Protocol { what: "upload batch blobs" })?;
+        if rows.len() != blobs.len() {
+            return Err(ClientError::Protocol { what: "upload batch count" });
+        }
+        for (row, (expect, _)) in rows.iter().zip(blobs) {
+            let got = row
+                .get("blob_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<BlobId>().ok())
+                .ok_or(ClientError::Protocol { what: "upload batch blob_id" })?;
+            if got != *expect {
+                return Err(ClientError::DigestMismatch {
+                    what: "uploaded blob identity",
+                    expected: *expect.as_bytes(),
+                    found: *got.as_bytes(),
+                });
+            }
+        }
+        Ok(blobs.iter().map(|(digest, _)| *digest).collect())
+    }
+
+    /// Publish N complete assets in ONE request — one state-thread visit,
+    /// one catalog transaction server-side. Blobs must be admitted first
+    /// (see [`Self::upload_blob_batch`]); the response is per-item
+    /// `(asset_id, revision, already_published)` in request order, each
+    /// verified against the locally computed identity.
+    pub fn publish_batch(
+        &self,
+        items: &[PublishBatchWireItem],
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        if items.is_empty() || items.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "publish batch size" });
+        }
+        let labels =
+            |v: &[String]| Value::Arr(v.iter().map(|s| json::s(s.clone())).collect());
+        let mut rows: Vec<Value> = Vec::with_capacity(items.len());
+        for item in items {
+            item.annotation.validate()?;
+            let ann = &item.annotation;
+            let mut ann_pairs: Vec<(&str, Value)> = vec![
+                ("title", json::s(ann.title.clone())),
+                ("description", json::s(ann.description.clone())),
+                ("categories", labels(&ann.categories)),
+                ("tags", labels(&ann.tags)),
+                ("creator", json::s(ann.creator.clone())),
+                ("generator", json::s(ann.generator.clone())),
+                ("backend", json::s(ann.backend.clone())),
+                ("model", json::s(ann.model.clone())),
+                ("prompt", json::s(ann.prompt.clone())),
+                ("provenance", json::s(ann.provenance.clone())),
+                (
+                    "visibility",
+                    json::s(if ann.private { "private" } else { "public" }),
+                ),
+            ];
+            if let Some(kind) = ann.kind {
+                ann_pairs.push(("kind", json::s(dto::kind_name(kind))));
+            }
+            let mut pairs: Vec<(&str, Value)> = vec![
+                ("namespace", json::s(item.namespace.clone())),
+                ("manifest", json::s(crate::util::to_hex(&item.manifest))),
+                ("annotation", json::obj(ann_pairs)),
+            ];
+            if let Some(alias) = &item.alias {
+                pairs.push(("alias", json::s(alias.as_str().to_string())));
+            }
+            rows.push(json::obj(pairs));
+        }
+        let body = json::obj(vec![("items", Value::Arr(rows))])
+            .to_json()
+            .into_bytes();
+        let path = wire::path_publish_batch();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let rows = v
+            .get("items")
+            .and_then(Value::as_arr)
+            .ok_or(ClientError::Protocol { what: "publish batch items" })?;
+        if rows.len() != items.len() {
+            return Err(ClientError::Protocol { what: "publish batch count" });
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for (row, item) in rows.iter().zip(items) {
+            let asset = row
+                .get("asset_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<AssetId>().ok())
+                .ok_or(ClientError::Protocol { what: "publish batch asset_id" })?;
+            let revision = row
+                .get("revision")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<AssetRevisionId>().ok())
+                .ok_or(ClientError::Protocol { what: "publish batch revision" })?;
+            // The identities are computable locally; a divergent echo means
+            // the answer describes something else.
+            let mut hasher = Sha256::new();
+            hasher.update(&item.manifest);
+            if revision != AssetRevisionId::from_bytes(hasher.finalize()) {
+                return Err(ClientError::Protocol { what: "publish batch revision mismatch" });
+            }
+            let already = row
+                .get("already_published")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            out.push((asset, revision, already));
+        }
+        Ok(out)
+    }
+
+    /// Admit a file the SERVER can see, by reference: the store hashes it in
+    /// place and catalogues it without copying. The path travels; the bytes
+    /// never do, so this is only meaningful when client and store share a
+    /// filesystem (an app hosting its own store on loopback).
+    ///
+    /// Returns the digest and the length the server measured — the caller
+    /// did not read the file, so those come from the store, not from a local
+    /// guess. `ClientError::NotFound` means the server does not offer
+    /// reference admission (policy off, or an older build): fall back to
+    /// [`Self::upload_blob`].
+    pub fn admit_blob_ref(&self, ns: &str, path: &str) -> ClientResult<BlobRefAdmission> {
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "blob ref namespace" });
+        }
+        if path.is_empty() || path.len() > wire::MAX_BLOB_REF_PATH_BYTES {
+            return Err(ClientError::InvalidInput { what: "blob ref path" });
+        }
+        let body = json::obj(vec![("path", json::s(path.to_string()))])
+            .to_json()
+            .into_bytes();
+        let target = wire::path_blob_ref(ns);
+        let mut req = Request::post(&target, &body);
+        req.body_content_type = "application/json";
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.data, req, &[200, 201])?;
+        let blob = v
+            .get("blob_id")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<BlobId>().ok())
+            .ok_or(ClientError::Protocol { what: "blob ref blob_id" })?;
+        let size = v
+            .get("size")
+            .and_then(Value::as_u64)
+            .ok_or(ClientError::Protocol { what: "blob ref size" })?;
+        Ok(BlobRefAdmission {
+            blob,
+            size,
+            deduped: v.get("deduped").and_then(Value::as_bool).unwrap_or(false),
+            owned: v.get("owned").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+
+    /// RE-SCAN one bounded page of the store's reference blobs: for each,
+    /// what its file looks like on the server's disk right now.
+    ///
+    /// This is what makes "we did not copy your library" operable — a UI can
+    /// walk it a page at a time and show which originals moved, changed or
+    /// vanished, instead of discovering it when a clip refuses to play.
+    /// Verifying re-hashes each file server-side, so keep pages small.
+    pub fn blob_refs_page(
+        &self,
+        after: Option<&BlobId>,
+        limit: u32,
+    ) -> ClientResult<BlobRefsPage> {
+        let path = wire::path_blob_refs(after, limit.clamp(1, 256));
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        let total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
+        let rows = match v.get("refs") {
+            Some(Value::Arr(rows)) => rows.clone(),
+            _ => return Err(ClientError::Protocol { what: "blob refs list" }),
+        };
+        if rows.len() > wire::MAX_PAGE_ENTRIES {
+            return Err(ClientError::OverBudget {
+                what: "blob refs page",
+                limit: wire::MAX_PAGE_ENTRIES as u64,
+                found: rows.len() as u64,
+            });
+        }
+        let mut refs = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let blob = row
+                .get("blob_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<BlobId>().ok())
+                .ok_or(ClientError::Protocol { what: "blob ref id" })?;
+            let path = row
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(ClientError::Protocol { what: "blob ref path" })?
+                .to_string();
+            if path.len() > wire::MAX_BLOB_REF_PATH_BYTES {
+                return Err(ClientError::Protocol { what: "blob ref path length" });
+            }
+            refs.push(BlobRefRow {
+                blob,
+                path,
+                size: row.get("size").and_then(Value::as_u64).unwrap_or(0),
+                state: row
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                ok: row.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            });
+        }
+        let next = v
+            .get("next")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<BlobId>().ok());
+        Ok(BlobRefsPage { total, refs, next })
     }
 
     /// Register an asset id (server-minted when `id` is None). Registering
@@ -1152,6 +2072,96 @@ impl Api {
             });
         }
         Ok(local)
+    }
+
+    /// Delete an asset from the store: every revision is retired, every
+    /// alias head pointing at it drops, its search rows are removed, and its
+    /// bytes become collectable by [`Self::gc_blobs`]. Idempotent — a repeat
+    /// answers with `already_retired`.
+    ///
+    /// Requires the moderation capability (`asset_quarantine`) on the
+    /// asset's namespace, exactly like pulling content.
+    pub fn retire_asset(&self, asset: &AssetId) -> ClientResult<crate::dto::RetireDto> {
+        let path = wire::path_asset_retire(asset);
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let dto = crate::dto::parse_retire(&v)?;
+        if &dto.asset_id != asset {
+            return Err(ClientError::Protocol { what: "retire response mismatch" });
+        }
+        Ok(dto)
+    }
+
+    /// Delete ONE revision (typically a superseded one); the asset stays
+    /// live. Idempotent.
+    pub fn retire_revision(
+        &self,
+        asset: &AssetId,
+        rev: &AssetRevisionId,
+    ) -> ClientResult<crate::dto::RetireDto> {
+        let path = wire::path_revision_retire(asset, rev);
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let dto = crate::dto::parse_retire(&v)?;
+        if &dto.asset_id != asset || dto.revision.as_ref() != Some(rev) {
+            return Err(ClientError::Protocol { what: "retire response mismatch" });
+        }
+        Ok(dto)
+    }
+
+    /// Advance blob garbage collection, starting a run if none is active,
+    /// and return the run's durable progress. ONE call does a bounded amount
+    /// of work — poll until `done` (the server also finishes runs on its own
+    /// janitor, so a caller that stops polling does not strand one).
+    ///
+    /// `dry_run` counts what would be reclaimed and deletes nothing.
+    /// Whole-store admin operation: the bootstrap admin token.
+    pub fn gc_blobs(&self, req: &GcRequest) -> ClientResult<crate::dto::GcStatusDto> {
+        let mut pairs: Vec<(&str, Value)> = vec![("dry_run", Value::Bool(req.dry_run))];
+        if let Some(grace) = req.grace_ms {
+            pairs.push(("grace_ms", Value::Int(grace as i64)));
+        }
+        if let Some(keep) = req.retain_per_asset {
+            if keep == 0 {
+                return Err(ClientError::InvalidInput { what: "retain_per_asset zero" });
+            }
+            pairs.push(("retain_per_asset", Value::Int(keep as i64)));
+        }
+        if let Some(steps) = req.max_steps {
+            if steps == 0 {
+                return Err(ClientError::InvalidInput { what: "gc max_steps zero" });
+            }
+            pairs.push(("max_steps", Value::Int(steps as i64)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_gc();
+        let mut http = Request::post(&path, &body);
+        http.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, http, &[200])?;
+        crate::dto::parse_gc_status(&v)
+    }
+
+    /// The newest GC run's progress, without starting or advancing one.
+    pub fn gc_status(&self) -> ClientResult<crate::dto::GcStatusDto> {
+        let path = wire::path_gc();
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        crate::dto::parse_gc_status(&v)
+    }
+
+    /// Abandon the active run. Returns whether one was stopped; anything
+    /// already collected stays collected.
+    pub fn gc_cancel(&self) -> ClientResult<bool> {
+        let path = wire::path_gc_cancel();
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        v.get("cancelled")
+            .and_then(Value::as_bool)
+            .ok_or(ClientError::Protocol { what: "gc cancel flag" })
     }
 
     pub fn publish_asset_revision(
@@ -1365,7 +2375,8 @@ impl Api {
         let mut req = Request::put(&path, &body);
         req.bearer = self.bearer();
         req.allow_no_content = true;
-        let resp = http::http_call(self.endpoints.control, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
         self.accept(resp, &[200, 204])?;
         Ok(())
     }
@@ -1378,7 +2389,7 @@ impl Api {
         blob: &BlobId,
         range_start: Option<u64>,
         body_deadline_ms: u64,
-    ) -> ClientResult<Response> {
+    ) -> ClientResult<Response<'_>> {
         let path = wire::path_blob(blob);
         let mut req = Request::get(&path);
         req.bearer = self.bearer();
@@ -1392,7 +2403,8 @@ impl Api {
             etag = blob.to_string();
             req.if_range = Some(&etag);
         }
-        let resp = http::http_call(self.endpoints.data, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
         self.accept(resp, &[200, 206, 416])
     }
 
@@ -1606,6 +2618,37 @@ impl Api {
             return Err(ClientError::Protocol { what: "chat cancel id mismatch" });
         }
         Ok(session)
+    }
+
+    /// Answer a client-executed tool call (the game's world tools). `outcome`
+    /// is the encoded tool-outcome object (`{"outcome": "ok", "value": …}`);
+    /// the server validates it against the chat wire's own bounds.
+    pub fn chat_tool_result(
+        &self,
+        id: &crate::dto::ChatSessionId,
+        call_id: &str,
+        outcome: &Value,
+    ) -> ClientResult<()> {
+        if call_id.is_empty() || call_id.len() > 64 {
+            return Err(ClientError::InvalidInput { what: "chat tool call id" });
+        }
+        let body = json::obj(vec![
+            ("id", json::s(call_id)),
+            ("outcome", outcome.clone()),
+        ])
+        .to_json()
+        .into_bytes();
+        if body.len() > 24 * 1024 {
+            return Err(ClientError::InvalidInput { what: "chat tool outcome too large" });
+        }
+        let path = wire::path_chat_tool_result(&id.to_string());
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        match v.get("accepted").and_then(Value::as_bool) {
+            Some(true) => Ok(()),
+            _ => Err(ClientError::Protocol { what: "chat tool result echo" }),
+        }
     }
 
     pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {
@@ -1933,7 +2976,8 @@ impl Api {
     ) -> ClientResult<Vec<u8>> {
         let mut req = Request::get(path);
         req.bearer = self.bearer();
-        let resp = http::http_call(self.endpoints.control, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         if resp.head().etag.as_deref() != Some(etag) {
             return Err(ClientError::Protocol { what: "canonical etag mismatch" });
@@ -2110,6 +3154,16 @@ mod tests {
         let mut q = CatalogQuery::browse(10);
         q.namespace = Some(String::new());
         assert!(q.validate().is_err());
+        // `exclude_tag` is bounded exactly like the other filter values.
+        let mut q = CatalogQuery::browse(10);
+        q.exclude_tag = Some(String::new());
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("bad\u{7}".into());
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("x".repeat(wire::MAX_FILTER_VALUE_BYTES + 1));
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("intermediate".into());
+        assert!(q.validate().is_ok());
     }
 
     #[test]
@@ -2124,6 +3178,14 @@ mod tests {
         assert_eq!(body.get("limit").unwrap().as_i64(), Some(25));
         assert_eq!(body.get("cursor").unwrap().as_str(), Some("ab12"));
         assert!(q.body(None).get("cursor").is_none());
+        // Absent filters emit no key at all; set ones travel verbatim.
+        assert!(body.get("tag").is_none());
+        assert!(body.get("exclude_tag").is_none());
+        q.tag = Some("keep".into());
+        q.exclude_tag = Some("intermediate".into());
+        let body = q.body(None);
+        assert_eq!(body.get("tag").unwrap().as_str(), Some("keep"));
+        assert_eq!(body.get("exclude_tag").unwrap().as_str(), Some("intermediate"));
     }
 
     #[test]

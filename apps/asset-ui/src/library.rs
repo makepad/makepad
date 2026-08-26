@@ -35,6 +35,14 @@ pub struct LibraryMeta {
     /// over thumbnails. Kept separate so a caption run cannot overwrite
     /// the import source tags the Library filter is built on.
     pub enhanced_tags: Option<Vec<String>>,
+    /// Is this row the run's PRODUCT (the thing the user asked for) rather
+    /// than an intermediate stage artifact (source image, untextured mesh,
+    /// PBR map, sidecar)? Written at route time by the pipeline, where the
+    /// stage index is known; `None` on rows from before the field existed
+    /// and on non-run routes (drops, webcam, manual imports). Consumed by
+    /// the publish loop, which tags non-products `intermediate` so program
+    /// surfaces can exclude them.
+    pub product: Option<bool>,
 }
 
 impl LibraryMeta {
@@ -92,6 +100,27 @@ pub fn asset_shelf(domain: &str, content_type: &str) -> &'static str {
     }
 }
 
+/// Pure keep-vs-rerender decision for a re-landed GLB's `.thumb` sidecar.
+///
+/// `created` is `Library::import_unique_with_thumbnail`'s own return:
+/// `false` means the freshly landed bytes are byte-for-byte identical to a
+/// payload already in the library (an exact-content dedupe hit found via
+/// `find_exact_payload`), and `ensure_thumbnail` left that payload's
+/// existing sidecar untouched. `true` means genuinely new or changed
+/// content, whose old sidecar (if any) has already been overwritten or
+/// discarded by the land itself.
+///
+/// `needs_render` is `Library::needs_model_thumbnail(file)` — true when no
+/// `.thumb` is actually on disk for the landed file right now.
+///
+/// Re-rendering only pays for new/changed content, or for a dedupe hit that
+/// never got a render in the first place; a byte-identical reimport (e.g.
+/// re-running "Import all" over ~3400 unchanged Kenney GLBs) keeps every
+/// existing icon instead of rebuilding it.
+pub fn keep_existing_glb_thumbnail(created: bool, needs_render: bool) -> bool {
+    !created && !needs_render
+}
+
 #[derive(Clone, Default, Debug, PartialEq, Eq, SerJson, DeJson)]
 pub struct LibraryIndex {
     pub items: Vec<LibraryMeta>,
@@ -101,9 +130,11 @@ pub struct LibraryIndex {
 }
 
 /// Disk cap: oldest payloads are pruned past this.
-/// Kenney kits exceed 64 (space-kit is 153). Cap must hold one imported
-/// pack or land evicts members mid-thumbnail and later cards never get icons.
-pub const LIBRARY_CAP: usize = 2048;
+/// Kenney kits exceed 64 (space-kit is 153) and "Import all" lands ~3800
+/// models at once. The cap must hold everything ONE import lands, or landing
+/// evicts members mid-thumbnail and later cards (and the server thumbnails
+/// re-imports build from them) never get icons.
+pub const LIBRARY_CAP: usize = 8192;
 
 /// One unit of missing-preview regeneration work. The app drains these a
 /// bounded slice at a time after the first frame; until a job lands its card
@@ -122,11 +153,15 @@ pub enum ThumbnailBackfillJob {
 /// background regenerator rebuilds them from the payloads.
 ///
 /// model v12: yaw around AABB centre (v11 rotated pack-grid models off-card).
-const MODEL_PREVIEW_VERSION: &str = "12-center-yaw";
+/// model v13: a full turn, sixteen views packed into one declared sheet, so
+/// a card rotates instead of showing one frozen three-quarter angle.
+const MODEL_PREVIEW_VERSION: &str = "13-turntable-16";
 /// audio v1: a WAV's preview is ALWAYS its own waveform strip. Earlier
 /// sidecars could be a byte-copy of an upstream pipeline image (provenance
 /// bug: lib-55.wav.thumb == lib-54.png) and are exactly what this discards.
-const AUDIO_PREVIEW_VERSION: &str = "1-own-waveform";
+/// audio v4: ONE composite — the spectrogram composed for a card, with a
+/// waveform strip along its bottom edge, both regions declared.
+const AUDIO_PREVIEW_VERSION: &str = "4-composite-tile";
 const PREVIEW_VERSIONS_FILE: &str = ".preview-versions";
 /// Pre-split marker (model-only semantics); superseded and reaped on open.
 const LEGACY_MODEL_VERSION_FILE: &str = ".model-thumbnail-version";
@@ -183,7 +218,14 @@ impl Library {
         // regenerates it. This cheap per-kind version migration discards
         // sidecars whose derivation semantics changed (file unlinks only).
         library.invalidate_stale_previews();
-        library.backfill_missing_tags();
+        let mut dirty = library.backfill_missing_tags();
+        dirty |= library.backfill_missing_products();
+        // The in-process publish loop reads index.json from DISK, so a
+        // backfilled flag that only exists in memory would publish the
+        // whole library as products. Commit once, here.
+        if dirty {
+            let _ = library.save();
+        }
         library
     }
 
@@ -202,6 +244,18 @@ impl Library {
 
     pub fn get(&self, file: &str) -> Option<&LibraryMeta> {
         self.index.items.iter().find(|item| item.file == file)
+    }
+
+    /// File ids for every item `predicate` accepts, newest first — exactly
+    /// the order and rule the Library grid renders with. Shared seam for
+    /// "act on everything the current filter shows" UI (e.g. bulk delete)
+    /// so the shown count and the acted-on set can never disagree: both
+    /// come from this one pass over the index.
+    pub fn files_matching(&self, mut predicate: impl FnMut(&LibraryMeta) -> bool) -> Vec<String> {
+        self.newest_items()
+            .filter(|item| predicate(item))
+            .map(|item| item.file.clone())
+            .collect()
     }
 
     pub fn payload_path(&self, file: &str) -> io::Result<PathBuf> {
@@ -357,7 +411,7 @@ impl Library {
         label: &str,
         bytes: &[u8],
     ) -> io::Result<String> {
-        self.add_with_thumbnail(domain, content_type, prompt, label, bytes, None, None)
+        self.add_with_thumbnail(domain, content_type, prompt, label, bytes, None, None, None)
     }
 
     /// Add a payload together with a visual preview. The preview is stored as
@@ -374,6 +428,7 @@ impl Library {
         bytes: &[u8],
         thumbnail: Option<&[u8]>,
         group: Option<(&str, &str)>,
+        product: Option<bool>,
     ) -> io::Result<String> {
         let original = self.index.clone();
         self.index.next_id = self.index.next_id.saturating_add(1);
@@ -421,6 +476,7 @@ impl Library {
                 prompt,
             )),
             enhanced_tags: None,
+            product,
         });
         let mut pruned = Vec::new();
         while self.index.items.len() > LIBRARY_CAP {
@@ -458,7 +514,16 @@ impl Library {
 
     /// Copy native-size sprite frames next to a landed `.billboard` and
     /// rewrite the manifest to those sibling names (`lib-N.f000.png`).
+    ///
+    /// A packed sheet (`SheetLayout`) puts many frames' `cell` entries on the
+    /// SAME source file (`sheet_file`); a legacy manifest still gives every
+    /// frame its own file. Either way, each distinct `frame.file` is copied
+    /// exactly once — under the name of the FIRST frame index that
+    /// references it — and every frame sharing that source is rewritten to
+    /// the one landed name. Without the dedupe, a ~40-frame packed actor
+    /// would copy its single shared sheet ~40 times.
     pub fn install_billboard_frames(&self, file: &str, source_manifest: &Path) -> io::Result<()> {
+        use std::collections::BTreeMap;
         let dest = self.payload_path(file)?;
         let text = fs::read_to_string(source_manifest)?;
         let Ok(mut bb) = makepad_asset_importer::stateful_billboard::StatefulBillboard::parse(&text)
@@ -470,13 +535,19 @@ impl Library {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("lib");
+        let mut copied: BTreeMap<String, String> = BTreeMap::new();
         for (i, frame) in bb.frames.iter_mut().enumerate() {
+            if let Some(name) = copied.get(&frame.file) {
+                frame.file = name.clone();
+                continue;
+            }
             let src = src_dir.join(&frame.file);
             if !src.is_file() {
                 continue;
             }
             let name = format!("{stem}.f{i:03}.png");
             fs::copy(&src, self.dir.join(&name))?;
+            copied.insert(frame.file.clone(), name.clone());
             frame.file = name;
         }
         fs::write(&dest, bb.to_text())?;
@@ -501,22 +572,49 @@ impl Library {
         if asset_key.is_empty() {
             return None;
         }
-        let stem = asset_key
-            .rsplit('/')
-            .next()
-            .unwrap_or(asset_key)
-            .to_ascii_lowercase();
+        let key = asset_key.replace('\\', "/").to_ascii_lowercase();
+        let stem = key.rsplit('/').next().unwrap_or(key.as_str());
         if stem.is_empty() {
             return None;
         }
         let needle = format!(" · {stem} · ");
         let needle_end = format!(" · {stem}");
-        let item = self.index.items.iter().rev().find(|item| {
+        let dotted = key.replace('/', " · ");
+        let score = |item: &LibraryMeta| -> i32 {
             let prompt = item.prompt.to_ascii_lowercase();
-            prompt.contains(&needle)
+            let label = item.label.to_ascii_lowercase();
+            let ct = item.content_type.to_ascii_lowercase();
+            let domain = item.domain.to_ascii_lowercase();
+            let matched = label == stem
+                || label == dotted
+                || prompt.contains(&needle)
                 || prompt.ends_with(&needle_end)
-                || item.label.eq_ignore_ascii_case(&stem)
-        })?;
+                || prompt.contains(&dotted);
+            if !matched {
+                return -1;
+            }
+            let mesh = ct.contains("gltf")
+                || matches!(
+                    domain.as_str(),
+                    "mesh" | "character" | "weapon" | "prop" | "world" | "map"
+                );
+            if mesh {
+                2
+            } else {
+                0
+            }
+        };
+        let item = self
+            .index
+            .items
+            .iter()
+            .rev()
+            .filter_map(|item| {
+                let s = score(item);
+                (s >= 0).then_some((s, item))
+            })
+            .max_by_key(|(s, _)| *s)?
+            .1;
         self.payload_path(&item.file).ok()
     }
 
@@ -531,10 +629,17 @@ impl Library {
         )
     }
 
+    /// Where a playable rig's baked rest bundle (`.skinao`) lives for this
+    /// payload. The viewer reads it when its hash matches the rig and writes
+    /// it after an inline bake.
+    pub fn rig_cache_path(&self, file: &str) -> Option<PathBuf> {
+        self.payload_path(file).ok().map(|p| p.with_extension("skinao"))
+    }
+
     fn reap_payload_files(&self, file: &str) {
         if let Ok(path) = self.payload_path(file) {
             let _ = fs::remove_file(&path);
-            for ext in ["aomesh", "ao.png", "shadowsdf", "spawn", "place"] {
+            for ext in ["aomesh", "ao.png", "shadowsdf", "skinao", "spawn", "place"] {
                 let _ = fs::remove_file(path.with_extension(ext));
             }
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -599,7 +704,7 @@ impl Library {
             }
         }
         let (file, created) = self
-            .add_with_thumbnail(domain, content_type, prompt, label, bytes, thumbnail, group)
+            .add_with_thumbnail(domain, content_type, prompt, label, bytes, thumbnail, group, None)
             .map(|file| (file, true))?;
         if let Some((group_id, _)) = group {
             let prefix = prompt.split('·').next().unwrap_or(prompt).trim();
@@ -953,10 +1058,12 @@ impl Library {
         Ok(true)
     }
 
-    /// Fill `tags` on records written before the field existed. One save if
-    /// anything changed so the Library dropdown can list `freedoom` / `darkmod`
-    /// without a re-import.
-    fn backfill_missing_tags(&mut self) {
+    /// Fill `tags` on records written before the field existed, so the
+    /// Library dropdown can list `freedoom` / `darkmod` without a re-import
+    /// (and so the publish loop's generated-only scope gate sees the
+    /// `generated` tag on legacy `run-…` rows). Returns whether anything
+    /// changed; [`Library::open`] commits both backfills in one save.
+    fn backfill_missing_tags(&mut self) -> bool {
         let mut dirty = false;
         for item in &mut self.index.items {
             if item.tags.is_some() {
@@ -969,9 +1076,40 @@ impl Library {
             ));
             dirty = true;
         }
-        if dirty {
-            let _ = self.save();
+        dirty
+    }
+
+    /// Fill `product` on records written before the field existed, using the
+    /// importer's shared group classifier over the whole ordered index. The
+    /// inference needs COMPLETE groups, which is exactly what a persisted
+    /// index holds; live runs never reach here — they author the flag at
+    /// route time, where the stage index is known.
+    fn backfill_missing_products(&mut self) -> bool {
+        if self.index.items.iter().all(|item| item.product.is_some()) {
+            return false;
         }
+        let flags = {
+            let rows: Vec<makepad_asset_importer::import::ProductRow<'_>> = self
+                .index
+                .items
+                .iter()
+                .map(|item| makepad_asset_importer::import::ProductRow {
+                    domain: &item.domain,
+                    content_type: &item.content_type,
+                    group_id: item.group_id.as_deref(),
+                    product: item.product,
+                })
+                .collect();
+            makepad_asset_importer::import::classify_products(&rows)
+        };
+        let mut dirty = false;
+        for (item, flag) in self.index.items.iter_mut().zip(flags) {
+            if item.product.is_none() {
+                item.product = Some(flag);
+                dirty = true;
+            }
+        }
+        dirty
     }
 }
 
@@ -1131,6 +1269,18 @@ pub fn normalize_tag(raw: &str) -> String {
 /// millisecond and ids from a relaunched app can never collide in one
 /// library. The id is persisted on every artifact of the run; grouping is
 /// never re-derived from anything else.
+/// Whether a persisted group id names an import/pack landing group — the
+/// `import:<source>:<pack>` convention `land_imported_pack` writes for
+/// classic/Kenney bulk imports — rather than a generated pipeline run
+/// (`run-…`) or another single-artifact grouping (`webcam-…`, `drop-…`, the
+/// one-off `import-…` standalone-import id). Pack groups can hold thousands
+/// of unrelated members (a whole Kenney kit, a whole Doom shareware pull);
+/// the viewer's RUN tray exists to walk one run's own stage artifacts, so it
+/// must never treat a pack import as a run.
+pub fn is_import_pack_group(group_id: &str) -> bool {
+    group_id.starts_with("import:")
+}
+
 pub fn new_group_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1287,6 +1437,150 @@ mod tests {
     }
 
     #[test]
+    fn keep_existing_glb_thumbnail_only_when_unchanged_and_rendered() {
+        // Unchanged content (created == false) with a render already on
+        // disk: keep it.
+        assert!(keep_existing_glb_thumbnail(false, false));
+        // Unchanged content but no render ever landed: still needs one.
+        assert!(!keep_existing_glb_thumbnail(false, true));
+        // New or changed content: always re-render, render state
+        // notwithstanding.
+        assert!(!keep_existing_glb_thumbnail(true, false));
+        assert!(!keep_existing_glb_thumbnail(true, true));
+    }
+
+    #[test]
+    fn reimporting_identical_glb_bytes_preserves_thumbnail() {
+        let dir = TestDir::new("reimport-thumb-keep");
+        let bytes = b"glTF unchanged model payload";
+        let mut library = Library::open(&dir.0);
+        let (file, created) = library
+            .import_unique_with_thumbnail(
+                "prop",
+                "model/gltf-binary",
+                "crate",
+                "Crate",
+                bytes,
+                None,
+                Some(("import:kenney:space-kit", "Kenney space-kit")),
+            )
+            .unwrap();
+        assert!(created);
+        // Simulate a rendered icon landing, as the GPU thumbnail pass would.
+        fs::write(
+            dir.0.join(format!("{file}.thumb")),
+            b"\x89PNG\r\n\x1a\nrendered",
+        )
+        .unwrap();
+        assert!(!library.needs_model_thumbnail(&file));
+
+        // Re-land the exact same bytes under the exact same label/group, as
+        // a second "Import all" pass over an unchanged pack would.
+        let (file2, created2) = library
+            .import_unique_with_thumbnail(
+                "prop",
+                "model/gltf-binary",
+                "crate",
+                "Crate",
+                bytes,
+                None,
+                Some(("import:kenney:space-kit", "Kenney space-kit")),
+            )
+            .unwrap();
+        assert_eq!(file2, file);
+        assert!(
+            !created2,
+            "byte-identical reimport must be a dedupe hit, not a fresh add"
+        );
+        let needs_render = library.needs_model_thumbnail(&file2);
+        assert!(
+            !needs_render,
+            "the existing sidecar must survive an unchanged reimport"
+        );
+        assert!(keep_existing_glb_thumbnail(created2, needs_render));
+        // The sidecar bytes on disk are untouched by the re-land.
+        assert_eq!(
+            fs::read(dir.0.join(format!("{file}.thumb"))).unwrap(),
+            b"\x89PNG\r\n\x1a\nrendered"
+        );
+    }
+
+    #[test]
+    fn reimporting_changed_glb_bytes_forces_rerender() {
+        let dir = TestDir::new("reimport-thumb-rerender");
+        let mut library = Library::open(&dir.0);
+        let (file, created) = library
+            .import_unique_with_thumbnail(
+                "prop",
+                "model/gltf-binary",
+                "crate",
+                "Crate",
+                b"glTF v1",
+                None,
+                Some(("import:kenney:space-kit", "Kenney space-kit")),
+            )
+            .unwrap();
+        assert!(created);
+        fs::write(
+            dir.0.join(format!("{file}.thumb")),
+            b"\x89PNG\r\n\x1a\nrendered",
+        )
+        .unwrap();
+
+        // Re-land the SAME label under the SAME group, but with different
+        // bytes — a genuine content change (e.g. the upstream pack asset was
+        // updated), not a no-op reimport.
+        let (file2, created2) = library
+            .import_unique_with_thumbnail(
+                "prop",
+                "model/gltf-binary",
+                "crate",
+                "Crate",
+                b"glTF v2 - different payload bytes",
+                None,
+                Some(("import:kenney:space-kit", "Kenney space-kit")),
+            )
+            .unwrap();
+        assert_eq!(file2, file);
+        assert!(
+            created2,
+            "a genuinely changed payload must not be treated as a dedupe hit"
+        );
+        // overwrite_payload already drops the stale sidecar itself; the
+        // landing code must also treat this as needing a fresh render.
+        assert!(library.needs_model_thumbnail(&file2));
+        assert!(!keep_existing_glb_thumbnail(
+            created2,
+            library.needs_model_thumbnail(&file2)
+        ));
+    }
+
+    #[test]
+    fn files_matching_selects_by_predicate_in_newest_first_order() {
+        let dir = TestDir::new("files-matching");
+        let mut library = Library::open(&dir.0);
+        let (imp, _) = library
+            .import_unique("prop", "model/gltf-binary", "p", "Doom Imp", b"a")
+            .unwrap();
+        let (zombie, _) = library
+            .import_unique("prop", "model/gltf-binary", "p", "Doom Zombie", b"b")
+            .unwrap();
+        let (_crate_file, _) = library
+            .import_unique("prop", "model/gltf-binary", "p", "Space Crate", b"c")
+            .unwrap();
+
+        let doom_files = library.files_matching(|item| item.label.to_ascii_lowercase().contains("doom"));
+        // Newest first, same order the grid renders.
+        assert_eq!(doom_files, vec![zombie, imp]);
+
+        let none = library.files_matching(|item| item.label.contains("nonexistent"));
+        assert!(none.is_empty());
+
+        let all = library.files_matching(|_| true);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
     fn import_is_deduplicated_and_delete_preserves_external_source() {
         let dir = TestDir::new("import-delete");
         let source = dir.0.with_extension("source.glb");
@@ -1406,6 +1700,105 @@ mod tests {
     }
 
     #[test]
+    fn install_billboard_frames_dedupes_a_shared_packed_sheet() {
+        let dir = TestDir::new("billboard-sheet-dedupe");
+        let src_dir = dir.0.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let sheet_bytes = b"packed-sheet-png-bytes";
+        fs::write(src_dir.join("trooper_sheet.png"), sheet_bytes).unwrap();
+        let manifest_text = "\
+stateful-billboard 1
+prefix trooper
+role character
+preview idle
+facings 1
+sheet 8 64 64
+frame 0 A 1 64 64 trooper_sheet.png cell 0
+frame 1 B 1 64 64 trooper_sheet.png cell 1
+";
+        let manifest = src_dir.join("trooper.billboard");
+        fs::write(&manifest, manifest_text).unwrap();
+
+        let mut library = Library::open(&dir.0);
+        let (file, added) = library
+            .import_unique(
+                "character",
+                makepad_asset_importer::stateful_billboard::CONTENT_TYPE,
+                "trooper",
+                "Trooper",
+                manifest_text.as_bytes(),
+            )
+            .unwrap();
+        assert!(added);
+        library.install_billboard_frames(&file, &manifest).unwrap();
+
+        let payload = library.payload_path(&file).unwrap();
+        let stem = payload.file_stem().and_then(|s| s.to_str()).unwrap();
+        // The shared sheet is copied exactly once, under the FIRST frame
+        // index that referenced it...
+        let landed_sheet = dir.0.join(format!("{stem}.f000.png"));
+        assert!(landed_sheet.is_file());
+        assert_eq!(fs::read(&landed_sheet).unwrap(), sheet_bytes);
+        // ...never a second time under the second frame's own index.
+        assert!(!dir.0.join(format!("{stem}.f001.png")).is_file());
+
+        // Both frames are rewritten to that one landed name; sheet/cell
+        // metadata round-trips untouched.
+        let landed_text = fs::read_to_string(&payload).unwrap();
+        let bb = makepad_asset_importer::stateful_billboard::StatefulBillboard::parse(&landed_text)
+            .unwrap();
+        assert_eq!(bb.frames.len(), 2);
+        let landed_name = format!("{stem}.f000.png");
+        assert_eq!(bb.frames[0].file, landed_name);
+        assert_eq!(bb.frames[1].file, landed_name);
+        assert_eq!(bb.frames[0].cell, Some(0));
+        assert_eq!(bb.frames[1].cell, Some(1));
+        assert!(bb.sheet.is_some());
+    }
+
+    #[test]
+    fn install_billboard_frames_keeps_legacy_one_file_per_frame() {
+        let dir = TestDir::new("billboard-legacy-per-frame");
+        let src_dir = dir.0.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("trooper_a1.png"), b"frame-a1").unwrap();
+        fs::write(src_dir.join("trooper_a2.png"), b"frame-a2").unwrap();
+        let manifest_text = "\
+stateful-billboard 1
+prefix trooper
+role character
+preview idle
+facings 1
+frame 0 A 1 64 64 trooper_a1.png
+frame 1 A 2 64 64 trooper_a2.png
+";
+        let manifest = src_dir.join("trooper.billboard");
+        fs::write(&manifest, manifest_text).unwrap();
+
+        let mut library = Library::open(&dir.0);
+        let (file, _added) = library
+            .import_unique(
+                "character",
+                makepad_asset_importer::stateful_billboard::CONTENT_TYPE,
+                "trooper",
+                "Trooper",
+                manifest_text.as_bytes(),
+            )
+            .unwrap();
+        library.install_billboard_frames(&file, &manifest).unwrap();
+
+        let payload = library.payload_path(&file).unwrap();
+        let stem = payload.file_stem().and_then(|s| s.to_str()).unwrap();
+        assert!(dir.0.join(format!("{stem}.f000.png")).is_file());
+        assert!(dir.0.join(format!("{stem}.f001.png")).is_file());
+        let landed_text = fs::read_to_string(&payload).unwrap();
+        let bb = makepad_asset_importer::stateful_billboard::StatefulBillboard::parse(&landed_text)
+            .unwrap();
+        assert_eq!(bb.frames[0].file, format!("{stem}.f000.png"));
+        assert_eq!(bb.frames[1].file, format!("{stem}.f001.png"));
+    }
+
+    #[test]
     fn unsafe_index_entry_cannot_escape_managed_directory() {
         let dir = TestDir::new("unsafe-index");
         let sentinel = dir.0.with_extension("sentinel");
@@ -1421,6 +1814,7 @@ mod tests {
                 group_label: None,
                 tags: None,
                 enhanced_tags: None,
+                product: None,
             }],
             next_id: 1,
         };
@@ -1449,6 +1843,7 @@ mod tests {
                     &format!("item-{index}"),
                     format!("payload-{index}").as_bytes(),
                     Some(thumbnail.as_bytes()),
+                    None,
                     None,
                 )
                 .unwrap();
@@ -1529,6 +1924,7 @@ mod tests {
                 "statue",
                 b"glTF static statue",
                 Some(b"model-render"),
+                None,
                 None,
             )
             .unwrap();
@@ -1625,6 +2021,24 @@ mod tests {
     }
 
     #[test]
+    fn is_import_pack_group_only_for_colon_prefixed_pack_ids() {
+        // The `land_imported_pack` pack-landing convention: colon-separated,
+        // can hold hundreds/thousands of members.
+        assert!(is_import_pack_group("import:kenney:space-kit"));
+        assert!(is_import_pack_group("import:doom:doom"));
+        assert!(is_import_pack_group("import:duke3d:duke3d"));
+        // Generated pipeline runs and other single-artifact groupings must
+        // never be mistaken for a pack import.
+        assert!(!is_import_pack_group("run-1755000000-123-4"));
+        assert!(!is_import_pack_group("webcam-1755000000-123-4"));
+        assert!(!is_import_pack_group("drop-1755000000-123-4"));
+        // The one-off standalone-import id (`new_group_id("import")`) uses a
+        // dash, not the pack's colon convention, and is deliberately NOT
+        // treated as a pack group.
+        assert!(!is_import_pack_group("import-1755000000-123-4"));
+    }
+
+    #[test]
     fn groups_persist_and_pre_group_indexes_read_as_earlier_imports() {
         let dir = TestDir::new("group-roundtrip");
         let mut library = Library::open(&dir.0);
@@ -1637,6 +2051,7 @@ mod tests {
                 b"\x89PNG-a",
                 None,
                 Some(("run-1-2-3", "video (small) — \"storm\"")),
+                None,
             )
             .unwrap();
         drop(library);
@@ -1676,6 +2091,7 @@ mod tests {
                 b"glTF chair",
                 None,
                 Some(("import:darkmod:darkmod", "The Dark Mod · CC-BY-NC-SA-3.0")),
+                None,
             )
             .unwrap();
         let kenney = library
@@ -1687,6 +2103,7 @@ mod tests {
                 b"glTF crate",
                 None,
                 Some(("import:kenney:space-kit", "Kenney space-kit · CC-BY-4.0")),
+                None,
             )
             .unwrap();
         assert_eq!(library.get(&file).unwrap().import_tags(), ["darkmod"]);
@@ -1710,6 +2127,74 @@ mod tests {
     }
 
     #[test]
+    fn open_backfills_products_over_complete_groups_and_persists_them() {
+        let dir = TestDir::new("product-backfill");
+        // One legacy `image → mesh → PBR` run, written before the field
+        // existed, plus one authored row the backfill must not touch.
+        let legacy = r#"{"items":[
+            {"file":"lib-1.png","label":"src","domain":"image","content_type":"image/png","prompt":"p","group_id":"run-1","tags":["generated"]},
+            {"file":"lib-2.glb","label":"mesh","domain":"mesh","content_type":"model/gltf-binary","prompt":"p","group_id":"run-1","tags":["generated"]},
+            {"file":"lib-3.glb","label":"painted","domain":"paint","content_type":"model/gltf-binary","prompt":"p","group_id":"run-1","tags":["generated"]},
+            {"file":"lib-4.png","label":"albedo","domain":"paint","content_type":"image/png","prompt":"p","group_id":"run-1","tags":["generated"]},
+            {"file":"lib-5.png","label":"kept","domain":"image","content_type":"image/png","prompt":"p","group_id":"run-2","tags":["generated"],"product":false}
+        ],"next_id":6}"#;
+        fs::write(dir.0.join("index.json"), legacy).unwrap();
+        for file in ["lib-1.png", "lib-2.glb", "lib-3.glb", "lib-4.png", "lib-5.png"] {
+            fs::write(dir.0.join(file), b"payload").unwrap();
+        }
+        let library = Library::open(&dir.0);
+        assert_eq!(library.get("lib-1.png").unwrap().product, Some(false));
+        assert_eq!(library.get("lib-2.glb").unwrap().product, Some(false));
+        assert_eq!(library.get("lib-3.glb").unwrap().product, Some(true));
+        assert_eq!(library.get("lib-4.png").unwrap().product, Some(false));
+        assert_eq!(
+            library.get("lib-5.png").unwrap().product,
+            Some(false),
+            "an authored flag is never re-inferred"
+        );
+        // The publish loop reads index.json from disk, so the backfill has
+        // to be durable before the watcher's first poll.
+        let saved = fs::read_to_string(dir.0.join("index.json")).unwrap();
+        assert!(saved.contains("\"product\""), "product backfill must persist");
+        let reopened = Library::open(&dir.0);
+        assert_eq!(reopened.get("lib-3.glb").unwrap().product, Some(true));
+    }
+
+    #[test]
+    fn routed_product_flag_round_trips_through_the_index() {
+        let dir = TestDir::new("product-roundtrip");
+        let mut library = Library::open(&dir.0);
+        let product = library
+            .add_with_thumbnail(
+                "paint",
+                "model/gltf-binary",
+                "p",
+                "elf",
+                b"glTF elf",
+                None,
+                Some(("run-9", "character")),
+                Some(true),
+            )
+            .unwrap();
+        let map = library
+            .add_with_thumbnail(
+                "paint",
+                "image/png",
+                "p",
+                "albedo",
+                b"png albedo",
+                None,
+                Some(("run-9", "character")),
+                Some(false),
+            )
+            .unwrap();
+        drop(library);
+        let reopened = Library::open(&dir.0);
+        assert_eq!(reopened.get(&product).unwrap().product, Some(true));
+        assert_eq!(reopened.get(&map).unwrap().product, Some(false));
+    }
+
+    #[test]
     fn tag_stats_sort_by_count_then_name_and_mark_enhanced() {
         let items = [
             LibraryMeta {
@@ -1722,6 +2207,7 @@ mod tests {
                 group_label: None,
                 tags: Some(vec!["freedoom".into(), "darkmod".into()]),
                 enhanced_tags: Some(vec!["wooden".into()]),
+                product: None,
             },
             LibraryMeta {
                 file: "b.glb".into(),
@@ -1733,6 +2219,7 @@ mod tests {
                 group_label: None,
                 tags: Some(vec!["freedoom".into()]),
                 enhanced_tags: None,
+                product: None,
             },
             LibraryMeta {
                 file: "c.glb".into(),
@@ -1744,6 +2231,7 @@ mod tests {
                 group_label: None,
                 tags: Some(vec!["freedoom".into()]),
                 enhanced_tags: Some(vec!["wooden".into()]),
+                product: None,
             },
         ];
         let stats = collect_tag_stats(items.iter());
@@ -1767,18 +2255,21 @@ mod tests {
             .add_with_thumbnail(
                 "image", "image/png", "p", "a1", b"payload-a1",
                 Some(b"thumb-a1"), Some(("run-a", "run A")),
+                None,
             )
             .unwrap();
         let a2 = library
             .add_with_thumbnail(
                 "sfx", "audio/wav", "p", "a2", b"payload-a2",
                 Some(b"thumb-a2"), Some(("run-a", "run A")),
+                None,
             )
             .unwrap();
         let b1 = library
             .add_with_thumbnail(
                 "image", "image/png", "p", "b1", b"payload-b1",
                 Some(b"thumb-b1"), Some(("run-b", "run B")),
+                None,
             )
             .unwrap();
         let ungrouped = library.add("text", "text/plain", "p", "old", b"old").unwrap();
@@ -1815,12 +2306,14 @@ mod tests {
             .add_with_thumbnail(
                 "image", "image/png", "p", "a1", b"payload-a1",
                 Some(b"thumb-a1"), Some(("run-a", "run A")),
+                None,
             )
             .unwrap();
         let b1 = library
             .add_with_thumbnail(
                 "image", "image/png", "p", "b1", b"payload-b1",
                 None, Some(("run-b", "run B")),
+                None,
             )
             .unwrap();
 
@@ -1865,6 +2358,7 @@ mod tests {
                 "done",
                 b"glTF with preview",
                 Some(b"render"),
+                None,
                 None,
             )
             .unwrap();
@@ -1928,6 +2422,7 @@ mod tests {
                 &wav_bytes,
                 Some(b"poisoned-upstream-image"),
                 None,
+                None,
             )
             .unwrap();
         let sidecar = library.thumbnail_path(&file).unwrap().expect("own waveform");
@@ -1967,6 +2462,7 @@ mod tests {
                 b"RIFF....WAVE....",
                 Some(b"poison"),
                 None,
+                None,
             )
             .unwrap();
         assert!(library.thumbnail_path(&broken).unwrap().is_none());
@@ -1983,12 +2479,14 @@ mod tests {
             .add_with_thumbnail(
                 "image", "image/png", "p", "keep", b"\x89PNG-keep",
                 Some(b"thumb-keep"), Some(("run-a", "run A")),
+                None,
             )
             .unwrap();
         let victim = library
             .add_with_thumbnail(
                 "image", "image/png", "p", "victim", b"\x89PNG-victim",
                 Some(b"thumb-victim"), Some(("run-a", "run A")),
+                None,
             )
             .unwrap();
         drop(library);

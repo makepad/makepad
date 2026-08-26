@@ -42,6 +42,7 @@ GOOGLE_KEY
 experiments/websocket-windows/nodejs-websocketserver
 experiments/svgloader
 CLAUDE.md
+!examples/godot/resources/template/CLAUDE.md
 
 /tools/__pycache__/
 **/*.obsidian
@@ -118,3 +119,5 @@ fleet-hosts*.txt
 /examples/automate/local/
 /examples/cad/generated/
 window_*_frame_*.png
+remote-jobs/
+apps/asset-ui/resources/

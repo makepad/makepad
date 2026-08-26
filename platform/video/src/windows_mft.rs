@@ -1,0 +1,120 @@
+//! Raw `IMFTransform` vtable calls shared by the Windows stream encoder and
+//! decoder.
+//!
+//! WHY THIS EXISTS: the vendored `windows-rs` subset checked into this repo
+//! (`libs/windows/windows-rs`, pre-generated — this crate has no codegen
+//! step of its own to re-run) only generated the *implement-this-interface*
+//! side of `IMFTransform` (the `IMFTransform_Impl` trait and the raw
+//! `IMFTransform_Vtbl` struct — needed just so `GetTransformForStream` in
+//! `windows_encoder.rs` has a `Vtable` type to satisfy `windows::core::
+//! Interface`), not client-callable wrapper methods for `ProcessInput` /
+//! `ProcessOutput` / `SetInputType` / `SetOutputType` / etc. Those calls are
+//! the entire point of driving an MFT directly for streaming, so this module
+//! calls through the (fully present) `IMFTransform_Vtbl` function pointers
+//! by hand — the same thing the generated wrapper methods on every OTHER
+//! interface in this crate do internally.
+//!
+//! UNVERIFIED: written and only ever `cargo check`ed (cross-compiled, never
+//! linked or run — there is no Windows machine available). See the module
+//! docs on `windows_stream_encoder`/`windows_stream_decoder` for the full
+//! list of hand-derived constants this implies.
+
+use windows::core::Interface;
+use windows::Win32::Media::MediaFoundation::{
+    IMFMediaType, IMFSample, IMFTransform, MFT_MESSAGE_TYPE, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
+};
+
+// mftransform.h — stable since Vista, not part of the vendored binding
+// subset (see module doc). FLUSH/NOTIFY_END_OF_STREAM are unused today
+// (neither backend currently issues an explicit flush/end-of-stream — a
+// live session just drops the transform) but are kept alongside the ones
+// that ARE used since they're one small, complete, documented set.
+#[allow(dead_code)]
+pub(crate) const MFT_MESSAGE_COMMAND_FLUSH: i32 = 0x0000_0000;
+#[allow(dead_code)]
+pub(crate) const MFT_MESSAGE_NOTIFY_END_OF_STREAM: i32 = 0x1000_0002;
+pub(crate) const MFT_MESSAGE_NOTIFY_START_OF_STREAM: i32 = 0x1000_0003;
+pub(crate) const MFT_MESSAGE_NOTIFY_BEGIN_STREAMING: i32 = 0x1000_0000;
+
+/// `MF_E_TRANSFORM_NEED_MORE_INPUT` (mferror.h) — the pull loop's normal
+/// "nothing more to give you right now" terminal condition.
+pub(crate) const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = 0xC00D_6D72u32 as i32;
+/// `MF_E_TRANSFORM_STREAM_CHANGE` (mferror.h) — `ProcessOutput` signals this
+/// once the decoder has parsed enough of the bitstream (SPS) to know the
+/// real output format/dimensions; the caller must re-negotiate the output
+/// type (see `get_output_available_type`) and retry.
+pub(crate) const MF_E_TRANSFORM_STREAM_CHANGE: i32 = 0xC00D_6D60u32 as i32;
+
+/// Bit in `MFT_OUTPUT_STREAM_INFO::dwFlags` meaning the MFT allocates its
+/// own output samples (caller must pass `None` to `process_output`,
+/// otherwise the caller must pre-allocate one of `cbSize` bytes).
+pub(crate) const MFT_OUTPUT_STREAM_PROVIDES_SAMPLES: u32 = 0x0000_0001;
+
+pub(crate) unsafe fn process_message(transform: &IMFTransform, message: i32, param: usize) -> windows::core::Result<()> {
+    let vtbl = Interface::vtable(transform);
+    (vtbl.ProcessMessage)(Interface::as_raw(transform), MFT_MESSAGE_TYPE(message), param).ok()
+}
+
+pub(crate) unsafe fn set_input_type(transform: &IMFTransform, media_type: &IMFMediaType) -> windows::core::Result<()> {
+    let vtbl = Interface::vtable(transform);
+    (vtbl.SetInputType)(Interface::as_raw(transform), 0, Interface::as_raw(media_type), 0).ok()
+}
+
+pub(crate) unsafe fn set_output_type(transform: &IMFTransform, media_type: &IMFMediaType) -> windows::core::Result<()> {
+    let vtbl = Interface::vtable(transform);
+    (vtbl.SetOutputType)(Interface::as_raw(transform), 0, Interface::as_raw(media_type), 0).ok()
+}
+
+pub(crate) unsafe fn get_output_stream_info(transform: &IMFTransform) -> windows::core::Result<MFT_OUTPUT_STREAM_INFO> {
+    let mut info = MFT_OUTPUT_STREAM_INFO::default();
+    let vtbl = Interface::vtable(transform);
+    (vtbl.GetOutputStreamInfo)(Interface::as_raw(transform), 0, &mut info).ok()?;
+    Ok(info)
+}
+
+/// `IMFTransform::GetOutputAvailableType(0, type_index)` — enumerates the
+/// output media types the transform currently offers (only meaningful for a
+/// decoder after enough input has been fed for it to know its real output
+/// format; see [`MF_E_TRANSFORM_STREAM_CHANGE`]).
+pub(crate) unsafe fn get_output_available_type(
+    transform: &IMFTransform,
+    type_index: u32,
+) -> windows::core::Result<IMFMediaType> {
+    let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
+    let vtbl = Interface::vtable(transform);
+    (vtbl.GetOutputAvailableType)(Interface::as_raw(transform), 0, type_index, &mut raw).ok()?;
+    Ok(IMFMediaType::from_raw(raw))
+}
+
+/// `Ok(())` accepted; the caller is expected to inspect the *raw* HRESULT
+/// via `.map_err` rather than pattern-match a friendly error, since the
+/// caller (the ProcessInput/ProcessOutput pump loop) treats "rejected,
+/// drain first" generically rather than matching the exact (unverified)
+/// `MF_E_NOTACCEPTING` code.
+pub(crate) unsafe fn process_input(transform: &IMFTransform, sample: &IMFSample) -> windows::core::HRESULT {
+    let vtbl = Interface::vtable(transform);
+    (vtbl.ProcessInput)(Interface::as_raw(transform), 0, Interface::as_raw(sample), 0)
+}
+
+/// Pulls one output sample. `provided_sample` must be `Some` (pre-allocated
+/// by the caller, sized from `get_output_stream_info().cbSize`) unless
+/// `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES` is set, in which case it must be
+/// `None`. Returns the raw HRESULT (compare against
+/// [`MF_E_TRANSFORM_NEED_MORE_INPUT`] for the loop's exit condition) and the
+/// output sample when one was produced.
+pub(crate) unsafe fn process_output(
+    transform: &IMFTransform,
+    provided_sample: Option<IMFSample>,
+) -> (windows::core::HRESULT, Option<IMFSample>) {
+    let mut buffer = MFT_OUTPUT_DATA_BUFFER {
+        dwStreamID: 0,
+        pSample: core::mem::ManuallyDrop::new(provided_sample),
+        dwStatus: 0,
+        pEvents: core::mem::ManuallyDrop::new(None),
+    };
+    let mut status = 0u32;
+    let vtbl = Interface::vtable(transform);
+    let hr = (vtbl.ProcessOutput)(Interface::as_raw(transform), 0, 1, &mut buffer, &mut status);
+    let sample = core::mem::ManuallyDrop::into_inner(buffer.pSample);
+    (hr, sample)
+}

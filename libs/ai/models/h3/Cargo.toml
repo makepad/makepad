@@ -1,0 +1,12 @@
+[package]
+name = "makepad-ai-h3"
+version = "0.1.0"
+edition = "2021"
+description = "MiniMax-H3 video family (bf16 / q4-gguf / nvfp4). Split out of libs/diffusion (lane T6, /aiarch.md)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-micro-serde = { path = "../../../micro_serde" }
+makepad-ai-llm = { path = "../../llm" }

@@ -23,11 +23,17 @@
 //! - `GET  /models`          -> registry list + per-model state
 //!                              (absent / downloading{progress} / ready / loaded / error)
 //! - `POST /generate`        -> `{model, prompt, width, height, seed, steps, ...}` -> `{job_id}`
-//! - `GET  /job/<id>`        -> queued / running{stage, progress} / done{artifacts} / error
+//! - `GET  /job/<id>`        -> queued / running{stage, progress} / live{stage, frames_in,
+//!                              frames_out, fps} / done{artifacts} / error
 //! - `GET  /artifact/<id>`   -> artifact bytes with the right content-type
+//! - `POST /realtime`        -> `{model, width, height, prompt, strength, steps, loop_mode,
+//!                              ...}` -> `{job_id, ws_path}`; then `GET <ws_path>` (websocket
+//!                              upgrade) streams input/output video frames + live control —
+//!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
 pub mod backend;
 pub mod client;
+pub mod control_image;
 pub mod depth_backend;
 pub mod download;
 pub mod error;
@@ -36,11 +42,14 @@ pub mod gpu;
 pub mod h3_backend;
 pub mod http_client;
 pub mod jobs;
+pub mod lane_advert;
 pub mod indextts_backend;
 pub mod kokoro_backend;
 pub mod llm_backend;
 pub mod matte_backend;
 pub mod segment_backend;
+pub mod upscale_backend;
+pub mod enhance_backend;
 pub mod motion_backend;
 #[cfg(feature = "motion-native")]
 pub mod motion_native_backend;
@@ -52,6 +61,8 @@ pub mod peer;
 pub mod peer_fetch;
 pub mod peer_serve;
 pub mod protocol;
+pub mod realtime;
+pub mod realtime_wire;
 pub mod registry;
 pub mod resample;
 pub mod residency;
@@ -64,6 +75,7 @@ pub mod sa3_backend;
 pub mod discovery;
 pub mod server;
 pub mod sha256;
+pub mod splat_backend;
 pub mod subproc_img;
 pub mod testpattern;
 pub mod trellis_backend;
@@ -76,6 +88,10 @@ pub mod world_backend;
 pub mod flux_backend;
 #[cfg(feature = "flux")]
 pub mod flux2_backend;
+#[cfg(feature = "flux")]
+pub mod control_backend;
+#[cfg(feature = "flux")]
+pub mod inpaint_backend;
 
 pub use error::AssetAiError;
 pub use server::{start_service, ServiceConfig, ServiceHandle};

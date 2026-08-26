@@ -1,0 +1,14 @@
+[package]
+name = "makepad-sqlite"
+version = "1.0.0"
+edition = "2021"
+description = "Clean-room Rust engine for the SQLite 3 on-disk file format: pager, WAL, b-tree cursors and a read-only SQL layer"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_sqlite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sqlq"
+path = "src/bin/sqlq.rs"

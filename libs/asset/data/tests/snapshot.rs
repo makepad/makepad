@@ -13,7 +13,7 @@ use makepad_asset_data::*;
 const GOLDEN_SNAPSHOT_STREAM: &str =
     "snap_1d694e336100a9ba95a2aae56d681b0403f1915ccaadb9bd557a4c210afd25cd";
 const GOLDEN_SNAPSHOT_BEGIN_DOC: &str =
-    "sha256:f4ecf4eda60aebcca63668a87d17e83767c11089be09584ee3e1956179faef49";
+    "sha256:eb2734c44df4ec2303f1ab7dd8097be4edf6e0933c03c928d23ca959dbd11e70";
 
 fn scene_tag() -> SceneTag {
     SceneTag {

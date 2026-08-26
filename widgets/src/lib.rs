@@ -59,11 +59,15 @@ pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
 
+pub mod combo_box;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
 pub mod slider;
 pub mod text_input;
+pub mod drop_slider;
+pub mod tip;
+pub mod value_input;
 
 pub mod splitter;
 
@@ -76,6 +80,7 @@ pub mod loading_spinner;
 pub mod bare_step;
 pub mod turtle_step;
 
+pub mod data_grid;
 pub mod portal_list;
 pub mod text_flow;
 
@@ -146,6 +151,7 @@ pub use crate::{
     cached_widget::*,
     callout_tooltip::*,
     check_box::*,
+    combo_box::*,
     desktop_button::*,
     dock::*,
 
@@ -174,6 +180,7 @@ pub use crate::{
     page_flip::*,
     popup_menu::*,
     popup_notification::*,
+    data_grid::*,
     portal_list::*,
     radio_button::*,
     root::*,
@@ -555,6 +562,10 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
+    crate::drop_slider::script_mod(vm);
+    crate::tip::script_mod(vm);
+    crate::value_input::script_mod(vm);
+    crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);
 
@@ -567,6 +578,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
 
+    crate::data_grid::script_mod(vm);
     crate::portal_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 

@@ -767,12 +767,14 @@ pub struct ScriptParser {
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     pub had_error: bool,
-    /// Formatted parse errors, mirroring what `report_error` logged. Parse
-    /// errors never reach the VM's trap queue (the parser recovers and the
-    /// module still runs), so hosts capturing diagnostics (validation, AI
-    /// repair loops) read them from here — the eval paths drain this into
-    /// `ScriptVmBase::captured_errors` when a sink is installed.
-    pub errors: Vec<String>,
+    /// The formatted messages behind `had_error`, bounded. A host that
+    /// installs a captured-error sink gets these routed into it after each
+    /// streaming parse (vm::eval_with_append_source), so a structural parse
+    /// error FAILS a game eval instead of logging into the void while the
+    /// recovered parse runs something else entirely — `let loop = [...]`
+    /// recovered into an infinite empty loop and burned the whole
+    /// instruction budget before this existed.
+    pub parse_errors: Vec<String>,
 
     state: Vec<State>,
     pub file: String,
@@ -816,7 +818,7 @@ impl Default for ScriptParser {
             opcodes: Default::default(),
             source_map: Default::default(),
             had_error: false,
-            errors: Default::default(),
+            parse_errors: Default::default(),
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -857,13 +859,15 @@ impl ScriptParser {
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
-        self.errors.push(format!(
-            "{}:{}:{} - {}",
-            self.file,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            msg
-        ));
+        if self.parse_errors.len() < 16 {
+            self.parse_errors.push(format!(
+                "{}:{}:{}: {}",
+                self.file,
+                line as usize + self.line_offset + 1,
+                col as usize + self.col_offset + 1,
+                msg
+            ));
+        }
         log_with_level(
             &self.file,
             line as u32 + self.line_offset as u32,
@@ -1014,15 +1018,60 @@ impl ScriptParser {
         self.slot_frames.push((ctx.slots_frame_at, names));
     }
 
-    fn slot_ctx(&mut self) -> Option<&mut SlotCtx> {
-        self.slot_ctxs.last_mut()
-    }
-
     /// A name that must stay dynamic in the innermost body.
     fn slot_poison(&mut self, name: LiveId) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             if !ctx.poisoned.contains(&name) {
                 ctx.poisoned.push(name);
+            }
+        }
+    }
+
+    /// True when the states on top of the stack are a (possibly empty) run
+    /// of tighter-than-unary EmitOps (field access, order < 6) sitting on
+    /// a pending unary operator: `-a.b`, `!a.b.c`.
+    fn unary_pending_under_tight_ops(&self) -> bool {
+        for st in self.state.iter().rev() {
+            match st {
+                State::EmitOp { what_op, .. } => {
+                    let order = State::operator_order(*what_op);
+                    if order == 0 || order >= 6 {
+                        return false;
+                    }
+                }
+                State::EmitUnary { .. } => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Emit the pending unary operators before a binary operator that binds
+    /// looser than they do. A pending field access may sit ON TOP of the
+    /// unary (`-a.b - c`, `!a.b && c`): it binds tighter still, so it is
+    /// drained first — otherwise the unary would only be emitted after the
+    /// whole binary expression and `-a.b - c` would compile as `-(a.b - c)`.
+    fn flush_pending_unary(&mut self) {
+        loop {
+            match self.state.last() {
+                Some(State::EmitUnary { what_op, index }) => {
+                    let (what_op, index) = (*what_op, *index);
+                    self.state.pop();
+                    self.push_code(State::operator_to_unary(what_op), index);
+                }
+                Some(State::EmitOp {
+                    what_op,
+                    index,
+                    slot_assign,
+                }) if self.unary_pending_under_tight_ops() => {
+                    let (what_op, index, slot_assign) = (*what_op, *index, *slot_assign);
+                    self.state.pop();
+                    if let Some(name) = slot_assign {
+                        self.slot_poison(name);
+                    }
+                    self.push_code(State::operator_to_opcode(what_op), index);
+                }
+                _ => break,
             }
         }
     }
@@ -4078,15 +4127,7 @@ impl ScriptParser {
                 // These need the TEST opcode emitted BEFORE the second operand
                 if State::is_short_circuit_op(op) {
                     // Emit any pending unary operators first - they bind tighter than all binary ops
-                    loop {
-                        if let Some(State::EmitUnary { what_op, index }) = self.state.last() {
-                            let (what_op, index) = (*what_op, *index);
-                            self.state.pop();
-                            self.push_code(State::operator_to_unary(what_op), index);
-                        } else {
-                            break;
-                        }
-                    }
+                    self.flush_pending_unary();
 
                     let op_order = State::operator_order(op);
 
@@ -4189,16 +4230,8 @@ impl ScriptParser {
                     // Emit any pending unary operators, but only if this binary op has lower
                     // precedence than unary (order >= 6). Field access (order 3) has higher
                     // precedence than unary, so -x.y should parse as -(x.y), not (-x).y
-                    if State::operator_order(op) >= 6 {
-                        loop {
-                            if let Some(State::EmitUnary { what_op, index }) = self.state.last() {
-                                let (what_op, index) = (*what_op, *index);
-                                self.state.pop();
-                                self.push_code(State::operator_to_unary(what_op), index);
-                            } else {
-                                break;
-                            }
-                        }
+                    if State::operator_order(op) >= 6 && !State::is_assign_operator(op) {
+                        self.flush_pending_unary();
                     }
 
                     // Slot resolver: an assign operator directly after a bare

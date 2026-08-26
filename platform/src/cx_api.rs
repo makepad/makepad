@@ -166,6 +166,14 @@ pub trait CxOsApi {
 
     fn browser_history_go(&mut self, _delta: i32) {}
 
+    /// Platform hook shared by native and synthetic pointer injection. Cocoa
+    /// uses it to activate the clicked window before the down is dispatched.
+    fn activate_window_on_pointer_down(&mut self, _window_id: WindowId) {}
+
+    /// Re-evaluate any platform pacing override after widget capture state
+    /// may have changed in a pointer callback.
+    fn update_pointer_capture_pacing(&mut self) {}
+
     fn seconds_since_app_start(&self) -> f64;
 
     fn default_window_size(&self) -> Vec2d {
@@ -260,6 +268,11 @@ pub enum CxOsOp {
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     SetTopmost(WindowId, bool),
+    /// `true`: drop the native maximized-state border/titlebar strip a
+    /// backend would otherwise keep (Windows only; other backends ignore
+    /// it) so a maximized window reads as a clean fullscreen picture
+    /// rather than a decorated window pinned to the work area.
+    SetChromelessWhenMaximized(WindowId, bool),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
@@ -489,6 +502,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
             Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
+            Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
@@ -1915,6 +1929,15 @@ impl Cx {
             .push_back(CxOsOp::SelectFolderDialog(FileDialog::new()));
     }
 
+    /// Open the platform's native folder picker, configured (title, start
+    /// location) by `dialog`. The answer arrives later as a
+    /// [`crate::file_dialogs::FileDialogAction`] in the actions pass —
+    /// `FolderSelected` with the chosen path, or `FolderCancelled`.
+    pub fn open_select_folder_dialog(&mut self, dialog: FileDialog) {
+        self.platform_ops
+            .push_back(CxOsOp::SelectFolderDialog(dialog));
+    }
+
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
@@ -2085,4 +2108,3 @@ mod tests {
         assert!(platform_ops.is_empty());
     }
 }
-

@@ -1,0 +1,49 @@
+// VIDEO TORUS 3D — the clip wrapped right around a fat revolving ring: u
+// runs around the major circle, v around the tube, so the picture bends
+// through real perspective as the ring leans and turns. A hot highlight
+// ring chases around the torus once per beat. Pattern taught here: the
+// torus surface uv as a video map, and a beat-phase sweep along uv.x.
+{
+    name: "Video Torus 3D"
+    engine: "videomesh"
+    shape: "torus"
+    seed: 6
+
+    detail: 40
+    size: 3.6
+    fly: 0.7
+
+    beat_pulse: 0.45
+    input0: "test"
+
+    color_bg: #x060512
+    color_a: #x40e8c0
+    color_b: #xe84f9a
+    color_c: #xe6fff6
+
+    fog: 0.015
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.7, strength: 0.8, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE — the wrapped texel plus the beat chaser:
+    // sweep = distance (around the ring) from the beat-phase point.
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.3, 1.0, 0.15)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            return vec4(0.0, 0.0, 0.0, t * 0.4 * (1.0 + clamp(self.user.x, 0.0, 4.0)))
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let d = abs(fract(self.v_uv.x - self.time_beat.z + 0.5) - 0.5) * 2.0
+            let chase = 1.0 - smoothstep(0.0, 0.16, d)
+            let lit = content.xyz * t
+            let hot = self.col_a.xyz * chase
+                * (0.5 + self.time_beat.w * 1.2 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + hot) * self.fog.y, 1.0)
+        }
+    }
+}

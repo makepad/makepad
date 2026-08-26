@@ -1,8 +1,5 @@
 use super::codec::{compress_tile, compression_metadata_rows};
-use super::{
-    payload_overflow_threshold_max, payload_overflow_threshold_min, payload_overflows, Error,
-    PageType, Result, TileCompression, SQLITE_MAGIC,
-};
+use super::{local_payload_size, Error, PageType, Result, TileCompression, SQLITE_MAGIC};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -456,19 +453,15 @@ impl TableStream {
 
 fn table_leaf_cell_len(payload_len: usize, rowid: i64) -> Result<usize> {
     let usable_size = PAGE_SIZE;
-    let max_local = payload_overflow_threshold_max(PageType::TableLeaf, usable_size);
-    let min_local = payload_overflow_threshold_min(PageType::TableLeaf, usable_size);
-    let (_, local_size) = payload_overflows(payload_len, max_local, min_local, usable_size);
+    let (_, local_size) = local_payload_size(payload_len, PageType::TableLeaf, usable_size);
     let payload_len_u64 = u64::try_from(payload_len)
         .map_err(|_| Error::InvalidInput("payload length exceeds u64".to_string()))?;
     Ok(varint_len(payload_len_u64) + varint_len(rowid as u64) + local_size)
 }
 
 fn encode_table_leaf_cell(db: &mut RawDbWriter, payload: &[u8], rowid: i64) -> Result<Vec<u8>> {
-    let max_local = payload_overflow_threshold_max(PageType::TableLeaf, PAGE_SIZE);
-    let min_local = payload_overflow_threshold_min(PageType::TableLeaf, PAGE_SIZE);
     let (overflows, local_size) =
-        payload_overflows(payload.len(), max_local, min_local, PAGE_SIZE);
+        local_payload_size(payload.len(), PageType::TableLeaf, PAGE_SIZE);
     let local_data_len = if overflows {
         local_size
             .checked_sub(4)
@@ -844,7 +837,10 @@ mod tests {
         ] {
             let mut bytes = Vec::new();
             write_varint(value, &mut bytes);
-            assert_eq!(super::super::read_varint(&bytes).unwrap(), (value, bytes.len()));
+            assert_eq!(
+                makepad_sqlite::value::read_varint(&bytes).unwrap(),
+                (value, bytes.len())
+            );
         }
     }
 

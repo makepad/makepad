@@ -57,6 +57,67 @@ impl Cx {
         false
     }
 
+    /// The window a pass ultimately presents into (through any chain of
+    /// offscreen parents); None for Xr/parentless passes.
+    ///
+    /// Shared by the per-window paced backends — the macOS display link and the
+    /// Windows DXGI frame-latency beat — to decide which passes belong to the
+    /// window whose flip is currently being serviced. The 64-step cap is a
+    /// cycle guard: a malformed parent chain must not hang the paint loop.
+    #[allow(dead_code)]
+    pub(crate) fn pass_root_window(&self, pass_id: DrawPassId) -> Option<crate::window::WindowId> {
+        let mut id = pass_id;
+        for _ in 0..64 {
+            match self.passes[id].parent.clone() {
+                CxDrawPassParent::Window(window_id) => return Some(window_id),
+                CxDrawPassParent::DrawPass(parent) => id = parent,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Whether the time repaint (`demo_time_repaint`: some shader read
+    /// `draw_pass.time`, so repaint every frame) may re-dirty this pass.
+    ///
+    /// It used to re-dirty EVERY pass with a main draw list — including
+    /// passes their owner did not begin again on the latest redraw, which
+    /// still hold a stale draw list, parent and target. Re-running one of
+    /// those overwrites the fresh output of the pass that took its place:
+    /// the VJ's warp-only beat re-ran the previous beat's whole tween chain
+    /// and its stale warp stage (same depth, higher pool id) clobbered
+    /// `warp_out` with the old t (audit hazard (a); 999/2000 beats in the
+    /// timed alternation probe).
+    ///
+    /// "Begun on the latest redraw" is read off the draw lists: a pass's main
+    /// draw list is rebuilt (`clear_draw_items(redraw_id)`) every time the
+    /// pass is begun, so its `redraw_id` is the draw cycle that last began
+    /// the pass. The reference is the pass's root window's own main list —
+    /// not the global cycle — so a window that did not redraw this cycle
+    /// keeps its time-animated child passes alive (multi-window), while a
+    /// child left behind by a window that DID redraw is stale. Window passes
+    /// are always live; parentless passes compare against the current cycle.
+    /// Explicit `repaint_pass` users are untouched: this gates only the time
+    /// repaint, and dirty propagation to parents is unchanged.
+    fn pass_live_for_time_repaint(&self, pass_id: DrawPassId) -> bool {
+        let pass = &self.passes[pass_id];
+        let Some(list_id) = pass.main_draw_list_id else {
+            return false;
+        };
+        if matches!(pass.parent, CxDrawPassParent::Window(_)) {
+            return true;
+        }
+        let reference = match self.pass_root_window(pass_id) {
+            Some(window_id) if self.windows.is_valid(window_id) => self.windows[window_id]
+                .main_pass_id
+                .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
+                .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
+                .unwrap_or(self.redraw_id),
+            _ => self.redraw_id,
+        };
+        self.draw_lists[list_id].redraw_id >= reference
+    }
+
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
@@ -65,10 +126,8 @@ impl Cx {
             // loop untill we don't propagate anymore
             let mut altered = false;
             for draw_pass_id in self.passes.id_iter() {
-                if self.demo_time_repaint {
-                    if self.passes[draw_pass_id].main_draw_list_id.is_some() {
-                        self.passes[draw_pass_id].paint_dirty = true;
-                    }
+                if self.demo_time_repaint && self.pass_live_for_time_repaint(draw_pass_id) {
+                    self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
                     let other = match self.passes[draw_pass_id].parent {
@@ -88,34 +147,46 @@ impl Cx {
             }
         }
 
+        // EXECUTION ORDER IS THE DEPENDENCY TREE, deepest first. A pass's
+        // parent is its CONSUMER — the pass that samples the texture it
+        // renders — so every dirty pass must execute before its parent.
+        // Distance-to-root gives exactly that: sort deepest first; the
+        // stable sort keeps pool-id order between passes at equal depth
+        // (siblings), which is the order this function always produced for
+        // them. The old scan inserted a child directly before its parent
+        // only when the parent was ALREADY in the list, so with three or
+        // more levels of texture passes and adverse (recycled) pool ids a
+        // grandchild could land AFTER the pass that consumes its output,
+        // which then read a stale texture (the VJ's post/sim pass chains
+        // hit exactly this). Parentless passes keep their old "run first"
+        // contract via the depth bias.
+        const ROOT_NONE_BIAS: u64 = 1 << 32;
         for draw_pass_id in self.passes.id_iter() {
             if self.passes[draw_pass_id].paint_dirty {
-                let mut inserted = false;
-                match self.passes[draw_pass_id].parent {
-                    CxDrawPassParent::Window(_) | CxDrawPassParent::Xr => {}
-                    CxDrawPassParent::DrawPass(dep_of_pass_id) => {
-                        if draw_pass_id == dep_of_pass_id {
-                            panic!()
-                        }
-                        for insert_before in 0..passes_todo.len() {
-                            if passes_todo[insert_before] == dep_of_pass_id {
-                                passes_todo.insert(insert_before, draw_pass_id);
-                                inserted = true;
-                                break;
-                            }
-                        }
-                    }
-                    CxDrawPassParent::None => {
-                        // we need to be first
-                        passes_todo.insert(0, draw_pass_id);
-                        inserted = true;
-                    }
-                }
-                if !inserted {
-                    passes_todo.push(draw_pass_id);
-                }
+                passes_todo.push(draw_pass_id);
             }
         }
+        let slot_cap = self.passes.id_iter().count();
+        let depth_of = |start: DrawPassId| -> u64 {
+            let mut depth = 0u64;
+            let mut walk = start;
+            loop {
+                match self.passes[walk].parent {
+                    CxDrawPassParent::DrawPass(parent_id) => {
+                        depth += 1;
+                        walk = parent_id;
+                        if depth as usize > slot_cap {
+                            // A cycle in stale parent links (recycled pass
+                            // slots): stop counting rather than hang.
+                            return depth;
+                        }
+                    }
+                    CxDrawPassParent::None => return depth + ROOT_NONE_BIAS,
+                    _ => return depth,
+                }
+            }
+        };
+        passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
         self.demo_time_repaint = false;
     }
 
@@ -179,9 +250,27 @@ impl Cx {
 
     #[allow(dead_code)]
     pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
+        self.take_studio_screenshot_request_ids_for_window(kind_id, None)
+    }
+
+    /// Drain the pending screenshot requests this pass can answer.
+    ///
+    /// `window_id` is the window the presenting pass belongs to (None for
+    /// offscreen/stdin passes). A `--remote` `/g?w=N` grab only matches its own
+    /// window, so a multi-window app can be captured window by window instead of
+    /// whichever pass happens to present first. Studio and file-sink requests
+    /// are untargeted and match any pass, exactly as before.
+    #[allow(dead_code)]
+    pub(crate) fn take_studio_screenshot_request_ids_for_window(
+        &mut self,
+        kind_id: u32,
+        window_id: Option<usize>,
+    ) -> Vec<u64> {
         let mut request_ids = Vec::new();
         self.screenshot_requests.retain(|request| {
-            if request.kind_id == kind_id {
+            if request.kind_id == kind_id
+                && crate::remote::grab_targets_window(request.request_id, window_id)
+            {
                 request_ids.push(request.request_id);
                 false
             } else {
@@ -198,6 +287,16 @@ impl Cx {
         height: u32,
         png: Vec<u8>,
     ) {
+        if request_ids.is_empty() {
+            return;
+        }
+        // `--remote` grabs are answered on the requesting HTTP thread.
+        let request_ids = crate::remote::deliver_grabs(
+            request_ids,
+            width,
+            height,
+            &png,
+        );
         if request_ids.is_empty() {
             return;
         }
@@ -495,6 +594,10 @@ impl Cx {
     ) -> bool {
         match msg {
             StudioToApp::MouseDown(e) => {
+                // Synthetic input must take the same activation path as a
+                // native click. In particular, an unfocused macOS window
+                // must become key before its drag starts.
+                self.activate_window_on_pointer_down(window_id);
                 let event = crate::event::MouseDownEvent {
                     abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
@@ -506,6 +609,7 @@ impl Cx {
                 self.fingers.process_tap_count(event.abs, event.time);
                 self.fingers.mouse_down(event.button, window_id);
                 self.call_event_handler(&Event::MouseDown(event));
+                self.update_pointer_capture_pacing();
             }
             StudioToApp::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
@@ -531,6 +635,7 @@ impl Cx {
                 self.call_event_handler(&Event::MouseUp(event));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.update_pointer_capture_pacing();
                 self.send_studio_key_focus_rect_response();
             }
             StudioToApp::Scroll(e) => {
@@ -624,10 +729,13 @@ impl Cx {
 
     /// Drain the global control channel and dispatch each message as an event.
     /// Must be called from the event loop (not from inside an event handler).
+    /// Also services the `--remote` HTTP control surface, which every backend
+    /// therefore gets by calling this one function.
     pub fn poll_control_channel(&mut self) {
         use crate::makepad_math::dvec2;
         use crate::web_socket::CONTROL_CHANNEL;
         use crate::window::CxWindowPool;
+        crate::remote::poll(self);
         let msgs: Vec<StudioToApp> = {
             let lock = CONTROL_CHANNEL.lock().unwrap();
             if let Some(rx) = lock.as_ref() {

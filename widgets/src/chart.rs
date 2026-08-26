@@ -89,6 +89,64 @@ script_mod! {
         width: Fill
         height: Fill
     }
+
+    mod.widgets.SparklineBase = #(Sparkline::register_widget(vm))
+
+    mod.widgets.Sparkline = set_type_default() do mod.widgets.SparklineBase{
+        width: Fill
+        height: Fill
+        color_up: #x26a69a
+        color_down: #xef5350
+        baseline_alpha: 0.35
+        gap: 1.0
+    }
+
+    set_type_default() do #(DrawChartSegment::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn(){
+            let p = self.pos * self.rect_size
+            let a = self.seg_a
+            let b = self.seg_b
+            if self.mode > 0.5 {
+                let t = clamp((p.x - a.x) / max(b.x - a.x, 0.0001), 0.0, 1.0)
+                let ly = mix(a.y, b.y, t)
+                let below = p.y - ly
+                if below < 0.0 {
+                    return #0000
+                }
+                let fade = clamp(1.0 - below / max(self.fade_len, 1.0), 0.0, 1.0)
+                let alpha = self.color.a * fade * fade
+                return vec4(self.color.rgb * alpha, alpha)
+            }
+            let pa = p - a
+            let ba = b - a
+            let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+            let d = length(pa - ba * h)
+            let aa = 1.0 - smoothstep(self.thickness * 0.5 - 0.75, self.thickness * 0.5 + 0.75, d)
+            return vec4(self.color.rgb * self.color.a * aa, self.color.a * aa)
+        }
+    }
+
+    mod.widgets.TrendChartBase = #(TrendChart::register_widget(vm))
+
+    mod.widgets.TrendChart = set_type_default() do mod.widgets.TrendChartBase{
+        width: Fill
+        height: Fill
+        color_bg: #x14142a
+        color_grid: #x272a44
+        color_line: #x4fc3f7
+        color_fill: #x4fc3f73f
+        color_up: #x26a69a
+        color_down: #xef5350
+        color_text: #x8890a8
+        color_accent: #xffb74d
+        line_width: 2.0
+
+        draw_text +: {
+            text_style +: {font_size: 8.0}
+            color: #x8890a8
+        }
+    }
 }
 
 // ---- Data types ----
@@ -1473,5 +1531,391 @@ impl Widget for OhlcChart {
 
         self.chart_view.end(cx);
         DrawStep::done()
+    }
+}
+
+// ---- Sparkline widget ----
+
+/// A tiny, dependency-free trend chart meant to live inside list rows and
+/// [`crate::data_grid::DataGrid`] cells: value bars rising from the series
+/// minimum, tinted by overall trend, drawn purely with batched quads so any
+/// number of sparklines on screen coalesce into one draw call.
+#[derive(Script, ScriptHook, Widget)]
+pub struct Sparkline {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bar: DrawColor,
+    #[live]
+    pub color_up: Vec4f,
+    #[live]
+    pub color_down: Vec4f,
+    /// Alpha of the bar body below the value cap.
+    #[live(0.35)]
+    pub baseline_alpha: f32,
+    /// Horizontal gap between bars in pixels.
+    #[live(1.0)]
+    pub gap: f64,
+    #[rust]
+    values: Vec<f64>,
+}
+
+impl Sparkline {
+    pub fn set_values(&mut self, values: &[f64]) {
+        self.values.clear();
+        self.values.extend_from_slice(values);
+    }
+}
+
+impl Widget for Sparkline {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        let n = self.values.len();
+        if n < 2 || rect.size.x <= 2.0 || rect.size.y <= 2.0 {
+            return DrawStep::done();
+        }
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for v in &self.values {
+            min = min.min(*v);
+            max = max.max(*v);
+        }
+        let range = (max - min).max(1e-9);
+        let up = self.values[n - 1] >= self.values[0];
+        let color = if up { self.color_up } else { self.color_down };
+        let bw = rect.size.x / n as f64;
+        let gap = self.gap.min(bw * 0.4);
+        let h = rect.size.y;
+        for (i, v) in self.values.iter().enumerate() {
+            let t = (v - min) / range;
+            let bar_h = (t * (h - 2.0)).max(1.0);
+            let x = rect.pos.x + i as f64 * bw;
+            let y = rect.pos.y + h - bar_h;
+            // translucent body
+            let mut body = color;
+            body.w = self.baseline_alpha;
+            self.draw_bar.color = body;
+            self.draw_bar.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, y),
+                    size: dvec2((bw - gap).max(1.0), bar_h),
+                },
+            );
+            // solid cap on the value
+            self.draw_bar.color = color;
+            self.draw_bar.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, y),
+                    size: dvec2((bw - gap).max(1.0), 2.0f64.min(bar_h)),
+                },
+            );
+        }
+        DrawStep::done()
+    }
+}
+
+impl SparklineRef {
+    pub fn set_values(&self, cx: &mut Cx, values: &[f64]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_values(values);
+            inner.draw_bar.redraw(cx);
+        }
+    }
+}
+
+// ---- TrendChart: quad-based chart that composes anywhere ----
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawChartSegment {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    pub seg_a: Vec2f,
+    #[live]
+    pub seg_b: Vec2f,
+    #[live]
+    pub color: Vec4f,
+    #[live(2.0)]
+    pub thickness: f32,
+    #[live]
+    pub mode: f32,
+    #[live(120.0)]
+    pub fade_len: f32,
+}
+
+/// A self-contained price/series chart drawn entirely with instanced quads:
+/// an SDF anti-aliased polyline with gradient area fill, or candlesticks,
+/// over a nice-tick grid with axis labels. No turtle alignment, no vector
+/// paths — it renders correctly under any parent (docks, grids, cells) and
+/// the whole chart batches into a handful of draw calls.
+#[derive(Script, ScriptHook, Widget)]
+pub struct TrendChart {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[live]
+    draw_grid: DrawColor,
+    #[live]
+    draw_seg: DrawChartSegment,
+    #[live]
+    draw_candle: DrawColor,
+    #[live]
+    draw_text: DrawText,
+
+    #[live]
+    pub color_bg: Vec4f,
+    #[live]
+    pub color_grid: Vec4f,
+    #[live]
+    pub color_line: Vec4f,
+    #[live]
+    pub color_fill: Vec4f,
+    #[live]
+    pub color_up: Vec4f,
+    #[live]
+    pub color_down: Vec4f,
+    #[live]
+    pub color_text: Vec4f,
+    #[live]
+    pub color_accent: Vec4f,
+    #[live(2.0)]
+    pub line_width: f64,
+
+    #[rust]
+    series: Vec<f64>,
+    #[rust]
+    candles: Vec<Candle>,
+}
+
+impl TrendChart {
+    pub fn set_series(&mut self, values: &[f64]) {
+        self.series.clear();
+        self.series.extend_from_slice(values);
+        self.candles.clear();
+    }
+
+    pub fn set_candles(&mut self, candles: Vec<Candle>) {
+        self.candles = candles;
+        self.series.clear();
+    }
+
+    fn nice_step(raw: f64) -> f64 {
+        let mag = 10f64.powf(raw.abs().max(1e-12).log10().floor());
+        let n = raw / mag;
+        let nice = if n < 1.5 {
+            1.0
+        } else if n < 3.0 {
+            2.0
+        } else if n < 7.0 {
+            5.0
+        } else {
+            10.0
+        };
+        nice * mag
+    }
+}
+
+impl Widget for TrendChart {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        self.draw_bg.color = self.color_bg;
+        self.draw_bg.draw_abs(cx, rect);
+
+        // data range
+        let (mut min, mut max, n) = if !self.candles.is_empty() {
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for c in &self.candles {
+                min = min.min(c.low);
+                max = max.max(c.high);
+            }
+            (min, max, self.candles.len())
+        } else {
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for v in &self.series {
+                min = min.min(*v);
+                max = max.max(*v);
+            }
+            (min, max, self.series.len())
+        };
+        if n < 2 || rect.size.x < 80.0 || rect.size.y < 60.0 {
+            return DrawStep::done();
+        }
+        let pad = (max - min).max(1e-9) * 0.08;
+        min -= pad;
+        max += pad;
+        let range = max - min;
+
+        let gutter = 54.0;
+        let plot = Rect {
+            pos: rect.pos + dvec2(10.0, 8.0),
+            size: rect.size - dvec2(gutter + 18.0, 18.0),
+        };
+        let py = |v: f64| plot.pos.y + (1.0 - (v - min) / range) * plot.size.y;
+
+        // horizontal grid at nice ticks, labels in the right gutter
+        let step = Self::nice_step(range / 5.0);
+        let mut tick = (min / step).ceil() * step;
+        self.draw_grid.color = self.color_grid;
+        self.draw_text.color = self.color_text;
+        while tick < max {
+            let y = py(tick);
+            self.draw_grid.draw_abs(cx, Rect {
+                pos: dvec2(plot.pos.x, y),
+                size: dvec2(plot.size.x, 1.0),
+            });
+            let label = if step >= 1.0 {
+                format!("{:.0}", tick)
+            } else {
+                format!("{:.2}", tick)
+            };
+            self.draw_text
+                .draw_abs(cx, dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0), &label);
+            tick += step;
+        }
+        // vertical grid every ~90px
+        let vticks = (plot.size.x / 90.0).max(1.0) as usize;
+        for i in 1..=vticks {
+            let x = plot.pos.x + plot.size.x * i as f64 / vticks as f64;
+            self.draw_grid.draw_abs(cx, Rect {
+                pos: dvec2(x, plot.pos.y),
+                size: dvec2(1.0, plot.size.y),
+            });
+        }
+
+        if !self.candles.is_empty() {
+            let slot = plot.size.x / n as f64;
+            let bw = (slot * 0.62).max(1.0);
+            for (i, c) in self.candles.iter().enumerate() {
+                let x = plot.pos.x + (i as f64 + 0.5) * slot;
+                let up = c.close >= c.open;
+                let color = if up { self.color_up } else { self.color_down };
+                self.draw_candle.color = color;
+                // wick
+                self.draw_candle.draw_abs(cx, Rect {
+                    pos: dvec2(x - 0.5, py(c.high)),
+                    size: dvec2(1.0, (py(c.low) - py(c.high)).max(1.0)),
+                });
+                // body
+                let (top, bottom) = if up {
+                    (py(c.close), py(c.open))
+                } else {
+                    (py(c.open), py(c.close))
+                };
+                self.draw_candle.draw_abs(cx, Rect {
+                    pos: dvec2(x - bw * 0.5, top),
+                    size: dvec2(bw, (bottom - top).max(1.0)),
+                });
+            }
+        } else {
+            let dx = plot.size.x / (n - 1) as f64;
+            // area fill: one column quad per segment, shader fades below the line
+            self.draw_seg.mode = 1.0;
+            self.draw_seg.color = self.color_fill;
+            self.draw_seg.fade_len = (plot.size.y * 0.85) as f32;
+            for i in 0..n - 1 {
+                let x0 = plot.pos.x + i as f64 * dx;
+                let y0 = py(self.series[i]);
+                let y1 = py(self.series[i + 1]);
+                let top = y0.min(y1);
+                let r = Rect {
+                    pos: dvec2(x0, top),
+                    size: dvec2(dx, plot.pos.y + plot.size.y - top),
+                };
+                self.draw_seg.seg_a = Vec2f {
+                    x: 0.0,
+                    y: (y0 - top) as f32,
+                };
+                self.draw_seg.seg_b = Vec2f {
+                    x: r.size.x as f32,
+                    y: (y1 - top) as f32,
+                };
+                self.draw_seg.draw_abs(cx, r);
+            }
+            // anti-aliased polyline on top
+            self.draw_seg.mode = 0.0;
+            self.draw_seg.color = self.color_line;
+            self.draw_seg.thickness = self.line_width as f32;
+            let m = self.line_width + 2.0;
+            for i in 0..n - 1 {
+                let x0 = plot.pos.x + i as f64 * dx;
+                let x1 = x0 + dx;
+                let y0 = py(self.series[i]);
+                let y1 = py(self.series[i + 1]);
+                let top = y0.min(y1) - m;
+                let bottom = y0.max(y1) + m;
+                let r = Rect {
+                    pos: dvec2(x0 - m, top),
+                    size: dvec2(x1 - x0 + 2.0 * m, bottom - top),
+                };
+                self.draw_seg.seg_a = Vec2f {
+                    x: (x0 - r.pos.x) as f32,
+                    y: (y0 - r.pos.y) as f32,
+                };
+                self.draw_seg.seg_b = Vec2f {
+                    x: (x1 - r.pos.x) as f32,
+                    y: (y1 - r.pos.y) as f32,
+                };
+                self.draw_seg.draw_abs(cx, r);
+            }
+            // last-value marker line + label
+            let last = *self.series.last().unwrap();
+            let y = py(last);
+            self.draw_grid.color = self.color_accent;
+            let mut x = plot.pos.x;
+            while x < plot.pos.x + plot.size.x {
+                self.draw_grid.draw_abs(cx, Rect {
+                    pos: dvec2(x, y),
+                    size: dvec2(4.0, 1.0),
+                });
+                x += 8.0;
+            }
+            self.draw_text.color = self.color_accent;
+            self.draw_text.draw_abs(
+                cx,
+                dvec2(plot.pos.x + plot.size.x + 6.0, y - 6.0),
+                &format!("{:.2}", last),
+            );
+        }
+        DrawStep::done()
+    }
+}
+
+impl TrendChartRef {
+    pub fn set_series(&self, cx: &mut Cx, values: &[f64]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_series(values);
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn set_candles(&self, cx: &mut Cx, candles: Vec<Candle>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_candles(candles);
+            inner.draw_bg.redraw(cx);
+        }
     }
 }

@@ -1,184 +1,125 @@
-//! Qwen chat pane for AI Content.
+//! The Create pane's chat: a THIN client of the Asset Server's chat broker.
 //!
-//! Presentation follows the Sandbox `ArcadeChat` / aichat `ChatList` shape:
-//! a process-global transcript the list widget reads during draw, plus a
-//! worker thread that talks to the Asset Server chat broker. The UI thread
-//! never blocks on HTTP.
+//! The mechanics — the session, the worker thread on a channel, the
+//! transcript with its tool chips and rate meter, cancel and clear — are the
+//! shared component in [`makepad_asset_chat_ui`], the same one the game
+//! sandbox runs. This file is what makes it the ASSET UI's chat:
+//!
+//! - it opens the session as `("gen", "gen")`, so the broker assembles the
+//!   generation context (see `libs/asset/chat/context/gen.md`) and offers
+//!   the generate/defaults/fleet tool surface — not the game's;
+//! - it executes the tools that profile parks back on this app
+//!   ([`AppTools`]): every `*.generate` becomes a run in the Create page's
+//!   own queue, `defaults.*` edits this app's persistent generation
+//!   defaults, and `fleet.introspect` reads the live box list this app
+//!   polls.
+//!
+//! What it no longer does is call a fleet box itself. The server picks the
+//! serving node, executes the catalog and operation tools with its own
+//! credentials, and streams the turn back over `/v1/chat/sessions/*`.
 
 use crate::pipeline::{
-    IMAGE_SIZES, IMAGE_STEPS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS,
+    IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use makepad_asset_ai::fleet::BoxSnapshot;
-use makepad_asset_chat::dispatch::AssetServerTools;
-use makepad_asset_chat::provider::ChatProvider;
-use makepad_asset_chat::qwen::{FleetQwenChatProvider, HttpFleetTransport};
-use makepad_asset_chat::session::{CancelFlag, ExecCtx, Session, ToolExecutor};
 use makepad_asset_chat::tools::{ContentToolCall, GenerateThen};
-use makepad_asset_chat::wire::{ChatEventBody, ProviderAvailability, ToolOutcome};
+use makepad_asset_chat::wire::ToolOutcome;
+use makepad_asset_chat_ui::feed::{default_call_title, default_outcome_summary, ellipsis};
+use makepad_asset_chat_ui::{ChatFeed, ClientTools, FeedConfig};
+use makepad_asset_client::dto::ChatToolOutcomeDto;
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
-use makepad_widgets::*;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-pub static CHAT: RwLock<ChatData> = RwLock::new(ChatData {
-    messages: Vec::new(),
-    streaming_raw: String::new(),
-    streaming_thinking: String::new(),
-    streaming_text: String::new(),
-    activity: String::new(),
-    is_streaming: false,
-    status: String::new(),
-});
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum ChatRole {
-    User,
-    Assistant,
-    Thinking,
-    Tool,
-    System,
-}
-
-#[derive(Clone, Debug)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub text: String,
-}
-
-pub struct ChatData {
-    pub messages: Vec<ChatMessage>,
-    pub streaming_raw: String,
-    pub streaming_thinking: String,
-    pub streaming_text: String,
-    pub activity: String,
-    pub is_streaming: bool,
-    pub status: String,
-}
-
-impl ChatData {
-    pub fn push(role: ChatRole, text: impl Into<String>) {
-        if let Ok(mut data) = CHAT.write() {
-            data.messages.push(ChatMessage { role, text: text.into() });
-        }
-    }
-
-    pub fn begin_stream() {
-        if let Ok(mut data) = CHAT.write() {
-            data.streaming_raw.clear();
-            data.streaming_thinking.clear();
-            data.streaming_text.clear();
-            data.activity = "Qwen thinking…".into();
-            data.is_streaming = true;
-        }
-    }
-
-    fn refresh_stream_split(data: &mut ChatData) {
-        let split = makepad_asset_chat::toolcall::split_thinking(&data.streaming_raw);
-        data.streaming_thinking = split.thinking;
-        data.streaming_text = makepad_asset_chat::toolcall::strip_marker(&split.visible);
-        if !split.think_closed && data.activity == "Qwen thinking…" {
-            // keep the waiting label until tokens arrive
-        } else if !data.streaming_thinking.is_empty() && data.streaming_text.is_empty() {
-            data.activity.clear();
-        }
-    }
-
-    pub fn push_delta(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
-            data.streaming_raw.push_str(text);
-            Self::refresh_stream_split(&mut data);
-        }
-    }
-
-    fn commit_stream_locked(data: &mut ChatData) {
-        let thinking = std::mem::take(&mut data.streaming_thinking);
-        let text = std::mem::take(&mut data.streaming_text);
-        data.streaming_raw.clear();
-        if !thinking.trim().is_empty() {
-            data.messages.push(ChatMessage { role: ChatRole::Thinking, text: thinking });
-        }
-        if !text.trim().is_empty() {
-            data.messages.push(ChatMessage { role: ChatRole::Assistant, text });
-        }
-    }
-
-    pub fn commit_partial() {
-        if let Ok(mut data) = CHAT.write() {
-            Self::refresh_stream_split(&mut data);
-            Self::commit_stream_locked(&mut data);
-        }
-    }
-
-    pub fn end_stream() {
-        let Ok(mut data) = CHAT.write() else { return };
-        Self::refresh_stream_split(&mut data);
-        Self::commit_stream_locked(&mut data);
-        data.is_streaming = false;
-        data.activity.clear();
-    }
-
-    pub fn set_activity(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
-            data.activity = text.to_string();
-        }
-    }
-
-    pub fn set_status(text: impl Into<String>) {
-        if let Ok(mut data) = CHAT.write() {
-            data.status = text.into();
-        }
-    }
-
-    pub fn status() -> String {
-        CHAT.read().map(|d| d.status.clone()).unwrap_or_default()
-    }
-
-    pub fn item_count() -> usize {
-        match CHAT.read() {
-            Ok(data) => data.messages.len() + data.is_streaming as usize,
-            Err(_) => 0,
-        }
-    }
-}
+/// The transcript and its rate meter are the shared component's; this app
+/// only reads them.
+pub use makepad_asset_chat_ui::{ChatData, ChatRole};
+// Test-only: the module tests below read the shared transcript directly.
+#[cfg(test)]
+use makepad_asset_chat_ui::CHAT;
 
 // ---------------------------------------------------------------------------
 // mutable generation defaults
 // ---------------------------------------------------------------------------
 
+/// What the Generate form is set to right now, republished by the app on
+/// every chat refresh.
+///
+/// The chat is the OTHER front door to the same machinery, so the form is
+/// the source of truth for anything the conversation did not ask for: a
+/// chat run inherits the form's size, steps, model picks, box choice and
+/// mesh knobs, and only what the model spelled out overrides them.
 #[derive(Clone, Debug)]
-pub struct GenDefaults {
+pub struct FormDefaults {
     pub image_model: Option<String>,
     pub width: u32,
     pub height: u32,
     pub steps: Option<u32>,
+}
+
+impl Default for FormDefaults {
+    fn default() -> Self {
+        FormDefaults { image_model: None, width: 512, height: 512, steps: None }
+    }
+}
+
+/// The conversation's OVERRIDES on top of the form (`defaults.set`), plus
+/// the form snapshot they sit on.
+#[derive(Clone, Debug)]
+pub struct GenDefaults {
+    pub image_model: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub steps: Option<u32>,
     pub then: GenerateThen,
+    pub form: FormDefaults,
 }
 
 impl Default for GenDefaults {
     fn default() -> Self {
         GenDefaults {
             image_model: None,
-            width: 512,
-            height: 512,
+            width: None,
+            height: None,
             steps: None,
             then: GenerateThen::None,
+            form: FormDefaults::default(),
         }
     }
 }
 
 impl GenDefaults {
+    /// The values a run would actually use: the chat's override, else what
+    /// the form shows.
+    pub fn effective_model(&self) -> Option<String> {
+        self.image_model.clone().or_else(|| self.form.image_model.clone())
+    }
+
+    pub fn effective_width(&self) -> u32 {
+        self.width.unwrap_or(self.form.width)
+    }
+
+    pub fn effective_height(&self) -> u32 {
+        self.height.unwrap_or(self.form.height)
+    }
+
+    pub fn effective_steps(&self) -> Option<u32> {
+        self.steps.or(self.form.steps)
+    }
+
     pub fn summary(&self) -> String {
-        let model = self.image_model.as_deref().unwrap_or("affinity");
-        let steps = self.steps.map(|s| s.to_string()).unwrap_or_else(|| "model".into());
+        let model = self.effective_model().unwrap_or_else(|| "affinity".into());
+        let steps = self
+            .effective_steps()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "model".into());
         format!(
             "defaults · model {model} · {}×{} · steps {steps} · then {}",
-            self.width,
-            self.height,
+            self.effective_width(),
+            self.effective_height(),
             self.then.slug()
         )
     }
@@ -187,21 +128,25 @@ impl GenDefaults {
         json::obj(vec![
             (
                 "image_model",
-                match &self.image_model {
-                    Some(m) => json::s(m.clone()),
-                    None => json::s("affinity"),
-                },
+                json::s(self.effective_model().unwrap_or_else(|| "affinity".into())),
             ),
-            ("width", Value::Int(self.width as i64)),
-            ("height", Value::Int(self.height as i64)),
+            ("width", Value::Int(self.effective_width() as i64)),
+            ("height", Value::Int(self.effective_height() as i64)),
             (
                 "steps",
-                match self.steps {
+                match self.effective_steps() {
                     Some(s) => Value::Int(s as i64),
                     None => json::s("model"),
                 },
             ),
             ("then", json::s(self.then.slug())),
+            (
+                "note",
+                json::s(
+                    "these are the Create form's settings; anything you do not set \
+                     in a generate call follows the form",
+                ),
+            ),
         ])
     }
 }
@@ -373,6 +318,15 @@ impl FleetView {
                         .collect(),
                 ),
             ));
+            options.push((
+                "mesh_face_counts",
+                Value::Arr(
+                    MESH_FACE_COUNTS
+                        .iter()
+                        .map(|s| Value::Int(*s as i64))
+                        .collect(),
+                ),
+            ));
         }
         if include_video {
             options.push((
@@ -437,7 +391,7 @@ pub enum ChatJobKind {
 }
 
 impl ChatJobKind {
-    pub fn preset_name(self, then: GenerateThen, model: Option<&str>) -> &'static str {
+    pub fn preset_name(self, then: GenerateThen, _model: Option<&str>) -> &'static str {
         match self {
             ChatJobKind::Image => match then {
                 GenerateThen::None => "image",
@@ -449,19 +403,9 @@ impl ChatJobKind {
                 GenerateThen::Depth => "image → depthmap",
             },
             ChatJobKind::Video => "video (small)",
-            ChatJobKind::Audio => match model {
-                Some(m) if m.contains("moss") => "audio sfx (moss)",
-                Some(m) if m.contains("woosh") => "audio sfx (woosh)",
-                _ => "audio sfx (sa3)",
-            },
-            ChatJobKind::Speech => match model {
-                Some(m) if m.contains("indextts") => "speech clone (indextts-2.5)",
-                _ => "speech (kokoro)",
-            },
-            ChatJobKind::Music => match model {
-                Some(m) if m.contains("ace") => "music (ace-step-1.5-xl)",
-                _ => "music (minimax-music3)",
-            },
+            ChatJobKind::Audio => "audio sfx",
+            ChatJobKind::Speech => "speech",
+            ChatJobKind::Music => "music",
             ChatJobKind::Mesh => "image → mesh",
             ChatJobKind::World => "image → world (splat)",
             ChatJobKind::Character => "character (playable)",
@@ -477,6 +421,20 @@ impl ChatJobKind {
             ChatJobKind::Audio => "audio",
             ChatJobKind::Speech => "speech",
             ChatJobKind::Music => "music",
+        }
+    }
+
+    /// How the chip names this job.
+    fn label(self) -> &'static str {
+        match self {
+            ChatJobKind::Image => "image",
+            ChatJobKind::Video => "video",
+            ChatJobKind::Audio => "sound",
+            ChatJobKind::Speech => "speech",
+            ChatJobKind::Music => "music",
+            ChatJobKind::Mesh => "mesh",
+            ChatJobKind::World => "world",
+            ChatJobKind::Character => "character",
         }
     }
 }
@@ -497,87 +455,98 @@ pub struct ChatJob {
 }
 
 // ---------------------------------------------------------------------------
-// worker
+// the app's side of the session
 // ---------------------------------------------------------------------------
 
-enum ChatCmd {
-    SetFleet { bases: Vec<String> },
-    ConnectAsset {
-        endpoints: ApiEndpoints,
-        token: Option<String>,
-        cache: PathBuf,
-        server_id: [u8; 16],
-    },
-    Send { text: String, attachments: Vec<ChatAttachment> },
-    Cancel,
-    Shutdown,
-}
-
+/// The Create pane's handle on the chat: the shared feed once the asset
+/// server session is up, plus the app-owned state its tools read and write.
 pub struct ChatBridge {
-    tx: Sender<ChatCmd>,
-    dirty: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
     defaults: Arc<Mutex<GenDefaults>>,
     fleet: Arc<Mutex<FleetView>>,
+    jobs_tx: Sender<ChatJob>,
     jobs_rx: Receiver<ChatJob>,
+    feed: Option<ChatFeed>,
 }
 
 impl Default for ChatBridge {
     fn default() -> Self {
-        Self::start()
+        Self::new()
     }
 }
 
 impl ChatBridge {
-    pub fn start() -> ChatBridge {
-        let (tx, rx) = mpsc::channel();
+    pub fn new() -> ChatBridge {
         let (jobs_tx, jobs_rx) = mpsc::channel();
-        let dirty = Arc::new(AtomicBool::new(false));
-        let connected = Arc::new(AtomicBool::new(false));
-        let defaults = Arc::new(Mutex::new(GenDefaults::default()));
-        let fleet = Arc::new(Mutex::new(FleetView::default()));
-        let dirty_w = dirty.clone();
-        let connected_w = connected.clone();
-        let defaults_w = defaults.clone();
-        let fleet_w = fleet.clone();
-        let _ = std::thread::Builder::new().name("ai-content-chat".into()).spawn(move || {
-            worker(rx, dirty_w, connected_w, defaults_w, fleet_w, jobs_tx);
-        });
-        ChatData::set_status("Waiting for Qwen fleet…");
-        ChatBridge { tx, dirty, connected, defaults, fleet, jobs_rx }
+        ChatData::set_status("Waiting for the asset server…");
+        ChatBridge {
+            defaults: Arc::new(Mutex::new(GenDefaults::default())),
+            fleet: Arc::new(Mutex::new(FleetView::default())),
+            jobs_tx,
+            jobs_rx,
+            feed: None,
+        }
     }
 
-    pub fn set_fleet(&self, bases: Vec<String>) {
-        let _ = self.tx.send(ChatCmd::SetFleet { bases });
-    }
-
-    pub fn connect_asset(
-        &self,
-        endpoints: ApiEndpoints,
-        token: Option<String>,
-        cache: PathBuf,
-        server_id: [u8; 16],
-    ) {
-        let _ = self.tx.send(ChatCmd::ConnectAsset { endpoints, token, cache, server_id });
+    /// The store session is up: open the chat on its broker. The session
+    /// itself is created lazily, on the first turn.
+    pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>, cache: PathBuf) {
+        let tools = AppTools {
+            defaults: self.defaults.clone(),
+            fleet: self.fleet.clone(),
+            jobs: self.jobs_tx.clone(),
+        };
+        ChatData::set_status("Asset server connected · opening Qwen on the first message");
+        self.feed = Some(ChatFeed::start(
+            FeedConfig::new(endpoints, token, cache, "gen", "gen"),
+            Box::new(tools),
+        ));
     }
 
     pub fn send(&self, text: String, attachments: Vec<ChatAttachment>) {
-        ChatData::push(ChatRole::User, &text);
-        ChatData::begin_stream();
-        self.dirty.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(ChatCmd::Send { text, attachments });
+        match &self.feed {
+            Some(feed) => {
+                // The app owns the user's bubble (see `ChatFeed::send`):
+                // exactly one push per message, from here.
+                ChatData::push(ChatRole::User, &text);
+                feed.send(text, attachments);
+            }
+            None => {
+                ChatData::push(ChatRole::User, &text);
+                ChatData::push(
+                    ChatRole::System,
+                    "The asset server session is not up yet — the chat opens as soon as it is.",
+                );
+            }
+        }
     }
 
+    /// Escape / Stop.
     pub fn cancel(&self) {
-        let _ = self.tx.send(ChatCmd::Cancel);
+        if let Some(feed) = &self.feed {
+            feed.cancel();
+        }
+    }
+
+    /// Clear: wipe the transcript and start a new session next turn.
+    pub fn clear(&self) {
+        match &self.feed {
+            Some(feed) => feed.clear(),
+            None => ChatData::clear(),
+        }
     }
 
     pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
+        self.feed.as_ref().is_some_and(|feed| feed.is_connected())
+    }
+
+    /// True once the store session was handed over (a second connect is a
+    /// second session on the broker, so the host asks first).
+    pub fn is_linked(&self) -> bool {
+        self.feed.is_some()
     }
 
     pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
+        self.feed.as_ref().is_some_and(|feed| feed.take_dirty())
     }
 
     pub fn defaults_summary(&self) -> String {
@@ -590,6 +559,15 @@ impl ChatBridge {
         }
     }
 
+    /// Republish what the Generate form is set to. The chat's tools read
+    /// this so `defaults.get` answers with the settings the user can SEE,
+    /// and so a generate call that names nothing runs what the form would.
+    pub fn set_form_defaults(&self, form: FormDefaults) {
+        if let Ok(mut slot) = self.defaults.lock() {
+            slot.form = form;
+        }
+    }
+
     pub fn take_jobs(&self) -> Vec<ChatJob> {
         let mut out = Vec::new();
         while let Ok(job) = self.jobs_rx.try_recv() {
@@ -599,229 +577,14 @@ impl ChatBridge {
     }
 }
 
-impl Drop for ChatBridge {
-    fn drop(&mut self) {
-        let _ = self.tx.send(ChatCmd::Shutdown);
-    }
-}
-
-struct Live {
-    session: Session,
-    tools: AppTools,
-}
-
-fn worker(
-    rx: Receiver<ChatCmd>,
-    dirty: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
-    defaults: Arc<Mutex<GenDefaults>>,
-    fleet: Arc<Mutex<FleetView>>,
-    jobs_tx: Sender<ChatJob>,
-) {
-    let mut live: Option<Live> = None;
-    let mut tools = AppTools {
-        defaults: defaults.clone(),
-        fleet,
-        jobs: jobs_tx,
-        asset: None,
-    };
-    loop {
-        match rx.recv_timeout(Duration::from_millis(150)) {
-            Ok(ChatCmd::Shutdown) => break,
-            Ok(ChatCmd::SetFleet { bases }) => {
-                ChatData::set_status("Probing LAN Qwen…");
-                dirty.store(true, Ordering::Relaxed);
-                match open_qwen(bases, &mut tools) {
-                    Ok(session) => {
-                        connected.store(true, Ordering::Relaxed);
-                        if let Ok(d) = defaults.lock() {
-                            let summary = d.summary();
-                            if !summary.is_empty() {
-                                ChatData::set_status(format!(
-                                    "{} · {summary}",
-                                    ChatData::status()
-                                ));
-                            }
-                        }
-                        if let Some(live) = live.as_mut() {
-                            live.session = session;
-                        } else {
-                            live = Some(Live { session, tools: tools.clone_handles() });
-                        }
-                        dirty.store(true, Ordering::Relaxed);
-                    }
-                    Err(reason) => {
-                        connected.store(false, Ordering::Relaxed);
-                        live = None;
-                        ChatData::set_status(reason.clone());
-                        ChatData::push(ChatRole::System, reason);
-                        dirty.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-            Ok(ChatCmd::ConnectAsset { endpoints, token, cache, server_id }) => {
-                let _ = (cache, server_id);
-                match AssetServerTools::connect(endpoints, token, "gen") {
-                    Ok(asset) => {
-                        if let Some(live) = live.as_mut() {
-                            live.tools.asset = Some(asset);
-                        } else {
-                            tools.asset = Some(asset);
-                        }
-                        ChatData::set_status(format!("{} · catalog tools on", ChatData::status()));
-                        dirty.store(true, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        ChatData::push(ChatRole::System, format!("catalog tools off: {e}"));
-                        dirty.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-            Ok(ChatCmd::Send { text, attachments }) => {
-                if let Some(live) = live.as_mut() {
-                    let atts: Vec<makepad_asset_chat::wire::AttachmentBinding> = attachments
-                        .iter()
-                        .map(|a| makepad_asset_chat::wire::AttachmentBinding {
-                            revision: a.revision,
-                            role: a.role.clone(),
-                        })
-                        .collect();
-                    match live.session.send(&text, &atts, &mut live.tools) {
-                        Ok(_) => drain_session(&mut live.session, &dirty),
-                        Err(e) => {
-                            ChatData::end_stream();
-                            ChatData::push(ChatRole::System, format!("{e:?}"));
-                            dirty.store(true, Ordering::Relaxed);
-                        }
-                    }
-                } else {
-                    ChatData::end_stream();
-                    ChatData::push(ChatRole::System, "Qwen is not connected yet.");
-                    dirty.store(true, Ordering::Relaxed);
-                }
-            }
-            Ok(ChatCmd::Cancel) => {
-                if let Some(live) = live.as_mut() {
-                    live.session.cancel();
-                    drain_session(&mut live.session, &dirty);
-                }
-                ChatData::end_stream();
-                ChatData::push(ChatRole::System, "Cancelled.");
-                dirty.store(true, Ordering::Relaxed);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if let Some(live) = live.as_mut() {
-            if !live.session.is_idle() {
-                live.session.pump(&mut live.tools);
-                drain_session(&mut live.session, &dirty);
-            }
-        }
-    }
-}
-
-fn open_qwen(bases: Vec<String>, _tools: &mut AppTools) -> Result<Session, String> {
-    if bases.is_empty() {
-        return Err("no fleet nodes configured".into());
-    }
-    let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, bases);
-    match provider.availability() {
-        ProviderAvailability::Available { model, detail } => {
-            ChatData::set_status(format!("Qwen ready · {model} · {detail}"));
-        }
-        ProviderAvailability::Unavailable { reason } => {
-            return Err(format!("Qwen unavailable: {reason}"));
-        }
-    }
-    Ok(Session::new("ai-content", Box::new(provider)))
-}
-
-fn drain_session(session: &mut Session, dirty: &AtomicBool) {
-    let events = session.drain_events();
-    if events.is_empty() {
-        return;
-    }
-    for ev in events {
-        match ev.body {
-            ChatEventBody::Delta { text } => {
-                if !CHAT.read().map(|d| d.is_streaming).unwrap_or(false) {
-                    ChatData::begin_stream();
-                }
-                ChatData::push_delta(&text);
-            }
-            ChatEventBody::ToolCall { name, .. } => {
-                ChatData::commit_partial();
-                ChatData::set_activity(&format!("running {name}…"));
-            }
-            ChatEventBody::ToolProgress { id, note, permille, .. } => {
-                if id == "qwen" {
-                    ChatData::set_activity(&note);
-                } else {
-                    ChatData::set_activity(&format!("Tool · {permille}‰ · {note}"));
-                }
-            }
-            ChatEventBody::ToolResult { outcome, .. } => {
-                ChatData::push(ChatRole::Tool, format_tool_outcome(&outcome));
-                ChatData::set_activity("");
-            }
-            ChatEventBody::Done => ChatData::end_stream(),
-            ChatEventBody::Cancelled => {
-                ChatData::end_stream();
-                ChatData::push(ChatRole::System, "Turn cancelled.");
-            }
-            ChatEventBody::Error { code, message } => {
-                ChatData::end_stream();
-                ChatData::push(ChatRole::System, format!("{code}: {message}"));
-            }
-        }
-    }
-    dirty.store(true, Ordering::Relaxed);
-}
-
-fn format_tool_outcome(outcome: &ToolOutcome) -> String {
-    match outcome {
-        ToolOutcome::Ok { value } => {
-            if let Some(models) = value.get("models").and_then(Value::as_arr) {
-                let backends = value
-                    .get("backends")
-                    .and_then(Value::as_arr)
-                    .map(|b| b.len())
-                    .unwrap_or(0);
-                return format!("ok · fleet · {backends} backends · {} models", models.len());
-            }
-            value
-                .get("note")
-                .and_then(Value::as_str)
-                .or_else(|| value.get("prompt").and_then(Value::as_str))
-                .or_else(|| value.get("image_model").and_then(Value::as_str))
-                .map(|s| format!("ok · {s}"))
-                .unwrap_or_else(|| "ok".into())
-        }
-        ToolOutcome::Unavailable { reason } => format!("unavailable · {reason}"),
-        ToolOutcome::Denied { what } => format!("denied · {what}"),
-        ToolOutcome::Refused { what } => format!("refused · {what}"),
-        ToolOutcome::Failed { message } => format!("failed · {message}"),
-    }
-}
-
+/// The tools the broker parks back on this app, executed here.
 struct AppTools {
     defaults: Arc<Mutex<GenDefaults>>,
     fleet: Arc<Mutex<FleetView>>,
     jobs: Sender<ChatJob>,
-    asset: Option<AssetServerTools>,
 }
 
 impl AppTools {
-    fn clone_handles(&self) -> AppTools {
-        AppTools {
-            defaults: self.defaults.clone(),
-            fleet: self.fleet.clone(),
-            jobs: self.jobs.clone(),
-            asset: None,
-        }
-    }
-
     fn apply_defaults_set(
         &self,
         image_model: &Option<String>,
@@ -839,10 +602,10 @@ impl AppTools {
             };
         }
         if let Some(w) = width {
-            d.width = w;
+            d.width = Some(w);
         }
         if let Some(h) = height {
-            d.height = h;
+            d.height = Some(h);
         }
         if let Some(s) = steps {
             d.steps = Some(s);
@@ -853,18 +616,24 @@ impl AppTools {
         Ok(d.clone())
     }
 
-    fn queue_job(&self, job: ChatJob, progress: &mut dyn FnMut(u16, &str)) -> ToolOutcome {
-        progress(100, "queued on the AI Content fleet");
+    fn queue_job(&self, job: ChatJob) -> ToolOutcome {
         if self.jobs.send(job.clone()).is_err() {
             return ToolOutcome::Failed { message: "generate queue closed".into() };
         }
         let mut pairs = vec![
             ("queued", Value::Bool(true)),
-            ("kind", json::s(format!("{:?}", job.kind).to_ascii_lowercase())),
+            ("kind", json::s(job.kind.label())),
             ("prompt", json::s(job.prompt)),
             (
                 "model",
                 json::s(job.model.clone().unwrap_or_else(|| "affinity".into())),
+            ),
+            (
+                "note",
+                json::s(
+                    "the run is in the Create page's queue; it publishes to the library \
+                     when it finishes",
+                ),
             ),
         ];
         match job.kind {
@@ -908,55 +677,26 @@ impl AppTools {
             prompt: prompt.to_string(),
             kind,
             then,
-            model: model.clone().or(d.image_model.clone()),
-            width: width.unwrap_or(d.width),
-            height: height.unwrap_or(d.height),
-            steps: steps.or(d.steps),
+            model: model.clone().or_else(|| d.effective_model()),
+            width: width.unwrap_or_else(|| d.effective_width()),
+            height: height.unwrap_or_else(|| d.effective_height()),
+            steps: steps.or_else(|| d.effective_steps()),
             frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
             seconds: MUSIC_DEFAULT_SECONDS,
             voice: None,
         })
     }
-}
 
-impl ToolExecutor for AppTools {
-    fn capability_doc(&mut self) -> String {
-        let defs = self.defaults.lock().map(|d| d.summary()).unwrap_or_default();
-        let mut out = format!(
-            "Live generation defaults: {defs}\n\
-             Fleet generate tools: image.generate, video.generate, audio.generate, \
-             speech.generate, music.generate, mesh.generate, world.generate, \
-             character.generate.\n\
-             defaults.get / defaults.set change the persistent image model, resolution and steps.\n\
-             fleet.introspect lists live backends, models, and legal sizes/steps.\n"
-        );
-        if let Some(asset) = &mut self.asset {
-            out.push_str(&asset.capability_doc());
-        } else {
-            out.push_str("Asset catalog tools are off until the Asset Server session is up.\n");
-        }
-        out
-    }
-
-    fn execute(
-        &mut self,
-        call: &ContentToolCall,
-        ctx: &ExecCtx,
-        progress: &mut dyn FnMut(u16, &str),
-        cancel: &CancelFlag,
-    ) -> ToolOutcome {
+    fn run(&mut self, call: ContentToolCall) -> ToolOutcome {
         match call {
             ContentToolCall::DefaultsGet => match self.defaults.lock() {
                 Ok(d) => ToolOutcome::Ok { value: d.encode() },
                 Err(_) => ToolOutcome::Failed { message: "defaults lock".into() },
             },
             ContentToolCall::DefaultsSet { image_model, width, height, steps, then } => {
-                match self.apply_defaults_set(image_model, *width, *height, *steps, *then) {
-                    Ok(d) => {
-                        ChatData::set_status(format!("Qwen · {}", d.summary()));
-                        ToolOutcome::Ok { value: d.encode() }
-                    }
+                match self.apply_defaults_set(&image_model, width, height, steps, then) {
+                    Ok(d) => ToolOutcome::Ok { value: d.encode() },
                     Err(e) => ToolOutcome::Failed { message: e },
                 }
             }
@@ -969,7 +709,6 @@ impl ToolExecutor for AppTools {
                     Ok(v) => v.clone(),
                     Err(_) => return ToolOutcome::Failed { message: "fleet lock".into() },
                 };
-                progress(80, "reading live fleet catalog");
                 ToolOutcome::Ok { value: view.encode(domain.as_deref(), &defaults) }
             }
             ContentToolCall::ImageGenerate { prompt, then, model, width, height, steps } => {
@@ -979,334 +718,189 @@ impl ToolExecutor for AppTools {
                 };
                 match self.image_job(
                     ChatJobKind::Image,
-                    prompt,
+                    &prompt,
                     then.unwrap_or(d.then),
-                    model,
-                    *width,
-                    *height,
-                    *steps,
+                    &model,
+                    width,
+                    height,
+                    steps,
                 ) {
-                    Ok(job) => self.queue_job(job, progress),
+                    Ok(job) => self.queue_job(job),
                     Err(e) => ToolOutcome::Failed { message: e },
                 }
             }
-            ContentToolCall::VideoGenerate { prompt, model, width, height, frames, steps } => {
-                self.queue_job(
-                    ChatJob {
-                        prompt: prompt.clone(),
-                        kind: ChatJobKind::Video,
-                        then: GenerateThen::None,
-                        model: model.clone(),
-                        width: width.unwrap_or(VIDEO_SIZES[0].0),
-                        height: height.unwrap_or(VIDEO_SIZES[0].1),
-                        steps: *steps,
-                        frames: frames.unwrap_or(VIDEO_LENGTHS[0].0),
-                        video_steps: steps.unwrap_or(VIDEO_LENGTHS[0].1),
-                        seconds: MUSIC_DEFAULT_SECONDS,
-                        voice: None,
-                    },
-                    progress,
-                )
-            }
-            ContentToolCall::AudioGenerate { prompt, model } => self.queue_job(
-                ChatJob {
-                    prompt: prompt.clone(),
-                    kind: ChatJobKind::Audio,
+            ContentToolCall::VideoGenerate { prompt, model, width, height, frames, steps } => self
+                .queue_job(ChatJob {
+                    prompt,
+                    kind: ChatJobKind::Video,
                     then: GenerateThen::None,
-                    model: model.clone(),
-                    width: 0,
-                    height: 0,
-                    steps: None,
-                    frames: 0,
-                    video_steps: 0,
-                    seconds: 0,
+                    model,
+                    width: width.unwrap_or(VIDEO_SIZES[0].0),
+                    height: height.unwrap_or(VIDEO_SIZES[0].1),
+                    steps,
+                    frames: frames.unwrap_or(VIDEO_LENGTHS[0].0),
+                    video_steps: steps.unwrap_or(VIDEO_LENGTHS[0].1),
+                    seconds: MUSIC_DEFAULT_SECONDS,
                     voice: None,
-                },
-                progress,
-            ),
-            ContentToolCall::SpeechGenerate { prompt, model, voice } => self.queue_job(
-                ChatJob {
-                    prompt: prompt.clone(),
-                    kind: ChatJobKind::Speech,
-                    then: GenerateThen::None,
-                    model: model.clone(),
-                    width: 0,
-                    height: 0,
-                    steps: None,
-                    frames: 0,
-                    video_steps: 0,
-                    seconds: 0,
-                    voice: voice.clone(),
-                },
-                progress,
-            ),
-            ContentToolCall::MusicGenerate { prompt, model, seconds } => self.queue_job(
-                ChatJob {
-                    prompt: prompt.clone(),
-                    kind: ChatJobKind::Music,
-                    then: GenerateThen::None,
-                    model: model.clone(),
-                    width: 0,
-                    height: 0,
-                    steps: None,
-                    frames: 0,
-                    video_steps: 0,
-                    seconds: seconds.unwrap_or(MUSIC_DEFAULT_SECONDS),
-                    voice: None,
-                },
-                progress,
-            ),
+                }),
+            ContentToolCall::AudioGenerate { prompt, model } => self.queue_job(ChatJob {
+                prompt,
+                kind: ChatJobKind::Audio,
+                then: GenerateThen::None,
+                model,
+                width: 0,
+                height: 0,
+                steps: None,
+                frames: 0,
+                video_steps: 0,
+                seconds: 0,
+                voice: None,
+            }),
+            ContentToolCall::SpeechGenerate { prompt, model, voice } => self.queue_job(ChatJob {
+                prompt,
+                kind: ChatJobKind::Speech,
+                then: GenerateThen::None,
+                model,
+                width: 0,
+                height: 0,
+                steps: None,
+                frames: 0,
+                video_steps: 0,
+                seconds: 0,
+                voice,
+            }),
+            ContentToolCall::MusicGenerate { prompt, model, seconds } => self.queue_job(ChatJob {
+                prompt,
+                kind: ChatJobKind::Music,
+                then: GenerateThen::None,
+                model,
+                width: 0,
+                height: 0,
+                steps: None,
+                frames: 0,
+                video_steps: 0,
+                seconds: seconds.unwrap_or(MUSIC_DEFAULT_SECONDS),
+                voice: None,
+            }),
             ContentToolCall::MeshGenerate { prompt, model, width, height, steps } => {
                 match self.image_job(
                     ChatJobKind::Mesh,
-                    prompt,
+                    &prompt,
                     GenerateThen::Mesh,
-                    model,
-                    *width,
-                    *height,
-                    *steps,
+                    &model,
+                    width,
+                    height,
+                    steps,
                 ) {
-                    Ok(job) => self.queue_job(job, progress),
+                    Ok(job) => self.queue_job(job),
                     Err(e) => ToolOutcome::Failed { message: e },
                 }
             }
             ContentToolCall::WorldGenerate { prompt, model, width, height, steps } => {
                 match self.image_job(
                     ChatJobKind::World,
-                    prompt,
+                    &prompt,
                     GenerateThen::World,
-                    model,
-                    *width,
-                    *height,
-                    *steps,
+                    &model,
+                    width,
+                    height,
+                    steps,
                 ) {
-                    Ok(job) => self.queue_job(job, progress),
+                    Ok(job) => self.queue_job(job),
                     Err(e) => ToolOutcome::Failed { message: e },
                 }
             }
             ContentToolCall::CharacterGenerate { prompt, model } => {
                 match self.image_job(
                     ChatJobKind::Character,
-                    prompt,
+                    &prompt,
                     GenerateThen::Character,
-                    model,
+                    &model,
                     None,
                     None,
                     None,
                 ) {
-                    Ok(job) => self.queue_job(job, progress),
+                    Ok(job) => self.queue_job(job),
                     Err(e) => ToolOutcome::Failed { message: e },
                 }
             }
-            other => match &mut self.asset {
-                Some(asset) => asset.execute(other, ctx, progress, cancel),
-                None => ToolOutcome::Unavailable {
-                    reason: "Asset Server catalog tools are not connected".into(),
-                },
+            // The broker parks only what the `gen` profile declares; a call
+            // outside that set is a version skew worth saying out loud.
+            other => ToolOutcome::Failed {
+                message: format!("'{}' is not a tool the asset UI executes", other.name()),
             },
         }
     }
 }
 
-script_mod! {
-    use mod.prelude.widgets_internal.*
-    use mod.widgets.*
-
-    mod.widgets.ContentChatBase = #(ContentChat::register_widget(vm))
-    mod.widgets.ContentChat = set_type_default() do mod.widgets.ContentChatBase {
-        width: Fill
-        height: Fill
-
-        list := PortalList {
-            width: Fill
-            height: Fill
-            flow: Down
-            drag_scrolling: false
-            auto_tail: true
-            smooth_tail: true
-            selectable: true
-
-            User := RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 6 bottom: 6 left: 48 right: 8}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
-                show_bg: true
-                draw_bg +: {
-                    color: #x1a2838
-                    radius: 6.0
-                    border_color: #x3d9bf033
-                    border_size: 1.0
-                }
-                body := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text.color: #xe6ebf0
-                    draw_text.text_style: theme.font_regular{font_size: 11}
-                }
-            }
-
-            Assistant := RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 6 bottom: 6 left: 8 right: 48}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
-                show_bg: true
-                draw_bg +: {
-                    color: #x18181c
-                    radius: 6.0
-                    border_color: #xffffff10
-                    border_size: 1.0
-                }
-                body := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text.color: #xdfe6ec
-                    draw_text.text_style: theme.font_regular{font_size: 11}
-                }
-            }
-
-            Thinking := RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 16 right: 48}
-                padding: Inset{left: 10 top: 6 right: 10 bottom: 6}
-                show_bg: true
-                draw_bg +: {
-                    color: #x12141a
-                    radius: 4.0
-                    border_color: #x8fcdf022
-                    border_size: 1.0
-                }
-                body := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text.color: #x7a8896
-                    draw_text.text_style: theme.font_regular{font_size: 9}
-                }
-            }
-
-            Tool := RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 16 right: 16}
-                padding: Inset{left: 10 top: 6 right: 10 bottom: 6}
-                show_bg: true
-                draw_bg +: {
-                    color: #x14181c
-                    radius: 4.0
-                    border_color: #x3d9bf022
-                    border_size: 1.0
-                }
-                body := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text.color: #x8fcdf0
-                    draw_text.text_style: theme.font_regular{font_size: 10}
-                }
-            }
-
-            System := RoundedView {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 16 right: 16}
-                padding: Inset{left: 10 top: 6 right: 10 bottom: 6}
-                show_bg: true
-                draw_bg +: {
-                    color: #x241818
-                    radius: 4.0
-                }
-                body := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text.color: #xe8c9a0
-                    draw_text.text_style: theme.font_regular{font_size: 10}
-                }
-            }
+impl ClientTools for AppTools {
+    fn execute(&mut self, name: &str, args: &Value) -> ToolOutcome {
+        match ContentToolCall::parse(name, args) {
+            Ok(call) => self.run(call),
+            // The broker parks only after ITS parse succeeded, so a failure
+            // here is a protocol skew between app and server.
+            Err(reason) => ToolOutcome::Failed {
+                message: format!("the asset UI could not parse the call: {reason}"),
+            },
         }
     }
-}
 
-#[derive(Script, ScriptHook, Widget)]
-pub struct ContentChat {
-    #[deref]
-    view: View,
-}
-
-impl Widget for ContentChat {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let Ok(data) = CHAT.read() else {
-            return DrawStep::done();
+    fn call_title(&mut self, name: &str, args: &Value) -> String {
+        let prompt = || {
+            ellipsis(args.get("prompt").and_then(Value::as_str).unwrap_or(""), 48)
         };
-        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            let portal = item.as_portal_list();
-            let Some(mut list) = portal.borrow_mut() else {
-                continue;
-            };
-            let msg_count = data.messages.len();
-            let show_think = data.is_streaming && !data.streaming_thinking.is_empty();
-            let show_answer = data.is_streaming
-                && (!data.streaming_text.is_empty()
-                    || !data.activity.is_empty()
-                    || !show_think);
-            let extra = usize::from(show_think) + usize::from(show_answer);
-            list.set_item_range(cx, 0, msg_count + extra);
-            while let Some(item_id) = list.next_visible_item(cx) {
-                if show_think && item_id == msg_count {
-                    let widget = list.item(cx, item_id, id!(Thinking));
-                    widget.label(cx, ids!(body)).set_text(
-                        cx,
-                        &format!("thinking\n{}", data.streaming_thinking),
-                    );
-                    widget.draw_all_unscoped(cx);
-                    continue;
-                }
-                if show_answer && item_id == msg_count + usize::from(show_think) {
-                    let mut text = data.streaming_text.clone();
-                    if !data.activity.is_empty() {
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str(&data.activity);
-                    }
-                    if text.is_empty() {
-                        text = "…".into();
-                    }
-                    let widget = list.item(cx, item_id, id!(Assistant));
-                    widget.label(cx, ids!(body)).set_text(cx, &text);
-                    widget.draw_all_unscoped(cx);
-                    continue;
-                }
-                let Some(msg) = data.messages.get(item_id) else {
-                    continue;
-                };
-                let template = match msg.role {
-                    ChatRole::User => id!(User),
-                    ChatRole::Assistant => id!(Assistant),
-                    ChatRole::Thinking => id!(Thinking),
-                    ChatRole::Tool => id!(Tool),
-                    ChatRole::System => id!(System),
-                };
-                let body = if msg.role == ChatRole::Thinking {
-                    format!("thinking\n{}", msg.text)
-                } else {
-                    msg.text.clone()
-                };
-                let widget = list.item(cx, item_id, template);
-                widget.label(cx, ids!(body)).set_text(cx, &body);
-                widget.draw_all_unscoped(cx);
-            }
+        match name {
+            "image.generate" => format!("generating an image: {}", prompt()),
+            "video.generate" => format!("generating video: {}", prompt()),
+            "audio.generate" => format!("generating a sound: {}", prompt()),
+            "speech.generate" => format!("speaking: {}", prompt()),
+            "music.generate" => format!("generating music: {}", prompt()),
+            "mesh.generate" => format!("generating a mesh: {}", prompt()),
+            "world.generate" => format!("generating a world: {}", prompt()),
+            "character.generate" => format!("generating a character: {}", prompt()),
+            "defaults.get" => "reading the generation defaults".to_string(),
+            "defaults.set" => "changing the generation defaults".to_string(),
+            "fleet.introspect" => "reading the live fleet".to_string(),
+            other => default_call_title(other, args),
         }
-        DrawStep::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
+    fn outcome_summary(&mut self, name: &str, outcome: &ChatToolOutcomeDto) -> (String, String) {
+        let ChatToolOutcomeDto::Ok { value } = outcome else {
+            return default_outcome_summary(name, outcome);
+        };
+        if let Some(kind) = value.get("kind").and_then(Value::as_str) {
+            let model = value.get("model").and_then(Value::as_str).unwrap_or("affinity");
+            let size = match (
+                value.get("width").and_then(Value::as_i64),
+                value.get("height").and_then(Value::as_i64),
+            ) {
+                (Some(w), Some(h)) => format!(" · {w}×{h}"),
+                _ => String::new(),
+            };
+            return (
+                format!("queued a {kind} run · {model}{size}"),
+                format!("\n{}", value.to_json()),
+            );
+        }
+        if name == "fleet.introspect" {
+            let backends = value.get("backends").and_then(Value::as_arr).map(|b| b.len()).unwrap_or(0);
+            let models = value.get("models").and_then(Value::as_arr).map(|m| m.len()).unwrap_or(0);
+            return (
+                format!("read the fleet · {backends} boxes · {models} models"),
+                format!("\n{}", value.to_json()),
+            );
+        }
+        if name.starts_with("defaults.") {
+            let summary = value
+                .get("image_model")
+                .and_then(Value::as_str)
+                .map(|m| format!(" · model {m}"))
+                .unwrap_or_default();
+            let verb = if name == "defaults.set" { "set the defaults" } else { "read the defaults" };
+            return (format!("{verb}{summary}"), format!("\n{}", value.to_json()));
+        }
+        default_outcome_summary(name, outcome)
     }
 }
 
@@ -1332,6 +926,8 @@ mod tests {
                 capabilities: Some(vec![domain.into()]),
                 vram_reserve_mb: Some(1024),
                 queue_limit: Some(4),
+                fleet: None,
+                lanes: None,
             }),
             models: vec![ModelInfoJson {
                 id: id.into(),
@@ -1348,8 +944,25 @@ mod tests {
                 error: None,
                 revision: None,
                 unavailable_reason: None,
+                license_name: None,
+                license_url: None,
+                license_summary: None,
+                license_restriction: None,
+                license_sha256: None,
             }],
         }
+    }
+
+    fn tools() -> (AppTools, Receiver<ChatJob>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            AppTools {
+                defaults: Arc::new(Mutex::new(GenDefaults::default())),
+                fleet: Arc::new(Mutex::new(FleetView::default())),
+                jobs: tx,
+            },
+            rx,
+        )
     }
 
     #[test]
@@ -1370,5 +983,142 @@ mod tests {
         assert!(sizes.iter().any(|s| s.as_str() == Some("512x512")));
         let backends = encoded.get("backends").and_then(Value::as_arr).unwrap();
         assert_eq!(backends.len(), 1);
+    }
+
+    /// The parked call the broker sends arrives as name + args; it has to
+    /// come out the other side as a run in the Create page's queue.
+    #[test]
+    fn a_parked_generate_call_becomes_a_queued_run() {
+        let (mut tools, rx) = tools();
+        let args = json::obj(vec![
+            ("prompt", json::s("a rusty trawler at dawn")),
+            ("width", Value::Int(768)),
+            ("height", Value::Int(768)),
+        ]);
+        let outcome = tools.execute("image.generate", &args);
+        match outcome {
+            ToolOutcome::Ok { value } => {
+                assert_eq!(value.get("queued").and_then(Value::as_bool), Some(true));
+                assert_eq!(value.get("kind").and_then(Value::as_str), Some("image"));
+            }
+            other => panic!("expected a queued run, got {other:?}"),
+        }
+        let job = rx.try_recv().expect("a job on the app queue");
+        assert_eq!(job.kind, ChatJobKind::Image);
+        assert_eq!((job.width, job.height), (768, 768));
+        assert!(job.prompt.contains("trawler"));
+    }
+
+    /// The chat is the other front door to the Generate form: a call that
+    /// names no size runs what the form is set to, and `defaults.get`
+    /// reports the same thing the user can see on screen.
+    #[test]
+    fn a_call_that_names_nothing_follows_the_form() {
+        let (mut tools, rx) = tools();
+        if let Ok(mut d) = tools.defaults.lock() {
+            d.form = FormDefaults {
+                image_model: Some("flux2-dev".into()),
+                width: 1024,
+                height: 1024,
+                steps: Some(20),
+            };
+        }
+        let outcome = tools.execute(
+            "image.generate",
+            &json::obj(vec![("prompt", json::s("a unicorn"))]),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok { .. }));
+        let job = rx.try_recv().expect("a job");
+        assert_eq!((job.width, job.height), (1024, 1024));
+        assert_eq!(job.steps, Some(20));
+        assert_eq!(job.model.as_deref(), Some("flux2-dev"));
+
+        match tools.execute("defaults.get", &json::obj(vec![])) {
+            ToolOutcome::Ok { value } => {
+                assert_eq!(value.get("width").and_then(Value::as_i64), Some(1024));
+                assert_eq!(
+                    value.get("image_model").and_then(Value::as_str),
+                    Some("flux2-dev")
+                );
+            }
+            other => panic!("expected the form's settings, got {other:?}"),
+        }
+    }
+
+    /// defaults.set is app state: it must survive into the next generate
+    /// call rather than being echoed back and forgotten.
+    #[test]
+    fn defaults_set_moves_the_next_run() {
+        let (mut tools, rx) = tools();
+        let set = json::obj(vec![
+            ("width", Value::Int(1024)),
+            ("height", Value::Int(576)),
+            ("steps", Value::Int(8)),
+        ]);
+        assert!(matches!(tools.execute("defaults.set", &set), ToolOutcome::Ok { .. }));
+        let outcome = tools.execute(
+            "image.generate",
+            &json::obj(vec![("prompt", json::s("a lighthouse"))]),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok { .. }));
+        let job = rx.try_recv().expect("a job");
+        assert_eq!((job.width, job.height), (1024, 576));
+        assert_eq!(job.steps, Some(8));
+    }
+
+    /// One send, one user bubble. Both halves used to push it — the app
+    /// and the shared feed — and the message appeared twice.
+    #[test]
+    fn a_send_puts_the_message_on_screen_exactly_once() {
+        let bridge = ChatBridge::new();
+        ChatData::clear();
+        bridge.send("make me a girl".into(), Vec::new());
+        let data = CHAT.read().unwrap();
+        let users: Vec<&str> = data
+            .messages
+            .iter()
+            .filter(|m| m.role == ChatRole::User)
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(users, vec!["make me a girl"], "{:?}", data.messages);
+        drop(data);
+        ChatData::clear();
+    }
+
+    /// A tool this app does not own is refused by name — the broker only
+    /// parks what the `gen` profile declares, so this is a skew report.
+    #[test]
+    fn a_foreign_call_is_refused_not_swallowed() {
+        let (mut tools, _rx) = tools();
+        let outcome = tools.execute(
+            "world.place",
+            &json::obj(vec![("items", Value::Arr(Vec::new()))]),
+        );
+        match outcome {
+            ToolOutcome::Failed { message } => assert!(message.contains("world.place"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The chip says what was queued, not "ok".
+    #[test]
+    fn a_queued_run_titles_its_chip_with_the_job() {
+        let (mut tools, _rx) = tools();
+        let title = tools.call_title(
+            "image.generate",
+            &json::obj(vec![("prompt", json::s("a rusty trawler"))]),
+        );
+        assert!(title.starts_with("generating an image: a rusty trawler"), "{title}");
+        let outcome = ChatToolOutcomeDto::Ok {
+            value: json::obj(vec![
+                ("queued", Value::Bool(true)),
+                ("kind", json::s("image")),
+                ("model", json::s("flux1-schnell")),
+                ("width", Value::Int(512)),
+                ("height", Value::Int(512)),
+            ]),
+        };
+        let (title, _detail) = tools.outcome_summary("image.generate", &outcome);
+        assert_eq!(title, "queued a image run · flux1-schnell · 512×512");
     }
 }

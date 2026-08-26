@@ -1,0 +1,35 @@
+// TRI FIELD — the N-gon family's three-sided member: every square cell
+// is cut along its diagonal into two triangles, each opening outward
+// from the centre on its own triangle-centroid distance.
+{
+    name: "Tri Field"
+    engine: "transition"
+    p1: 0.5
+    dials: [
+        {name: "SOFT", bind: "p0", default: 0.1},
+        {name: "CELLS", bind: "p1", default: 0.5},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let n = 5.0 + floor(self.user.y * 7.0)
+            let col = floor(uv.x * n)
+            let row = floor(uv.y * n)
+            let fx = fract(uv.x * n)
+            let fy = fract(uv.y * n)
+            let upper = step(fx + fy, 1.0)
+            let tc = mix(0.66, 0.33, upper)
+            let ccx = (col + tc) / n
+            let ccy = (row + tc) / n
+            let d = vec2((ccx - 0.5) * self.aspect(), ccy - 0.5)
+            let field = length(d)
+            let rmax = 0.5 * sqrt(self.aspect() * self.aspect() + 1.0)
+            let soft = 0.02 + self.user.x * 0.12
+            let edge = t * (rmax + 2.0 * soft) - soft
+            let inside = smoothstep(edge + soft, edge - soft, field)
+            let c = self.deck_a(uv).mix(self.deck_b(uv), inside)
+            let dim = 1.0 - 4.0 * clamp(t, 0.0, 1.0) * (1.0 - clamp(t, 0.0, 1.0)) * self.user.z * 0.9
+            return vec4(c.xyz * dim, 1.0)
+        }
+    }
+}

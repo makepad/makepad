@@ -1,0 +1,87 @@
+// RADIAL SPECTRUM BLOOM — the bar field bent into a circle: angle IS
+// frequency, radius IS level, and the last few seconds of spectrum bloom
+// outward as ghost rings behind the live petal ring.
+//
+// Pattern taught: MIRRORING the frequency axis. Folding angle to 0..1 and
+// back gives a symmetric flower instead of a seam, which is what makes a
+// circular spectrum read as a shape rather than as a wrapped graph.
+{
+    name: "Radial Spectrum Bloom"
+    engine: "screen"
+    seed: 3
+
+    speed: 1.0
+    beat_pulse: 0.8
+    beat_rate: 1.0
+    bar_beats: 4
+    glow: 1.05
+
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "GAIN", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "ECHO", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05030e
+    color_a: #x7cf0ff
+    color_b: #xff4bd8
+    color_c: #xffe9b0
+
+    stages: [
+        {kind: "bloom", threshold: 0.45, strength: 1.35, levels: 4}
+    ]
+
+    shader: draw.DrawVjFxScreen {
+        // Level at a folded angle, floored so silence still draws a ring.
+        petal: fn(ang: float, age: float, gain: float) -> float {
+            // Fold 0..1 to 0..1..0: no seam where the circle closes.
+            let f = 1.0 - abs(fract(ang) * 2.0 - 1.0)
+            let idle = 0.055 + 0.05 * sin(f * 13.0 + self.time_beat.x * 1.1)
+            return clamp(max(self.audio_fft(f, age), idle) * gain, 0.0, 1.0)
+        }
+
+        fx_color: fn(uv: vec2, content: vec4, cmix: float) -> vec4 {
+            let aspect = 16.0 / 9.0
+            let p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5)
+            let r = length(p)
+            let spin = (clamp(self.user.y, 0.0, 1.0) - 0.5) * 0.9
+            let ang = atan2(p.y, p.x) / 6.2831853 + 0.5
+                + modf(self.time_beat.x * spin, 1.0)
+            let gain = 0.6 + 1.2 * clamp(self.user.x, 0.0, 1.0)
+
+            // The inner disc breathes on the broadband level; the petals
+            // grow outward from its rim.
+            let core = 0.12 + 0.05 * self.audio_env.w + 0.03 * self.time_beat.w
+            let live = self.petal(ang, 0.0, gain)
+            let rim = core + live * 0.30
+
+            // Petal body + a hot edge exactly at the rim.
+            let body = smoothstep(0.01, 0.0, r - rim)
+            let edge = exp(0.0 - abs(r - rim) * 70.0)
+
+            // ECHO: three older rings, each further out and dimmer. Every
+            // one is a plain texture read of the spectrogram history — no
+            // feedback buffer, no accumulator.
+            let echo = clamp(self.user.z, 0.0, 1.0)
+            let mut halo = 0.0
+            let a1 = 0.03 + 0.10 * echo
+            halo = halo + exp(0.0 - abs(r - (core + self.petal(ang, a1, gain) * 0.44)) * 42.0) * 0.45
+            let a2 = 0.07 + 0.22 * echo
+            halo = halo + exp(0.0 - abs(r - (core + self.petal(ang, a2, gain) * 0.60)) * 30.0) * 0.28
+            let a3 = 0.12 + 0.38 * echo
+            halo = halo + exp(0.0 - abs(r - (core + self.petal(ang, a3, gain) * 0.78)) * 22.0) * 0.16
+
+            // Colour by which way round the flower we are, hot at the edge.
+            let hue = 1.0 - abs(fract(ang) * 2.0 - 1.0)
+            let tint = self.col_a.xyz.mix(self.col_b.xyz, hue)
+
+            let mut rgb = self.col_bg.xyz
+            rgb = rgb + tint * (body * 0.55 + halo * 0.85)
+            rgb = rgb + self.col_c.xyz * (edge * 1.1)
+            // The bass sits in the middle as a soft lamp.
+            rgb = rgb + self.col_b.xyz * (exp(0.0 - r * 9.0) * (0.12 + 0.7 * self.audio_env.x))
+            return vec4(rgb * self.fog.y, 1.0)
+        }
+    }
+}

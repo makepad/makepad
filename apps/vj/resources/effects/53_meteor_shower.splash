@@ -1,0 +1,107 @@
+// METEOR SHOWER — scripted emitters: jets streak DOWN across the sky on
+// the off-beats; where each one "lands", a ring shock pops two beats
+// later. Pattern taught: slot-less spawns for one-shots, staggered kinds.
+{
+    name: "Meteor Shower"
+    engine: "emitters"
+    particles: 900
+    size: 0.12
+
+    // PERFORMANCE DIALS — the tick reads the dial params as fx.p0..fx.p3;
+    // mid-knob reproduces the stock shower exactly.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BLAZE", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x040208
+    cam_dist: 16.0
+    cam_height: 3.0
+    cam_orbit: 0.02
+
+    stages: [
+        {kind: "feedback", amount: "min(0.65 + (p1-0.5)*0.6, 0.97)", zoom: 1.0, rotate: 0.0, dim: 0.88},
+        {kind: "bloom", threshold: 0.35, strength: "1.6 * (0.25 + 1.5*p2)", levels: 3}
+    ]
+
+    frame: fn(fx) {
+        let out = []
+        // BEAT EDGE, robustly: a bare `phase < dt*2` is a single-frame
+        // window a fixed-step clock can straddle forever (the thumbnail
+        // bake's 30fps at 120bpm steps phase by exactly dt*2). Floor the
+        // window wider than one step and key each spawn to the BEAT
+        // NUMBER via `slot`, so an extra frame in the window replaces the
+        // spawn instead of doubling it.
+        let edge = fx.phase < max(fx.dt * 2.0, 0.075)
+        let n = floor(fx.beat)
+        // A meteor on every beat, entering high on one side.
+        if edge {
+            let lane = modf(n * 2.7, 12.0) - 6.0
+            out.push({
+                kind: "jet"
+                slot: 60 + modf(n, 6.0)
+                pos: vec3(lane + 6.0, 8.0, 0.0 - modf(n, 4.0))
+                vel: vec3(-6.0, -5.5, 0.0)
+                life: 1.6
+                speed: 0.9
+                // BLAZE dial: meteor size rides fx.p0.
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
+                fraction: 0.45
+                gravity: 0.0
+                color: #xffffff
+                color2: #x88bbff
+                seed: n
+            })
+        }
+        // The impact ring where a meteor from two beats ago came down.
+        if edge && modf(n, 2.0) < 0.5 {
+            let lane2 = modf((n - 2.0) * 2.7, 12.0) - 6.0
+            out.push({
+                kind: "ring"
+                slot: 50 + modf(n * 0.5, 2.0)
+                pos: vec3(lane2 - 3.0, -1.0, 0.0)
+                life: 1.4
+                speed: 5.0 * (0.5 + fx.p0)
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
+                fraction: 0.8
+                color: #xffffff
+                color2: #x99aaff
+                seed: n * 3.3
+            })
+        }
+        return out
+    }
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxEmitter {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let heat = clamp(1.0 - attr.y * 3.0, 0.0, 1.0)
+            let tint0 = self.e_col_a.mix(self.e_col_b, t)
+            let pal = tint0.xyz.mix(
+                content.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(cmix * 1.2, 0.0, 1.0)
+            )
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
+            let fade = (1.0 - t) * (1.0 - t)
+            return vec4(rgb, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.4, d)
+            let halo = 1.0 - smoothstep(0.1, 0.9, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
+}

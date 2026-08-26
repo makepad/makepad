@@ -1,0 +1,103 @@
+// BARN DOORS ROTATING — the flat barn-door wipe done as CARPENTRY: deck A
+// is two panels on real hinges that swing back into the room, so the split
+// does not just part, it opens — each panel foreshortens toward its hinge
+// and dims as it turns away, and deck B is the wall behind them.
+//
+// Pattern taught: the plane-in-3D helper (`plane_uv` below, the family's
+// shared block — the reference copy lives in the Perspective doc), used
+// with a HINGE that is not the plane's centre. The helper takes the pivot
+// in world coordinates and puts it back after the intersection, so a panel
+// swung about the frame's left edge is the same three lines of code as a
+// card spun about its middle.
+//
+// HINGE picks where the hinges are: at the frame edges (the doors open
+// from the middle) or on the centre line (they open like a book). Either
+// way the panels swing AWAY from the camera, so they never overlap and no
+// pixel is ever a blend of the two.
+{
+    name: "Barn Doors Rotating"
+    engine: "transition"
+    p0: 0.5
+    dials: [
+        {name: "SWING", bind: "p0", default: 0.5},
+        {name: "HINGE", bind: "p1", default: 0.0},
+        {name: "DIP", bind: "p2", default: 0.0}
+    ]
+    shader: draw.DrawVjFxDuo {
+        // ---- THE SHARED HELPER: one ray, one rotated video plane --------
+        // The plane is the rectangle of half-extents (aspect, 1) * 0.5/f
+        // whose HINGE sits at world (piv.x, piv.y, -d), spun about that
+        // hinge by the Euler angles `ang` (Rz then Ry then Rx, radians).
+        // Returns (plane u, plane v, on-quad 0/1, front-facing 0/1).
+        plane_uv: fn(uv: vec2, ang: vec3, piv: vec2, d: float, f: float) -> vec4 {
+            let a = self.aspect()
+            let c0 = cos(ang.x)
+            let s0 = sin(ang.x)
+            let c1 = cos(ang.y)
+            let s1 = sin(ang.y)
+            let c2 = cos(ang.z)
+            let s2 = sin(ang.z)
+            // The ray through this fragment (y up) and the eye, both
+            // measured from the hinge.
+            let rd = vec3((uv.x - 0.5) * a, 0.5 - uv.y, 0.0 - f)
+            let ro = vec3(0.0 - piv.x, 0.0 - piv.y, d)
+            let r1 = vec3(rd.x * c2 + rd.y * s2, rd.y * c2 - rd.x * s2, rd.z)
+            let o1 = vec3(ro.x * c2 + ro.y * s2, ro.y * c2 - ro.x * s2, ro.z)
+            let r2 = vec3(r1.x * c1 - r1.z * s1, r1.y, r1.x * s1 + r1.z * c1)
+            let o2 = vec3(o1.x * c1 - o1.z * s1, o1.y, o1.x * s1 + o1.z * c1)
+            let r3 = vec3(r2.x, r2.y * c0 + r2.z * s0, r2.z * c0 - r2.y * s0)
+            let o3 = vec3(o2.x, o2.y * c0 + o2.z * s0, o2.z * c0 - o2.y * s0)
+            // Intersect z = 0. A ray running parallel to the plane is
+            // NUDGED, never divided by zero — it lands far off the quad.
+            let den = r3.z + (1.0 - step(0.0001, abs(r3.z))) * 0.001
+            let k = 0.0 - o3.z / den
+            let hx = o3.x + k * r3.x + piv.x
+            let hy = o3.y + k * r3.y + piv.y
+            let pu = hx * f / a + 0.5
+            let pv = 0.5 - hy * f
+            let onq = step(0.0, pu) * step(pu, 1.0) * step(0.0, pv) * step(pv, 1.0)
+                * step(0.001, k)
+            return vec4(pu, pv, onq, step(0.0, o3.z))
+        }
+
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let tc = clamp(t, 0.0, 1.0)
+            let fl = 1.12
+            // Half the frame's width in world units: the offset of the
+            // edge hinges (the plane's half-extents are (aspect, 1)*0.5/f).
+            let edge = 0.5 * self.aspect() / fl
+            let flip = step(0.5, self.user.y)
+            let hg = mix(edge, 0.0, flip)
+            // Edge hinges and centre hinges open in opposite senses; both
+            // send the free edge AWAY from the camera.
+            let sgn = mix(1.0, -1.0, flip)
+            // SWING: 1.25..2.05 rad, i.e. always past edge-on at the top.
+            // The eased beat pulse rattles the doors on the way (bounded:
+            // pulse is 0..1 and the whole term is scaled by the sweep).
+            let e = pow(tc, 1.15)
+            let sw = (1.25 + 0.8 * clamp(self.user.x, 0.0, 1.0) + 0.04 * self.time_beat.w) * e
+            let vis = 1.0 - smoothstep(0.9, 1.0, tc)
+            // A panel dims as it turns off-axis; exactly 1 at rest, which
+            // is what keeps t = 0 deck A to the pixel.
+            let sh = 0.45 + 0.55 * abs(cos(sw))
+            // LEFT panel: the half of the frame with u <= 0.5.
+            let pl = self.plane_uv(uv, vec3(0.0, sw * sgn, 0.0), vec2(0.0 - hg, 0.0), 1.0, fl)
+            let hitl = pl.z * step(pl.x, 0.5) * vis
+            // RIGHT panel: u >= 0.5, hinged on the mirrored side.
+            let pr = self.plane_uv(uv, vec3(0.0, 0.0 - sw * sgn, 0.0), vec2(hg, 0.0), 1.0, fl)
+            let hitr = pr.z * step(0.5, pr.x) * vis
+            // Deck B is the wall; the panels lay over it, never blended.
+            let mut c = self.deck_b(uv).xyz
+            c = mix(c, self.deck_a(vec2(pl.x, pl.y)).xyz * sh, hitl)
+            c = mix(c, self.deck_a(vec2(pr.x, pr.y)).xyz * sh, hitr)
+            // The opening edge catches a highlight, so the gap reads as a
+            // gap and not as a wipe.
+            let gap = (1.0 - smoothstep(0.0, 0.008, abs(pl.x - 0.5))) * hitl
+                + (1.0 - smoothstep(0.0, 0.008, abs(pr.x - 0.5))) * hitr
+            c = c + vec3(1.0, 1.0, 1.0) * (gap * 0.3 * e)
+            // DIP: duck through black mid-open (0 = off, the stock look).
+            let dim = 1.0 - 4.0 * tc * (1.0 - tc) * self.user.z * 0.9
+            return vec4(c * dim, 1.0)
+        }
+    }
+}

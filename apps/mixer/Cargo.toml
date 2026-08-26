@@ -1,0 +1,23 @@
+# Makepad Mixer — an LR-Mix control surface for a small-format digital
+# rack mixer speaking OSC 1.0 over UDP (port 10024).
+#
+# SAFETY IS THE ARCHITECTURE HERE. The transmit path is built so that the
+# application cannot emit a dangerous OSC address even by bug:
+#   - safety::Param is a closed enum: the ONLY way to construct an outgoing
+#     message. Phantom power, snapshots, presets, routing, console init and
+#     preferences are not variants, so they cannot be expressed.
+#   - safety::GuardedSocket::transmit is the ONE UdpSocket::send_to in the
+#     client; it re-parses the address out of the encoded bytes and refuses
+#     anything matching the deny list, plus any non-loopback destination
+#     when the app runs in --fake (test) mode.
+# The tests in src/safety.rs and src/livewire.rs assert both layers against
+# an in-process fake mixer on UDP loopback.
+
+[package]
+name = "makepad-mixer"
+version = "0.1.0"
+edition = "2021"
+default-run = "makepad-mixer"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }

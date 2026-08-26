@@ -1,0 +1,56 @@
+// SPIN CUBE — the live video wrapped onto one big, slowly tumbling cube:
+// every face plays the clip, the silhouette drifts on a tilted axis and the
+// face edges flash on the beat. Pattern taught here: the videomesh engine's
+// placement hooks — fx_axis pins the tumble axis, fx_place composes a steady
+// spin with a slow breathing wobble (both pure functions of time), and the
+// engine's orbit camera does the rest.
+{
+    name: "Spin Cube"
+    engine: "videomesh"
+    shape: "box"
+    seed: 3
+
+    size: 2.6
+    fly: 0.9
+    spin: 1.0
+
+    beat_pulse: 0.45
+    input0: "test"
+
+    color_bg: #x05070f
+    color_a: #x40c8f0
+    color_b: #x9040f0
+    color_c: #xd8ecff
+
+    fog: 0.0
+    glow: 1.0
+
+    stages: [
+        {kind: "bloom", threshold: 0.72, strength: 0.7, levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the choreography and pixel math this
+    // effect runs. Rewrite it and the effect looks different; the
+    // geometry, the beat and the content coupling keep working,
+    // because the block SUBCLASSES the engine shader.
+    // Inputs: fx_color t = light drive, attr = (hash, face, edge, id).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxVideomesh {
+        fx_axis: fn(id: float, hash: float) -> vec3 {
+            return vec3(0.45, 1.0, 0.3)
+        }
+        fx_place: fn(id: float, hash: float, t: float) -> vec4 {
+            let rate = 0.5 * (1.0 + clamp(self.user.x, 0.0, 4.0))
+            return vec4(0.0, 0.0, 0.0, t * rate + 0.6 * sin(t * 0.23))
+        }
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let lit = content.xyz * (t * (0.5 + 0.5 * attr.z))
+            let rim = self.col_c.xyz * (1.0 - attr.z)
+                * (0.3 + self.time_beat.w * 1.2 + clamp(self.user.z, 0.0, 4.0))
+            return vec4((lit + rim) * self.fog.y, 1.0)
+        }
+    }
+}

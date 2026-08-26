@@ -1,0 +1,22 @@
+// MIRROR HALL — fullscreen family: the live content folded against itself
+// while a slow feedback rotation drags it into an endless corridor.
+{
+    name: "Mirror Hall"
+    engine: "screen"
+    input0: "test"
+
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "FOLD", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "SPIN", bind: "p2", default: 0.5}
+    ]
+
+    stages: [
+        {kind: "mirror", p1: 0.8, p2: "min(0.9 * (0.2 + 1.6*p0), 1.0)"},
+        {kind: "feedback", amount: "min(0.8 + (p1-0.5)*0.34, 0.97)", zoom: 1.025,
+         rotate: "sin(bar * tau) * 0.012 + (p2-0.5)*0.04", dim: 0.95},
+        {kind: "bloom", threshold: 0.6, strength: 1.1, levels: 2}
+    ]
+}

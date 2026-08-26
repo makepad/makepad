@@ -11,6 +11,41 @@ It also has a large set of AI backends integrated for embedding llms or generati
 
 This repository contains the core engine, widgets, tools, and examples.
 
+## Building the VJ example app
+
+Rust stable is the toolchain everywhere: https://rustup.rs
+
+**macOS** — install Rust and the Xcode command line tools, then:
+
+```bash
+cargo run -p makepad-vj --release
+```
+
+**Windows** — install Rust, Visual Studio 2022 (Desktop development with
+C++), and the NVIDIA CUDA toolkit (any recent version; the build finds it
+by itself). Then the same `cargo run -p makepad-vj --release`. Without a
+CUDA toolkit the build still links — the GPU-AI lanes just stub out.
+
+**Linux** — the VJ currently only compiles with CUDA present, and the
+lane is not regularly tested; expect to fix small things. The errors are
+shallow — point an AI coding assistant at them and it will get you
+building.
+
+**What CUDA is for**: the VJ uses the GPU-AI lane for audio source
+separation (BS-RoFormer splits a track into vocals/drums/bass/other,
+which drives the stem mutes and the karaoke word timing). The app runs
+fine without it — those features just stay off.
+
+**Model files install from inside the app.** The music decks use two
+MIT-licensed model files: the BS-RoFormer stem splitter (527 MB) and the
+Whisper large-v3-turbo transcriber (1.6 GB, karaoke word timing). On a
+machine that lacks them the music page shows an **INSTALL MODELS** row
+under the track explorer — accept the licenses and the app downloads both
+(resumable, sha256-verified) into `local/` in the checkout. Until then the
+VJ reports "stems: model not installed" and carries on. Existing copies
+are found via `VJ_STEMS_CKPT` / `MAKEPAD_VOICE_MODEL` or the standard
+`local/` paths.
+
 ## What Makepad Is
 
 - A cross-platform UI runtime for native and web targets.

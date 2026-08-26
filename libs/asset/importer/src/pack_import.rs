@@ -9,7 +9,9 @@
 //! metadata are byte-identical.
 
 use crate::glb::inspect_glb;
-use crate::thumbs::{jpeg_dims, parse_wav, png_dims};
+use crate::stateful_billboard::StatefulBillboard;
+use crate::world_nav::WorldNav;
+use crate::thumbs::{jpeg_dims, parse_wav, png_dims, thumbnail_is_placeholder};
 use crate::videothumb::probe_video;
 use makepad_asset_client::json::{self, obj, s, Value};
 use makepad_asset_client::util::from_hex_exact;
@@ -19,11 +21,11 @@ use makepad_asset_data::limits::{
     MAX_STRING_BYTES, MAX_TEXTURE_DIM, MAX_TRIANGLES, MAX_VERTICES, THUMBNAIL_MIN_DIM,
 };
 use makepad_asset_data::{
-    sha256, AssetAlias, AssetFile, AssetKind, Axis, BlobId, Bounds, Capabilities, CoordinateSystem,
+    sha256, Anchor, AssetAlias, AssetFile, AssetKind, Axis, BlobId, Bounds, Capabilities, CoordinateSystem,
     DerivativePolicy, DeviceTier, FileRole, ImageDims, ImportAsset, ImportFile, ImportManifest,
-    ImportThumbnail, MediaType, Metrics, PackEntryKey, Pivot, Redistribution, Rights,
-    SourceCollection, SourceCollectionId, SourceOrigin, ThumbnailMedia, ThumbnailMeta, Vec3,
-    IMPORT_ASSET_ID_POLICY_V1,
+    ImportThumbnail, MediaType, Metrics, PackEntryKey, Pivot, Quat, Redistribution, Rights,
+    SourceCollection, SourceCollectionId, SourceOrigin, ThumbnailCells, ThumbnailMedia,
+    ThumbnailMeta, ThumbnailView, ThumbnailViewKind, Transform, Vec3, IMPORT_ASSET_ID_POLICY_V1,
 };
 use makepad_render::skin::SkinnedModel;
 use makepad_render::StaticModel;
@@ -47,7 +49,32 @@ const MAX_SOURCE_CONFIG_BYTES: u64 = MAX_DOCUMENT_BYTES as u64;
 const MAX_WALK_DEPTH: usize = 16;
 const MAX_WALK_DIRS: usize = 4096;
 const MAX_WALK_ENTRIES: usize = 8192;
-const MAX_DIR_ENTRIES: usize = 1024;
+/// Entries the walk will collect from ONE directory. A defensive bound on
+/// `list_dir_bounded`'s `names` vector — the whole tree is already bounded
+/// by `MAX_WALK_ENTRIES`, so this only decides how flat a pack may be.
+///
+/// It is NOT a content-contract number: nothing here is encoded, digested,
+/// or compared against a golden. The contract's own shape is much wider —
+/// `MAX_IMPORT_ASSETS` (1024) assets per pack at up to
+/// `MAX_IMPORT_FILES_PER_ASSET` (32) files each.
+///
+/// At 1024 this bound contradicted the packs it serves. Vendors ship flat
+/// kits — every model in one folder — and a STAGED model is five directory
+/// entries that all share one entry key: payload, thumbnail, and the
+/// `.aomesh` / `.ao.png` / `.shadowsdf` the AO bake writes beside it. So
+/// 1024 entries meant ~204 models, and Kenney's brick-kit (296 models,
+/// 1480 entries) and nature-kit (329, ~1645) could not be imported at all.
+///
+/// Sharding such a pack into subdirectories is NOT the alternative: a
+/// directory segment is part of the entry key, and the key is the published
+/// alias (`{source_id}/{pack_name}/{key}`), so sharding renames every asset
+/// in the pack — see
+/// `a_directory_segment_becomes_part_of_the_entry_key_and_the_alias`.
+///
+/// 4096 matches `MAX_WALK_DIRS`, clears the largest real kit better than
+/// twice over, and stays strictly under `MAX_WALK_ENTRIES` so a pack that
+/// is flat AND huge still meets a per-directory refusal it can read.
+const MAX_DIR_ENTRIES: usize = 4096;
 const MAX_GLB_CHUNKS: usize = 8;
 const MAX_GLB_NODES: usize = 4096;
 const MAX_GLB_MESHES: usize = 1024;
@@ -202,6 +229,13 @@ pub fn kenney_pack(name: &str) -> Option<&'static KenneyPack> {
     KENNEY_PACKS.iter().find(|p| p.name == name)
 }
 
+/// Official kenney.nl page of one kit (catalogued page, else the slug URL).
+pub fn kenney_page(name: &str) -> String {
+    kenney_pack(name)
+        .map(|p| p.page.to_string())
+        .unwrap_or_else(|| format!("{KENNEY_ASSETS_HOME}/{name}"))
+}
+
 /// Source/rights spec for one Kenney pack. Unknown slugs still use the same
 /// explicit CC-BY-4.0 Kenney grant (never CC0); only the pack name / page
 /// change. Refuse empty or illegal slugs so a caller cannot invent rights.
@@ -221,9 +255,6 @@ pub fn kenney_spec(pack_name: &str) -> Result<PackSourceSpec, PackImportError> {
     }
     let pack = kenney_pack(name);
     let version = pack.map(|p| p.version).unwrap_or("1.0");
-    let page = pack
-        .map(|p| p.page.to_string())
-        .unwrap_or_else(|| format!("https://kenney.nl/assets/{name}"));
     Ok(PackSourceSpec {
         source_id: Some(KENNEY_SOURCE_ID.into()),
         source_title: Some(KENNEY_SOURCE_TITLE.into()),
@@ -234,7 +265,12 @@ pub fn kenney_spec(pack_name: &str) -> Result<PackSourceSpec, PackImportError> {
         terms_digest: Some(kenney_terms_digest_hex()),
         terms_url: Some(KENNEY_TERMS_URL.into()),
         credits: Some(KENNEY_CREDITS.into()),
-        source: Some(page),
+        // Collection-level origin, NOT the pack page: these rights are the
+        // registered terms of the ONE `kenney` source collection, and the
+        // server refuses a second registration with a different digest.
+        // A per-pack URL here made every kit after the first 409. The pack
+        // page is `https://kenney.nl/assets/<pack_name>` (see `kenney_page`).
+        source: Some(KENNEY_ASSETS_HOME.into()),
         source_archive: None,
         redistribution: Some(KENNEY_REDISTRIBUTION.into()),
         derivatives: Some(KENNEY_DERIVATIVES.into()),
@@ -345,6 +381,26 @@ pub struct PackCompileReport {
     pub source_path: PathBuf,
     pub manifest_path: PathBuf,
     pub plan_path: PathBuf,
+    /// Models the pack ships that this importer could not represent, each
+    /// with the reason. A compile SUCCEEDS with these present: one model a
+    /// vendor kit happens to ship in a shape we cannot read must not cost
+    /// the other three hundred. Never silent — the caller reports them.
+    pub skipped_models: Vec<(String, String)>,
+}
+
+/// Progress observed while [`compile_pack_with_progress`] walks the pack:
+/// files fully hashed+measured so far / discovered total, and cumulative
+/// bytes hashed so far / total bytes across every discovered file (both
+/// totals known upfront, from the same directory walk that already stats
+/// every file). `current` names the file that just finished (its
+/// pack-relative path); empty for the initial call, before the first file.
+#[derive(Clone, Debug, Default)]
+pub struct CompileProgress {
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub current: String,
 }
 
 /// Compile one local pack into canonical documents + an upload plan.
@@ -355,6 +411,25 @@ pub fn compile_pack(
     cli: PackSourceSpec,
     source_config: Option<&Path>,
     log: bool,
+) -> Result<PackCompileReport, PackImportError> {
+    compile_pack_with_progress(pack_dir, out_dir, cli, source_config, log, None)
+}
+
+/// As [`compile_pack`], with `progress` called once files are known (their
+/// count and total bytes) and again after each file is fully hashed and
+/// measured — this is the ONLY per-file work in a compile, so it is also
+/// the only source of granular progress here. Called on every file, not
+/// throttled: a big pack calls back a few hundred to a few thousand times
+/// over the whole compile, which is cheap for any reasonable callback: the
+/// classic-pack publish path throttles what it forwards from this into a
+/// UI phase message (see `apps/asset-ui/src/import_classic.rs`).
+pub fn compile_pack_with_progress(
+    pack_dir: &Path,
+    out_dir: &Path,
+    cli: PackSourceSpec,
+    source_config: Option<&Path>,
+    log: bool,
+    progress: Option<&mut dyn FnMut(CompileProgress)>,
 ) -> Result<PackCompileReport, PackImportError> {
     let mut spec = PackSourceSpec::default();
     if let Some(path) = source_config {
@@ -369,7 +444,7 @@ pub fn compile_pack(
 
     let (discovered, dir_snaps) = scan_pack(&pack_root)?;
     fire_after_enum_hook();
-    let built = build_manifest(&pack_root, &resolved, discovered, &dir_snaps)?;
+    let built = build_manifest(&pack_root, &resolved, discovered, &dir_snaps, progress)?;
     if log {
         eprintln!(
             "[asset-worker] import-pack {} assets / {} blobs → {}",
@@ -803,6 +878,9 @@ fn parse_redistribution(text: &str) -> Result<Redistribution, PackImportError> {
         "allowed" => Ok(Redistribution::Allowed),
         "attribution-required" => Ok(Redistribution::AttributionRequired),
         "forbidden" => Ok(Redistribution::Forbidden),
+        // The classic-pack declaration: the user's own game data, served on
+        // the user's LAN only.
+        "user-owned-local" | "lan-local" => Ok(Redistribution::LanLocal),
         other => Err(PackImportError::new(
             PackImportErrorKind::Rights,
             format!("unknown redistribution policy {other}"),
@@ -815,6 +893,7 @@ fn parse_derivatives(text: &str) -> Result<DerivativePolicy, PackImportError> {
         "allowed" => Ok(DerivativePolicy::Allowed),
         "attribution-required" => Ok(DerivativePolicy::AttributionRequired),
         "forbidden" => Ok(DerivativePolicy::Forbidden),
+        "local-preview-only" | "local-preview" => Ok(DerivativePolicy::LocalPreview),
         other => Err(PackImportError::new(
             PackImportErrorKind::Rights,
             format!("unknown derivatives policy {other}"),
@@ -850,6 +929,30 @@ enum MediaKind {
     Wav,
     Mp4,
     Glb,
+    /// `<stem>.aomesh`: the offline AO bake's mesh (ao_uv lane) for
+    /// `<stem>.glb`. A sidecar, never an asset of its own.
+    AoMesh,
+    /// `<stem>.ao.png`: the AO atlas the aomesh samples.
+    AoPng,
+    /// `<stem>.shadowsdf`: the baked shadow SDF for `<stem>.glb`.
+    ShadowSdf,
+    /// `<stem>.billboard`: a stateful-billboard manifest. ONE catalog asset
+    /// per actor — its `Texture` file is the same-stem packed sprite sheet,
+    /// its `Source` file this text, and the per-frame PNGs it names never
+    /// become assets of their own.
+    Billboard,
+    /// `<stem>.spawn`: where a player stands in `<stem>.glb` and how high the
+    /// floor, eye and step are. Published as manifest ANCHORS on the World,
+    /// never as a blob — a walker must not have to fetch a second file to
+    /// know it is standing on the floor.
+    Spawn,
+    /// `<stem>.place`: the world's actor/item placements (`world-place 1`
+    /// text, self-identifying) — every THING with a billboard actor key,
+    /// position and yaw. Published as a Source-role text blob beside the
+    /// world GLB so a game can populate the map; a typed FileRole waits
+    /// for the next schema bump (a new canon_enum tag hard-errors every
+    /// deployed client).
+    Place,
 }
 
 impl MediaKind {
@@ -860,8 +963,22 @@ impl MediaKind {
             "wav" => Some(Self::Wav),
             "mp4" => Some(Self::Mp4),
             "glb" => Some(Self::Glb),
+            "aomesh" => Some(Self::AoMesh),
+            "shadowsdf" => Some(Self::ShadowSdf),
+            "billboard" => Some(Self::Billboard),
+            "spawn" => Some(Self::Spawn),
+            "place" => Some(Self::Place),
             _ => None,
         }
+    }
+
+    /// Derived companion of a same-stem GLB (published as extra file roles
+    /// on that mesh asset, skipped when no such GLB exists).
+    fn is_sidecar(self) -> bool {
+        matches!(
+            self,
+            Self::AoMesh | Self::AoPng | Self::ShadowSdf | Self::Spawn | Self::Place
+        )
     }
 
     fn media_type(self) -> MediaType {
@@ -871,6 +988,9 @@ impl MediaKind {
             Self::Wav => MediaType::Wav,
             Self::Mp4 => MediaType::Mp4,
             Self::Glb => MediaType::Glb,
+            Self::AoMesh | Self::ShadowSdf => MediaType::Bin,
+            Self::AoPng => MediaType::Png,
+            Self::Billboard | Self::Spawn | Self::Place => MediaType::Text,
         }
     }
 
@@ -881,6 +1001,12 @@ impl MediaKind {
             Self::Wav => "wav",
             Self::Mp4 => "mp4",
             Self::Glb => "glb",
+            Self::AoMesh => "aomesh",
+            Self::AoPng => "ao_png",
+            Self::ShadowSdf => "shadowsdf",
+            Self::Billboard => "billboard",
+            Self::Spawn => "spawn",
+            Self::Place => "place",
         }
     }
 }
@@ -1072,7 +1198,7 @@ fn walk_dir(
     unix::bind_resolved(dir, &root.path, rel)?;
     let names = unix::list_dir_bounded(dir, rel, entries)?;
     let meta = dir.metadata().map_err(|e| {
-        PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+        PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
     })?;
     snaps.push(DirSnapshot {
         rel: rel.to_string(),
@@ -1719,7 +1845,7 @@ mod unix {
         entries: &mut usize,
     ) -> Result<Vec<String>, PackImportError> {
         let before = dir.metadata().map_err(|e| {
-            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
         })?;
         // Reopen from this descriptor via "." so each pass gets a new file
         // description (dup() shares the directory offset and the second
@@ -1729,16 +1855,16 @@ mod unix {
         if names != again {
             return Err(PackImportError::new(
                 PackImportErrorKind::Changed,
-                format!("directory {rel} mutated during listing"),
+                format!("directory {} mutated during listing", dir_label(rel)),
             ));
         }
         let after = dir.metadata().map_err(|e| {
-            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
         })?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(PackImportError::new(
                 PackImportErrorKind::Changed,
-                format!("directory {rel} identity changed during listing"),
+                format!("directory {} identity changed during listing", dir_label(rel)),
             ));
         }
         Ok(names)
@@ -1756,7 +1882,7 @@ mod unix {
             unsafe { close(fd) };
             return Err(PackImportError::new(
                 PackImportErrorKind::Io,
-                format!("fdopendir {rel}: {}", std::io::Error::last_os_error()),
+                format!("fdopendir {}: {}", dir_label(rel), std::io::Error::last_os_error()),
             ));
         }
         let result = collect_dir_names(dp, rel, entries);
@@ -1798,7 +1924,7 @@ mod unix {
                 if err != 0 {
                     return Err(PackImportError::new(
                         PackImportErrorKind::Io,
-                        format!("readdir {rel}: {}", std::io::Error::from_raw_os_error(err)),
+                        format!("readdir {}: {}", dir_label(rel), std::io::Error::from_raw_os_error(err)),
                     ));
                 }
                 break;
@@ -1807,7 +1933,7 @@ mod unix {
             let name = name.to_str().map_err(|_| {
                 PackImportError::new(
                     PackImportErrorKind::Malformed,
-                    format!("non-utf8 name under {rel}"),
+                    format!("non-utf8 name under {}", dir_label(rel)),
                 )
             })?;
             if name == "." || name == ".." {
@@ -1825,7 +1951,10 @@ mod unix {
             if names.len() >= MAX_DIR_ENTRIES {
                 return Err(PackImportError::new(
                     PackImportErrorKind::Content,
-                    format!("directory {rel} exceeds {MAX_DIR_ENTRIES} entries"),
+                    format!(
+                        "directory {} exceeds {MAX_DIR_ENTRIES} entries",
+                        dir_label(rel)
+                    ),
                 ));
             }
             names.push(name.to_string());
@@ -2051,6 +2180,18 @@ mod unix {
     }
 }
 
+/// A directory's relative path as a person can read it. The pack root's
+/// `rel` is the empty string, which turned every message about it into a
+/// blank ("directory  exceeds 1024 entries") — the one directory every pack
+/// has, and the one a reader most needs named.
+fn dir_label(rel: &str) -> &str {
+    if rel.is_empty() {
+        "<pack root>"
+    } else {
+        rel
+    }
+}
+
 fn skip_entry(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -2070,10 +2211,14 @@ fn skip_entry(name: &str) -> bool {
             | "thumbs.db"
             | ".ds_store"
     ) || matches!(
+        // `.place` is NOT here any more: it used to be a local-only
+        // artifact and this list dropped it during the WALK, before
+        // anything could classify it — which is why wiring `MediaKind::Place`
+        // everywhere else still published no placements. `.skinao` stays
+        // local.
         ext_of(&lower).as_deref(),
-        Some("txt" | "md" | "html" | "htm" | "url" | "pdf" | "aomesh" | "shadowsdf" | "spawn" | "place" | "skinao" | "billboard")
-    ) || lower.ends_with(".ao.png")
-        || lower.ends_with(".glb.shadowsdf")
+        Some("txt" | "md" | "html" | "htm" | "url" | "pdf" | "skinao")
+    ) || lower.ends_with(".glb.shadowsdf")
 }
 
 fn ext_of(name: &str) -> Option<String> {
@@ -2120,20 +2265,34 @@ fn classify_rel(rel: &str) -> Result<(String, String, MediaKind), PackImportErro
         }
         let last = i + 1 == segments.len();
         if last {
-            let ext = ext_of(seg).ok_or_else(|| {
-                PackImportError::new(
-                    PackImportErrorKind::Unsupported,
-                    format!("unsupported file {rel}"),
-                )
-            })?;
-            let kind = MediaKind::from_ext(&ext).ok_or_else(|| {
-                PackImportError::new(
-                    PackImportErrorKind::Unsupported,
-                    format!("unsupported file {rel}"),
-                )
-            })?;
-            let stem = seg.rsplit_once('.').map(|(s, _)| s).unwrap_or(seg);
-            let stem = sanitize_segment(stem, false, rel)?;
+            // `<stem>.ao.png` is the AO atlas sidecar of `<stem>.glb`: its
+            // key is the GLB's, so it attaches instead of becoming a texture.
+            let lower = seg.to_ascii_lowercase();
+            let (ext, kind, stem) = if let Some(stem) = lower.strip_suffix(".ao.png") {
+                if stem.is_empty() {
+                    return Err(PackImportError::new(
+                        PackImportErrorKind::Unsupported,
+                        format!("unsupported file {rel}"),
+                    ));
+                }
+                ("ao.png".to_string(), MediaKind::AoPng, seg[..stem.len()].to_string())
+            } else {
+                let ext = ext_of(seg).ok_or_else(|| {
+                    PackImportError::new(
+                        PackImportErrorKind::Unsupported,
+                        format!("unsupported file {rel}"),
+                    )
+                })?;
+                let kind = MediaKind::from_ext(&ext).ok_or_else(|| {
+                    PackImportError::new(
+                        PackImportErrorKind::Unsupported,
+                        format!("unsupported file {rel}"),
+                    )
+                })?;
+                let stem = seg.rsplit_once('.').map(|(s, _)| s).unwrap_or(seg);
+                (ext, kind, stem.to_string())
+            };
+            let stem = sanitize_segment(&stem, false, rel)?;
             let file_seg = format!("{stem}.{ext}");
             check_windows_reserved(&file_seg, rel)?;
             dir_parts.push(file_seg);
@@ -2145,8 +2304,8 @@ fn classify_rel(rel: &str) -> Result<(String, String, MediaKind), PackImportErro
                 ));
             }
             let key = pack_path
-                .rsplit_once('.')
-                .map(|(k, _)| k.to_string())
+                .strip_suffix(&format!(".{ext}"))
+                .map(str::to_string)
                 .unwrap_or_else(|| pack_path.clone());
             return Ok((pack_path, key, kind));
         }
@@ -2237,6 +2396,10 @@ struct BuiltPack {
     collection: SourceCollection,
     manifest: ImportManifest,
     blobs: Vec<PlanBlob>,
+    /// Models the pack ships that this importer could not represent, each
+    /// with the reason it was left out. Never a silent drop: the compile
+    /// report carries these up so a caller can say what did not arrive.
+    skipped: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -2257,6 +2420,30 @@ struct HashedFile {
     media_millis: u32,
     glb: Option<GlbMeasure>,
     identity: FileIdentity,
+    /// False for a sidecar the renderer cannot read (stale bake format,
+    /// truncated file): it is left behind, the pack still compiles.
+    sidecar_ok: bool,
+    /// Parsed `.billboard` manifest (states, frames, sheet layout).
+    billboard: Option<StatefulBillboard>,
+    /// Parsed `.spawn` sidecar (player starts + walk heights).
+    nav: Option<WorldNav>,
+    /// A flat / fully transparent image: never a legal thumbnail.
+    placeholder: bool,
+    /// The cell layout a packed sheet stamped into itself, when this image
+    /// is one. Read from the bytes that were hashed, so a thumbnail declares
+    /// the layout its packer WROTE instead of one a consumer measured.
+    sheet: Option<(ThumbnailCells, f32)>,
+}
+
+/// The declared views of a thumbnail file: an `anim` view when the picture
+/// stamped its own cell layout, nothing at all otherwise. A still that says
+/// nothing about itself is honest — the alternative was every consumer
+/// measuring the pixels and calling a 1024-square render a 64-frame sheet.
+fn sheet_views(file: &HashedFile) -> Vec<ThumbnailView> {
+    match file.sheet {
+        Some((cells, fps)) => vec![ThumbnailView::cells(ThumbnailViewKind::Anim, cells, fps)],
+        None => Vec::new(),
+    }
 }
 
 #[derive(Debug)]
@@ -2271,6 +2458,126 @@ struct GlbMeasure {
     rigged: bool,
     animated: bool,
     image_uris: Vec<String>,
+    /// Source-neutral connection points declared by the GLB contract. A
+    /// vendor adapter may author them, but the compiler only understands the
+    /// generic names and measured transforms.
+    anchors: Vec<Anchor>,
+}
+
+/// Generic vehicle contract carried by staged GLBs. Source adapters are free
+/// to recognize any vendor layout, but the compiler admits a Vehicle only
+/// when these four stable connection names are present exactly once.
+const VEHICLE_WHEEL_CONNECTIONS: [&str; 4] = [
+    "wheel_front_left",
+    "wheel_front_right",
+    "wheel_rear_left",
+    "wheel_rear_right",
+];
+
+fn json_f32(value: &Value) -> Option<f32> {
+    let n = match value {
+        Value::Int(v) => *v as f64,
+        Value::F64(v) => *v,
+        _ => return None,
+    };
+    (n.is_finite() && n >= f32::MIN as f64 && n <= f32::MAX as f64).then_some(n as f32)
+}
+
+fn json_vec3_f32(value: &Value) -> Option<[f32; 3]> {
+    let values = value.as_arr()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        json_f32(&values[0])?,
+        json_f32(&values[1])?,
+        json_f32(&values[2])?,
+    ])
+}
+
+/// Read the source-neutral wheel declarations an asset-side adapter authored.
+/// No path, pack or vendor name participates. A partial/duplicate declaration
+/// refuses instead of silently degrading a published Vehicle into a Mesh.
+fn inspect_vehicle_connections(
+    bytes: &[u8],
+    pack_path: &str,
+) -> Result<Option<Vec<Anchor>>, PackImportError> {
+    let container = parse_glb_container(bytes, pack_path)?;
+    let root = json::parse(container.json).map_err(|e| {
+        PackImportError::new(
+            PackImportErrorKind::Malformed,
+            format!("{pack_path}: GLB JSON: {e}"),
+        )
+    })?;
+    let Some(nodes) = root.get("nodes").and_then(Value::as_arr) else {
+        return Ok(None);
+    };
+    let mut anchors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for node in nodes {
+        let Some(extras) = node.get("extras") else {
+            continue;
+        };
+        if extras.get("kind").and_then(Value::as_str) != Some("vehicle_wheel") {
+            continue;
+        }
+        let connection = extras
+            .get("connection")
+            .and_then(Value::as_str)
+            .ok_or_else(|| glb_err(pack_path, "vehicle wheel missing connection"))?;
+        if !VEHICLE_WHEEL_CONNECTIONS.contains(&connection) {
+            return Err(glb_err(
+                pack_path,
+                format!("unknown vehicle wheel connection {connection}"),
+            ));
+        }
+        if !seen.insert(connection.to_string()) {
+            return Err(glb_err(
+                pack_path,
+                format!("duplicate vehicle wheel connection {connection}"),
+            ));
+        }
+        let [x, y, z] = extras
+            .get("anchor")
+            .and_then(json_vec3_f32)
+            .ok_or_else(|| glb_err(pack_path, format!("{connection} has invalid anchor")))?;
+        let pivot_ok = extras.get("pivot").and_then(json_vec3_f32).is_some();
+        let radius = extras.get("radius").and_then(json_f32).unwrap_or(0.0);
+        let width = extras.get("width").and_then(json_f32).unwrap_or(0.0);
+        if !pivot_ok || radius <= 0.0 || width <= 0.0 {
+            return Err(glb_err(
+                pack_path,
+                format!("{connection} has invalid pivot/radius/width"),
+            ));
+        }
+        anchors.push(Anchor {
+            name: connection.to_string(),
+            transform: Transform {
+                pos: Vec3::new(x, y, z),
+                rot: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        });
+    }
+    if anchors.is_empty() {
+        return Ok(None);
+    }
+    if seen.len() != VEHICLE_WHEEL_CONNECTIONS.len()
+        || VEHICLE_WHEEL_CONNECTIONS
+            .iter()
+            .any(|connection| !seen.contains(*connection))
+    {
+        return Err(glb_err(
+            pack_path,
+            format!(
+                "vehicle rig has {} of {} required wheel connections",
+                seen.len(),
+                VEHICLE_WHEEL_CONNECTIONS.len()
+            ),
+        ));
+    }
+    anchors.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Some(anchors))
 }
 
 fn build_manifest(
@@ -2278,19 +2585,225 @@ fn build_manifest(
     source: &ResolvedSource,
     files: Vec<DiscoveredFile>,
     dir_snaps: &[DirSnapshot],
+    mut progress: Option<&mut dyn FnMut(CompileProgress)>,
 ) -> Result<BuiltPack, PackImportError> {
+    let files_total = files.len();
+    let bytes_total: u64 = files.iter().map(|f| f.snapshot.len).sum();
+    let mut files_done = 0usize;
+    let mut bytes_done = 0u64;
+    if let Some(cb) = progress.as_deref_mut() {
+        cb(CompileProgress {
+            files_done,
+            files_total,
+            bytes_done,
+            bytes_total,
+            current: String::new(),
+        });
+    }
     let mut hashed = Vec::with_capacity(files.len());
+    let mut skipped: Vec<(String, String)> = Vec::new();
+    let mut skipped_keys: BTreeSet<String> = BTreeSet::new();
     for file in files {
-        hashed.push(hash_and_measure(root, file)?);
+        let pack_path = file.pack_path.clone();
+        let key = file.key.clone();
+        let file_len = file.snapshot.len;
+        match hash_and_measure(root, file) {
+            Ok(h) => {
+                files_done += 1;
+                bytes_done += file_len;
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(CompileProgress {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                        current: pack_path.clone(),
+                    });
+                }
+                hashed.push(h)
+            }
+            // ONE unusable entry must not cost the other three hundred.
+            // A pack is a vendor's folder, not a curated set: an entry in a
+            // shape this importer declares it does not SUPPORT — a model
+            // binding two texture FILES, a name too long to be a catalog
+            // key — is named and left out, and the rest of the kit imports.
+            //
+            // `Unsupported` and nothing else. `Malformed` is not a synonym
+            // for it: a truncated GLB, or one pointing a texture at
+            // `file:///…` (`refuse_external_uri`), means the pack is broken
+            // or trying something — those still refuse the pack whole, as do
+            // Io/Changed/Traversal/Special, which say the tree is moving or
+            // hostile underneath us and the re-verify contract depends on
+            // nothing being quietly dropped.
+            Err(error) if error.kind == PackImportErrorKind::Unsupported => {
+                // One line per ASSET, not per file: a model and its
+                // thumbnail share a key, and both fail an over-long-key
+                // check independently. Files arrive sorted by pack path, so
+                // `x.glb` is recorded before `x.png` and the reason named is
+                // the payload's own.
+                if skipped_keys.insert(key) {
+                    skipped.push((pack_path, error.to_string()));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // A skipped model takes its companions with it. The thumbnail and the
+    // AO/shadow sidecars beside a mesh exist to SERVE that mesh; left on
+    // their own they would publish as a stray image asset — a picture of a
+    // model the catalog does not have.
+    if !skipped_keys.is_empty() {
+        hashed.retain(|h| {
+            h.discovered.kind == MediaKind::Glb || !skipped_keys.contains(&h.discovered.key)
+        });
     }
 
     let mut thumb_for_glb: BTreeMap<String, usize> = BTreeMap::new();
     let mut used_as_thumb: BTreeSet<usize> = BTreeSet::new();
+    // Baked companions of each GLB, by the GLB's key. The AO pair travels
+    // together (an atlas without its mesh — or the reverse — is useless);
+    // the shadow SDF stands alone. Sidecars without a GLB are dropped.
+    let mut sidecars_for_glb: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    // Index of the `.spawn` sidecar per GLB key (anchors, not a blob).
+    let mut nav_for_glb: BTreeMap<String, usize> = BTreeMap::new();
     for glb in hashed.iter().filter(|f| f.discovered.kind == MediaKind::Glb) {
         let pick = pick_thumbnail(&hashed, &glb.discovered.key);
         if let Some(idx) = pick {
             thumb_for_glb.insert(glb.discovered.key.clone(), idx);
             used_as_thumb.insert(idx);
+        }
+        let find = |kind: MediaKind| {
+            hashed.iter().position(|f| {
+                f.discovered.kind == kind && f.sidecar_ok && f.discovered.key == glb.discovered.key
+            })
+        };
+        let mut attached = Vec::new();
+        if let (Some(mesh), Some(png)) = (find(MediaKind::AoMesh), find(MediaKind::AoPng)) {
+            attached.push(mesh);
+            attached.push(png);
+        }
+        if let Some(sdf) = find(MediaKind::ShadowSdf) {
+            attached.push(sdf);
+        }
+        // The placements sidecar rides the same lane, as a Source-role text
+        // blob on the world's own asset — this is the line that makes
+        // `.place` reach the catalog at all. Everything else about it was
+        // already wired (extension, `is_sidecar`, media type, the
+        // skip-as-its-own-asset arm, the role mapping, the parse on
+        // measure), so a `.place` was read, validated, and then silently
+        // dropped: 70 Doom worlds published with no placements and no
+        // complaint, and a game streaming a map got an empty level.
+        if let Some(place) = find(MediaKind::Place) {
+            attached.push(place);
+        }
+        // The spawn sidecar becomes anchors, never a file: it is metadata
+        // the manifest already has room for.
+        if let Some(idx) = hashed.iter().position(|f| {
+            f.discovered.kind == MediaKind::Spawn
+                && f.sidecar_ok
+                && f.discovered.key == glb.discovered.key
+        }) {
+            nav_for_glb.insert(glb.discovered.key.clone(), idx);
+        }
+        if !attached.is_empty() {
+            sidecars_for_glb.insert(glb.discovered.key.clone(), attached);
+        }
+    }
+
+    // Images that belong to something else and must never become their own
+    // catalog row: a mesh's own texture, and every file a billboard manifest
+    // packed away. Deleting such a row would break its owner.
+    let mut attached_images: BTreeSet<usize> = BTreeSet::new();
+    let pack_has_glb = hashed.iter().any(|f| f.discovered.kind == MediaKind::Glb);
+    for glb in hashed.iter().filter(|f| f.discovered.kind == MediaKind::Glb) {
+        let Some(&thumb_idx) = thumb_for_glb.get(&glb.discovered.key) else {
+            continue;
+        };
+        for uri in glb.glb.as_ref().map(|g| g.image_uris.as_slice()).unwrap_or(&[]) {
+            let tex = resolve_glb_texture(&hashed, glb, uri, thumb_idx)?;
+            if let Some(i) = hashed
+                .iter()
+                .position(|h| h.discovered.pack_path == tex.discovered.pack_path)
+            {
+                attached_images.insert(i);
+            }
+        }
+    }
+
+    // A companion `<key>_thumb` picture for an entry that is not a stateful
+    // billboard: a sound's spectrogram, a single-tile sprite's padded still.
+    // Without this the entry published `thumbnail: None` and drew a BLANK
+    // library tile forever — a re-import could not repair it, because the
+    // picture beside it was being published as its own card instead of being
+    // attached (or, for a sound, ignored outright).
+    let mut thumb_for_entry: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, file) in hashed.iter().enumerate() {
+        if !matches!(file.discovered.kind, MediaKind::Png | MediaKind::Jpeg) {
+            continue;
+        }
+        let Some(owner) = file
+            .discovered
+            .key
+            .strip_suffix(crate::billboard_sheet::THUMB_SUFFIX)
+        else {
+            continue;
+        };
+        if file.placeholder || !thumb_dims_ok(file.dims) {
+            continue;
+        }
+        thumb_for_entry.insert(owner.to_string(), index);
+        attached_images.insert(index);
+    }
+
+    // ONE asset per stateful-billboard actor: the manifest text plus the
+    // packed sheet it indexes. Its frame PNGs (483 `bossa2a8` cards, once)
+    // and its preview strip stay attached, never independent.
+    let mut sheet_for_billboard: BTreeMap<String, usize> = BTreeMap::new();
+    let mut thumb_for_billboard: BTreeMap<String, usize> = BTreeMap::new();
+    for manifest in hashed
+        .iter()
+        .filter(|f| f.discovered.kind == MediaKind::Billboard)
+    {
+        let Some(bb) = manifest.billboard.as_ref() else {
+            continue;
+        };
+        let key = &manifest.discovered.key;
+        let find_image = |want: &str| {
+            hashed.iter().position(|f| {
+                matches!(f.discovered.kind, MediaKind::Png | MediaKind::Jpeg)
+                    && f.discovered.key == want
+            })
+        };
+        if let Some(idx) = find_image(key) {
+            sheet_for_billboard.insert(key.clone(), idx);
+            attached_images.insert(idx);
+        }
+        if let Some(idx) = find_image(&format!("{key}{}", crate::billboard_sheet::THUMB_SUFFIX)) {
+            if hashed[idx].placeholder {
+                return Err(PackImportError::new(
+                    PackImportErrorKind::Content,
+                    format!(
+                        "{}: preview strip is a placeholder (flat or transparent)",
+                        hashed[idx].discovered.pack_path
+                    ),
+                ));
+            }
+            thumb_for_billboard.insert(key.clone(), idx);
+            attached_images.insert(idx);
+        }
+        let mut seen_frames: BTreeSet<&str> = BTreeSet::new();
+        for frame in &bb.frames {
+            if frame.file.is_empty() || !seen_frames.insert(frame.file.as_str()) {
+                continue;
+            }
+            let pack_path =
+                resolve_relative_pack_uri(&manifest.discovered.pack_path, &frame.file)?;
+            if let Some(idx) = hashed
+                .iter()
+                .position(|f| f.discovered.pack_path == pack_path)
+            {
+                attached_images.insert(idx);
+            }
         }
     }
 
@@ -2313,33 +2826,70 @@ fn build_manifest(
     let mut seen_keys: BTreeSet<String> = BTreeSet::new();
     let mut seen_aliases: BTreeSet<String> = BTreeSet::new();
 
-    for file in &hashed {
-        if used_as_thumb.contains(&hashed.iter().position(|h| {
-            h.discovered.pack_path == file.discovered.pack_path
-        }).unwrap_or(usize::MAX))
-            && !matches!(file.discovered.kind, MediaKind::Glb)
-        {
+    for (index, file) in hashed.iter().enumerate() {
+        if file.discovered.kind.is_sidecar() {
+            continue;
+        }
+        if used_as_thumb.contains(&index) && !matches!(file.discovered.kind, MediaKind::Glb) {
             continue;
         }
         let asset = match file.discovered.kind {
             MediaKind::Png | MediaKind::Jpeg => {
-                if used_as_thumb.iter().any(|&i| hashed[i].discovered.pack_path == file.discovered.pack_path)
-                {
+                if used_as_thumb.contains(&index) || attached_images.contains(&index) {
                     continue;
                 }
-                texture_asset(file)?
+                // A pack that ships meshes keeps its atlases with them:
+                // `Textures/colormap.png` is a shared surface, not a card.
+                if pack_has_glb && is_pack_atlas(&file.discovered.pack_path) {
+                    continue;
+                }
+                let thumb = thumb_for_entry.get(&file.discovered.key).map(|&i| &hashed[i]);
+                if let Some(t) = thumb {
+                    push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
+                }
+                texture_asset(file, thumb)?
             }
-            MediaKind::Wav => audio_asset(file)?,
+            MediaKind::Billboard => {
+                let Some(&sheet) = sheet_for_billboard.get(&file.discovered.key) else {
+                    // No packed sheet next to it: publish nothing rather
+                    // than one card per frame.
+                    continue;
+                };
+                let thumb = thumb_for_billboard
+                    .get(&file.discovered.key)
+                    .map(|&i| &hashed[i]);
+                push_blob(&mut blobs, &mut seen_blob_paths, &hashed[sheet], FileRole::Texture)?;
+                if let Some(t) = thumb.filter(|t| thumb_dims_ok(t.dims)) {
+                    push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
+                }
+                billboard_asset(file, &hashed[sheet], thumb)?
+            }
+            MediaKind::Wav => {
+                let thumb = thumb_for_entry.get(&file.discovered.key).map(|&i| &hashed[i]);
+                if let Some(t) = thumb {
+                    push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
+                }
+                audio_asset(file, thumb)?
+            }
             MediaKind::Mp4 => video_asset(file)?,
             MediaKind::Glb => {
                 let thumb_idx = thumb_for_glb.get(&file.discovered.key).copied().ok_or_else(|| {
-                    PackImportError::new(
-                        PackImportErrorKind::Malformed,
-                        format!(
-                            "{}: mesh-bearing import needs a pack PNG/JPEG thumbnail ≥ {THUMBNAIL_MIN_DIM}px",
-                            file.discovered.pack_path
+                    match rejected_thumbnail(&hashed, &file.discovered.key) {
+                        Some(bad) => PackImportError::new(
+                            PackImportErrorKind::Content,
+                            format!(
+                                "{}: thumbnail is a placeholder (flat or transparent), not a render of the asset",
+                                bad.discovered.pack_path
+                            ),
                         ),
-                    )
+                        None => PackImportError::new(
+                            PackImportErrorKind::Malformed,
+                            format!(
+                                "{}: mesh-bearing import needs a pack PNG/JPEG thumbnail ≥ {THUMBNAIL_MIN_DIM}px",
+                                file.discovered.pack_path
+                            ),
+                        ),
+                    }
                 })?;
                 let albedo = match file
                     .glb
@@ -2362,8 +2912,23 @@ fn build_manifest(
                 if let Some(tex) = albedo {
                     push_blob(&mut blobs, &mut seen_blob_paths, tex, FileRole::Texture)?;
                 }
-                mesh_asset(file, &hashed[thumb_idx], albedo)?
+                let sidecars: Vec<&HashedFile> = sidecars_for_glb
+                    .get(&file.discovered.key)
+                    .map(|idxs| idxs.iter().map(|&i| &hashed[i]).collect())
+                    .unwrap_or_default();
+                for sidecar in &sidecars {
+                    push_blob(&mut blobs, &mut seen_blob_paths, sidecar, role_of(sidecar))?;
+                }
+                let nav = nav_for_glb
+                    .get(&file.discovered.key)
+                    .and_then(|&i| hashed[i].nav.as_ref());
+                mesh_asset(file, &hashed[thumb_idx], albedo, &sidecars, nav)?
             }
+            MediaKind::AoMesh
+            | MediaKind::AoPng
+            | MediaKind::ShadowSdf
+            | MediaKind::Spawn
+            | MediaKind::Place => continue,
         };
         if !seen_keys.insert(asset.key.as_str().to_string()) {
             return Err(PackImportError::new(
@@ -2437,6 +3002,7 @@ fn build_manifest(
         collection,
         manifest,
         blobs,
+        skipped,
     })
 }
 
@@ -2505,7 +3071,20 @@ fn role_of(file: &HashedFile) -> FileRole {
         MediaKind::Wav => FileRole::Audio,
         MediaKind::Mp4 => FileRole::Video,
         MediaKind::Glb => FileRole::RenderGlb,
+        MediaKind::AoMesh => FileRole::AoMesh,
+        MediaKind::AoPng => FileRole::AoTexture,
+        MediaKind::ShadowSdf => FileRole::ShadowSdf,
+        MediaKind::Billboard | MediaKind::Spawn | MediaKind::Place => FileRole::Source,
     }
+}
+
+/// `.../textures/foo.png` — a pack-wide atlas directory at any depth.
+/// Meaningless on its own, so a mesh-bearing pack keeps it attached to the
+/// meshes that sample it instead of publishing an orphan card.
+fn is_pack_atlas(pack_path: &str) -> bool {
+    let mut segments: Vec<&str> = pack_path.split('/').collect();
+    segments.pop();
+    segments.iter().any(|s| s.eq_ignore_ascii_case("textures"))
 }
 
 fn push_blob(
@@ -2536,11 +3115,24 @@ fn thumb_dims_ok(dims: Option<ImageDims>) -> bool {
 }
 
 fn pick_thumbnail(files: &[HashedFile], glb_key: &str) -> Option<usize> {
-    // Same-stem / explicit association only. Pack-wide preview.png is not a thumb.
+    // Same-stem / explicit association only. Pack-wide preview.png is not a
+    // thumb, and neither is a placeholder tile: the catalog must never show
+    // a grid of "no visual available".
     files.iter().position(|f| {
         matches!(f.discovered.kind, MediaKind::Png | MediaKind::Jpeg)
             && thumb_dims_ok(f.dims)
+            && !f.placeholder
             && f.discovered.key == glb_key
+    })
+}
+
+/// The same-key image a mesh WOULD have used, when it was rejected. Lets the
+/// error name the file instead of saying "no thumbnail".
+fn rejected_thumbnail<'a>(files: &'a [HashedFile], glb_key: &str) -> Option<&'a HashedFile> {
+    files.iter().find(|f| {
+        matches!(f.discovered.kind, MediaKind::Png | MediaKind::Jpeg)
+            && f.discovered.key == glb_key
+            && f.placeholder
     })
 }
 
@@ -2570,7 +3162,10 @@ fn classic_image_kind(pack_path: &str) -> AssetKind {
     }
 }
 
-fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
+fn texture_asset(
+    file: &HashedFile,
+    thumb: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
     let dims = file.dims.ok_or_else(|| {
         PackImportError::new(
             PackImportErrorKind::Malformed,
@@ -2578,6 +3173,14 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
         )
     })?;
     let byte_len = file.byte_len;
+    let thumbnail = match thumb {
+        Some(t) => companion_thumbnail(t)?,
+        None => None,
+    };
+    let total_bytes = match &thumbnail {
+        Some(t) => byte_len.saturating_add(t.meta.byte_len),
+        None => byte_len,
+    };
     Ok(ImportAsset {
         key: parse_key(&file.discovered.key)?,
         kind: classic_image_kind(&file.discovered.pack_path),
@@ -2593,9 +3196,9 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
                 dims: Some(dims),
             },
         }],
-        thumbnail: None,
+        thumbnail,
         metrics: Metrics {
-            total_bytes: byte_len,
+            total_bytes,
             triangles: 0,
             vertices: 0,
             joints: 0,
@@ -2614,13 +3217,197 @@ fn texture_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
     })
 }
 
-fn audio_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
+/// ONE `Billboard` asset per actor: the packed sprite sheet (`Texture`) plus
+/// the manifest that indexes it (`Source`). The manifest's `sheet` header is
+/// checked against the real sheet dimensions — a sheet that does not match
+/// its cell table would cut garbage frames on the far side.
+/// The `<key>_thumb` picture an entry publishes, when it has one.
+///
+/// The same shape [`billboard_asset`] builds for a preview strip, for the
+/// entries that are not stateful billboards: a sound's spectrogram, a
+/// single-tile sprite's padded still. A PNG carries its own stamped cell
+/// layout, so its views are read back from the file; a JPEG carries none and
+/// declares no regions — "one picture, take it as it comes", which the
+/// manifest treats as no claim rather than a wrong one.
+fn companion_thumbnail(t: &HashedFile) -> Result<Option<ImportThumbnail>, PackImportError> {
+    if !thumb_dims_ok(t.dims) {
+        return Ok(None);
+    }
+    let Some(d) = t.dims else { return Ok(None) };
+    let media = match t.discovered.kind {
+        MediaKind::Png => ThumbnailMedia::Png,
+        MediaKind::Jpeg => ThumbnailMedia::Jpeg,
+        _ => return Ok(None),
+    };
+    let views = match t.discovered.kind {
+        MediaKind::Png => sheet_views(t),
+        _ => Vec::new(),
+    };
+    Ok(Some(ImportThumbnail {
+        path: t.discovered.pack_path.clone(),
+        meta: ThumbnailMeta {
+            blob: t.blob,
+            media,
+            width: d.width,
+            height: d.height,
+            byte_len: t.byte_len,
+            views,
+        },
+    }))
+}
+
+fn billboard_asset(
+    manifest: &HashedFile,
+    sheet: &HashedFile,
+    thumb: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
+    let dims = sheet.dims.ok_or_else(|| {
+        PackImportError::new(
+            PackImportErrorKind::Malformed,
+            format!("{}: sprite sheet missing dims", sheet.discovered.pack_path),
+        )
+    })?;
+    if dims.width > MAX_TEXTURE_DIM || dims.height > MAX_TEXTURE_DIM {
+        return Err(PackImportError::new(
+            PackImportErrorKind::Content,
+            format!(
+                "{}: sprite sheet exceeds MAX_TEXTURE_DIM",
+                sheet.discovered.pack_path
+            ),
+        ));
+    }
+    let bb = manifest.billboard.as_ref().ok_or_else(|| {
+        PackImportError::new(
+            PackImportErrorKind::Malformed,
+            format!("{}: unparsed billboard manifest", manifest.discovered.pack_path),
+        )
+    })?;
+    if let Some(layout) = bb.sheet {
+        let cells = bb.sheet_cells();
+        let want_w = layout.cols.saturating_mul(layout.cell_w);
+        let want_h = layout.rows_for(cells).saturating_mul(layout.cell_h);
+        if want_w != dims.width || want_h != dims.height {
+            return Err(PackImportError::new(
+                PackImportErrorKind::Malformed,
+                format!(
+                    "{}: sheet header says {want_w}x{want_h}, {} is {}x{}",
+                    manifest.discovered.pack_path,
+                    sheet.discovered.pack_path,
+                    dims.width,
+                    dims.height
+                ),
+            ));
+        }
+    }
+    let mut total_bytes = sheet
+        .byte_len
+        .checked_add(manifest.byte_len)
+        .ok_or_else(|| {
+            PackImportError::new(PackImportErrorKind::Malformed, "file byte_len sum")
+        })?;
+    let thumbnail = match thumb.filter(|t| thumb_dims_ok(t.dims)) {
+        Some(t) => {
+            let d = t.dims.ok_or_else(|| {
+                PackImportError::new(
+                    PackImportErrorKind::Malformed,
+                    format!("{}: thumbnail missing dims", t.discovered.pack_path),
+                )
+            })?;
+            let media = match t.discovered.kind {
+                MediaKind::Png => ThumbnailMedia::Png,
+                MediaKind::Jpeg => ThumbnailMedia::Jpeg,
+                _ => {
+                    return Err(PackImportError::new(
+                        PackImportErrorKind::Malformed,
+                        format!("{}: thumbnail is not an image", t.discovered.pack_path),
+                    ))
+                }
+            };
+            total_bytes = total_bytes.checked_add(t.byte_len).ok_or_else(|| {
+                PackImportError::new(PackImportErrorKind::Malformed, "file byte_len sum")
+            })?;
+            Some(ImportThumbnail {
+                path: t.discovered.pack_path.clone(),
+                meta: ThumbnailMeta {
+                    blob: t.blob,
+                    media,
+                    width: d.width,
+                    height: d.height,
+                    byte_len: t.byte_len,
+                    views: sheet_views(t),
+                },
+            })
+        }
+        None => None,
+    };
+    Ok(ImportAsset {
+        key: parse_key(&manifest.discovered.key)?,
+        kind: AssetKind::Billboard,
+        files: vec![
+            ImportFile {
+                path: sheet.discovered.pack_path.clone(),
+                file: AssetFile {
+                    role: FileRole::Texture,
+                    tier: DeviceTier::Any,
+                    lod: 0,
+                    media: sheet.discovered.kind.media_type(),
+                    blob: sheet.blob,
+                    byte_len: sheet.byte_len,
+                    dims: Some(dims),
+                },
+            },
+            ImportFile {
+                path: manifest.discovered.pack_path.clone(),
+                file: AssetFile {
+                    role: FileRole::Source,
+                    tier: DeviceTier::Any,
+                    lod: 0,
+                    media: MediaType::Text,
+                    blob: manifest.blob,
+                    byte_len: manifest.byte_len,
+                    dims: None,
+                },
+            },
+        ],
+        thumbnail,
+        metrics: Metrics {
+            total_bytes,
+            triangles: 0,
+            vertices: 0,
+            joints: 0,
+            clips: 0,
+            max_texture_dim: dims.width.max(dims.height),
+            media_millis: 0,
+        },
+        coordinate_system: PACK_COORD,
+        bounds: Bounds {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        },
+        anchors: Vec::new(),
+        capabilities: Capabilities::default(),
+        spawn_recipe: None,
+    })
+}
+
+fn audio_asset(
+    file: &HashedFile,
+    thumb: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
     if file.media_millis == 0 {
         return Err(PackImportError::new(
             PackImportErrorKind::Malformed,
             format!("{}: unmeasured audio duration", file.discovered.pack_path),
         ));
     }
+    let thumbnail = match thumb {
+        Some(t) => companion_thumbnail(t)?,
+        None => None,
+    };
+    let total_bytes = match &thumbnail {
+        Some(t) => file.byte_len.saturating_add(t.meta.byte_len),
+        None => file.byte_len,
+    };
     Ok(ImportAsset {
         key: parse_key(&file.discovered.key)?,
         kind: AssetKind::Audio,
@@ -2636,9 +3423,9 @@ fn audio_asset(file: &HashedFile) -> Result<ImportAsset, PackImportError> {
                 dims: None,
             },
         }],
-        thumbnail: None,
+        thumbnail,
         metrics: Metrics {
-            total_bytes: file.byte_len,
+            total_bytes,
             triangles: 0,
             vertices: 0,
             joints: 0,
@@ -2823,6 +3610,8 @@ fn mesh_asset(
     glb: &HashedFile,
     thumb: &HashedFile,
     albedo: Option<&HashedFile>,
+    sidecars: &[&HashedFile],
+    nav: Option<&WorldNav>,
 ) -> Result<ImportAsset, PackImportError> {
     let measure = glb.glb.as_ref().ok_or_else(|| {
         PackImportError::new(
@@ -2895,6 +3684,32 @@ fn mesh_asset(
         })?;
         max_texture_dim = max_texture_dim.max(tex_dims.width.max(tex_dims.height));
     }
+    // Baked companions ride along as explicit derived roles; a game that
+    // streams the mesh gets its AO and shadow bake from the same manifest.
+    for sidecar in sidecars {
+        let kind = sidecar.discovered.kind;
+        if kind == MediaKind::AoPng && sidecar.dims.is_none() {
+            return Err(PackImportError::new(
+                PackImportErrorKind::Malformed,
+                format!("{}: ao atlas missing dims", sidecar.discovered.pack_path),
+            ));
+        }
+        files.push(ImportFile {
+            path: sidecar.discovered.pack_path.clone(),
+            file: AssetFile {
+                role: role_of(sidecar),
+                tier: DeviceTier::Any,
+                lod: 0,
+                media: kind.media_type(),
+                blob: sidecar.blob,
+                byte_len: sidecar.byte_len,
+                dims: sidecar.dims,
+            },
+        });
+        total_bytes = total_bytes.checked_add(sidecar.byte_len).ok_or_else(|| {
+            PackImportError::new(PackImportErrorKind::Malformed, "file byte_len sum")
+        })?;
+    }
     Ok(ImportAsset {
         key: parse_key(&glb.discovered.key)?,
         kind: measure.kind,
@@ -2907,6 +3722,7 @@ fn mesh_asset(
                 width: dims.width,
                 height: dims.height,
                 byte_len: thumb.byte_len,
+                views: sheet_views(thumb),
             },
         }),
         metrics: Metrics {
@@ -2920,10 +3736,18 @@ fn mesh_asset(
         },
         coordinate_system: PACK_COORD,
         bounds: measure.bounds,
-        anchors: Vec::new(),
+        // Navigation facts of a converted map: where a player spawns, the
+        // floor under them, the eye and step heights. Without these a walker
+        // has to guess, and guesses walk on the ceiling.
+        anchors: nav
+            .map(WorldNav::anchors)
+            .unwrap_or_else(|| measure.anchors.clone()),
         capabilities: Capabilities {
             rigged: measure.rigged,
             animated: measure.animated,
+            // A world you can spawn into is a world you can stand on: the
+            // triangles ARE the collision until a collider role exists.
+            collidable: measure.kind == AssetKind::World && measure.triangles > 0,
             ..Capabilities::default()
         },
         spawn_recipe: None,
@@ -2940,6 +3764,25 @@ fn parse_key(key: &str) -> Result<PackEntryKey, PackImportError> {
 }
 
 fn hash_and_measure(root: &PackRoot, file: DiscoveredFile) -> Result<HashedFile, PackImportError> {
+    // Can this entry's key exist at all? The key contract is the CATALOG's
+    // (`MAX_KEY_SEGMENT_BYTES` and friends, in the frozen `makepad_asset_data`
+    // limits), so a vendor file whose name overruns it can never publish —
+    // brick-kit ships two, `square-{lq,hq}-brick-slope-corner-outside-inverted-2x2`,
+    // one byte over the 48-byte segment budget.
+    //
+    // Asked here, before a single byte is hashed, and answered `Unsupported`
+    // so it costs that entry and not the other 294. Refusing the whole pack
+    // for it was the same all-or-nothing shape as the multi-texture rule:
+    // an entire kit lost to one long file name.
+    if let Err(error) = file.key.parse::<PackEntryKey>() {
+        return Err(PackImportError::new(
+            PackImportErrorKind::Unsupported,
+            format!(
+                "{}: entry key {} cannot exist in the catalog ({error})",
+                file.pack_path, file.key
+            ),
+        ));
+    }
     let mut handle = root.open_relative(&file.local_rel, &file.pack_path)?;
     let identity = identity_of(&handle, &file.pack_path)?;
     if !identity.is_file || !identity.matches(&file.snapshot) {
@@ -2965,8 +3808,7 @@ fn hash_and_measure(root: &PackRoot, file: DiscoveredFile) -> Result<HashedFile,
             format!("{}: identity changed during hashing", file.pack_path),
         ));
     }
-    let (dims, media_millis, glb) =
-        measure_handle(&mut handle, &file, &identity, blob)?;
+    let measured = measure_handle(&mut handle, &file, &identity, blob)?;
     let after = identity_of(&handle, &file.pack_path)?;
     if !after.matches(&identity) {
         return Err(PackImportError::new(
@@ -2978,10 +3820,15 @@ fn hash_and_measure(root: &PackRoot, file: DiscoveredFile) -> Result<HashedFile,
         discovered: file,
         blob,
         byte_len,
-        dims,
-        media_millis,
-        glb,
+        dims: measured.dims,
+        media_millis: measured.media_millis,
+        glb: measured.glb,
         identity,
+        sidecar_ok: measured.sidecar_ok,
+        billboard: measured.billboard,
+        nav: measured.nav,
+        placeholder: measured.placeholder,
+        sheet: measured.sheet,
     })
 }
 
@@ -3120,27 +3967,66 @@ fn recheck_unchanged(
     Ok(())
 }
 
+/// `(image dims, media millis, glb measure, sidecar readable)`.
+/// What one file's bytes say about itself (dimensions, duration, mesh
+/// shape, manifest contents). Everything here is measured from the bytes
+/// that were just hashed, never from the file name.
+#[derive(Default)]
+struct Measured {
+    dims: Option<ImageDims>,
+    media_millis: u32,
+    glb: Option<GlbMeasure>,
+    /// False for a derived sidecar this build cannot read (it is left
+    /// behind instead of refusing the whole pack).
+    sidecar_ok: bool,
+    billboard: Option<StatefulBillboard>,
+    nav: Option<WorldNav>,
+    /// True for an image that is a flat/placeholder tile, never a picture of
+    /// the asset. Measured from the bytes that were just hashed.
+    placeholder: bool,
+    /// The stamped cell layout of a packed sheet, read from those same bytes.
+    sheet: Option<(ThumbnailCells, f32)>,
+}
+
+impl Measured {
+    fn ok() -> Self {
+        Self { sidecar_ok: true, ..Self::default() }
+    }
+
+    fn image(w: u32, h: u32) -> Self {
+        Self { dims: Some(ImageDims { width: w, height: h }), ..Self::ok() }
+    }
+
+    fn thumbnailable_image(w: u32, h: u32, bytes: &[u8]) -> Self {
+        Self {
+            placeholder: thumbnail_is_placeholder(bytes),
+            sheet: crate::anim_icon::read_layout(bytes),
+            ..Self::image(w, h)
+        }
+    }
+}
+
 fn measure_handle(
     handle: &mut File,
     file: &DiscoveredFile,
     identity: &FileIdentity,
     hashed: BlobId,
-) -> Result<(Option<ImageDims>, u32, Option<GlbMeasure>), PackImportError> {
+) -> Result<Measured, PackImportError> {
     match file.kind {
         MediaKind::Png => {
             let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
             let (w, h) = validate_png(&bytes, &file.pack_path)?;
-            Ok((Some(ImageDims { width: w, height: h }), 0, None))
+            Ok(Measured::thumbnailable_image(w, h, &bytes))
         }
         MediaKind::Jpeg => {
             let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
             let (w, h) = validate_jpeg(&bytes, &file.pack_path)?;
-            Ok((Some(ImageDims { width: w, height: h }), 0, None))
+            Ok(Measured::thumbnailable_image(w, h, &bytes))
         }
         MediaKind::Wav => {
             let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
             let millis = validate_wav(&bytes, &file.pack_path)?;
-            Ok((None, millis, None))
+            Ok(Measured { media_millis: millis, ..Measured::ok() })
         }
         MediaKind::Mp4 => {
             let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
@@ -3166,11 +4052,69 @@ fn measure_handle(
                     format!("{}: identity changed during video probe", file.pack_path),
                 ));
             }
-            Ok((None, millis, None))
+            Ok(Measured { media_millis: millis, ..Measured::ok() })
         }
         MediaKind::Glb => {
             let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
-            Ok((None, 0, Some(measure_glb(&bytes, &file.pack_path)?)))
+            Ok(Measured { glb: Some(measure_glb(&bytes, &file.pack_path)?), ..Measured::ok() })
+        }
+        // Sidecars are derived caches, not source: one the renderer cannot
+        // read (older bake format, truncated) is left behind rather than
+        // refusing the whole pack.
+        MediaKind::AoPng => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            Ok(match validate_png(&bytes, &file.pack_path) {
+                Ok((w, h)) => Measured::image(w, h),
+                Err(_) => Measured::default(),
+            })
+        }
+        MediaKind::AoMesh => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            Ok(Measured {
+                sidecar_ok: StaticModel::from_aomesh(&bytes).is_some(),
+                ..Measured::default()
+            })
+        }
+        MediaKind::ShadowSdf => Ok(Measured::ok()),
+        // A spawn sidecar this build cannot read is left behind (the world
+        // still publishes) — it is a convenience, not the payload.
+        MediaKind::Spawn => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let nav = std::str::from_utf8(&bytes).ok().and_then(WorldNav::parse);
+            Ok(Measured {
+                sidecar_ok: nav.is_some(),
+                nav,
+                ..Measured::default()
+            })
+        }
+        // Same convenience contract as Spawn: an unreadable placement
+        // sidecar is left behind, the world still publishes.
+        MediaKind::Place => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let ok = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| crate::world_place::WorldPlace::parse(text).ok())
+                .is_some();
+            Ok(Measured { sidecar_ok: ok, ..Measured::default() })
+        }
+        // A manifest that cannot be read is refused, never published as a
+        // mystery blob: its frame list is what keeps the per-frame PNGs out
+        // of the catalog.
+        MediaKind::Billboard => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                PackImportError::new(
+                    PackImportErrorKind::Malformed,
+                    format!("{}: billboard manifest is not utf-8", file.pack_path),
+                )
+            })?;
+            let bb = StatefulBillboard::parse(text).map_err(|e| {
+                PackImportError::new(
+                    PackImportErrorKind::Malformed,
+                    format!("{}: {e}", file.pack_path),
+                )
+            })?;
+            Ok(Measured { billboard: Some(bb), ..Measured::ok() })
         }
     }
 }
@@ -3186,19 +4130,18 @@ fn probe_mp4_trusted(
             format!("{pack_path}: probe bytes do not match digest"),
         ));
     }
-    let hex = {
-        #[cfg(unix)]
-        {
-            unix::random_hex16()?
-        }
-        #[cfg(not(unix))]
-        {
-            return Err(PackImportError::new(
-                PackImportErrorKind::Io,
-                format!("{pack_path}: getentropy probe dir unavailable"),
-            ));
-        }
-    };
+    // Split rather than nested: an ATTRIBUTED BLOCK in tail position is a
+    // statement, so `let hex = { #[cfg(not(unix))] { return … ; } }` binds
+    // `()` on Windows instead of diverging — which is exactly how this
+    // stopped compiling off unix. `return` as the initializer expression
+    // has type `!` and coerces, so both arms really do bind a String.
+    #[cfg(unix)]
+    let hex = unix::random_hex16()?;
+    #[cfg(not(unix))]
+    let hex: String = return Err(PackImportError::new(
+        PackImportErrorKind::Io,
+        format!("{pack_path}: getentropy probe dir unavailable"),
+    ));
     let dir = std::env::temp_dir().join(format!(".pack-import-probe-{hex}"));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -4523,6 +5466,17 @@ fn validate_wav(bytes: &[u8], pack_path: &str) -> Result<u32, PackImportError> {
         }
         at = end + (size & 1);
         if at > bytes.len() {
+            // RIFF pads an odd-sized chunk to even, but the pad byte after
+            // the LAST chunk is routinely left off — the file simply ends
+            // where the data ends. Nothing is missing: `end` already proved
+            // the chunk body is entirely present, and there is no following
+            // chunk that the missing byte could misalign. Every practical
+            // reader accepts this; refusing it cost the whole Quake 3
+            // import for one sound (`sound/world/drone6.wav`, an 18329-byte
+            // data chunk ending exactly at EOF).
+            if end == bytes.len() {
+                break;
+            }
             return Err(PackImportError::new(
                 PackImportErrorKind::Malformed,
                 format!("{pack_path}: wav pad extends past EOF"),
@@ -4673,6 +5627,7 @@ fn walk_mp4_boxes(
 
 fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportError> {
     let image_uris = preflight_glb(bytes, pack_path)?;
+    let vehicle_anchors = inspect_vehicle_connections(bytes, pack_path)?;
     let static_res = StaticModel::parse_glb(bytes);
     let inspect_res = inspect_glb(bytes);
     let skinned_res = SkinnedModel::parse_glb(bytes);
@@ -4691,8 +5646,17 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
             ));
         }
     };
-    let triangles = model.triangle_count() as u32;
-    let vertices = model.vertex_count() as u32;
+    // StaticModel deliberately removes externally-driven rigid parts from
+    // its flattened body stream. Catalog metrics describe the complete GLB,
+    // so prefer inspect_glb's document topology (body + driven parts).
+    let triangles = inspect_res
+        .as_ref()
+        .map(|m| m.triangles)
+        .unwrap_or_else(|_| model.triangle_count() as u32);
+    let vertices = inspect_res
+        .as_ref()
+        .map(|m| m.vertices)
+        .unwrap_or_else(|_| model.vertex_count() as u32);
     if triangles == 0 || vertices < 3 {
         return Err(PackImportError::new(
             PackImportErrorKind::Malformed,
@@ -4735,7 +5699,9 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
     // Classic Freedoom/LibreQuake staging uses path prefixes (worlds/, weapons/,
     // props/). Kenney packs never use those folders — additive only.
     let kind = classic_glb_kind(pack_path).unwrap_or_else(|| {
-        if rigged && animated {
+        if vehicle_anchors.is_some() {
+            AssetKind::Vehicle
+        } else if rigged && animated {
             AssetKind::Character
         } else {
             AssetKind::Mesh
@@ -4767,6 +5733,7 @@ fn measure_glb(bytes: &[u8], pack_path: &str) -> Result<GlbMeasure, PackImportEr
         rigged,
         animated,
         image_uris,
+        anchors: vehicle_anchors.unwrap_or_default(),
     })
 }
 
@@ -4952,7 +5919,9 @@ fn preflight_glb_uris_from_json(
     let mut image_uris = Vec::new();
     let mut embedded = 0u32;
     if let Some(arr) = value.get("images").and_then(|v| v.as_arr()) {
-        if arr.len() > 8 {
+        // World/map GLBs (Quake, Duke levels) embed every surface texture;
+        // the cap only guards against runaway memory, not real content.
+        if arr.len() > 256 {
             return Err(glb_err(pack_path, "too many glb images"));
         }
         for img in arr {
@@ -4974,10 +5943,88 @@ fn preflight_glb_uris_from_json(
             }
         }
     }
-    if image_uris.len() > 1 || (image_uris.len() == 1 && embedded > 0) || embedded > 1 {
-        return Err(glb_err(pack_path, "unsupported multi-texture glb"));
+    // The one-atlas rule is about texture FILES this pack must publish as
+    // their own blobs: a mesh asset carries a single `FileRole::Texture`
+    // (`mesh_asset`'s `albedo`), so a GLB pointing at two pack images has
+    // nowhere to put the second.
+    //
+    // An EMBEDDED image is not that. It already lives in the BIN chunk of
+    // the mesh blob, costs the manifest nothing, and both render lanes draw
+    // it: `StaticModel::split_draw_layers` emits one draw layer per
+    // embedded base-color image, and `GltfRenderer::apply_material` binds
+    // per-material textures for one draw per primitive.
+    //
+    // Counting embedded images here refused every multi-material model a
+    // vendor ships — 157 of them across Kenney's two retro kits, whole kits
+    // lost for it — AND every level this repo's own
+    // `write_glb_mesh_textured_parts` writes, which is one image per
+    // surface by construction.
+    //
+    // A sky node paints itself from its own picture and a prelit marker
+    // points back at an existing one: neither makes a level's ONE atlas
+    // into two, which is what `annexed` still discounts for the mixed case.
+    let annexed = annexed_images(value);
+    let embedded = embedded.saturating_sub(annexed);
+    if image_uris.len() > 1 || (image_uris.len() == 1 && embedded > 0) {
+        // `Unsupported`, not `Malformed`: the file is fine, this importer
+        // just has one albedo slot to put it in. That kind is what lets a
+        // single such model be skipped instead of costing the whole pack.
+        return Err(PackImportError::new(
+            PackImportErrorKind::Unsupported,
+            format!("{pack_path}: unsupported multi-texture glb"),
+        ));
     }
     Ok(image_uris)
+}
+
+/// Images that belong to a `sky` node's own material — they are not the
+/// mesh's texture and do not count toward the one-atlas rule.
+fn annexed_images(value: &Value) -> u32 {
+    let arr = |name: &str| value.get(name).and_then(|v| v.as_arr()).unwrap_or(&[]);
+    let materials = arr("materials");
+    let textures = arr("textures");
+    let meshes = arr("meshes");
+    let mut annexed: BTreeSet<u64> = BTreeSet::new();
+    let image_of_material = |mi: usize| -> Option<u64> {
+        let ti = materials
+            .get(mi)?
+            .get("pbrMetallicRoughness")?
+            .get("baseColorTexture")?
+            .get("index")
+            .and_then(json_u64)?;
+        textures
+            .get(ti as usize)?
+            .get("source")
+            .and_then(json_u64)
+    };
+    for node in arr("nodes") {
+        let is_sky = node
+            .get("extras")
+            .and_then(|e| e.get("kind"))
+            .and_then(|k| k.as_str())
+            == Some("sky");
+        if !is_sky {
+            continue;
+        }
+        let Some(mesh) = node.get("mesh").and_then(json_u64) else {
+            continue;
+        };
+        let Some(prims) = meshes
+            .get(mesh as usize)
+            .and_then(|m| m.get("primitives"))
+            .and_then(|p| p.as_arr())
+        else {
+            continue;
+        };
+        for prim in prims {
+            if let Some(mi) = prim.get("material").and_then(json_u64) {
+                if let Some(image) = image_of_material(mi as usize) {
+                    annexed.insert(image);
+                }
+            }
+        }
+    }
+    annexed.len() as u32
 }
 
 fn preflight_glb_accessors(
@@ -5338,6 +6385,7 @@ fn write_outputs(
         source_path: out_dir.join(SOURCE_COLLECTION_FILE),
         manifest_path: out_dir.join(IMPORT_MANIFEST_FILE),
         plan_path: out_dir.join(UPLOAD_PLAN_FILE),
+        skipped_models: built.skipped.clone(),
     })
 }
 
@@ -5692,6 +6740,13 @@ fn role_name(role: FileRole) -> &'static str {
         FileRole::Video => "video",
         FileRole::Source => "source",
         FileRole::Depth => "depth",
+        FileRole::Splat => "splat",
+        FileRole::AoTexture => "ao_texture",
+        FileRole::StemDrums => "stem_drums",
+        FileRole::StemBass => "stem_bass",
+        FileRole::StemVocals => "stem_vocals",
+        FileRole::StemOther => "stem_other",
+        FileRole::Lyrics => "lyrics",
     }
 }
 
@@ -5710,6 +6765,8 @@ fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
+        AssetKind::VjEffect => "vjeffect",
     }
 }
 
@@ -5718,6 +6775,7 @@ fn redistribution_name(p: Redistribution) -> &'static str {
         Redistribution::Allowed => "allowed",
         Redistribution::AttributionRequired => "attribution-required",
         Redistribution::Forbidden => "forbidden",
+        Redistribution::LanLocal => "lan-local",
     }
 }
 
@@ -5726,6 +6784,7 @@ fn derivatives_name(p: DerivativePolicy) -> &'static str {
         DerivativePolicy::Allowed => "allowed",
         DerivativePolicy::AttributionRequired => "attribution-required",
         DerivativePolicy::Forbidden => "forbidden",
+        DerivativePolicy::LocalPreview => "local-preview-only",
     }
 }
 
@@ -5738,6 +6797,20 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// The `.place` placements sidecar (world-place 1 text) rides the same
+    /// sidecar lane as `.spawn`: recognized by extension, attached to the
+    /// same-stem GLB, published as a Source-role TEXT blob (a typed role
+    /// waits for the next schema bump — new canon_enum tags hard-error
+    /// deployed clients). Consumers pick it out of the Source files by its
+    /// self-identifying first line.
+    #[test]
+    fn place_sidecar_recognized_and_text_typed() {
+        assert_eq!(MediaKind::from_ext("place"), Some(MediaKind::Place));
+        assert!(MediaKind::Place.is_sidecar());
+        assert_eq!(MediaKind::Place.media_type(), MediaType::Text);
+        assert_eq!(MediaKind::Place.name(), "place");
+    }
 
     fn test_root(name: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -5784,7 +6857,19 @@ mod tests {
         let raw_len = (row as usize)
             .checked_mul(h as usize)
             .expect("png dims");
-        let raw = vec![0u8; raw_len];
+        // A real thumbnail is not one flat colour — the compiler refuses
+        // placeholders, so the fixture must look like a picture.
+        let mut raw = vec![0u8; raw_len];
+        for y in 0..h as usize {
+            let row = y * row as usize;
+            for x in 0..w as usize {
+                let p = row + 1 + x * 4;
+                raw[p] = (x * 7) as u8;
+                raw[p + 1] = (y * 5) as u8;
+                raw[p + 2] = ((x + y) * 3) as u8;
+                raw[p + 3] = 255;
+            }
+        }
         let mut zlib = vec![0x78, 0x01];
         let mut off = 0usize;
         while off < raw.len() {
@@ -5835,6 +6920,7 @@ mod tests {
                 fps_den: 1,
                 video_bitrate_bps: 4_000_000,
                 audio: None,
+                ..Default::default()
             },
         )
         .expect("encoder");
@@ -6002,6 +7088,20 @@ mod tests {
     }
 
     #[test]
+    fn user_owned_local_rights_are_lan_local_and_importable() {
+        // The classic packs' declaration: the user's own game data is served
+        // on the user's LAN (this catalog) and nothing leaves it.
+        assert_eq!(parse_redistribution("user-owned-local").unwrap(), Redistribution::LanLocal);
+        assert_eq!(parse_redistribution("lan-local").unwrap(), Redistribution::LanLocal);
+        assert_eq!(
+            parse_derivatives("local-preview-only").unwrap(),
+            DerivativePolicy::LocalPreview
+        );
+        assert_eq!(redistribution_name(Redistribution::LanLocal), "lan-local");
+        assert_eq!(derivatives_name(DerivativePolicy::LocalPreview), "local-preview-only");
+    }
+
+    #[test]
     fn rights_fail_closed_never_defaults_cc0() {
         let mut spec = licensed_spec();
         spec.license = None;
@@ -6068,8 +7168,10 @@ mod tests {
         );
     }
 
+    /// Unreadable derived sidecars never block a pack: the GLB compiles as
+    /// a plain mesh (the shadow SDF is opaque bytes and still attaches).
     #[test]
-    fn derived_sidecars_are_skipped_so_kenney_source_compiles() {
+    fn unreadable_sidecars_are_left_behind_so_kenney_source_compiles() {
         let pack = test_root("sidecars");
         let out = test_bundle("sidecars_out");
         fs::write(pack.join("crate.glb"), tiny_glb()).unwrap();
@@ -6079,6 +7181,48 @@ mod tests {
         fs::write(pack.join("crate.ao.png"), valid_png(64, 64)).unwrap();
         let report = compile_pack(&pack, &out, licensed_spec(), None, false).unwrap();
         assert_eq!(report.assets, 1);
+        let manifest = ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+            .unwrap();
+        let roles: Vec<FileRole> = manifest.assets[0].files.iter().map(|f| f.file.role).collect();
+        assert_eq!(roles, [FileRole::RenderGlb, FileRole::ShadowSdf], "{roles:?}");
+    }
+
+    /// A real AO bake beside its GLB publishes as explicit derived roles on
+    /// the SAME asset (aomesh + atlas together, shadow SDF alone), so a game
+    /// streaming the mesh gets the bake from one manifest.
+    #[test]
+    fn baked_sidecars_attach_to_their_glb_as_derived_roles() {
+        let pack = test_root("sidecars_attach");
+        let out = test_bundle("sidecars_attach_out");
+        let glb = tiny_glb();
+        fs::write(pack.join("crate.glb"), &glb).unwrap();
+        fs::write(pack.join("crate.png"), valid_png(512, 512)).unwrap();
+        let aomesh = StaticModel::parse_glb(&glb).expect("tiny glb parses").to_aomesh();
+        assert!(StaticModel::from_aomesh(&aomesh).is_some());
+        fs::write(pack.join("crate.aomesh"), &aomesh).unwrap();
+        fs::write(pack.join("crate.ao.png"), valid_png(64, 64)).unwrap();
+        fs::write(pack.join("crate.shadowsdf"), b"sdf-bytes-opaque").unwrap();
+        // An orphan sidecar (no GLB) is neither an asset nor an error.
+        fs::write(pack.join("ghost.aomesh"), &aomesh).unwrap();
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false).unwrap();
+        assert_eq!(report.assets, 1);
+        let manifest = ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+            .unwrap();
+        let asset = &manifest.assets[0];
+        let mut roles: Vec<FileRole> = asset.files.iter().map(|f| f.file.role).collect();
+        roles.sort();
+        assert_eq!(
+            roles,
+            [FileRole::RenderGlb, FileRole::AoMesh, FileRole::ShadowSdf, FileRole::AoTexture],
+            "{roles:?}"
+        );
+        let ao_png = asset.files.iter().find(|f| f.file.role == FileRole::AoTexture).unwrap();
+        assert_eq!(ao_png.file.media, MediaType::Png);
+        assert_eq!(ao_png.file.dims.map(|d| (d.width, d.height)), Some((64, 64)));
+        let sum: u64 = asset.files.iter().map(|f| f.file.byte_len).sum::<u64>()
+            + asset.thumbnail.as_ref().map(|t| t.meta.byte_len).unwrap_or(0);
+        assert_eq!(asset.metrics.total_bytes, sum);
+        assert_eq!(report.blobs, 5, "glb + thumb + 3 sidecars");
     }
 
     #[test]
@@ -6088,19 +7232,36 @@ mod tests {
         assert_eq!(space.license.as_deref(), Some("CC-BY-4.0"));
         assert_ne!(space.license.as_deref(), Some("CC0-1.0"));
         assert_eq!(space.credits.as_deref(), Some(KENNEY_CREDITS));
-        assert_eq!(space.source.as_deref(), Some("https://kenney.nl/assets/space-kit"));
+        assert_eq!(space.source.as_deref(), Some(KENNEY_ASSETS_HOME));
         assert_eq!(space.redistribution.as_deref(), Some("attribution-required"));
         let ui = kenney_spec("ui-pack").unwrap();
         assert_eq!(ui.pack_name.as_deref(), Some("ui-pack"));
-        assert_eq!(ui.source.as_deref(), Some("https://kenney.nl/assets/ui-pack"));
+        // ONE registered collection for every kit: the rights (and so the
+        // collection digest) must not vary with the pack. The per-kit page
+        // is a separate lookup.
+        assert_eq!(ui.source, space.source);
+        assert_eq!(kenney_page("ui-pack"), "https://kenney.nl/assets/ui-pack");
         let err = kenney_spec("Not A Pack").unwrap_err();
         assert_eq!(err.kind, PackImportErrorKind::Config);
         let extra = kenney_spec("castle-kit").unwrap();
         assert_eq!(extra.license.as_deref(), Some("CC-BY-4.0"));
-        assert_eq!(
-            extra.source.as_deref(),
-            Some("https://kenney.nl/assets/castle-kit")
+        assert_eq!(extra.source, space.source);
+        assert_eq!(kenney_page("castle-kit"), "https://kenney.nl/assets/castle-kit");
+        let (a, b) = (
+            resolve_kenney_collection("space-kit"),
+            resolve_kenney_collection("castle-kit"),
         );
+        assert_eq!(a.digest().unwrap(), b.digest().unwrap(), "collection digest drifts per kit");
+    }
+
+    fn resolve_kenney_collection(pack: &str) -> SourceCollection {
+        let source = kenney_spec(pack).unwrap().resolve().expect("resolve");
+        SourceCollection {
+            id: source.source_id.clone(),
+            title: source.source_title.clone(),
+            origin: SourceOrigin::Upload,
+            terms: source.rights.clone(),
+        }
     }
 
     #[test]
@@ -6286,8 +7447,11 @@ mod tests {
         let out = test_bundle("mix_out");
         write_mixed_pack(&pack, shared_mp4());
         let report = compile(&pack, &out, licensed_spec());
-        assert_eq!(report.assets, 5, "texture png, jpeg, wav, mp4, mesh");
-        assert!(report.blobs >= 6, "five assets + mesh thumbnail");
+        assert_eq!(
+            report.assets, 3,
+            "wav, mp4, mesh — a mesh pack's textures/ atlases ride with the meshes"
+        );
+        assert!(report.blobs >= 4, "three assets + mesh thumbnail");
 
         let source_bytes = fs::read(&report.source_path).unwrap();
         let manifest_bytes = fs::read(&report.manifest_path).unwrap();
@@ -6308,7 +7472,10 @@ mod tests {
         assert_eq!(manifest.source_collection, collection.digest().unwrap());
 
         let has = |k| manifest.assets.iter().any(|a| a.kind == k);
-        assert!(has(AssetKind::Texture));
+        assert!(
+            !has(AssetKind::Texture),
+            "textures/ images of a mesh pack are never standalone catalog rows"
+        );
         assert!(has(AssetKind::Audio));
         assert!(has(AssetKind::Video));
         assert!(has(AssetKind::Mesh));
@@ -6353,6 +7520,43 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The progress callback: fires once before any file (files_done=0,
+    /// totals already known), once per file after (monotonic, ending at the
+    /// discovered total), and reports a plausible byte count along the way
+    /// — what a caller like the classic-pack publish path drives its status
+    /// line from.
+    #[test]
+    fn compile_with_progress_reports_a_monotonic_file_and_byte_count() {
+        let pack = test_root("progress");
+        let out = test_bundle("progress_out");
+        write_mixed_pack(&pack, shared_mp4());
+
+        let mut calls: Vec<CompileProgress> = Vec::new();
+        let mut cb = |p: CompileProgress| calls.push(p);
+        compile_pack_with_progress(&pack, &out, licensed_spec(), None, false, Some(&mut cb))
+            .expect("compile with progress");
+
+        assert!(calls.len() >= 2, "at least an initial call and one per file");
+        let first = &calls[0];
+        assert_eq!(first.files_done, 0, "no file has landed on the very first call");
+        assert!(first.files_total > 0, "the total is known from the first call");
+        assert_eq!(first.bytes_done, 0);
+        assert!(first.bytes_total > 0);
+
+        let last = calls.last().unwrap();
+        assert_eq!(last.files_done, last.files_total, "the run ends fully counted");
+        assert_eq!(last.files_total, first.files_total, "the total never changes mid-run");
+        assert_eq!(last.bytes_total, first.bytes_total, "the byte total never changes mid-run");
+        assert!(last.bytes_done > 0);
+        assert!(last.bytes_done <= last.bytes_total);
+
+        // Every field only ever moves forward.
+        for pair in calls.windows(2) {
+            assert!(pair[1].files_done >= pair[0].files_done, "files_done went backwards");
+            assert!(pair[1].bytes_done >= pair[0].bytes_done, "bytes_done went backwards");
+        }
     }
 
     #[test]
@@ -6619,6 +7823,123 @@ mod tests {
         assert!(err.to_string().contains("entries"), "{err}");
     }
 
+    /// The per-directory bound still exists and still refuses readably —
+    /// expressed against the constant, so it holds at whatever the bound is.
+    #[test]
+    fn a_flat_kit_of_multi_file_models_is_refused_by_the_per_dir_cap() {
+        let pack = test_root("flatkit");
+        // Comfortably over the cap at five entries per model, and well
+        // under MAX_WALK_ENTRIES so the per-directory bound is what bites.
+        let models = MAX_DIR_ENTRIES / 4;
+        for i in 0..models {
+            let stem = format!("brick-{i:04}");
+            fs::write(pack.join(format!("{stem}.png")), valid_png(4, 4)).unwrap();
+            fs::write(pack.join(format!("{stem}.ao.png")), valid_png(4, 4)).unwrap();
+            fs::write(pack.join(format!("{stem}.aomesh")), b"aomesh").unwrap();
+            fs::write(pack.join(format!("{stem}.shadowsdf")), b"sdf").unwrap();
+            fs::write(pack.join(format!("{stem}.jpg")), b"jpeg").unwrap();
+        }
+        let err = compile_pack(&pack, &test_bundle("flatkit_out"), licensed_spec(), None, false)
+            .unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Content);
+        assert!(
+            err.to_string().contains(&format!("exceeds {MAX_DIR_ENTRIES} entries")),
+            "{err}"
+        );
+        // The pack root is the one directory every pack has; it must not
+        // print as a blank ("directory  exceeds 1024 entries").
+        assert!(err.to_string().contains("<pack root>"), "{err}");
+        assert!(
+            !err.to_string().contains("directory  "),
+            "the pack root printed as an empty name: {err}"
+        );
+    }
+
+    /// The bound must admit a real flat vendor kit. Kenney ships every
+    /// model of a kit in one folder, and a STAGED model is five directory
+    /// entries sharing one entry key — `.glb`, `.png`, and the `.aomesh` /
+    /// `.ao.png` / `.shadowsdf` the AO bake writes beside it (pinned by
+    /// `baked_sidecars_attach_to_their_glb_as_derived_roles`).
+    ///
+    /// At `MAX_DIR_ENTRIES = 1024` that meant ~204 models, and brick-kit
+    /// (296) and nature-kit (329) were refused outright: "content:
+    /// directory <pack root> exceeds 1024 entries". This is the arithmetic
+    /// that refusal was, so the bound cannot quietly drift back under it.
+    #[test]
+    fn the_per_dir_cap_admits_a_real_flat_vendor_kit() {
+        /// Kenney's nature-kit, the largest kit on the LOAD surface.
+        const LARGEST_KIT_MODELS: usize = 329;
+        /// glb + thumbnail + aomesh + ao.png + shadowsdf.
+        const STAGED_ENTRIES_PER_MODEL: usize = 5;
+        let needed = LARGEST_KIT_MODELS * STAGED_ENTRIES_PER_MODEL;
+        assert!(
+            MAX_DIR_ENTRIES >= needed,
+            "a flat {LARGEST_KIT_MODELS}-model kit stages {needed} entries in the pack root, \
+             but one directory is capped at {MAX_DIR_ENTRIES}"
+        );
+        // Strictly under the whole-tree bound, so a pack that is flat AND
+        // huge still meets the per-directory refusal rather than the total.
+        assert!(MAX_DIR_ENTRIES < MAX_WALK_ENTRIES);
+        // And the bound stays a bound: it is not quietly wider than the
+        // shape the content contract itself permits.
+        assert!(
+            MAX_DIR_ENTRIES
+                <= makepad_asset_data::limits::MAX_IMPORT_ASSETS
+                    * makepad_asset_data::limits::MAX_IMPORT_FILES_PER_ASSET
+        );
+    }
+
+    /// A directory segment IS part of the entry key, and the key IS the
+    /// catalog alias (`{source_id}/{pack_name}/{key}` — `alias_for`).
+    ///
+    /// So "shard a big flat pack into subdirectories to fit the per-dir
+    /// cap" is not a layout detail: it renames every asset in the pack and
+    /// breaks re-import-as-a-new-revision for all of them. Pinned so the
+    /// cost of that idea shows up as a failing test, not as a silently
+    /// re-identified catalog.
+    #[test]
+    fn a_directory_segment_becomes_part_of_the_entry_key_and_the_alias() {
+        let (flat_path, flat_key, _) = classify_rel("brick-a.png").unwrap();
+        assert_eq!(flat_path, "brick-a.png");
+        assert_eq!(flat_key, "brick-a");
+
+        let (sharded_path, sharded_key, _) = classify_rel("shard-00/brick-a.png").unwrap();
+        assert_eq!(sharded_path, "shard-00/brick-a.png");
+        assert_eq!(
+            sharded_key, "shard-00/brick-a",
+            "sharding changes the entry key, and the key is the asset's identity"
+        );
+        assert_ne!(flat_key, sharded_key);
+
+        // …and that difference reaches the PUBLISHED alias verbatim, through
+        // the real compile — `alias_for` is `{source_id}/{pack_name}/{key}`.
+        let alias_of = |rel: &str, name: &str| -> String {
+            let pack = test_root(name);
+            let path = pack.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, tiny_glb()).unwrap();
+            fs::write(path.with_extension("png"), valid_png(512, 512)).unwrap();
+            let report =
+                compile_pack(&pack, &test_bundle(name), licensed_spec(), None, false).unwrap();
+            let manifest =
+                ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                    .unwrap();
+            manifest
+                .alias_for(&manifest.assets[0].key)
+                .unwrap()
+                .as_str()
+                .to_string()
+        };
+        let flat_alias = alias_of("brick-a.glb", "alias_flat");
+        let sharded_alias = alias_of("shard-00/brick-a.glb", "alias_sharded");
+        assert!(flat_alias.ends_with("/brick-a"), "{flat_alias}");
+        assert!(
+            sharded_alias.ends_with("/shard-00/brick-a"),
+            "a shard directory lands in the catalog alias: {sharded_alias}"
+        );
+        assert_ne!(flat_alias, sharded_alias);
+    }
+
     #[test]
     fn mp4_probe_refuses_digest_mismatch_without_using_pack_path() {
         let bytes = b"not-a-trusted-mp4";
@@ -6680,6 +8001,422 @@ mod tests {
             "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{}}}],
             "buffers":[{{"byteLength":{}}}],
             "images":[{{"uri":"{escaped}"}}]}}"#,
+            bin.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// The shape Kenney's retro kits ship: ONE mesh whose primitives each
+    /// carry their own material, each material its own EMBEDDED picture.
+    /// `barrels.glb` is barrel+planks, `cliff-corner.glb` is rock+grass;
+    /// across the two kits there are 157 of these, up to four ways.
+    ///
+    /// Nothing here points outside the file — there is no external texture
+    /// to publish as a separate blob, which is what the one-atlas rule is
+    /// actually about.
+    fn multi_texture_glb(images: usize) -> Vec<u8> {
+        assert!((1..=4).contains(&images));
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let uvs: [f32; 6] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let uv_off = bin.len();
+        for f in uvs {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        // Each material's own picture, embedded in the BIN chunk.
+        let mut views = vec![
+            format!(
+                r#"{{"buffer":0,"byteOffset":0,"byteLength":{}}}"#,
+                uv_off
+            ),
+            format!(
+                r#"{{"buffer":0,"byteOffset":{uv_off},"byteLength":{}}}"#,
+                bin.len() - uv_off
+            ),
+        ];
+        let mut image_defs = Vec::new();
+        for i in 0..images {
+            while bin.len() % 4 != 0 {
+                bin.push(0);
+            }
+            let off = bin.len();
+            let png = valid_png(8 + i as u32, 8);
+            bin.extend_from_slice(&png);
+            views.push(format!(
+                r#"{{"buffer":0,"byteOffset":{off},"byteLength":{}}}"#,
+                png.len()
+            ));
+            image_defs.push(format!(
+                r#"{{"bufferView":{},"mimeType":"image/png","name":"mat{i}"}}"#,
+                views.len() - 1
+            ));
+        }
+        let prims: Vec<String> = (0..images)
+            .map(|i| {
+                format!(
+                    r#"{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":{i}}}"#
+                )
+            })
+            .collect();
+        let materials: Vec<String> = (0..images)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"mat{i}","pbrMetallicRoughness":{{"baseColorTexture":{{"index":{i}}}}}}}"#
+                )
+            })
+            .collect();
+        let textures: Vec<String> = (0..images)
+            .map(|i| format!(r#"{{"source":{i}}}"#))
+            .collect();
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{}]}}],
+            "materials":[{}],
+            "textures":[{}],
+            "images":[{}],
+            "accessors":[
+                {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+                {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],
+            "bufferViews":[{}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            prims.join(","),
+            materials.join(","),
+            textures.join(","),
+            image_defs.join(","),
+            views.join(","),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// The refusal that killed retro-fantasy-kit and retro-urban-kit whole:
+    /// 157 of their 229 models bind more than one texture. Every one is
+    /// SELF-CONTAINED — the pictures are embedded in the BIN chunk, there
+    /// is no second pack file to publish — so nothing about the manifest
+    /// was ever ambiguous, and both render lanes draw one call per image.
+    #[test]
+    fn a_multi_material_embedded_glb_imports_as_one_asset() {
+        for images in [2usize, 4] {
+            let pack = test_root(&format!("multitex{images}"));
+            let out = test_bundle(&format!("multitex{images}_out"));
+            fs::write(pack.join("barrels.glb"), multi_texture_glb(images)).unwrap();
+            fs::write(pack.join("barrels.png"), valid_png(512, 512)).unwrap();
+            let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+                .unwrap_or_else(|e| panic!("{images}-texture glb must import: {e}"));
+            assert_eq!(report.assets, 1, "{images} textures is still one asset");
+            assert!(report.skipped_models.is_empty(), "{:?}", report.skipped_models);
+            let manifest =
+                ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                    .unwrap();
+            let roles: Vec<FileRole> =
+                manifest.assets[0].files.iter().map(|f| f.file.role).collect();
+            // The embedded pictures ride inside the mesh blob: no extra
+            // Texture blob is published, whatever the material count.
+            assert_eq!(roles, [FileRole::RenderGlb], "{roles:?}");
+        }
+    }
+
+    /// The same rule refused every level this repo's OWN world writer
+    /// produces — `write_glb_mesh_textured_parts` is one image per surface
+    /// by construction, and it is what the Duke / Quake 2 / Quake 3 / Doom
+    /// level importers call. A pack importer that cannot read our own
+    /// output is not enforcing a contract, it is a bug.
+    #[test]
+    fn a_level_from_our_own_world_writer_passes_preflight() {
+        let png_a = valid_png(8, 8);
+        let png_b = valid_png(9, 8);
+        let png_c = valid_png(10, 8);
+        let pos = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let idx = [0u32, 1, 2];
+        let uvs = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        fn part<'a>(
+            png: &'a [u8],
+            pos: &'a [[f32; 3]],
+            idx: &'a [u32],
+            uvs: &'a [[f32; 2]],
+        ) -> makepad_gltf::GlbTexturedPart<'a> {
+            makepad_gltf::GlbTexturedPart {
+                positions: pos,
+                indices: idx,
+                uvs,
+                normals: None,
+                colors: None,
+                base_color_png: png,
+                base_color_factor: None,
+                lightmap_png: None,
+                lightmap_uvs: None,
+                detail_png: None,
+                detail_scale: [1.0, 1.0],
+            }
+        }
+        let glb = makepad_gltf::write_glb_mesh_textured_parts(
+            &[
+                part(&png_a, &pos, &idx, &uvs),
+                part(&png_b, &pos, &idx, &uvs),
+                part(&png_c, &pos, &idx, &uvs),
+            ],
+            true,
+        );
+        let uris = super::preflight_glb(&glb, "worlds/e1l1.glb")
+            .expect("our own multi-surface level must preflight");
+        assert!(uris.is_empty(), "a level embeds its surfaces: {uris:?}");
+    }
+
+    /// One texture FILE is still the limit, because a mesh asset carries
+    /// exactly one `FileRole::Texture` blob and a second has nowhere to go.
+    #[test]
+    fn two_external_texture_files_are_still_refused() {
+        let two = tiny_glb_with_two_uris("a.png", "b.png");
+        let err = super::preflight_glb(&two, "twin.glb").unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Unsupported);
+        assert!(err.to_string().contains("multi-texture"), "{err}");
+    }
+
+    /// A model the importer cannot represent costs that model, not the kit.
+    #[test]
+    fn one_unreadable_model_is_named_and_the_rest_of_the_pack_imports() {
+        let pack = test_root("skipmodel");
+        let out = test_bundle("skipmodel_out");
+        for stem in ["good-a", "good-b"] {
+            fs::write(pack.join(format!("{stem}.glb")), tiny_glb()).unwrap();
+            fs::write(pack.join(format!("{stem}.png")), valid_png(512, 512)).unwrap();
+        }
+        // Two pack images for one mesh: representable in the pack, not in a
+        // mesh asset's single Texture blob — a content refusal, per model.
+        fs::write(pack.join("twin.glb"), tiny_glb_with_two_uris("a.png", "b.png")).unwrap();
+        fs::write(pack.join("twin.png"), valid_png(512, 512)).unwrap();
+
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("one bad model must not refuse the pack");
+        assert_eq!(report.assets, 2, "both good models imported");
+        assert_eq!(report.skipped_models.len(), 1);
+        let (path, why) = &report.skipped_models[0];
+        assert_eq!(path, "twin.glb");
+        assert!(why.contains("multi-texture"), "{why}");
+
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["good-a", "good-b"], "the skipped model is not published");
+    }
+
+    /// Quake 3's `sound/world/drone6.wav` is a complete, ordinary WAV whose
+    /// odd-sized `data` chunk ends exactly at EOF with no trailing pad
+    /// byte — the shape every practical reader accepts and real encoders
+    /// routinely write. Refusing it cost the ENTIRE Quake 3 import
+    /// ("wav pad extends past EOF"), one sound against a whole game.
+    ///
+    /// A pad that is genuinely missing BETWEEN chunks still refuses: there
+    /// the absent byte misaligns everything after it.
+    #[test]
+    fn a_final_odd_chunk_may_omit_its_riff_pad_byte() {
+        // 8-bit mono, an ODD number of frames so `data` is odd and last.
+        let mut wav = Vec::new();
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // pcm
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&8u16.to_le_bytes()); // 8-bit
+        let data: Vec<u8> = vec![0x80; 801];
+        let body = 4 + (8 + fmt.len()) + (8 + data.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(body as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        // No pad byte: the file ends exactly where the data ends.
+        assert_eq!(wav.len() % 2, 1, "odd total, as the real file is");
+
+        validate_wav(&wav, "sound/world/drone6.wav")
+            .expect("a final odd chunk without its pad byte is a valid wav");
+
+        // But an odd chunk followed by another chunk still needs its pad.
+        let mut bad = wav.clone();
+        bad.extend_from_slice(b"LIST");
+        bad.extend_from_slice(&0u32.to_le_bytes());
+        let err = validate_wav(&bad, "bad.wav").unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Malformed);
+    }
+
+    /// A world's `.place` placements must REACH the catalog. Every other
+    /// part of that lane was wired — the extension, `is_sidecar`, the media
+    /// type, the skip-as-its-own-asset arm, the Source role, the parse on
+    /// measure — but nothing attached it to the world GLB, so a `.place`
+    /// was read, validated and dropped without a word. Seventy Doom worlds
+    /// published that way: no placements, no error, an empty level for
+    /// anything streaming the map.
+    #[test]
+    fn a_world_publishes_its_place_sidecar() {
+        let pack = test_root("placesidecar");
+        let out = test_bundle("placesidecar_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/e1m1.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/e1m1.png"), valid_png(512, 512)).unwrap();
+        fs::write(
+            pack.join("worlds/e1m1.place"),
+            "world-place 1\nsource doom\nworld e1m1\n\
+             place t0 character billboards/doom1/poss 1.0000 0.0000 2.0000 0.00000\n",
+        )
+        .unwrap();
+
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false).expect("compile");
+        assert_eq!(report.assets, 1, "the world is one asset, not two");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let asset = &manifest.assets[0];
+        assert_eq!(asset.key.as_str(), "worlds/e1m1");
+        let paths: Vec<&str> = asset.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with(".place")),
+            "the placements sidecar must ride on the world's own asset: {paths:?}"
+        );
+        // Source role, as the lane declares until a typed role can land.
+        let place = asset
+            .files
+            .iter()
+            .find(|f| f.path.as_str().ends_with(".place"))
+            .expect("place file");
+        assert_eq!(place.file.role, FileRole::Source);
+    }
+
+    /// An unreadable placements sidecar is left behind and the world still
+    /// publishes — the same convenience contract `.spawn` has.
+    #[test]
+    fn an_unreadable_place_sidecar_does_not_cost_the_world() {
+        let pack = test_root("badplace");
+        let out = test_bundle("badplace_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/e1m1.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/e1m1.png"), valid_png(512, 512)).unwrap();
+        fs::write(pack.join("worlds/e1m1.place"), "not a place sidecar at all").unwrap();
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("a bad sidecar must not refuse the world");
+        assert_eq!(report.assets, 1);
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let paths: Vec<&str> = manifest.assets[0]
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(!paths.iter().any(|p| p.ends_with(".place")), "{paths:?}");
+    }
+
+    /// brick-kit ships `square-lq-brick-slope-corner-outside-inverted-2x2`
+    /// and its `hq` twin: 49 bytes of stem against the catalog's 48-byte
+    /// key-segment budget. That budget is the CONTRACT's
+    /// (`makepad_asset_data::limits::MAX_KEY_SEGMENT_BYTES`) and is frozen,
+    /// so the two models genuinely cannot publish — but 294 others in the
+    /// kit can, and used to be lost with them.
+    #[test]
+    fn a_name_too_long_to_be_a_catalog_key_costs_that_model_only() {
+        let pack = test_root("longname");
+        let out = test_bundle("longname_out");
+        let long = "square-lq-brick-slope-corner-outside-inverted-2x2";
+        assert_eq!(long.len(), 49, "the real brick-kit stem, one byte over");
+        assert!(long.parse::<PackEntryKey>().is_err(), "cannot be a key");
+        fs::write(pack.join(format!("{long}.glb")), tiny_glb()).unwrap();
+        fs::write(pack.join(format!("{long}.png")), valid_png(512, 512)).unwrap();
+        for stem in ["brick-a", "brick-b"] {
+            fs::write(pack.join(format!("{stem}.glb")), tiny_glb()).unwrap();
+            fs::write(pack.join(format!("{stem}.png")), valid_png(512, 512)).unwrap();
+        }
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("one over-long name must not refuse the kit");
+        assert_eq!(report.assets, 2, "the other models imported");
+        assert_eq!(report.skipped_models.len(), 1);
+        let (path, why) = &report.skipped_models[0];
+        assert_eq!(path, &format!("{long}.glb"));
+        assert!(why.contains("cannot exist in the catalog"), "{why}");
+        // Its thumbnail did not survive it as a stray image asset.
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["brick-a", "brick-b"]);
+    }
+
+    /// The per-model escape hatch is for shapes we do not SUPPORT, never
+    /// for a pack that is broken or trying something. A model pointing its
+    /// texture outside the pack refuses the whole pack, even standing
+    /// beside models that are perfectly fine — being skippable would turn
+    /// a security refusal into a line in a summary nobody reads.
+    #[test]
+    fn a_malformed_model_still_refuses_the_whole_pack() {
+        let pack = test_root("hostile");
+        let out = test_bundle("hostile_out");
+        fs::write(pack.join("good.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("good.png"), valid_png(512, 512)).unwrap();
+        fs::write(
+            pack.join("evil.glb"),
+            tiny_glb_with_uri("file:///etc/passwd"),
+        )
+        .unwrap();
+        fs::write(pack.join("evil.png"), valid_png(512, 512)).unwrap();
+        let err = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect_err("an external texture uri must refuse the pack, not skip one model");
+        assert_eq!(err.kind, PackImportErrorKind::Malformed);
+        assert!(err.to_string().contains("external"), "{err}");
+    }
+
+    fn tiny_glb_with_two_uris(a: &str, b: &str) -> Vec<u8> {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}],
+            "images":[{{"uri":"{a}"}},{{"uri":"{b}"}}]}}"#,
             bin.len(),
             bin.len()
         );
@@ -7170,5 +8907,248 @@ mod tests {
             err.to_string().contains("trailing") || err.to_string().contains("length"),
             "{err}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // One asset per actor / textures ride with their mesh
+    // -----------------------------------------------------------------
+
+    fn write_billboard_actor(dir: &Path) {
+        // The shape classic import writes: ONE packed sheet, ONE manifest
+        // indexing its cells, one animated preview strip.
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("troo.png"), valid_png(8, 6)).unwrap();
+        fs::write(dir.join("troo_thumb.png"), valid_png(1024, 256)).unwrap();
+        fs::write(
+            dir.join("troo.billboard"),
+            "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             facings 1\n\
+             sheet 2 4 6\n\
+             state walk 0 2 1 8\n\
+             frame 0 A 1 4 6 troo.png cell 0\n\
+             frame 1 B 1 4 6 troo.png flip cell 1\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn billboard_actor_is_one_asset_with_its_sheet_and_manifest() {
+        let pack = test_root("bb_actor");
+        let out = test_bundle("bb_actor_out");
+        write_billboard_actor(&pack.join("billboards/doom1"));
+        let report = compile(&pack, &out, licensed_spec());
+        assert_eq!(report.assets, 1, "one actor, one card");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        let asset = &manifest.assets[0];
+        assert_eq!(asset.kind, AssetKind::Billboard);
+        assert_eq!(asset.key.as_str(), "billboards/doom1/troo");
+        let roles: Vec<(FileRole, &str)> = asset
+            .files
+            .iter()
+            .map(|f| (f.file.role, f.path.as_str()))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                (FileRole::Texture, "billboards/doom1/troo.png"),
+                (FileRole::Source, "billboards/doom1/troo.billboard"),
+            ]
+        );
+        assert_eq!(
+            asset.files[0].file.dims,
+            Some(ImageDims { width: 8, height: 6 }),
+            "the sheet publishes its dimensions"
+        );
+        assert_eq!(asset.files[1].file.media, MediaType::Text);
+        let thumb = asset.thumbnail.as_ref().expect("animated preview strip");
+        assert_eq!(thumb.path, "billboards/doom1/troo_thumb.png");
+        assert_eq!((thumb.meta.width, thumb.meta.height), (1024, 256));
+    }
+
+    #[test]
+    fn per_frame_pngs_of_an_actor_never_become_assets() {
+        let pack = test_root("bb_frames");
+        let out = test_bundle("bb_frames_out");
+        let dir = pack.join("billboards/doom1");
+        write_billboard_actor(&dir);
+        // A legacy actor beside it: per-frame PNGs, no packed sheet. It
+        // publishes NOTHING rather than one card per lump.
+        for lump in ["bossa1", "bossa2a8", "bossb1"] {
+            fs::write(dir.join(format!("{lump}.png")), valid_png(4, 6)).unwrap();
+        }
+        fs::write(
+            dir.join("boss.billboard"),
+            "stateful-billboard 1\n\
+             prefix boss\n\
+             role character\n\
+             preview walk\n\
+             facings 8\n\
+             mirrors 8\n\
+             state walk 0 3 1 8\n\
+             frame 0 A 1 4 6 bossa1.png\n\
+             frame 1 A 2 4 6 bossa2a8.png\n\
+             frame 2 A 8 4 6 bossa2a8.png flip\n\
+             frame 3 B 1 4 6 bossb1.png\n",
+        )
+        .unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, vec!["billboards/doom1/troo"], "{keys:?}");
+        let plan = String::from_utf8(fs::read(&report.plan_path).unwrap()).unwrap();
+        assert!(
+            !plan.contains("bossa2a8.png"),
+            "frame pixels are not uploaded at all"
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_lies_about_its_sheet_is_refused() {
+        let pack = test_root("bb_lies");
+        let out = test_bundle("bb_lies_out");
+        let dir = pack.join("billboards/doom1");
+        write_billboard_actor(&dir);
+        // Header claims 2x4 wide cells; the sheet on disk is 8x6.
+        fs::write(
+            dir.join("troo.billboard"),
+            "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             sheet 2 9 6\n\
+             state walk 0 2 1 8\n\
+             frame 0 A 1 4 6 troo.png cell 0\n\
+             frame 1 B 1 4 6 troo.png cell 1\n",
+        )
+        .unwrap();
+        let err = compile_pack(&pack, &out, licensed_spec(), None, false).unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Malformed, "{err}");
+        assert!(err.to_string().contains("sheet header"), "{err}");
+    }
+
+    #[test]
+    fn a_mesh_packs_atlas_is_attached_never_an_orphan_texture() {
+        let pack = test_root("atlas");
+        let out = test_bundle("atlas_out");
+        fs::create_dir_all(pack.join("models")).unwrap();
+        fs::create_dir_all(pack.join("Textures")).unwrap();
+        fs::write(pack.join("models/box.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("models/box.png"), valid_png(512, 512)).unwrap();
+        fs::write(pack.join("Textures/colormap.png"), valid_png(1024, 1024)).unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        assert_eq!(report.assets, 1, "the kit is one mesh, not mesh + atlas");
+        assert_eq!(manifest.assets[0].kind, AssetKind::Mesh);
+        assert!(
+            !manifest.assets.iter().any(|a| a.kind == AssetKind::Texture),
+            "a deletable texture row is a dependency waiting to break"
+        );
+    }
+
+    #[test]
+    fn an_image_only_pack_still_publishes_its_textures() {
+        let pack = test_root("tex_only");
+        let out = test_bundle("tex_only_out");
+        fs::create_dir_all(pack.join("textures")).unwrap();
+        fs::write(pack.join("textures/hull.png"), valid_png(512, 256)).unwrap();
+        fs::write(pack.join("textures/detail.jpg"), jpeg_solid(64, 48)).unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        assert_eq!(report.assets, 2, "a ui/sprite pack is its images");
+        assert!(manifest.assets.iter().all(|a| a.kind == AssetKind::Texture));
+    }
+
+    #[test]
+    fn a_worlds_spawn_sidecar_publishes_as_anchors_and_never_as_a_blob() {
+        let pack = test_root("nav");
+        let out = test_bundle("nav_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/map01.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/map01.png"), valid_png(512, 512)).unwrap();
+        fs::write(
+            pack.join("worlds/map01.spawn"),
+            "world-spawn 1\n1.0000 0.6406 1.0000\n1.57080 0.00000\n\
+             start player_start 1.0000 0.6406 1.0000 1.57080 0.00000\n\
+             start deathmatch_1 4.0000 0.6406 -2.0000 -1.57080 0.00000\n\
+             floor 0.0000\nstep 0.3750\neye 0.6406\n",
+        )
+        .unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        assert_eq!(report.assets, 1, "the sidecar is metadata, not an asset");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        let world = &manifest.assets[0];
+        let names: Vec<&str> = world.anchors.iter().map(|a| a.name.as_str()).collect();
+        // canonicalize() sorts anchors by name.
+        assert_eq!(
+            names,
+            vec![
+                "deathmatch_1",
+                "eye_height",
+                "floor_height",
+                "player_start",
+                "step_height"
+            ]
+        );
+        let ps = world.anchors.iter().find(|a| a.name == "player_start").unwrap();
+        assert!((ps.transform.pos.y - 0.6406).abs() < 1e-4);
+        assert!((ps.transform.rot.y - std::f32::consts::FRAC_PI_4.sin()).abs() < 1e-4);
+        let step = world.anchors.iter().find(|a| a.name == "step_height").unwrap();
+        assert!((step.transform.pos.y - 0.375).abs() < 1e-4);
+
+        let plan = String::from_utf8(fs::read(&report.plan_path).unwrap()).unwrap();
+        assert!(!plan.contains("map01.spawn"), "sidecar must not be uploaded");
+        assert!(
+            !world.files.iter().any(|f| f.path.ends_with(".spawn")),
+            "no file role carries navigation"
+        );
+    }
+
+    #[test]
+    fn a_world_without_a_sidecar_still_publishes() {
+        let pack = test_root("nonav");
+        let out = test_bundle("nonav_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/map02.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/map02.png"), valid_png(512, 512)).unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        assert!(manifest.assets[0].anchors.is_empty());
+    }
+
+    #[test]
+    fn a_placeholder_thumbnail_refuses_the_mesh() {
+        let pack = test_root("placeholder");
+        let out = test_bundle("placeholder_out");
+        fs::create_dir_all(pack.join("models")).unwrap();
+        fs::write(pack.join("models/box.glb"), tiny_glb()).unwrap();
+        // A flat 512² tile: the "no visual available" shape.
+        let mut rgba = Vec::new();
+        for _ in 0..512 * 512 {
+            rgba.extend_from_slice(&[32, 38, 46, 255]);
+        }
+        let flat = crate::classic_import::encode_png_rgba(&rgba, 512, 512).unwrap();
+        fs::write(pack.join("models/box.png"), flat).unwrap();
+        let err = compile_pack(&pack, &out, licensed_spec(), None, false).unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Content, "{err}");
+        assert!(err.to_string().contains("placeholder"), "{err}");
+        assert!(err.to_string().contains("models/box.png"), "{err}");
+    }
+
+    #[test]
+    fn atlas_directory_is_recognized_at_any_depth() {
+        assert!(is_pack_atlas("textures/colormap.png"));
+        assert!(is_pack_atlas("kit/Textures/colormap.png"));
+        assert!(is_pack_atlas("a/b/TEXTURES/c/colormap.png"));
+        assert!(!is_pack_atlas("models/box.png"));
+        assert!(!is_pack_atlas("textures.png"));
     }
 }

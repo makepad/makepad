@@ -1470,6 +1470,16 @@ impl ShaderFnCompiler {
                         || id == id!(cos)
                         || id == id!(step)
                         || id == id!(smoothstep)
+                        // exp/log/pow family: the analytic sky is exp(vec3)
+                        // and pow(vec3, s) — unsuffixed they hit the scalar
+                        // preamble fns and the whole shader fails the JIT.
+                        || id == id!(exp)
+                        || id == id!(exp2)
+                        || id == id!(log)
+                        || id == id!(log2)
+                        || id == id!(pow)
+                        || id == id!(tan)
+                        || id == id!(modf)
                 );
                 if needs_suffix && !concrete_args.is_empty() {
                     let first_ty = concrete_args[0];
@@ -1557,21 +1567,22 @@ impl ShaderFnCompiler {
                 );
             }
             id!(sample) | id!(sample_as_bgra) | id!(sample_lod) | id!(sample_nearest)
-            | id!(sample_rt) => {
+            | id!(sample_repeat) | id!(sample_as_bgra_repeat) => {
                 // sample(coord) samples the texture at normalized coordinates.
                 // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
                 // applies a BGRA->RGBA swizzle in the sampler helper.
-                // sample_rt(coord) is for offscreen render targets: on GL-family
-                // backends the FBO is stored bottom-up, so it flips V (1.0 - y); on
-                // Metal/D3D/WGSL/Rust render targets are top-left origin so it's plain sample.
-                let method_name = if method_id == id!(sample_as_bgra) {
+                // There is deliberately NO render-target variant: every
+                // backend stores offscreen targets in top-left row order
+                // (GL renders them through a Y-inverted projection), so a
+                // render texture samples exactly like any other.
+                let method_name = if method_id == id!(sample_as_bgra)
+                    || method_id == id!(sample_as_bgra_repeat)
+                {
                     "sample_as_bgra"
                 } else if method_id == id!(sample_nearest) {
                     "sample_nearest"
                 } else if method_id == id!(sample_lod) {
                     "sample_lod"
-                } else if method_id == id!(sample_rt) {
-                    "sample_rt"
                 } else {
                     "sample"
                 };
@@ -1610,6 +1621,13 @@ impl ShaderFnCompiler {
                     let sampler = if method_id == id!(sample_nearest) {
                         ShaderSampler {
                             filter: SamplerFilter::Nearest,
+                            ..ShaderSampler::default()
+                        }
+                    } else if method_id == id!(sample_repeat)
+                        || method_id == id!(sample_as_bgra_repeat)
+                    {
+                        ShaderSampler {
+                            address: SamplerAddress::Repeat,
                             ..ShaderSampler::default()
                         }
                     } else {
@@ -1736,7 +1754,9 @@ impl ShaderFnCompiler {
                                             texture_expr, coord, lod
                                         )
                                         .ok();
-                                    } else if method_id == id!(sample_as_bgra) {
+                                    } else if method_id == id!(sample_as_bgra)
+                                        || method_id == id!(sample_as_bgra_repeat)
+                                    {
                                         write!(s, "samplecube_bgra({}, {})", texture_expr, coord)
                                             .ok();
                                     } else {
@@ -1766,11 +1786,10 @@ impl ShaderFnCompiler {
                                             texture_expr, coord, lod
                                         )
                                         .ok();
-                                    } else if method_id == id!(sample_as_bgra) {
+                                    } else if method_id == id!(sample_as_bgra)
+                                        || method_id == id!(sample_as_bgra_repeat)
+                                    {
                                         write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
-                                            .ok();
-                                    } else if method_id == id!(sample_rt) {
-                                        write!(s, "sample2d_rt({}, {})", texture_expr, coord)
                                             .ok();
                                     } else {
                                         write!(s, "sample2d({}, {})", texture_expr, coord).ok();
@@ -1780,8 +1799,18 @@ impl ShaderFnCompiler {
                         }
                         ShaderBackend::Rust => {
                             // Rust headless backend keeps texture data in logical RGBA,
-                            // so sample_as_bgra is a no-op alias of sample.
-                            if let Some(lod) = lod {
+                            // so sample_as_bgra is a no-op alias of sample. The
+                            // sampler STATE is not: `sample_nearest` means an exact
+                            // texel fetch (every data pass depends on it) and only
+                            // the *_repeat forms wrap, so each maps to its own
+                            // runtime method rather than collapsing to `sample`.
+                            if method_id == id!(sample_nearest) {
+                                write!(s, "{}.sample_nearest({})", texture_expr, coord).ok();
+                            } else if method_id == id!(sample_repeat)
+                                || method_id == id!(sample_as_bgra_repeat)
+                            {
+                                write!(s, "{}.sample_repeat({})", texture_expr, coord).ok();
+                            } else if let Some(lod) = lod {
                                 write!(s, "{}.sample_lod({}, {})", texture_expr, coord, lod).ok();
                             } else {
                                 write!(s, "{}.sample({})", texture_expr, coord).ok();
@@ -1871,8 +1900,9 @@ impl ShaderFnCompiler {
                         &[
                             id!(sample),
                             id!(sample_as_bgra),
+                            id!(sample_repeat),
+                            id!(sample_as_bgra_repeat),
                             id!(sample_lod),
-                            id!(sample_rt),
                             id!(sample_video),
                             id!(size)
                         ]

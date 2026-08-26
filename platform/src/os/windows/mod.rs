@@ -5,6 +5,7 @@ pub mod dataobject;
 pub mod dropfiles;
 pub mod dropsource;
 pub mod droptarget;
+pub mod file_dialog;
 pub mod enumformatetc;
 pub mod media_foundation;
 pub mod video_file_decoder;

@@ -42,6 +42,7 @@ script_mod! {
         draw_text +: {
             disabled: instance(0.0)
             down: instance(0.0)
+            ink_centered: true
             color: theme.color_label_inner
             color_hover: uniform(theme.color_label_inner_hover)
             color_focus: uniform(theme.color_label_inner_focus)
@@ -479,6 +480,11 @@ pub struct DropDown2 {
     scroll: Option<f64>,
     #[rust]
     geom: Option<ApplePopupGeom>,
+    /// The field's rect as last seen BETWEEN draws (final, aligned). During
+    /// a draw the field's own area still sits at its pre-alignment position
+    /// when it follows a Fill sibling, so the popup cannot be placed from it.
+    #[rust]
+    aligned_rect: Option<Rect>,
     #[rust]
     arrow_dir: Option<f64>,
     #[rust]
@@ -599,8 +605,7 @@ impl DropDown2 {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
     }
 
-    fn draw_popup(&mut self, cx: &mut Cx2d) {
-        let trigger = self.draw_bg.area().rect(cx);
+    fn draw_popup(&mut self, cx: &mut Cx2d, trigger: Rect) {
         let pass = cx.current_pass_size();
         let font_px = 9.0;
         let content_w = estimate_label_width(&self.labels, font_px);
@@ -718,6 +723,12 @@ impl Widget for DropDown2 {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        // Between draws every deferred alignment has been applied, so this
+        // is the field's true on-screen rect (see `aligned_rect`).
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            self.aligned_rect = Some(rect);
+        }
 
         if let Some(ne) = self.next_frame.is_event(event) {
             if self.is_active {
@@ -902,7 +913,16 @@ impl Widget for DropDown2 {
         self.clamp_selected();
         self.draw_field(cx, walk);
         if self.is_active {
-            self.draw_popup(cx);
+            // Turtle alignment is deferred: a field laid out after a Fill
+            // sibling (or below a Fill one) is recorded at its pre-shift
+            // position and only moved when the ancestor turtle ends, so the
+            // rect visible during THIS draw would put the popup at the row's
+            // pre-alignment origin. Place it from the rect captured between
+            // draws instead (the popup only ever opens from an event).
+            let trigger = self
+                .aligned_rect
+                .unwrap_or_else(|| self.draw_bg.area().rect(cx));
+            self.draw_popup(cx, trigger);
         }
         DrawStep::done()
     }

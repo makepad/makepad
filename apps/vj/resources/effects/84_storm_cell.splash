@@ -1,0 +1,58 @@
+// STORM CELL — the dark twin of Cumulus Drift: slate cloud clusters roll
+// through the frame and LIGHTNING fires inside them on the kick. Pattern
+// taught here: flash-via-binding — `beat_pulse` is gated so only every
+// second beat strikes hard (fract(beat*0.5) selects them), and the
+// subclassed fx_color turns that pulse into interior illumination plus a
+// white col_c strike, so thunderheads glow from within instead of merely
+// brightening.
+{
+    name: "Storm Cell"
+    engine: "particles"
+    mode: "clouds"
+    seed: 66
+
+    count: 1600
+    spread: 9.0
+    size: 1.0
+    rate: 0.015
+    swirl: 1.4
+
+    // The lightning gate: full strike on beats 1 and 3, near-dark between.
+    // STRIKE (p0) scales the whole gate; mid-knob = the stock storm.
+    beat_pulse: "(0.3 + 2.9 * step(0.45, fract(beat * 0.5))) * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "STRIKE", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x05060a
+    color_a: #x2a3038
+    color_b: #x11151d
+    color_c: #xcfe0ff
+
+    cam_dist: 19.0
+    cam_height: 1.0
+    cam_orbit: 0.025
+    fog: 0.012
+
+    // Interior illumination: the pulse (already gated by beat_pulse) is the
+    // strike envelope; squaring it sharpens the flash into a flicker.
+    shader: draw.DrawVjFxParticles {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let body = self.col_a.mix(self.col_b, attr.z)
+            let strike = self.time_beat.w
+            let lit = 0.22 + strike * 1.6
+            let bolt = self.col_c.xyz * (strike * strike * 0.85)
+            let fade = (1.0 - t) * smoothstep(0.0, 0.08, t)
+            return vec4(body.xyz * lit + bolt, fade)
+        }
+    }
+
+    stages: [
+        {kind: "feedback", amount: "min(0.4 + (p1-0.5)*0.8, 0.97)", zoom: 1.002, rotate: 0.0, dim: 0.96},
+        {kind: "bloom", threshold: "0.75 - 0.35 * pulse", strength: "1.1 * (0.25 + 1.5*p2)", levels: 3}
+    ]
+}

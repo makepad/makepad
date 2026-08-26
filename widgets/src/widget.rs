@@ -1,6 +1,7 @@
 pub use crate::register_widget;
 use {
     crate::makepad_draw::*,
+    crate::makepad_script::script_err_wrong_value,
     crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
     crate::widget_tree::{set_ui_root, CxWidgetExt},
     std::any::{Any, TypeId},
@@ -152,9 +153,16 @@ pub trait WidgetNode: ScriptApply {
     }
     /// Whether this widget's area contains the given point. Override for widgets with
     /// multiple hit areas (e.g. TextFlowLink with drawn_areas).
+    ///
+    /// Uses the *clipped* rect, the same geometry `Event::hits` tests against.
+    /// `Area::rect` is unclipped: a widget drawn outside its container's clip —
+    /// every recycled row a `PortalList` draws past the viewport edge, anything
+    /// scrolled out of a `ScrollXYView` — still reports a full-size rect at a
+    /// position where nothing of it is on screen. Matching those would hand
+    /// point queries a widget the user cannot see or click.
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
         let area = self.area();
-        area.is_valid(cx) && area.rect(cx).contains(point)
+        area.is_valid(cx) && area.clipped_rect(cx).contains(point)
     }
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
@@ -712,8 +720,46 @@ impl WidgetRef {
         method: LiveId,
         args: ScriptValue,
     ) -> ScriptAsyncResult {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.script_call(vm, method, args);
+        {
+            let mut borrow = self.0.borrow_mut();
+            let Some(inner) = borrow.as_mut() else {
+                return ScriptAsyncResult::MethodNotFound;
+            };
+            match inner.widget.script_call(vm, method, args) {
+                ScriptAsyncResult::MethodNotFound => {}
+                handled => return handled,
+            }
+        }
+        // Visibility is a property of EVERY widget (the `Widget` trait carries
+        // it, and `#[visible]` derives it), so a script gets it on every widget
+        // too. It used to live in `View::script_call` alone, which meant
+        // `ui.some_label.set_visible(false)` raised "method not found" — the
+        // one call a responsive layout leans on hardest, silently refused on
+        // every leaf widget.
+        if method == live_id!(set_visible) {
+            let Some(args_obj) = args.as_object() else {
+                return ScriptAsyncResult::Return(NIL);
+            };
+            let trap = vm.bx.threads.cur().trap.pass();
+            let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+            let visible = value
+                .as_bool()
+                .or_else(|| value.as_number().map(|n| n != 0.0));
+            // Never guess on a bad argument: a silent default (especially
+            // `true`) turns script bugs into invisible misbehavior. Keep the
+            // current visibility and surface an error instead.
+            let Some(visible) = visible else {
+                return ScriptAsyncResult::Return(script_err_wrong_value!(
+                    vm.trap(),
+                    "set_visible expects a bool (or number), got {:?}",
+                    value.value_type()
+                ));
+            };
+            vm.with_cx_mut(|cx| self.set_visible(cx, visible));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(visible) {
+            return ScriptAsyncResult::Return(self.visible().into());
         }
         ScriptAsyncResult::MethodNotFound
     }

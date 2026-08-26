@@ -32,6 +32,8 @@ Caption rules:
 - Target about 250-450 English words for Arrangement; the three caption blocks together should be a full official Structured Caption, not a one-line summary.
 
 Lyrics rules:
+- Every word after `Lyrics:` is sung verbatim by the model. Never write bar counts, durations, seconds, BPM, timing math, planning notes, or arrangement commentary there — "8 bars" would literally be sung. Pacing and structure talk belongs in the Arrangement block only.
+- A section tag line is the tag alone (plus at most one hyphen modifier), nothing appended — no "[Verse] - 8 lines", no "[Chorus] (12 bars)".
 - Newly written for this request. Never imitate or quote an existing song, artist, title, or copyrighted lyric.
 - Match the requested subject, tone, and the Style-direction target duration. Memorable chorus, concrete imagery, no padding by repeating one line.
 - Caption and lyrics must agree: instruments, energy, and vocal treatment in tags must match Vocal Details and Arrangement.

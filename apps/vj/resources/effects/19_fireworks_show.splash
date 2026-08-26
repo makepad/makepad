@@ -1,0 +1,153 @@
+// FIREWORKS SHOW — the programmable-emitters engine. The `frame:` function
+// below runs EVERY FRAME (bounded, like a game tick): it launches climbing
+// shells on the beat, pops them into burst emitters at fuse time, and keeps
+// a sparkle field simmering. It only ever touches EMITTERS — every visible
+// spark is stateless GPU work derived from the emitter's parameters.
+//
+// Emitter spawn keys: kind (burst/jet/sparkle/ring), pos, vel, life, speed,
+// size, gravity, stagger, fraction, spread, color, color2, seed, slot
+// (re-spawning a slot MOVES that emitter — persistent, script-animated).
+{
+    name: "Fireworks Show"
+    engine: "emitters"
+    particles: 1024
+    size: 0.14
+
+    // PERFORMANCE DIALS — the tick reads the dial params as fx.p0..fx.p3;
+    // mid-knob reproduces the stock show exactly.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "BURST", bind: "p0", default: 0.5},
+        {name: "TRAIL", bind: "p1", default: 0.5},
+        {name: "GLOW", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x030309
+    cam_dist: 15.0
+    cam_height: 4.0
+    cam_orbit: 0.03
+
+    stages: [
+        {kind: "bloom", threshold: 0.3, strength: "1.7 * (0.25 + 1.5*p2)", levels: 3},
+        {kind: "feedback", amount: "min(0.5 + (p1-0.5)*0.8, 0.97)", zoom: 1.0, rotate: 0.0, dim: 0.88}
+    ]
+
+    frame: fn(fx) {
+        let out = []
+        // BEAT EDGE, robustly: a bare `phase < dt*2` is a single-frame
+        // window a fixed-step clock can straddle forever (the thumbnail
+        // bake's 30fps at 120bpm steps phase by exactly dt*2). Floor the
+        // window wider than one step and key each spawn to the BEAT
+        // NUMBER via `slot`, so an extra frame in the window replaces the
+        // spawn instead of doubling it.
+        let edge = fx.phase < max(fx.dt * 2.0, 0.075)
+        let n = floor(fx.beat)
+        // One shell per beat, launched RIGHT after the beat lands.
+        if edge {
+            let lane = modf(n, 5.0) - 2.0
+            out.push({
+                kind: "jet"
+                slot: 90 + modf(n, 2.0)
+                pos: vec3(lane * 4.0, -8.0, 0.0)
+                vel: vec3(0.0 - lane * 0.4, 11.0, 0.0)
+                life: 1.1
+                speed: 1.2
+                size: 0.10
+                fraction: 0.12
+                color: #xffe0b0
+                color2: #xff8030
+                seed: n
+            })
+        }
+        // The pop: a burst where the shell arrived, one beat later.
+        if edge {
+            let lane2 = modf(n - 1.0, 5.0) - 2.0
+            let hue = modf(n, 3.0)
+            let col = #x66aaff
+            let col2 = #x2244aa
+            if hue < 0.5 {
+                col = #xffd24a
+                col2 = #xaa6620
+            } else if hue < 1.5 {
+                col = #xff5588
+                col2 = #x992244
+            }
+            out.push({
+                kind: "burst"
+                slot: 80 + modf(n, 6.0)
+                pos: vec3(lane2 * 4.0 - lane2 * 0.4, 3.0, 0.0)
+                vel: vec3(0.0, 0.6, 0.0)
+                life: 2.6
+                // BURST dial: the pop's reach and spark size ride fx.p0.
+                speed: 5.5 * (0.5 + fx.p0)
+                size: 0.16 * (0.4 + 1.2 * fx.p0)
+                gravity: 1.0
+                stagger: 0.05
+                color: col
+                color2: col2
+                seed: n * 1.7
+            })
+            // A crackle ring under the big break, every other beat.
+            if modf(n, 2.0) < 0.5 {
+                out.push({
+                    kind: "ring"
+                    slot: 70 + modf(n * 0.5, 2.0)
+                    pos: vec3(lane2 * 4.0, 3.0, 0.0)
+                    life: 1.2
+                    speed: 4.0
+                    size: 0.09
+                    fraction: 0.4
+                    color: #xffffff
+                    color2: #x8899ff
+                    seed: n * 3.1
+                })
+            }
+        }
+        // A slow sparkle field that simmers between the big hits.
+        if fx.emitters < 3 {
+            out.push({
+                kind: "sparkle"
+                pos: vec3(0.0, 5.0, -3.0)
+                life: 6.0
+                spread: 9.0
+                size: 0.05
+                fraction: 0.5
+                color: #xaaccff
+                color2: #x334488
+                seed: fx.time
+            })
+        }
+        return out
+    }
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = life 0..1, attr = (id, seconds alive, ignition rnd, spread rnd).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxEmitter {
+        fx_color: fn(t: float, attr: vec4, content: vec4, cmix: float) -> vec4 {
+            let heat = clamp(1.0 - attr.y * 3.0, 0.0, 1.0)
+            let tint0 = self.e_col_a.mix(self.e_col_b, t)
+            let pal = tint0.xyz.mix(
+                content.xyz * (1.05 + 0.5 * self.time_beat.w),
+                clamp(cmix * 1.2, 0.0, 1.0)
+            )
+            let rgb = mix(pal, vec3(1.0, 0.98, 0.92), heat * heat)
+            let fade = (1.0 - t) * (1.0 - t)
+            return vec4(rgb, fade)
+        }
+
+        fx_sprite: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let core = 1.0 - smoothstep(0.0, 0.4, d)
+            let halo = 1.0 - smoothstep(0.1, 0.9, d)
+            let a = clamp(core + halo * 0.5, 0.0, 1.0) * tint.w
+            return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+        }
+    }
+}

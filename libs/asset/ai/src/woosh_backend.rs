@@ -224,8 +224,8 @@ mod woosh_gen {
     use super::AudioJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::woosh_pipeline::WooshPipeline;
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_sfx::woosh_pipeline::WooshPipeline;
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     /// DiffusionError -> AssetAiError, preserving cancellation.

@@ -517,6 +517,7 @@ impl LayoutContext {
         let descender_in_lpxs =
             font.map_or(0.0, |font| font.descender_in_ems()) * font_size_in_lpxs;
         let line_gap_in_lpxs = font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        let cap_height_in_lpxs = font.map_or(0.0, |font| font.cap_height_in_ems()) * font_size_in_lpxs;
 
         let text = self
             .text
@@ -532,6 +533,7 @@ impl LayoutContext {
             ascender_in_lpxs,
             descender_in_lpxs,
             line_gap_in_lpxs,
+            cap_height_in_lpxs,
             line_spacing_scale: self.options.line_spacing_scale,
             glyphs,
         };
@@ -1120,6 +1122,33 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
+    /// How far down the text has to move for its *ink* to sit in the middle of
+    /// the box `size_in_lpxs` describes, instead of its line box.
+    ///
+    /// The box this text occupies runs from the first row's ascender down to
+    /// the last row's descender. The ink runs from the first row's cap line
+    /// down to the last row's baseline. A text face's ascender reaches further
+    /// above the cap line than its descender reaches below the baseline, so
+    /// the two centers do not coincide and the ink reads as sitting high. The
+    /// difference works out to `(descender + cap_height - ascender) / 2`
+    /// whatever the row count, because both boxes share everything in between.
+    ///
+    /// Returns `0.0` when the metrics are not trustworthy enough to move
+    /// anything: a face with no capital (icon and symbol fonts), or one whose
+    /// cap height claims to reach past its own ascender.
+    pub fn ink_center_offset_in_lpxs(&self) -> f32 {
+        let (Some(first), Some(last)) = (self.rows.first(), self.rows.last()) else {
+            return 0.0;
+        };
+        let ascender = first.ascender_in_lpxs;
+        let cap_height = first.cap_height_in_lpxs;
+        let descender = -last.descender_in_lpxs;
+        if cap_height <= 0.0 || cap_height > ascender {
+            return 0.0;
+        }
+        (descender + cap_height - ascender) * 0.5
+    }
+
     pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
         let row_index = self.cursor_to_row_index(cursor);
         let row = &self.rows[row_index];
@@ -1260,6 +1289,9 @@ pub struct LaidoutRow {
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
+    /// Height of a capital above this row's baseline, or `0.0` when the row's
+    /// font has no capital to measure (see [`Font::cap_height_in_ems`]).
+    pub cap_height_in_lpxs: f32,
     pub line_spacing_scale: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
@@ -1642,5 +1674,225 @@ mod tests {
         // the excess without waiting for a new insert.
         layouter.advance_cache_generation();
         assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multiline ellipsis: `max_rows: Some(n)` + `ellipsis: true` + `wrap` must
+    // wrap normally up to row n, fill row n to the width limit, and end it in
+    // "…" — the contract a two-line card caption stands on. These tests load
+    // the bundled fonts (as loader::tests does) because truncation decisions
+    // depend on real glyph advances.
+    // -----------------------------------------------------------------------
+
+    use super::BorrowedLayoutParams;
+    use crate::makepad_platform::SharedBytes;
+    use crate::text::font::FontId;
+    use crate::text::loader::{FontDefinition, FontFamilyDefinition};
+    use std::path::PathBuf;
+
+    const LATIN_FAMILY: u64 = 0xE111_00FA;
+    const CJK_FAMILY: u64 = 0xE111_00FB;
+
+    fn real_font_layouter() -> Layouter {
+        let mut layouter = Layouter::new(Settings::default());
+        let resources =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources");
+        for (family_id, font_id, file) in [
+            (LATIN_FAMILY, 0xE111_0001_u64, "IBMPlexSans-Text.ttf"),
+            (CJK_FAMILY, 0xE111_0002_u64, "LXGWWenKaiRegular.ttf"),
+        ] {
+            let data = SharedBytes::from_file_mmap_or_read(resources.join(file))
+                .expect("bundled font bytes should load");
+            let font_id: FontId = font_id.into();
+            layouter.define_font(
+                font_id,
+                FontDefinition {
+                    data,
+                    index: 0,
+                    ascender_fudge_in_ems: 0.0,
+                    descender_fudge_in_ems: 0.0,
+                    weight: None,
+                    variations: Vec::new(),
+                },
+            );
+            layouter.define_font_family(
+                family_id.into(),
+                FontFamilyDefinition {
+                    font_ids: vec![font_id],
+                    expected_member_count: 1,
+                },
+            );
+        }
+        layouter
+    }
+
+    fn wrapped_layout(
+        layouter: &mut Layouter,
+        family: u64,
+        text: &str,
+        max_width: f32,
+        max_rows: Option<usize>,
+        ellipsis: bool,
+    ) -> Rc<LaidoutText> {
+        layouter.get_or_layout(BorrowedLayoutParams {
+            text,
+            style: super::Style {
+                font_family_id: family.into(),
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions {
+                max_width_in_lpxs: Some(max_width),
+                wrap: true,
+                max_rows,
+                ellipsis,
+                ..LayoutOptions::default()
+            },
+        })
+    }
+
+    /// The appended ellipsis glyphs are stamped with `cluster == text.len()`,
+    /// past every real grapheme — the one place a row can point beyond its
+    /// own text.
+    fn ends_with_ellipsis(text: &LaidoutText) -> bool {
+        let last_row = text.rows.last().expect("layout always yields a row");
+        last_row
+            .glyphs
+            .last()
+            .is_some_and(|glyph| glyph.cluster >= last_row.text.len())
+    }
+
+    #[test]
+    fn multiline_ellipsis_truncates_at_last_allowed_row() {
+        let mut layouter = real_font_layouter();
+        let text = "The quick brown fox jumps over the lazy dog and keeps running far beyond the fence";
+        let max_width = 120.0;
+
+        // Sanity: unrestricted, this text wraps past two rows at this width.
+        let free = wrapped_layout(&mut layouter, LATIN_FAMILY, text, max_width, None, false);
+        assert!(free.rows.len() > 2, "test text must overflow two rows");
+        assert!(!free.is_truncated);
+        assert!(!ends_with_ellipsis(&free));
+
+        let capped = wrapped_layout(&mut layouter, LATIN_FAMILY, text, max_width, Some(2), true);
+        assert_eq!(capped.rows.len(), 2, "exactly the allowed rows remain");
+        assert!(capped.is_truncated);
+        assert!(ends_with_ellipsis(&capped));
+        // The ellipsis row obeys the width limit it truncated for.
+        let last = capped.rows.last().unwrap();
+        assert!(
+            last.width_in_lpxs <= max_width + 0.01,
+            "last row ({}) must fit the bound ({})",
+            last.width_in_lpxs,
+            max_width
+        );
+        // The first row is untouched by truncation: identical to the free layout.
+        assert_eq!(capped.rows[0].text, free.rows[0].text);
+    }
+
+    #[test]
+    fn multiline_ellipsis_leaves_fitting_text_alone() {
+        let mut layouter = real_font_layouter();
+        let text = "Two short lines";
+        let laidout = wrapped_layout(&mut layouter, LATIN_FAMILY, text, 120.0, Some(2), true);
+        assert!(laidout.rows.len() <= 2);
+        assert!(!laidout.is_truncated, "text that fits must not be marked truncated");
+        assert!(!ends_with_ellipsis(&laidout), "no ellipsis on untruncated text");
+    }
+
+    #[test]
+    fn multiline_ellipsis_one_row_over_gets_ellipsis() {
+        let mut layouter = real_font_layouter();
+        // Find a prefix of words that lays out to exactly three rows, then cap
+        // at two: the minimal "one row over" case, measured in real advances
+        // instead of guessed.
+        let words: Vec<&str> =
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+                .split(' ')
+                .collect();
+        let max_width = 90.0;
+        let mut three_row_text = None;
+        for take in 1..=words.len() {
+            let candidate = words[..take].join(" ");
+            let free =
+                wrapped_layout(&mut layouter, LATIN_FAMILY, &candidate, max_width, None, false);
+            if free.rows.len() == 3 {
+                three_row_text = Some(candidate);
+                break;
+            }
+        }
+        let text = three_row_text.expect("some prefix must lay out to three rows");
+        let capped =
+            wrapped_layout(&mut layouter, LATIN_FAMILY, &text, max_width, Some(2), true);
+        assert_eq!(capped.rows.len(), 2);
+        assert!(capped.is_truncated);
+        assert!(ends_with_ellipsis(&capped));
+    }
+
+    #[test]
+    fn multiline_ellipsis_fills_last_row_by_grapheme() {
+        let mut layouter = real_font_layouter();
+        // The word that overflows row 2 is far wider than the row: word-wrap
+        // would carry it wholly to a (forbidden) third row and leave row 2
+        // ellipsized at a fraction of the width. The layouter instead fills
+        // the last allowed row grapheme-by-grapheme before truncating.
+        let text = "on and on Supercalifragilisticexpialidocious Supercalifragilisticexpialidocious";
+        let max_width = 110.0;
+        let capped = wrapped_layout(&mut layouter, LATIN_FAMILY, text, max_width, Some(2), true);
+        assert_eq!(capped.rows.len(), 2);
+        assert!(ends_with_ellipsis(&capped));
+        let last = capped.rows.last().unwrap();
+        assert!(
+            last.width_in_lpxs > max_width * 0.7,
+            "grapheme fill must use the row ({} of {})",
+            last.width_in_lpxs,
+            max_width
+        );
+        assert!(last.width_in_lpxs <= max_width + 0.01);
+    }
+
+    #[test]
+    fn multiline_ellipsis_truncates_cjk_on_grapheme_boundaries() {
+        let mut layouter = real_font_layouter();
+        // Unspaced CJK exercises the grapheme wrapping path end to end.
+        let text = "这是一个很长的中文标题它会先换到第二行然后在第二行的结尾处出现省略号而不是被裁掉";
+        let max_width = 140.0;
+        let capped = wrapped_layout(&mut layouter, CJK_FAMILY, text, max_width, Some(2), true);
+        assert_eq!(capped.rows.len(), 2);
+        assert!(capped.is_truncated);
+        assert!(ends_with_ellipsis(&capped));
+        // Every surviving glyph must still start on a char boundary of its
+        // row's text: truncation pops whole glyphs, never bytes.
+        for row in capped.rows.iter() {
+            for glyph in row.glyphs.iter().filter(|g| g.cluster < row.text.len()) {
+                assert!(
+                    row.text.is_char_boundary(glyph.cluster),
+                    "glyph cluster {} must be a char boundary",
+                    glyph.cluster
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_line_ellipsis_under_wrapping_flow() {
+        // `max_lines: 1` on a wrapping Label — the list-row configuration.
+        let mut layouter = real_font_layouter();
+        let text = "A single line that is much too long for the row it must fit into";
+        let capped = wrapped_layout(&mut layouter, LATIN_FAMILY, text, 100.0, Some(1), true);
+        assert_eq!(capped.rows.len(), 1);
+        assert!(capped.is_truncated);
+        assert!(ends_with_ellipsis(&capped));
+        assert!(capped.rows[0].width_in_lpxs <= 100.0 + 0.01);
+    }
+
+    #[test]
+    fn multiline_ellipsis_counts_explicit_newlines() {
+        let mut layouter = real_font_layouter();
+        let capped =
+            wrapped_layout(&mut layouter, LATIN_FAMILY, "one\ntwo\nthree", 200.0, Some(2), true);
+        assert_eq!(capped.rows.len(), 2);
+        assert!(capped.is_truncated, "a discarded third line is a truncation");
+        assert!(ends_with_ellipsis(&capped));
     }
 }

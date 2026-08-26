@@ -11,7 +11,9 @@ use makepad_asset_chat::responses::{
     DEFAULT_GROK_TIMEOUT, MAX_RESPONSES_BODY,
 };
 use makepad_asset_chat::wire::{MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_MESSAGES};
-use makepad_asset_chat::wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind};
+use makepad_asset_chat::wire::{
+    ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ServingFacts,
+};
 use makepad_asset_client::json::{self, Value};
 use makepad_network::blocking_http::CancelToken;
 use std::cell::RefCell;
@@ -165,6 +167,225 @@ fn qwen_does_not_let_later_preferred_overwrite_qwen38() {
     }
 }
 
+/// The box counts the tokens; the broker only forwards the count. A delta
+/// is a `partial_text` DIFF at poll cadence, so its size says nothing about
+/// how many tokens produced it — this is what makes an honest tok/s
+/// readout possible downstream.
+#[test]
+fn qwen_forwards_the_decode_token_count_and_lane_contention() {
+    let mut t = ScriptedFleet::default();
+    let mut h = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut h {
+        pairs.push((
+            "lanes".to_string(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(4)),
+                ("slots_claimed", Value::Int(3)),
+                ("slots_free", Value::Int(1)),
+                ("lanes_active", Value::Int(2)),
+                ("context_per_slot", Value::Int(16384)),
+                ("queue_depth", Value::Int(0)),
+                ("queue_max", Value::Int(8)),
+            ]),
+        ));
+    }
+    t.on_get("http://n1:8765/health", Ok(h));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-tok"))]));
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 12/3072")),
+            ("partial_text", json::s("Hel")),
+        ])),
+    );
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 40/3072")),
+            ("partial_text", json::s("Hello there")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    let facts = |gen| ServingFacts {
+        gen_tokens: gen,
+        lanes_active: Some(2),
+        slots_total: Some(4), ..Default::default() };
+    // Facts precede the delta they describe.
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(12)), ProviderEvent::Delta("Hel".into())]
+    );
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(40)), ProviderEvent::Delta("lo there".into())]
+    );
+    // An unchanged count says nothing twice.
+    assert!(p.poll().is_empty());
+}
+
+/// The box's own `serving.gen_tokens` beats the `decode k/n` progress LABEL.
+///
+/// The label only exists while it is the current stage; the moment the box
+/// says `prefill 900/900 tok` or `encode`, the scrape yields nothing while the
+/// think/visible counters keep moving — so the facts went out carrying a
+/// generated count of zero and the client's meter read `0 tok/s` for a reply
+/// that was streaming fine. The count is now reported as a count.
+#[test]
+fn qwen_prefers_the_reported_token_count_over_the_stage_label() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-count"))]));
+    let serving = |gen: i64| {
+        json::obj(vec![
+            ("gen_tokens", Value::Int(gen)),
+            ("think_tokens", Value::Int(gen)),
+        ])
+    };
+    // A stage that is NOT `decode k/n` — the old scrape read nothing here.
+    t.on_get(
+        "http://n1:8765/job/j-count",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("prefill 900/900 tok")),
+            ("partial_text", json::s("Hel")),
+            ("serving", serving(41)),
+        ])),
+    );
+    t.on_get(
+        "http://n1:8765/job/j-count",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("encode")),
+            ("partial_text", json::s("Hello")),
+            ("serving", serving(77)),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    let counts = |events: Vec<ProviderEvent>| -> Vec<u32> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                ProviderEvent::Serving(facts) => Some(facts.gen_tokens),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(counts(p.poll()), vec![41], "the reported count, not the label");
+    assert_eq!(counts(p.poll()), vec![77]);
+}
+
+/// An older box that reports no count still works: the `decode k/n` label is
+/// the fallback, exactly as before.
+#[test]
+fn qwen_still_scrapes_the_decode_stage_when_the_box_reports_no_count() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-old"))]));
+    t.on_get(
+        "http://n1:8765/job/j-old",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 12/3072")),
+            ("partial_text", json::s("Hel")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    assert_eq!(
+        p.poll(),
+        vec![
+            ProviderEvent::Serving(ServingFacts { gen_tokens: 12, ..Default::default() }),
+            ProviderEvent::Delta("Hel".into())
+        ]
+    );
+}
+
+/// A wait says WHAT it is waiting for. "loading 42%" makes a person guess;
+/// the job carries the model id, so the note names it.
+#[test]
+fn qwen_load_status_names_the_model() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-load"))]));
+    t.on_get(
+        "http://n1:8765/job/j-load",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("model", json::s("qwen3.8-27b")),
+            ("stage", json::s("load llm compile 0/1 (18s)")),
+            ("progress", Value::F64(0.86)),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    match p.poll().into_iter().next() {
+        Some(ProviderEvent::Status { note, permille }) => {
+            assert_eq!(note, "loading qwen3.8-27b 86%");
+            assert_eq!(permille, 860);
+        }
+        other => panic!("expected a load status: {other:?}"),
+    }
+}
+
+/// A box that advertises no lanes means ONE lane — never "unknown", and
+/// never a fabricated "1/1" on a readout.
+#[test]
+fn qwen_says_nothing_about_lanes_when_the_box_advertises_none() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-nolanes"))]));
+    t.on_get(
+        "http://n1:8765/job/j-nolanes",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 5/3072")),
+            ("partial_text", json::s("Hi")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    assert_eq!(
+        p.poll(),
+        vec![
+            ProviderEvent::Serving(ServingFacts {
+                gen_tokens: 5,
+                lanes_active: None,
+                slots_total: None, ..Default::default() }),
+            ProviderEvent::Delta("Hi".into())
+        ]
+    );
+}
+
 #[test]
 fn qwen_poll_emits_stage_status_before_tokens() {
     let mut t = ScriptedFleet::default();
@@ -285,6 +506,9 @@ fn qwen_probe_caches_and_skips_dead_nodes() {
     assert_eq!(
         first,
         vec![
+            // A failed idempotent GET retries once before the node is
+            // marked dead (a flaky LAN drop must not cost DEAD_TTL).
+            "http://dead:8765/health".to_string(),
             "http://dead:8765/health".to_string(),
             "http://n1:8765/health".to_string(),
             "http://n1:8765/models".to_string(),
@@ -377,6 +601,54 @@ fn qwen_cancel_posts_job_cancel() {
     assert_eq!(recorded.last().unwrap().0, "http://n1:8765/job/j-9/cancel");
     drop(recorded);
     assert!(p.poll().is_empty());
+}
+
+/// N concurrent chat sessions each own a provider, but the fleet roster is
+/// a fact about the LAN — with a shared pick cache the SECOND provider
+/// inherits the first one's scan instead of paying its own `/health` +
+/// `/models` (and its own connect timeouts on a dark box).
+#[test]
+fn qwen_providers_share_one_probe_through_the_pick_cache() {
+    let picks = std::sync::Arc::new(makepad_asset_chat::qwen::FleetPickCache::new());
+
+    let mut first = ScriptedFleet::default();
+    first.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    first.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_first = first.seen_gets.clone();
+    let mut a =
+        FleetQwenChatProvider::with_pick_cache(first, vec!["http://n1:8765".into()], picks.clone());
+    assert!(a.availability().is_available());
+    assert_eq!(seen_first.borrow().len(), 2, "the first provider scans once");
+
+    // A transport that PANICS on any GET: the second provider must not
+    // touch the network at all.
+    let second = ScriptedFleet::default();
+    let seen_second = second.seen_gets.clone();
+    let mut b = FleetQwenChatProvider::with_pick_cache(
+        second,
+        vec!["http://n1:8765".into()],
+        picks.clone(),
+    );
+    match b.availability() {
+        ProviderAvailability::Available { model, .. } => assert_eq!(model, "qwen3.8-27b"),
+        other => panic!("shared pick was not reused: {other:?}"),
+    }
+    assert!(seen_second.borrow().is_empty(), "{:?}", seen_second.borrow());
+
+    // A private cache (the plain constructor) is unchanged: it scans.
+    let mut third = ScriptedFleet::default();
+    third.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    third.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_third = third.seen_gets.clone();
+    let mut c = FleetQwenChatProvider::new(third, vec!["http://n1:8765".into()]);
+    assert!(c.availability().is_available());
+    assert_eq!(seen_third.borrow().len(), 2);
 }
 
 // -------------------------------------------------------------- responses

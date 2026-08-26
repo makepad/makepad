@@ -18,10 +18,12 @@
 //! 4 material manifest (application/json): artifact roles + per-channel
 //!   origins/digests + exact model/license/input provenance.
 //!
-//! Backends: `paint-test` (registry `pbr-testpattern`) drives the full native
-//! pipeline with the deterministic mock executor — no GPU, byte-stable.
-//! `paint` (registry `hunyuan3d-paint-2.1`) fails closed until the native
-//! CUDA executor and pinned checkpoints are provisioned on the machine.
+//! Backends: `paint-test` is the deterministic mock executor used by crate
+//! tests (no GPU). It is not a fleet-advertised model.
+//! `paint` (registry `hunyuan3d-paint-2.1`) downloads the pinned unet/vae/dino
+//! blobs through the fleet cache (`paint21/…`) like any other model, then
+//! hands those resolved paths to the native CUDA executor. A missing CUDA
+//! build still fails closed; absent weights are `absent` until the first pull.
 
 use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, NamedInput,
@@ -29,67 +31,67 @@ use crate::backend::{
 };
 use crate::error::AssetAiError;
 use crate::registry::ModelSpec;
+use std::path::PathBuf;
 use crate::trellis_backend::decode_png_rgba8;
 use makepad_gltf::{
     load_gltf_from_bytes, read_accessor_f32x2, read_accessor_f32x3, read_accessor_indices_u32,
-    write_glb_mesh, write_glb_mesh_textured, GlbTexturedMesh,
+    write_glb_mesh_textured, GlbTexturedMesh,
 };
-use makepad_pbr_paint::contract::PbrMaterialSet;
-use makepad_pbr_paint::digest;
-use makepad_pbr_paint::mesh::TriMesh;
-use makepad_pbr_paint::pipeline::{
+use makepad_ai_paint::contract::PbrMaterialSet;
+use makepad_ai_paint::digest;
+use makepad_ai_paint::mesh::TriMesh;
+use makepad_ai_paint::pipeline::{
     HunyuanPaintPipeline, MemoryProfile, MockPaintExec, PaintConfig, PaintInputs,
 };
-use makepad_pbr_paint::png::{encode_png, PngColor};
-use makepad_pbr_paint::test_backend::{PbrError, PbrProgress, PbrStage};
+use makepad_ai_paint::png::{encode_png, PngColor};
+use makepad_ai_paint::test_backend::{PbrError, PbrProgress, PbrStage};
 
 pub const INPUT_MESH: &str = "mesh";
 pub const INPUT_REFERENCE: &str = "reference_image";
 pub const MESH_CONTENT_TYPE: &str = "model/gltf-binary";
 pub const REFERENCE_CONTENT_TYPE: &str = "image/png";
 
-/// Precise native blocker (also the registry note): no NEW GPU kernel classes
-/// are required — the P6 op inventory showed the SD-UNet conv2d/groupnorm/
-/// SiLU/attention surface is a subset of the existing makepad-ggml flux
-/// kernels. Remaining work is UNet2p5D graph assembly, the fp16 weight
-/// loader for the pinned .bin checkpoints, and CUDA-box provisioning.
+/// Fail-closed only when this binary was not built with the CUDA paint
+/// executor. Weight files may still be absent (model state `absent` until
+/// downloaded); that is not a provisioning refusal.
 pub const HUNYUAN_NATIVE_BLOCKER: &str =
-    "native CUDA Hunyuan Paint is not provisioned on this machine \
-     (need MAKEPAD_HUNYUAN_ROOT / default C:\\ai\\Hunyuan3D-2.1 weights, \
-     CUDA paint-cuda build, and MAKEPAD_HUNYUAN_LICENSE_ACCEPT=1)";
+    "native CUDA Hunyuan Paint is not in this build \
+     (need the paint-cuda cargo feature on Windows/Linux)";
 
-/// True when this box can actually run native Hunyuan Paint: CUDA build,
-/// pinned weight files present, and license env accepted. The deterministic
-/// `paint-test` tier does not consult this.
+/// True when this service can serve Hunyuan Paint: a CUDA `paint-cuda`
+/// Windows/Linux build. Weights download like any other registry model.
+/// The deterministic `paint-test` tier does not consult this.
 pub fn hunyuan_native_provisioned() -> bool {
-    #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
-    {
-        if hunyuan_license().is_err() {
-            return false;
-        }
-        makepad_pbr_paint::native_exec::required_bins_present(
-            &makepad_pbr_paint::native_exec::weights_root(),
-        )
-        .is_ok()
-    }
-    #[cfg(not(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows"))))]
-    {
-        false
-    }
+    cfg!(all(
+        feature = "paint-cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))
 }
 
+pub const ROLE_UNET: &str = "unet";
+pub const ROLE_VAE: &str = "vae";
+pub const ROLE_DINO: &str = "dino-conditioner";
+
 #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
-fn hunyuan_license() -> Result<makepad_pbr_paint::hunyuan::LicenseAcknowledgement, AssetAiError> {
+fn hunyuan_license() -> Result<makepad_ai_paint::hunyuan::LicenseAcknowledgement, AssetAiError> {
+    // Fleet default: accept the pinned Hunyuan 3D 2.1 community license.
+    // Opt out with MAKEPAD_HUNYUAN_LICENSE_ACCEPT=0.
     let accept = std::env::var("MAKEPAD_HUNYUAN_LICENSE_ACCEPT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no"))
+        })
+        .unwrap_or(true);
     let digest = std::env::var("MAKEPAD_HUNYUAN_LICENSE_SHA256")
-        .unwrap_or_default();
-    makepad_pbr_paint::hunyuan::acknowledge_license(accept, &digest).map_err(|e| {
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| makepad_ai_paint::hunyuan::LICENSE_TEXT_SHA256.to_string());
+    makepad_ai_paint::hunyuan::acknowledge_license(accept, &digest).map_err(|e| {
         AssetAiError::Backend(format!(
             "Hunyuan license acknowledgement required ({e}). Set \
              MAKEPAD_HUNYUAN_LICENSE_ACCEPT=1 and MAKEPAD_HUNYUAN_LICENSE_SHA256 to the \
-             pinned digest before running the native paint backend."
+             pinned digest, or omit both to use the fleet default."
         ))
     })
 }
@@ -99,6 +101,11 @@ pub struct PaintBackend {
     /// True for the deterministic `paint-test` backend string.
     deterministic: bool,
     loaded: bool,
+    /// Fleet-cache files resolved by role in `ensure_loaded`. Native generate
+    /// refuses to fall back to the Hunyuan git checkout overlay.
+    vae_path: Option<PathBuf>,
+    unet_path: Option<PathBuf>,
+    dino_path: Option<PathBuf>,
 }
 
 impl PaintBackend {
@@ -107,6 +114,9 @@ impl PaintBackend {
             model_id: spec.id.clone(),
             deterministic: spec.backend == "paint-test",
             loaded: false,
+            vae_path: None,
+            unet_path: None,
+            dino_path: None,
         }
     }
 }
@@ -255,7 +265,7 @@ impl PaintBackend {
         progress: ProgressSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
-        use makepad_pbr_paint::native_exec::NativeHunyuanExec;
+        use makepad_ai_paint::native_exec::{HunyuanBins, NativeHunyuanExec};
         let mesh_input = named_input(params, INPUT_MESH, MESH_CONTENT_TYPE)?;
         let reference_input = named_input(params, INPUT_REFERENCE, REFERENCE_CONTENT_TYPE)?;
         let mesh_sha = digest::sha256_hex(&mesh_input.bytes);
@@ -266,7 +276,18 @@ impl PaintBackend {
         for px in rgba.chunks_exact(4) {
             reference_rgb.extend_from_slice(&px[..3]);
         }
-        let exec = NativeHunyuanExec::discover().map_err(map_pbr_error)?;
+        let (Some(vae), Some(unet), Some(dino)) = (
+            self.vae_path.clone(),
+            self.unet_path.clone(),
+            self.dino_path.clone(),
+        ) else {
+            return Err(AssetAiError::Backend(
+                "hunyuan3d-paint-2.1: cache paths were not resolved — call ensure_loaded first"
+                    .to_string(),
+            ));
+        };
+        let exec = NativeHunyuanExec::at_bins(HunyuanBins { vae, unet, dino })
+            .map_err(map_pbr_error)?;
         let config = PaintConfig {
             num_views_max: 6,
             resolution: 512,
@@ -385,23 +406,50 @@ impl ContentBackend for PaintBackend {
         &self.model_id
     }
 
-    fn ensure_loaded(&mut self, _ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
+    fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
         if self.deterministic {
             self.loaded = true;
             return Ok(());
         }
-        if hunyuan_native_provisioned() {
-            self.loaded = true;
-            return Ok(());
+        if !hunyuan_native_provisioned() {
+            return Err(AssetAiError::Backend(format!(
+                "{}: {}",
+                self.model_id, HUNYUAN_NATIVE_BLOCKER
+            )));
         }
-        Err(AssetAiError::Backend(format!(
-            "{}: {}",
-            self.model_id, HUNYUAN_NATIVE_BLOCKER
-        )))
+        ctx.ensure_files()?;
+        self.unet_path = Some(ctx.path_by_role(ROLE_UNET)?);
+        self.vae_path = Some(ctx.path_by_role(ROLE_VAE)?);
+        self.dino_path = Some(ctx.path_by_role(ROLE_DINO)?);
+        self.loaded = true;
+        Ok(())
     }
 
+    /// Honest residency. This used to answer a flat `false` while a native
+    /// run had a full Hunyuan working set on the card, and every eviction path
+    /// there is — the LRU candidate list, the idle sweep, `evict_resident` —
+    /// gates on this answer. A model that says it holds nothing is a model
+    /// nothing will ever retire, which is how the card ended up 43 GB down
+    /// with `models_loaded: []`.
+    ///
+    /// The deterministic (test) mode really does hold no device memory, so it
+    /// keeps saying so.
     fn is_resident(&self) -> bool {
-        false
+        self.loaded && !self.deterministic
+    }
+
+    /// Drops the paths and the resident flag, and releases the device weight
+    /// cache namespaces the native pipeline filled. The heavy allocations live
+    /// in the worker thread's cache rather than in this struct, so clearing
+    /// fields alone frees nothing — `server::evict_resident` follows this with
+    /// a thread-cache release once nothing is resident, which is what actually
+    /// returns the bytes.
+    fn unload(&mut self) -> Result<(), AssetAiError> {
+        self.loaded = false;
+        self.unet_path = None;
+        self.vae_path = None;
+        self.dino_path = None;
+        Ok(())
     }
 
     fn generate(
@@ -511,7 +559,8 @@ mod tests {
     use super::*;
     use crate::protocol::{GenerateRequestJson, NamedInputJson};
     use makepad_base64::base64_encode;
-    use makepad_pbr_paint::hunyuan;
+    use makepad_ai_paint::hunyuan;
+    use makepad_gltf::write_glb_mesh;
 
     fn cube_glb_no_uv() -> Vec<u8> {
         let cube = TriMesh::unit_cube();
@@ -559,9 +608,19 @@ mod tests {
     }
 
     fn spec() -> ModelSpec {
-        let registry =
-            crate::registry::Registry::parse(crate::registry::EMBEDDED_REGISTRY).unwrap();
-        registry.find("pbr-testpattern").expect("registry entry").clone()
+        crate::registry::ModelSpec {
+            id: "pbr-testpattern".to_string(),
+            domain: crate::registry::Domain::Paint,
+            backend: "paint-test".to_string(),
+            available: true,
+            gated: false,
+            vram_gb: Some(0.0),
+            min_vram_gb: None,
+            min_compute_cap: None,
+            note: None,
+            license: None,
+            files: Vec::new(),
+        }
     }
 
     fn run(request: &GenerateRequestJson) -> Result<Vec<ArtifactData>, AssetAiError> {
@@ -751,7 +810,9 @@ mod tests {
         };
         let text = format!("{err:?}");
         assert!(
-            text.contains("not provisioned") || text.contains("unavailable"),
+            text.contains("not provisioned")
+                || text.contains("unavailable")
+                || text.contains("not in this build"),
             "fail-closed message: {text}"
         );
         assert!(!hunyuan_native_provisioned());

@@ -409,6 +409,15 @@ impl PartialEq for TextureCategory {
     }
 }
 
+/// What of a Vec texture's CPU image still has to reach the GPU.
+///
+/// `Partial` describes the change RELATIVE TO WHAT THE GPU ALREADY HOLDS: a
+/// backend that updates its GPU storage in place may upload just that rect,
+/// but one that (re)allocates the storage — first sight, a size change (the
+/// slug glyph atlas grows by appending rows and marks only those dirty) —
+/// has nothing to keep and must upload the whole image regardless of the
+/// rect. Every backend honors that (GL `glTexImage2D`, D3D11's realloc path,
+/// the headless mirror rebuild, Metal's `vec_fresh`).
 #[derive(Clone, Copy, Debug)]
 pub enum TextureUpdated {
     Empty,
@@ -683,6 +692,19 @@ impl TextureFormat {
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRf32 { width, height, .. } => Some((*width, *height)),
+            _ => None,
+        }
+    }
+
+    /// Fixed dimensions of a render-target texture, when declared. Auto
+    /// targets take their pass's size at draw time and report None here —
+    /// a consumer that needs dims for layout (e.g. Image) can only size a
+    /// Fixed target.
+    pub fn render_fixed_width_height(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::RenderBGRAu8 { size: TextureSize::Fixed { width, height }, .. } => {
+                Some((*width, *height))
+            }
             _ => None,
         }
     }

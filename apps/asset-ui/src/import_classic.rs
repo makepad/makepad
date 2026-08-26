@@ -6,7 +6,8 @@
 //! `pack_import` rights path as Kenney. AO bake runs on every produced GLB.
 
 use crate::import::{
-    probe_dir, BakeStats, DiskProbe, ImportPhase, LibraryLanding, ServerSession,
+    clear_pack_staging, probe_dir, BakeStats, DiskProbe, IconResumeGate, ImportPhase,
+    LibraryLanding, ServerSession,
 };
 use makepad_widgets::*;
 use makepad_asset_importer::classic_import::{
@@ -23,8 +24,8 @@ use makepad_asset_importer::classic_import::{
     QUAKE_GITHUB, QUAKE_HOME, QUAKE_LICENSE, QUAKE_SOURCE_ID, QUAKE_SOURCE_TITLE, QUAKE_TERMS_URL,
 };
 use makepad_asset_importer::pack_import::{self, IMPORT_MANIFEST_FILE, SOURCE_COLLECTION_FILE, UPLOAD_PLAN_FILE};
-use makepad_asset_client::{AnnotationUpload, AssetClient, ClientConfig};
-use makepad_asset_data::{sha256, AssetKind, BlobId};
+use makepad_asset_client::{wire, AnnotationUpload, AssetClient, ClientConfig};
+use makepad_asset_data::{AssetKind, BlobId};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -214,6 +215,12 @@ pub struct ClassicImportCard {
     pending_out: PathBuf,
     tdm: Option<TdmSync>,
     iso: Option<IsoSync>,
+    /// The icon-render handshake for THIS source, mirroring Kenney/KayKit:
+    /// the import thread parks in `ImportPhase::IconsPending` until every
+    /// landing it handed the UI has been drained into the icon renderer, so
+    /// a classic pack publishes real thumbnails and its staging can be
+    /// reclaimed the moment publish succeeds. See [`IconResumeGate`].
+    icon_resume: IconResumeGate,
 }
 
 struct IsoSync {
@@ -265,6 +272,7 @@ impl ClassicImportCard {
             pending_out: PathBuf::new(),
             tdm: None,
             iso: None,
+            icon_resume: IconResumeGate::default(),
         }
     }
 
@@ -294,6 +302,9 @@ impl ClassicImportCard {
                     | ImportPhase::Publishing { .. }
                     | ImportPhase::Annotating { .. }
                     | ImportPhase::Baking { .. }
+                    // Parked waiting for icons: the thread is alive and WILL
+                    // publish, so a second start must still be refused.
+                    | ImportPhase::IconsPending { .. }
             )
     }
 
@@ -338,6 +349,7 @@ impl ClassicImportCard {
                         || current.starts_with("clear")
                         || current.starts_with("found ")
                         || current.starts_with("loading texture")
+                        || current.starts_with("building upload plan")
                     {
                         format!("{pack}: {done}/{total} · {current}")
                     } else {
@@ -379,13 +391,15 @@ impl ClassicImportCard {
                 assets,
                 bake,
                 out,
+                error,
                 library,
                 ..
             } => {
-                let why = out
-                    .to_str()
-                    .filter(|s| s.starts_with("pack_import:"))
-                    .unwrap_or("server offline — not in catalog");
+                let why = error.as_deref().unwrap_or_else(|| {
+                    out.to_str()
+                        .filter(|s| s.starts_with("pack_import:"))
+                        .unwrap_or("server offline — not in catalog")
+                });
                 format!(
                     "compiled {pack} locally · {assets} assets · {} landings · {why} · {}",
                     library.len(),
@@ -401,6 +415,18 @@ impl ClassicImportCard {
             } => format!(
                 "published {pack} · {assets} assets · {annotated} annotated · {}",
                 bake_fragment(bake)
+            ),
+            ImportPhase::IconsPending { pack, assets, .. } => {
+                format!("{pack}: rendering {assets} icons…")
+            }
+            ImportPhase::PackFinished { pack, assets, .. } => {
+                format!("{pack}: finished · {assets} assets")
+            }
+            ImportPhase::AllDone { ok, failed, skipped } => format!(
+                "all done · {} imported · {} failed · {} skipped",
+                ok.len(),
+                failed.len(),
+                skipped.len()
             ),
             ImportPhase::Failed { pack, message } => format!("{pack}: {message}"),
             ImportPhase::Cancelled { pack, message } => format!("{pack}: stopped — {message}"),
@@ -433,7 +459,14 @@ impl ClassicImportCard {
                     )
                 }
             }
-            other => format!("{other:?}"),
+            // Never Debug-format into UI text: a phase carries whole
+            // LibraryLanding vectors and the card printed the lot.
+            ImportPhase::PreviewThumb { pack, .. } => format!("{pack}: preview"),
+            // Multi-pack-only phase; a classic source imports one pack per
+            // run and never emits it. Still say the reason if it appears.
+            ImportPhase::PackFailed { pack, message, .. } => {
+                format!("{pack}: NOT imported — {message}")
+            }
         }
     }
 
@@ -502,11 +535,28 @@ impl ClassicImportCard {
         std::mem::take(&mut self.pending_previews)
     }
 
+    /// True once this card's parked import may continue: its landings are
+    /// drained and the UI's icon renderer is idle (or the user cancelled).
+    pub fn icons_pending_ready(&self, landings_drained: bool, icons_busy: bool) -> bool {
+        matches!(self.phase, ImportPhase::IconsPending { .. }) && landings_drained && !icons_busy
+    }
+
+    /// Let the parked import thread continue. No-op past the first call per
+    /// `IconsPending` phase.
+    pub fn resume_icons_pending(&mut self) -> bool {
+        self.icon_resume.resume()
+    }
+
     fn ingest(&mut self, phase: ImportPhase) {
         match &phase {
             ImportPhase::PreviewThumb { name, png, .. } => {
                 self.pending_previews.push((name.clone(), png.clone()));
                 return;
+            }
+            ImportPhase::IconsPending { library, .. } => {
+                self.pending_landings.extend(library.iter().cloned());
+                // A fresh icon wait for this pack: allow exactly one resume.
+                self.icon_resume.arm();
             }
             ImportPhase::Published { library, .. }
             | ImportPhase::CompiledLocal { library, .. } => {
@@ -1401,11 +1451,23 @@ impl ClassicImportCard {
         self.rx = Some(rx);
         self.phase = ImportPhase::compiling(pack_name.clone());
         let cancel = self.cancel.clone();
+        // Same handshake Kenney/KayKit use: the thread parks after staging
+        // until the UI has taken every landing for icon rendering.
+        let (gate, icon_resume_rx) = IconResumeGate::armed();
+        self.icon_resume = gate;
         thread::Builder::new()
             .name(format!("asset-ui-{}-import", source.id()))
             .spawn(move || {
-                let phase =
-                    run_classic_import(&dir, &out, source, &pack_name, server, &tx, &cancel);
+                let phase = run_classic_import(
+                    &dir,
+                    &out,
+                    source,
+                    &pack_name,
+                    server,
+                    &tx,
+                    &cancel,
+                    &icon_resume_rx,
+                );
                 let _ = tx.send(phase);
             })
             .map_err(|e| format!("failed to start classic import thread: {e}"))?;
@@ -1455,6 +1517,7 @@ fn bake_fragment(bake: &BakeStats) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_classic_import(
     pack_dir: &Path,
     out: &Path,
@@ -1463,6 +1526,7 @@ fn run_classic_import(
     server: Option<ServerSession>,
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
+    icon_resume_rx: &Receiver<()>,
 ) -> ImportPhase {
     let work = out.join("work");
     let staged = work.join("source");
@@ -1557,15 +1621,94 @@ fn run_classic_import(
         }
     };
 
+    // Real icons before publish, ALWAYS — the same handshake Kenney/KayKit
+    // use. Conversion already wrote this pack's own thumbnails (world
+    // previews, sprite strips, mesh rasters); parking here hands those
+    // landings to the UI's icon renderer and, crucially, guarantees every
+    // landing has been READ out of `work/source/` before the staging
+    // cleanup below deletes it.
+    let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
+    let _ = tx.send(ImportPhase::IconsPending {
+        pack: pack_name.into(),
+        assets: library.len(),
+        library: library.clone(),
+        bake: BakeStats {
+            total: convert.bake.total,
+            baked: convert.bake.baked,
+            skipped: convert.bake.skipped,
+            failed: convert.bake.failed,
+        },
+    });
+    if icon_resume_rx.recv().is_err() {
+        return ImportPhase::Cancelled {
+            pack: pack_name.into(),
+            message: "icon handshake lost".into(),
+        };
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: pack_name.into(),
+            message: "stopped while rendering icons".into(),
+        };
+    }
+
     let spec = source.pack_spec(pack_name);
-    let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
+    // `compile_pack` walks every staged file to build the upload plan
+    // (hashing each one), and it can run for a while on a big pack. Without
+    // live progress here the status line would stay on the just-finished
+    // `IconsPending` text ("rendering N icons…") for that whole stretch,
+    // reading as a hang even though icon rendering is already done and the
+    // thread has moved on — so drive `ImportPhase::Compiling` from
+    // `compile_pack_with_progress`'s per-file callback instead of one
+    // static message. Throttled to <=10 updates/s (the callback itself
+    // fires once per file, which for a big pack is far more often than
+    // that); the very first call (nothing hashed yet) and the very last
+    // (everything hashed) always get through regardless of the throttle,
+    // so the phase change and the final tally are never swallowed.
+    let mut last_progress_sent: Option<std::time::Instant> = None;
+    let mut send_compile_progress = move |p: pack_import::CompileProgress| {
+        let now = std::time::Instant::now();
+        let edge = p.files_done == 0 || p.files_done == p.files_total;
+        if !edge {
+            if let Some(last) = last_progress_sent {
+                if now.duration_since(last) < std::time::Duration::from_millis(100) {
+                    return;
+                }
+            }
+        }
+        last_progress_sent = Some(now);
+        let current = format!(
+            "building upload plan · {}/{} MB{}",
+            p.bytes_done / (1024 * 1024),
+            p.bytes_total / (1024 * 1024),
+            if p.current.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", p.current)
+            }
+        );
+        let _ = tx.send(ImportPhase::Compiling {
+            pack: pack_name.to_string(),
+            done: p.files_done,
+            total: p.files_total,
+            current,
+        });
+    };
+    let report = match pack_import::compile_pack_with_progress(
+        &staged,
+        &bundle,
+        spec,
+        None,
+        false,
+        Some(&mut send_compile_progress),
+    ) {
         Ok(r) => Some(r),
         Err(error) => {
             log!("import {pack_name}: pack_import failed: {error}");
             // Converted assets still land in the local library. Catalog
             // publish needs a valid bundle; we report the compile error in
-            // the local status line instead of dropping the pack.
-            let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
+            // the local status line instead of dropping the pack. Staging
+            // stays put for inspection (`staging_dirs_to_clear(false)`).
             let bake = BakeStats {
                 total: convert.bake.total,
                 baked: convert.bake.baked,
@@ -1577,14 +1720,13 @@ fn run_classic_import(
                 assets: convert.assets.len(),
                 blobs: 0,
                 out: PathBuf::from(format!("pack_import: {error}")),
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
                 bake,
             };
         }
     };
     let report = report.expect("compile ok");
-
-    let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
 
     let publish_result = if let Some(session) = server {
         let _ = tx.send(ImportPhase::Publishing {
@@ -1626,7 +1768,7 @@ fn run_classic_import(
         Some(Err(_)) => unreachable!(),
     };
 
-    // AO parked — convert.bake is empty. Do not re-walk the tree.
+    // Classic AO stays off (convert.bake is empty). Kenney still bakes.
     let bake = BakeStats {
         total: convert.bake.total,
         baked: convert.bake.baked,
@@ -1640,10 +1782,15 @@ fn run_classic_import(
             assets: report.assets,
             blobs: report.blobs,
             out: report.plan_path,
+            error: None,
             library,
             bake,
         };
     }
+    // Published: the converted tree has done its job (the catalog has the
+    // blobs, the library has its copies), so reclaim `work/`+`out/` exactly
+    // like the Kenney/KayKit path. A classic pack stages gigabytes.
+    clear_pack_staging(pack_name, out, true);
     ImportPhase::Published {
         pack: pack_name.into(),
         assets: report.assets,
@@ -1666,7 +1813,9 @@ fn classic_library_landings(
     let mut seen_icons = std::collections::BTreeSet::new();
     let mut seen_titles = std::collections::BTreeSet::new();
     for asset in assets {
-        if matches!(asset.kind, AssetKind::Texture) {
+        if matches!(asset.kind, AssetKind::Texture)
+            && !matches!(source, classic_import::ClassicSource::Quake3)
+        {
             continue;
         }
         if matches!(source, classic_import::ClassicSource::Duke3d)
@@ -1690,6 +1839,7 @@ fn classic_library_landings(
             AssetKind::Character => (path, "model/gltf-binary", "character"),
             AssetKind::Weapon => (path, "model/gltf-binary", "weapon"),
             AssetKind::Prop => (path, "model/gltf-binary", "prop"),
+            AssetKind::Texture => (path, "image/png", "image"),
             AssetKind::Audio => {
                 let music = asset.key.starts_with("music/")
                     || asset.tags.iter().any(|t| t.eq_ignore_ascii_case("music"));
@@ -1736,25 +1886,34 @@ fn classic_library_landings(
             .next()
             .unwrap_or(asset.key.as_str())
             .to_string();
-        let title = match asset.kind {
-            AssetKind::Billboard => {
-                makepad_asset_importer::stateful_billboard::sprite_title(&stem)
+        let title = if matches!(source, classic_import::ClassicSource::Quake3) {
+            // Full key so gothic_floor/wood and gothic_wall/wood stay two cards.
+            asset.key.replace('/', " · ")
+        } else {
+            match asset.kind {
+                AssetKind::Billboard => {
+                    makepad_asset_importer::stateful_billboard::sprite_title(&stem)
+                }
+                AssetKind::World => {
+                    makepad_asset_importer::stateful_billboard::world_title(&asset.key)
+                }
+                AssetKind::Character | AssetKind::Weapon | AssetKind::Prop => {
+                    makepad_asset_importer::stateful_billboard::mesh_title(&asset.key)
+                }
+                _ => stem.clone(),
             }
-            AssetKind::World => {
-                makepad_asset_importer::stateful_billboard::world_title(&asset.key)
-            }
-            AssetKind::Character | AssetKind::Weapon | AssetKind::Prop => {
-                makepad_asset_importer::stateful_billboard::mesh_title(&asset.key)
-            }
-            _ => stem.clone(),
         };
-        if title.to_ascii_lowercase().contains("shareware") {
+        if !matches!(source, classic_import::ClassicSource::Quake3)
+            && title.to_ascii_lowercase().contains("shareware")
+        {
             continue;
         }
-        if matches!(
-            asset.kind,
-            AssetKind::Billboard | AssetKind::Audio | AssetKind::Texture
-        ) && !seen_titles.insert(title.clone())
+        if !matches!(source, classic_import::ClassicSource::Quake3)
+            && matches!(
+                asset.kind,
+                AssetKind::Billboard | AssetKind::Audio | AssetKind::Texture
+            )
+            && !seen_titles.insert(title.clone())
         {
             continue;
         }
@@ -1786,7 +1945,7 @@ fn classic_library_landings(
 
 fn kind_word(kind: AssetKind) -> &'static str {
     match kind {
-        AssetKind::World => "world",
+        AssetKind::World => "map",
         AssetKind::Character => "character",
         AssetKind::Weapon => "weapon",
         AssetKind::Prop => "prop",
@@ -1795,6 +1954,42 @@ fn kind_word(kind: AssetKind) -> &'static str {
         AssetKind::Texture => "texture",
         _ => "mesh",
     }
+}
+
+/// Upload whatever is queued in `batch` as ONE `upload_blob_batch_with_digests`
+/// request, advance `blob_done` by the batch size, and tell the UI. No-op on
+/// an empty batch (the tail flush after the loop, or the one right before an
+/// oversized single blob, may have nothing queued).
+#[allow(clippy::too_many_arguments)]
+fn flush_publish_batch(
+    client: &AssetClient,
+    ns: &str,
+    pack_name: &str,
+    assets: usize,
+    blob_total: usize,
+    batch: &mut Vec<(BlobId, Vec<u8>)>,
+    blob_done: &mut usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+) -> Result<(), String> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<(BlobId, &[u8])> = batch
+        .iter()
+        .map(|(digest, bytes)| (*digest, bytes.as_slice()))
+        .collect();
+    client
+        .upload_blob_batch_with_digests(ns, &refs)
+        .map_err(|e| format!("upload batch of {}: {e}", batch.len()))?;
+    *blob_done += batch.len();
+    batch.clear();
+    let _ = tx.send(ImportPhase::Publishing {
+        pack: pack_name.to_string(),
+        assets,
+        blobs: blob_total,
+        blob_done: *blob_done,
+    });
+    Ok(())
 }
 
 fn publish_classic_pack(
@@ -1836,7 +2031,36 @@ fn publish_classic_pack(
         .register_source_collection(&collection)
         .map_err(|e| format!("register source: {e}"))?;
 
+    // Every blob's bytes are read exactly ONCE, client-side, in this whole
+    // compile+publish run: `hash_and_measure` (pack_import.rs) already
+    // hashed each one, moments ago in this same process, while building
+    // this very plan. `pack_root` here is `work/source` — OUR OWN staging
+    // directory, written only by this importer's own conversion code;
+    // nothing external ever touches it between compile and publish — so
+    // re-hashing it again here would be pure TOCTOU paranoia against a
+    // threat that does not exist for this path. The plan's declared digest
+    // is trusted directly as the precomputed digest passed to the upload
+    // calls; the
+    // upload plan's own `"uploader": "re-hash each local_path…"` law (see
+    // `UPLOADER_REVERIFY` in pack_import.rs) is left untouched for whatever
+    // GENERIC consumer of an `upload_plan.json` that law is written for
+    // (a standalone CLI/worker acting on a plan handed to it from outside
+    // its own process, where the file really could have changed since) —
+    // this in-process classic-import path is not that consumer, and the
+    // server still independently computes and echoes back the real digest
+    // of whatever bytes it receives (`upload_blob_with_digest` /
+    // `upload_blob_batch_with_digests` still refuse on a disagreement), so
+    // skipping the local re-hash here does not weaken the end-to-end
+    // guarantee — a changed file still gets caught, one hop later, at the
+    // server instead of locally.
+    //
+    // Uploads go out in batches sized to the wire limits, one HTTP request
+    // per batch instead of one per blob; a blob too big to share a batch on
+    // its own falls back to a single upload.
     let mut blob_done = 0usize;
+    let mut batch: Vec<(BlobId, Vec<u8>)> = Vec::new();
+    let mut batch_bytes: u64 = 0;
+
     for blob in blobs {
         let local = blob
             .get("local_path")
@@ -1846,29 +2070,40 @@ fn publish_classic_pack(
             .get("blob")
             .and_then(makepad_asset_client::json::Value::as_str)
             .ok_or("blob missing digest")?;
+        let digest: BlobId = expect
+            .parse()
+            .map_err(|_| format!("blob digest malformed for {local}: {expect}"))?;
         let bytes = std::fs::read(pack_root.join(local))
             .map_err(|e| format!("read {local}: {e}"))?;
-        let digest = BlobId::hash_of(&bytes);
-        if digest.to_string() != expect {
-            return Err(format!(
-                "rehash mismatch for {local}: plan {expect} != sha256 {}",
-                digest
-            ));
+        let size = bytes.len() as u64;
+        if size > wire::UPLOAD_BATCH_SAFE_BYTES {
+            // Too big to ever share a batch: flush what's queued (keeps
+            // upload order matching plan order) then send it alone.
+            flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
+            batch_bytes = 0;
+            client
+                .upload_blob_with_digest(&ns, &bytes, digest)
+                .map_err(|e| format!("upload {local}: {e}"))?;
+            blob_done += 1;
+            let _ = tx.send(ImportPhase::Publishing {
+                pack: pack_name.to_string(),
+                assets,
+                blobs: blob_total,
+                blob_done,
+            });
+            continue;
         }
-        if sha256(&bytes) != *digest.as_bytes() {
-            return Err(format!("sha256 drift for {local}"));
+        if !batch.is_empty()
+            && (batch.len() >= wire::MAX_UPLOAD_BATCH_ITEMS
+                || batch_bytes + size > wire::UPLOAD_BATCH_SAFE_BYTES)
+        {
+            flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
+            batch_bytes = 0;
         }
-        client
-            .upload_blob(&ns, &bytes)
-            .map_err(|e| format!("upload {local}: {e}"))?;
-        blob_done += 1;
-        let _ = tx.send(ImportPhase::Publishing {
-            pack: pack_name.to_string(),
-            assets,
-            blobs: blob_total,
-            blob_done,
-        });
+        batch.push((digest, bytes));
+        batch_bytes += size;
     }
+    flush_publish_batch(&client, &ns, pack_name, assets, blob_total, &mut batch, &mut blob_done, tx)?;
 
     let report = client
         .run_import(&manifest)
@@ -2034,6 +2269,23 @@ impl ClassicImportPage {
             .any(|card| card.handle_http_response(cx, request_id, response))
     }
 
+    /// Let every classic card parked in `IconsPending` continue once the UI
+    /// has drained its landings and the icon renderer is idle (or the user
+    /// cancelled it). Mirrors `ImportPage::resume_icons_pending` — see
+    /// [`IconResumeGate`]. Returns the sources that were resumed.
+    pub fn resume_icons_pending(&mut self, landings_drained: bool, icons_busy: bool) -> Vec<&'static str> {
+        let mut resumed = Vec::new();
+        for card in self.cards_mut() {
+            let ready = card.icons_pending_ready(landings_drained, icons_busy);
+            let cancelled = card.stop_requested()
+                && matches!(card.phase, ImportPhase::IconsPending { .. });
+            if (ready || cancelled) && card.resume_icons_pending() {
+                resumed.push(card.source.id());
+            }
+        }
+        resumed
+    }
+
     fn cards_mut(&mut self) -> impl Iterator<Item = &mut ClassicImportCard> {
         [
             &mut self.freedoom,
@@ -2104,6 +2356,42 @@ fn fmt_bytes(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn icons_pending(pack: &str) -> ImportPhase {
+        ImportPhase::IconsPending {
+            pack: pack.into(),
+            assets: 3,
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        }
+    }
+
+    #[test]
+    fn a_classic_pack_waits_for_its_icons_before_publishing() {
+        let mut card = ClassicImportCard::new(ClassicSource::Freedoom);
+        // Idle: nothing to wait for.
+        assert!(!card.icons_pending_ready(true, false));
+
+        card.phase = icons_pending("freedoom");
+        // Landings still queued for the icon renderer: NOT ready.
+        assert!(!card.icons_pending_ready(false, false));
+        // Renderer still working through them: NOT ready.
+        assert!(!card.icons_pending_ready(true, true));
+        // Drained and idle: the parked thread may compile+publish.
+        assert!(card.icons_pending_ready(true, false));
+        // And the card counts as busy while parked, so a second start of the
+        // same source is refused instead of racing the first.
+        assert!(card.compiling());
+    }
+
+    #[test]
+    fn resuming_an_unarmed_card_is_a_no_op() {
+        // A card that never started an import has no channel: resume must
+        // report nothing rather than pretend it signalled a thread.
+        let mut page = ClassicImportPage::default();
+        page.freedoom.phase = icons_pending("freedoom");
+        assert!(page.resume_icons_pending(true, false).is_empty());
+    }
 
     #[test]
     fn shareware_cards_say_local_preview_not_a_redistributable_grant() {

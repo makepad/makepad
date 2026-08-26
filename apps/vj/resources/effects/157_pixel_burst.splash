@@ -1,0 +1,62 @@
+// PIXEL BURST — every particle carries one texel of input0 and explodes
+// outward from the plane's centre on a saw-phase clock: each cycle snaps
+// open fast, drags to a stop, then resets and fires again.
+{
+    name: "Pixel Burst"
+    engine: "particles"
+    mode: "image"
+    seed: 157
+    input0: "test"
+
+    count: 12000
+    spread: 6.0
+    size: 0.09
+    rate: 0.35
+
+    beat_pulse: "0.4 * (0.2 + 1.6*p0)"
+    beat_rate: 1.0
+    // PERFORMANCE DIALS — mid-knob = the stock look, exact.
+    p0: 0.5  p1: 0.5  p2: 0.5
+    dials: [
+        {name: "SPEED", bind: "p0", default: 0.5},
+        {name: "SPIN", bind: "p1", default: 0.5},
+        {name: "HANG", bind: "p2", default: 0.5}
+    ]
+
+    color_bg: #x050508
+    color_a: #xffffff
+    color_b: #xffffff
+    color_c: #xffffff
+
+    cam_dist: 7.5
+    cam_height: 0.0
+    cam_orbit: 0.0
+    fog: 0.0
+
+    stages: [
+        {kind: "feedback", amount: "0.35 + 0.3*p2", zoom: 1.01, rotate: 0.0, dim: 0.94},
+        {kind: "bloom", threshold: 0.55, strength: "1.1 * (0.25 + 1.5*p0)", levels: 2}
+    ]
+
+    // THE LOOK LIVES HERE: fx_center is the whole motion program — a
+    // fresh saw-phase explosion every respawn cycle (the doc's `rate`
+    // field paces the cycle), drag-eased outward from the plane's centre
+    // along each particle's own random direction seed.
+    // Params: mode/id/dir/t01/cyc/r0/r1 — see CONTRACT.md "particles".
+    shader: draw.DrawVjFxParticles {
+        fx_center: fn(mode: float, id: float, dir: vec3, t01: float, cyc: float, r0: float, r1: float) -> vec3 {
+            let spread = self.shape.y
+            let speed = spread * (0.6 + 1.4 * self.user.x)
+            let k = 1.0 + 4.0 * (1.0 - clamp(self.user.z, 0.0, 1.0))
+            let drag = (1.0 - exp(0.0 - k * t01)) / k
+            let pos = dir * speed * drag * (0.6 + 0.6 * r1)
+            let spin = self.user.y * 5.0
+            let ang = spin * t01
+            let cs = cos(ang)
+            let sn = sin(ang)
+            let x = pos.x * cs - pos.y * sn
+            let y = pos.x * sn + pos.y * cs
+            return vec3(x, y, pos.z)
+        }
+    }
+}

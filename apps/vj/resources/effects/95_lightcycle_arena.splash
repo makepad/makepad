@@ -1,0 +1,69 @@
+// LIGHTCYCLE ARENA — the tron mood: a dark fine-grid floor, edge-lit black
+// towers, and ten light-cycle trail walls sweeping the street lattice IN
+// TEMPO. Each trail's front is a pure function of the beat (one lap per
+// `trail_beats`, per-trail phase offsets so the arena never syncs into one
+// pulse), the head burns white and the wall ages behind it. Pattern
+// taught: `trails` is the tron ingredient — walls collapse ahead of their
+// front in the vertex shader, so the sweep costs nothing on the CPU.
+{
+    name: "Lightcycle Arena"
+    engine: "city"
+    seed: 7
+
+    style: "tron"
+    blocks: 9
+    block: 6.0
+    street: 0.30
+    towers: 180
+    max_h: 7.5
+    win: 0.5
+    density: 0.10
+    flicker: 0.06
+    trails: 10
+    trail_beats: 8
+    wall_h: 1.5
+    alt: 8.0
+    fly: 1.5
+    bank: 1.8
+
+    beat_pulse: 0.7
+    p1: "0.4 + 1.0*pulse"       // trail heads flare on the kick
+    p2: 0.8                      // tower edge glow
+
+    // PERFORMANCE DIALS — the city engine's own p-levers: DENS lights
+    // tower windows, HEAD holds the trail-head flare when touched, EDGE
+    // gains the tower edge glow.
+    dials: [
+        {name: "DENS", bind: "p0", default: 0.0},
+        {name: "HEAD", bind: "p1", default: 0.5},
+        {name: "EDGE", bind: "p2", default: 0.8}
+    ]
+
+    color_bg: #x02060a
+    color_a: #x22d8ff
+    color_b: #xff9a1e
+    color_c: #xeaffff
+
+    fog: 0.020
+    glow: 1.25
+
+    stages: [
+        {kind: "bloom", threshold: 0.38, strength: 1.8, levels: 3}
+    ]
+
+    // THE LOOK LIVES HERE. This block is not a reference to the
+    // engine's shader — it IS the pixel math this effect runs.
+    // Rewrite it and the effect looks different; everything else
+    // (geometry, motion, the content coupling, the beat) keeps
+    // working, because the block SUBCLASSES the engine shader.
+    // Inputs: t = height 0..1, attr = (class, id, hash, height/phase).
+    // Signals: self.time_beat (time, beat, phase, pulse),
+    // self.sig (bar, bpm, energy, dt), self.user (p0..p3),
+    // self.col_a/b/c/bg, self.fog (density, glow, content, -).
+    shader: draw.DrawVjFxCity {
+        fx_color: fn(t: float, attr: vec4, normal: vec3, wpos: vec3) -> vec4 {
+            let v = 0.8 + 0.4 * attr.z
+            return self.col_a.mix(self.col_b, clamp(t * 0.8 + attr.z * 0.3, 0.0, 1.0)) * v
+        }
+    }
+}

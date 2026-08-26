@@ -42,7 +42,7 @@ impl KvCache {
             v.clear();
         }
         self.n_past = 0;
-        crate::metal_backend::clear_decoder_kv_cache();
+        crate::accel::clear_decoder_kv_cache();
     }
 
     /// Append K, V rows for a layer
@@ -64,6 +64,11 @@ impl KvCache {
 /// tokens: token IDs for this step (can be >1 for prompt processing)
 /// kv_cache: self-attention KV cache (mutated)
 /// cross_kv: pre-computed cross-attention K, V per layer
+/// capture: when present, the softmaxed cross-attention rows of the
+/// alignment heads are copied out for DTW word timing. Capturing forces the
+/// plain CPU path for everything that fuses cross-attention (those kernels
+/// never materialize the attention matrix); self-attention and the encoder
+/// keep their accelerators.
 /// Returns logits: [n_tokens, n_vocab]
 pub fn decode(
     model: &WhisperModel,
@@ -71,11 +76,14 @@ pub fn decode(
     positions: &[i32],
     kv_cache: &mut KvCache,
     cross_kv: &[(Tensor, Tensor)],
+    mut capture: Option<&mut crate::align::AlignCapture>,
 ) -> Tensor {
     let n_tokens = tokens.len();
     let n_state = model.hparams.n_text_state as usize;
     let n_head = model.hparams.n_text_head as usize;
     let n_state_head = n_state / n_head;
+    let capturing = capture.is_some();
+    let capture_base = capture.as_deref_mut().map(|cap| cap.begin_rows(n_tokens));
 
     // Token embedding + positional embedding
     let token_embd = Tensor::get_rows(&model.d_te, tokens);
@@ -90,9 +98,9 @@ pub fn decode(
         let residual = cur.clone();
 
         // Q, K, V projections.
-        let (q, k_new, v_new) = if crate::metal_backend::is_requested() && n_tokens == 1 {
+        let (q, k_new, v_new) = if crate::accel::is_requested() && n_tokens == 1 {
             if let Some((q_data, k_data, v_data)) =
-                crate::metal_backend::try_decoder_self_qkv_step_f32(
+                crate::accel::try_decoder_self_qkv_step_f32(
                     &cur.data,
                     n_state,
                     &layer.attn_ln_0_w.data,
@@ -149,15 +157,15 @@ pub fn decode(
 
         let (ref k_cross, ref v_cross) = cross_kv[il];
         let n_audio_ctx = k_cross.shape[0];
-        let n_audio_ctx_flash = if crate::metal_backend::is_requested() && n_tokens == 1 {
+        let n_audio_ctx_flash = if crate::accel::is_requested() && n_tokens == 1 {
             pad_to(n_audio_ctx, 256)
         } else {
             n_audio_ctx
         };
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
-        if crate::metal_backend::is_requested() && n_tokens == 1 {
-            if let Some(out) = crate::metal_backend::try_decoder_self_cross_ffn_step_f32(
+        if crate::accel::is_requested() && n_tokens == 1 && !capturing {
+            if let Some(out) = crate::accel::try_decoder_self_cross_ffn_step_f32(
                 il,
                 &residual.data,
                 &q.data,
@@ -179,8 +187,8 @@ pub fn decode(
             }
         }
 
-        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
-            crate::metal_backend::try_flash_attn_f32_self_kv_cache(
+        let attn_out = if crate::accel::is_requested() && n_tokens == 1 {
+            crate::accel::try_flash_attn_f32_self_kv_cache(
                 il,
                 &q.data,
                 k_all,
@@ -191,7 +199,7 @@ pub fn decode(
                 scale,
             )
             .or_else(|| {
-                crate::metal_backend::try_flash_attn_f32_packed(
+                crate::accel::try_flash_attn_f32_packed(
                     &q.data,
                     k_all,
                     v_all,
@@ -365,8 +373,8 @@ pub fn decode(
         let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
 
-        if crate::metal_backend::is_requested() && n_tokens == 1 {
-            if let Some(out) = crate::metal_backend::try_decoder_cross_ffn_step_f32(
+        if crate::accel::is_requested() && n_tokens == 1 && !capturing {
+            if let Some(out) = crate::accel::try_decoder_cross_ffn_step_f32(
                 il,
                 &cur.data,
                 n_state,
@@ -398,8 +406,8 @@ pub fn decode(
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
 
-        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
-            crate::metal_backend::try_flash_attn_f32_cross_kv_cache(
+        let attn_out = if crate::accel::is_requested() && n_tokens == 1 && !capturing {
+            crate::accel::try_flash_attn_f32_cross_kv_cache(
                 il,
                 &q.data,
                 &k_cross.data,
@@ -411,7 +419,7 @@ pub fn decode(
                 scale,
             )
             .or_else(|| {
-                crate::metal_backend::try_flash_attn_f32_packed(
+                crate::accel::try_flash_attn_f32_packed(
                     &q.data,
                     &k_cross.data,
                     &v_cross.data,
@@ -500,6 +508,12 @@ pub fn decode(
             let q_data = &q.data;
             let k_cross_data = &k_cross.data;
             let v_cross_data = &v_cross.data;
+            // Word-alignment capture for this layer, if any of its heads is
+            // an alignment head. Built after begin_rows, so the destination
+            // buffer cannot move under the raw writes below.
+            let capture_write = capture
+                .as_deref_mut()
+                .and_then(|cap| cap.writer(il, capture_base.unwrap_or(0), n_audio_ctx));
             parallel_for(n_head, |h| {
                 let h_off = h * n_state_head;
                 let mut qh = vec![0.0f32; n_tokens * n_state_head];
@@ -542,6 +556,10 @@ pub fn decode(
                     for v in row.iter_mut() {
                         *v *= inv;
                     }
+                }
+
+                if let Some(write) = &capture_write {
+                    write.store(h, n_tokens, n_audio_ctx, &scores);
                 }
 
                 // scores @ V_cross with transposed V

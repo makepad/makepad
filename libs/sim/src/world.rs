@@ -55,6 +55,11 @@ pub struct GameWorld {
     /// HUD gauges, keyed by name.
     pub hud_bars: Vec<HudBar>,
     pub crosshair: bool,
+    /// The composed HUD: panels, gauges, readouts, icons, slot grids, the
+    /// message log and the screen flash. The layer above `hud_slots`/
+    /// `hud_bars`, which stay exactly as they are for the games that use
+    /// them.
+    pub hud: crate::hud::HudDoc,
     /// Camera requests from script.
     pub cam_target: Vec3f,
     pub cam_distance: f32,
@@ -90,6 +95,13 @@ pub struct GameWorld {
     pub look_dy: f64,
     /// Vertical field of view (degrees). Racing games widen it with speed.
     pub cam_fov: f32,
+    /// Near clip plane in metres (0 = the renderer's stock 0.15). The
+    /// NORMALIZATION RULE: the near plane's frustum-corner reach
+    /// (near x sqrt(1 + tan^2(fovx/2) + tan^2(fovy/2))) must stay inside
+    /// the walker's wall margin, or a head against a wall sees through
+    /// it. Classic-import maps shrink this to fit their declared body
+    /// (a Doom body's 0.25 m radius needs ~0.10).
+    pub cam_near: f32,
     /// Decaying random camera offset amplitude (game.cam_shake).
     pub cam_shake: f32,
     /// game.save/game.load persistence. NOT cleared on eval — surviving
@@ -132,6 +144,12 @@ pub struct GameWorld {
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).
     /// Presentation only — the step never reads it.
     pub sun: SunConfig,
+    /// World-level gameplay knobs (`game.tune({car_speed: 0.6})`): scalars
+    /// every block of a kind multiplies its authored config by, each tick.
+    /// Retroactive by construction — a car spawned before the tune reads the
+    /// same scalar as one spawned after — and idempotent, so a re-declaration
+    /// on the addon lane is the whole persistence story (see WorldTuning).
+    pub tuning: WorldTuning,
     /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
     /// camera-relative movement ("run where the camera looks").
     pub cam_yaw: f32,
@@ -312,6 +330,9 @@ impl GameWorld {
         self.water = None;
         self.sky = None;
         self.sun = SunConfig::default();
+        // World knobs are script content like the sun: the re-eval re-declares
+        // them (`world.tune` appends an idempotent line, so a reload does).
+        self.tuning = WorldTuning::default();
         self.next_id = 0;
         self.gravity = 30.0;
         self.on_tick = None;
@@ -321,6 +342,7 @@ impl GameWorld {
         self.timers.clear();
         self.hud_slots.clear();
         self.hud_bars.clear();
+        self.hud.clear();
         self.crosshair = false;
         self.beams.clear();
         self.cam_target = vec3f(0.0, 2.0, 0.0);
@@ -337,6 +359,7 @@ impl GameWorld {
         self.cam_pitch_request = None;
         self.cam_yaw_request = None;
         self.cam_fov = 40.0;
+        self.cam_near = 0.15;
         self.cam_shake = 0.0;
         self.rng = 0x9E37_79B9_7F4A_7C15;
         // Fresh box3d world; the mirror rebuilds from entities at the next

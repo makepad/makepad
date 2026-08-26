@@ -10,6 +10,7 @@ use makepad_asset_store::{ChatConfig, ChatScript, ScriptedLane, ScriptedTurn};
 fn scripted_cfg() -> impl FnOnce(&mut makepad_asset_store::ServerConfig) {
     |cfg| {
         cfg.chat = ChatConfig {
+            fleet: String::new(),
             fleet_bases: Vec::new(),
             max_sessions: 8,
             max_sessions_per_owner: 4,
@@ -28,17 +29,21 @@ fn scripted_cfg() -> impl FnOnce(&mut makepad_asset_store::ServerConfig) {
                         },
                         ScriptedTurn::Text("Here is the quarry arena Grok drafted.".into()),
                     ],
+                    ..Default::default()
                 },
                 openai: ScriptedLane {
                     available: true,
                     model: "gpt-scripted".into(),
                     turns: vec![ScriptedTurn::Text("OpenAI primary reply.".into())],
+                    ..Default::default()
                 },
                 grok: ScriptedLane {
                     available: true,
                     model: "grok-scripted".into(),
                     turns: vec![ScriptedTurn::Text("fn spawn_quarry_arena() {}".into())],
+                    ..Default::default()
                 },
+                ..Default::default()
             }),
         };
     }
@@ -164,6 +169,167 @@ fn game_can_choose_external_as_primary() {
     assert!(deltas.iter().any(|t| t.contains("OpenAI primary reply")), "{deltas:?}");
 }
 
+/// Poll events until `pred` matches one (or panic). Unlike [`wait_events`]
+/// this does not require `done` — a parked turn never reaches it.
+fn wait_until(client: &mut Client, session: &str, pred: impl Fn(&Value) -> bool) -> Vec<Value> {
+    let mut last = 0u64;
+    let mut all: Vec<Value> = Vec::new();
+    for _ in 0..20 {
+        let r = client.get(&format!(
+            "/v1/chat/sessions/{session}/events?after={last}&wait=500&limit=64"
+        ));
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let body = r.json();
+        for ev in body.get("events").and_then(Value::as_arr).unwrap() {
+            all.push(ev.clone());
+            if let Some(seq) = ev.get("seq").and_then(Value::as_u64) {
+                last = last.max(seq);
+            }
+        }
+        if all.iter().any(&pred) {
+            return all;
+        }
+    }
+    panic!("event never arrived; events={all:?}");
+}
+
+/// The GAME profile end to end over real sockets: the model queries the
+/// catalog (executed by the BROKER against the server's own catalog file),
+/// then calls a world tool — the turn PARKS, the client answers over the
+/// tool-result route, and the turn resumes to done.
+#[test]
+fn game_session_queries_the_catalog_and_round_trips_a_world_tool() {
+    let ts = start_server_with("chat_game_roundtrip", |cfg| {
+        cfg.chat = ChatConfig {
+            fleet: String::new(),
+            fleet_bases: Vec::new(),
+            max_sessions: 8,
+            max_sessions_per_owner: 4,
+            event_cap: 64,
+            event_max_wait_ms: 2_000,
+            script: Some(ChatScript {
+                fleet_qwen: ScriptedLane {
+                    available: true,
+                    model: "qwen-scripted".into(),
+                    turns: vec![
+                        ScriptedTurn::Text(
+                            "<<tool>>{\"name\":\"assets.query\",\"args\":{\"sql\":\"SELECT COUNT(*) AS n FROM search_annotations WHERE live=1\"}}"
+                                .into(),
+                        ),
+                        ScriptedTurn::Text(
+                            "<<tool>>{\"name\":\"world.set_source\",\"args\":{\"source\":\"game.sky({})\"}}"
+                                .into(),
+                        ),
+                        ScriptedTurn::Text("The level is live.".into()),
+                    ],
+                    ..Default::default()
+                },
+                openai: ScriptedLane::default(),
+                grok: ScriptedLane::default(),
+                ..Default::default()
+            }),
+        };
+    });
+    let admin = ts.admin_token();
+    let mut c = ts.control(Some(&admin));
+    let player = principal_with(&mut c, &[("chat", "gen")]);
+    c.set_token(Some(&player));
+
+    // Unknown profiles refuse; the game profile creates.
+    let r = c.post_json(
+        "/v1/chat/sessions",
+        &jobj(vec![
+            ("api_version", Value::Int(1)),
+            ("namespace", jstr("gen")),
+            ("provider", jstr("fleet-qwen")),
+            ("client", jstr("root")),
+        ]),
+    );
+    assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(&r.body));
+    let r = c.post_json(
+        "/v1/chat/sessions",
+        &jobj(vec![
+            ("api_version", Value::Int(1)),
+            ("namespace", jstr("gen")),
+            ("provider", jstr("fleet-qwen")),
+            ("client", jstr("game")),
+        ]),
+    );
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    let session = r.str_field("session");
+
+    let r = c.post_json(
+        &format!("/v1/chat/sessions/{session}/send"),
+        &jobj(vec![("text", jstr("build me a level"))]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+
+    // The catalog query executed broker-side against the server's OWN
+    // catalog file; the world call parked the turn on the client.
+    let events = wait_until(&mut c, &session, |e| {
+        e.get("type").and_then(Value::as_str) == Some("tool_call")
+            && e.get("name").and_then(Value::as_str) == Some("world.set_source")
+    });
+    let query_result = events
+        .iter()
+        .find(|e| e.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .expect("assets.query result");
+    let outcome = query_result.get("result").unwrap();
+    assert_eq!(outcome.get("outcome").and_then(Value::as_str), Some("ok"), "{outcome:?}");
+    let table = outcome.get("value").and_then(|v| v.get("text")).and_then(Value::as_str).unwrap();
+    assert!(table.contains('n'), "aligned table with the column name: {table}");
+    let world_call = events
+        .iter()
+        .find(|e| {
+            e.get("type").and_then(Value::as_str) == Some("tool_call")
+                && e.get("name").and_then(Value::as_str) == Some("world.set_source")
+        })
+        .unwrap();
+    let call_id = world_call.get("id").and_then(Value::as_str).unwrap().to_string();
+
+    // A wrong call id is a 409; a foreign principal is a 404.
+    let outcome_ok = jobj(vec![
+        ("outcome", jstr("ok")),
+        ("value", jobj(vec![("eval", jstr("game evaluated successfully"))])),
+    ]);
+    let r = c.post_json(
+        &format!("/v1/chat/sessions/{session}/tool-result"),
+        &jobj(vec![("id", jstr("tc_9_9")), ("outcome", outcome_ok.clone())]),
+    );
+    assert_eq!(r.status, 409, "{}", String::from_utf8_lossy(&r.body));
+    c.set_token(Some(&admin));
+    let r = c.post_json(
+        &format!("/v1/chat/sessions/{session}/tool-result"),
+        &jobj(vec![("id", jstr(call_id.clone())), ("outcome", outcome_ok.clone())]),
+    );
+    assert_eq!(r.status, 404, "{}", String::from_utf8_lossy(&r.body));
+    c.set_token(Some(&player));
+
+    // The real answer resumes the turn to done.
+    let r = c.post_json(
+        &format!("/v1/chat/sessions/{session}/tool-result"),
+        &jobj(vec![("id", jstr(call_id)), ("outcome", outcome_ok)]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let events = wait_events(&mut c, &session, 0);
+    let world_result = events
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .nth(1)
+        .expect("world tool result");
+    let outcome = world_result.get("result").unwrap();
+    assert_eq!(
+        outcome.get("value").and_then(|v| v.get("eval")).and_then(Value::as_str),
+        Some("game evaluated successfully")
+    );
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("delta"))
+        .filter_map(|e| e.get("text").and_then(Value::as_str))
+        .collect();
+    assert!(deltas.iter().any(|t| t.contains("The level is live")), "{deltas:?}");
+}
+
 #[test]
 fn foreign_principal_cannot_see_or_drive_session() {
     let ts = start_server_with("chat_owner_scope", scripted_cfg());
@@ -256,4 +422,55 @@ fn unauthenticated_chat_is_uniform_401() {
         ]),
     );
     assert_eq!(r.status, 401);
+}
+
+#[test]
+fn sessions_list_is_owner_scoped() {
+    let ts = start_server_with("chat_list", scripted_cfg());
+    let admin = ts.admin_token();
+    let mut c = ts.control(Some(&admin));
+    let player = principal_with(&mut c, &[("chat", "gen")]);
+    c.set_token(Some(&player));
+
+    // No sessions yet: an empty list, not an error.
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let rows = r.json().get("sessions").and_then(Value::as_arr).unwrap().len();
+    assert_eq!(rows, 0);
+
+    let mut made = Vec::new();
+    for _ in 0..2 {
+        let r = c.post_json(
+            "/v1/chat/sessions",
+            &jobj(vec![
+                ("api_version", Value::Int(1)),
+                ("namespace", jstr("gen")),
+                ("provider", jstr("fleet-qwen")),
+            ]),
+        );
+        assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+        made.push(r.str_field("session").to_string());
+    }
+
+    // The owner's list names exactly the sessions they created.
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200);
+    let body = r.json();
+    let rows = body.get("sessions").and_then(Value::as_arr).unwrap();
+    let ids: Vec<&str> =
+        rows.iter().filter_map(|v| v.get("session").and_then(Value::as_str)).collect();
+    assert_eq!(rows.len(), 2, "{ids:?}");
+    for id in &made {
+        assert!(ids.contains(&id.as_str()), "{ids:?} missing {id}");
+    }
+
+    // A DIFFERENT principal sees none of them — the list never leaks
+    // another owner's transcripts.
+    c.set_token(Some(&admin));
+    let other = principal_with(&mut c, &[("chat", "gen")]);
+    c.set_token(Some(&other));
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200);
+    let rows = r.json().get("sessions").and_then(Value::as_arr).unwrap().len();
+    assert_eq!(rows, 0);
 }

@@ -1,0 +1,35 @@
+// TINT BLEND — deck B's LUMA (its brightness and motion) is re-tinted
+// with deck A's CHROMA (its hue), so B rides through wearing A's colour
+// instead of its own — a colourise-over blend rather than a replace.
+// AMOUNT sets how strongly A's chroma overrides B's own colour, SAT
+// scales the borrowed chroma's strength, GAIN brightens it.
+{
+    name: "Tint Blend"
+    engine: "transition"
+    engage: "ramp"
+    dials: [
+        {name: "AMOUNT", bind: "p0", default: 0.6},
+        {name: "SAT", bind: "p1", default: 0.6},
+        {name: "GAIN", bind: "p2", default: 0.5}
+    ]
+    shader: draw.DrawVjFxDuo {
+        trans: fn(uv: vec2, t: float) -> vec4 {
+            let a = self.deck_a(uv)
+            let b = self.deck_b(uv)
+            let w = vec3(0.2126, 0.7152, 0.0722)
+            let luma_b = dot(b.xyz, w)
+            let luma_a = dot(a.xyz, w)
+            let chroma_a = a.xyz - vec3(luma_a, luma_a, luma_a)
+            let sat = 0.5 + self.user.y * 2.5
+            let gain = 0.5 + self.user.z * 1.5
+            let flat = vec3(luma_b, luma_b, luma_b)
+            let tinted = flat + chroma_a * sat * gain
+            let raw = b.xyz.mix(tinted, self.user.x)
+            let composite = a.xyz.mix(raw, clamp(t, 0.0, 1.0))
+            let cx = clamp(composite.x, 0.0, 1.0)
+            let cy = clamp(composite.y, 0.0, 1.0)
+            let cz = clamp(composite.z, 0.0, 1.0)
+            return vec4(cx, cy, cz, 1.0)
+        }
+    }
+}

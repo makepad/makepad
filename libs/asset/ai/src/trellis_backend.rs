@@ -160,11 +160,36 @@ pub fn alpha_is_segmented(rgba: &[u8]) -> bool {
 /// The second check catches a sheet split across several components.  A normal
 /// foot sole can touch the minimum Y plane, but it neither consumes 12% of all
 /// faces nor spans 80% of both other reconstruction axes.
-/// Stable marker propagated through the HTTP job error. The UI uses this to
-/// distinguish a retryable sampled-geometry rejection from transport/model
-/// failures without matching human diagnostic prose.
-pub const TRELLIS_GEOMETRY_QUALITY_MARKER: &str = "trellis-geometry-quality:";
+/// Piecewise-linear map from the generator's internal progress timeline to
+/// the fraction shown to clients. Knots are (internal, display); measured
+/// on an RTX PRO 6000 for an ~80k-face result: forward 28s, weld+fill 9s,
+/// BVH+field 3s, remesh/decimate 8s, xatlas unwrap 20-40s, bake 2s.
+pub fn display_fraction(internal: f64) -> f64 {
+    const KNOTS: [(f64, f64); 10] = [
+        (0.000, 0.00),
+        (0.880, 0.42), // native forward done
+        (0.890, 0.52), // weld + fill holes
+        (0.900, 0.56), // BVH + remesh field
+        (0.937, 0.62), // remesh faces, weld/fill/drop
+        (0.960, 0.70), // decimate
+        (0.967, 0.73), // final weld/fill/drop, orient, sampler
+        (0.973, 0.92), // xatlas unwrap
+        (0.980, 0.97), // texel bake
+        (1.000, 1.00), // encode + done
+    ];
+    let x = if internal.is_finite() { internal.clamp(0.0, 1.0) } else { 0.0 };
+    for pair in KNOTS.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        if x <= x1 {
+            return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
+        }
+    }
+    1.0
+}
 
+/// Advisory only: the reconstruction is logged against these heuristics but
+/// never rejected. Whatever TRELLIS produced is what the user gets.
 pub fn check_trellis_mesh_quality(
     positions: &[[f32; 3]],
     indices: &[u32],
@@ -632,6 +657,16 @@ pub fn decode_png_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAi
                 rgba[i * 4..i * 4 + 3].copy_from_slice(chunk);
                 rgba[i * 4 + 3] = 255;
             }
+            // Grayscale / grayscale+alpha (common for hand-authored inpaint
+            // masks): replicate luma across R/G/B.
+            2 => {
+                rgba[i * 4..i * 4 + 3].copy_from_slice(&[chunk[0]; 3]);
+                rgba[i * 4 + 3] = chunk[1];
+            }
+            1 => {
+                rgba[i * 4..i * 4 + 3].copy_from_slice(&[chunk[0]; 3]);
+                rgba[i * 4 + 3] = 255;
+            }
             _ => return Err(bad(format!("{components} components unsupported"))),
         }
     }
@@ -668,15 +703,10 @@ impl ContentBackend for TrellisBackend {
     }
 
     fn resident_is_healthy_after_error(&self, error: &AssetAiError) -> bool {
-        // Geometry-quality rejection happens after a complete native forward
-        // and deterministic remesh audit. It does not corrupt weights or the
-        // CUDA cache, and the character pipeline is expected to retry another
-        // seed. Treat it like parameter validation so `/models` remains
-        // ready/loaded; ordinary backend/CUDA errors stay conservative.
+        // Parameter validation and cancellation happen without touching the
+        // weights or the CUDA cache, so `/models` stays ready/loaded;
+        // ordinary backend/CUDA errors stay conservative.
         matches!(error, AssetAiError::Cancelled | AssetAiError::Params(_))
-            || error
-                .to_string()
-                .contains(TRELLIS_GEOMETRY_QUALITY_MARKER)
     }
 
     fn generate(
@@ -717,10 +747,16 @@ impl ContentBackend for TrellisBackend {
                 .clamp(256, 4096) as usize,
         };
         cancel.check()?;
+        // The generator reports on an internal timeline (native forward
+        // 0..0.88, then the CPU post-processing squeezed into 0.88..0.98).
+        // Wall time is the other way round on a real mesh — the unwrap alone
+        // outlasts the whole forward — so the client-visible fraction is
+        // re-banded to roughly follow elapsed time.
+        let mut display = |label: &str, internal: f64| progress(label, display_fraction(internal));
         let bytes = match &mut self.gen {
-            Gen::Stub(gen) => gen(&job, progress)?,
+            Gen::Stub(gen) => gen(&job, &mut display)?,
             #[cfg(feature = "mesh")]
-            Gen::Trellis(gen) => gen.generate(&job, progress, cancel)?,
+            Gen::Trellis(gen) => gen.generate(&job, &mut display, cancel)?,
         };
         cancel.check()?;
         Ok(vec![ArtifactData {
@@ -740,36 +776,71 @@ mod trellis_gen {
     use super::MeshJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::backend::gpu_pool_cap_override;
-    use makepad_diffusion::birefnet::{
+    use makepad_ai_common::backend::gpu_pool_cap_override;
+    use makepad_ai_vision::birefnet::{
         unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights,
     };
-    use makepad_diffusion::h3_pipeline::H3NoiseRng;
-    use makepad_diffusion::trellis::{
+    use makepad_ai_h3::h3_pipeline::H3NoiseRng;
+    use makepad_ai_trellis::trellis::{
         t2_quantize_unique_coords, t2_rope_tables, TrellisWeights, T2_SHAPE_SAMPLER,
         T2_SHAPE_SLAT_MEAN, T2_SHAPE_SLAT_STD, T2_SLAT_CHANNELS, T2_SS_CHANNELS, T2_SS_SAMPLER,
         T2_SS_TOKENS, T2_TEX_IN_CHANNELS, T2_TEX_SAMPLER, T2_TEX_SLAT_MEAN, T2_TEX_SLAT_STD,
     };
-    use makepad_diffusion::trellis_dino::T2Dino;
-    use makepad_diffusion::trellis_dit::{t2_upload_cond, t2_upload_rope, T2Dit};
-    use makepad_diffusion::trellis_image::{
+    use makepad_ai_trellis::trellis_dino::T2Dino;
+    use makepad_ai_trellis::trellis_dit::{t2_upload_cond, t2_upload_rope, T2Dit};
+    use makepad_ai_trellis::trellis_image::{
         t2_cond_input, t2_pad_black, t2_preprocess_rgba, t2_subject_border, T2Image,
     };
-    use makepad_diffusion::trellis_mesh::{
+    use makepad_ai_trellis::trellis_mesh::{
         t2_dual_grid_to_mesh, t2_fdg_fields, t2_mesh_to_glb_colored, t2_yup, T2VoxelSampler,
     };
-    use makepad_diffusion::trellis_pipeline::{
+    use makepad_ai_trellis::trellis_pipeline::{
         t2_chw_to_tokens, t2_run_ss_cancel, t2_sample_flow_cancel, t2_sample_flow_concat_ctl,
     };
-    use makepad_diffusion::trellis_slat::T2SparseDec;
-    use makepad_diffusion::trellis_vae::T2SsDec;
-    use makepad_diffusion::DiffusionError;
-    use makepad_remesh::{remesh_narrow_band_dc, SurfaceBvh};
+    use makepad_ai_trellis::trellis_slat::T2SparseDec;
+    use makepad_ai_trellis::trellis_vae::T2SsDec;
+    use makepad_ai_common::DiffusionError;
+    use makepad_remesh::{remesh_narrow_band_dc_ctl, SurfaceBvh};
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// Job-status writes are expensive. Forward a tick on phase change or
+    /// every ~700ms — enough to show life, not enough to stall remesh.
+    struct CoarseProgress<'a> {
+        sink: ProgressSink<'a>,
+        last: Instant,
+        last_label: String,
+    }
+
+    impl<'a> CoarseProgress<'a> {
+        fn new(sink: ProgressSink<'a>) -> Self {
+            Self {
+                sink,
+                last: Instant::now() - Duration::from_secs(1),
+                last_label: String::new(),
+            }
+        }
+
+        fn emit(&mut self, label: &str, frac: f64) {
+            let now = Instant::now();
+            if label == self.last_label && now.duration_since(self.last) < Duration::from_millis(700)
+            {
+                return;
+            }
+            self.last = now;
+            self.last_label.clear();
+            self.last_label.push_str(label);
+            (self.sink)(label, frac);
+        }
+    }
 
     /// The registry files this backend loads (tex flow + tex decoder only
     /// when the job asks for texture — the service default).
     struct Paths {
+        /// `<cache_dir>/trellis`: where the last pre-unwrap mesh is kept so a
+        /// hung or ugly unwrap can be replayed offline (single overwritten
+        /// file, a few MB).
+        scratch: PathBuf,
         ss_flow: PathBuf,
         lr_flow: PathBuf,
         hr_flow: PathBuf,
@@ -822,7 +893,7 @@ mod trellis_gen {
         /// This must run on the service worker thread which performed the
         /// generation because both caches are thread-local by design.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            use makepad_diffusion::backend::{
+            use makepad_ai_common::backend::{
                 gpu_pool_clear, gpu_weight_cache_evict_prefix,
             };
 
@@ -839,6 +910,7 @@ mod trellis_gen {
         pub fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
             ctx.ensure_files()?;
             self.paths = Some(Paths {
+                scratch: ctx.cache_dir.join("trellis"),
                 ss_flow: ctx.path_by_role("ss-flow")?,
                 lr_flow: ctx.path_by_role("shape-flow-512")?,
                 hr_flow: ctx.path_by_role("shape-flow-1024")?,
@@ -1246,7 +1318,8 @@ mod trellis_gen {
             };
 
             cancel.check()?;
-            progress("surface cleanup", 0.89);
+            let mut coarse = CoarseProgress::new(progress);
+            coarse.emit("weld surface", 0.88);
             // Keep this cleaned decoded surface alive through remesh AND
             // baking. Its BVH drives the UDF and snaps every atlas texel
             // after simplification back to the original attribute surface.
@@ -1255,18 +1328,39 @@ mod trellis_gen {
             for face in mesh.faces {
                 surface_indices.extend_from_slice(&face);
             }
-            makepad_remesh::weld_vertices(
+            makepad_remesh::weld_vertices_ctl(
                 &mut surface_positions,
                 &mut surface_indices,
                 1.0 / 8192.0,
+                &mut |done, total| {
+                    let frac = done as f64 / total.max(1) as f64;
+                    coarse.emit("weld surface", 0.88 + 0.004 * frac.clamp(0.0, 1.0));
+                    !cancel.is_cancelled()
+                },
             );
-            makepad_remesh::fill_small_holes(&mut surface_indices, 64);
-            let surface_bvh = SurfaceBvh::build(&surface_positions, &surface_indices)
-                .map_err(trellis_err)?;
+            cancel.check()?;
+            coarse.emit("fill holes", 0.884);
+            makepad_remesh::fill_small_holes_ctl(&mut surface_indices, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes", 0.884 + 0.006 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            coarse.emit("build BVH", 0.89);
+            let surface_bvh = SurfaceBvh::build_ctl(
+                &surface_positions,
+                &surface_indices,
+                &mut |done, total| {
+                    let frac = done as f64 / total.max(1) as f64;
+                    coarse.emit("build BVH", 0.89 + 0.008 * frac.clamp(0.0, 1.0));
+                    !cancel.is_cancelled()
+                },
+            )
+            .map_err(trellis_err)?;
 
             cancel.check()?;
-            progress("narrow-band remesh", 0.90);
-            let remeshed = remesh_narrow_band_dc(
+            coarse.emit("remesh voxelize", 0.90);
+            let remeshed = remesh_narrow_band_dc_ctl(
                 &surface_positions,
                 &surface_indices,
                 &surface_bvh,
@@ -1277,12 +1371,34 @@ mod trellis_gen {
                 // inner and outer shells back onto a noisy decoded surface
                 // creates near-coincident geometry and dark interference.
                 0.0,
+                &mut |stage, frac| {
+                    coarse.emit(
+                        &format!("remesh {stage}"),
+                        0.90 + 0.03 * frac.clamp(0.0, 1.0),
+                    );
+                    !cancel.is_cancelled()
+                },
             )
             .map_err(trellis_err)?;
             let (mut positions, mut indices) = (remeshed.positions, remeshed.indices);
-            makepad_remesh::weld_vertices(&mut positions, &mut indices, 1.0 / 8192.0);
-            makepad_remesh::fill_small_holes(&mut indices, 64);
-            makepad_remesh::drop_small_components(&mut positions, &mut indices, 0.02);
+            cancel.check()?;
+            makepad_remesh::weld_vertices_ctl(&mut positions, &mut indices, 1.0 / 8192.0, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("weld remesh", 0.930 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            makepad_remesh::fill_small_holes_ctl(&mut indices, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes (remesh)", 0.932 + 0.003 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            makepad_remesh::drop_small_components_ctl(&mut positions, &mut indices, 0.02, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("drop islands", 0.935 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
 
             // All remeshed outputs honor the requested game-density target,
             // including untextured jobs. Raw high-density output remains
@@ -1296,9 +1412,9 @@ mod trellis_gen {
                 &mut |_round, faces| {
                     let span = start_faces.saturating_sub(job.decimation_target).max(1);
                     let done = start_faces.saturating_sub(faces) as f64 / span as f64;
-                    progress(
+                    coarse.emit(
                         &format!("decimate {}k", faces / 1000),
-                        0.91 + 0.04 * done.clamp(0.0, 1.0),
+                        0.937 + 0.023 * done.clamp(0.0, 1.0),
                     );
                     !cancel.is_cancelled()
                 },
@@ -1306,15 +1422,33 @@ mod trellis_gen {
             let Some((mut dp, mut di)) = decimated else {
                 return Err(AssetAiError::Cancelled);
             };
-            makepad_remesh::weld_vertices(&mut dp, &mut di, 1.0 / 8192.0);
-            makepad_remesh::fill_small_holes(&mut di, 64);
-            makepad_remesh::drop_small_components(&mut dp, &mut di, 0.03);
-            super::check_trellis_mesh_quality(&dp, &di).map_err(|detail| {
-                AssetAiError::Params(format!(
-                    "trellis: {} {detail}",
-                    super::TRELLIS_GEOMETRY_QUALITY_MARKER
-                ))
-            })?;
+            cancel.check()?;
+            makepad_remesh::weld_vertices_ctl(&mut dp, &mut di, 1.0 / 8192.0, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("weld final", 0.960 + 0.001 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            makepad_remesh::fill_small_holes_ctl(&mut di, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes (final)", 0.961 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            makepad_remesh::drop_small_components_ctl(&mut dp, &mut di, 0.03, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("drop islands (final)", 0.963 + 0.001 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            // The geometry heuristics (planar sheets, boundary occupancy,
+            // floor components) stay as a logged AUDIT, not a gate: the user
+            // gets whatever TRELLIS reconstructed. Rejecting + reseeding
+            // never produced a better mesh in practice, and busts / figurines
+            // / anything with a flat cut were refused outright.
+            coarse.emit("quality audit", 0.964);
+            if let Err(detail) = super::check_trellis_mesh_quality(&dp, &di) {
+                eprintln!("trellis geometry audit (advisory): {detail}");
+            }
+            coarse.emit("orient faces", 0.965);
             let before_orient = makepad_remesh::audit_mesh_topology(&dp, &di);
             let reoriented = makepad_remesh::unify_face_orientations(&dp, &mut di);
             let after_orient = makepad_remesh::audit_mesh_topology(&dp, &di);
@@ -1328,10 +1462,26 @@ mod trellis_gen {
                 reoriented,
             );
 
+            // Keep the exact xatlas input on disk: the unwrap is the one
+            // stage that has hung in production, and the mesh is otherwise
+            // unrecoverable (it only exists in this stack frame).
+            dump_pre_unwrap_mesh(&paths.scratch, &dp, &di);
+            // xatlas on a decimation-mangled mesh can take arbitrarily long
+            // (chart merge is quadratic in chart count). Past this budget the
+            // unwrap is abandoned and the projection fallbacks bake instead,
+            // so the user always gets a textured mesh.
+            let unwrap_started = Instant::now();
+            let unwrap_budget = Duration::from_secs(
+                std::env::var("MAKEPAD_TRELLIS_UNWRAP_BUDGET_S")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(150),
+            );
+
             let glb = match &voxel_pbr {
                 Some(pbr) => {
                     cancel.check()?;
-                    progress("bake", 0.96);
+                    coarse.emit("bake: sampler", 0.966);
                     let sampler = T2VoxelSampler::new(&voxel_coords, pbr, 6, 1024)
                         .map_err(trellis_err)?;
                     let sample = |p: [f32; 3]| -> Option<[f32; 6]> {
@@ -1347,13 +1497,34 @@ mod trellis_gen {
                     };
                     // Hunyuan-Paint's official unwrap is xatlas.parametrize.
                     // Chart/box projection stay as fallbacks if xatlas fails.
-                    let mut baked = makepad_remesh::uv_xatlas_bake(
+                    // xatlas unwrap 0.967..0.973 (chart groups), texel bake
+                    // 0.973..0.98 (per triangle).
+                    let mut baked = makepad_remesh::uv_xatlas_bake_ctl(
                         &dp,
                         &di,
                         job.texture_size,
                         &sample,
+                        &mut |stage, frac| {
+                            let frac = frac.clamp(0.0, 1.0);
+                            let (label, lo, span) = match stage {
+                                "unwrap" => ("unwrap (xatlas)", 0.967, 0.006),
+                                _ => ("bake texels", 0.973, 0.007),
+                            };
+                            coarse.emit(label, lo + span * frac);
+                            !cancel.is_cancelled()
+                                && (stage != "unwrap" || unwrap_started.elapsed() < unwrap_budget)
+                        },
                     );
+                    if cancel.is_cancelled() {
+                        return Err(AssetAiError::Cancelled);
+                    }
                     if !baked.ok() {
+                        eprintln!(
+                            "trellis: xatlas unwrap abandoned after {:.1}s (budget {}s) - chart projection fallback",
+                            unwrap_started.elapsed().as_secs_f64(),
+                            unwrap_budget.as_secs()
+                        );
+                        coarse.emit("unwrap (chart projection)", 0.973);
                         baked = makepad_remesh::uv_chart_bake(
                             &dp,
                             &di,
@@ -1371,7 +1542,7 @@ mod trellis_gen {
                     }
                     if baked.ok() {
                         cancel.check()?;
-                        progress("encode", 0.98);
+                        coarse.emit("encode png", 0.98);
                         let t = baked.size;
                         let base_png =
                             crate::testpattern::encode_png_rgba(&baked.base_rgba, t, t)?;
@@ -1421,7 +1592,11 @@ mod trellis_gen {
                 None => {
                     // Geometry-only still carries Hunyuan-ready UV0 so a
                     // later paint stage can retexture without a second remesh.
-                    match makepad_remesh::uv_xatlas_unwrap(&dp, &di) {
+                    coarse.emit("unwrap (xatlas)", 0.967);
+                    match makepad_remesh::uv_xatlas_unwrap_ctl(&dp, &di, &mut |frac| {
+                        coarse.emit("unwrap (xatlas)", 0.967 + 0.012 * frac.clamp(0.0, 1.0));
+                        !cancel.is_cancelled() && unwrap_started.elapsed() < unwrap_budget
+                    }) {
                         Ok((pos, uvs, idx, src)) => {
                             let pre_normals = makepad_gltf::compute_vertex_normals(&dp, &di);
                             let normals: Vec<[f32; 3]> = src
@@ -1438,6 +1613,12 @@ mod trellis_gen {
                             )
                         }
                         Err(_) => {
+                            cancel.check()?;
+                            eprintln!(
+                                "trellis: xatlas unwrap abandoned after {:.1}s (budget {}s) - exporting without UVs",
+                                unwrap_started.elapsed().as_secs_f64(),
+                                unwrap_budget.as_secs()
+                            );
                             let exported_positions: Vec<[f32; 3]> =
                                 dp.iter().copied().map(t2_yup).collect();
                             makepad_gltf::write_glb_mesh(&exported_positions, &di)
@@ -1446,6 +1627,23 @@ mod trellis_gen {
                 }
             };
             Ok(glb)
+        }
+    }
+
+    /// Best effort: `<scratch>/pre_unwrap.glb` (positions + indices in the
+    /// TRELLIS frame). Failure only logs — this must never fail a job.
+    fn dump_pre_unwrap_mesh(scratch: &std::path::Path, positions: &[[f32; 3]], indices: &[u32]) {
+        let path = scratch.join("pre_unwrap.glb");
+        let result = std::fs::create_dir_all(scratch)
+            .and_then(|_| std::fs::write(&path, makepad_gltf::write_glb_mesh(positions, indices)));
+        match result {
+            Ok(()) => eprintln!(
+                "trellis: pre-unwrap mesh saved to {} (V={} F={})",
+                path.display(),
+                positions.len(),
+                indices.len() / 3
+            ),
+            Err(err) => eprintln!("trellis: pre-unwrap mesh dump failed: {err}"),
         }
     }
 }
@@ -1909,15 +2107,32 @@ mod tests {
     }
 
     #[test]
-    fn geometry_quality_rejection_keeps_resident_backend_healthy() {
+    fn display_fraction_is_monotone_and_time_weighted() {
+        let mut last = -1.0;
+        for i in 0..=1000 {
+            let x = i as f64 / 1000.0;
+            let y = display_fraction(x);
+            assert!(y >= last, "not monotone at {x}: {y} < {last}");
+            assert!((0.0..=1.0).contains(&y));
+            last = y;
+        }
+        assert_eq!(display_fraction(0.0), 0.0);
+        assert_eq!(display_fraction(1.0), 1.0);
+        // The unwrap band (0.967..0.973 internally) must be a real stretch
+        // of the visible bar, not the 0.6% it was.
+        assert!(display_fraction(0.973) - display_fraction(0.967) > 0.15);
+        assert!(display_fraction(0.88) < 0.5, "forward is under half the wall time");
+        assert_eq!(display_fraction(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn params_and_cancel_errors_keep_resident_backend_healthy() {
         let backend = TrellisBackend::with_stub(
             "trellis-2",
             Box::new(|_: &MeshJob, _p: ProgressSink| unreachable!()),
         );
-        let quality = AssetAiError::Params(format!(
-            "trellis: {TRELLIS_GEOMETRY_QUALITY_MARKER} planar sheet"
-        ));
-        assert!(backend.resident_is_healthy_after_error(&quality));
+        let params = AssetAiError::Params("trellis: needs an input image".to_string());
+        assert!(backend.resident_is_healthy_after_error(&params));
         assert!(backend.resident_is_healthy_after_error(&AssetAiError::Cancelled));
         assert!(!backend.resident_is_healthy_after_error(&AssetAiError::Backend(
             "trellis: CUDA kernel launch failed".to_string()
