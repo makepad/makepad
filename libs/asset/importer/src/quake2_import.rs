@@ -840,7 +840,7 @@ fn bsp38_to_glb(bytes: &[u8], bank: &WalBank) -> Result<Bsp38Map, String> {
 
 /// Quake II map space is Z-up: `(x, y, z)` → GLB `(x, z, −y)`, scaled to
 /// metres. Every position, bound and offset in this module goes through here.
-fn to_glb(p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn to_glb(p: [f32; 3]) -> [f32; 3] {
     [p[0] * SCALE, p[2] * SCALE, -p[1] * SCALE]
 }
 

@@ -39,6 +39,13 @@ pub struct Place {
     pub height: f32,
     /// `face` (camera-facing), `wall`, or `floor`.
     pub align: String,
+    /// Raw source-format placement flags, preserved so a future difficulty
+    /// option can re-derive another cast without re-importing. For Doom /
+    /// Freedoom this is the THING record's 16-bit `flags` word verbatim
+    /// (skill bits 0x0001/0x0002/0x0004, ambush 0x0008, multiplayer-only
+    /// 0x0010). Zero for placements from formats that carry no such flags,
+    /// and for old `.place` rows written before this field existed.
+    pub flags: u32,
 }
 
 impl WorldPlace {
@@ -66,6 +73,9 @@ impl WorldPlace {
             }
             if !p.class.is_empty() {
                 out.push_str(&format!(" class={}", p.class));
+            }
+            if p.flags != 0 {
+                out.push_str(&format!(" flags={}", p.flags));
             }
             out.push('\n');
         }
@@ -119,6 +129,9 @@ impl WorldPlace {
                     let mut width = 0.0f32;
                     let mut height = 0.0f32;
                     let mut align = String::new();
+                    // `flags` is a newer, optional attribute: rows written
+                    // before it existed simply lack the key and default to 0.
+                    let mut flags = 0u32;
                     for extra in it {
                         if let Some(v) = extra.strip_prefix("class=") {
                             class = v.to_string();
@@ -128,6 +141,8 @@ impl WorldPlace {
                             height = v.parse().unwrap_or(0.0);
                         } else if let Some(v) = extra.strip_prefix("align=") {
                             align = v.to_string();
+                        } else if let Some(v) = extra.strip_prefix("flags=") {
+                            flags = v.parse().unwrap_or(0);
                         }
                     }
                     places.push(Place {
@@ -140,6 +155,7 @@ impl WorldPlace {
                         width,
                         height,
                         align,
+                        flags,
                     });
                 }
                 _ => {}
@@ -376,6 +392,7 @@ mod tests {
                     width: 0.0,
                     height: 0.0,
                     align: String::new(),
+                    flags: 0,
                 },
                 Place {
                     id: "thing-1".into(),
@@ -387,6 +404,7 @@ mod tests {
                     width: 0.0,
                     height: 0.0,
                     align: String::new(),
+                    flags: 0,
                 },
             ],
         };
@@ -396,6 +414,48 @@ mod tests {
         assert_eq!(parsed.places.len(), 2);
         assert_eq!(parsed.places[1].asset, "billboards/freedoom2/poss");
         assert!(parsed.places[0].asset.is_empty());
+    }
+
+    /// The raw THING `flags` word (skill bits + multiplayer-only) must
+    /// survive `to_text` -> `parse`, so a future difficulty option can
+    /// re-derive another cast from an already-imported `.place` file.
+    #[test]
+    fn place_flags_round_trip() {
+        let p = WorldPlace {
+            source: "doom".into(),
+            world: "worlds/doom1/e1m1".into(),
+            spawn: None,
+            places: vec![Place {
+                id: "thing-9".into(),
+                kind: "character".into(),
+                asset: "billboards/doom1/spos".into(),
+                pos: [1.0, 0.0, 2.0],
+                yaw: 0.0,
+                class: "9".into(),
+                width: 0.0,
+                height: 0.0,
+                align: String::new(),
+                // skill 3 (0x0002) + skill 4/5 (0x0004) + ambush (0x0008)
+                flags: 0x000E,
+            }],
+        };
+        let text = p.to_text();
+        assert!(text.contains("flags=14"), "expected flags=14 in: {text}");
+        let parsed = WorldPlace::parse(&text).expect("parse");
+        assert_eq!(parsed.places[0].flags, 0x000E);
+    }
+
+    /// A `.place` file written before `flags` existed has no `flags=` key on
+    /// its `place` rows — that must still parse, defaulting to 0, not error.
+    #[test]
+    fn place_without_flags_key_parses_as_zero() {
+        let text = "world-place 1\n\
+             source doom\n\
+             world worlds/doom1/e1m1\n\
+             place thing-0 character billboards/doom1/poss 1.0000 0.0000 2.0000 0.00000 class=3004\n";
+        let parsed = WorldPlace::parse(text).expect("parse");
+        assert_eq!(parsed.places.len(), 1);
+        assert_eq!(parsed.places[0].flags, 0);
     }
 
     #[test]

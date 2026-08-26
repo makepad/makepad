@@ -682,6 +682,17 @@ pub struct ServingStatusJson {
     /// Tokens generated after it closed — what the user can actually read.
     /// Absent while the block is still open.
     pub visible_tokens: Option<u64>,
+    /// Tokens generated so far this turn, think block included — the number a
+    /// client's tok/s meter divides by time.
+    ///
+    /// It exists because the only place this count used to appear was the
+    /// `decode k/n` PROGRESS STRING, and a client had to scrape it back out.
+    /// Every moment the stage said something else — `starting`, `prefill
+    /// k/n tok`, `encode` — the scrape returned nothing while the think/visible
+    /// counters kept moving, so the client published serving facts carrying a
+    /// generated count of zero and its meter read an authoritative-looking
+    /// `0 tok/s`. A counter is a counter; it does not belong in a label.
+    pub gen_tokens: Option<u64>,
 }
 
 /// Live-session counters mirrored on `GET /job/<id>` (see

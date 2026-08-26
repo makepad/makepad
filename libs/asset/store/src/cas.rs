@@ -74,7 +74,33 @@ fn fsync_dir(_dir: &Path) -> ServerResult<()> {
 
 #[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> ServerResult<()> {
-    File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cas fsync dir"))
+    let f = File::open(dir).map_err(io_err("cas fsync dir"))?;
+    fsync_plain(&f, "cas fsync dir")
+}
+
+/// Flush one file the way the CATALOG flushes its WAL: a plain `fsync`, not
+/// Rust's `sync_all` (which on macOS asks for `F_FULLFSYNC`, a full drive
+/// barrier costing ~5-10ms PER CALL — where `fsync` is ~0.1ms). One store,
+/// one durability stance: the object bytes and the catalog rows that name
+/// them ride the same barrier level, in the required order. The stronger
+/// barrier remains what it always was engine-side: `PRAGMA fullfsync`'s
+/// opt-in, which nothing here sets.
+#[cfg(unix)]
+fn fsync_plain(file: &File, op: &'static str) -> ServerResult<()> {
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn fsync(fd: i32) -> i32;
+    }
+    // Safety: the fd is owned by `file` for the duration of the call.
+    if unsafe { fsync(file.as_raw_fd()) } != 0 {
+        return Err(io_err(op)(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn fsync_plain(file: &File, op: &'static str) -> ServerResult<()> {
+    file.sync_all().map_err(io_err(op))
 }
 
 pub struct Cas {
@@ -268,7 +294,7 @@ impl Cas {
             });
             // writer drops here and removes its temp file.
         }
-        file.sync_all().map_err(io_err("cas fsync temp"))?;
+        fsync_plain(&file, "cas fsync temp")?;
         drop(file);
         let final_path = self.object_path(&blob_id);
         let leaf = final_path.parent().expect("object path has parent");

@@ -67,7 +67,8 @@ pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
 pub use dto::{
-    AliasDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto, CatalogEventDto,
+    AliasDto, AliasStatusDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
+    CatalogEventDto,
     CatalogEventKind, CatalogFacet, CatalogHit, ClaimedJobDto, EventsPageDto, FacetKind,
     GameAliasDto, GcPhaseDto,
     GcStatusDto, HealthDto, ImportEntryDto, RetireDto,
