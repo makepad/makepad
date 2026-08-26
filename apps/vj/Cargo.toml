@@ -46,6 +46,8 @@ makepad-gltf = { path = "../../libs/gltf" }
 makepad-xr = { path = "../../xr" }
 # Procedural placeholder thumbnails for bundled effect presets.
 jpeg-encoder = { path = "../../libs/jpeg-encoder", version = "0.6.1" }
+# WebP import: decoded once at import time, published as owned png bytes.
+makepad-webp = { path = "../../libs/webp" }
 # FULLY-LOCAL MODE: the VJ hosts its own Asset Server in-process, on
 # loopback, when no external store is reachable. Same crate asset-ui and the
 # sandbox embed — the VJ stays a THIN CLIENT over it either way, talking
@@ -54,6 +56,9 @@ makepad-asset-store = { path = "../../libs/asset/store" }
 # Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
 # pictures for audio, and the dimension probes for stills.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
+# NEURAL frame tweening (flow_tween.rs RIFE producer): the in-house
+# Practical-RIFE v4.26 port, running on the macOS Metal/BLAS device path.
+makepad-ai-rife = { path = "../../libs/ai/models/rife" }
 # VARIABLE-FRAMERATE IMPORT: the `mkfl` payload the player reads, the
 # classical (model-free) optical flow that fills it, and the all-intra
 # re-encode. Shared with the enhance backend, which fills the same box from

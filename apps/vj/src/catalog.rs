@@ -44,6 +44,15 @@ pub const PAGE_SIZE: u32 = 48;
 pub const MAX_CARRY: usize = 8192;
 /// Catalog tag the asset-ui puts on non-product run artifacts.
 pub const INTERMEDIATE_TAG: &str = "intermediate";
+/// Catalog tag every music-shaped audio asset carries: the music-directory
+/// importer stamps it on every imported track, and the generators put
+/// generated songs in the same bucket. The importer's constant is the
+/// authority so the two can never drift apart.
+pub const MUSIC_TAG: &str = makepad_asset_importer::music_import::MUSIC_TAG;
+/// Catalog tag the classic game imports stamp on every sound effect. Note
+/// it is a TAG, not a category — no importer writes an `sfx` category, so
+/// a category-based sfx filter lists nothing at all.
+pub const SFX_TAG: &str = "sfx";
 
 /// The playable file a tile's manifest selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,6 +342,29 @@ impl<C: Clone> BrowseModel<C> {
         Self::new_multi(vec![AssetKind::Mesh, AssetKind::Character], "")
     }
 
+    /// The DJ deck explorer: every MUSIC-tagged audio asset in the store,
+    /// whatever its namespace — a generated song is as loadable as an
+    /// imported one. The classic-import sound effects (tagged [`SFX_TAG`])
+    /// stay on the SFX surface: they outnumber the music and sort ahead of
+    /// it by alias, so an unfiltered deck browser opens on pages of door
+    /// hinges and shotgun noises with the user's library six pages deep.
+    /// The tag narrowing rides BESIDE the default intermediate-artifact
+    /// exclusion (`tag` and `exclude` are separate wire fields).
+    pub fn music() -> BrowseModel<C> {
+        let mut model = Self::new(AssetKind::Audio, "");
+        model.tag = MUSIC_TAG.to_string();
+        model
+    }
+
+    /// The SFX surface: sound-effect-tagged audio. A TAG filter — the old
+    /// `sfx` CATEGORY filter matched nothing (no importer writes one), so
+    /// the surface listed an empty store.
+    pub fn sfx() -> BrowseModel<C> {
+        let mut model = Self::new(AssetKind::Audio, "");
+        model.tag = SFX_TAG.to_string();
+        model
+    }
+
     /// Every kind that can land on A/B: video clips, stills, 3D, sprites
     /// and splat/world scenes.
     pub fn visual_kinds() -> Vec<AssetKind> {
@@ -607,21 +639,32 @@ impl<C: Clone> BrowseModel<C> {
         }
         self.next_cursors[slot] = next;
         if first && self.cleared_gen != gen {
-            // Double-buffered swap: the FIRST first-page of a generation
-            // replaces the old tiles; the other kind lane then merges in.
-            // Resolved tiles are carried, not dropped.
             self.cleared_gen = gen;
-            let outgoing: Vec<Tile> = self.tiles.drain(..).collect();
-            for tile in outgoing {
-                self.remember(tile);
-            }
-            self.index.clear();
             if self.resort {
                 // A real query change: the whole strip is re-derived from
-                // the server's order.
+                // the server's order. Double-buffered swap — the FIRST
+                // first-page of a generation replaces the old tiles; the
+                // other kind lane then merges in. Resolved tiles are
+                // carried, not dropped.
+                let outgoing: Vec<Tile> = self.tiles.drain(..).collect();
+                for tile in outgoing {
+                    self.remember(tile);
+                }
+                self.index.clear();
                 self.order.clear();
                 self.pending.clear();
             }
+            // An EVENT refresh KEEPS ITS TILES. It only ever asks for page
+            // ONE, while `order` holds every position the operator can
+            // already see — so draining here left everything past the first
+            // page with a place in the grid and no row to draw in it. On a
+            // catalog of a few hundred (the effect library, mid-seed) that
+            // is a grid of empty cards, occasionally down to a single real
+            // tile: the publish burst re-lists faster than the operator can
+            // scroll the missing pages back in, and nothing ever backfills
+            // them because paging is driven by the window, not by the gap.
+            // Keeping them costs one stale title until the row is re-paged;
+            // dropping them cost the whole grid.
         }
         let mut added = 0usize;
         let mut resorted = false;
@@ -885,6 +928,19 @@ impl<C: Clone> BrowseModel<C> {
         if let Some(&i) = self.index.get(&asset) {
             match latest_published {
                 Some(revision) => {
+                    // A NEW REVISION INVALIDATES THE OLD FILES. `media` and
+                    // `source` name blobs of the revision they came with, so
+                    // carrying them onto a newer revision hands out a
+                    // MISMATCHED PAIR — which is exactly how a republished
+                    // effect got its new revision's animated thumbnail
+                    // rendered from the previous revision's document, and
+                    // cached that way for good. The PICTURE stays (a
+                    // republish should refresh a grid, not blank it); the
+                    // playable files come back with the manifest.
+                    if self.tiles[i].revision != Some(revision) {
+                        self.tiles[i].media = None;
+                        self.tiles[i].source = None;
+                    }
                     self.tiles[i].revision = Some(revision);
                     self.resolving += 1;
                     cmds.push(CatCmd::FetchManifest { gen: self.gen, asset, revision });
@@ -1004,6 +1060,10 @@ mod tests {
 
     fn media(seed: u8) -> TileMedia {
         TileMedia { blob: BlobId::from_bytes([seed; 32]), len: 10, media: MediaType::Mp4 }
+    }
+
+    fn tile_thumb(seed: u8) -> TileThumb {
+        TileThumb { blob: BlobId::from_bytes([seed + 100; 32]), len: 20, anim: None }
     }
 
     fn search_gen<C: Clone>(cmds: &[CatCmd<C>]) -> CatGen {
@@ -1254,6 +1314,29 @@ mod tests {
         assert!(!kind_may_be_sheet(None));
     }
 
+    /// The DJ explorer asks the SERVER for music only, the SFX surface for
+    /// sound effects only, and BOTH keep the intermediate-artifact
+    /// exclusion — the tag narrowing and the exclude ride different wire
+    /// fields. This is the whole music/sfx separation: get it wrong and
+    /// the deck browser opens on pages of door hinges again.
+    #[test]
+    fn music_and_sfx_surfaces_narrow_by_tag_and_keep_the_exclusion() {
+        for (mut model, tag) in [
+            (BrowseModel::<u8>::music(), MUSIC_TAG),
+            (BrowseModel::<u8>::sfx(), SFX_TAG),
+        ] {
+            let cmds = model.refresh();
+            assert_eq!(cmds.len(), 1, "{tag}: one audio lane");
+            let CatCmd::SearchPage { query, .. } = &cmds[0] else {
+                panic!("{tag}: expected a search page");
+            };
+            assert_eq!(query.kind, Some(AssetKind::Audio));
+            assert_eq!(query.tag.as_deref(), Some(tag));
+            assert_eq!(query.category, None, "{tag}: narrowing is a TAG (no sfx category exists)");
+            assert_eq!(query.exclude_tag.as_deref(), Some(INTERMEDIATE_TAG));
+        }
+    }
+
     #[test]
     fn tiles_carry_the_lane_kind_when_the_server_omits_it() {
         let mut m = BrowseModel::<u8>::new_multi(
@@ -1438,6 +1521,44 @@ mod tests {
         let g3 = search_gen(&m.set_text(String::new()));
         m.page_arrived(g3, 0, true, vec![hit(1)], 1, None);
         assert_eq!(m.tile(&a).unwrap().revision, Some(rev(2)));
+    }
+
+    /// THE MISMATCHED-PAIR BUG. A tile's `media` names a blob of the
+    /// revision it arrived with. When a republish moves the revision on, the
+    /// old blob must not still be offered beside the NEW revision id — a
+    /// livecoded effect had its new revision's animated thumbnail rendered
+    /// from the previous revision's document, and the sheet cache is keyed
+    /// by revision, so the wrong picture stuck for good.
+    ///
+    /// The PICTURE is a different matter and deliberately survives: a
+    /// republish refreshes a grid, it does not blank it.
+    #[test]
+    fn a_new_revision_never_carries_the_old_revisions_files() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        let a = hit(1).asset;
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        m.detail_arrived(g, a, Some(rev(1)));
+        m.manifest_arrived(g, a, rev(1), Some(media(1)), None, Some(tile_thumb(1)));
+        assert_eq!(m.tile(&a).unwrap().media, Some(media(1)));
+
+        m.event_republished(a);
+        m.detail_arrived(g, a, Some(rev(2)));
+        let tile = m.tile(&a).unwrap();
+        assert_eq!(tile.revision, Some(rev(2)));
+        assert_eq!(
+            tile.media, None,
+            "rev 2 must never be paired with rev 1's blob"
+        );
+        assert!(tile.thumb.is_some(), "the picture on screen stays");
+
+        m.manifest_arrived(g, a, rev(2), Some(media(2)), None, Some(tile_thumb(2)));
+        assert_eq!(m.tile(&a).unwrap().media, Some(media(2)));
+
+        // A detail that reports the SAME revision (a republish of another
+        // asset, a resync) must not throw away files we already have.
+        m.detail_arrived(g, a, Some(rev(2)));
+        assert_eq!(m.tile(&a).unwrap().media, Some(media(2)));
     }
 
     /// The resolve pipeline is as wide as the app says. Four at a time made

@@ -467,6 +467,7 @@ script_mod! {
         min: 0.0
         max: 2.0
         default: 1.0
+        scroll_step: 0.025
         text: ""
         flow: Down
         text_input: TextInput{width: 0 height: 0}
@@ -504,11 +505,28 @@ script_mod! {
     }
 
     // A knob's legend: fills its stack, never widens it, never wraps.
-    let KnobLabel = MusicLabel{
+    // A flat Button rather than a Label so a click on it resets its knob.
+    let KnobLabel = Button{
         width: Fill
-        flow: Flow.Right{wrap: false}
-        max_lines: 1
-        draw_text.text_style: theme.font_bold{font_size: 7}
+        height: Fit
+        padding: 0
+        margin: 0
+        align: Align{x: 0.5, y: 0.0}
+        draw_bg +: {
+            color: #x00000000
+            color_focus: #x00000000
+            color_hover: #x00000000
+            color_down: #x00000000
+            border_size: 0.0
+            border_radius: 0.0
+        }
+        draw_text +: {
+            color: #xa6b1bd
+            color_focus: #xa6b1bd
+            color_hover: #xd6dee6
+            color_down: #x8e9aa7
+            text_style: theme.font_bold{font_size: 7}
+        }
     }
 
     let KnobStack = View{
@@ -525,6 +543,7 @@ script_mod! {
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
+        scroll_step: 0.025
         width: 40
         height: Fill
         text: ""
@@ -565,6 +584,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
@@ -825,22 +845,22 @@ script_mod! {
                             flow: Right
                             spacing: 3
                             KnobStack{
-                                KnobLabel{text: "HIGH"}
+                                deck_a_label_eq_high := KnobLabel{text: "HIGH"}
                                 deck_a_eq_high := MusicKnob{}
                                 deck_a_kill_high := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "MID"}
+                                deck_a_label_eq_mid := KnobLabel{text: "MID"}
                                 deck_a_eq_mid := MusicKnob{}
                                 deck_a_kill_mid := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "LOW"}
+                                deck_a_label_eq_low := KnobLabel{text: "LOW"}
                                 deck_a_eq_low := MusicKnob{}
                                 deck_a_kill_low := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "FILTER"}
+                                deck_a_label_filter := KnobLabel{text: "FILTER"}
                                 deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
                             }
                         }
@@ -926,21 +946,21 @@ script_mod! {
                             flow: Right
                             spacing: 3
                             KnobStack{
-                                KnobLabel{text: "FILTER"}
+                                deck_b_label_filter := KnobLabel{text: "FILTER"}
                                 deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
                             }
                             KnobStack{
-                                KnobLabel{text: "LOW"}
+                                deck_b_label_eq_low := KnobLabel{text: "LOW"}
                                 deck_b_eq_low := MusicKnob{}
                                 deck_b_kill_low := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "MID"}
+                                deck_b_label_eq_mid := KnobLabel{text: "MID"}
                                 deck_b_eq_mid := MusicKnob{}
                                 deck_b_kill_mid := KillButton{}
                             }
                             KnobStack{
-                                KnobLabel{text: "HIGH"}
+                                deck_b_label_eq_high := KnobLabel{text: "HIGH"}
                                 deck_b_eq_high := MusicKnob{}
                                 deck_b_kill_high := KillButton{}
                             }
@@ -1090,9 +1110,12 @@ script_mod! {
         }
 
         // ---- content explorer + queue ----
+        // Fill, not a constant: the track list and the deck section above
+        // split whatever the window offers. The old fixed 236 capped the
+        // list at eight visible rows however tall the window was.
         View{
             width: Fill
-            height: 236
+            height: Fill
             flow: Right
             spacing: 8
             new_batch: true
@@ -1107,17 +1130,29 @@ script_mod! {
                     flow: Right
                     spacing: 6
                     align: Align{x: 0.0, y: 0.5}
-                    music_search := TextInput{
+                    // Catalog-only controls: the local listing is neither
+                    // searched nor paginated, so these fold away with it.
+                    music_catalog := View{
                         width: Fill
-                        empty_text: "search music…"
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0, y: 0.5}
+                        music_search := TextInput{
+                            width: Fill
+                            empty_text: "search music…"
+                        }
+                        music_category := TextInput{
+                            width: 96
+                            empty_text: "category"
+                        }
+                        music_go := MusicButton{width: 60 height: 22 text: "Search"}
+                        music_more := MusicButton{width: 52 height: 22 text: "More"}
                     }
-                    music_category := TextInput{
-                        width: 96
-                        empty_text: "category"
-                    }
-                    music_go := MusicButton{width: 60 height: 22 text: "Search"}
-                    music_more := MusicButton{width: 52 height: 22 text: "More"}
                     music_local := MusicButton{width: 84 height: 22 text: "LOCAL FILES"}
+                    // The same IMPORT CONTENT flow the VJ page has: pick a
+                    // folder, and its media publishes into the store no-copy.
+                    music_import := MusicButton{width: 64 height: 22 text: "IMPORT"}
                     music_count := MusicLabel{width: 90 text: ""}
                     MusicLabel{text: "load"}
                     deck_target := DropDown{labels: ["Auto" "Deck A" "Deck B"]}
@@ -1179,6 +1214,16 @@ script_mod! {
             models_install := MusicButton{width: 130 height: 20 text: "INSTALL MODELS"}
         }
 
+        // ZERO layout footprint HOST (the remove_modal pattern): a Fill
+        // Modal sitting bare in this Down flow claims a Fill SHARE of the
+        // page height even while closed — it halved the deck section and
+        // left a dead strip across the bottom of the console. The Modal
+        // itself must KEEP its Fill walk (its overlay pass sizes the
+        // dialog from it; a 0x0 modal opens invisible), so the flow slot
+        // is a zero view and the modal draws on the overlay.
+        View{
+        width: 0
+        height: 0
         models_license_modal := Modal{
             can_dismiss: true
             content +: {
@@ -1235,6 +1280,7 @@ script_mod! {
                     }
                 }
             }
+        }
         }
     }
 }
