@@ -1,0 +1,11 @@
+[package]
+name = "makepad-fab-loader-gltf"
+version = "0.1.0"
+edition = "2021"
+description = "glTF and GLB loader for makepad-fab-shell"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-fab-shell = { path = "../../../../libs/fab", version = "0.1.0" }
+makepad-raytrace = { path = "../../../../libs/raytrace", version = "0.1.0" }
+makepad-gltf = { path = "../../../../libs/gltf", version = "1.0.0" }
