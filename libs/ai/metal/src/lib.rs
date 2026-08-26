@@ -9,6 +9,7 @@ pub mod gpu_types;
 pub mod gpu_tensor;
 pub mod runtime;
 pub mod shim;
+pub mod rife;
 
 pub use affine::*;
 pub use backend_kind::*;

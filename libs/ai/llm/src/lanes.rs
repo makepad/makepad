@@ -970,6 +970,24 @@ pub struct LaneExecutor {
     /// occupant, and cleared the moment the batch widens — after which that
     /// turn finishes unspeculated and the next one re-establishes it.
     solo_native: bool,
+    /// The session's own token list describes slot 0's rows — live OR parked.
+    ///
+    /// `solo_native` says whether the turn RUNNING on slot 0 is session-native
+    /// and is cleared when that turn retires. This outlives the turn: it is what
+    /// a later chunk, or a returning conversation, consults before appending
+    /// onto the session's history, and it is false the moment anything writes
+    /// slot 0 through the slot path — a prefill chunk or a batched step — since
+    /// from then on the session's list is a stale copy of someone's past.
+    ///
+    /// Without it, LIVE on .165: a cold multi-chunk prompt sent its FIRST chunk
+    /// through the slot path (the session was dirty from the previous
+    /// conversation) and every LATER chunk through the session — appended at
+    /// the old conversation's length, onto the old conversation's rows. The
+    /// reply was fluent and conditioned on a past the prompt did not contain,
+    /// the session list grew by one prompt per turn until it overflowed the
+    /// context and killed the worker, and every single-chunk prompt in between
+    /// decoded unspeculated at the plain rate.
+    native_history: bool,
     /// Cost of a step of C columns and of one shared draft forward, for the
     /// depth decision. Built once, and built knowing WHICH draft head this
     /// session loaded: the restricted sidecar is ~3.3x cheaper per drafted
@@ -1019,6 +1037,37 @@ pub struct LaneExecutor {
 /// writes.
 pub const SOLO_LANE: usize = 0;
 
+/// Whether a solo lane's prefill chunk may be ingested through the session's
+/// own single-sequence state — the path the speculative loop decodes against —
+/// or must go through the slot path.
+///
+/// * `parked_resume`: the scheduler resumed slot 0's parked history for this
+///   turn, so `start` is that history's length and the chunk extends it.
+/// * `start`: within-slot position of the chunk's first token.
+/// * `session_tokens`: how many tokens the session's own list holds.
+/// * `native_history`: the session's list describes slot 0's rows
+///   ([`LaneExecutor::native_history`]).
+///
+/// A cold turn's FIRST chunk always qualifies: the solo arm resets the session
+/// before ingesting, so alignment holds by construction and the session being
+/// dirty from an earlier conversation is no reason to decode this one
+/// unspeculated. Every other chunk — a later chunk of a cold turn, or any chunk
+/// of a resumed one — appends, and may only append onto a session list that IS
+/// this lane's history: written by the session-native path, and exactly
+/// `start` long. Length alone is not enough; a stale list of a coincidentally
+/// equal length is precisely the wrong past this exists to refuse.
+fn solo_chunk_is_session_native(
+    parked_resume: bool,
+    start: usize,
+    session_tokens: usize,
+    native_history: bool,
+) -> bool {
+    if !parked_resume && start == 0 {
+        return true;
+    }
+    native_history && session_tokens == start
+}
+
 impl LaneExecutor {
     /// Sampling settings for whoever holds `lane`, falling back to the
     /// executor's default when the lane is unclaimed.
@@ -1047,10 +1096,16 @@ impl LaneExecutor {
         // that causes is silent: a reply that runs past its own end-of-turn
         // token into a new one, and a lane that never retires.
         let scheduler = scheduler.with_stop_tokens(session.stop_tokens());
+        // Priced for the card this session is on. The verify curve is the term
+        // that decides whether a deeper batched round pays, and it is a
+        // per-card measurement: the RTX PRO 6000 verifies a column for ~3.2 ms
+        // where the 5090 fit charges 5.7, and an allocator running the 5090
+        // numbers there refuses rounds the box would win.
+        let costs = crate::slots::StepCostModel::for_device(&session.device_name());
         let costs = if session.has_restricted_draft_head() {
-            crate::slots::StepCostModel::measured_5090().with_restricted_draft_head()
+            costs.with_restricted_draft_head()
         } else {
-            crate::slots::StepCostModel::measured_5090()
+            costs
         };
         let forced_depth = std::env::var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH")
             .ok()
@@ -1061,6 +1116,7 @@ impl LaneExecutor {
             samplers,
             params,
             solo_native: false,
+            native_history: false,
             costs,
             config: crate::slots::SchedulerConfig::default(),
             forced_depth,
@@ -1074,6 +1130,37 @@ impl LaneExecutor {
     /// Batched speculative rounds this executor has run.
     pub fn batched_spec_rounds(&self) -> u64 {
         self.batched_spec_rounds
+    }
+
+    /// Which card's step-cost measurements the depth decision is priced with
+    /// (`"5090"`, `"rtx-pro-6000"`), for the worker's boot line.
+    pub fn cost_calibration(&self) -> &'static str {
+        self.costs.calibration()
+    }
+
+    /// The uniform draft depth the cost model would pick for a batched step
+    /// of `width` lanes, before the per-step context clamp.
+    ///
+    /// The boot line prints the ladder so a box's log shows what its allocator
+    /// will do at every width — a calibration that changes nothing on the
+    /// box it was written for is visible there rather than a week later in a
+    /// throughput report.
+    pub fn modelled_depth(&self, width: usize) -> usize {
+        let allowed = crate::slots::draft_depth_for_budget(
+            width,
+            self.session.speculation_depth(),
+            self.config.column_budget,
+        );
+        if allowed == 0 {
+            return 0;
+        }
+        crate::slots::batched_draft_depth(
+            width,
+            allowed,
+            crate::slots::BATCHED_CHAT_ACCEPTANCE,
+            &self.config,
+            &self.costs,
+        )
     }
 
     /// `(width, uniform draft depth)` of the last batched speculative round, or
@@ -1253,7 +1340,12 @@ impl LaneExecutor {
                 last,
             } if lane == SOLO_LANE
                 && self.scheduler.is_solo(lane)
-                && (resumed || self.session.token_count() == start) =>
+                && solo_chunk_is_session_native(
+                    !self.scheduler.reset_requested(lane),
+                    start,
+                    self.session.token_count(),
+                    self.native_history,
+                ) =>
             {
                 // Session-native ingest, so the speculative loop can run
                 // against it. `reset_first` is the worker's prefix decision —
@@ -1296,6 +1388,7 @@ impl LaneExecutor {
                     0
                 };
                 self.solo_native = true;
+                self.native_history = true;
                 events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
                 self.adopt_solo_state()?;
             }
@@ -1309,6 +1402,12 @@ impl LaneExecutor {
                 last,
             } => {
                 let _ = resumed;
+                if lane == SOLO_LANE {
+                    // Slot 0's rows are about to be written through the slot
+                    // path; whatever the session's own list says about them is
+                    // now a stale copy of some earlier conversation.
+                    self.native_history = false;
+                }
                 // A fresh conversation on a used slot inherits the previous
                 // occupant's RECURRENT state — the scan resumes from the row it
                 // is given, and admission only resets counters. Attention rows
@@ -1377,6 +1476,11 @@ impl LaneExecutor {
                 // graph family (checkpointed state rows, hidden write rows).
                 // Taking the plain step there keeps the byte-identity the
                 // existing gates rest on and compiles one graph family fewer.
+                if plan.slots.iter().any(|step| step.slot == SOLO_LANE) {
+                    // Same rule as the slot prefill: a batched step advances
+                    // slot 0 without the session's list following.
+                    self.native_history = false;
+                }
                 let depth = self.batched_depth(&plan);
                 if depth > 0 || (self.force_round && self.session.speculative_enabled()) {
                     events.extend(self.speculative_batch(&plan, depth)?);
@@ -2593,5 +2697,49 @@ mod tests {
         for lane in &lanes {
             assert_eq!(lane.tokens.len(), lane.fill);
         }
+    }
+
+    /// LIVE on .165, 2026-08-25: every cold turn after the first went through
+    /// the slot path because the session still held the previous
+    /// conversation, and a lone slot-path lane does not speculate — the box
+    /// served single-chunk prompts at the plain 65 tok/s against a solo path
+    /// measured at 112. The session is RESET by the arm before a cold first
+    /// chunk is ingested, so a dirty session is no reason to refuse it.
+    #[test]
+    fn a_cold_first_chunk_is_session_native_however_dirty_the_session_is() {
+        assert!(solo_chunk_is_session_native(false, 0, 0, false));
+        assert!(solo_chunk_is_session_native(false, 0, 9418, false));
+        assert!(solo_chunk_is_session_native(false, 0, 9418, true));
+    }
+
+    /// The other half of the same live bug: the LATER chunks of that cold
+    /// prompt DID take the session arm (the per-chunk `resumed` flag is true
+    /// past the first chunk) and appended onto the previous conversation at
+    /// its length — a reply conditioned on a past the prompt did not contain,
+    /// and a session list that grew by one prompt per turn until it overflowed
+    /// the context. A continuation chunk follows its first chunk's path.
+    #[test]
+    fn a_continuation_chunk_follows_the_path_its_first_chunk_took() {
+        // First chunk went native: the session holds exactly the first chunk.
+        assert!(solo_chunk_is_session_native(false, 512, 512, true));
+        // First chunk went through the slot path: the session's 9418 are
+        // someone else's, and the chunk belongs at 512 of THIS lane's rows.
+        assert!(!solo_chunk_is_session_native(false, 512, 9418, false));
+        // Even a coincidentally aligned stale list is refused.
+        assert!(!solo_chunk_is_session_native(false, 512, 512, false));
+    }
+
+    /// A returning conversation appends onto its parked history only when that
+    /// history is the session's own. A parked history written through the
+    /// slot path has a session list that is at best a stale twin of it.
+    #[test]
+    fn a_resumed_turn_appends_only_onto_a_native_history() {
+        assert!(solo_chunk_is_session_native(true, 9418, 9418, true));
+        assert!(!solo_chunk_is_session_native(true, 9418, 9418, false));
+        assert!(!solo_chunk_is_session_native(true, 9418, 52, true));
+        // A resumed turn's first delta chunk never sits at 0: a park holds
+        // at least the prompt. Position 0 with a resume flag is still gated
+        // on the history being native, not waved through.
+        assert!(!solo_chunk_is_session_native(true, 0, 0, false));
     }
 }

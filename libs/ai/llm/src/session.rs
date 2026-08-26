@@ -514,8 +514,14 @@ impl LlamaSession {
         config: LlamaSessionConfig,
         progress: &mut dyn FnMut(&str, f64),
     ) -> Result<Self> {
-        progress("load llm parse", 0.11);
-        Self::from_owned_model_with_progress(LlamaModel::load(path)?, config, progress)
+        // The load reports as a LADDER of named phases, not two labels with
+        // minutes of silence between them. Every rung below is a phase that was
+        // measured to take real time on a 27B/96GB box, and a rung that does
+        // not move is the one to blame — which is the whole point of naming
+        // them rather than emitting `mmap 13%` and going quiet for 20 seconds.
+        progress("load llm parse", 0.110);
+        let model = LlamaModel::load(path)?;
+        Self::from_owned_model_with_progress(model, config, progress)
     }
 
     pub fn from_model(model: &LlamaModel, config: LlamaSessionConfig) -> Result<Self> {
@@ -1218,7 +1224,12 @@ impl LlamaSession {
             ));
         }
 
+        // Building the vocabulary walks the gguf's whole token table (248k
+        // rows on Qwen3.8) — seconds, and previously inside the silence
+        // between `parse` and `mmap`.
+        progress("load llm vocab", 0.115);
         let vocab = LlamaVocab::from_model(&model)?;
+        progress("load llm plan", 0.120);
         let plan = model.execution_plan()?;
         let max_context = resolve_max_context(&model, config)?;
         // `max_context` is PER SLOT. Slots share one flat attention arena of
@@ -2238,6 +2249,20 @@ impl LlamaSession {
     /// expensive one.
     pub fn has_restricted_draft_head(&self) -> bool {
         self.draft_vocab.is_some()
+    }
+
+    /// The driver's name for the device this session decodes on
+    /// (`"NVIDIA RTX PRO 6000 Blackwell Workstation Edition"`,
+    /// `"NVIDIA GeForce RTX 5090"`), or `"metal"`.
+    ///
+    /// The allocator's step-cost curve is a per-card measurement, and the two
+    /// cards in service differ by ~1.8x on the term that decides draft depth;
+    /// this is what lets it pick the curve for the card it is actually on.
+    pub fn device_name(&self) -> String {
+        match self.graphs.shared_runtime.features() {
+            crate::exec::ExecFeatures::Cuda(features) => features.device_name,
+            crate::exec::ExecFeatures::Metal(_) => "metal".to_string(),
+        }
     }
 
     /// Offset inside slot 0's recurrent block that the session's own
@@ -3601,19 +3626,33 @@ fn build_runtime_state(
     for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
         // Retries re-run this: remapping the same file is cheap, and only
         // a real mapping failure may take the owned-arena fallback.
-        progress("load llm mmap", 0.13);
+        progress("load llm mmap", 0.130);
         let mapped_weights = if use_mmap {
             plan.full_weights.map_and_load(&model.gguf, extra_bytes)
         } else {
             None
         };
+        let weight_gb = plan.full_weights.total_bytes as f64 / 1e9;
         let mut weights = match mapped_weights {
             Some(weights) => weights,
-            None => plan
-                .full_weights
-                .allocate_and_load_with_extra(&model.gguf, extra_bytes)?,
+            // The owned-arena fallback READS the whole gguf here — 17 GB off
+            // disk with nothing else to look at. Say what it is doing and how
+            // big it is; the read itself is one bulk call, so this is the
+            // finest honest granularity without reaching into the reader.
+            None => {
+                progress(
+                    &format!("load llm read ({weight_gb:.1}GB)"),
+                    0.135,
+                );
+                plan.full_weights
+                    .allocate_and_load_with_extra(&model.gguf, extra_bytes)?
+            }
         };
+        // Binding the GPU backend: CUDA context creation on a cold driver is
+        // seconds on its own.
+        progress("load llm device", 0.140);
         let shared_runtime = ExecRuntime::new()?;
+        progress("load llm cache", 0.145);
         let mut shared_cache =
             allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
         // The draft head is one more attention layer with its own KV cache,
@@ -3651,9 +3690,16 @@ fn build_runtime_state(
             }
         }
         let prompt_batch_capacity = prompt_batch_capacity.max(1);
+        // Each reserve BUILDS AND PLANS the whole decode graph to find out how
+        // wide it is — 62 layers of it. Two passes, and together they were the
+        // bulk of the 20 seconds the bar used to spend frozen at 13%. They are
+        // counted so the second one visibly follows the first.
+        let reserve_passes = if prompt_batch_capacity > 1 { 2 } else { 1 };
+        progress(&format!("load llm reserve 1/{reserve_passes}"), 0.150);
         let mut required_main_buffer_size = shared_runtime
             .reserve_hybrid_decode_main_buffer_size(&weights, spec, Some(&shared_cache), 1, 1)?;
         if prompt_batch_capacity > 1 {
+            progress(&format!("load llm reserve 2/{reserve_passes}"), 0.165);
             required_main_buffer_size = required_main_buffer_size.max(
                 shared_runtime.reserve_hybrid_decode_main_buffer_size(
                     &weights,
@@ -3693,7 +3739,21 @@ fn build_runtime_state(
                 );
             },
         )?;
-        progress("load llm compile", 0.85);
+        // The compile band. Every graph shape built up front gets its own rung
+        // across 0.85..0.95 — `compile k/n` — so the phase reads as work with
+        // a denominator instead of one label that sits at 85% for a minute.
+        // There is one shape today; the loop shape is what keeps the readout
+        // honest when a second one is added rather than silently regressing.
+        const COMPILE_START: f64 = 0.85;
+        const COMPILE_END: f64 = 0.95;
+        let compile_total = 1usize;
+        let mut compile_done = 0usize;
+        let mut compile_tick = |done: usize| {
+            let frac = COMPILE_START
+                + (COMPILE_END - COMPILE_START) * (done as f64 / compile_total as f64);
+            progress(&format!("load llm compile {done}/{compile_total}"), frac);
+        };
+        compile_tick(0);
         let mut compiled_by_params = BTreeMap::new();
         let build_result = (|| {
             let token_generation = shared_runtime.compile_hybrid_decode(
@@ -3707,6 +3767,8 @@ fn build_runtime_state(
                 session_attention_key_count(spec)?,
                 1,
             )?;
+            compile_done += 1;
+            compile_tick(compile_done);
             compiled_by_params.insert(
                 SessionGraphParams::token_generation(session_attention_key_count(spec)?),
                 token_generation,

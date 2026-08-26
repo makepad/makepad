@@ -3281,7 +3281,14 @@ mod imp {
     }
 
     pub fn gpu_slice_rows(_x: &GpuTensor, _start: usize, _len: usize) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::slice_rows(_x, _start, _len);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_concat_rows(_a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor, String> {
@@ -3289,7 +3296,22 @@ mod imp {
     }
 
     pub fn gpu_concat_rows_many(_parts: &[&GpuTensor]) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let mut parts = _parts.iter();
+            let first = parts
+                .next()
+                .ok_or_else(|| "concat_rows_many: empty".to_string())?;
+            let mut acc = makepad_ai_metal::gpu_tensor::slice_rows(first, 0, first.rows())?;
+            for part in parts {
+                acc = makepad_ai_metal::gpu_tensor::concat_rows(&acc, part)?;
+            }
+            return Ok(acc);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_beam_cache_reorder_append(
@@ -3572,7 +3594,18 @@ mod imp {
         _stride_x: usize,
         _stride_y: usize,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (_cache_namespace, _weight_cache_key);
+            return makepad_ai_metal::rife::conv2d_planar_strided(
+                _x, _in_width, _in_height, _out_width, _out_height, _weights, _bias,
+                _out_channels, _kw, _kh, _pad_x, _pad_y, _stride_x, _stride_y,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_birefnet_relu(_x: &GpuTensor) -> Result<GpuTensor, String> {
@@ -3587,7 +3620,14 @@ mod imp {
     }
 
     pub fn gpu_realesrgan_lrelu(_x: &GpuTensor, _slope: f32) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::lrelu(_x, _slope);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_realesrgan_scale_add(
@@ -3610,7 +3650,14 @@ mod imp {
         _width: usize,
         _height: usize,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::warp(_x, _flow, _width, _height);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3628,7 +3675,18 @@ mod imp {
         _pad: usize,
         _stride: usize,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (_cache_namespace, _weight_cache_key);
+            return makepad_ai_metal::rife::conv_transpose2d(
+                _x, _in_width, _in_height, _weights, _bias, _out_channels, _kw, _kh,
+                _pad, _stride,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_rife_res_conv(
@@ -3637,15 +3695,36 @@ mod imp {
         _beta: &[f32],
         _slope: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::res_conv(_conv, _residual, _beta, _slope);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_rife_scale(_x: &GpuTensor, _scale: f32) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::scale(_x, _scale);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_rife_fill(_rows: usize, _cols: usize, _value: f32) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::fill(_rows, _cols, _value);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3679,7 +3758,17 @@ mod imp {
         _width: usize,
         _height: usize,
     ) -> Result<Vec<u8>, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::merge_rgb8(
+                _warped0, _warped1, _mask, _padded_width, _padded_height, _width,
+                _height,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3861,7 +3950,16 @@ mod imp {
         _scale: usize,
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::rife::pixel_shuffle_planar(
+                _x, _in_width, _in_height, _out_channels, _scale, _bias,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
