@@ -125,6 +125,8 @@ script_mod! {
             active: instance(0.0)
             disabled: instance(0.0)
 
+            ink_centered: true
+
             color: theme.color_label_outer
             color_hover: uniform(theme.color_label_outer_hover)
             color_down: uniform(theme.color_label_outer_down)

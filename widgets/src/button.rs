@@ -31,6 +31,10 @@ script_mod! {
             focus: instance(0.0)
             disabled: instance(0.0)
 
+            // A button face is a box with one line of text in it: center the
+            // ink, not the line box, or the label reads as sitting high.
+            ink_centered: true
+
             color: theme.color_label_inner
             color_hover: theme.color_label_inner_hover
             color_down: uniform(theme.color_label_inner_down)

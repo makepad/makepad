@@ -517,6 +517,7 @@ impl LayoutContext {
         let descender_in_lpxs =
             font.map_or(0.0, |font| font.descender_in_ems()) * font_size_in_lpxs;
         let line_gap_in_lpxs = font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        let cap_height_in_lpxs = font.map_or(0.0, |font| font.cap_height_in_ems()) * font_size_in_lpxs;
 
         let text = self
             .text
@@ -532,6 +533,7 @@ impl LayoutContext {
             ascender_in_lpxs,
             descender_in_lpxs,
             line_gap_in_lpxs,
+            cap_height_in_lpxs,
             line_spacing_scale: self.options.line_spacing_scale,
             glyphs,
         };
@@ -1120,6 +1122,33 @@ pub struct LaidoutText {
 }
 
 impl LaidoutText {
+    /// How far down the text has to move for its *ink* to sit in the middle of
+    /// the box `size_in_lpxs` describes, instead of its line box.
+    ///
+    /// The box this text occupies runs from the first row's ascender down to
+    /// the last row's descender. The ink runs from the first row's cap line
+    /// down to the last row's baseline. A text face's ascender reaches further
+    /// above the cap line than its descender reaches below the baseline, so
+    /// the two centers do not coincide and the ink reads as sitting high. The
+    /// difference works out to `(descender + cap_height - ascender) / 2`
+    /// whatever the row count, because both boxes share everything in between.
+    ///
+    /// Returns `0.0` when the metrics are not trustworthy enough to move
+    /// anything: a face with no capital (icon and symbol fonts), or one whose
+    /// cap height claims to reach past its own ascender.
+    pub fn ink_center_offset_in_lpxs(&self) -> f32 {
+        let (Some(first), Some(last)) = (self.rows.first(), self.rows.last()) else {
+            return 0.0;
+        };
+        let ascender = first.ascender_in_lpxs;
+        let cap_height = first.cap_height_in_lpxs;
+        let descender = -last.descender_in_lpxs;
+        if cap_height <= 0.0 || cap_height > ascender {
+            return 0.0;
+        }
+        (descender + cap_height - ascender) * 0.5
+    }
+
     pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
         let row_index = self.cursor_to_row_index(cursor);
         let row = &self.rows[row_index];
@@ -1260,6 +1289,9 @@ pub struct LaidoutRow {
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
+    /// Height of a capital above this row's baseline, or `0.0` when the row's
+    /// font has no capital to measure (see [`Font::cap_height_in_ems`]).
+    pub cap_height_in_lpxs: f32,
     pub line_spacing_scale: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }

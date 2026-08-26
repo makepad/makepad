@@ -1292,6 +1292,21 @@ pub struct DrawText {
     #[live]
     pub temp_y_shift: f32,
 
+    /// Center the text's *ink* in the box a walk allocates for it, rather than
+    /// its line box.
+    ///
+    /// A widget that puts one line of text in a box it paints — a button face,
+    /// a tab, a dropdown — wants the cap-height band centered, because that
+    /// band is what the eye reads as "the text". Centering the line box
+    /// instead leaves the text sitting high by half the difference between the
+    /// font's over-cap ascender and its descender. Off by default: it moves
+    /// glyphs relative to their box, which text that has to line up with
+    /// something else (a code editor's rows, a text flow's baselines) must not
+    /// do. Only [`DrawText::draw_walk`] honors it; the resumable flow paths
+    /// stay baseline-exact.
+    #[live]
+    pub ink_centered: bool,
+
     /// Centering height (in unscaled lpxs) for RowAlign::Center; TextFlow sets
     /// this to the line style's height so mixed-font runs stay baseline-aligned.
     #[rust]
@@ -2258,8 +2273,20 @@ impl DrawText {
         }
 
 
+        // The ink shift moves the glyphs *inside* the box the walk just took,
+        // so the box — and every layout decision already made from it, this
+        // call's own return value included — stays exactly where it was.
+        let ink_shift_in_lpxs = if self.ink_centered {
+            laidout_text.ink_center_offset_in_lpxs() * self.font_scale
+        } else {
+            0.0
+        };
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_rect.pos.y as f32);
-        self.draw_text(cx, origin_in_lpxs, laidout_text);
+        self.draw_text(
+            cx,
+            Point::new(origin_in_lpxs.x, origin_in_lpxs.y + ink_shift_in_lpxs),
+            laidout_text,
+        );
 
         rect(
             origin_in_lpxs.x as f64,
