@@ -1110,9 +1110,12 @@ script_mod! {
         }
 
         // ---- content explorer + queue ----
+        // Fill, not a constant: the track list and the deck section above
+        // split whatever the window offers. The old fixed 236 capped the
+        // list at eight visible rows however tall the window was.
         View{
             width: Fill
-            height: 236
+            height: Fill
             flow: Right
             spacing: 8
             new_batch: true
@@ -1211,6 +1214,16 @@ script_mod! {
             models_install := MusicButton{width: 130 height: 20 text: "INSTALL MODELS"}
         }
 
+        // ZERO layout footprint HOST (the remove_modal pattern): a Fill
+        // Modal sitting bare in this Down flow claims a Fill SHARE of the
+        // page height even while closed — it halved the deck section and
+        // left a dead strip across the bottom of the console. The Modal
+        // itself must KEEP its Fill walk (its overlay pass sizes the
+        // dialog from it; a 0x0 modal opens invisible), so the flow slot
+        // is a zero view and the modal draws on the overlay.
+        View{
+        width: 0
+        height: 0
         models_license_modal := Modal{
             can_dismiss: true
             content +: {
@@ -1267,6 +1280,7 @@ script_mod! {
                     }
                 }
             }
+        }
         }
     }
 }
