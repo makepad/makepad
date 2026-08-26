@@ -127,6 +127,7 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
             ground: vec4(0.02, 0.022, 0.025, 1.0),
             ground_bottom: vec4(0.01, 0.011, 0.013, 1.0),
             fog: 0.01,
+            ..SkyConfig::default()
         })
     } else {
         Some(SkyConfig::default())

@@ -84,10 +84,10 @@ script_mod! {
         csm_rz2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
 
         // One PCF tap against cascade `ci`'s tile (strip u = (u + ci)/3,
-        // matching shadow_csm::CSM_CASCADES = 3). Taps clamp 1.5 texels
-        // inside the tile so the kernel never reads a neighbour cascade.
+        // matching shadow_csm::CSM_CASCADES = 3). Taps clamp 2.5 texels
+        // inside the tile so the 4x4 tent never reads a neighbour cascade.
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
-            let m = 1.5 * self.csm_p.y
+            let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
             return step(ref01, self.csm_map.sample_nearest(
@@ -95,10 +95,51 @@ script_mod! {
             ).x)
         }
 
+        // The 3x3 box average, bilinearly interpolated between the
+        // texel-aligned positions it is measured at: a separable tent over
+        // 4x4 texels (per-axis weights (1-f, 1, 1, f)/3). Same ~3-texel
+        // penumbra the box gave, but continuous — the box alone is
+        // piecewise constant per shadow-map texel, which reads as
+        // stair-steps along every sunlit edge.
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+            let e = self.csm_p.y
+            let tu = u / e - 0.5
+            let tv = v / e - 0.5
+            let fu = fract(tu)
+            let fv = fract(tv)
+            let bu = (floor(tu) + 0.5) * e
+            let bv = (floor(tv) + 0.5) * e
+            let wu0 = 1.0 - fu
+            let wv0 = 1.0 - fv
+            var s = 0.0
+            var r = 0.0
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            s = r * wv0
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
+            r = r + self.csm_tap(bu, bv, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            s = s + r * fv
+            return s * 0.11111111
+        }
+
         // Sun visibility from the cascades: pick the tightest cascade that
         // contains the point in full XYZ. The fitted slice spheres can
         // overlap in light-space XY without sharing a depth interval, so XY
-        // alone is not coverage. Then a 3x3 PCF compare. Slope-scaled bias:
+        // alone is not coverage. Then the csm_pcf tent filter. Slope-scaled bias:
         // grazing sun needs more depth slack or every curved surface acnes.
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
@@ -133,7 +174,7 @@ script_mod! {
             // cover texel·tanθ, which is the Kenney terminator hatch.
             // Slide the receiver off the knife edge along n, then reproject
             // the same cascade (do not re-pick — the offset is sub-texel).
-            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            let wp2 = wp + normalize(n) * (tw * 1.75 * (1.0 - clamp(ndl, 0.0, 1.0)))
             if ci < 0.5 {
                 nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
                 ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
@@ -149,21 +190,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
-            let u = nx * 0.5 + 0.5
-            let v = 0.5 - ny * 0.5
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            let e = self.csm_p.y
-            var s = 0.0
-            s = s + self.csm_tap(u - e, v - e, ci, ref01)
-            s = s + self.csm_tap(u, v - e, ci, ref01)
-            s = s + self.csm_tap(u + e, v - e, ci, ref01)
-            s = s + self.csm_tap(u - e, v, ci, ref01)
-            s = s + self.csm_tap(u, v, ci, ref01)
-            s = s + self.csm_tap(u + e, v, ci, ref01)
-            s = s + self.csm_tap(u - e, v + e, ci, ref01)
-            s = s + self.csm_tap(u, v + e, ci, ref01)
-            s = s + self.csm_tap(u + e, v + e, ci, ref01)
-            return s / 9.0
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            // Cross-fade the outer band of a cascade's window into the
+            // NEXT cascade: with soft edges a hard hand-over would show as
+            // a line where the penumbra's texel size steps.
+            let edge = max(abs(nx), abs(ny))
+            if ci < 1.5 && edge > 0.97 {
+                var mx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                var my = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                var mz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+                var b2 = self.csm_bias.y
+                if ci > 0.5 {
+                    mx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                    my = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                    mz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
+                    b2 = self.csm_bias.z
+                }
+                if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
+                    let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
+                }
+            }
+            return s
         }
         // Per-frame dynamic lights, up to 8 (renderer.rs write_light_uniforms):
         // dl_posN = xyz + radius (0 = empty slot), dl_colN = rgb + spot amount.
@@ -674,15 +724,50 @@ script_mod! {
             )
             self.world = self.draw_list.view_transform
                 * vec4(world3.x, world3.y, world3.z, 1.0)
-            // Video rows are top-first; quad uv.y grows upward. Flip v.
-            self.v_uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
+            // Video rows are top-first; quad uv.y grows upward. Flip v, then
+            // map into this instance's window on the texture.
+            let q = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
+            self.v_uv = vec2(
+                self.uv_rect.x + q.x * (self.uv_rect.z - self.uv_rect.x),
+                self.uv_rect.y + q.y * (self.uv_rect.w - self.uv_rect.y)
+            )
             self.vertex_pos = self.draw_pass.camera_projection
                 * (self.draw_pass.camera_view * self.world)
             return self.vertex_pos
         }
 
         pixel: fn() {
-            let color = self.tex.sample_as_bgra(self.v_uv)
+            // Classic sprite artwork is a few dozen texels tall and fills the
+            // screen at point-blank range. A plain bilinear fetch smears it
+            // into mush there; a plain nearest fetch is crisp up close but
+            // crawls and sparkles the moment the same sprite is far away.
+            //
+            // Sample on texel centres, but let the crossing between two
+            // texels take exactly ONE SCREEN PIXEL. Magnified, that is a
+            // nearest-neighbour fetch with an antialiased edge — hard pixels,
+            // no stair-step shimmer. Minified, one screen pixel spans several
+            // texels, the ramp is wider than the texel, and the expression
+            // collapses back to the ordinary bilinear average. One sampler,
+            // both behaviours, decided per fragment by the derivatives.
+            var uv = self.v_uv
+            let dims = self.screen_size.zw
+            if dims.x > 0.5 && dims.y > 0.5 {
+                let texel = uv * dims
+                let ramp = max(
+                    max(abs(dFdx(texel)), abs(dFdy(texel))),
+                    vec2(0.00001, 0.00001)
+                )
+                let f = fract(texel) - vec2(0.5, 0.5)
+                let s = clamp(f / ramp + vec2(0.5, 0.5), vec2(0.0, 0.0), vec2(1.0, 1.0))
+                uv = (floor(texel) + s) / dims
+            }
+            let color = self.tex.sample_as_bgra(uv)
+            // Sprite quads (cutout) are cut-out artwork: the pixels outside
+            // the figure are transparent and must not paint a rectangle.
+            // A video screen keeps its opaque frame (cutout 0).
+            if self.cutout > 0.5 && color.w < 0.5 {
+                discard()
+            }
             return vec4(color.x, color.y, color.z, 1.0)
         }
 
@@ -763,13 +848,10 @@ script_mod! {
 
         pixel: fn() {
             let v = normalize(self.v_dir)
-            // The Preetham daylight model. Everything sun/turbidity-
-            // dependent arrives precomputed from sky.rs; this evaluates
-            // the per-pixel Perez product in Yxy, converts to linear sRGB
-            // and tone-maps (see sky.rs docs).
+            // The established engine sky. The sun-dependent half is prepared
+            // once in sky.rs; this evaluates the per-pixel Perez product.
             let ct = max(v.y, 0.01)
-            let sun_d = self.sun_e.xyz
-            let cg = clamp(dot(v, sun_d), 0.0 - 1.0, 1.0)
+            let cg = clamp(dot(v, self.sun_e.xyz), 0.0 - 1.0, 1.0)
             let g = acos(cg)
             let cg2 = cg * cg
             let fy = (1.0 + self.pz_y.x * exp(self.pz_y.y / ct))
@@ -781,9 +863,6 @@ script_mod! {
             let yl = self.zenith.x * fy * self.pz_f0.x
             let xc = self.zenith.y * fx * self.pz_f0.y
             let yc = max(self.zenith.z * fc * self.pz_f0.z, 0.0001)
-            // Reinhard on LUMINANCE (chromaticity survives), then
-            // XYZ -> linear sRGB, hue-preserving normalise, display
-            // gamma — the mirror of sky.rs's yxy_to_rgb.
             var yt = max(yl * self.sun_e.w, 0.0)
             yt = yt / (1.0 + yt)
             let bx = xc * (yt / yc)
@@ -792,90 +871,47 @@ script_mod! {
             let gr = max((0.0 - 0.9689) * bx + 1.8758 * yt + 0.0415 * bz, 0.0)
             let b = max(0.0557 * bx - 0.204 * yt + 1.057 * bz, 0.0)
             let m = max(max(r, gr), max(b, 1.0))
-            var day = pow(vec3(r / m, gr / m, b / m), vec3(0.4545, 0.4545, 0.4545))
-            // Below the horizon the model has no answer: carry the
-            // horizon colour down, dimmed — it reads as ground haze
-            // wherever terrain does not already cover the dome.
+            var day = pow(
+                vec3(r / m, gr / m, b / m),
+                vec3(0.4545454, 0.4545454, 0.4545454)
+            )
             day = day * mix(1.0, 0.35, clamp((0.0 - v.y) * 3.0, 0.0, 1.0))
-            // A visible sun that SETS properly — the robobo1221 recipe
-            // (shadertoy atmospheric scattering): NO hand-tuned fades.
-            // The disc is a sharp smoothstep limb at high intensity, and
-            // everything else is ABSORPTION physics — optical depth
-            // blows up near the horizon (density / pow(elevation, 3/4)),
-            // transmittance exp(-skyColor * depth) kills blue first, so
-            // the disc reddens and dims through thickening air while the
-            // horizon slices a chord through its sharp limb: semicircle,
-            // sliver, gone. The broad Mie glow is tinted by the SUN's
-            // own absorption, so the afterglow reds out and dies
-            // naturally as the sun sinks — never a dot dimming in place.
-            // All horizon references sit at the VISIBLE ground line, not
-            // eye level: a standing camera sees flat ground meet the sky
-            // ~2 degrees BELOW v.y = 0, so cutting or absorbing at 0 made
-            // the sun vanish visibly above the line ("sets halfway into
-            // the sky"). The 0.033 rad offset drops the disc cut and both
-            // absorption knees to where the ground edge actually is;
-            // terrain z-wins over the dome wherever it covers, so the
-            // offset only shapes the open haze band.
+
+            // The visible disc, Mie glow and afterglow follow the true sun;
+            // sun_e is clamped above the horizon only for Perez stability.
             let nb = self.zenith.w
-            // The disc's absorption floor is the HORIZON-CONTACT optical
-            // depth (~9, ballpark of real ~38 air masses scaled to taste)
-            // — with an unbounded divergence the atmosphere annihilated
-            // the disc in the last half degree above the line, so it
-            // dimmed to nothing while touching it ("stuck at the horizon,
-            // fades out") and the geometric slice below was never seen.
-            // At contact the disc must still be a vivid red circle; the
-            // horizon then cuts it: semicircle, sliver, gone.
-            // Disc/Mie/afterglow follow the TRUE sun (sun_e is clamped
-            // ~2 deg up for the Perez normaliser — painting the disc
-            // around it froze the sun at the horizon while it faded).
             let sun_t = self.sun_true.xyz
             let gt = acos(clamp(dot(v, sun_t), 0.0 - 1.0, 1.0))
             let absf = exp(vec3(0.39, 0.57, 1.0)
                 * (0.0 - 0.485 / pow(max(v.y + 0.033, 0.02), 0.75))) * 2.0
             let abss = exp(vec3(0.39, 0.57, 1.0)
                 * (0.0 - 0.485 / pow(max(sun_t.y + 0.033, 0.012), 0.75))) * 2.0
-            // NOT the reference's reversed-edge smoothstep(hi, lo, x) —
-            // edge0 > edge1 is undefined on Metal and returns no disc.
             let limb = 1.0 - smoothstep(0.048, 0.055, gt)
             let mie_d = clamp(1.0 - pow(gt * 0.55, 0.1), 0.0, 1.0)
             let mie = mie_d * mie_d * (3.0 - 2.0 * mie_d) * 1.4
-            // x20 core (the reference uses x50): saturated through the
-            // absorption right down to the cut — the framebuffer clamp is
-            // the tonemap here, a blinding disc is the point.
             day = day + (absf * (limb * 20.0) + abss * mie)
                 * clamp((v.y + 0.033) * 90.0 + 0.5, 0.0, 1.0)
-            // Night: near-pitch-black dome (the star field carries it), a
-            // whisper of blue kept so terrain still separates at the
-            // horizon.
+
+            // The game's moonless night dome. The bright day/afterglow term
+            // is completely absent once nb reaches one at civil twilight.
             let nsky = mix(
                 vec3(0.010, 0.012, 0.020),
                 vec3(0.002, 0.003, 0.006),
                 clamp(v.y * 1.4, 0.0, 1.0)
             )
-            // Stars: rotate the view dir into the celestial frame (the
-            // day cycle wheels the dome around the sun arc's pole, so the
-            // sky turns with the earth), sample the equirect panorama,
-            // fade in with night and cut below the horizon.
+
+            // Rotate into the celestial frame. A bound panorama enriches
+            // the catalogue; without one, both analytic point layers remain
+            // visible and follow the same rotation and twilight fade.
             let sd = vec3(
-                self.star_r0.x * v.x + self.star_r0.y * v.y + self.star_r0.z * v.z,
-                self.star_r1.x * v.x + self.star_r1.y * v.y + self.star_r1.z * v.z,
-                self.star_r2.x * v.x + self.star_r2.y * v.y + self.star_r2.z * v.z
+                dot(self.star_r0.xyz, v),
+                dot(self.star_r1.xyz, v),
+                dot(self.star_r2.xyz, v)
             )
             let su = atan2(sd.z, sd.x) * 0.15915494 + 0.5
             let sv = 0.5 - asin(clamp(sd.y, 0.0 - 1.0, 1.0)) * 0.31830989
-            let star_fade = nb * self.star_r0.w * clamp(v.y * 6.0 + 0.1, 0.0, 1.0)
-            // The Milky Way is a series of PINPRICKS with high contrast —
-            // no equirect photo can deliver that magnified across a dome,
-            // so the NASA panorama serves as the DENSITY MAP and the
-            // stars themselves are procedural points: per-cell hash
-            // candidates whose keep-threshold follows the map's
-            // luminance (dense sharp grains inside the band, lone stars
-            // in the void), sharp radial falloff, hashed brightness. A
-            // second, sparser layer adds the scattered bright stars. All
-            // in the ROTATED frame (su/sv) so everything wheels with the
-            // earth; only a faint residual of the photo remains as
-            // nebulosity behind the points.
-            let smap = self.star_tex.sample_as_bgra(vec2(su, sv)).xyz
+            let star_fade = nb * clamp(v.y * 6.0 + 0.1, 0.0, 1.0)
+            let smap = self.star_tex.sample_as_bgra(vec2(su, sv)).xyz * self.star_r0.w
             let lum = dot(smap, vec3(0.35, 0.5, 0.15))
             let suv = vec2(su * 1600.0, sv * 800.0)
             let sh = fract(sin(dot(floor(suv), vec2(127.1, 311.7))) * 43758.5453)
@@ -890,8 +926,6 @@ script_mod! {
             let stars = (smap * 0.18
                 + vec3(0.85, 0.9, 1.0) * spark
                 + vec3(1.0, 0.97, 0.9) * spark2) * star_fade
-            // Dome-anchored hash dither: the near-black night gradient is
-            // the worst 8-bit banding case on the whole dome. ±1 LSB.
             let hash = fract(
                 sin(dot(v.xy + v.zz, vec2(12.9898, 78.233))) * 43758.5453
             )
@@ -1005,7 +1039,10 @@ script_mod! {
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        // Imported model layers may be deliberate sheets (roof soffits,
+        // glazing, CAD faces). The shadow depth path is already two-sided;
+        // the receiver path must show and light the same geometry.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -1081,10 +1118,48 @@ script_mod! {
         csm_map: texture_2d(float)
         // Q3 / Unreal detail overlay. Last texture so CSM stays slot 4.
         detail_map: texture_2d(float)
-        detail_st: instance(vec2(0.0, 0.0))
-        // 1 = COLOR_0 is a baked lightmap (Q3 worlds). Analytic sun
-        // leaves inward vaults black; the tint already *is* the light.
-        prelit: instance(0.0)
+        // `detail_st` (the overlay's uv scale) and `prelit` (1 = COLOR_0 is a
+        // baked lightmap, so the analytic sun must not multiply it again) are
+        // the Rust struct's own #[live] instance fields — `script_shader`
+        // already declares them. Re-declaring them here as `instance(...)`
+        // applies a shader-descriptor OBJECT to a typed field, which fails
+        // the apply: it is what logged the two `type mismatch for property`
+        // errors every app on this shader printed at boot. See DrawHudShape
+        // below for the same rule stated once.
+        // ---- per-element lookup (CAD hosts) — slot 6, OFF by default ----
+        // A viewer that hides, isolates or explodes PARTS of one merged
+        // static model, every frame, without ever re-uploading its
+        // geometry. `elem_ctl.w == 0` (the default, and what every game
+        // path leaves it at) skips the whole block, so a model that does
+        // not opt in renders byte-identically to before this lane.
+        //
+        // When it is ON, the `ao_uv` lane is NOT an atlas coordinate but a
+        // 32-bit element index (unorm16x2, lo in xy / hi in zw), and
+        // `elem_map` holds one RGBA texel per element:
+        //   r = visible (< 0.5 collapses the vertex to the model origin, so
+        //       the whole triangle is zero-area and rasterises nothing)
+        //   gba = a model-space offset added to the vertex (exploded views)
+        // `elem_ctl` = (map width, map height, unused, enable).
+        // The host writes both with `DrawVars::set_texture(6, ..)` /
+        // `set_uniform(live_id!(elem_ctl), ..)` on its own draw struct.
+        elem_map: texture_2d(float)
+        elem_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // ---- screen-space AO (ssao.rs) — slot 7, OFF by default ----
+        // A host that runs `SsaoPass` hands its blurred output to
+        // `Renderer::set_ssao`, which binds it here for BOTH model lanes.
+        // The factor multiplies the AMBIENT fill only — never the direct
+        // sun, never the shadow-mapped light — so a sunlit facade keeps its
+        // brightness while its creases darken. `ssao_ctl.x` is the strength;
+        // 0 (the default, and what every game path leaves it at) skips the
+        // sample, so a scene that does not opt in shades exactly as before.
+        ssao_map: texture_2d(float)
+        ssao_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The fragment's own clip position, for the screen-space AO lookup.
+        v_spos: varying(vec4f)
+        // Which SPACE this lane shades in. 0 (the default) is the game's:
+        // sRGB texels times a display-referred sun rig, written raw. 1 is the
+        // scene-referred lane — see `to_scene` / `to_display`.
+        display: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         csm_p: uniform(vec4(0.0, 0.001, 0.0, 0.0))
         csm_bias: uniform(vec4(0.001, 0.001, 0.001, 0.0))
         csm_rx0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
@@ -1100,12 +1175,53 @@ script_mod! {
         v_csm_n: varying(vec3f)
 
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
-            let m = 1.5 * self.csm_p.y
+            let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
             return step(ref01, self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
+        }
+
+        // The 3x3 box average, bilinearly interpolated between the
+        // texel-aligned positions it is measured at: a separable tent over
+        // 4x4 texels (per-axis weights (1-f, 1, 1, f)/3). Same ~3-texel
+        // penumbra the box gave, but continuous — the box alone is
+        // piecewise constant per shadow-map texel, which reads as
+        // stair-steps along every sunlit edge.
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+            let e = self.csm_p.y
+            let tu = u / e - 0.5
+            let tv = v / e - 0.5
+            let fu = fract(tu)
+            let fv = fract(tv)
+            let bu = (floor(tu) + 0.5) * e
+            let bv = (floor(tv) + 0.5) * e
+            let wu0 = 1.0 - fu
+            let wv0 = 1.0 - fv
+            var s = 0.0
+            var r = 0.0
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            s = r * wv0
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
+            r = r + self.csm_tap(bu, bv, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            s = s + r * fv
+            return s * 0.11111111
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -1141,7 +1257,7 @@ script_mod! {
             // cover texel·tanθ, which is the Kenney terminator hatch.
             // Slide the receiver off the knife edge along n, then reproject
             // the same cascade (do not re-pick — the offset is sub-texel).
-            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            let wp2 = wp + normalize(n) * (tw * 1.75 * (1.0 - clamp(ndl, 0.0, 1.0)))
             if ci < 0.5 {
                 nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
                 ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
@@ -1157,21 +1273,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
-            let u = nx * 0.5 + 0.5
-            let v = 0.5 - ny * 0.5
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            let e = self.csm_p.y
-            var s = 0.0
-            s = s + self.csm_tap(u - e, v - e, ci, ref01)
-            s = s + self.csm_tap(u, v - e, ci, ref01)
-            s = s + self.csm_tap(u + e, v - e, ci, ref01)
-            s = s + self.csm_tap(u - e, v, ci, ref01)
-            s = s + self.csm_tap(u, v, ci, ref01)
-            s = s + self.csm_tap(u + e, v, ci, ref01)
-            s = s + self.csm_tap(u - e, v + e, ci, ref01)
-            s = s + self.csm_tap(u, v + e, ci, ref01)
-            s = s + self.csm_tap(u + e, v + e, ci, ref01)
-            return s / 9.0
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            // Cross-fade the outer band of a cascade's window into the
+            // NEXT cascade: with soft edges a hard hand-over would show as
+            // a line where the penumbra's texel size steps.
+            let edge = max(abs(nx), abs(ny))
+            if ci < 1.5 && edge > 0.97 {
+                var mx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                var my = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                var mz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+                var b2 = self.csm_bias.y
+                if ci > 0.5 {
+                    mx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                    my = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                    mz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
+                    b2 = self.csm_bias.z
+                }
+                if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
+                    let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
+                }
+            }
+            return s
         }
 
         // One dynamic light at world point `wp`, world normal `n`.
@@ -1227,6 +1352,42 @@ script_mod! {
             return sun_vis + (1.0 - sun_vis) * fill
         }
 
+        // ---- the two ends of the scene-referred lane (display.x = 1) -----
+        //
+        // A GAME shades in display space and it is right to: its texels are
+        // sRGB bytes used as-is, its sun rig sums to one for a fully lit white
+        // surface, and the product goes straight into an 8-bit target. Off
+        // (display.x = 0) both of these are the identity and that lane is
+        // untouched, bit for bit.
+        //
+        // A host that shades PHYSICALLY needs the other convention, and needs
+        // BOTH ends of it or neither. `to_scene` decodes a texel to linear
+        // reflectance so it can be multiplied by a cosine; `to_display` puts
+        // the result back through the same ACES fit and 1/2.2 gamma the
+        // analytic sky, the fog colour and the path tracer already finish
+        // with. Multiplying light by an sRGB-encoded albedo and writing the
+        // product raw is what crushes the midtones — the reason a fully
+        // sunlit charcoal building still read as a silhouette against a sky
+        // that WAS tone mapped.
+        to_scene: fn(encoded: vec3) -> vec3 {
+            return mix(encoded, pow(encoded, vec3(2.2, 2.2, 2.2)), self.display.x)
+        }
+
+        to_display: fn(linear: vec3) -> vec3 {
+            let mapped = clamp(
+                (linear * (linear * 2.51 + vec3(0.03, 0.03, 0.03)))
+                    / (linear * (linear * 2.43 + vec3(0.59, 0.59, 0.59))
+                        + vec3(0.14, 0.14, 0.14)),
+                vec3(0.0, 0.0, 0.0),
+                vec3(1.0, 1.0, 1.0)
+            )
+            return mix(
+                linear,
+                pow(mapped, vec3(0.4545454, 0.4545454, 0.4545454)),
+                self.display.x
+            )
+        }
+
         // Octahedral decode: the inverse of skin.rs's oct_encode. Two f16
         // lanes carry a unit normal that would otherwise cost three floats.
         // sign is inlined rather than shared: the builtin sign() returns 0 at
@@ -1242,23 +1403,53 @@ script_mod! {
         }
 
         vertex: fn() {
-            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            var pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
             // ao_uv is unorm16x2 (model.rs pack_ao_uv), NOT an f16 pair — f16
             // spacing near 1.0 is a full texel of a 1024 atlas. Each axis is
             // (lo + 256*hi)/257 of the two unpacked bytes: 255*257 = 65535.
             let ao_uv_b = unpack4u8(self.geom.ao_uv)
-            self.v_ao_uv = vec2(
+            var chart_uv = vec2(
                 (ao_uv_b.x + ao_uv_b.y * 256.0) / 257.0,
                 (ao_uv_b.z + ao_uv_b.w * 256.0) / 257.0
             )
+            // The CAD lookup reads the same lane as an element index. See
+            // the `elem_map` declaration above; off unless the host enabled it.
+            if self.elem_ctl.w > 0.5 {
+                let ew = max(self.elem_ctl.x, 1.0)
+                let eh = max(self.elem_ctl.y, 1.0)
+                let lo = (ao_uv_b.x + ao_uv_b.y * 256.0) * 255.0
+                let hi = (ao_uv_b.z + ao_uv_b.w * 256.0) * 255.0
+                let ei = floor(lo + hi * 65536.0 + 0.5)
+                let ex = (modf(ei, ew) + 0.5) / ew
+                let ey = (floor(ei / ew) + 0.5) / eh
+                let f = self.elem_map.sample_nearest(vec2(ex, ey))
+                if f.x < 0.5 {
+                    pos = vec3(0.0, 0.0, 0.0)
+                } else {
+                    pos = pos + f.yzw
+                }
+                chart_uv = vec2(0.0, 0.0)
+            }
+            self.v_ao_uv = chart_uv
             // The lightmap REUSES the chart parameterisation: this instance's
             // atlas window is one offset/scale over the same uv.
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
             let normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             let model_view = self.draw_list.view_transform * self.transform
-            let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+            let raw_world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
+            // Face-forward only the side the camera actually sees. This is
+            // the two-sided material convention: an authored back face gets
+            // the opposite normal, so N.L, hemisphere fill, CSM bias and the
+            // PBR lobe all agree instead of an underside rendering black.
+            let raw_view_normal = (self.draw_pass.camera_view
+                * vec4(raw_world_normal.x, raw_world_normal.y, raw_world_normal.z, 0.0)).xyz
+            var face_sign = 1.0
+            if dot(raw_view_normal, view_pos.xyz) > 0.0 {
+                face_sign = 0.0 - 1.0
+            }
+            let world_normal = raw_world_normal * face_sign
             let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
             let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
@@ -1268,6 +1459,7 @@ script_mod! {
             // move them).
             let dl_wp = (self.transform * vec4(pos.x, pos.y, pos.z, 1.0)).xyz
             let dl_n = normalize((self.transform * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+                * face_sign
             self.v_dl = self.dl_sum_gated(dl_wp, dl_n)
             // Ground-field sun shadow for DYNAMIC instances (dl_apply = 1).
             // The field stores GROUND-level visibility, so the sample is
@@ -1301,8 +1493,10 @@ script_mod! {
             // move); only the stored depth shifts, so coplanar stacked
             // pieces resolve by placement order instead of z-fighting.
             let zk = 1.0 - self.depth_bias
-            self.vertex_pos = self.draw_pass.camera_projection
+            let clip_out = self.draw_pass.camera_projection
                 * vec4(view_pos.x * zk, view_pos.y * zk, view_pos.z * zk, view_pos.w)
+            self.v_spos = clip_out
+            self.vertex_pos = clip_out
         }
 
         pixel: fn() {
@@ -1319,7 +1513,8 @@ script_mod! {
             if tex.w < 0.5 || magenta {
                 discard()
             }
-            var albedo = vec3(tex.x * self.v_tint.x, tex.y * self.v_tint.y, tex.z * self.v_tint.z)
+            let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
+            var albedo = vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z)
             // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
             // Mean-127 overlay is identity; far mips go gray and drop out.
             if self.detail_st.x > 0.001 {
@@ -1352,6 +1547,16 @@ script_mod! {
             // take some of the direct term too is what every stylised renderer
             // does, and it is what makes a crease read as a crease.
             let ao_direct = mix(1.0, ao, 0.75)
+            // Screen-space AO (ssao.rs), composed with the baked term on the
+            // AMBIENT fill only — same law as `ao` above, stricter split:
+            // a crevice blocks sky light, not the sun, so the direct and
+            // shadow-mapped terms never see this factor at all.
+            var sao = 1.0
+            if self.ssao_ctl.x > 0.001 {
+                let sp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
+                let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
+                sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
+            }
             // Baked light: A gates the analytic sun through a smoothstep over
             // the signed-distance field — the penumbra width is the decode
             // WINDOW ([`LM_SUN_SOFT`]), a runtime knob, not a bake product.
@@ -1386,7 +1591,7 @@ script_mod! {
             // lightmap::lamp_shadow_fill.
             let local = lamps + self.v_dl
             let sun_lit = self.sun_filled(sun_all, local)
-            let analytic = self.v_ambient * ao
+            let analytic = self.v_ambient * (ao * sao)
                 + self.v_direct * (ao_direct * sun_lit)
                 + local * ao_direct
             // prelit: albedo already carries COLOR_0 = LM×4. Multiplying
@@ -1423,7 +1628,7 @@ script_mod! {
                     1.0
                 )
             }
-            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+            return vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0)
         }
 
         fragment: fn() {
@@ -1460,7 +1665,7 @@ script_mod! {
         ..mod.draw.DrawSceneSkinned
         // The glTF metallicRoughnessTexture: G = roughness, B = metallic,
         // and the factors multiply what it says. Declared AFTER the whole
-        // inherited set, so it takes the slot past detail_map (slot 6).
+        // inherited set, so it takes the slot past ssao_map (slot 8).
         orm_map: texture_2d(float)
         // TRUE world camera position (w unused). A specular lobe is the one
         // term in this file that needs the eye: everything else here is
@@ -1481,7 +1686,8 @@ script_mod! {
             if tex.w < 0.5 {
                 discard()
             }
-            let albedo = vec3(tex.x * self.v_tint.x, tex.y * self.v_tint.y, tex.z * self.v_tint.z)
+            let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
+            let albedo = vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z)
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
             // wall behind it.
@@ -1494,6 +1700,15 @@ script_mod! {
                 0.0, 1.0
             )
             let ao_direct = mix(1.0, ao, 0.75)
+            // Screen-space AO on the ambient terms only, exactly as
+            // DrawSceneSkinned: the diffuse fill below and the ambient
+            // specular — never the sun's diffuse or its lobe.
+            var sao = 1.0
+            if self.ssao_ctl.x > 0.001 {
+                let sp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
+                let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
+                sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
+            }
             let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
             let has_lm = step(0.000001, self.lm_rect.z)
             let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
@@ -1563,17 +1778,17 @@ script_mod! {
             let smooth3 = 1.0 - rough
             let fr = max(vec3(smooth3, smooth3, smooth3), f0)
             let f_env = f0 + (fr - f0) * self.pow5(1.0 - ndv)
-            let amb_spec = env * f_env * ao
+            let amb_spec = env * f_env * (ao * sao)
 
             // A metal has no diffuse lobe at all; a dielectric keeps all of
             // it. (The (1 - F) half of the split is deliberately dropped:
             // at grazing angles it only ever darkens, and without an
             // environment probe there is nothing to hand the energy to.)
-            let analytic = self.v_ambient * ao
+            let analytic = self.v_ambient * (ao * sao)
                 + self.v_direct * (ao_direct * sun_lit)
                 + local * ao_direct
             let lit = albedo * ((1.0 - metal) * analytic) + sun_spec * f + amb_spec
-            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+            return vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0)
         }
 
         // Re-declared rather than inherited so the depth-clip wrapper is
@@ -1747,12 +1962,53 @@ script_mod! {
         }
 
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
-            let m = 1.5 * self.csm_p.y
+            let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
             return step(ref01, self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
+        }
+
+        // The 3x3 box average, bilinearly interpolated between the
+        // texel-aligned positions it is measured at: a separable tent over
+        // 4x4 texels (per-axis weights (1-f, 1, 1, f)/3). Same ~3-texel
+        // penumbra the box gave, but continuous — the box alone is
+        // piecewise constant per shadow-map texel, which reads as
+        // stair-steps along every sunlit edge.
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+            let e = self.csm_p.y
+            let tu = u / e - 0.5
+            let tv = v / e - 0.5
+            let fu = fract(tu)
+            let fv = fract(tv)
+            let bu = (floor(tu) + 0.5) * e
+            let bv = (floor(tv) + 0.5) * e
+            let wu0 = 1.0 - fu
+            let wv0 = 1.0 - fv
+            var s = 0.0
+            var r = 0.0
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            s = r * wv0
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
+            r = r + self.csm_tap(bu, bv, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            s = s + r * fv
+            return s * 0.11111111
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -1788,7 +2044,7 @@ script_mod! {
             // cover texel·tanθ, which is the Kenney terminator hatch.
             // Slide the receiver off the knife edge along n, then reproject
             // the same cascade (do not re-pick — the offset is sub-texel).
-            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            let wp2 = wp + normalize(n) * (tw * 1.75 * (1.0 - clamp(ndl, 0.0, 1.0)))
             if ci < 0.5 {
                 nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
                 ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
@@ -1804,21 +2060,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
-            let u = nx * 0.5 + 0.5
-            let v = 0.5 - ny * 0.5
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            let e = self.csm_p.y
-            var s = 0.0
-            s = s + self.csm_tap(u - e, v - e, ci, ref01)
-            s = s + self.csm_tap(u, v - e, ci, ref01)
-            s = s + self.csm_tap(u + e, v - e, ci, ref01)
-            s = s + self.csm_tap(u - e, v, ci, ref01)
-            s = s + self.csm_tap(u, v, ci, ref01)
-            s = s + self.csm_tap(u + e, v, ci, ref01)
-            s = s + self.csm_tap(u - e, v + e, ci, ref01)
-            s = s + self.csm_tap(u, v + e, ci, ref01)
-            s = s + self.csm_tap(u + e, v + e, ci, ref01)
-            return s / 9.0
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            // Cross-fade the outer band of a cascade's window into the
+            // NEXT cascade: with soft edges a hard hand-over would show as
+            // a line where the penumbra's texel size steps.
+            let edge = max(abs(nx), abs(ny))
+            if ci < 1.5 && edge > 0.97 {
+                var mx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                var my = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                var mz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+                var b2 = self.csm_bias.y
+                if ci > 0.5 {
+                    mx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                    my = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                    mz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
+                    b2 = self.csm_bias.z
+                }
+                if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
+                    let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
+                }
+            }
+            return s
         }
 
         // Same term as DrawSceneSkinned: (1 - d/r)^2 falloff, spot factor
@@ -2372,12 +2637,53 @@ script_mod! {
         }
 
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
-            let m = 1.5 * self.csm_p.y
+            let m = 2.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
             let vv = clamp(v, m, 1.0 - m)
             return step(ref01, self.csm_map.sample_nearest(
                 vec2((uu + ci) * 0.33333333, vv)
             ).x)
+        }
+
+        // The 3x3 box average, bilinearly interpolated between the
+        // texel-aligned positions it is measured at: a separable tent over
+        // 4x4 texels (per-axis weights (1-f, 1, 1, f)/3). Same ~3-texel
+        // penumbra the box gave, but continuous — the box alone is
+        // piecewise constant per shadow-map texel, which reads as
+        // stair-steps along every sunlit edge.
+        csm_pcf: fn(u: float, v: float, ci: float, ref01: float) -> float {
+            let e = self.csm_p.y
+            let tu = u / e - 0.5
+            let tv = v / e - 0.5
+            let fu = fract(tu)
+            let fv = fract(tv)
+            let bu = (floor(tu) + 0.5) * e
+            let bv = (floor(tv) + 0.5) * e
+            let wu0 = 1.0 - fu
+            let wv0 = 1.0 - fv
+            var s = 0.0
+            var r = 0.0
+            r = wu0 * self.csm_tap(bu - e, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu, bv - e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv - e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv - e, ci, ref01)
+            s = r * wv0
+            r = wu0 * self.csm_tap(bu - e, bv, ci, ref01)
+            r = r + self.csm_tap(bu, bv, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e, ci, ref01)
+            s = s + r
+            r = wu0 * self.csm_tap(bu - e, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu, bv + e + e, ci, ref01)
+            r = r + self.csm_tap(bu + e, bv + e + e, ci, ref01)
+            r = r + fu * self.csm_tap(bu + e + e, bv + e + e, ci, ref01)
+            s = s + r * fv
+            return s * 0.11111111
         }
 
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
@@ -2413,7 +2719,7 @@ script_mod! {
             // cover texel·tanθ, which is the Kenney terminator hatch.
             // Slide the receiver off the knife edge along n, then reproject
             // the same cascade (do not re-pick — the offset is sub-texel).
-            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            let wp2 = wp + normalize(n) * (tw * 1.75 * (1.0 - clamp(ndl, 0.0, 1.0)))
             if ci < 0.5 {
                 nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
                 ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
@@ -2429,21 +2735,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
-            let u = nx * 0.5 + 0.5
-            let v = 0.5 - ny * 0.5
             let ref01 = nz - bias * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
-            let e = self.csm_p.y
-            var s = 0.0
-            s = s + self.csm_tap(u - e, v - e, ci, ref01)
-            s = s + self.csm_tap(u, v - e, ci, ref01)
-            s = s + self.csm_tap(u + e, v - e, ci, ref01)
-            s = s + self.csm_tap(u - e, v, ci, ref01)
-            s = s + self.csm_tap(u, v, ci, ref01)
-            s = s + self.csm_tap(u + e, v, ci, ref01)
-            s = s + self.csm_tap(u - e, v + e, ci, ref01)
-            s = s + self.csm_tap(u, v + e, ci, ref01)
-            s = s + self.csm_tap(u + e, v + e, ci, ref01)
-            return s / 9.0
+            var s = self.csm_pcf(nx * 0.5 + 0.5, 0.5 - ny * 0.5, ci, ref01)
+            // Cross-fade the outer band of a cascade's window into the
+            // NEXT cascade: with soft edges a hard hand-over would show as
+            // a line where the penumbra's texel size steps.
+            let edge = max(abs(nx), abs(ny))
+            if ci < 1.5 && edge > 0.97 {
+                var mx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                var my = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                var mz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+                var b2 = self.csm_bias.y
+                if ci > 0.5 {
+                    mx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                    my = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                    mz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
+                    b2 = self.csm_bias.z
+                }
+                if max(abs(mx), abs(my)) < 0.99 && mz > 0.0 && mz < 1.0 {
+                    let r2 = mz - b2 * (1.0 + (1.0 - clamp(ndl, 0.0, 1.0)) * 2.0)
+                    let s2 = self.csm_pcf(mx * 0.5 + 0.5, 0.5 - my * 0.5, ci + 1.0, r2)
+                    s = mix(s, s2, clamp((edge - 0.97) * 50.0, 0.0, 1.0))
+                }
+            }
+            return s
         }
 
         vertex: fn() {
@@ -4203,6 +4518,119 @@ script_mod! {
             self.fb0 = self.pixel()
         }
     }
+
+    // ---- 2D HUD -------------------------------------------------------
+    //
+    // The HUD draws AFTER the 3D pass is blitted, in ordinary 2D turtle
+    // space, so these are plain DrawQuads. Two shapes carry the whole kit:
+    // a rounded plate (panels, bar tracks, bar fills, pips) and an arc
+    // (rings). Everything else a HUD needs is text, which DrawText already
+    // does, or an icon, which is an SVG or a store image and never a shader.
+    mod.draw.DrawHudShape = mod.std.set_type_default() do #(DrawHudShape::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        // `fill`, `stroke`, `border`, `radius`, `shape`, `from`, `sweep`,
+        // `thickness` and `frac` are the Rust struct's own #[live] instance
+        // fields — `script_shader` declares them. Re-declaring them here as
+        // `instance(...)` applies a shader-descriptor OBJECT to a typed f32
+        // field, which fails the apply and leaves the shader half-built.
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            match self.shape {
+                1.0 => {
+                    let c = self.rect_size * 0.5
+                    let r = min(c.x, c.y) - self.thickness * 0.5 - 1.0
+                    // A zero-length arc must draw nothing rather than a full
+                    // ring: `end == start` is a degenerate sweep and the SDF
+                    // reads it as "everywhere".
+                    if self.frac > 0.001 {
+                        sdf.arc_flat_caps(c.x, c.y, r, self.from, self.from + self.sweep * self.frac, self.thickness)
+                        sdf.fill(self.fill)
+                    }
+                    return sdf.result
+                }
+                _ => {
+                    let b = max(self.border, 0.0)
+                    sdf.box(b * 0.5, b * 0.5, self.rect_size.x - b, self.rect_size.y - b, self.radius)
+                    sdf.fill_keep(self.fill)
+                    if b > 0.0 {
+                        sdf.stroke(self.stroke, b)
+                    }
+                    return sdf.result
+                }
+            }
+        }
+    }
+
+    // One HUD image: a catalog picture (a key sprite, a mugshot, a weapon
+    // frame) on a quad, tinted and optionally ghosted. Classic artwork is a
+    // few dozen texels tall, so it samples on texel centres — the same
+    // reason DrawSceneScreen does.
+    mod.draw.DrawHudImage = mod.std.set_type_default() do #(DrawHudImage::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        tex: texture_2d(float)
+        // `tint` and `tex_size` come from the Rust struct; see DrawHudShape.
+        pixel: fn() {
+            var uv = vec2(
+                self.uv_rect.x + self.pos.x * (self.uv_rect.z - self.uv_rect.x),
+                self.uv_rect.y + self.pos.y * (self.uv_rect.w - self.uv_rect.y)
+            )
+            if self.tex_size.x > 0.5 && self.tex_size.y > 0.5 {
+                let texel = uv * self.tex_size
+                let ramp = max(
+                    max(abs(dFdx(texel)), abs(dFdy(texel))),
+                    vec2(0.00001, 0.00001)
+                )
+                let f = fract(texel) - vec2(0.5, 0.5)
+                let s = clamp(f / ramp + vec2(0.5, 0.5), vec2(0.0, 0.0), vec2(1.0, 1.0))
+                uv = (floor(texel) + s) / self.tex_size
+            }
+            let c = self.tex.sample_as_bgra(uv)
+            return Pal.premul(vec4(c.xyz * self.tint.xyz, c.w * self.tint.w))
+        }
+    }
+}
+
+/// A HUD plate or arc. `#[repr(C)]` and instance-fields-after-the-deref, the
+/// same layout rule every draw shader here follows.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHudShape {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub fill: Vec4f,
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub stroke: Vec4f,
+    #[live(0.0)]
+    pub border: f32,
+    #[live(0.0)]
+    pub radius: f32,
+    #[live(0.0)]
+    pub shape: f32,
+    #[live(-1.5707963)]
+    pub from: f32,
+    #[live(6.2831853)]
+    pub sweep: f32,
+    #[live(6.0)]
+    pub thickness: f32,
+    #[live(1.0)]
+    pub frac: f32,
+}
+
+/// A HUD image quad.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHudImage {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub tint: Vec4f,
+    #[live(vec2(0.0, 0.0))]
+    pub tex_size: Vec2f,
+    /// Sub-rectangle of the texture to show, `(u0, v0, u1, v1)`; `u0 > u1`
+    /// mirrors. A packed sheet is one texture with many windows into it.
+    #[live(vec4(0.0, 0.0, 1.0, 1.0))]
+    pub uv_rect: Vec4f,
 }
 
 #[derive(Script, ScriptHook, Debug)]
@@ -4346,6 +4774,22 @@ pub struct DrawSceneSkyAnalytic {
     pub star_r1: Vec4f,
     #[live(vec4(0.0, 0.0, 1.0, 0.0))]
     pub star_r2: Vec4f,
+    /// Additive shared-model lanes. The legacy fields above remain part of
+    /// this public draw type for existing hosts.
+    #[live(vec4(0.0, 1.0, 0.0, 0.025))]
+    pub sun_model: Vec4f,
+    #[live(vec4(0.0, 1.0, 0.0, 0.999989))]
+    pub sun_dir: Vec4f,
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub sun_radiance: Vec4f,
+    #[live(vec4(0.0, 1.0, 0.0, 1.0))]
+    pub world_up: Vec4f,
+    #[live(vec4(1.0, 0.0, 0.0, 0.0))]
+    pub star_east: Vec4f,
+    #[live(vec4(1.0, 0.0, 0.0, 0.0))]
+    pub blend: Vec4f,
+    #[live(1.0)]
+    pub exposure: f32,
 }
 
 /// A map's own sky surfaces, shaded by view direction
@@ -4533,6 +4977,18 @@ pub struct DrawSceneScreen {
     /// x = width, y = height in world units; zw unused.
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_size: Vec4f,
+    /// 1 = alpha-cut-out sprite artwork (transparent pixels discard), 0 = an
+    /// opaque screen. Sprite billboards are cut-outs by nature; a video
+    /// frame is not, and must never depend on what its decoder wrote into
+    /// the alpha byte.
+    #[live(0.0)]
+    pub cutout: f32,
+    /// Sub-rectangle of the texture this quad shows, `(u0, v0, u1, v1)`.
+    /// A packed sprite sheet is ONE texture with many windows into it, which
+    /// is what keeps a level's actor set at a dozen textures instead of five
+    /// hundred. `u0 > u1` draws the X-mirrored pair the source stores once.
+    #[live(vec4(0.0, 0.0, 1.0, 1.0))]
+    pub uv_rect: Vec4f,
 }
 
 /// GPU-skinned character mesh: rest geometry + joint-palette texture.

@@ -18,6 +18,7 @@
 pub mod dynamics;
 pub mod entity;
 pub mod heading;
+pub mod hud;
 pub mod nav;
 pub mod particles;
 pub mod player;
@@ -33,6 +34,10 @@ pub mod world;
 pub use dynamics::*;
 pub use entity::*;
 pub use heading::*;
+pub use hud::{
+    layout as hud_layout, Crosshair, CrosshairStyle, HudAlign, HudDoc, HudElement, HudKind,
+    HudLine, HudPlaced, HudPulse, HudStack, HudValue,
+};
 pub use nav::{FlowField, NavAgent, NavMap};
 pub use particles::*;
 pub use player::*;

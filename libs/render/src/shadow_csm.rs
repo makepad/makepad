@@ -45,9 +45,9 @@ pub struct CsmCascade {
     pub rz: Vec4f,
     /// World units one shadow texel covers (receiver-side bias input).
     pub texel_world: f32,
-    /// Depth bias in z01 units: texel footprint x 1.5 + 5mm, the bake
-    /// depth passes' tolerance (raster error only — anything fatter reads
-    /// kit detail sheets as lit).
+    /// Depth bias in z01 units: three quarters of a texel plus 2 mm. The
+    /// receiver shader adds a normal/slope offset at grazing angles; keeping
+    /// this base small preserves crisp roof/wall contact without acne.
     pub bias01: f32,
 }
 
@@ -171,7 +171,7 @@ fn fit_cascade(
     let z0 = z_min - 0.5;
     let z1 = cf + radius + 0.5;
     let zr = (z1 - z0).max(0.01);
-    let bias_world = texel * 1.5 + 0.005;
+    let bias_world = texel * 0.75 + 0.002;
     CsmCascade {
         rx: Vec4f {
             x: right.x / ex,

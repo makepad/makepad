@@ -3068,7 +3068,12 @@ pub(crate) fn oct_decode_pub(ox: f32, oy: f32) -> makepad_draw::makepad_math::Ve
     }
 }
 
-pub(crate) fn oct_encode(n: Vec3f) -> (f32, f32) {
+/// Octahedral unit-normal encode, the packer for `GameMeshVertex.nrm`.
+///
+/// Public because a host that builds a [`crate::StaticModel`] in memory
+/// (rather than parsing a GLB) has to pack the same lane the shaders decode,
+/// and a second implementation would drift.
+pub fn oct_encode(n: Vec3f) -> (f32, f32) {
     let l1 = n.x.abs() + n.y.abs() + n.z.abs();
     if l1 < 1.0e-8 {
         return (0.0, 0.0);

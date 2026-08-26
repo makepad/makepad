@@ -102,11 +102,123 @@ impl SunLight {
     /// hands back the night rig instead, and the direction keeps sinking —
     /// which is what lights the analytic sky's night blend and its stars.
     pub fn from_time_of_day(hours: f32, latitude_deg: f32) -> Self {
+        Self::from_time_of_day_balanced(hours, latitude_deg, None)
+    }
+
+    /// [`Self::from_time_of_day`] with the daylight split re-aimed at a
+    /// given disc-to-dome luminance ratio — see
+    /// [`makepad_game_sim::SunConfig::daylight_balance`]. `None` is the
+    /// stock rig, unchanged in every bit.
+    pub fn from_time_of_day_balanced(
+        hours: f32,
+        latitude_deg: f32,
+        daylight_balance: Option<f32>,
+    ) -> Self {
         let dir = solar_dir(hours, latitude_deg);
         let mut sun = Self::from_scene_sun(&SceneSun::from_time_of_day(hours, latitude_deg));
         sun.dir = dir;
+        // BEFORE the night ramp: the balance is a property of DAYLIGHT. After
+        // it, the same call would be scaling a twilight floor that has
+        // nothing to do with a clear sky, and would drive the ambient of a
+        // moonless midnight toward zero.
+        if let Some(ratio) = daylight_balance {
+            sun.rebalance_daylight(ratio);
+        }
         sun.apply_night(dir.y.clamp(-1.0, 1.0).asin().to_degrees());
         sun
+    }
+
+    /// The daylight rig aimed AND styled by an explicit sun direction —
+    /// the resolve path for a host that computes the true solar position
+    /// itself (fab's NOAA model) and hands the engine `time_of_day` + `dir`.
+    ///
+    /// [`Self::from_time_of_day_balanced`] keys its warmth and night ramps
+    /// off the engine's own fixed-declination sun, which at a real site on
+    /// a real date can sit tens of degrees from the true one — far enough
+    /// that the rig called "night" while the sky still painted a golden
+    /// sun well above the horizon. Here every elevation-dependent term
+    /// follows the DIRECTION the sky, the disc, the shadows and the
+    /// shading all share:
+    ///
+    /// 1. the clear-sky split (`daylight_balance`) lands on the
+    ///    full-daylight levels — it is a property of DAYLIGHT;
+    /// 2. the direct term takes the sun's own colour: the sky model's
+    ///    transmittance at this height ([`crate::sky::sun_transmittance`],
+    ///    the disc/glow curve — not a second reddening ramp);
+    /// 3. the dome fill dims as the sun sinks (the same fill curve the
+    ///    hour rig uses), then rides the shared twilight ramp down to the
+    ///    night floor — all at the TRUE elevation;
+    /// 4. the direct term does NOT take that twilight ramp: its fade is the
+    ///    transmittance itself, gated only where the disc drops below the
+    ///    horizon — running both would double-count the sunset.
+    pub fn from_direction_balanced(dir: Vec3f, daylight_balance: Option<f32>) -> Self {
+        let dir = dir.normalize();
+        let elev = dir.y.clamp(-1.0, 1.0).asin();
+        // Full-daylight base: SceneSun's stock levels (the same numbers the
+        // hour rig starts from, before its warmth curve), converted with
+        // the same map->game factors.
+        let base = SceneSun::default();
+        let mut sun = Self {
+            dir,
+            color: base.color * MAP_DIRECT_TO_GAME,
+            sky: base.sky * MAP_AMBIENT_TO_GAME,
+            ground: base.ground * MAP_AMBIENT_TO_GAME,
+            shadow_alpha: 0.16,
+        };
+        if let Some(ratio) = daylight_balance {
+            sun.rebalance_daylight(ratio);
+        }
+        // The transmittance IS the sunset fade for the DIRECT term: at one
+        // degree it is already down to a tenth of noon and deep gold, the
+        // way a facade four minutes before sunset really looks. Running the
+        // hour rig's +10..-3 degree twilight ramp on top would double-count
+        // that fade and kill the glow the sun study exists to show — so the
+        // direct term only GATES at the horizon, where the disc itself
+        // slips away.
+        let elev_deg = elev.to_degrees();
+        let disc = {
+            let x = ((elev_deg + 2.0) / 2.5).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        sun.color = sun.color * crate::sky::sun_transmittance(dir.y) * disc;
+        sun.shadow_alpha *= disc;
+        // The dome fill keeps the shared twilight: dimming toward the
+        // horizon, then the same ramp down to the night floor the hour rig
+        // uses ([`Self::apply_night`]'s ambient half).
+        let sky_dim = 0.7 + 0.3 * (elev / 0.9).clamp(0.0, 1.0);
+        let s = {
+            let x = ((elev_deg + 3.0) / 13.0).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let mix = |a: Vec3f, b: Vec3f, k: f32| a + (b - a) * k;
+        sun.sky = mix(NIGHT_AMBIENT, sun.sky * sky_dim, s);
+        sun.ground = mix(NIGHT_AMBIENT, sun.ground * sky_dim, s);
+        sun
+    }
+
+    /// Move light between the disc and the dome WITHOUT changing how much
+    /// there is: `direct + fill` keeps its luminance, so a fully lit white
+    /// surface still lands where it did and nothing starts clipping. Only
+    /// the split moves, and with it the depth of every shadow.
+    ///
+    /// Hue is preserved on both halves; only their strength changes. The
+    /// hemisphere's own shape survives too — the ground bounce is scaled by
+    /// the same factor as the sky, so an underside keeps its relationship
+    /// to the sky above it.
+    fn rebalance_daylight(&mut self, direct_over_fill: f32) {
+        let ratio = direct_over_fill.max(0.0);
+        let direct = crate::sky::luminance(self.color);
+        let fill = crate::sky::luminance(self.sky);
+        if direct <= 1.0e-6 || fill <= 1.0e-6 {
+            return;
+        }
+        let total = direct + fill;
+        let want_fill = total / (1.0 + ratio);
+        let want_direct = total - want_fill;
+        self.color = self.color * (want_direct / direct);
+        let fill_scale = want_fill / fill;
+        self.sky = self.sky * fill_scale;
+        self.ground = self.ground * fill_scale;
     }
 
     /// Fade this daylight rig toward night by the sun's true elevation.
@@ -234,22 +346,38 @@ pub fn celestial_rows(hours: f32, latitude_deg: f32) -> [Vec4f; 3] {
 /// Resolved from the sim's [`makepad_game_sim::SunConfig`], which stores
 /// only what script asked for (the sim cannot depend on `makepad_draw`).
 ///
-/// `time_of_day` picks the rig — day, twilight or night. The overrides that
-/// follow are exactly that: overrides. An explicit `dir` MOVES the sun
-/// without re-deciding which rig it is, because a script that authors a
-/// direction is authoring a LOOK (the village's 38-degree sun is a set
-/// dressing choice, not a time); a script that wants night asks for the
-/// hour.
+/// `time_of_day` alone picks the rig — day, twilight or night — from the
+/// engine's own solar model. An explicit `dir` WITHOUT an hour moves the
+/// sun but keeps the default daylight rig, because a script that authors
+/// only a direction is authoring a LOOK (the village's 38-degree sun is a
+/// set dressing choice, not a time). A host that supplies BOTH is saying
+/// "this is the TRUE sun for that hour" (fab's NOAA position): then the
+/// whole rig — warmth, twilight, night — follows the direction, so the
+/// light on the walls and the glow in the sky are one sun
+/// ([`SunLight::from_direction_balanced`]). The overrides that follow are
+/// exactly that: overrides.
 pub fn resolve_sun(cfg: &makepad_game_sim::SunConfig) -> SunLight {
-    let mut sun = match cfg.time_of_day {
-        Some(hours) => SunLight::from_time_of_day(hours, cfg.latitude),
-        None => SunLight::default(),
-    };
-    if let Some(dir) = cfg.dir {
-        if dir.x != 0.0 || dir.y != 0.0 || dir.z != 0.0 {
-            sun.dir = dir.normalize();
+    let explicit_dir = cfg
+        .dir
+        .filter(|d| d.x != 0.0 || d.y != 0.0 || d.z != 0.0);
+    let mut sun = match (cfg.time_of_day, explicit_dir) {
+        (Some(_), Some(dir)) => {
+            SunLight::from_direction_balanced(dir, cfg.daylight_balance)
         }
-    }
+        (Some(hours), None) => {
+            SunLight::from_time_of_day_balanced(hours, cfg.latitude, cfg.daylight_balance)
+        }
+        (None, dir) => {
+            let mut sun = SunLight::default();
+            if let Some(ratio) = cfg.daylight_balance {
+                sun.rebalance_daylight(ratio);
+            }
+            if let Some(dir) = dir {
+                sun.dir = dir.normalize();
+            }
+            sun
+        }
+    };
     if let Some(c) = cfg.color {
         sun.color = c;
     }
@@ -269,6 +397,73 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    /// The clear-sky rig: same total light, a much harder key.
+    #[test]
+    fn the_daylight_balance_moves_light_without_making_more_of_it() {
+        let stock = SunLight::from_time_of_day(13.0, 47.6);
+        let clear = SunLight::from_time_of_day_balanced(13.0, 47.6, Some(9.0));
+        let lum = crate::sky::luminance;
+        // Same light, differently spent.
+        assert!(
+            (lum(stock.color) + lum(stock.sky) - lum(clear.color) - lum(clear.sky)).abs()
+                < 1.0e-4,
+            "stock {:?}/{:?} vs clear {:?}/{:?}",
+            stock.color,
+            stock.sky,
+            clear.color,
+            clear.sky
+        );
+        let ratio = lum(clear.color) / lum(clear.sky);
+        assert!((ratio - 9.0).abs() < 0.05, "clear-sky ratio {ratio}");
+        assert!(
+            lum(stock.color) / lum(stock.sky) < 4.0,
+            "the stock rig was already a clear sky"
+        );
+        // A harder sun and a deeper shadow, both.
+        assert!(lum(clear.color) > lum(stock.color));
+        assert!(lum(clear.sky) < lum(stock.sky));
+        // Hue survives: only the strengths moved.
+        let hue = |c: Vec3f| c * (1.0 / lum(c).max(1.0e-6));
+        let (a, b) = (hue(stock.color), hue(clear.color));
+        assert!((a.x - b.x).abs() < 1.0e-4 && (a.z - b.z).abs() < 1.0e-4);
+        // The hemisphere keeps its shape: sky and ground scale together.
+        assert!(
+            ((lum(clear.ground) / lum(clear.sky)) - (lum(stock.ground) / lum(stock.sky))).abs()
+                < 1.0e-4
+        );
+    }
+
+    /// Daylight only. A rig the night ramp has already taken apart must not
+    /// be re-split, or a moonless midnight loses the floor that keeps a town
+    /// visible — and gains a sun that is not there.
+    #[test]
+    fn the_daylight_balance_leaves_the_night_alone() {
+        let lum = crate::sky::luminance;
+        for hour in [0.0f32, 2.0, 22.5] {
+            let stock = SunLight::from_time_of_day(hour, 47.6);
+            let clear = SunLight::from_time_of_day_balanced(hour, 47.6, Some(9.0));
+            assert!(
+                (lum(stock.sky) - lum(clear.sky)).abs() < 1.0e-4,
+                "{hour}h: night fill moved from {:?} to {:?}",
+                stock.sky,
+                clear.sky
+            );
+            assert!(lum(clear.color) < 1.0e-4, "{hour}h: {:?}", clear.color);
+        }
+    }
+
+    /// The whole point, stated as a picture: a surface facing the sun is
+    /// many times brighter than the same surface facing away.
+    #[test]
+    fn a_clear_sky_separates_a_lit_face_from_a_shaded_one() {
+        let sun = SunLight::from_time_of_day_balanced(13.0, 47.6, Some(9.0));
+        let lum = crate::sky::luminance;
+        // Facing the sun squarely against facing straight away: ambient only.
+        let lit = lum(sun.color) + lum(sun.sky);
+        let shaded = lum(sun.sky);
+        assert!(lit / shaded > 8.0, "lit {lit} vs shaded {shaded}");
     }
 
     #[test]
@@ -429,6 +624,78 @@ mod tests {
         let mut sun = SunLight::default();
         sun.dir = vec3f(1.0, 0.001, 0.0).normalize();
         assert!(sun.shadow_len_per_unit() <= 4.0);
+    }
+
+    /// A host that supplies BOTH an hour and the true direction (fab's
+    /// NOAA sun) gets a rig that follows the DIRECTION: the hour must not
+    /// smuggle the engine's fixed-declination elevation back in.
+    #[test]
+    fn an_explicit_direction_carries_the_whole_rig() {
+        let lum = crate::sky::luminance;
+        let cfg = |hours: f32, dir: Vec3f| makepad_game_sim::SunConfig {
+            time_of_day: Some(hours),
+            latitude: 52.0,
+            dir: Some(dir),
+            ..Default::default()
+        };
+        // The engine model's midnight, but the TRUE sun 15 degrees up:
+        // there is direct light, and it is warmer than the noon sun.
+        let low = vec3f(0.9, 15.0f32.to_radians().sin(), 0.3).normalize();
+        let evening = resolve_sun(&cfg(0.0, low));
+        assert!(lum(evening.color) > 0.05, "{:?}", evening.color);
+        assert!(
+            evening.color.x / evening.color.z.max(1.0e-6) > 1.3,
+            "low sun should be golden: {:?}",
+            evening.color
+        );
+        // The engine model's noon, but the TRUE sun below the horizon:
+        // night, regardless of the hour.
+        let down = vec3f(0.5, -0.3, 0.5).normalize();
+        let night = resolve_sun(&cfg(12.0, down));
+        assert!(lum(night.color) < 1.0e-3, "{:?}", night.color);
+        assert_eq!(night.sky, NIGHT_AMBIENT);
+        // A high explicit sun stays effectively the stock daylight rig.
+        let high = vec3f(0.2, 0.9, 0.3).normalize();
+        let noon = resolve_sun(&cfg(20.0, high));
+        assert!(
+            noon.color.x / noon.color.z.max(1.0e-6) < 1.15,
+            "high sun stays near-white: {:?}",
+            noon.color
+        );
+        assert!((lum(noon.color) - LEGACY_DIRECT).abs() < 0.1, "{:?}", noon.color);
+    }
+
+    /// The clear-sky split holds through the direction path too: at a high
+    /// explicit sun the disc-to-dome ratio is what was asked for.
+    #[test]
+    fn the_direction_rig_keeps_the_daylight_balance() {
+        let lum = crate::sky::luminance;
+        let sun = SunLight::from_direction_balanced(
+            vec3f(0.2, 0.95, 0.2).normalize(),
+            Some(9.0),
+        );
+        let ratio = lum(sun.color) / lum(sun.sky);
+        assert!((ratio - 9.0).abs() < 0.9, "clear-sky ratio {ratio}");
+    }
+
+    /// The direct term's tint IS the sky's transmittance curve — one
+    /// reddening in the whole engine.
+    #[test]
+    fn the_direction_rigs_gold_is_the_skys_gold() {
+        let y = 6.0f32.to_radians().sin();
+        let sun = SunLight::from_direction_balanced(
+            vec3f((1.0 - y * y).sqrt(), y, 0.0),
+            None,
+        );
+        let t = crate::sky::sun_transmittance(y);
+        // Same channel RATIOS as the transmittance (the base colour is a
+        // near-white constant on top).
+        let rig_rb = sun.color.x / sun.color.z.max(1.0e-6);
+        let sky_rb = t.x / t.z.max(1.0e-6);
+        assert!(
+            (rig_rb / sky_rb - 1.0).abs() < 0.08,
+            "rig {rig_rb} vs sky {sky_rb}"
+        );
     }
 
     #[test]

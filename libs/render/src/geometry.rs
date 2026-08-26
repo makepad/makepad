@@ -220,7 +220,6 @@ mod shape_tests {
         // Culls: closed solids whose winding this crate generates and asserts.
         assert_eq!(setting("DrawSceneCube"), Some(true), "solid slabs must cull");
         assert_eq!(setting("DrawSceneTerrain"), Some(true), "terrain must cull");
-        assert_eq!(setting("DrawSceneSkinned"), Some(true), "props/characters must cull");
         assert_eq!(setting("DrawSceneSkinnedGpu"), Some(true), "characters must cull");
 
         // Does not cull, deliberately — each documented at its declaration.
@@ -228,6 +227,11 @@ mod shape_tests {
         // face and culling erases it. Foliage is two-sided cards. The alpha
         // batch carries flat single-sided blobs and water where culling changes
         // the composite rather than hiding a hidden face.
+        assert_eq!(
+            setting("DrawSceneSkinned"),
+            Some(false),
+            "imported model sheets and roof undersides are two-sided"
+        );
         assert_eq!(setting("DrawSceneSky"), Some(false), "sky is viewed from inside");
         assert_eq!(
             setting("DrawSceneSkyAnalytic"),
@@ -263,5 +267,35 @@ mod shape_tests {
             "fract(uv) aliases distant tiles once mips exist"
         );
     }
-}
 
+    /// The imported-model material is both a CSM receiver and an analytic
+    /// daylight surface. Pin the actual shader expressions: a regression to
+    /// the CAD flat path would remove N.L or the shadow multiplier while the
+    /// Rust-side sun configuration continued to look perfectly healthy.
+    #[test]
+    fn imported_models_receive_direct_sun_ambient_ao_and_csm() {
+        let src = include_str!("shaders.rs");
+        let at = src
+            .find("mod.draw.DrawSceneSkinned = ")
+            .expect("DrawSceneSkinned");
+        let tail = &src[at..];
+        let end = tail.find("\n    mod.draw.").unwrap_or(tail.len());
+        let decl = &tail[..end];
+        for expression in [
+            "let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)",
+            "self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)",
+            "self.v_direct = self.sun_color * dp",
+            "self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)",
+            // Baked AO and screen-space AO both gate the AMBIENT fill only;
+            // the direct sun term must never carry the screen-space factor.
+            "self.v_ambient * (ao * sao)",
+            "self.v_direct * (ao_direct * sun_lit)",
+        ] {
+            assert!(decl.contains(expression), "model lighting lost `{expression}`");
+        }
+        assert!(
+            decl.contains("let world_normal = raw_world_normal * face_sign"),
+            "two-sided receiver normals must face the visible side"
+        );
+    }
+}
