@@ -257,6 +257,104 @@ fn every_crash_point_in_wal_mode_leaves_a_consistent_database() {
     assert!(committed > 0, "no crash point landed after the commit");
 }
 
+/// Child mode for the checkpoint sweep: fold the log with the countdown armed.
+#[test]
+fn crash_child_checkpoint() {
+    let Ok(path) = std::env::var("MAKEPAD_SQLITE_CRASH_CHILD_CKPT") else {
+        return; // not the child: nothing to do
+    };
+    let at: u64 = std::env::var("MAKEPAD_SQLITE_CRASH_AT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut db = Connection::open(Path::new(&path), Duration::from_secs(5)).expect("open");
+    makepad_sqlite::pager::set_crash_after(at);
+    db.execute("PRAGMA wal_checkpoint", &[]).expect("checkpoint");
+    println!("STEPS {}", makepad_sqlite::pager::write_steps());
+}
+
+fn run_checkpoint_child(db: &Path, crash_at: u64) -> (bool, String) {
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = Command::new(exe)
+        .args(["--exact", "crash_child_checkpoint", "--nocapture"])
+        .env("MAKEPAD_SQLITE_CRASH_CHILD_CKPT", db)
+        .env("MAKEPAD_SQLITE_CRASH_AT", crash_at.to_string())
+        .output()
+        .expect("spawn child");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// CRASH SAFETY OF THE CHECKPOINT ITSELF: a writer killed at any durable
+/// step of folding the log into the database leaves either the old WAL over
+/// a (possibly torn) database — which recovery replays — or the folded
+/// state; the logical content is identical at every point, and it is NEVER a
+/// mixture. This is the property that lets a connection own its log for
+/// life: nothing about crash recovery depends on idle-time lock courtesy.
+/// (Every sweep iteration also re-acquires WAL ownership after an aborted
+/// owner, which is the no-stale-lock property: POSIX locks die with the
+/// process.)
+#[test]
+fn every_crash_point_in_a_wal_checkpoint_leaves_a_consistent_database() {
+    if std::env::var("MAKEPAD_SQLITE_CRASH_CHILD").is_ok()
+        || std::env::var("MAKEPAD_SQLITE_CRASH_CHILD_CKPT").is_ok()
+    {
+        return;
+    }
+    let scratch = Scratch::new("crash-ckpt");
+    let pristine = scratch.path("pristine.db");
+    setup_mode(&pristine, true);
+    let pristine_wal = scratch.path("pristine.db-wal");
+    assert!(pristine_wal.exists(), "the fixture is not in WAL mode");
+    let before = state(&pristine);
+    assert_eq!(before.0, ROWS_BEFORE);
+
+    let copy_pair = |from: &Path, to: &Path| {
+        std::fs::copy(from, to).expect("copy db");
+        let from_wal = PathBuf::from(format!("{}-wal", from.display()));
+        let to_wal = PathBuf::from(format!("{}-wal", to.display()));
+        if from_wal.exists() {
+            std::fs::copy(&from_wal, &to_wal).expect("copy wal");
+        } else {
+            let _ = std::fs::remove_file(&to_wal);
+        }
+    };
+
+    let work = scratch.path("count.db");
+    copy_pair(&pristine, &work);
+    let (ok, out) = run_checkpoint_child(&work, 0);
+    assert!(ok, "uncrashed checkpoint child failed: {out}");
+    let steps: u64 = out
+        .lines()
+        .find_map(|l| l.strip_prefix("STEPS "))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("child reported no step count");
+    assert!(steps > 3, "expected a multi-step checkpoint, got {steps}");
+    eprintln!("checkpoint crash harness: {steps} durable write steps");
+
+    let mut crashed = 0;
+    for at in 1..=steps {
+        let path = scratch.path(&format!("ckpt-crash-{at}.db"));
+        copy_pair(&pristine, &path);
+        let (ok, _) = run_checkpoint_child(&path, at);
+        if !ok {
+            crashed += 1;
+        }
+        let recovered = recover_and_check(&path, &scratch, &format!("ckpt-{at}"));
+        // A checkpoint changes no logical content: every crash point must
+        // recover to exactly the pre-checkpoint state.
+        assert_eq!(
+            recovered, before,
+            "crash at checkpoint step {at} changed the database's content"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", path.display())));
+    }
+    assert!(crashed > 0, "no checkpoint crash point actually aborted the child");
+}
+
 #[test]
 fn a_hot_journal_is_replayed_by_sqlite_too() {
     if std::env::var("MAKEPAD_SQLITE_CRASH_CHILD").is_ok() || !have_sqlite3() {

@@ -198,6 +198,9 @@ fn an_annotation_burst_keeps_the_index_describing_the_table() {
             "generation {g}: the label count drifted"
         );
     }
+    // A connection owns the log for its whole life; the CLI cross-check runs
+    // after it closes and hands the log back.
+    drop(w);
     if have_sqlite3() {
         assert_eq!(sqlite3(&path, "PRAGMA integrity_check;\n").trim(), "ok");
     }
@@ -273,6 +276,10 @@ fn a_long_lived_reader_never_answers_from_a_stale_index() {
             "generation {generation}: the label count drifted"
         );
     }
+    // A connection owns the log for its whole life; the CLI cross-check runs
+    // after both handles close and the log is handed back.
+    drop(reader);
+    drop(w);
     if have_sqlite3() {
         assert_eq!(sqlite3(&path, "PRAGMA integrity_check;\n").trim(), "ok");
     }
