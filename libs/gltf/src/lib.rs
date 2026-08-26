@@ -35,3 +35,4 @@ pub use crate::writer::{
     GlbTexturedPart,
 };
 pub use makepad_math::DecodedPrimitive;
+pub use makepad_micro_serde::JsonValue;
