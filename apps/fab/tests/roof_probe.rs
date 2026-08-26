@@ -39,13 +39,27 @@ fn scene_input_all_visible(snap: &SceneSnapshot) -> SceneInput {
             emission: m.emission,
             ior: if m.ior > 1.0 { m.ior } else { 1.5 },
             transmission: m.transmission,
-            texture: None,
+            texture: if m.texture == u32::MAX { None } else { Some(m.texture as usize) },
             two_sided: m.double_sided,
         })
         .collect();
     if s.materials.is_empty() {
         s.materials.push(makepad_raytrace::Material::default());
     }
+    s.images = snap
+        .textures
+        .iter()
+        .map(|t| {
+            let data = t
+                .rgba
+                .chunks_exact(4)
+                .map(|p| {
+                    ((p[3] as u32) << 24) | ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | p[2] as u32
+                })
+                .collect();
+            makepad_raytrace::Image { width: t.width as usize, height: t.height as usize, data }
+        })
+        .collect();
     s
 }
 
@@ -70,6 +84,48 @@ fn roof_hit_distribution() {
         snap.triangle_priority.iter().filter(|p| **p != 0).count(),
         snap.triangle_coplanar_group.iter().filter(|g| **g != 0).count(),
     );
+    // FAB_PROBE_MAT=1: per-material triangle counts, texture presence and
+    // uv spread — which surfaces the tracer shades flat that the raster
+    // textures (the lawn parity question).
+    if std::env::var("FAB_PROBE_MAT").is_ok() {
+        let n_tris = snap.indices.len() / 3;
+        let nm = snap.materials.len();
+        let mut tri_count = vec![0usize; nm];
+        let mut uv_min = vec![[f32::MAX; 2]; nm];
+        let mut uv_max = vec![[f32::MIN; 2]; nm];
+        for t in 0..n_tris {
+            let m = snap.triangle_material.get(t).copied().unwrap_or(0) as usize;
+            if m >= nm {
+                continue;
+            }
+            tri_count[m] += 1;
+            for k in 0..3 {
+                let vi = snap.indices[t * 3 + k] as usize;
+                if let Some(uv) = snap.uvs.get(vi) {
+                    for a in 0..2 {
+                        uv_min[m][a] = uv_min[m][a].min(uv[a]);
+                        uv_max[m][a] = uv_max[m][a].max(uv[a]);
+                    }
+                }
+            }
+        }
+        for (m, mat) in snap.materials.iter().enumerate() {
+            if tri_count[m] == 0 {
+                continue;
+            }
+            let tex = if mat.texture == u32::MAX {
+                "none".to_string()
+            } else {
+                let t = &snap.textures[mat.texture as usize];
+                format!("#{} {}x{}", mat.texture, t.width, t.height)
+            };
+            eprintln!(
+                "mat {m:2}: tris {:6} albedo {:?} rough {:.2} tex {} uv [{:.2},{:.2}]..[{:.2},{:.2}]",
+                tri_count[m], mat.albedo, mat.roughness, tex,
+                uv_min[m][0], uv_min[m][1], uv_max[m][0], uv_max[m][1]
+            );
+        }
+    }
     let mut input = scene_input_all_visible(&snap);
     // The interactive camera + sun of the live repro session (seam log).
     input.camera = Camera {
@@ -86,6 +142,38 @@ fn roof_hit_distribution() {
         sun_strength: 4.0,
     };
     let packed = PackedScene::pack(&input);
+    if input.materials.len() > 18 {
+        let base = 18 * 16;
+        eprintln!(
+            "probe: images {} atlas {:?}; mat18 tex flag {} rect {:?}",
+            input.images.len(),
+            packed.atlas.as_ref().map(|a| (a.width, a.height)),
+            packed.mat.data[base + 10],
+            &packed.mat.data[base + 12..base + 16],
+        );
+        // The grass image's own contrast: if the source texels are nearly
+        // uniform, a flat traced lawn is faithful and the raster's texture
+        // comes from somewhere else.
+        if let Some(img) = input.images.get(8) {
+            let mut lum: Vec<f32> = img
+                .data
+                .iter()
+                .map(|p| {
+                    let r = ((p >> 16) & 255) as f32;
+                    let g = ((p >> 8) & 255) as f32;
+                    let b = (p & 255) as f32;
+                    (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+                })
+                .collect();
+            lum.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean = lum.iter().sum::<f32>() / lum.len() as f32;
+            eprintln!(
+                "probe: image8 {}x{} lum mean {:.3} p5 {:.3} p95 {:.3}",
+                img.width, img.height, mean,
+                lum[lum.len() / 20], lum[lum.len() * 19 / 20]
+            );
+        }
+    }
     let mut tracer = cpu_ref::cpu_tracer(&input, &packed);
     if std::env::var("FAB_PROBE_NO_SKIN").is_ok() {
         tracer.shadow_skin = 0.0;
@@ -122,6 +210,8 @@ fn roof_hit_distribution() {
     // Pass 2: per-sample primary hit + sun shadow on those pixels.
     let n_samples = 32u32;
     let mut alternating_layer = 0usize;
+    let mut cross_group_alternating = 0usize;
+    let mut cross_group_examples: Vec<(u32, u32, f32, Vec<(i32, u32, u16)>)> = Vec::new();
     let mut alternating_shadow = 0usize;
     let mut dark_total = 0u64;
     let mut lit_total = 0u64;
@@ -162,6 +252,29 @@ fn roof_hit_distribution() {
         let spread = t_max - t_min;
         if tris.len() > 1 && spread < 0.05 {
             alternating_layer += 1;
+            // Same coplanar group = the deterministic priority tie-break
+            // already owns the decision; cross-group / zero-group pairs are
+            // the ones a per-sample flip can still slip through.
+            let groups: std::collections::HashSet<u32> = tris
+                .keys()
+                .map(|t| input.tri_coplanar_group.get(*t as usize).copied().unwrap_or(0))
+                .collect();
+            if groups.len() > 1 || groups.contains(&0) {
+                if cross_group_examples.len() < 8 {
+                    let detail: Vec<(i32, u32, u16)> = tris
+                        .keys()
+                        .map(|t| {
+                            (
+                                *t,
+                                input.tri_coplanar_group.get(*t as usize).copied().unwrap_or(0),
+                                input.tri_priority.get(*t as usize).copied().unwrap_or(0),
+                            )
+                        })
+                        .collect();
+                    cross_group_examples.push((px, py, spread, detail));
+                }
+                cross_group_alternating += 1;
+            }
         }
         if shadow_lit > 0 && shadow_dark > 0 {
             alternating_shadow += 1;
@@ -172,10 +285,13 @@ fn roof_hit_distribution() {
         }
     }
     eprintln!(
-        "probe: of {} sampled roof pixels — {} alternate between stacked layers (<5 cm band), {} alternate sun shadow; dark samples {} / lit {} ({:.1} % dark)",
-        sampled, alternating_layer, alternating_shadow, dark_total, lit_total,
+        "probe: of {} sampled roof pixels — {} alternate between stacked layers (<5 cm band), {} of those cross groups, {} alternate sun shadow; dark samples {} / lit {} ({:.1} % dark)",
+        sampled, alternating_layer, cross_group_alternating, alternating_shadow, dark_total, lit_total,
         100.0 * dark_total as f64 / (dark_total + lit_total).max(1) as f64
     );
+    for (px, py, spread, detail) in &cross_group_examples {
+        eprintln!("  cross-group px({px},{py}) spread {spread:.4}: {detail:?} (tri, group, priority)");
+    }
     // Blocker-distance histogram over the dark samples: how far away is the
     // thing that blocks a roof pixel's sun ray?
     let mut blockers: Vec<f32> = Vec::new();
