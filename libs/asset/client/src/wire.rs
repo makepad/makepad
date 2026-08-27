@@ -22,8 +22,9 @@ use makepad_asset_data::{
 // ---- discovery beacon ------------------------------------------------------
 
 /// Catalog-event vocabulary this build speaks (see [`path_events`]). v1 is
-/// the original kind set; v2 adds `asset_retired` / `revision_retired`.
-pub const EVENT_VOCABULARY: u32 = 2;
+/// the original kind set; v2 adds retirement, and v4 adds in-memory model
+/// part deltas (which older vocabularies are never sent).
+pub const EVENT_VOCABULARY: u32 = 4;
 
 pub const DISCOVERY_MAGIC: [u8; 8] = *b"MPASDIS1";
 pub const BEACON_LEN: usize = 36;
@@ -368,6 +369,18 @@ pub fn path_events(
     p
 }
 
+pub fn path_model_previews() -> String {
+    "/v1/model-previews".to_string()
+}
+
+pub fn path_model_preview_part(session: &str, part: &str) -> String {
+    format!("/v1/model-preview-sessions/{session}/parts/{part}")
+}
+
+pub fn path_model_preview_mesh(token: &str) -> String {
+    format!("/v1/model-preview-meshes/{token}")
+}
+
 // ---- typed asset operations -------------------------------------------------
 
 /// The versioned operation registry with truthful availability.
@@ -437,9 +450,31 @@ pub fn path_chat_tool_result(id: &str) -> String {
     format!("/v1/chat/sessions/{id}/tool-result")
 }
 
+/// The durable conversation of one session, as a client renders it.
+pub fn path_chat_transcript(id: &str) -> String {
+    format!("/v1/chat/sessions/{id}/transcript")
+}
+
 pub const MAX_CHAT_WAIT_MS: u64 = 30_000;
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_CHAT_ATTACHMENTS: usize = 8;
+/// `client_key` / `context_key` on session create: the identity a keyed
+/// (create-or-resume) session is stored under on the server.
+pub const MAX_CHAT_KEY_BYTES: usize = 64;
+
+/// A chat session key (`client_key` = who, e.g. `ip:10.0.0.7`; `context_key`
+/// = what, e.g. the game's asset id) is opaque but DISPLAY-SAFE and
+/// path-safe by construction: 1..=64 bytes of `[A-Za-z0-9._:@-]` with at
+/// least one letter or digit. Never a secret — it names a transcript file
+/// on the server, it does not protect it (the bearer token does).
+pub fn chat_key_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_CHAT_KEY_BYTES
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'@' | b'-')
+        })
+        && s.bytes().any(|b| b.is_ascii_alphanumeric())
+}
 
 // ---- import + immutable derived variants -----------------------------------
 
@@ -671,6 +706,47 @@ mod tests {
             assert!(p.bytes().all(target_byte_ok), "{p}");
             assert!(p.starts_with('/'), "{p}");
         }
+    }
+
+    #[test]
+    fn chat_paths_and_keys_are_strict() {
+        let sid = "chat_0123456789abcdef";
+        for p in [
+            path_chat_providers(),
+            path_chat_sessions(),
+            path_chat_session(sid),
+            path_chat_send(sid),
+            path_chat_events(sid, 7, 500, 64),
+            path_chat_cancel(sid),
+            path_chat_tool_result(sid),
+            path_chat_transcript(sid),
+        ] {
+            assert!(p.len() <= MAX_TARGET_BYTES, "{p}");
+            assert!(p.bytes().all(target_byte_ok), "{p}");
+            assert!(p.starts_with("/v1/chat/"), "{p}");
+        }
+        assert_eq!(path_chat_transcript(sid), "/v1/chat/sessions/chat_0123456789abcdef/transcript");
+        // The keys the sandbox sends today, a multiplayer player id later,
+        // and an asset id as the context — all fine.
+        for good in ["ip:10.0.0.7", "ip:fe80::1", "player-42", "ast_0123456789abcdef", "a", "rik@n4"] {
+            assert!(chat_key_ok(good), "{good}");
+        }
+        for bad in [
+            "",
+            " ",
+            "a b",
+            "a/b",
+            "..",
+            "...",
+            ":",
+            "a\n",
+            "ü",
+            "a\u{7}",
+            &"x".repeat(MAX_CHAT_KEY_BYTES + 1),
+        ] {
+            assert!(!chat_key_ok(bad), "{bad:?}");
+        }
+        assert!(chat_key_ok(&"x".repeat(MAX_CHAT_KEY_BYTES)));
     }
 
     #[test]

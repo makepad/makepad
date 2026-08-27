@@ -1,7 +1,15 @@
-use crate::page::{FontEncoding, FontResource};
+use crate::page::{BaseEncoding, FontEncoding, FontResource};
 
 /// Get the width of a character code in a font (in PDF text space units, i.e. 1/1000 of text size).
 pub fn char_width(font: &FontResource, char_code: u32) -> f64 {
+    // Type0/CID: the descendant font's W map, DW for everything else.
+    if let Some(cid_widths) = &font.cid_widths {
+        return cid_widths
+            .get(&char_code)
+            .copied()
+            .unwrap_or(font.default_width);
+    }
+
     // Try font-specific widths first
     if char_code >= font.first_char && char_code <= font.last_char {
         let idx = (char_code - font.first_char) as usize;
@@ -18,71 +26,305 @@ pub fn char_width(font: &FontResource, char_code: u32) -> f64 {
     font.default_width
 }
 
-/// Decode a byte sequence to a Unicode string using the font's encoding.
-pub fn decode_text(font: &FontResource, bytes: &[u8]) -> String {
-    // Try ToUnicode CMap first
-    if let Some(ref cmap) = font.to_unicode {
-        let mut result = String::new();
-        // Check if this is a 2-byte encoding (CIDFont / Identity-H)
-        let is_two_byte =
-            matches!(font.encoding, FontEncoding::Identity) || font.subtype == "Type0";
-
-        if is_two_byte && bytes.len() >= 2 {
-            let mut i = 0;
-            while i + 1 < bytes.len() {
-                let code = ((bytes[i] as u32) << 8) | (bytes[i + 1] as u32);
-                if let Some(s) = cmap.mappings.get(&code) {
-                    result.push_str(s);
-                } else if let Some(ch) = char::from_u32(code) {
-                    result.push(ch);
-                } else {
-                    result.push('\u{FFFD}');
+/// Decode a byte sequence into (character code, Unicode text) pairs — the
+/// unit a renderer needs to place each glyph at its own PDF-metric
+/// position (`char_width(code)`), which is what keeps substituted-font
+/// output aligned. A code may decode to several chars (ligatures).
+pub fn decode_codes(font: &FontResource, bytes: &[u8]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let is_two_byte = matches!(font.encoding, FontEncoding::Identity) || font.subtype == "Type0";
+    if is_two_byte && bytes.len() >= 2 {
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            let code = ((bytes[i] as u32) << 8) | (bytes[i + 1] as u32);
+            let s = if let Some(cmap) = &font.to_unicode {
+                match cmap.mappings.get(&code) {
+                    Some(s) => s.clone(),
+                    None => char::from_u32(code)
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
                 }
-                i += 2;
-            }
-            // Handle odd trailing byte
-            if i < bytes.len() {
-                let code = bytes[i] as u32;
-                if let Some(s) = cmap.mappings.get(&code) {
-                    result.push_str(s);
-                }
+            } else {
+                char::from_u32(code)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            };
+            out.push((code, s));
+            i += 2;
+        }
+        return out;
+    }
+    for &b in bytes {
+        let code = b as u32;
+        let s = if let Some(cmap) = &font.to_unicode {
+            match cmap.mappings.get(&code) {
+                Some(s) => s.clone(),
+                None => decode_single_byte(font, b),
             }
         } else {
-            for &b in bytes {
-                let code = b as u32;
-                if let Some(s) = cmap.mappings.get(&code) {
-                    result.push_str(s);
-                } else {
-                    result.push(winansi_to_char(b));
-                }
-            }
-        }
-        return result;
+            decode_single_byte(font, b)
+        };
+        out.push((code, s));
     }
+    out
+}
 
-    // Fall back to encoding-based decoding
+fn decode_single_byte(font: &FontResource, b: u8) -> String {
     match &font.encoding {
-        FontEncoding::WinAnsi | FontEncoding::Standard => {
-            bytes.iter().map(|&b| winansi_to_char(b)).collect()
-        }
-        FontEncoding::MacRoman => bytes.iter().map(|&b| macroman_to_char(b)).collect(),
-        FontEncoding::Identity => {
-            // Two-byte identity encoding
-            let mut result = String::new();
-            let mut i = 0;
-            while i + 1 < bytes.len() {
-                let code = ((bytes[i] as u32) << 8) | (bytes[i + 1] as u32);
-                if let Some(ch) = char::from_u32(code) {
-                    result.push(ch);
+        FontEncoding::MacRoman => macroman_to_char(b).to_string(),
+        FontEncoding::Custom(base, map) => match map.get(&b) {
+            Some(name) => glyph_name_to_string(name),
+            // Unmapped codes go through the DIFFERENCES' base encoding.
+            // (Standard shares our WinAnsi table's Latin range.)
+            None => match base {
+                BaseEncoding::MacRoman => macroman_to_char(b).to_string(),
+                _ => winansi_to_char(b).to_string(),
+            },
+        },
+        _ => winansi_to_char(b).to_string(),
+    }
+}
+
+/// Decode a byte sequence to a Unicode string using the font's encoding.
+/// One policy for drawing, selection and extraction: the concatenation of
+/// [`decode_codes`], so a renderer's per-glyph pieces and the tracker's
+/// text can never disagree.
+pub fn decode_text(font: &FontResource, bytes: &[u8]) -> String {
+    decode_codes(font, bytes)
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect()
+}
+
+/// A glyph name to its Unicode text: `uniXXXX`/`uXXXX(XX)` forms, the
+/// common Latin/AGL names a Differences array actually uses, else — for a
+/// single-character name like `a` — the character itself.
+pub fn glyph_name_to_string(name: &str) -> String {
+    // `uniXXXX` (possibly several 4-digit groups, e.g. uni00660069 = "fi").
+    // Glyph names are attacker-controlled: only ASCII hex is sliced, so no
+    // panics on non-char-boundary bytes from #-escaped names.
+    if let Some(hex) = name.strip_prefix("uni") {
+        if hex.len() >= 4
+            && hex.len() % 4 == 0
+            && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            let mut out = String::new();
+            for group in hex.as_bytes().chunks(4) {
+                let s = std::str::from_utf8(group).unwrap_or("");
+                match u32::from_str_radix(s, 16).ok().and_then(char::from_u32) {
+                    Some(ch) => out.push(ch),
+                    None => return String::new(),
                 }
-                i += 2;
             }
-            result
+            return out;
         }
-        FontEncoding::Custom(_) => {
-            // For custom encodings, just use WinAnsi as a reasonable fallback
-            bytes.iter().map(|&b| winansi_to_char(b)).collect()
+    }
+    if let Some(hex) = name.strip_prefix('u') {
+        if (4..=6).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if let Ok(code) = u32::from_str_radix(hex, 16) {
+                if let Some(ch) = char::from_u32(code) {
+                    return ch.to_string();
+                }
+            }
         }
+    }
+    let s = match name {
+        "space" => " ",
+        "exclam" => "!",
+        "quotedbl" => "\"",
+        "numbersign" => "#",
+        "dollar" => "$",
+        "percent" => "%",
+        "ampersand" => "&",
+        "quotesingle" => "'",
+        "parenleft" => "(",
+        "parenright" => ")",
+        "asterisk" => "*",
+        "plus" => "+",
+        "comma" => ",",
+        "hyphen" => "-",
+        "minus" => "\u{2212}",
+        "period" => ".",
+        "slash" => "/",
+        "zero" => "0",
+        "one" => "1",
+        "two" => "2",
+        "three" => "3",
+        "four" => "4",
+        "five" => "5",
+        "six" => "6",
+        "seven" => "7",
+        "eight" => "8",
+        "nine" => "9",
+        "colon" => ":",
+        "semicolon" => ";",
+        "less" => "<",
+        "equal" => "=",
+        "greater" => ">",
+        "question" => "?",
+        "at" => "@",
+        "bracketleft" => "[",
+        "backslash" => "\\",
+        "bracketright" => "]",
+        "asciicircum" => "^",
+        "underscore" => "_",
+        "grave" => "`",
+        "braceleft" => "{",
+        "bar" => "|",
+        "braceright" => "}",
+        "asciitilde" => "~",
+        "fi" => "\u{FB01}",
+        "fl" => "\u{FB02}",
+        "ffi" => "\u{FB03}",
+        "ffl" => "\u{FB04}",
+        "ff" => "\u{FB00}",
+        "quoteleft" => "\u{2018}",
+        "quoteright" => "\u{2019}",
+        "quotedblleft" => "\u{201C}",
+        "quotedblright" => "\u{201D}",
+        "quotesinglbase" => "\u{201A}",
+        "quotedblbase" => "\u{201E}",
+        "guillemotleft" => "\u{00AB}",
+        "guillemotright" => "\u{00BB}",
+        "guilsinglleft" => "\u{2039}",
+        "guilsinglright" => "\u{203A}",
+        "endash" => "\u{2013}",
+        "emdash" => "\u{2014}",
+        "bullet" => "\u{2022}",
+        "ellipsis" => "\u{2026}",
+        "dagger" => "\u{2020}",
+        "daggerdbl" => "\u{2021}",
+        "perthousand" => "\u{2030}",
+        "trademark" => "\u{2122}",
+        "copyright" => "\u{00A9}",
+        "registered" => "\u{00AE}",
+        "degree" => "\u{00B0}",
+        "plusminus" => "\u{00B1}",
+        "multiply" => "\u{00D7}",
+        "divide" => "\u{00F7}",
+        "Euro" => "\u{20AC}",
+        "sterling" => "\u{00A3}",
+        "yen" => "\u{00A5}",
+        "cent" => "\u{00A2}",
+        "currency" => "\u{00A4}",
+        "section" => "\u{00A7}",
+        "paragraph" => "\u{00B6}",
+        "exclamdown" => "\u{00A1}",
+        "questiondown" => "\u{00BF}",
+        "germandbls" => "\u{00DF}",
+        "AE" => "\u{00C6}",
+        "ae" => "\u{00E6}",
+        "OE" => "\u{0152}",
+        "oe" => "\u{0153}",
+        "Oslash" => "\u{00D8}",
+        "oslash" => "\u{00F8}",
+        "Aring" => "\u{00C5}",
+        "aring" => "\u{00E5}",
+        "Adieresis" => "\u{00C4}",
+        "adieresis" => "\u{00E4}",
+        "Odieresis" => "\u{00D6}",
+        "odieresis" => "\u{00F6}",
+        "Udieresis" => "\u{00DC}",
+        "udieresis" => "\u{00FC}",
+        "Idieresis" => "\u{00CF}",
+        "idieresis" => "\u{00EF}",
+        "Edieresis" => "\u{00CB}",
+        "edieresis" => "\u{00EB}",
+        "ydieresis" => "\u{00FF}",
+        "Aacute" => "\u{00C1}",
+        "aacute" => "\u{00E1}",
+        "Eacute" => "\u{00C9}",
+        "eacute" => "\u{00E9}",
+        "Iacute" => "\u{00CD}",
+        "iacute" => "\u{00ED}",
+        "Oacute" => "\u{00D3}",
+        "oacute" => "\u{00F3}",
+        "Uacute" => "\u{00DA}",
+        "uacute" => "\u{00FA}",
+        "Agrave" => "\u{00C0}",
+        "agrave" => "\u{00E0}",
+        "Egrave" => "\u{00C8}",
+        "egrave" => "\u{00E8}",
+        "Igrave" => "\u{00CC}",
+        "igrave" => "\u{00EC}",
+        "Ograve" => "\u{00D2}",
+        "ograve" => "\u{00F2}",
+        "Ugrave" => "\u{00D9}",
+        "ugrave" => "\u{00F9}",
+        "Acircumflex" => "\u{00C2}",
+        "acircumflex" => "\u{00E2}",
+        "Ecircumflex" => "\u{00CA}",
+        "ecircumflex" => "\u{00EA}",
+        "Icircumflex" => "\u{00CE}",
+        "icircumflex" => "\u{00EE}",
+        "Ocircumflex" => "\u{00D4}",
+        "ocircumflex" => "\u{00F4}",
+        "Ucircumflex" => "\u{00DB}",
+        "ucircumflex" => "\u{00FB}",
+        "Atilde" => "\u{00C3}",
+        "atilde" => "\u{00E3}",
+        "Ntilde" => "\u{00D1}",
+        "ntilde" => "\u{00F1}",
+        "Otilde" => "\u{00D5}",
+        "otilde" => "\u{00F5}",
+        "Ccedilla" => "\u{00C7}",
+        "ccedilla" => "\u{00E7}",
+        "Scaron" => "\u{0160}",
+        "scaron" => "\u{0161}",
+        "Zcaron" => "\u{017D}",
+        "zcaron" => "\u{017E}",
+        "Ydieresis" => "\u{0178}",
+        "Thorn" => "\u{00DE}",
+        "thorn" => "\u{00FE}",
+        "Eth" => "\u{00D0}",
+        "eth" => "\u{00F0}",
+        "mu" => "\u{00B5}",
+        "florin" => "\u{0192}",
+        "circumflex" => "\u{02C6}",
+        "tilde" => "\u{02DC}",
+        "caron" => "\u{02C7}",
+        "breve" => "\u{02D8}",
+        "dotaccent" => "\u{02D9}",
+        "ring" => "\u{02DA}",
+        "ogonek" => "\u{02DB}",
+        "hungarumlaut" => "\u{02DD}",
+        "cedilla" => "\u{00B8}",
+        "dieresis" => "\u{00A8}",
+        "macron" => "\u{00AF}",
+        "acute" => "\u{00B4}",
+        "brokenbar" => "\u{00A6}",
+        "logicalnot" => "\u{00AC}",
+        "middot" | "periodcentered" => "\u{00B7}",
+        "onesuperior" => "\u{00B9}",
+        "twosuperior" => "\u{00B2}",
+        "threesuperior" => "\u{00B3}",
+        "onequarter" => "\u{00BC}",
+        "onehalf" => "\u{00BD}",
+        "threequarters" => "\u{00BE}",
+        "ordfeminine" => "\u{00AA}",
+        "ordmasculine" => "\u{00BA}",
+        _ => "",
+    };
+    if !s.is_empty() {
+        return s.to_string();
+    }
+    // Component ligature names join their parts with underscores
+    // ("f_i", "f_f_l"): decompose and map each part.
+    if name.contains('_') && !name.starts_with('_') {
+        let joined: String = name
+            .split('_')
+            .filter(|p| !p.is_empty())
+            .map(glyph_name_to_string)
+            .collect();
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c.to_string(),
+        // Unknown multi-char name: render nothing rather than garbage.
+        _ => String::new(),
     }
 }
 

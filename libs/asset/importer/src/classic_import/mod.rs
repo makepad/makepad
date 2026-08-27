@@ -29,6 +29,13 @@ pub(crate) fn merge_near_corners(parts: &[&[[f32; 3]]]) -> weld::Merge {
     weld::Merge::from_parts(parts, weld::MERGE_TOLERANCE)
 }
 
+/// As [`merge_near_corners`], for a converter whose source unit is not the
+/// id-tech one: the tolerance is "three of the SOURCE's units", so a Build
+/// map passes three of its own (see `weld::MERGE_TOLERANCE`'s tuning note).
+pub(crate) fn merge_near_corners_with(parts: &[&[[f32; 3]]], tolerance: f32) -> weld::Merge {
+    weld::Merge::from_parts(parts, tolerance)
+}
+
 /// Test-only audit: T-junctions still present across a converted level's
 /// parts (see [`weld::t_junctions_left`]).
 #[cfg(test)]
@@ -972,6 +979,9 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
     for (group, idxs) in doom_groups {
         let mut lumps = Vec::new();
         let mut tags_base = Vec::new();
+        // Letter, size and patch origin per lump — what the view-weapon
+        // lines of a held gun are written from once the sheet is packed.
+        let mut view_frames: Vec<(char, u32, u32, Option<(i32, i32)>)> = Vec::new();
         for &i in &idxs {
             let rel = assets[i].rel_path.replace('\\', "/");
             let stem = rel
@@ -985,6 +995,10 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             };
             let path = staged.join(&assets[i].rel_path);
             let (w, h) = png_dims(&path).unwrap_or((1, 1));
+            if let Some(&(letter, _)) = parsed.pairs.first() {
+                let grab = std::fs::read(&path).ok().and_then(|png| doom::png_grab(&png));
+                view_frames.push((letter, w, h, grab));
+            }
             let file = rel
                 .rsplit('/')
                 .next()
@@ -999,6 +1013,22 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
         let Some(mut bb) = assemble(prefix, &lumps) else {
             continue;
         };
+        // The thing's behaviour rides on its own asset: whatever this
+        // prefix IS in a level (a Zombieman, a medikit, a drum that bursts)
+        // is written into the manifest beside its frames, with its sounds
+        // and burst artwork named by the keys this pack publishes.
+        let wad_slug = group
+            .rsplit('/')
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
+        bb.actor = doom::doom_prefix_actor(&wad_slug, prefix);
+        bb.weapon = doom::doom_prefix_weapon(&wad_slug, prefix);
+        // Doom draws one patch texel per map unit (`R_ProjectSprite`), so
+        // the sheet states the metre a pixel covers and no reader has to
+        // calibrate pixels against a walker: a 56-texel play sprite IS
+        // the 1.75 m marine.
+        bb.metres_per_pixel = doom::DOOM_UNIT;
         let rel_path = format!("{group}.billboard");
         let dest = staged.join(&rel_path);
         if let Some(parent) = dest.parent() {
@@ -1007,9 +1037,37 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
         let Some(icon_rel) = write_actor_sheet(staged, &dest, &mut bb) else {
             continue;
         };
+        // A held weapon (or its muzzle flash) also says how the player's
+        // own hands draw it — frames per state at their tics, flash, bob,
+        // raise and sounds — appended after the sheet lines, ignored by
+        // every reader that only wants the actor.
+        if let Some(lines) = doom::view_weapon_lines(&group, &view_frames) {
+            use std::io::Write;
+            let appended = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&dest)
+                .and_then(|mut manifest| manifest.write_all(lines.as_bytes()));
+            if let Err(e) = appended {
+                log_line(&format!("view weapon {}: {e}", dest.display()));
+            }
+        }
         let mut tags = tags_base;
         tags.push("stateful".into());
         tags.push(bb.role.as_str().into());
+        // The names a person would search by ("imp", "demon", "barrel"),
+        // and the role word "monster" for hostiles — the chat's catalog
+        // search runs on labels, and a sheet labeled only by its lump
+        // mnemonic is invisible to it.
+        for name in doom::doom_prefix_names(prefix) {
+            tags.push((*name).to_string());
+        }
+        if bb
+            .actor
+            .as_ref()
+            .is_some_and(|a| a.role == makepad_asset_data::actor_def::ActorRole::Monster)
+        {
+            tags.push("monster".into());
+        }
         extra.push(ClassicAsset {
             key: group,
             kind: AssetKind::Billboard,
@@ -1053,6 +1111,8 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
         }
         let slug = group.rsplit('/').next().unwrap_or("sprite");
         let mut bb = sequential_idle(slug, frames, SpriteRole::Effect);
+        // Quake `.spr` frames are one texel per map unit as well.
+        bb.metres_per_pixel = doom::QUAKE_UNIT;
         let rel_path = format!("{group}.billboard");
         let dest = staged.join(&rel_path);
         let Some(icon_rel) = write_actor_sheet(staged, &dest, &mut bb) else {
@@ -1290,6 +1350,47 @@ mod tests {
             assets.iter().map(|a| &a.key).collect::<Vec<_>>()
         );
         assert!(assets.iter().any(|a| a.key == "worlds/e1l1"));
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    /// A held weapon's per-lump frames collapse into one pack whose
+    /// manifest carries the view-weapon lines: placements from each
+    /// frame's patch origin, the fire table, and the flash pack beside it —
+    /// while a frame that lost its origin still gets a bottom-centred seat.
+    #[test]
+    fn collapse_writes_view_weapon_lines_for_held_guns() {
+        use makepad_asset_data::view_weapon::ViewWeapon;
+        let staged = tmp_dir("doom_view_weapon");
+        let dir = staged.join("billboards/doom1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |w: u32, h: u32| encode_png_rgba(&vec![0u8; (w * h * 4) as usize], w, h).unwrap();
+        std::fs::write(dir.join("shtga0.png"), doom::png_with_grab(png(79, 60), -121, -108)).unwrap();
+        std::fs::write(dir.join("shtgb0.png"), png(119, 121)).unwrap();
+        std::fs::write(dir.join("shtfa0.png"), doom::png_with_grab(png(44, 31), -141, -95)).unwrap();
+        let lump = |name: &str| ClassicAsset {
+            key: format!("billboards/doom1/{name}"),
+            kind: AssetKind::Billboard,
+            rel_path: format!("billboards/doom1/{name}.png"),
+            tags: vec!["billboard".into(), "weapon".into()],
+            icon_rel: None,
+        };
+        let mut assets = vec![lump("shtga0"), lump("shtgb0"), lump("shtfa0")];
+        collapse_stateful_billboards(&mut assets, &staged);
+        let gun = std::fs::read_to_string(staged.join("billboards/doom1/shtg.billboard")).unwrap();
+        let def = ViewWeapon::parse(&gun).expect("view lines on the shotgun");
+        assert_eq!(def.key, "billboards/doom1/shtg");
+        assert_eq!(def.flash.as_deref(), Some("billboards/doom1/shtf"));
+        assert_eq!(def.places[&'A'], (122.0, 140.0));
+        assert_eq!(def.places[&'B'], (100.5, 79.0));
+        assert_eq!(def.clip("fire").unwrap().steps.len(), 9);
+        // The plain reader still sees the same pack underneath.
+        let bb = crate::stateful_billboard::StatefulBillboard::parse(&gun).unwrap();
+        assert_eq!(bb.prefix, "shtg");
+        assert_eq!(bb.frames.len(), 2);
+        let flash = std::fs::read_to_string(staged.join("billboards/doom1/shtf.billboard")).unwrap();
+        let flash = ViewWeapon::parse(&flash).expect("placements on the flash");
+        assert!(flash.clips.is_empty());
+        assert_eq!(flash.places[&'A'], (142.0, 127.0));
         let _ = std::fs::remove_dir_all(&staged);
     }
 
@@ -1593,11 +1694,11 @@ mod tests {
         let mut pos = Vec::new();
         let mut uvs = Vec::new();
         let mut idx = Vec::new();
-        emit_sector_grid(&mut pos, &mut uvs, &mut idx, &left, &verts, 1.0 / 64.0, 0.0, slot, false);
+        emit_sector_grid(&mut pos, &mut uvs, &mut idx, &left, &verts, doom::DOOM_UNIT, 0.0, slot, false);
         let left_end = idx.len();
-        emit_sector_grid(&mut pos, &mut uvs, &mut idx, &right, &verts, 1.0 / 64.0, 0.0, slot, false);
+        emit_sector_grid(&mut pos, &mut uvs, &mut idx, &right, &verts, doom::DOOM_UNIT, 0.0, slot, false);
         // Just right of the shared wall (Doom x = 80), mid-room.
-        let probe = doom_xz(80.0 + 0.05 * 64.0, 32.0);
+        let probe = doom_xz(80.0 + 0.05 / doom::DOOM_UNIT, 32.0);
         let mut hits = 0u32;
         for tri in idx.chunks_exact(3) {
             let a = pos[tri[0] as usize];
@@ -1754,7 +1855,7 @@ mod tests {
             &mut idx,
             &edges,
             &verts,
-            1.0 / 64.0,
+            doom::DOOM_UNIT,
             1.0,
             slot,
             true,
@@ -1817,7 +1918,7 @@ mod tests {
             &mut idx,
             &edges,
             &verts,
-            1.0 / 64.0,
+            doom::DOOM_UNIT,
             0.0,
             slot,
             false,
@@ -1866,7 +1967,7 @@ mod tests {
         let mut idx = Vec::new();
         let pts: Vec<[f32; 2]> = ring.iter().map(|&i| verts[i]).collect();
         emit_convex_ring(
-            &mut pos, &mut uvs, &mut idx, &pts, 1.0 / 64.0, 0.0, slot, false,
+            &mut pos, &mut uvs, &mut idx, &pts, doom::DOOM_UNIT, 0.0, slot, false,
         );
         let centre = doom_xz(32.0, 32.0);
         let mut hits = 0u32;
@@ -1929,7 +2030,7 @@ mod tests {
         let mut uvs = Vec::new();
         let mut idx = Vec::new();
         emit_convex_ring(
-            &mut pos, &mut uvs, &mut idx, &poly, 1.0 / 64.0, 0.0, slot, false,
+            &mut pos, &mut uvs, &mut idx, &poly, doom::DOOM_UNIT, 0.0, slot, false,
         );
         let probe = doom_xz(inside[0], inside[1]);
         let hits = idx.chunks_exact(3).filter(|tri| {
@@ -1958,7 +2059,7 @@ mod tests {
             &mut uvs,
             &mut idx,
             &[[0.0, 0.0], [128.0, 0.0], [0.0, 128.0]],
-            1.0 / 64.0,
+            doom::DOOM_UNIT,
             0.0,
             slot,
             false,
@@ -2043,7 +2144,7 @@ mod tests {
                 &sec_light,
                 colors,
                 &uv_map,
-                1.0 / 64.0,
+                doom::DOOM_UNIT,
                 None,
                 None,
             );
@@ -2076,7 +2177,7 @@ mod tests {
             &mut idx,
             &edges,
             &verts,
-            1.0 / 64.0,
+            doom::DOOM_UNIT,
             0.0,
             slot,
             false,
@@ -2132,7 +2233,7 @@ mod tests {
             &mut idx,
             &edges,
             &verts,
-            1.0 / 64.0,
+            doom::DOOM_UNIT,
             0.0,
             slot,
             false,
@@ -2887,11 +2988,11 @@ mesh {
         assert_eq!(door.name, "door_1");
         // Closed on the floor, open at 128 - 4 headroom, at 1/64 scale.
         assert!((door.closed_y - 0.0).abs() < 1e-6, "{door:?}");
-        assert!((door.open_y - 124.0 / 64.0).abs() < 1e-6, "{door:?}");
+        assert!((door.open_y - 124.0 * doom::DOOM_UNIT).abs() < 1e-6, "{door:?}");
         // Doorway centre in engine space (Doom x 128..192, y 0..128; north
         // is −Z, so the doorway's y = 64 lands at z = −1).
-        assert!((door.centre[0] - 160.0 / 64.0).abs() < 1e-4, "{door:?}");
-        assert!((door.centre[2] + 64.0 / 64.0).abs() < 1e-4, "{door:?}");
+        assert!((door.centre[0] - 160.0 * doom::DOOM_UNIT).abs() < 1e-4, "{door:?}");
+        assert!((door.centre[2] + 64.0 * doom::DOOM_UNIT).abs() < 1e-4, "{door:?}");
 
         // The exported GLB carries it as an animating node.
         let json_text = glb_json(&mesh.glb);
@@ -3050,7 +3151,7 @@ mesh {
             attr.get("COLOR_0").expect("COLOR_0 baked into the level"),
         );
         assert_eq!(colors.len(), pos.len());
-        // Room A is at x < 2 m, room B at x > 3 m.
+        // Room A is at map x < 128 (4 m), room B past x > 192 (6 m).
         let light_at = |pick: fn(f32) -> bool| {
             pos.chunks_exact(3)
                 .zip(colors.chunks_exact(3))
@@ -3060,8 +3161,8 @@ mesh {
         };
         // Walls carry Doom's fake contrast (+/- one 16-unit light level),
         // so each room's vertices sit within a step of its lightlevel.
-        let bright = light_at(|x| x < 1.5);
-        let dim = light_at(|x| x > 3.5);
+        let bright = light_at(|x| x < 96.0 * doom::DOOM_UNIT);
+        let dim = light_at(|x| x > 224.0 * doom::DOOM_UNIT);
         assert!(
             (239.0 / 255.0..=1.0).contains(&bright),
             "lightlevel 255 (+/- fake contrast) -> {bright}"
@@ -3216,11 +3317,11 @@ mesh {
         assert!(names.contains(&"exit"), "{names:?}");
         assert!(names.contains(&"key_red"), "{names:?}");
         let key = markers.iter().find(|m| m.name == "key_red").unwrap();
-        assert!((key.pos[0] - 96.0 / 64.0).abs() < 1e-4, "{key:?}");
-        assert!((key.pos[1] - 41.0 / 64.0).abs() < 1e-4, "eye above the floor");
+        assert!((key.pos[0] - 96.0 * doom::DOOM_UNIT).abs() < 1e-4, "{key:?}");
+        assert!((key.pos[1] - 41.0 * doom::DOOM_UNIT).abs() < 1e-4, "eye above the floor");
         let exit = markers.iter().find(|m| m.name == "exit").unwrap();
         // Room A's south wall runs (0,0)->(128,0): its midpoint is x=64.
-        assert!((exit.pos[0] - 1.0).abs() < 1e-4, "{exit:?}");
+        assert!((exit.pos[0] - 64.0 * doom::DOOM_UNIT).abs() < 1e-4, "{exit:?}");
         assert!(exit.pos[2].abs() < 1e-4, "{exit:?}");
         let _ = map_verts(&wad.lumps, "MAP01");
 
@@ -3259,12 +3360,12 @@ mesh {
             let (x, z) = (f32::from_bits(*bx), f32::from_bits(*bz));
             buckets.entry((x as i32, z as i32)).or_default().push((x, z));
         }
-        // Snap quantum: `snap_pos` rounds to 1/1024 m, so anything within
+        // Snap quantum: `snap_pos` rounds to 1/512 m, so anything within
         // half of that of an edge is ON it. The end margin is the weld's own
         // `MIN_FROM_END`, so this audit asks the same question the pass
         // answers — see its doc for why a cut nearer than one source unit to
         // a corner is not worth making.
-        const ON_EDGE: f32 = 1.0 / 2048.0;
+        const ON_EDGE: f32 = 1.0 / 1024.0;
         const FROM_END: f32 = super::weld::MIN_FROM_END;
         let mut hits = 0usize;
         for t in tris {
@@ -3844,13 +3945,13 @@ mesh {
 
         // The vanilla table, stated in metres in the player's own frame.
         for (name, typ, ahead, left) in [
-            ("green armour (zigzag room, WEST)", 2018u16, 6.0f32, 20.0f32),
-            ("blue armour (courtyard, EAST)", 2019, 5.25, -12.0),
-            ("shotgun (east hall, BEHIND)", 2001, -5.0, -34.5),
+            ("green armour (zigzag room, WEST)", 2018u16, 12.0f32, 40.0f32),
+            ("blue armour (courtyard, EAST)", 2019, 10.5, -24.0),
+            ("shotgun (east hall, BEHIND)", 2001, -10.0, -69.0),
         ] {
             let (got_ahead, got_left) = ahead_left(spawn_pos, spawn_yaw, at(typ));
             assert!(
-                (got_ahead - ahead).abs() < 0.02 && (got_left - left).abs() < 0.02,
+                (got_ahead - ahead).abs() < 0.04 && (got_left - left).abs() < 0.04,
                 "{name}: vanilla puts it {ahead:.2} m ahead / {left:.2} m left, \
                  the GLB puts it {got_ahead:.2} / {got_left:.2} \
                  (a sign flip on `left` is the level's MIRROR)"
@@ -4101,7 +4202,7 @@ mesh {
         // tops out exactly at the higher floor. (A per-triangle invariant
         // would be wrong here — `push_wall_tiled` splits a wall at texture
         // boundaries, so a middle tile's top is a tile edge, not the wall's.)
-        let unit = 1.0f32 / 64.0;
+        let unit = doom::DOOM_UNIT;
         let lump = |name: &str| {
             crate::classic_import::doom::lump_by_name_after(&wad.lumps, "E1M1", name)
                 .expect(name)
@@ -4232,15 +4333,15 @@ mesh {
                             // are where several sectors' corner slivers
                             // meet and clip against each other; the tread
                             // itself is the span between them.
-                            let at = along_of(cx, cz) * len * 64.0;
-                            let span = len * 64.0;
+                            let at = along_of(cx, cz) * len / doom::DOOM_UNIT;
+                            let span = len / doom::DOOM_UNIT;
                             if at > 6.0 && at < span - 6.0 {
                                 worst = worst.max(sp.abs().min(sq.abs()));
                             }
                         }
                     }
                     if worst > 0.0 {
-                        let by = worst * 64.0;
+                        let by = worst / doom::DOOM_UNIT;
                         straddles.push((y, by, is_upper));
                         // `snap_pos` quantises to 1/1024m, so a vertex ON the
                         // line can land 0.03 units to either side. Anything
@@ -4255,10 +4356,10 @@ mesh {
                             "tread at y={:.4} overhangs the riser line \
                              ({:.1},{:.1})-({:.1},{:.1}) by {by:.3} map units",
                             y,
-                            a[0] * 64.0,
-                            -a[1] * 64.0,
-                            b[0] * 64.0,
-                            -b[1] * 64.0
+                            a[0] / doom::DOOM_UNIT,
+                            -a[1] / doom::DOOM_UNIT,
+                            b[0] / doom::DOOM_UNIT,
+                            -b[1] / doom::DOOM_UNIT
                         );
                     }
                 }
@@ -4267,10 +4368,10 @@ mesh {
                 top <= upper + 1e-4,
                 "step at ({:.1},{:.1})-({:.1},{:.1}): riser tops {:.4}m above the {:.4}m floor \
                  — {:.2} map units of lip",
-                a[0] * 64.0,
-                -a[1] * 64.0,
-                b[0] * 64.0,
-                -b[1] * 64.0,
+                a[0] / doom::DOOM_UNIT,
+                -a[1] / doom::DOOM_UNIT,
+                b[0] / doom::DOOM_UNIT,
+                -b[1] / doom::DOOM_UNIT,
                 top,
                 upper,
                 (top - upper) * 64.0
@@ -4343,10 +4444,52 @@ mesh {
 
         // The renderer's own parser must find the same sky in the real map.
         let model = makepad_render::model::StaticModel::parse_glb(&mesh.glb).expect("parse");
-        let sky = model.sky.expect("E1M1 sky part");
+        let sky = model.sky.as_ref().expect("E1M1 sky part");
         assert_eq!(sky.repeat, 4.0);
         assert_eq!(sky.images.len(), 1);
         assert!(sky.indices.len() >= 3, "sky faces survive");
+        // Regression pin: every horizontal F_SKY1 face belongs only to the
+        // tagged sky node. The ordinary level stream must have no ceiling
+        // covering the same point, or a renderer that correctly lifts the
+        // sky node out still leaves a huge black slab over the outdoor area.
+        let stride = makepad_render::model::MODEL_VERTEX_FLOATS;
+        let packed_pos = |vertices: &[f32], index: u32| {
+            let at = index as usize * stride;
+            [vertices[at], vertices[at + 1], vertices[at + 2]]
+        };
+        let mut sky_ceilings = 0usize;
+        for tri in sky.indices.chunks_exact(3) {
+            let face = [
+                packed_pos(&sky.vertices, tri[0]),
+                packed_pos(&sky.vertices, tri[1]),
+                packed_pos(&sky.vertices, tri[2]),
+            ];
+            if face[0][1] != face[1][1] || face[1][1] != face[2][1] {
+                continue; // sky-to-sky upper wall, not a sector ceiling
+            }
+            sky_ceilings += 1;
+            let sample = [
+                (face[0][0] + face[1][0] + face[2][0]) / 3.0,
+                (face[0][2] + face[1][2] + face[2][2]) / 3.0,
+            ];
+            let covered_by_level = model.indices.chunks_exact(3).any(|base| {
+                let base = [
+                    packed_pos(&model.vertices, base[0]),
+                    packed_pos(&model.vertices, base[1]),
+                    packed_pos(&model.vertices, base[2]),
+                ];
+                base[0][1] == face[0][1]
+                    && base[1][1] == face[0][1]
+                    && base[2][1] == face[0][1]
+                    && point_in_flat_tri(sample, &base)
+            });
+            assert!(
+                !covered_by_level,
+                "F_SKY1 ceiling at y={:.4} also exists in E1M1's ordinary level geometry",
+                face[0][1]
+            );
+        }
+        assert!(sky_ceilings > 0, "E1M1 must exercise F_SKY1 ceiling emission");
         let nav = crate::classic_import::doom::doom_map_nav(&wad.lumps, "E1M1").expect("nav");
         eprintln!(
             "E1M1 markers: {:?}",
@@ -4471,7 +4614,8 @@ mesh {
                     part.pos[tri[1] as usize],
                     part.pos[tri[2] as usize],
                 ];
-                if !ps.iter().all(|p| (p[0] - 2.0).abs() < 1e-3) {
+                // The step line sits at map x = 128.
+                if !ps.iter().all(|p| (p[0] - 128.0 * doom::DOOM_UNIT).abs() < 1e-3) {
                     continue;
                 }
                 let lo = ps.iter().fold(f32::MAX, |a, p| a.min(p[1]));
@@ -4491,7 +4635,7 @@ mesh {
         write_step_wad(&wad_path, [0, 24], [128, 128]);
         let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
         let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
-        let upper_floor = 24.0 / 64.0;
+        let upper_floor = 24.0 * doom::DOOM_UNIT;
         let spans = wall_plane_spans(&mesh.glb);
         assert!(!spans.is_empty(), "the riser must exist");
         let highest = spans.iter().fold(f32::MIN, |a, (_, hi)| a.max(*hi));
@@ -4528,7 +4672,7 @@ mesh {
         write_step_wad(&wad_path, [0, 0], [128, 96]);
         let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
         let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
-        let lower_ceiling = 96.0 / 64.0;
+        let lower_ceiling = 96.0 * doom::DOOM_UNIT;
         let spans = wall_plane_spans(&mesh.glb);
         assert!(!spans.is_empty(), "the band must exist");
         let lowest = spans.iter().fold(f32::MAX, |a, (lo, _)| a.min(*lo));
@@ -4654,7 +4798,7 @@ mesh {
         assert_eq!(mesh.lifts.len(), 1, "one plat sector");
         let lift = &mesh.lifts[0];
         assert_eq!(lift.name, "lift_1");
-        assert!((lift.closed_y - 1.0).abs() < 1e-4, "up floor 64 units");
+        assert!((lift.closed_y - 64.0 * doom::DOOM_UNIT).abs() < 1e-4, "up floor 64 units");
         assert!((lift.open_y - 0.0).abs() < 1e-4, "down to the neighbours");
 
         let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
@@ -4716,13 +4860,17 @@ mesh {
         assert_eq!(t.name, "teleport_1");
         // Destination in metres: Doom (256, 64) at floor 0 + eye 41, all
         // over 64, with north at −Z.
-        assert!((t.dst[0] - 4.0).abs() < 1e-4, "{t:?}");
-        assert!((t.dst[1] - 41.0 / 64.0).abs() < 1e-4, "{t:?}");
-        assert!((t.dst[2] + 1.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[0] - 256.0 * doom::DOOM_UNIT).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[1] - 41.0 * doom::DOOM_UNIT).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[2] + 64.0 * doom::DOOM_UNIT).abs() < 1e-4, "{t:?}");
         // Doom angle 90 is north, and north is −Z: yaw 0 looks down −Z.
         assert!(t.yaw.abs() < 1e-4, "{t:?}");
-        // The pad hugs the teleport line (x = 128 units = 2 m), 16 units deep.
-        assert!(t.pad_min[0] >= 1.7 && t.pad_max[0] <= 2.3, "{t:?}");
+        // The pad hugs the teleport line (x = 128 units), 16 units deep.
+        assert!(
+            t.pad_min[0] >= 112.0 * doom::DOOM_UNIT - 0.05
+                && t.pad_max[0] <= 128.0 * doom::DOOM_UNIT + 0.05,
+            "{t:?}"
+        );
         assert!(
             t.pad_max[1] - t.pad_min[1] > 1.5,
             "pad spans the doorway: {t:?}"
@@ -4784,7 +4932,7 @@ mesh {
                     part.pos[tri[2] as usize],
                 ]
                 .iter()
-                .all(|p| p[0] > 3.05 && p[1].abs() < 1e-3)
+                .all(|p| p[0] > 195.0 * doom::DOOM_UNIT && p[1].abs() < 1e-3)
             })
         };
         assert!(
@@ -4807,20 +4955,20 @@ mesh {
         let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
         let nav = doom_map_nav(&wad.lumps, "MAP01").expect("nav");
 
-        // THINGS: type 1 at (64, 64), angle 0. 64 map units = 1 m, and Doom
-        // north is GLB −Z, so y = 64 lands at z = −1.
+        // THINGS: type 1 at (64, 64), angle 0. 64 map units = 2 m, and Doom
+        // north is GLB −Z, so y = 64 lands at z = −2.
         assert_eq!(nav.starts.len(), 1);
         let start = &nav.starts[0];
         assert_eq!(start.name, "player_start");
-        assert!((start.pos[0] - 1.0).abs() < 1e-6, "{start:?}");
-        assert!((start.pos[2] + 1.0).abs() < 1e-6, "{start:?}");
+        assert!((start.pos[0] - 64.0 * doom::DOOM_UNIT).abs() < 1e-6, "{start:?}");
+        assert!((start.pos[2] + 64.0 * doom::DOOM_UNIT).abs() < 1e-6, "{start:?}");
         // Sector floor 0 + Doom VIEWHEIGHT 41 units.
-        assert!((start.pos[1] - 41.0 / 64.0).abs() < 1e-6, "{start:?}");
+        assert!((start.pos[1] - 41.0 * doom::DOOM_UNIT).abs() < 1e-6, "{start:?}");
         // Doom angle 0 is east, and east is +X: yaw π/2 looks down +X.
         assert!((start.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert_eq!(nav.floor_y, Some(0.0));
-        assert_eq!(nav.eye_height, Some(41.0 / 64.0));
-        assert_eq!(nav.step_height, Some(24.0 / 64.0));
+        assert_eq!(nav.eye_height, Some(41.0 * doom::DOOM_UNIT));
+        assert_eq!(nav.step_height, Some(24.0 * doom::DOOM_UNIT));
 
         // The anchors a World publishes.
         let anchors = nav.anchors();
@@ -4830,7 +4978,7 @@ mesh {
             vec!["floor_height", "step_height", "eye_height", "player_start"]
         );
         let ps = anchors.last().unwrap();
-        assert!((ps.transform.pos.y - 41.0 / 64.0).abs() < 1e-6);
+        assert!((ps.transform.pos.y - 41.0 * doom::DOOM_UNIT).abs() < 1e-6);
         // yaw pi/2 about +Y.
         assert!((ps.transform.rot.y - std::f32::consts::FRAC_PI_4.sin()).abs() < 1e-5);
         let _ = std::fs::remove_dir_all(&root);
@@ -4902,10 +5050,10 @@ mesh {
             .iter()
             .find(|a| a.name == "player_start")
             .unwrap();
-        assert!((ps.transform.pos.x - 1.0).abs() < 1e-4);
-        assert!((ps.transform.pos.y - 41.0 / 64.0).abs() < 1e-4);
-        // Doom north is GLB −Z: the thing at y = 64 lands at z = −1.
-        assert!((ps.transform.pos.z + 1.0).abs() < 1e-4);
+        assert!((ps.transform.pos.x - 64.0 * doom::DOOM_UNIT).abs() < 1e-4);
+        assert!((ps.transform.pos.y - 41.0 * doom::DOOM_UNIT).abs() < 1e-4);
+        // Doom north is GLB −Z: the thing at y = 64 lands at z = −2.
+        assert!((ps.transform.pos.z + 64.0 * doom::DOOM_UNIT).abs() < 1e-4);
         // Y-up metres, exactly what the GLB was exported in.
         assert_eq!(world.coordinate_system.units_per_meter, 1.0);
         assert_eq!(world.coordinate_system.up, makepad_asset_data::Axis::YPos);
@@ -4934,9 +5082,24 @@ mesh {
         );
         let text = std::fs::read_to_string(staged.join("billboards/freedoom/troo.billboard")).unwrap();
         let bb = crate::stateful_billboard::StatefulBillboard::parse(&text).unwrap();
+        // The sheet declares the metre one sprite pixel covers — Doom's own
+        // map unit, so a 56-px play sprite IS the 1.75 m marine and no
+        // reader ever calibrates pixels against a walker again.
+        assert!(
+            (bb.metres_per_pixel - doom::DOOM_UNIT).abs() < 1e-6,
+            "declared {} — the Doom unit is {}",
+            bb.metres_per_pixel,
+            doom::DOOM_UNIT
+        );
         let sheet = bb.sheet.expect("sheet header");
         assert_eq!(sheet.cols, 1);
         assert!(bb.frames.iter().all(|f| f.file == "troo.png" && f.cell.is_some()));
+        // The thing's behaviour rides on its own asset: what an Imp IS is
+        // written on the Imp's manifest, its sounds as this pack's keys.
+        let actor = bb.actor.expect("the Imp's definition rides on its billboard");
+        assert_eq!(actor.health, 60.0);
+        assert_eq!(actor.sounds.sight, "sfx/freedoom/dsbgsit1");
+        assert!(text.contains("\nactor role=monster "), "{text}");
 
         // In the catalog: exactly one Billboard row, sheet + manifest.
         let pack = report.pack.expect("compiled pack");

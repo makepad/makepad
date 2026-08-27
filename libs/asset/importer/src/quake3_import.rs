@@ -40,8 +40,11 @@ pub const QUAKE3_LICENSE: &str = "id-Software-demo";
 pub const QUAKE3_HOME: &str = "https://ioquake3.org/";
 pub const QUAKE3_CREDITS: &str = "id Software Quake III Arena demo";
 
-/// 64 Quake units = 1 metre (same scale as the Doom/Freedoom importer).
-const SCALE: f32 = 1.0 / 64.0;
+/// Metres per Quake III unit: the 56-unit player (`playerMins`/`playerMaxs`
+/// in `bg_pmove.c`, −24..32) stands `PERSON_HEIGHT` — 1/32 m, the same
+/// number as Doom, Quake and Quake II. It was 1/64 (a 0.875 m Sarge) until
+/// 2026-08-26.
+const SCALE: f32 = crate::dimensions::PERSON_HEIGHT / 56.0;
 /// Q3 `DEFAULT_VIEWHEIGHT` (standing).
 const VIEW_HEIGHT: f32 = 26.0;
 /// A spawn entity's origin sits this far above the floor (player bbox mins z).
@@ -3102,6 +3105,7 @@ fn bsp46_place(
         world: world_key.into(),
         spawn,
         places,
+        family: Default::default(),
     }
 }
 
@@ -5179,8 +5183,8 @@ blendFunc GL_ONE GL_ONE
                 nav.starts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
             );
             // Heights are the same engine constants everywhere.
-            assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
-            assert!((nav.step_height.unwrap() - STEP_HEIGHT / 64.0).abs() < 1e-4);
+            assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) * SCALE).abs() < 1e-4);
+            assert!((nav.step_height.unwrap() - STEP_HEIGHT * SCALE).abs() < 1e-4);
             assert!(nav.floor_y.is_some(), "{slug} floor");
             // Q3 has no exit and no keys: nothing is invented.
             assert!(nav.markers.is_empty(), "{slug} markers");
@@ -5693,8 +5697,8 @@ blendFunc GL_ONE GL_ONE
             Some(2)
         );
         // `angle -1` is UP; a 128-tall brush minus the default lip 8 travels
-        // 120 units = 1.875 m.
-        let travel = 120.0 / 64.0;
+        // 120 units in metres.
+        let travel = 120.0 * SCALE;
         assert!(
             (extra_f32(extras, "travel") - travel).abs() < 1e-4,
             "travel {}",
@@ -5774,10 +5778,10 @@ blendFunc GL_ONE GL_ONE
         let extras = lift.get("extras").expect("extras");
         assert_eq!(extras.get("kind").and_then(Value::as_str), Some("lift"));
         assert_eq!(extras.get("default").and_then(Value::as_str), Some("up"));
-        // Top of the brush at z=64 → 1 m; `height 64` drops it to 0.
-        assert!((extra_f32(extras, "up") - 1.0).abs() < 1e-4);
+        // Top of the brush at z=64; `height 64` drops it to 0.
+        assert!((extra_f32(extras, "up") - 64.0 * SCALE).abs() < 1e-4);
         assert!(extra_f32(extras, "down").abs() < 1e-4);
-        assert!((extra_f32(extras, "travel") + 1.0).abs() < 1e-4);
+        assert!((extra_f32(extras, "travel") + 64.0 * SCALE).abs() < 1e-4);
         assert!(
             (extra_f32(extras, "wait") - crate::glb_nodes::LIFT_WAIT_SECONDS).abs() < 1e-4
         );
@@ -5798,7 +5802,7 @@ blendFunc GL_ONE GL_ONE
         let sampler = &clip.get("samplers").unwrap().as_arr().unwrap()[0];
         let values = read_accessor(&root, &bin, sampler.get("output").unwrap().as_i64().unwrap());
         assert_eq!(&values[0..3], &[0.0, 0.0, 0.0], "t=0 is UP");
-        assert!((values[4] + 1.0).abs() < 1e-4, "t=1 is DOWN: {values:?}");
+        assert!((values[4] + 64.0 * SCALE).abs() < 1e-4, "t=1 is DOWN: {values:?}");
         let _ = std::fs::remove_dir_all(&staged);
     }
 
@@ -6018,40 +6022,40 @@ blendFunc GL_ONE GL_ONE
         let start = &nav.starts[0];
         // origin (0,0,64) → GLB (0, 64/64 + 26/64, 0), yaw 90° → 0.
         assert!(start.pos[0].abs() < 1e-4);
-        assert!((start.pos[1] - (64.0 + VIEW_HEIGHT) / 64.0).abs() < 1e-4);
+        assert!((start.pos[1] - (64.0 + VIEW_HEIGHT) * SCALE).abs() < 1e-4);
         assert!(start.yaw.abs() < 1e-4, "angle 90 looks down −Z");
-        assert!((nav.floor_y.unwrap() - (64.0 - ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
-        assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) / 64.0).abs() < 1e-4);
-        assert!((nav.step_height.unwrap() - STEP_HEIGHT / 64.0).abs() < 1e-4);
+        assert!((nav.floor_y.unwrap() - (64.0 - ORIGIN_ABOVE_FLOOR) * SCALE).abs() < 1e-4);
+        assert!((nav.eye_height.unwrap() - (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) * SCALE).abs() < 1e-4);
+        assert!((nav.step_height.unwrap() - STEP_HEIGHT * SCALE).abs() < 1e-4);
 
         assert_eq!(nav.doors.len(), 1);
         assert_eq!(nav.doors[0].name, "door_1");
-        // Brush centre (32, 8, 64) → GLB (0.5, 1.0, −0.125); it opens 120 up.
-        assert!((nav.doors[0].pos[0] - 0.5).abs() < 1e-4, "{:?}", nav.doors[0]);
-        assert!((nav.doors[0].closed_y - 1.0).abs() < 1e-4, "{:?}", nav.doors[0]);
+        // Brush centre (32, 8, 64), GLB axes; it opens 120 up.
+        assert!((nav.doors[0].pos[0] - 32.0 * SCALE).abs() < 1e-4, "{:?}", nav.doors[0]);
+        assert!((nav.doors[0].closed_y - 64.0 * SCALE).abs() < 1e-4, "{:?}", nav.doors[0]);
         assert!(
-            (nav.doors[0].open_y - (1.0 + 120.0 / 64.0)).abs() < 1e-4,
+            (nav.doors[0].open_y - (64.0 + 120.0) * SCALE).abs() < 1e-4,
             "{:?}",
             nav.doors[0]
         );
 
         assert_eq!(nav.lifts.len(), 1);
         assert_eq!(nav.lifts[0].name, "lift_1");
-        assert!((nav.lifts[0].closed_y - 1.0).abs() < 1e-4, "rests UP");
+        assert!((nav.lifts[0].closed_y - 64.0 * SCALE).abs() < 1e-4, "rests UP");
         assert!(nav.lifts[0].open_y.abs() < 1e-4, "drops to 0");
 
         assert_eq!(nav.teleports.len(), 1);
         let t = &nav.teleports[0];
         assert_eq!(t.name, "teleport_1");
-        // Pad x 300..364, map y −32..32 → GLB z −0.5..0.5.
-        assert!((t.pad_min[0] - 300.0 / 64.0).abs() < 1e-4, "{t:?}");
-        assert!((t.pad_max[0] - 364.0 / 64.0).abs() < 1e-4, "{t:?}");
-        assert!((t.pad_min[1] + 0.5).abs() < 1e-4, "{t:?}");
-        assert!((t.pad_max[1] - 0.5).abs() < 1e-4, "{t:?}");
+        // Pad x 300..364, map y −32..32 mirrored into GLB z.
+        assert!((t.pad_min[0] - 300.0 * SCALE).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_max[0] - 364.0 * SCALE).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_min[1] + 32.0 * SCALE).abs() < 1e-4, "{t:?}");
+        assert!((t.pad_max[1] - 32.0 * SCALE).abs() < 1e-4, "{t:?}");
         // Destination (512, 64, 32) at eye height, facing `angle 270`.
-        assert!((t.dst[0] - 8.0).abs() < 1e-4, "{t:?}");
-        assert!((t.dst[1] - (32.0 + VIEW_HEIGHT) / 64.0).abs() < 1e-4, "{t:?}");
-        assert!((t.dst[2] + 1.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[0] - 512.0 * SCALE).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[1] - (32.0 + VIEW_HEIGHT) * SCALE).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[2] + 64.0 * SCALE).abs() < 1e-4, "{t:?}");
         assert!(
             (t.yaw - (std::f32::consts::FRAC_PI_2 - 270f32.to_radians())).abs() < 1e-4,
             "{t:?}"
@@ -6082,7 +6086,7 @@ blendFunc GL_ONE GL_ONE
         }
         let lift = anchors.iter().find(|a| a.name == "lift_1").unwrap();
         assert!(
-            (lift.transform.pos.y - 1.0).abs() < 1e-4,
+            (lift.transform.pos.y - 64.0 * SCALE).abs() < 1e-4,
             "the lift anchor sits at the UP floor"
         );
         let _ = std::fs::remove_dir_all(&staged);
@@ -6357,7 +6361,7 @@ blendFunc GL_ONE GL_ONE
             "{warnings:?}"
         );
         // `angle 90` is +Y in map space, which is −Z in the GLB.
-        let travel = (128.0 - Q3_MOVER_LIP) / 64.0;
+        let travel = (128.0 - Q3_MOVER_LIP) * SCALE;
         assert!(movers[0].travel[0].abs() < 1e-4, "{:?}", movers[0]);
         assert!(
             (movers[0].travel[2] + travel).abs() < 1e-4,
@@ -6386,7 +6390,7 @@ blendFunc GL_ONE GL_ONE
             "{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n\"spawnflags\" \"1\"\n}\n",
         );
         let (open, _) = bsp46_movers(&open, &models);
-        let travel = (128.0 - Q3_MOVER_LIP) / 64.0;
+        let travel = (128.0 - Q3_MOVER_LIP) * SCALE;
         // Ordinary door: baked closed, opens UP.
         assert_eq!(plain[0].shift, [0.0; 3]);
         assert!((plain[0].travel[1] - travel).abs() < 1e-4, "{:?}", plain[0]);
@@ -6411,7 +6415,7 @@ blendFunc GL_ONE GL_ONE
             &open,
         )
         .0;
-        let baked_centre = 64.0 / 64.0;
+        let baked_centre = 64.0 * SCALE;
         assert!(
             (nav.doors[0].closed_y - (baked_centre + travel)).abs() < 1e-4,
             "{:?}",

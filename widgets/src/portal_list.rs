@@ -1774,6 +1774,18 @@ impl PortalList {
 
     /// The item currently shown first. A list whose content shrank under it
     /// needs this to notice that its viewport is now past the end.
+    /// One past the last item id set by `set_item_range`.
+    pub fn range_end(&self) -> usize {
+        self.range_end
+    }
+
+    /// The current scroll offset of `first_id`'s top relative to the
+    /// viewport start (paired with [`Self::set_first_id_and_scroll`] for
+    /// programmatic nudges; the draw pass renormalizes and clamps).
+    pub fn first_scroll(&self) -> f64 {
+        self.first_scroll
+    }
+
     pub fn first_id(&self) -> usize {
         self.first_id
     }

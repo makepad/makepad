@@ -265,6 +265,51 @@ fn asset_publication_manifest_alias_thumbnail() {
 }
 
 #[test]
+fn data_source_publishes_without_thumbnail_or_mesh() {
+    let ts = start_server("publish_data");
+    let token = ts.admin_token();
+    let mut control = ts.control(Some(&token));
+    let mut data = ts.data(Some(&token));
+    let source = b"dataset: city-boundaries-v1\nformat: geojson\n";
+
+    assert_eq!(data.post_bytes("/v1/blobs?ns=demo", source).status, 201);
+    let r = control.post_json("/v1/assets", &jobj(vec![("namespace", jstr("demo"))]));
+    assert_eq!(r.status, 201);
+    let asset_id = r.str_field("asset_id");
+    let asset: AssetId = asset_id.parse().unwrap();
+    let manifest = data_manifest(asset, source);
+    assert!(!manifest.kind.has_mesh());
+    assert!(manifest.thumbnail.is_none());
+    let bytes = manifest.to_canonical_bytes().expect("Source/Text-only Data manifest validates");
+
+    let r = control.post_bytes(&format!("/v1/assets/{asset_id}/revisions"), &bytes);
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    let revision = r.str_field("revision");
+    let r = control.post_json(
+        &format!("/v1/assets/{asset_id}/revisions/{revision}/publish"),
+        &jobj(vec![]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+
+    let r = control.get(&format!("/v1/revisions/{revision}/json"));
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json().get("kind").and_then(Value::as_str), Some("data"));
+    assert_eq!(data.get(&format!("/v1/thumbnails/revision/{revision}")).status, 404);
+
+    let annotation = jobj(vec![("title", jstr("City boundaries")), ("kind", jstr("data"))]);
+    assert_eq!(
+        control.put_json(&format!("/v1/assets/{asset_id}/annotation"), &annotation).status,
+        204
+    );
+    let r = control.get("/v1/search?ns=demo&kind=data");
+    assert_eq!(r.status, 200);
+    let page = r.json();
+    assert_eq!(page.get("total").and_then(Value::as_i64), Some(1));
+    let hit = &page.get("hits").and_then(Value::as_arr).unwrap()[0];
+    assert_eq!(hit.get("kind").and_then(Value::as_str), Some("data"));
+}
+
+#[test]
 fn quarantine_pulls_content_transactionally() {
     let ts = start_server("quarantine");
     let token = ts.admin_token();

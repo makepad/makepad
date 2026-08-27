@@ -18,13 +18,13 @@
 //!   a typed tool call ([`tools::ContentToolCall`]); the dispatcher
 //!   ([`dispatch::AssetServerTools`]) resolves and verifies every referenced
 //!   asset itself. Clients never relay paths, blobs, or credentials.
-//! - **Mutation is typed operations only.** There is no raw job enqueue,
-//!   publish, or alias tool: `operation.create` names a REGISTERED operation
-//!   kind over exact [`makepad_asset_data::AssetRevisionId`]s that must
-//!   already be bound to the session (attachments or revisions a prior tool
-//!   returned). The server pins the exact input file, validates rights, and
-//!   its atomic finalizer publishes NEW immutable revisions with exact
-//!   parent lineage; source revisions are never mutated.
+//! - **Mutation is closed and typed.** There is no raw job enqueue, publish,
+//!   or alias tool. Game sessions get one closed `content.generate` entry
+//!   point for three publishable pipeline families; transform work uses
+//!   `operation.create` over exact [`makepad_asset_data::AssetRevisionId`]s
+//!   already bound to the session. The server pins exact inputs, validates
+//!   rights, and workers publish NEW immutable revisions; sources are never
+//!   mutated.
 //! - **Availability is honest, end to end.** Operations are filtered by the
 //!   server's registered types intersected with live worker availability; a
 //!   missing or worker-less operation returns a structured
@@ -39,11 +39,15 @@
 //! [`fleet_http`] (minimal bounded HTTP for the fleet wire).
 
 pub mod catalog_sql;
+pub mod claude;
+pub mod cli;
+pub mod codex_cli;
 pub mod context;
 pub mod dispatch;
 pub mod fleet_discovery;
 pub mod fleet_http;
 pub mod grok;
+pub mod grok_cli;
 pub mod openai;
 pub mod provider;
 pub mod qwen;
@@ -51,6 +55,7 @@ pub mod responses;
 pub mod session;
 pub mod toolcall;
 pub mod tools;
+pub mod transcript;
 pub mod wire;
 
 pub use dispatch::AssetServerTools;
@@ -62,8 +67,8 @@ pub use session::{
     CancelFlag, ExecCtx, Origin, SendRefusal, Session, SessionId, ToolExecutor,
 };
 pub use tools::{
-    canonicalize_json, encode_args, AliasExpectArg, ConsultTask, ContentToolCall, GenerateThen,
-    InspectTarget, OperationInputArg, PublicationArg, ToolDef,
+    canonicalize_json, encode_args, AliasExpectArg, ConsultTask, ContentGenerateKind,
+    ContentToolCall, GenerateThen, InspectTarget, OperationInputArg, PublicationArg, ToolDef,
 };
 pub use wire::{
     AttachmentBinding, ChatEvent, ChatEventBody, ChatMessage, ChatRole, ProviderAvailability,

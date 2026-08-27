@@ -12,7 +12,7 @@ use {
             apple::apple_util::str_to_nsstring,
             macos::{
                 macos_app::{
-                    activate_cocoa_window_on_pointer_down, get_macos_class_global,
+                    activate_cocoa_window_on_pointer_down, focus_allowed, get_macos_class_global,
                     with_macos_app, MacosApp,
                 },
                 macos_event::MacosEvent,
@@ -220,6 +220,13 @@ impl MacosWindow {
         self.send_change_event();
     }
 
+    pub fn set_title(&mut self, title: &str) {
+        unsafe {
+            let title = str_to_nsstring(title);
+            let () = msg_send![self.window, setTitle: title];
+        }
+    }
+
     fn is_topmost(&self) -> bool {
         let level: i64 = unsafe { msg_send![self.window, level] };
         level > NSNormalWindowLevel
@@ -246,6 +253,7 @@ impl MacosWindow {
         self.macos_config = macos_config.normalized();
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+            crate::startup_trace("NSWindow init begin");
 
             // set the backpointeers
             (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
@@ -322,12 +330,16 @@ impl MacosWindow {
             // real Metal without flashing a window (the occlusion gate only
             // skips the WINDOW pass's present; child passes still render).
             if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
-                if self.is_nonactivating_panel() {
+                // A no-focus process (`--remote`, MAKEPAD_NO_FOCUS) shows the
+                // window without making it key or activating the app —
+                // see `macos_app::focus_allowed`.
+                if self.is_nonactivating_panel() || !focus_allowed() {
                     let () = msg_send![self.window, orderFront: nil];
                 } else {
                     let () = msg_send![self.window, makeKeyAndOrderFront: nil];
                 }
             }
+            crate::startup_trace("NSWindow ordered front");
 
             let rect = NSRect {
                 origin: NSPoint { x: 0., y: 0. },

@@ -62,6 +62,12 @@ const SEARCH_SPAN: i32 = 320;
 const ASTAR_BUDGET: usize = 20000;
 /// How far (in cells, Chebyshev) an endpoint may be snapped onto the grid.
 const SNAP_RADIUS: i32 = 6;
+/// Minimum time between invalidating already-derived cells. The simulation
+/// runs at 60 Hz, so 30 ticks is roughly half a second. Until this expires,
+/// queries deliberately use the previous grid: steering self-corrects on the
+/// next rebuild, while a moving obstacle can no longer force a derivation on
+/// every authored tick.
+const REBUILD_COOLDOWN_TICKS: u64 = 30;
 
 /// Fixed neighbour order — load-bearing for determinism (tie-breaks in A*
 /// and flow-field descent resolve by first-in-this-order).
@@ -100,10 +106,22 @@ pub struct NavMap {
     h: i32,
     /// Row-major chunk slots; `None` = dirty / not yet derived.
     chunks: Vec<Option<Arc<NavChunk>>>,
-    /// What the current layout was derived against.
-    built_render_rev: u64,
+    /// Regional edits wait here until the stale-ok cooldown expires. This is
+    /// kept parallel to `chunks`; entity changes rebuild the whole layout
+    /// because they may also change its coverage bounds.
+    pending_chunks: Vec<bool>,
+    /// What the current layout was derived against. `render_rev` is only a
+    /// cheap hint to recompute the obstacle fingerprint: presentation-only
+    /// changes must never invalidate navigation.
+    built_entity_hash: u64,
+    observed_entity_hash: u64,
+    observed_render_rev: u64,
     built_terrain_rev: u64,
     synced_once: bool,
+    last_invalidation_tick: u64,
+    /// Number of chunk-sized cell derivations performed. Kept as a cheap
+    /// runtime diagnostic and as the regression guard for nav storms.
+    derive_cells_runs: u64,
     /// Bumped whenever coverage or content is invalidated — path caches and
     /// flow fields key on it to know when to re-plan.
     pub generation: u64,
@@ -115,6 +133,7 @@ pub struct NavSrc<'a> {
     pub entities: &'a [Entity],
     pub terrain: Option<&'a Terrain>,
     pub render_rev: u64,
+    pub tick: u64,
 }
 
 impl NavMap {
@@ -128,11 +147,22 @@ impl NavMap {
         self.chunks.iter().flatten().count() * std::mem::size_of::<NavChunk>()
     }
 
+    /// Number of chunk derivations performed since this map was created.
+    pub fn derive_cells_runs(&self) -> u64 {
+        self.derive_cells_runs
+    }
+
     /// Dirty every chunk overlapping the world-space box — the terrain-edit
     /// hook (API-level; the producer lands in another track). Also records
     /// the terrain revision so the next sync does NOT full-invalidate: the
     /// caller told us exactly what moved.
-    pub fn mark_dirty(&mut self, min: Vec3f, max: Vec3f, terrain_rev: u64) {
+    pub fn mark_dirty(
+        &mut self,
+        min: Vec3f,
+        max: Vec3f,
+        terrain_rev: u64,
+        tick: u64,
+    ) {
         if self.w == 0 {
             return;
         }
@@ -141,33 +171,109 @@ impl NavMap {
         let c1x = ((max.x / NAV_CELL).ceil() as i32 - self.min_cx).div_euclid(NAV_CHUNK);
         let c1z = ((max.z / NAV_CELL).ceil() as i32 - self.min_cz).div_euclid(NAV_CHUNK);
         let (cw, ch) = (self.w / NAV_CHUNK, self.h / NAV_CHUNK);
+        if self.pending_chunks.len() != self.chunks.len() {
+            self.pending_chunks.resize(self.chunks.len(), false);
+        }
         // The 1-cell derivation apron means an edit inside a chunk can change
         // its neighbours' border cells too — dirty one chunk outward.
         for cz in (c0z - 1).max(0)..=(c1z + 1).min(ch - 1) {
             for cx in (c0x - 1).max(0)..=(c1x + 1).min(cw - 1) {
-                self.chunks[(cz * cw + cx) as usize] = None;
+                self.pending_chunks[(cz * cw + cx) as usize] = true;
             }
         }
+        // This revision is acknowledged by the pending bitmap. An unreported
+        // terrain revision still takes the full-layout path in `sync`.
         self.built_terrain_rev = terrain_rev;
-        self.generation = self.generation.wrapping_add(1);
+        if tick.saturating_sub(self.last_invalidation_tick) >= REBUILD_COOLDOWN_TICKS {
+            self.flush_pending(tick);
+        }
+    }
+
+    fn flush_pending(&mut self, tick: u64) {
+        let mut any = false;
+        for (chunk, pending) in self.chunks.iter_mut().zip(&mut self.pending_chunks) {
+            if *pending {
+                *chunk = None;
+                *pending = false;
+                any = true;
+            }
+        }
+        if any {
+            self.last_invalidation_tick = tick;
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 }
 
 // ── derivation ──────────────────────────────────────────────────────────
 
-/// Bring layout up to date. Static-entity churn (`render_rev`) or a terrain
-/// revision we were not told about (no `mark_dirty` call) full-invalidates;
-/// coverage bounds are recomputed then, chunks re-derive lazily on demand.
+/// Exactly the entities sampled by `derive_cell`. Parts are not entities at
+/// all; ordinary sensors, non-colliding decoration, movers, kinematics and
+/// rigids are also absent from the derived grid and therefore cannot dirty it.
+#[inline]
+fn entity_contributes_cells(e: &Entity) -> bool {
+    (e.kind == BodyKind::Static && !e.sensor && e.collide)
+        || (e.sensor && e.tag == "water")
+}
+
+/// Fingerprint only the fields `derive_cell` reads. The renderer's revision
+/// remains the cheap "something changed" hint, but a presentation-only edit
+/// computes the same fingerprint and leaves every nav chunk intact.
+fn entity_cells_hash(entities: &[Entity]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    };
+    for e in entities.iter().filter(|e| entity_contributes_cells(e)) {
+        mix(e.id);
+        mix(if e.sensor { 1 } else { 0 });
+        mix(e.pos.x.to_bits() as u64);
+        mix(e.pos.y.to_bits() as u64);
+        mix(e.pos.z.to_bits() as u64);
+        mix(e.half.x.to_bits() as u64);
+        mix(e.half.y.to_bits() as u64);
+        mix(e.half.z.to_bits() as u64);
+        mix(e.shape as u64);
+    }
+    hash
+}
+
+/// Bring layout up to date. A renderer revision only prompts a comparison of
+/// the actual rasterized inputs. Legitimate entity or unreported terrain
+/// changes full-invalidate no more than once per cooldown; stale chunks keep
+/// serving queries in between.
 fn sync(map: &mut NavMap, src: &NavSrc) {
     let trev = src.terrain.map_or(0, |t| t.revision);
-    if map.synced_once
-        && map.built_render_rev == src.render_rev
-        && map.built_terrain_rev == trev
-    {
+    if !map.synced_once {
+        let entity_hash = entity_cells_hash(src.entities);
+        map.synced_once = true;
+        map.observed_render_rev = src.render_rev;
+        map.observed_entity_hash = entity_hash;
+        rebuild_layout(map, src, entity_hash, trev);
+        map.last_invalidation_tick = src.tick;
         return;
     }
-    map.synced_once = true;
-    map.built_render_rev = src.render_rev;
+
+    if map.observed_render_rev != src.render_rev {
+        map.observed_render_rev = src.render_rev;
+        map.observed_entity_hash = entity_cells_hash(src.entities);
+    }
+
+    if src.tick.saturating_sub(map.last_invalidation_tick) < REBUILD_COOLDOWN_TICKS {
+        return;
+    }
+
+    if map.built_entity_hash != map.observed_entity_hash || map.built_terrain_rev != trev {
+        rebuild_layout(map, src, map.observed_entity_hash, trev);
+        map.last_invalidation_tick = src.tick;
+        return;
+    }
+    map.flush_pending(src.tick);
+}
+
+fn rebuild_layout(map: &mut NavMap, src: &NavSrc, entity_hash: u64, trev: u64) {
+    map.built_entity_hash = entity_hash;
     map.built_terrain_rev = trev;
     map.generation = map.generation.wrapping_add(1);
 
@@ -184,7 +290,7 @@ fn sync(map: &mut NavMap, src: &NavSrc) {
         any = true;
     }
     for e in src.entities {
-        if e.kind != BodyKind::Static || e.sensor || !e.collide {
+        if !entity_contributes_cells(e) || e.sensor {
             continue;
         }
         min.x = min.x.min(e.pos.x - e.half.x);
@@ -197,6 +303,7 @@ fn sync(map: &mut NavMap, src: &NavSrc) {
         map.w = 0;
         map.h = 0;
         map.chunks.clear();
+        map.pending_chunks.clear();
         return;
     }
     const PAD: f32 = 2.0;
@@ -216,6 +323,8 @@ fn sync(map: &mut NavMap, src: &NavSrc) {
     map.chunks.clear();
     map.chunks
         .resize(((map.w / NAV_CHUNK) * (map.h / NAV_CHUNK)) as usize, None);
+    map.pending_chunks.clear();
+    map.pending_chunks.resize(map.chunks.len(), false);
 }
 
 /// Walk-surface height and blocked-ness at one cell centre. This is THE
@@ -240,7 +349,7 @@ fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
             }
             continue;
         }
-        if e.kind != BodyKind::Static || !e.collide {
+        if !entity_contributes_cells(e) {
             continue;
         }
         // A wedge is a ramp: its walk surface here is GROUND, like terrain —
@@ -292,7 +401,7 @@ fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
 /// erosion never depends on neighbouring chunks' build state — every chunk
 /// is a pure function of the world, which is what makes the grid hash
 /// independent of build ORDER.
-fn build_chunk(src: &NavSrc, base_cx: i32, base_cz: i32) -> NavChunk {
+fn derive_cells(src: &NavSrc, base_cx: i32, base_cz: i32) -> NavChunk {
     const N: usize = (NAV_CHUNK + 2) as usize;
     let mut floor = [0.0f32; N * N];
     let mut walk = [false; N * N];
@@ -357,7 +466,8 @@ fn cell(map: &mut NavMap, src: &NavSrc, cx: i32, cz: i32) -> (u8, f32) {
     if map.chunks[ci].is_none() {
         let base_cx = map.min_cx + (lx / NAV_CHUNK) * NAV_CHUNK;
         let base_cz = map.min_cz + (lz / NAV_CHUNK) * NAV_CHUNK;
-        map.chunks[ci] = Some(Arc::new(build_chunk(src, base_cx, base_cz)));
+        map.derive_cells_runs = map.derive_cells_runs.wrapping_add(1);
+        map.chunks[ci] = Some(Arc::new(derive_cells(src, base_cx, base_cz)));
     }
     let chunk = map.chunks[ci].as_ref().expect("just built");
     let i = ((lz % NAV_CHUNK) * NAV_CHUNK + lx % NAV_CHUNK) as usize;
@@ -929,6 +1039,7 @@ impl GameWorld {
             entities,
             terrain,
             render_rev,
+            tick,
             ..
         } = self;
         (
@@ -937,17 +1048,21 @@ impl GameWorld {
                 entities,
                 terrain: terrain.as_ref(),
                 render_rev: *render_rev,
+                tick: *tick,
             },
         )
     }
 
     /// Straight-line passability for a standard agent; None = no coverage.
+    /// Streamed-level routing is deliberately not folded into this derived
+    /// entity grid: ActorKit asks the level's one-step provider directly.
     pub fn nav_line_clear(&mut self, a: Vec3f, b: Vec3f) -> Option<bool> {
         let (map, src) = self.nav_src();
         line_passable(map, &src, a, b, FLAG_CLEAR)
     }
 
-    /// A* route, string-pulled. False = no coverage or no route.
+    /// A route through the entity-derived grid. False = no coverage or no
+    /// route. Streamed-level ActorKit routing uses `NavProvider::next_step`.
     pub fn nav_find_path(&mut self, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> bool {
         let (map, src) = self.nav_src();
         find_path(map, &src, from, to, out)
@@ -964,10 +1079,16 @@ impl GameWorld {
     /// stops the next query from full-invalidating.
     pub fn nav_mark_dirty(&mut self, min: Vec3f, max: Vec3f) {
         let trev = self.terrain.as_ref().map_or(0, |t| t.revision);
-        // Make sure layout exists before dirtying regions of it.
-        let (map, src) = self.nav_src();
-        sync(map, &src);
-        map.mark_dirty(min, max, trev);
+        let tick = self.tick;
+        // The first edit may arrive before any query established coverage.
+        // After that, do not call `sync` before acknowledging the regional
+        // terrain revision: it would mistake the just-reported edit for an
+        // unreported one and discard the full layout.
+        if !self.nav.synced_once {
+            let (map, src) = self.nav_src();
+            sync(map, &src);
+        }
+        self.nav.mark_dirty(min, max, trev, tick);
     }
 
     /// Fully derive the grid and hash it — the determinism gate. Chunk build
@@ -1152,8 +1273,15 @@ mod tests {
         world.mark_render_dirty();
         assert_eq!(
             world.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0)),
+            Some(false),
+            "the stale grid is served during the rebuild cooldown"
+        );
+        assert_eq!(world.nav.generation, gen_before);
+        world.tick += REBUILD_COOLDOWN_TICKS;
+        assert_eq!(
+            world.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0)),
             Some(true),
-            "grid re-derived after the wall came down"
+            "grid re-derived after the cooldown"
         );
         assert!(world.nav.generation > gen_before, "generation moved");
     }
@@ -1164,14 +1292,40 @@ mod tests {
         let _ = world.nav_grid_hash(); // build everything
         let built = world.nav.built_bytes();
         world.nav_mark_dirty(vec3f(-2.0, 0.0, -2.0), vec3f(2.0, 0.0, 2.0));
-        assert!(
-            world.nav.built_bytes() < built,
-            "some chunks dropped for re-derivation"
+        assert_eq!(
+            world.nav.built_bytes(),
+            built,
+            "regional edits keep serving stale chunks during the cooldown"
         );
-        // Queries still work and re-derive lazily.
+        world.tick += REBUILD_COOLDOWN_TICKS;
+        // The first query after the cooldown drops the pending chunks and
+        // lazily re-derives only what that query touches.
         assert_eq!(
             world.nav_line_clear(vec3f(0.0, 0.5, -8.0), vec3f(0.0, 0.5, 8.0)),
             Some(true)
+        );
+        assert!(
+            world.nav.built_bytes() < built,
+            "some chunks dropped for lazy re-derivation"
+        );
+    }
+
+    #[test]
+    fn moving_real_obstacle_is_rate_limited() {
+        let mut world = plaza();
+        let from = vec3f(-5.0, 0.5, -8.0);
+        let to = vec3f(-5.0, 0.5, 8.0);
+        let _ = world.nav_line_clear(from, to);
+        for tick in 1..=300u64 {
+            world.entity_mut(2).unwrap().pos.x = -10.75 + (tick % 7) as f32 * 0.01;
+            world.mark_render_dirty();
+            world.tick += 1;
+            let _ = world.nav_line_clear(from, to);
+        }
+        assert!(
+            world.nav.derive_cells_runs() <= 22,
+            "a real moving obstacle derived {} chunks in 300 ticks",
+            world.nav.derive_cells_runs()
         );
     }
 

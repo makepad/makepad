@@ -24,6 +24,7 @@ script_mod! {
     use mod.widgets.KeyboardView
     use mod.widgets.WindowMenu
     use mod.widgets.NavControl
+    use mod.widgets.Tweaker
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
@@ -247,6 +248,9 @@ script_mod! {
             width: Fill height: Fill
             keyboard_min_shift: 30
         }
+        // The design-feedback overlay (widgets/src/tweaker.rs): hardcoded
+        // like the caption bar, inert unless --remote, zero cost while off.
+        tweaker := Tweaker {}
 
         cursor: MouseCursor.Default
         mouse_cursor_size: vec2(20 20)
@@ -1146,6 +1150,18 @@ mod tests {
 }
 
 impl WindowRef {
+    pub fn set_title(&self, cx: &mut Cx, title: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.window.title == title {
+                return;
+            }
+            inner.window.title = title.to_string();
+            inner.window.handle.set_title(cx, title.to_string());
+            inner.last_synced_title = None;
+            inner.sync_caption_title(cx);
+        }
+    }
+
     pub fn window_id(&self) -> Option<WindowId> {
         self.borrow().map(|inner| inner.window.handle.window_id())
     }
@@ -1421,7 +1437,13 @@ impl Widget for Window {
             cx.widget_action(uid, WindowAction::EventForOtherWindow);
             return;
         } else {
-            self.view.handle_event(cx, event, scope);
+            // Tweak mode swallows pointer events over the body before
+            // ordinary dispatch (picking must never fire a Button); all the
+            // logic lives in widgets/src/tweaker.rs.
+            if !crate::tweaker::window_intercept(cx, event, &mut self.view, self.window.window_id())
+            {
+                self.view.handle_event(cx, event, scope);
+            }
         }
 
         if let Event::Actions(actions) = event {

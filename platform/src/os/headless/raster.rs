@@ -1391,8 +1391,7 @@ impl Cx {
                     if let Some(p) = profile.as_deref_mut() {
                         p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
                     }
-                    if let Some(info) = __info
-                    {
+                    if let Some(info) = __info {
                         tex_infos.push(info);
                     } else {
                         tex_infos.push([0, 0, 0, 0]);

@@ -370,6 +370,10 @@ struct SkinVertex {
 }
 
 pub struct SkinnedModel {
+    /// Memoized [`Self::rest_hash`] — the FNV over the whole vertex buffer
+    /// was being recomputed per avatar PER FRAME by a draw-path filter
+    /// (measured hot). Rest data never changes after load.
+    rest_hash_cache: std::sync::OnceLock<u64>,
     nodes: Vec<Node>,
     /// skin.joints — indices into `nodes`.
     joint_nodes: Vec<usize>,
@@ -1197,6 +1201,7 @@ impl SkinnedModel {
         }
 
         Ok(SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
             nodes,
             joint_nodes,
             inverse_bind,
@@ -2678,6 +2683,10 @@ impl SkinnedModel {
     /// influences and topology). Stamped into [`SkinRestGpu`] so a disk-cached
     /// bake is ignored the moment the asset changes.
     pub fn rest_hash(&self) -> u64 {
+        *self.rest_hash_cache.get_or_init(|| self.rest_hash_compute())
+    }
+
+    fn rest_hash_compute(&self) -> u64 {
         fn eat(mut h: u64, bytes: &[u8]) -> u64 {
             for b in bytes {
                 h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
@@ -3148,6 +3157,7 @@ mod tests {
             Mat4f::mul(&mesh_inv, &torso_global).invert(),
         ];
         SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
             nodes,
             joint_nodes: vec![0, 1],
             inverse_bind,
@@ -3467,6 +3477,7 @@ mod tests {
             vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, s45, c45]
         };
         SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![
                 node("root", None),
                 node("spine", Some(0)),
@@ -3543,6 +3554,7 @@ mod tests {
             rest: NodeTrs::default(),
         };
         SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![node("arm"), node("leg"), node("torso"), node("mesh")],
             joint_nodes: vec![0, 1, 2],
             inverse_bind: vec![Mat4f::identity(); 3],
@@ -3569,6 +3581,7 @@ mod tests {
             rest: NodeTrs::default(),
         };
         SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
             nodes: vec![
                 node("root", None),
                 node("moving_limb", Some(0)),

@@ -60,6 +60,7 @@ fn room_value(room: &Room) -> Value {
         ("game", s(room.game.clone())),
         ("invite", s(room.invite.clone())),
         ("host", s(room.host.clone())),
+        ("players", Value::Int(room.players as i64)),
         ("created_ms", Value::Int(room.created_ms.min(i64::MAX as u64) as i64)),
         ("expires_ms", Value::Int(room.expires_ms.min(i64::MAX as u64) as i64)),
     ])
@@ -168,9 +169,13 @@ fn room_heartbeat(
     };
     let token = body_str(&body, "token")?.to_string();
     let ttl_ms = body_u64(&body, "ttl_ms").ok_or(Fail::Http(400, "ttl_ms required"))?;
+    // Optional: the host's head count. Out-of-range counts are clamped by
+    // the registry rather than refused — a heartbeat must never fail over
+    // a decoration.
+    let players = body_u64(&body, "players").map(|n| n.min(u32::MAX as u64) as u32);
     let room = rc
         .rooms
-        .heartbeat(&id, &token, ttl_ms, now_ms())
+        .heartbeat_with(&id, &token, ttl_ms, players, now_ms())
         .map_err(refuse)?;
     Ok(Outcome::Resp(Resp::json(
         200,

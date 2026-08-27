@@ -47,7 +47,7 @@ fn allow_duplicate_sibling_names(name: LiveId) -> bool {
     name == LiveId(0)
 }
 
-fn live_id_token(id: LiveId) -> String {
+pub(crate) fn live_id_token(id: LiveId) -> String {
     if id == LiveId(0) {
         return "-".to_string();
     }
@@ -60,7 +60,7 @@ fn live_id_token(id: LiveId) -> String {
     })
 }
 
-fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
+pub(crate) fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
     let mut widget_type_names = HashMap::new();
     let widget_registry = cx.components.get::<WidgetRegistry>();
     for (type_id, (info, _)) in widget_registry.map.iter() {
@@ -2640,6 +2640,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
+    cx.tweak_callback = Some(crate::tweaker::tweak_callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }

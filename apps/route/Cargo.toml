@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps", "voice"] }
+mp-theme = { path = "../../libs/mp_theme" }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
 makepad-ai-speech = { path = "../../libs/ai/models/speech" } # kokoro voice output (🔊)
 makepad-geodata = { path = "../../libs/geodata" }          # M1: geo.* corridor queries, rain radar

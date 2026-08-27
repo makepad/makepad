@@ -32,6 +32,10 @@ pub struct FontResource {
     pub last_char: u32,
     pub to_unicode: Option<CMapData>,
     pub default_width: f64,
+    /// Type0/CID width map from the descendant font's `W` array (CID →
+    /// width); `default_width` carries `DW` (1000 when absent). Simple
+    /// fonts leave this `None` and use `widths`.
+    pub cid_widths: Option<std::collections::HashMap<u32, f64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +44,17 @@ pub enum FontEncoding {
     MacRoman,
     WinAnsi,
     Identity,
-    Custom(std::collections::HashMap<u8, String>), // char code → glyph name
+    /// /Differences over a base encoding: char code → glyph name, with
+    /// unmapped codes decoded through the base.
+    Custom(BaseEncoding, std::collections::HashMap<u8, String>),
+}
+
+/// The /BaseEncoding under a /Differences map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseEncoding {
+    Standard,
+    WinAnsi,
+    MacRoman,
 }
 
 /// Parsed ToUnicode CMap: maps character codes to Unicode strings.
@@ -262,15 +276,15 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
     let subtype = dict.get_name("Subtype").unwrap_or("Type1").to_string();
     let base_font = dict.get_name("BaseFont").unwrap_or("Helvetica").to_string();
 
+    // The Encoding entry may be an indirect reference, and may be a
+    // dictionary carrying /Differences over a /BaseEncoding — the standard
+    // shape for subset fonts (ligatures and accents remapped to low codes).
     let encoding = match dict.get("Encoding") {
-        Some(PdfObj::Name(n)) => match n.as_str() {
-            "MacRomanEncoding" => FontEncoding::MacRoman,
-            "WinAnsiEncoding" => FontEncoding::WinAnsi,
-            "StandardEncoding" => FontEncoding::Standard,
-            "Identity-H" | "Identity-V" => FontEncoding::Identity,
-            _ => FontEncoding::WinAnsi,
-        },
-        _ => FontEncoding::WinAnsi,
+        Some(obj) => {
+            let resolved = doc.resolve(obj)?;
+            parse_encoding(&resolved)
+        }
+        None => FontEncoding::WinAnsi,
     };
 
     let first_char = dict.get_int("FirstChar").unwrap_or(0) as u32;
@@ -286,7 +300,41 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
         Vec::new()
     };
 
-    let default_width = dict.get_f64("MissingWidth").unwrap_or(600.0);
+    let mut default_width = dict.get_f64("MissingWidth").unwrap_or(600.0);
+
+    // Type0 (composite) fonts carry their widths on the descendant CID
+    // font: `W` (CID → width runs) and `DW` (the default, 1000 if absent).
+    // Every Type0 font gets a map (empty when `W` is absent) so missing
+    // CIDs consistently fall back to DW, never to base-14 estimates.
+    let mut cid_widths = if subtype == "Type0" {
+        Some(std::collections::HashMap::new())
+    } else {
+        None
+    };
+    if subtype == "Type0" {
+        default_width = 1000.0;
+        if let Some(desc_obj) = dict.get("DescendantFonts") {
+            let resolved_desc = doc.resolve(desc_obj)?;
+            let first = match &resolved_desc {
+                PdfObj::Array(arr) => arr.first().cloned(),
+                _ => None,
+            };
+            if let Some(first) = first {
+                let cid_font = doc.resolve(&first)?;
+                if let Some(cid_dict) = cid_font.as_dict() {
+                    if let Some(dw) = cid_dict.get_f64("DW") {
+                        default_width = dw;
+                    }
+                    if let Some(w_obj) = cid_dict.get("W") {
+                        let w_resolved = doc.resolve(w_obj)?;
+                        if let PdfObj::Array(arr) = &w_resolved {
+                            cid_widths = Some(parse_cid_widths(doc, arr)?);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Parse ToUnicode CMap if present
     let to_unicode = if let Some(tu_obj) = dict.get("ToUnicode") {
@@ -307,7 +355,116 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
         last_char,
         to_unicode,
         default_width,
+        cid_widths,
     })
+}
+
+/// An Encoding value: a name, or a dict with /BaseEncoding + /Differences.
+fn parse_encoding(obj: &PdfObj) -> FontEncoding {
+    fn base_from_name(n: &str) -> FontEncoding {
+        match n {
+            "MacRomanEncoding" => FontEncoding::MacRoman,
+            "WinAnsiEncoding" => FontEncoding::WinAnsi,
+            "StandardEncoding" => FontEncoding::Standard,
+            "Identity-H" | "Identity-V" => FontEncoding::Identity,
+            _ => FontEncoding::WinAnsi,
+        }
+    }
+    match obj {
+        PdfObj::Name(n) => base_from_name(n),
+        PdfObj::Dict(d) => {
+            // /Differences: [ code name name ... code name ... ] — each
+            // integer resets the code counter, each name maps the next code.
+            let mut map = std::collections::HashMap::new();
+            if let Some(PdfObj::Array(arr)) = d.get("Differences") {
+                let mut code: u32 = 0;
+                for item in arr {
+                    match item {
+                        PdfObj::Int(n) => code = *n as u32,
+                        PdfObj::Real(n) => code = *n as u32,
+                        PdfObj::Name(name) => {
+                            if code <= 255 {
+                                map.insert(code as u8, name.clone());
+                            }
+                            code = code.wrapping_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let base = match d.get_name("BaseEncoding") {
+                Some("MacRomanEncoding") => BaseEncoding::MacRoman,
+                Some("StandardEncoding") => BaseEncoding::Standard,
+                _ => BaseEncoding::WinAnsi,
+            };
+            if map.is_empty() {
+                match base {
+                    BaseEncoding::MacRoman => FontEncoding::MacRoman,
+                    BaseEncoding::Standard => FontEncoding::Standard,
+                    BaseEncoding::WinAnsi => FontEncoding::WinAnsi,
+                }
+            } else {
+                FontEncoding::Custom(base, map)
+            }
+        }
+        _ => FontEncoding::WinAnsi,
+    }
+}
+
+/// Parse a CID `W` array: `[ c [w1 w2 …]  cFirst cLast w  … ]`.
+fn parse_cid_widths(
+    doc: &mut PdfDocument,
+    arr: &[PdfObj],
+) -> PdfResult<std::collections::HashMap<u32, f64>> {
+    // CIDs live in 0..=65535; everything is clamped to that domain so a
+    // malformed `W` array can neither overflow `first + k` nor amplify a
+    // few bytes into unbounded allocations.
+    const CID_MAX: u32 = 65535;
+    let mut widths = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < arr.len() {
+        let Some(first) = arr[i].as_f64() else {
+            i += 1;
+            continue;
+        };
+        if !(0.0..=CID_MAX as f64).contains(&first) {
+            i += 1;
+            continue;
+        }
+        let first = first as u32;
+        if i + 1 >= arr.len() {
+            break;
+        }
+        let second = doc.resolve(&arr[i + 1])?;
+        match &second {
+            PdfObj::Array(ws) => {
+                // c [w1 w2 …]
+                for (k, w) in ws.iter().enumerate() {
+                    let Some(cid) = first.checked_add(k as u32).filter(|c| *c <= CID_MAX) else {
+                        break;
+                    };
+                    if let Some(w) = w.as_f64() {
+                        widths.insert(cid, w);
+                    }
+                }
+                i += 2;
+            }
+            _ => {
+                // cFirst cLast w
+                if i + 2 >= arr.len() {
+                    break;
+                }
+                let last = second.as_f64().unwrap_or(first as f64).clamp(0.0, CID_MAX as f64) as u32;
+                if let Some(w) = arr[i + 2].as_f64() {
+                    for c in first..=last.max(first).min(CID_MAX) {
+                        widths.insert(c, w);
+                    }
+                }
+                i += 3;
+            }
+        }
+    }
+    Ok(widths)
 }
 
 /// Parse a ToUnicode CMap from decoded stream data.

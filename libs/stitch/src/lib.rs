@@ -24,6 +24,7 @@ mod mem;
 mod module;
 mod ops;
 mod ref_;
+mod simd;
 mod stack;
 mod store;
 mod table;
@@ -32,6 +33,7 @@ mod val;
 mod validate;
 
 pub use self::{
+    config::Extensions,
     decode::DecodeError,
     engine::Engine,
     error::Error,
@@ -46,6 +48,7 @@ pub use self::{
     mem::{Mem, MemError, MemType},
     module::{Module, ModuleExports, ModuleImports},
     ref_::{Ref, RefType},
+    simd::V128,
     store::Store,
     table::{Table, TableError, TableType},
     val::{Val, ValType},

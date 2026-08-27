@@ -99,6 +99,8 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "billboard" => AssetKind::Billboard,
         "game" => AssetKind::Game,
         "vjeffect" => AssetKind::VjEffect,
+        "data" => AssetKind::Data,
+        "model-program" => AssetKind::ModelProgram,
         _ => return None,
     })
 }
@@ -120,6 +122,8 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -643,6 +647,9 @@ pub struct RoomDto {
     pub game: String,
     pub invite: String,
     pub host: String,
+    /// People in the world right now, host included (1 when the server or
+    /// the host predates the count).
+    pub players: u32,
     pub created_ms: u64,
     pub expires_ms: u64,
 }
@@ -681,6 +688,13 @@ pub fn parse_room(v: &Value) -> ClientResult<RoomDto> {
         invite: room_text(v, "invite", crate::wire::MAX_ROOM_INVITE_BYTES, "room invite")?
             .to_string(),
         host: room_text(v, "host", crate::wire::MAX_ROOM_HOST_BYTES, "room host")?.to_string(),
+        players: match v.get("players") {
+            None => 1,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| (1..=1024).contains(n))
+                .ok_or(ClientError::Protocol { what: "room players" })? as u32,
+        },
         created_ms: need_u64(v, "created_ms", "room created_ms")?,
         expires_ms: need_u64(v, "expires_ms", "room expires_ms")?,
     })
@@ -866,6 +880,8 @@ pub enum CatalogEventKind {
     GameQuarantined,
     GameAliasSet,
     GameAliasCleared,
+    ModelPreview,
+    ModelPreviewClear,
     /// A kind this build does not know (a newer server). Carries no
     /// interpretation on purpose.
     Other,
@@ -886,6 +902,8 @@ impl CatalogEventKind {
             Self::GameQuarantined => "game_quarantined",
             Self::GameAliasSet => "game_alias_set",
             Self::GameAliasCleared => "game_alias_cleared",
+            Self::ModelPreview => "model_preview",
+            Self::ModelPreviewClear => "model_preview_clear",
             Self::Other => "other",
         }
     }
@@ -910,12 +928,36 @@ impl CatalogEventKind {
             "game_quarantined" => Self::GameQuarantined,
             "game_alias_set" => Self::GameAliasSet,
             "game_alias_cleared" => Self::GameAliasCleared,
+            "model_preview" => Self::ModelPreview,
+            "model_preview_clear" => Self::ModelPreviewClear,
             _ => Self::Other,
         }
     }
 }
 
 /// One committed catalog change from `/v1/events`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewPartDto {
+    pub name: String,
+    pub mesh_token: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewRenameDto {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewDto {
+    pub session: String,
+    pub open: bool,
+    pub program: Option<String>,
+    pub parts: Vec<ModelPreviewPartDto>,
+    pub removed: Vec<String>,
+    pub renamed: Vec<ModelPreviewRenameDto>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogEventDto {
     pub seq: u64,
@@ -927,6 +969,8 @@ pub struct CatalogEventDto {
     pub game_revision: Option<GameRevisionId>,
     /// Asset or game alias in display spelling, for events that involve one.
     pub alias: Option<String>,
+    /// In-memory-only part delta for `ModelPreview`/`ModelPreviewClear`.
+    pub model_preview: Option<ModelPreviewDto>,
     /// The asset's declared content kind at emit time, when the server knew
     /// it. `None` means unknown, not "no kind" — kind-filtered subscribers
     /// still receive such events.
@@ -1012,6 +1056,113 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
                 Some(kind_parse(name).ok_or(ClientError::Protocol { what: "event content_kind" })?)
             }
         };
+        let model_preview = match r.get("preview_session") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                if !matches!(kind, CatalogEventKind::ModelPreview | CatalogEventKind::ModelPreviewClear) {
+                    return Err(ClientError::Protocol { what: "event preview kind" });
+                }
+                let session = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event preview session" })?;
+                if session.is_empty()
+                    || session.len() > 64
+                    || !session.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'-' | b'_')
+                    })
+                {
+                    return Err(ClientError::Protocol { what: "event preview session" });
+                }
+                let open = need_bool(r, "preview_open", "event preview open")?;
+                let program = match r.get("preview_program") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => {
+                        let value = value
+                            .as_str()
+                            .ok_or(ClientError::Protocol { what: "event preview program" })?;
+                        if value.len() > 12_000 {
+                            return Err(ClientError::Protocol { what: "event preview program" });
+                        }
+                        Some(value.to_string())
+                    }
+                };
+                let parse_name = |value: &Value| -> ClientResult<String> {
+                    let value = value
+                        .as_str()
+                        .ok_or(ClientError::Protocol { what: "event preview part name" })?;
+                    if value.is_empty()
+                        || value.len() > 24
+                        || !value.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                    {
+                        return Err(ClientError::Protocol { what: "event preview part name" });
+                    }
+                    Ok(value.to_string())
+                };
+                let part_rows = need(r, "preview_parts", "event preview parts")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview parts" })?;
+                if part_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview parts" });
+                }
+                let mut parts = Vec::with_capacity(part_rows.len());
+                for row in part_rows {
+                    let name = parse_name(need(row, "name", "event preview part name")?)?;
+                    let mesh_token = need_str(
+                        row,
+                        "mesh_token",
+                        70,
+                        "event preview mesh token",
+                    )?;
+                    let valid_token = mesh_token.strip_prefix("pmesh_").is_some_and(|hex| {
+                        hex.len() == 64
+                            && hex.bytes().all(|byte| {
+                                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                            })
+                    });
+                    if !valid_token {
+                        return Err(ClientError::Protocol { what: "event preview mesh token" });
+                    }
+                    parts.push(ModelPreviewPartDto { name, mesh_token: mesh_token.to_string() });
+                }
+                let removed_rows = need(r, "preview_removed", "event preview removed")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview removed" })?;
+                if removed_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview removed" });
+                }
+                let removed = removed_rows.iter().map(parse_name).collect::<ClientResult<_>>()?;
+                let rename_rows = need(r, "preview_renamed", "event preview renamed")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview renamed" })?;
+                if rename_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview renamed" });
+                }
+                let mut renamed = Vec::with_capacity(rename_rows.len());
+                for row in rename_rows {
+                    renamed.push(ModelPreviewRenameDto {
+                        from: parse_name(need(row, "from", "event preview rename from")?)?,
+                        to: parse_name(need(row, "to", "event preview rename to")?)?,
+                    });
+                }
+                Some(ModelPreviewDto {
+                    session: session.to_string(),
+                    open,
+                    program,
+                    parts,
+                    removed,
+                    renamed,
+                })
+            }
+        };
+        if matches!(kind, CatalogEventKind::ModelPreview | CatalogEventKind::ModelPreviewClear)
+            && model_preview.is_none()
+        {
+            return Err(ClientError::Protocol { what: "event preview payload" });
+        }
         let ts_ms = need_u64(r, "ts_ms", "event ts_ms")?;
         events.push(CatalogEventDto {
             seq,
@@ -1022,6 +1173,7 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
             game_id,
             game_revision,
             alias,
+            model_preview,
             content_kind,
             ts_ms,
         });
@@ -1349,6 +1501,9 @@ pub struct JobRowDto {
     pub state: JobStateDto,
     pub enqueued_by: Option<PrincipalDto>,
     pub created_ms: u64,
+    /// Bounded display prompt when the enqueued body carries one. Optional
+    /// for compatibility with older servers and non-generation jobs.
+    pub prompt: Option<String>,
 }
 
 pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
@@ -1371,7 +1526,14 @@ pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
             .ok_or(ClientError::Protocol { what: "job row state" })?;
         let enqueued_by = opt_principal(r, "enqueued_by", "job row enqueued_by")?;
         let created_ms = need_u64(r, "created_ms", "job row created_ms")?;
-        out.push(JobRowDto { job, namespace, kind, state, enqueued_by, created_ms });
+        let prompt = match r.get("prompt") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let prompt = v.as_str().ok_or(ClientError::Protocol { what: "job row prompt" })?;
+                Some(sanitize_text(prompt, 256))
+            }
+        };
+        out.push(JobRowDto { job, namespace, kind, state, enqueued_by, created_ms, prompt });
     }
     Ok(out)
 }
@@ -1951,6 +2113,11 @@ pub enum ChatProviderKind {
     FleetQwen,
     OpenAi,
     Grok,
+    /// Vendor CLIs logged in on the SERVER host; no key ever reaches a
+    /// client.
+    ClaudeCli,
+    CodexCli,
+    GrokCli,
 }
 
 impl ChatProviderKind {
@@ -1959,6 +2126,9 @@ impl ChatProviderKind {
             Self::FleetQwen => "fleet-qwen",
             Self::OpenAi => "openai",
             Self::Grok => "grok",
+            Self::ClaudeCli => "claude-cli",
+            Self::CodexCli => "codex-cli",
+            Self::GrokCli => "grok-cli",
         }
     }
 
@@ -1967,6 +2137,50 @@ impl ChatProviderKind {
             "fleet-qwen" => Some(Self::FleetQwen),
             "openai" => Some(Self::OpenAi),
             "grok" => Some(Self::Grok),
+            "claude-cli" => Some(Self::ClaudeCli),
+            "codex-cli" => Some(Self::CodexCli),
+            "grok-cli" => Some(Self::GrokCli),
+            _ => None,
+        }
+    }
+
+    /// Human label for a picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FleetQwen => "Qwen · asset-ai fleet",
+            Self::OpenAi => "OpenAI · API",
+            Self::Grok => "Grok · API",
+            Self::ClaudeCli => "Claude Code · CLI on server",
+            Self::CodexCli => "Codex · CLI on server",
+            Self::GrokCli => "Grok · CLI on server",
+        }
+    }
+
+    /// What the server reports when a row carries no `locality` (older
+    /// servers): only the fleet is local.
+    pub fn default_locality(self) -> ChatProviderLocality {
+        match self {
+            Self::FleetQwen => ChatProviderLocality::Local,
+            _ => ChatProviderLocality::Cloud,
+        }
+    }
+}
+
+/// Where a provider's model runs — the server's word, carried per row.
+/// `Local` = the asset-ai fleet on the LAN; `Cloud` = a vendor, whether by
+/// API key or by a CLI logged in on the server host. A "local AI only"
+/// lock filters on this and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatProviderLocality {
+    Local,
+    Cloud,
+}
+
+impl ChatProviderLocality {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Self::Local),
+            "cloud" => Some(Self::Cloud),
             _ => None,
         }
     }
@@ -1981,6 +2195,7 @@ pub enum ChatProviderStateDto {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatProviderDto {
     pub kind: ChatProviderKind,
+    pub locality: ChatProviderLocality,
     pub state: ChatProviderStateDto,
 }
 
@@ -2019,6 +2234,66 @@ pub struct ChatSessionDto {
     pub state: ChatSessionStateDto,
     pub turn: u64,
     pub idle: bool,
+    /// Present on a KEYED (durable, create-or-resume) session: the
+    /// `client_key` / `context_key` it is stored under. Both absent on an
+    /// ephemeral session.
+    pub client_key: Option<String>,
+    pub context_key: Option<String>,
+}
+
+/// One row of a session's transcript (`GET …/transcript`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatTranscriptRole {
+    User,
+    Assistant,
+    System,
+    /// A tool chip: `text` is its short title (`world.set_source · ok`);
+    /// `tool` / `outcome` on the row carry the parts.
+    Tool,
+}
+
+impl ChatTranscriptRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
+/// The durable conversation as the client should render it: thinking
+/// stripped, tool rounds folded into one `tool` chip each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatTranscriptRowDto {
+    pub role: ChatTranscriptRole,
+    pub text: String,
+    /// `tool` rows only: the dotted tool name (`world.set_source`).
+    pub tool: Option<String>,
+    /// `tool` rows only: `ok | unavailable | denied | refused | failed`.
+    pub outcome: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatTranscriptDto {
+    pub session: ChatSessionId,
+    pub provider: ChatProviderKind,
+    pub turn: u64,
+    /// Chronological; the server keeps the LAST rows that fit its budget.
+    pub messages: Vec<ChatTranscriptRowDto>,
+    /// Older rows were dropped to fit the server's budget.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2093,8 +2368,23 @@ pub fn parse_chat_providers(v: &Value) -> ClientResult<Vec<ChatProviderDto>> {
     }
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let kind = ChatProviderKind::parse(need_str(row, "kind", 32, "chat provider kind")?)
-            .ok_or(ClientError::Protocol { what: "chat provider kind" })?;
+        // A NEWER server may list provider kinds this client predates.
+        // Skip the unknown row instead of refusing the whole list: the
+        // fail-closed parser once turned one new server-side kind into
+        // "no providers at all" on every deployed client (the claude-cli
+        // rollout), and a provider this client cannot name is a provider
+        // it could never select anyway.
+        let Some(kind) = ChatProviderKind::parse(need_str(row, "kind", 32, "chat provider kind")?)
+        else {
+            continue;
+        };
+        let locality = match row.get("locality") {
+            None => kind.default_locality(),
+            Some(v) => v
+                .as_str()
+                .and_then(ChatProviderLocality::parse)
+                .ok_or(ClientError::Protocol { what: "chat provider locality" })?,
+        };
         let state = match need_str(row, "state", 16, "chat provider state")? {
             "available" => {
                 if row.get("detail").is_some() {
@@ -2117,7 +2407,7 @@ pub fn parse_chat_providers(v: &Value) -> ClientResult<Vec<ChatProviderDto>> {
             }
             _ => return Err(ClientError::Protocol { what: "chat provider state" }),
         };
-        out.push(ChatProviderDto { kind, state });
+        out.push(ChatProviderDto { kind, locality, state });
     }
     Ok(out)
 }
@@ -2135,7 +2425,35 @@ pub fn parse_chat_session(v: &Value) -> ClientResult<ChatSessionDto> {
         .ok_or(ClientError::Protocol { what: "chat session state" })?;
     let turn = need_u64(v, "turn", "chat turn")?;
     let idle = need_bool(v, "idle", "chat idle")?;
-    Ok(ChatSessionDto { session, namespace, provider, owner, state, turn, idle })
+    let client_key = opt_chat_key(v, "client_key", "chat client key")?;
+    let context_key = opt_chat_key(v, "context_key", "chat context key")?;
+    Ok(ChatSessionDto {
+        session,
+        namespace,
+        provider,
+        owner,
+        state,
+        turn,
+        idle,
+        client_key,
+        context_key,
+    })
+}
+
+/// A session key echoed by the server: absent (or null) on an ephemeral
+/// session; on a keyed one it must have the shape this client would have
+/// sent (see `wire::chat_key_ok`) — anything else is a protocol refusal.
+fn opt_chat_key(v: &Value, key: &'static str, what: &'static str) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if !crate::wire::chat_key_ok(s) {
+                return Err(ClientError::Protocol { what });
+            }
+            Ok(Some(s.to_string()))
+        }
+    }
 }
 
 pub fn parse_chat_send(v: &Value) -> ClientResult<u64> {
@@ -2144,6 +2462,66 @@ pub fn parse_chat_send(v: &Value) -> ClientResult<u64> {
 
 pub fn parse_chat_retired(v: &Value) -> ClientResult<bool> {
     need_bool(v, "retired", "chat retired")
+}
+
+/// Most transcript rows one response may carry, and the most text per row
+/// (the chat wire's message ceiling). The server stays under both.
+const MAX_CHAT_TRANSCRIPT_ROWS: usize = 256;
+const MAX_CHAT_TRANSCRIPT_TEXT: usize = 16 * 1024;
+
+pub fn parse_chat_transcript(v: &Value) -> ClientResult<ChatTranscriptDto> {
+    let session = ChatSessionId::parse(need_str(v, "session", 32, "chat transcript session")?)
+        .ok_or(ClientError::Protocol { what: "chat transcript session" })?;
+    let provider = ChatProviderKind::parse(need_str(v, "provider", 32, "chat transcript provider")?)
+        .ok_or(ClientError::Protocol { what: "chat transcript provider" })?;
+    let turn = need_u64(v, "turn", "chat transcript turn")?;
+    let rows = need(v, "messages", "chat transcript messages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "chat transcript messages" })?;
+    if rows.len() > MAX_CHAT_TRANSCRIPT_ROWS {
+        return Err(ClientError::Protocol { what: "chat transcript count" });
+    }
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = ChatTranscriptRole::parse(need_str(row, "role", 16, "chat transcript role")?)
+            .ok_or(ClientError::Protocol { what: "chat transcript role" })?;
+        let text = need_str(row, "text", MAX_CHAT_TRANSCRIPT_TEXT, "chat transcript text")?;
+        // Control characters other than the line/tab structure of a
+        // message are hostile in text meant for a screen.
+        if text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+            return Err(ClientError::Protocol { what: "chat transcript text" });
+        }
+        let tool = match row.get("tool") {
+            None | Some(Value::Null) => None,
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what: "chat transcript tool" })?;
+                if s.is_empty() || s.len() > MAX_CHAT_TOOL_NAME {
+                    return Err(ClientError::Protocol { what: "chat transcript tool" });
+                }
+                check_display(s, "chat transcript tool")?;
+                Some(s.to_string())
+            }
+        };
+        let outcome = match row.get("outcome") {
+            None | Some(Value::Null) => None,
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what: "chat transcript outcome" })?;
+                if !matches!(s, "ok" | "unavailable" | "denied" | "refused" | "failed") {
+                    return Err(ClientError::Protocol { what: "chat transcript outcome" });
+                }
+                Some(s.to_string())
+            }
+        };
+        if role != ChatTranscriptRole::Tool && (tool.is_some() || outcome.is_some()) {
+            return Err(ClientError::Protocol { what: "chat transcript tool" });
+        }
+        messages.push(ChatTranscriptRowDto { role, text: text.to_string(), tool, outcome });
+    }
+    let truncated = match v.get("truncated") {
+        None | Some(Value::Null) => false,
+        Some(x) => x.as_bool().ok_or(ClientError::Protocol { what: "chat transcript truncated" })?,
+    };
+    Ok(ChatTranscriptDto { session, provider, turn, messages, truncated })
 }
 
 pub fn parse_chat_events(v: &Value) -> ClientResult<ChatEventsPageDto> {
@@ -2673,16 +3051,37 @@ mod tests {
             &json::parse(
                 br#"{"providers":[
                     {"kind":"fleet-qwen","state":"available","model":"qwen-scripted"},
-                    {"kind":"openai","state":"unavailable","reason":"OPENAI_API_KEY is not set"}
+                    {"kind":"openai","state":"unavailable","reason":"OPENAI_API_KEY is not set"},
+                    {"kind":"claude-cli","locality":"cloud","state":"available","model":"claude-code"}
                 ]}"#,
             )
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(providers.len(), 2);
+        assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].kind, ChatProviderKind::FleetQwen);
+        // No locality on the row: the fleet is local, everything else cloud.
+        assert_eq!(providers[0].locality, ChatProviderLocality::Local);
+        assert_eq!(providers[1].locality, ChatProviderLocality::Cloud);
+        assert_eq!(providers[2].kind, ChatProviderKind::ClaudeCli);
+        assert_eq!(providers[2].locality, ChatProviderLocality::Cloud);
+        // An UNKNOWN provider kind (a newer server) is skipped, never a
+        // refusal of the whole list — one new server-side kind must not
+        // blank every old client's provider picker.
+        let skewed = parse_chat_providers(
+            &json::parse(
+                br#"{"providers":[
+                    {"kind":"gemini","state":"available","model":"x"},
+                    {"kind":"fleet-qwen","state":"available","model":"qwen"}
+                ]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(skewed.len(), 1);
+        assert_eq!(skewed[0].kind, ChatProviderKind::FleetQwen);
         assert!(parse_chat_providers(
-            &json::parse(br#"{"providers":[{"kind":"claude","state":"available","model":"x"}]}"#)
+            &json::parse(br#"{"providers":[{"kind":"fleet-qwen","locality":"nearby","state":"available","model":"x"}]}"#)
                 .unwrap(),
         )
         .is_err());
@@ -2771,6 +3170,115 @@ mod tests {
     }
 
     #[test]
+    fn keyed_chat_session_and_transcript_parse_fail_closed() {
+        let sid = "chat_0123456789abcdef";
+        // An ephemeral session: no keys on the document, none on the DTO.
+        let plain = parse_chat_session(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":0,"idle":true}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plain.client_key, None);
+        assert_eq!(plain.context_key, None);
+        // A keyed one echoes both keys verbatim.
+        let keyed = parse_chat_session(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":3,"idle":true,"client_key":"ip:10.0.0.7","context_key":"ast_0123456789abcdef0123456789abcdef"}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(keyed.client_key.as_deref(), Some("ip:10.0.0.7"));
+        assert_eq!(keyed.context_key.as_deref(), Some("ast_0123456789abcdef0123456789abcdef"));
+        assert_eq!(keyed.turn, 3);
+        // A key the client could never have sent is a protocol refusal,
+        // not a display surprise.
+        for bad in [r#""a b""#, r#""../x""#, r#""""#, "7", r#""x\n""#] {
+            let doc = format!(
+                r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":0,"idle":true,"client_key":{bad},"context_key":"g"}}"#
+            );
+            assert!(parse_chat_session(&json::parse(doc.as_bytes()).unwrap()).is_err(), "{bad}");
+        }
+
+        let transcript = parse_chat_transcript(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","provider":"fleet-qwen","turn":2,"messages":[
+                        {{"role":"user","text":"make a level"}},
+                        {{"role":"assistant","text":"Building it."}},
+                        {{"role":"tool","text":"world.set_source · ok","tool":"world.set_source","outcome":"ok"}},
+                        {{"role":"assistant","text":"Done — the level is live.\nEnjoy."}}
+                    ],"truncated":false}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transcript.session.to_string(), sid);
+        assert_eq!(transcript.provider, ChatProviderKind::FleetQwen);
+        assert_eq!(transcript.turn, 2);
+        assert!(!transcript.truncated);
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(transcript.messages[0].role, ChatTranscriptRole::User);
+        assert_eq!(transcript.messages[0].tool, None);
+        assert_eq!(
+            transcript.messages[2],
+            ChatTranscriptRowDto {
+                role: ChatTranscriptRole::Tool,
+                text: "world.set_source · ok".into(),
+                tool: Some("world.set_source".into()),
+                outcome: Some("ok".into()),
+            }
+        );
+        // `truncated` is optional (older servers), the rest is not.
+        let minimal = parse_chat_transcript(
+            &json::parse(
+                format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[]}}"#).as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(minimal.messages.is_empty());
+        assert!(!minimal.truncated);
+        for bad in [
+            // unknown role
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"narrator","text":"x"}}]}}"#),
+            // tool fields on a non-tool row
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user","text":"x","tool":"world.list"}}]}}"#),
+            // unknown outcome vocabulary
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"tool","text":"x","tool":"world.list","outcome":"maybe"}}]}}"#),
+            // control byte in text
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user","text":"x\u0007"}}]}}"#),
+            // missing text
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user"}}]}}"#),
+            // wrong id family
+            r#"{"session":"op_0123456789abcdef0123456789abcdef","provider":"grok","turn":0,"messages":[]}"#.to_string(),
+            // messages not an array
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":{{}}}}"#),
+        ] {
+            assert!(parse_chat_transcript(&json::parse(bad.as_bytes()).unwrap()).is_err(), "{bad}");
+        }
+        // Over the row ceiling refuses rather than rendering a runaway list.
+        let many: Vec<String> = (0..MAX_CHAT_TRANSCRIPT_ROWS + 1)
+            .map(|_| r#"{"role":"user","text":"x"}"#.to_string())
+            .collect();
+        let doc = format!(
+            r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{}]}}"#,
+            many.join(",")
+        );
+        assert!(parse_chat_transcript(&json::parse(doc.as_bytes()).unwrap()).is_err());
+    }
+
+    #[test]
     fn health_roundtrip_and_refusals() {
         let good = format!(r#"{{"server_id":"{}","protocol_version":1}}"#, "ab".repeat(16));
         let h = parse_health(&json::parse(good.as_bytes()).unwrap()).unwrap();
@@ -2788,19 +3296,50 @@ mod tests {
     }
 
     #[test]
+    fn asset_kind_wire_names_round_trip_and_unknowns_refuse() {
+        let all = [
+            AssetKind::Mesh,
+            AssetKind::Character,
+            AssetKind::Weapon,
+            AssetKind::Vehicle,
+            AssetKind::Prop,
+            AssetKind::Texture,
+            AssetKind::Material,
+            AssetKind::Audio,
+            AssetKind::Video,
+            AssetKind::Skybox,
+            AssetKind::World,
+            AssetKind::Prefab,
+            AssetKind::Billboard,
+            AssetKind::Game,
+            AssetKind::VjEffect,
+            AssetKind::Data,
+            AssetKind::ModelProgram,
+        ];
+        for kind in all {
+            assert_eq!(kind_parse(kind_name(kind)), Some(kind));
+        }
+        assert_eq!(kind_name(AssetKind::Data), "data");
+        assert_eq!(kind_name(AssetKind::ModelProgram), "model-program");
+        for unknown in ["", "Data", "blob", "unknown"] {
+            assert_eq!(kind_parse(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
     fn catalog_page_parses_and_bounds() {
         let body = format!(
-            r#"{{"hits":[{{"asset_id":"{}","namespace":"stock","kind":"mesh","title":"Rocket","snippet":"a rocket","score":90,"live":true}}],"total":1,"cursor":null}}"#,
+            r#"{{"hits":[{{"asset_id":"{}","namespace":"stock","kind":"data","title":"Rocket","snippet":"a rocket","score":90,"live":true}}],"total":1,"cursor":null}}"#,
             asset_id_str()
         );
         let page = parse_catalog_page(&json::parse(body.as_bytes()).unwrap()).unwrap();
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.total, 1);
         assert!(page.cursor.is_none());
-        assert_eq!(page.hits[0].kind, Some(AssetKind::Mesh));
+        assert_eq!(page.hits[0].kind, Some(AssetKind::Data));
 
         // Unknown kind refused; missing fields refused; control chars refused.
-        let bad_kind = body.replace("\"mesh\"", "\"blob\"");
+        let bad_kind = body.replace("\"data\"", "\"blob\"");
         assert!(parse_catalog_page(&json::parse(bad_kind.as_bytes()).unwrap()).is_err());
         let bad_title = body.replace("Rocket", "Ro\\u0007cket");
         assert!(parse_catalog_page(&json::parse(bad_title.as_bytes()).unwrap()).is_err());
@@ -2944,6 +3483,18 @@ mod tests {
         assert_eq!(page.events[0].kind, CatalogEventKind::AssetPublished);
         assert_eq!(page.events[0].content_kind, Some(AssetKind::Video));
 
+        let token = format!("pmesh_{}", "55".repeat(32));
+        let preview = format!(
+            r#"{{"events":[{{"seq":8,"kind":"model_preview","ns":"gen","alias":"gen/csg/mug","preview_session":"session-a","preview_open":true,"preview_program":"csg.part('body', csg.box(vec3(1,1,1)))","preview_parts":[{{"name":"body","mesh_token":"{token}"}}],"preview_removed":[],"preview_renamed":[],"content_kind":"model-program","ts_ms":100}}],"cursor":"0123456789abcdef-8","gap":false}}"#
+        );
+        let preview = parse_events_page(&json::parse(preview.as_bytes()).unwrap()).unwrap();
+        assert_eq!(preview.events[0].kind, CatalogEventKind::ModelPreview);
+        let payload = preview.events[0].model_preview.as_ref().unwrap();
+        assert!(payload.open);
+        assert_eq!(payload.parts[0].name, "body");
+        assert_eq!(payload.parts[0].mesh_token, token);
+        assert_eq!(preview.events[0].content_kind, Some(AssetKind::ModelProgram));
+
         // Build an explicit duplicate because whitespace changes should not
         // be part of the parser contract.
         let row = format!(
@@ -3065,11 +3616,12 @@ mod tests {
         let prin = format!("prin_{}", "cd".repeat(16));
         let body = format!(
             r#"{{"jobs":[{{"job":"{id}","namespace":"gen","kind":"video.generate",
-                "state":"running","enqueued_by":"{prin}","created_ms":7}}]}}"#
+                "state":"running","enqueued_by":"{prin}","created_ms":7,"prompt":"moonlit harbor"}}]}}"#
         );
         let rows = parse_jobs_page(&json::parse(body.as_bytes()).unwrap()).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, JobStateDto::Running);
+        assert_eq!(rows[0].prompt.as_deref(), Some("moonlit harbor"));
         assert_eq!(rows[0].enqueued_by.unwrap().to_string(), prin);
         assert_eq!(rows[0].kind, "video.generate");
 

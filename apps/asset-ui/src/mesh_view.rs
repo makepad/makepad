@@ -1020,6 +1020,8 @@ impl MeshView {
             self.extra_instances.push(ModelInstance {
                 model: id,
                 transform: trs_yaw(spec.pos, spec.yaw, 1.0),
+                tint: vec4(1.0, 1.0, 1.0, 1.0),
+                color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                 dynamic: true,
                 depth_order: 0.0,
                 part_poses: Vec::new(),
@@ -1493,6 +1495,8 @@ impl MeshView {
                     self.instance = Some(ModelInstance {
                         model: id,
                         transform: Mat4f::identity(),
+                        tint: vec4(1.0, 1.0, 1.0, 1.0),
+                        color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                         dynamic: true,
                         depth_order: 0.0,
                         part_poses: Vec::new(),
@@ -1511,6 +1515,8 @@ impl MeshView {
                             0.35,
                             scale,
                         ),
+                        tint: vec4(1.0, 1.0, 1.0, 1.0),
+                        color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                         // Realtime CSM only collects `dynamic` movers.
                         dynamic: true,
                         depth_order: 0.0,
@@ -1914,6 +1920,8 @@ impl Widget for MeshView {
                         pos: vec4(s.pos.x, s.pos.y, s.pos.z, self.orbit_yaw),
                         size: vec4(s.width, s.height, 0.0, 0.0),
                         uv: vec4(0.0, 0.0, 1.0, 1.0),
+                        tint: vec4(1.0, 1.0, 1.0, 1.0),
+                        color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                     })
                 })
                 .collect();

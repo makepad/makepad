@@ -76,7 +76,8 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowRect, MoveWindow, PostMessageW,
-                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+                        ShowWindow,
                         CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM,
                         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
                         HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
@@ -217,6 +218,13 @@ pub struct Win32Window {
 }
 
 impl Win32Window {
+    pub fn set_title(&self, title: &str) {
+        let title = encode_wide(title);
+        unsafe {
+            let _ = SetWindowTextW(self.window, PCWSTR(title.as_ptr()));
+        }
+    }
+
     /// Opt into Win11 rounded corners for overlapped custom-chrome windows.
     /// No-ops on older Windows (DwmSetWindowAttribute returns an error).
     fn apply_win11_window_shape(hwnd: HWND, small_radius: bool) {

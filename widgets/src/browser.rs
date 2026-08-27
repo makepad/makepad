@@ -70,6 +70,14 @@ pub struct Browser {
     #[cfg(feature = "cef")]
     #[rust]
     suppress_next_paste_shortcut: bool,
+    /// Size of the IOSurface-backed texture currently registered as the
+    /// accelerated paint target (None on the software path).
+    #[cfg(feature = "cef")]
+    #[rust]
+    accel_target_size: Option<(usize, usize)>,
+    #[cfg(feature = "cef")]
+    #[rust]
+    accel_frame_counter: u64,
 }
 
 impl Browser {
@@ -179,29 +187,17 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
-    fn dpi_factor(&self, cx: &mut Cx) -> f64 {
-        let area = self.browser_area();
-        if area.is_valid(cx) {
-            cx.get_dpi_factor_of(&area).max(1.0)
-        } else {
-            1.0
-        }
-    }
-
+    /// CEF takes mouse coordinates in view points (it applies the device
+    /// scale factor itself), so no dpi scaling here.
     #[cfg(feature = "cef")]
     fn cef_position(&self, cx: &mut Cx, abs: Vec2d) -> Option<(i32, i32)> {
         let rect = self.browser_rect(cx)?;
-        let dpi = self.dpi_factor(cx);
         let local = abs - rect.pos;
-        Some((
-            (local.x * dpi).round() as i32,
-            (local.y * dpi).round() as i32,
-        ))
+        Some((local.x.round() as i32, local.y.round() as i32))
     }
 
     #[cfg(feature = "cef")]
-    fn cef_modifiers(modifiers: KeyModifiers, pressed_buttons: MouseButton) -> u32 {
+    pub fn cef_modifiers(modifiers: KeyModifiers, pressed_buttons: MouseButton) -> u32 {
         let mut out = makepad_cef::EVENTFLAG_NONE;
         if modifiers.shift {
             out |= makepad_cef::EVENTFLAG_SHIFT_DOWN;
@@ -228,7 +224,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn cef_mouse_button(button: Option<MouseButton>) -> i32 {
+    pub fn cef_mouse_button(button: Option<MouseButton>) -> i32 {
         match button {
             Some(button) if button.is_secondary() => makepad_cef::MOUSE_BUTTON_RIGHT,
             Some(button) if button.is_middle() => makepad_cef::MOUSE_BUTTON_MIDDLE,
@@ -237,7 +233,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn windows_key_code(key_code: KeyCode) -> i32 {
+    pub fn windows_key_code(key_code: KeyCode) -> i32 {
         match key_code {
             KeyCode::Escape => 0x1B,
             KeyCode::Back => 0xA6,
@@ -345,7 +341,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn key_char(key_code: KeyCode, shift: bool) -> Option<char> {
+    pub fn key_char(key_code: KeyCode, shift: bool) -> Option<char> {
         match key_code {
             KeyCode::Backspace => Some('\u{8}'),
             KeyCode::Backtick => Some(if shift { '~' } else { '`' }),
@@ -420,7 +416,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn sends_char_on_keydown(key_code: KeyCode) -> bool {
+    pub fn sends_char_on_keydown(key_code: KeyCode) -> bool {
         matches!(
             key_code,
             KeyCode::Backspace | KeyCode::Tab | KeyCode::ReturnKey | KeyCode::NumpadEnter
@@ -428,7 +424,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn char_event_data(text: &str) -> Option<(i32, u16)> {
+    pub fn char_event_data(text: &str) -> Option<(i32, u16)> {
         let mut chars = text.chars();
         let ch = chars.next()?;
         if chars.next().is_some() {
@@ -448,7 +444,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn key_event_modifiers(key_event: &KeyEvent) -> u32 {
+    pub fn key_event_modifiers(key_event: &KeyEvent) -> u32 {
         let mut modifiers = Self::cef_modifiers(key_event.modifiers, MouseButton::empty());
         if key_event.is_repeat {
             modifiers |= makepad_cef::EVENTFLAG_IS_REPEAT;
@@ -585,6 +581,8 @@ impl Browser {
             }
         }
 
+        self.sync_accelerated_target(_cx, width, height);
+
         if let Some(browser) = &mut self.cef_browser {
             let url = self.url.as_ref();
             if self.last_url != url {
@@ -601,17 +599,62 @@ impl Browser {
         }
     }
 
+    /// GPU path: the browser paints into pooled IOSurfaces and blits them
+    /// into a Makepad-owned IOSurface texture (`create_iosurface_render_texture`)
+    /// that the quad samples directly — no CPU readback, no upload.
+    #[cfg(feature = "cef")]
+    fn sync_accelerated_target(&mut self, cx: &mut Cx, width: usize, height: usize) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(browser) = &mut self.cef_browser else {
+                return;
+            };
+            if !browser.is_accelerated() {
+                return;
+            }
+            if self.accel_target_size == Some((width, height)) && self.texture.is_some() {
+                return;
+            }
+            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(width, height);
+            match browser.set_accelerated_target(iosurface, width, height) {
+                Ok(()) => {
+                    self.texture = Some(texture);
+                    self.accel_target_size = Some((width, height));
+                }
+                Err(err) => {
+                    log!("Browser accelerated target failed, staying on software frames: {err}");
+                    self.accel_target_size = None;
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (cx, width, height);
+        }
+    }
+
     #[cfg(feature = "cef")]
     fn pump_browser(&mut self, cx: &mut Cx) {
         makepad_cef::do_message_loop_work();
         let mut latest_frame = None;
+        let mut accelerated_dirty = false;
         if let Some(browser) = &mut self.cef_browser {
             while let Some(frame) = browser.take_frame() {
                 latest_frame = Some(frame);
             }
+            let counter = browser.accelerated_frame_counter();
+            if counter != self.accel_frame_counter {
+                self.accel_frame_counter = counter;
+                accelerated_dirty = true;
+            }
         }
         if let Some(frame) = latest_frame {
+            // A software frame on an accelerated browser means CEF fell back;
+            // the texture becomes a plain upload target again.
+            self.accel_target_size = None;
             self.apply_frame(cx, frame);
+            self.redraw(cx);
+        } else if accelerated_dirty {
             self.redraw(cx);
         }
     }

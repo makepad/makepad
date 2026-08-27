@@ -713,6 +713,18 @@ impl WidgetRef {
         }
     }
 
+    /// Serialize the widget's CURRENT Rust field values (live + walk +
+    /// layout, recursively) into a fresh script object. This is the truth
+    /// after runtime applies — the `#[source]` object only holds what the
+    /// DSL originally applied. The tweaker's reflection reads this.
+    pub fn current_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.script_to_value(vm)
+        } else {
+            ScriptValue::NIL
+        }
+    }
+
     pub fn script_call(
         &self,
         vm: &mut ScriptVm,

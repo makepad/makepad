@@ -766,6 +766,11 @@ impl WaylandCx {
                 }
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
+                CxOsOp::SetWindowTitle(window_id, title) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_title(title);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {
                     if visuals.backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();

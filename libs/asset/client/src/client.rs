@@ -667,6 +667,17 @@ impl AssetClient {
         self.api.room_heartbeat(room, token, ttl_ms)
     }
 
+    /// See the API's `room_heartbeat_with`: heartbeat plus the head count.
+    pub fn room_heartbeat_with(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+        players: Option<u32>,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        self.api.room_heartbeat_with(room, token, ttl_ms, players)
+    }
+
     pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
         self.api.retire_room(room, token)
     }
@@ -718,6 +729,23 @@ impl AssetClient {
 
     pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {
         self.api.chat_retire(id)
+    }
+
+    /// The session's durable conversation as rows to render (see
+    /// `Api::chat_transcript`).
+    pub fn chat_transcript(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<Vec<crate::dto::ChatTranscriptRowDto>> {
+        self.api.chat_transcript(id)
+    }
+
+    /// `chat_transcript` plus provider, turn and the truncation flag.
+    pub fn chat_transcript_full(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<crate::dto::ChatTranscriptDto> {
+        self.api.chat_transcript_full(id)
     }
 
     /// Answer a client-executed tool call (see `Api::chat_tool_result`).
@@ -846,6 +874,42 @@ impl AssetClient {
         bytes: &[u8],
     ) -> ClientResult<makepad_asset_data::BlobId> {
         self.api.upload_blob(ns, bytes)
+    }
+
+    pub fn open_model_preview(
+        &self,
+        alias: &makepad_asset_data::AssetAlias,
+        session: &str,
+        program: &str,
+    ) -> ClientResult<()> {
+        self.api.open_model_preview(alias, session, program)
+    }
+
+    pub fn update_model_preview(
+        &self,
+        session: &str,
+        program: Option<&str>,
+        removed: &[String],
+        renamed: &[crate::dto::ModelPreviewRenameDto],
+    ) -> ClientResult<()> {
+        self.api.update_model_preview(session, program, removed, renamed)
+    }
+
+    pub fn clear_model_preview(&self, session: &str) -> ClientResult<()> {
+        self.api.clear_model_preview(session)
+    }
+
+    pub fn upload_model_preview_part(
+        &self,
+        session: &str,
+        part: &str,
+        bytes: &[u8],
+    ) -> ClientResult<String> {
+        self.api.upload_model_preview_part(session, part, bytes)
+    }
+
+    pub fn fetch_model_preview_mesh(&self, token: &str) -> ClientResult<Vec<u8>> {
+        self.api.fetch_model_preview_mesh(token)
     }
 
     /// As [`Self::upload_blob`], but the digest is supplied by the caller

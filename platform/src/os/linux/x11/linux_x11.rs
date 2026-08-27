@@ -662,6 +662,13 @@ impl X11Cx {
                         window.xlib_window.set_position(size);
                     }
                 }
+                CxOsOp::SetWindowTitle(window_id, title) => {
+                    if let Some(window) =
+                        opengl_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.xlib_window.set_title(&title);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {
                     if visuals.backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();

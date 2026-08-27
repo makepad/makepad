@@ -449,3 +449,88 @@ impl_extend_n!(i8, i64);
 impl_extend_n!(i16, i32);
 impl_extend_n!(i16, i64);
 impl_extend_n!(i32, i64);
+
+/// Nonstandard scalar float math operations (the 0xE0-prefixed opcode
+/// space; opt-in via [`Extensions::ext_math`](crate::Extensions)).
+///
+/// These are the Rust `std` float functions, so results are bit-identical
+/// to host code calling the same functions.
+pub(crate) trait MathOps: Sized {
+    fn sin(self) -> Result<Self, Trap>;
+    fn cos(self) -> Result<Self, Trap>;
+    fn tan(self) -> Result<Self, Trap>;
+    fn asin(self) -> Result<Self, Trap>;
+    fn acos(self) -> Result<Self, Trap>;
+    fn atan(self) -> Result<Self, Trap>;
+    fn exp(self) -> Result<Self, Trap>;
+    fn ln(self) -> Result<Self, Trap>;
+    fn atan2(self, other: Self) -> Result<Self, Trap>;
+    fn pow(self, other: Self) -> Result<Self, Trap>;
+    /// Rust `min` semantics (minNum: NaN loses), unlike Wasm `min`.
+    fn rmin(self, other: Self) -> Result<Self, Trap>;
+    /// Rust `max` semantics (maxNum: NaN loses), unlike Wasm `max`.
+    fn rmax(self, other: Self) -> Result<Self, Trap>;
+    /// Rust `%` (fmod) semantics.
+    fn rem(self, other: Self) -> Result<Self, Trap>;
+}
+
+macro_rules! impl_math_ops {
+    ($T:ty) => {
+        impl MathOps for $T {
+            fn sin(self) -> Result<Self, Trap> {
+                Ok(self.sin())
+            }
+
+            fn cos(self) -> Result<Self, Trap> {
+                Ok(self.cos())
+            }
+
+            fn tan(self) -> Result<Self, Trap> {
+                Ok(self.tan())
+            }
+
+            fn asin(self) -> Result<Self, Trap> {
+                Ok(self.asin())
+            }
+
+            fn acos(self) -> Result<Self, Trap> {
+                Ok(self.acos())
+            }
+
+            fn atan(self) -> Result<Self, Trap> {
+                Ok(self.atan())
+            }
+
+            fn exp(self) -> Result<Self, Trap> {
+                Ok(self.exp())
+            }
+
+            fn ln(self) -> Result<Self, Trap> {
+                Ok(self.ln())
+            }
+
+            fn atan2(self, other: Self) -> Result<Self, Trap> {
+                Ok(self.atan2(other))
+            }
+
+            fn pow(self, other: Self) -> Result<Self, Trap> {
+                Ok(self.powf(other))
+            }
+
+            fn rmin(self, other: Self) -> Result<Self, Trap> {
+                Ok(self.min(other))
+            }
+
+            fn rmax(self, other: Self) -> Result<Self, Trap> {
+                Ok(self.max(other))
+            }
+
+            fn rem(self, other: Self) -> Result<Self, Trap> {
+                Ok(self % other)
+            }
+        }
+    };
+}
+
+impl_math_ops!(f32);
+impl_math_ops!(f64);

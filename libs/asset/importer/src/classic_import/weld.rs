@@ -34,9 +34,9 @@
 //! Doom, Quake 1 and Build never welded at all — Quake 1's "sparklies" are
 //! exactly this defect.
 
-/// Half of `snap_pos`'s 1/1024 m quantum: a vertex this close to an edge is
+/// Half of `snap_pos`'s 1/512 m quantum: a vertex this close to an edge is
 /// ON it — the quantiser could have put it either side.
-const ON_EDGE: f32 = 1.0 / 2048.0;
+const ON_EDGE: f32 = 1.0 / 1024.0;
 
 /// A candidate closer than this to either end of an edge IS that end as far
 /// as this pass is concerned, and no cut is made.
@@ -46,15 +46,17 @@ const ON_EDGE: f32 = 1.0 / 2048.0;
 /// guaranteed to be within `ON_EDGE` of the line), and not cutting leaves a
 /// crack of the same `d × ON_EDGE`. What differs is that the sliver is
 /// geometry which can z-fight its neighbour, so below one source unit —
-/// 1/512 m is Duke's BUILD unit, an eighth of a Doom unit, and twice Doom's
-/// own snap quantum — the crack is the better of the two. `t_junctions` in
-/// the map tests measures against this same number, because "closer than one
-/// source unit to the corner" is not a defect either engine could express.
-pub(crate) const MIN_FROM_END: f32 = 1.0 / 512.0;
+/// 1/256 m is an eighth of a Doom unit, roughly two of Duke's BUILD units,
+/// and twice Doom's own snap quantum — the crack is the better of the two.
+/// `t_junctions` in the map tests measures against this same number, because
+/// "closer than one source unit to the corner" is not a defect either engine
+/// could express. (Every number here doubled with the 2026-08-26 move to the
+/// person-pinned metre — same map-unit rule, twice the metres.)
+pub(crate) const MIN_FROM_END: f32 = 1.0 / 256.0;
 
 /// Bucket size for the vertex lookup, in metres (64 Doom units), so a cell
 /// holds a handful of vertices even in a dense map.
-const CELL: f32 = 1.0;
+const CELL: f32 = 2.0;
 
 /// Cap on the re-passes described on [`Weld::split`]. Real maps settle in
 /// two or three; this only bounds a pathological one.
@@ -198,7 +200,7 @@ pub(crate) fn split_t_junctions(soup: Soup<'_>) -> usize {
 /// cannot change the surface. This pass is the deliberate exception, and it
 /// is why the tolerance is the interesting number rather than an
 /// implementation detail. At [`MERGE_TOLERANCE`] the furthest a corner
-/// travels is six millimetres in a world whose rooms are three metres tall
+/// travels is twelve millimetres in a world whose rooms are three storeys of metres tall
 /// — invisible, and smaller than the crack it closes, which is the whole
 /// justification. E1L1 goes from five residual T-junctions to none; two
 /// units leaves two, so three is the number the data asked for and not a
@@ -217,7 +219,7 @@ pub(crate) struct Merge {
 /// already what [`MIN_FROM_END`] calls indistinguishable; the residual
 /// defects are pairs of corners ONE TO THREE units apart, so anything less
 /// leaves the widest of them open (two units leaves two of E1L1's five).
-pub(crate) const MERGE_TOLERANCE: f32 = 3.0 / 512.0;
+pub(crate) const MERGE_TOLERANCE: f32 = 3.0 / 256.0;
 
 impl Merge {
     /// Build the table from every part's positions.
@@ -799,10 +801,10 @@ mod tests {
     /// same seam. The merge snaps one onto the other, and the seam shuts.
     #[test]
     fn two_corners_a_hair_apart_become_one() {
-        // Corner B is 2/512 m from corner A along z — inside the tolerance,
+        // Corner B is 2/256 m from corner A along z — inside the tolerance,
         // outside `MIN_FROM_END`, which is exactly the residual shape.
         let a = [1.0f32, 0.0, 0.0];
-        let b = [1.0f32, 0.0, 2.0 / 512.0];
+        let b = [1.0f32, 0.0, 2.0 / 256.0];
         let mut left = vec![[0.0, 0.0, 0.0], a, [0.0, 0.0, 1.0]];
         let mut right = vec![b, [2.0, 0.0, 0.0], [2.0, 0.0, 1.0]];
         let merge = Merge::from_parts(&[&left[..], &right[..]], MERGE_TOLERANCE);
@@ -846,7 +848,7 @@ mod tests {
             [1.0, 0.0, 0.0],
             [1.0, 0.0, 1.0],
             // A whole source unit past the tolerance.
-            [1.0 + 4.0 / 512.0, 0.0, 0.0],
+            [1.0 + 4.0 / 256.0, 0.0, 0.0],
         ];
         let merge = Merge::from_parts(&[&pos[..]], MERGE_TOLERANCE);
         assert!(merge.is_empty(), "nothing here is within the tolerance");
@@ -874,7 +876,7 @@ mod tests {
         let mut pos = vec![
             [0.0f32, 0.0, 0.0],
             [1.0, 0.0, 0.0],
-            [1.0, 0.0, 1.0 / 512.0],
+            [1.0, 0.0, 1.0 / 256.0],
             [1.0, 0.0, 0.0],
             [3.0, 0.0, 0.0],
             [3.0, 0.0, 1.0],
@@ -898,7 +900,7 @@ mod tests {
     #[test]
     fn the_merge_table_does_not_depend_on_part_order() {
         let a = vec![[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
-        let b = vec![[1.0f32, 0.0, 2.0 / 512.0], [5.0, 0.0, 0.0]];
+        let b = vec![[1.0f32, 0.0, 2.0 / 256.0], [5.0, 0.0, 0.0]];
         let one = Merge::from_parts(&[&a[..], &b[..]], MERGE_TOLERANCE);
         let two = Merge::from_parts(&[&b[..], &a[..]], MERGE_TOLERANCE);
         let mut ka: Vec<_> = one.moved.iter().map(|(k, v)| (*k, *v)).collect();
