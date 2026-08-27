@@ -141,10 +141,37 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
     })
 }
 
+/// Whether this process may activate itself or make a window key.
+///
+/// USER LAW (2026-08-26): an agent-driven or test instance must never steal
+/// the user's focus — they could not type in their own terminal while lanes
+/// launched and clicked windows. `--remote` therefore means VISIBLE BUT
+/// UNFOCUSED: the window is ordered on screen, never made key, and the app
+/// never activates — the bridge injects input through the event loop, not
+/// the OS, so key-window status is not needed for anything it does.
+/// `MAKEPAD_NO_FOCUS=1` asks for the same without `--remote`;
+/// `MAKEPAD_FOCUS=1` restores activation for a remote run the user wants
+/// in front. Decided once per process.
+pub fn focus_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        if std::env::var_os("MAKEPAD_FOCUS").is_some() {
+            return true;
+        }
+        if std::env::var_os("MAKEPAD_NO_FOCUS").is_some() {
+            return false;
+        }
+        !crate::remote::requested()
+    })
+}
+
 /// Activate one Cocoa window without holding the global `MacosApp` RefCell
 /// borrow across AppKit calls (which can synchronously re-enter delegates).
+/// A no-focus process (see [`focus_allowed`]) never activates: bridge
+/// clicks run through here too, and each one used to raise the window over
+/// whatever the user was typing in.
 pub fn activate_cocoa_window_on_pointer_down(window: ObjcId) -> bool {
-    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() || !focus_allowed() {
         return false;
     }
     unsafe {
@@ -554,6 +581,11 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
+        if !focus_allowed() {
+            // Visible-but-unfocused launch: no Dock dance, no activation.
+            self.startup_focus_hack_ran = true;
+            return;
+        }
         return unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
@@ -1040,6 +1072,20 @@ impl MacosApp {
     /// the OS state, tracked in `pointer_lock_applied` so focus churn never
     /// double-hides or double-shows the cursor.
     pub fn apply_pointer_lock_effects(&mut self, on: bool) {
+        // Only an ACTIVE app may take the user's pointer: a bridge-driven,
+        // unfocused instance clicking its own fps view must never hide and
+        // pin the cursor the user is using elsewhere. A real click activates
+        // the app before it arrives here, so players are unaffected.
+        if on {
+            let active: bool = unsafe {
+                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                msg_send![ns_app, isActive]
+            };
+            if !active {
+                self.pointer_lock_applied = false;
+                return;
+            }
+        }
         if self.pointer_lock_applied == on {
             return;
         }
@@ -1098,12 +1144,34 @@ impl MacosApp {
         }
     }
 
+    /// Focus left the window (cmd-tab, a click elsewhere): whatever the
+    /// game thinks, the OS pointer goes back to the user NOW. A lock held
+    /// past focus loss — and re-pinned every frame — left the user with no
+    /// mouse at all (2026-08-26). The game re-locks on its next click.
+    pub fn release_pointer_lock_on_focus_loss(&mut self) {
+        if self.mouse_pointer_lock || self.pointer_lock_applied {
+            self.mouse_pointer_lock = false;
+            self.pointer_lock_applied = false;
+            self.lock_pin = None;
+            self.apply_pointer_lock_effects(false);
+        }
+    }
+
     /// Per-frame while locked: force the hardware cursor back onto the pin
     /// and re-assert the disassociation. On systems where the association
     /// silently drops (observed live: deadzones the size of the desktop
     /// minus the window), this is the enforcement that actually holds.
+    /// Never while the app is inactive: the pointer belongs to whoever has
+    /// focus, and repinning it from the background is a trap.
     pub fn repin_pointer(&mut self) {
         if !self.mouse_pointer_lock || !self.pointer_lock_applied {
+            return;
+        }
+        let active: bool = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            msg_send![ns_app, isActive]
+        };
+        if !active {
             return;
         }
         let Some(pin) = self.lock_pin else { return };

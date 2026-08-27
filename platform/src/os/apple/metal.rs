@@ -284,6 +284,16 @@ impl Cx {
                     }
                 }
 
+                let cull_mode = if draw_call.options.backface_culling {
+                    2u64 // MTLCullModeBack
+                } else {
+                    0u64 // MTLCullModeNone
+                };
+                unsafe {
+                    let () = msg_send![encoder, setFrontFacingWinding: 1u64]; // MTLWindingCounterClockwise
+                    let () = msg_send![encoder, setCullMode: cull_mode];
+                }
+
                 let render_pipeline_state = shp.render_pipeline_state.as_id();
                 unsafe {
                     let () = msg_send![encoder, setRenderPipelineState: render_pipeline_state];
@@ -1374,6 +1384,14 @@ impl Cx {
     }
 
     pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        let _mp_batch = (
+            crate::startup_trace_enabled(),
+            self.draw_shaders.compile_set.len(),
+            std::time::Instant::now(),
+        );
+        if _mp_batch.0 && _mp_batch.1 > 0 {
+            crate::startup_trace(&format!("mtl_compile_shaders begin ({})", _mp_batch.1));
+        }
         for draw_shader_id in self
             .draw_shaders
             .compile_set
@@ -1423,6 +1441,13 @@ impl Cx {
             }
         }
         self.draw_shaders.compile_set.clear();
+        if _mp_batch.0 && _mp_batch.1 > 0 {
+            crate::startup_trace(&format!(
+                "mtl_compile_shaders done ({} in {:.2} ms)",
+                _mp_batch.1,
+                _mp_batch.2.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2522,6 +2547,11 @@ impl CxOsDrawShader {
                 _mp_src_len, _mp_lib_ms, _mp_t1.elapsed().as_secs_f64()*1000.0,
                 _mp_t0.elapsed().as_secs_f64()*1000.0);
         }
+        crate::startup_acc("metal newLibraryWithSource", _mp_lib_ms);
+        crate::startup_acc(
+            "metal newRenderPipelineState",
+            _mp_t1.elapsed().as_secs_f64() * 1000.0,
+        );
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
             .get_by_type_name(id!(DrawCallUniforms))

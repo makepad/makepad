@@ -45,6 +45,13 @@ mod imp {
     // ------------------------------------------------------------------
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// True when this process was started with `--remote` (any form). Pure
+    /// argv scan, usable before the bridge itself is up — the platform's
+    /// focus policy reads it while the first window is being created.
+    pub fn requested() -> bool {
+        std::env::args().any(|a| a == "--remote" || a.starts_with("--remote="))
+    }
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
     /// Grab request ids live in the top half of the id space, like the file
@@ -145,6 +152,17 @@ mod imp {
             window: Option<usize>,
             tx: Sender<Reply>,
         },
+        /// A tweaker-overlay operation. The route only parses; the whole
+        /// answer comes from `Cx::tweak_callback` (registered by the widgets
+        /// crate), so platform stays below widgets in the dependency order.
+        Tweak {
+            op: String,
+            args: Vec<(String, String)>,
+            /// Answer only after the next frame is drawn, so a following
+            /// grab sees the applied change on screen.
+            wait: bool,
+            tx: Sender<Reply>,
+        },
         Quit(Sender<Reply>),
     }
 
@@ -183,10 +201,12 @@ mod imp {
         Err(String),
     }
 
-    /// `(target repaint_id, responder)` — resolved once the app has drawn a
-    /// frame that includes whatever the request did.
-    fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>)>> {
-        static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>)>>> = OnceLock::new();
+    /// `(target repaint_id, responder, payload)` — resolved once the app has
+    /// drawn a frame that includes whatever the request did. `payload` is the
+    /// JSON to answer with (a tweak op's result); `None` answers with the
+    /// generic `{"ok":1,"f":N}` frame ack.
+    fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>, Option<String>)>> {
+        static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>, Option<String>)>>> = OnceLock::new();
         W.get_or_init(|| Mutex::new(Vec::new()))
     }
 
@@ -542,9 +562,13 @@ mod imp {
         // Resolve anyone who asked to be answered after the next frame.
         let repaint_id = cx.repaint_id;
         let mut waiters = frame_waiters().lock().unwrap();
-        waiters.retain(|(target, tx)| {
+        waiters.retain(|(target, tx, payload)| {
             if repaint_id >= *target {
-                let _ = tx.send(Reply::Text(format!("{{\"ok\":1,\"f\":{repaint_id}}}")));
+                let text = match payload {
+                    Some(payload) => payload.clone(),
+                    None => format!("{{\"ok\":1,\"f\":{repaint_id}}}"),
+                };
+                let _ = tx.send(Reply::Text(text));
                 false
             } else {
                 true
@@ -681,7 +705,7 @@ mod imp {
                     frame_waiters()
                         .lock()
                         .unwrap()
-                        .push((cx.repaint_id + 1, tx));
+                        .push((cx.repaint_id + 1, tx, None));
                 } else {
                     let _ = tx.send(Reply::Ok);
                 }
@@ -809,6 +833,27 @@ mod imp {
                 push_log_line(line);
                 let _ = tx.send(Reply::Ok);
                 cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+            }
+            Cmd::Tweak { op, args, wait, tx } => {
+                let result = match cx.tweak_callback {
+                    Some(callback) => callback(cx, &op, &args),
+                    None => Err("no tweaker (this app has no widgets ui root)".to_string()),
+                };
+                match result {
+                    Ok(json) => {
+                        if wait {
+                            frame_waiters()
+                                .lock()
+                                .unwrap()
+                                .push((cx.repaint_id + 1, tx, Some(json)));
+                        } else {
+                            let _ = tx.send(Reply::Text(json));
+                        }
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(Reply::Err(msg));
+                    }
+                }
             }
             Cmd::Quit(tx) => {
                 let line = "[makepad-remote] remote quit".to_string();
@@ -973,6 +1018,25 @@ mod imp {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
             }
+            // The tweaker overlay (design feedback). Thin: parse here, decide
+            // in the widgets-side callback. `wait` answers after the next
+            // drawn frame so a following grab sees the change.
+            "/tweak" => route_tweak("toggle", p, true),
+            "/tweak/state" => route_tweak("state", p, false),
+            "/tweak/apply" => route_tweak("apply", p, true),
+            "/tweak/diff" => route_tweak("diff", p, false),
+            "/tweak/clear" => route_tweak("clear", p, false),
+            "/tweak/final" => route_tweak_final(p),
+            // Escape hatch for tweaker ops that don't have (or need) a named
+            // route yet: /tweak/op?op=NAME&... — the callback decides.
+            "/tweak/op" => match p.get(&["op"]) {
+                Some(op) => route_tweak(&op.to_string(), p, false),
+                None => err("need op="),
+            },
+            // The window PNG with the overlay's outlines/annotations in it:
+            // the overlay draws inside the window's own pass, so the ordinary
+            // grab pipeline already composites it.
+            "/tweak/grab" => route_grab(p),
             "/quit" => reply_to_out(ask(|tx| Cmd::Quit(tx), 4)),
             _ => err("no route"),
         }
@@ -996,6 +1060,12 @@ mod imp {
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
+             /tweak?on=1|0     the TWEAKER design-feedback overlay (also F12 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
+             /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
+             /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
+             /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
+             /tweak/grab       window grab with the overlay composited (same as /g while tweaking)\n\
              /close?w=ID       close one window the normal way\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
@@ -1008,6 +1078,54 @@ mod imp {
             status.windows.len(),
             dir,
         )
+    }
+
+    fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
+        let op = op.to_string();
+        let args = p.0.clone();
+        // A `wait` op only resolves on the next drawn frame; give it the
+        // same slack as an input wait.
+        let timeout = if wait { 6 } else { 4 };
+        reply_to_out(ask(move |tx| Cmd::Tweak { op, args, wait, tx }, timeout))
+    }
+
+    /// `/tweak/final` — the coalesced end state. When the answer says the
+    /// user drew (`"drew":1`), grab the window too and name the composited
+    /// PNG in the same JSON, so the caller sees what the drawings mean
+    /// without a second round trip.
+    fn route_tweak_final(p: &Params) -> Out {
+        let args = p.0.clone();
+        let reply = ask(
+            move |tx| Cmd::Tweak {
+                op: "final".to_string(),
+                args,
+                wait: false,
+                tx,
+            },
+            4,
+        );
+        let mut json = match reply {
+            Reply::Text(text) => text,
+            other => return reply_to_out(other),
+        };
+        if json.contains("\"drew\":1") && json.ends_with('}') {
+            match grab_one(p.window(), p.f64(&["scale"], 1.0))
+                .and_then(|grabbed| write_grab(grabbed.window_id, &grabbed.png))
+            {
+                Ok(path) => {
+                    json.pop();
+                    json.push_str(&format!(
+                        ",\"png\":{}}}",
+                        json_str(&path.display().to_string())
+                    ));
+                }
+                Err(msg) => {
+                    json.pop();
+                    json.push_str(&format!(",\"png_err\":{}}}", json_str(&msg)));
+                }
+            }
+        }
+        Out::Json(200, json)
     }
 
     fn route_status(p: &Params) -> Out {

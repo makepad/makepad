@@ -180,6 +180,8 @@ pub fn server_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -1642,6 +1644,10 @@ fn start_embedded_asset_server_at(
     // the only loopback caller that uses it is this app's own observer (see
     // `start_observe_loop`) cataloguing directories the user pointed it at.
     cfg.blob_refs = makepad_asset_store::BlobRefPolicy::local_host();
+    // The chat broker listens for the SAME fleet this app's panel shows
+    // (`MAKEPAD_AI_FLEET`, defaulted in `setup` before this runs). Left
+    // empty it followed its own default and heard none of the `gen` boxes.
+    cfg.chat.fleet = makepad_asset_ai::discovery::wanted_fleet();
     cfg.log = true;
     let server = makepad_asset_store::AssetServer::start(cfg)
         .map_err(|e| format!("embedded asset server: {e}"))?;
@@ -2090,6 +2096,7 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: Some(format!("game/asset-{seq}")),
+            model_preview: None,
             content_kind: None,
             ts_ms: seq,
         };
@@ -2205,6 +2212,7 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: None,
+            model_preview: None,
             content_kind: None,
             ts_ms: 1,
         }]);
@@ -2228,6 +2236,7 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: None,
+            model_preview: None,
             content_kind: None,
             ts_ms: 2,
         }]);

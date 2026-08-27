@@ -95,6 +95,9 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "assets"] if m == Method::Post => asset_register(conn, head, rc),
         ["v1", "assets"] if is_read(m) => assets_list(head, rc),
         ["v1", "assets", a] if is_read(m) => asset_get(head, rc, ast_of(a)?),
+        ["v1", "model-previews"] if m == Method::Post => {
+            model_preview(conn, head, rc)
+        }
         ["v1", "assets", a, "revisions"] if m == Method::Post => {
             asset_stage(conn, head, rc, ast_of(a)?)
         }
@@ -354,6 +357,139 @@ fn asset_alias_of(rest: &[&str]) -> RouteResult<AssetAlias> {
 
 fn game_alias_of(rest: &[&str]) -> RouteResult<GameAlias> {
     GameAlias::new(rest.join("/")).map_err(|_| Fail::Http(400, "malformed alias"))
+}
+
+/// Open, edit, or clear one in-memory LocalGen preview session. Mesh bytes
+/// travel on the data plane and live only in [`events::EventHub`]; this route
+/// never admits a blob to CAS and never creates catalog state.
+fn model_preview(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = match read_json_body(conn, head, rc) {
+        Err(outcome) => return Ok(outcome),
+        Ok(result) => result?,
+    };
+    let operation = body_str(&body, "op")?.to_string();
+    let session = body_str(&body, "session")?.to_string();
+    if session.is_empty()
+        || session.len() > 64
+        || !session.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err(Fail::Http(400, "malformed model preview session"));
+    }
+    let alias = match body.get("alias") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let text = value
+                .as_str()
+                .ok_or(Fail::Http(400, "malformed model preview alias"))?;
+            let alias = AssetAlias::new(text.to_string())
+                .map_err(|_| Fail::Http(400, "malformed model preview alias"))?;
+            if !alias.as_str().starts_with("gen/csg/") {
+                return Err(Fail::Http(400, "model preview alias must be gen/csg/*"));
+            }
+            Some(alias)
+        }
+    };
+    let program = match body.get("program") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let value = value
+                .as_str()
+                .ok_or(Fail::Http(400, "malformed model preview program"))?;
+            if value.len() > 12_000 {
+                return Err(Fail::Http(400, "model preview program too long"));
+            }
+            Some(value.to_string())
+        }
+    };
+    let parse_names = |key: &'static str| -> RouteResult<Vec<String>> {
+        let Some(value) = body.get(key) else { return Ok(Vec::new()) };
+        let rows = value
+            .as_arr()
+            .ok_or(Fail::Http(400, "malformed model preview name list"))?;
+        if rows.len() > 32 {
+            return Err(Fail::Http(400, "model preview name list too long"));
+        }
+        rows.iter()
+            .map(|value| {
+                let name = value
+                    .as_str()
+                    .ok_or(Fail::Http(400, "malformed model preview part name"))?;
+                if name.is_empty()
+                    || name.len() > 24
+                    || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return Err(Fail::Http(400, "malformed model preview part name"));
+                }
+                Ok(name.to_string())
+            })
+            .collect()
+    };
+    let removed = parse_names("removed")?;
+    let renamed = match body.get("renamed") {
+        None => Vec::new(),
+        Some(value) => {
+            let rows = value
+                .as_arr()
+                .ok_or(Fail::Http(400, "malformed model preview rename list"))?;
+            if rows.len() > 32 {
+                return Err(Fail::Http(400, "model preview rename list too long"));
+            }
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let from = body_str(row, "from")?.to_string();
+                let to = body_str(row, "to")?.to_string();
+                for name in [&from, &to] {
+                    if name.is_empty()
+                        || name.len() > 24
+                        || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                    {
+                        return Err(Fail::Http(400, "malformed model preview rename"));
+                    }
+                }
+                out.push(events::ModelPreviewRename { from, to });
+            }
+            out
+        }
+    };
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let namespace = match operation.as_str() {
+        "open" => alias
+            .as_ref()
+            .ok_or(Fail::Http(400, "model preview open requires alias"))?
+            .namespace()
+            .to_string(),
+        "delta" | "clear" => hub
+            .model_preview_namespace(&session)
+            .ok_or(Fail::Http(404, "model preview session not found"))?,
+        _ => return Err(Fail::Http(400, "unknown model preview operation")),
+    };
+    call_state(&rc.state, move |ctx| {
+        let principal = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_cap(ctx, &principal, Capability::AssetPublish, &namespace)?;
+        let result = match operation.as_str() {
+            "open" => hub.open_model_preview(
+                namespace,
+                alias.expect("validated preview alias").as_str().to_string(),
+                session,
+                program.ok_or(ServerError::InvalidInput { what: "model preview program" })?,
+                now,
+            ),
+            "delta" => hub.update_model_preview_metadata(
+                &session,
+                program,
+                removed,
+                renamed,
+                now,
+            ),
+            "clear" => hub.clear_model_preview(&session, now),
+            _ => unreachable!(),
+        };
+        result.map_err(|what| ServerError::Conflict { what })?;
+        Ok(())
+    })?;
+    Ok(Outcome::Resp(Resp::json(200, &obj(vec![("ok", Value::Bool(true))]))))
 }
 
 pub(crate) fn read_json_body(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> Result<RouteResult<Value>, Outcome> {
@@ -827,6 +963,17 @@ fn asset_retire(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome
         }
         Ok(report)
     })?;
+    // A game's chat lives and dies with the game: every keyed conversation
+    // whose context is this asset — live or on disk, whoever's — goes.
+    if let Some(chat) = &rc.chat {
+        let dropped = chat.drop_context(&ast.to_string());
+        if dropped > 0 {
+            super::util::log(
+                rc.cfg.log,
+                &format!("chat: asset {ast} retired — dropped {dropped} keyed conversation(s)"),
+            );
+        }
+    }
     Ok(Outcome::Resp(Resp::json(
         200,
         &obj(vec![
@@ -1659,6 +1806,7 @@ fn alias_delete(head: &Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Ou
                 game_id: None,
                 game_revision: None,
                 alias: Some(alias.as_str().to_string()),
+                model_preview: None,
                 content_kind: None,
                 ts_ms: now,
             };
@@ -1969,6 +2117,7 @@ fn game_alias_delete(head: &Head, rc: &RouteCtx, alias: GameAlias) -> RouteResul
                 game_id: None,
                 game_revision: None,
                 alias: Some(alias.as_str().to_string()),
+                model_preview: None,
                 content_kind: None,
                 ts_ms: now,
             };
@@ -2011,6 +2160,15 @@ fn events_resp(
 ) -> Resp {
     let arr = events
         .iter()
+        // v1-v3 have no honest durable spelling for a part-delta preview.
+        // They advance over its sequence but do not receive a fake event.
+        .filter(|e| {
+            vocabulary >= 4
+                || !matches!(
+                    e.kind,
+                    events::KIND_MODEL_PREVIEW | events::KIND_MODEL_PREVIEW_CLEAR
+                )
+        })
         .map(|e| {
             let mut pairs = vec![
                 ("seq", Value::Int(e.seq as i64)),
@@ -2034,6 +2192,47 @@ fn events_resp(
             }
             if let Some(v) = &e.alias {
                 pairs.push(("alias", s(v.clone())));
+            }
+            if let Some(preview) = &e.model_preview {
+                pairs.push(("preview_session", s(preview.session.clone())));
+                pairs.push(("preview_open", Value::Bool(preview.open)));
+                if let Some(program) = &preview.program {
+                    pairs.push(("preview_program", s(program.clone())));
+                }
+                pairs.push((
+                    "preview_parts",
+                    Value::Arr(
+                        preview
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                obj(vec![
+                                    ("name", s(part.name.clone())),
+                                    ("mesh_token", s(part.token.clone())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ));
+                pairs.push((
+                    "preview_removed",
+                    Value::Arr(preview.removed.iter().cloned().map(s).collect()),
+                ));
+                pairs.push((
+                    "preview_renamed",
+                    Value::Arr(
+                        preview
+                            .renamed
+                            .iter()
+                            .map(|rename| {
+                                obj(vec![
+                                    ("from", s(rename.from.clone())),
+                                    ("to", s(rename.to.clone())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ));
             }
             if let Some(k) = e.content_kind {
                 pairs.push(("content_kind", s(k)));
@@ -2108,7 +2307,12 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
 
     let Some(cursor_text) = head.query_get("cursor") else {
         let tail = rc.events.tail_cursor();
-        return Ok(Outcome::Resp(events_resp(&[], &tail, false, vocabulary)));
+        let previews = if vocabulary >= 4 {
+            rc.events.active_model_previews(kind, limit)
+        } else {
+            Vec::new()
+        };
+        return Ok(Outcome::Resp(events_resp(&previews, &tail, false, vocabulary)));
     };
     let mut cursor =
         EventCursor::parse(cursor_text).ok_or(Fail::Http(400, "malformed cursor"))?;
@@ -2860,6 +3064,19 @@ fn job_get(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
     Ok(Outcome::Resp(Resp::json(200, &obj(pairs))))
 }
 
+fn job_prompt(payload: &[u8]) -> Option<String> {
+    let (_, _, body) = envelope_parse(payload)?;
+    let prompt = body.get("prompt")?.as_str()?;
+    let mut out = String::new();
+    for ch in prompt.chars().filter(|ch| !ch.is_control()) {
+        if out.len() + ch.len_utf8() > 256 {
+            break;
+        }
+        out.push(ch);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let ns = head.query_get("ns").map(str::to_string);
@@ -2881,22 +3098,31 @@ fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
         for meta in metas {
             // Skip crash-window orphans (meta row without a core job).
             if let Some(state) = ctx.core.jobs().state(&meta.job_id)? {
-                rows.push((meta, state));
+                let prompt = ctx
+                    .core
+                    .jobs()
+                    .payload(&meta.job_id)?
+                    .and_then(|payload| job_prompt(&payload));
+                rows.push((meta, state, prompt));
             }
         }
         Ok(rows)
     })?;
     let jobs = rows
         .iter()
-        .map(|(meta, state)| {
-            obj(vec![
+        .map(|(meta, state, prompt)| {
+            let mut pairs = vec![
                 ("job", s(super::api::job_str(&meta.job_id))),
                 ("namespace", s(meta.ns.clone())),
                 ("kind", s(meta.kind.clone())),
                 ("state", s(state.as_str())),
                 ("enqueued_by", s(principal_str(&meta.enqueued_by))),
                 ("created_ms", Value::Int(meta.created_ms as i64)),
-            ])
+            ];
+            if let Some(prompt) = prompt {
+                pairs.push(("prompt", s(prompt.clone())));
+            }
+            obj(pairs)
         })
         .collect();
     Ok(Outcome::Resp(Resp::json(200, &obj(vec![("jobs", Value::Arr(jobs))]))))
@@ -3189,4 +3415,22 @@ fn worker_fail(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
         200,
         &obj(vec![("state", s(state.as_str()))]),
     )))
+}
+
+#[cfg(test)]
+mod generation_projection_tests {
+    use super::*;
+
+    #[test]
+    fn job_prompt_is_display_safe_and_response_bounded() {
+        let payload = envelope_build(
+            "sandbox",
+            &PrincipalId([7; 16]),
+            &obj(vec![("prompt", s(format!("bunny\n{}", "é".repeat(300))))]),
+        );
+        let prompt = job_prompt(&payload).expect("projected prompt");
+        assert!(!prompt.chars().any(char::is_control));
+        assert!(prompt.len() <= 256);
+        assert!(std::str::from_utf8(prompt.as_bytes()).is_ok());
+    }
 }

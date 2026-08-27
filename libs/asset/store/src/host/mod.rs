@@ -36,6 +36,7 @@ pub mod util;
 
 pub(crate) mod appdb;
 pub(crate) mod chat;
+pub(crate) mod chat_store;
 pub(crate) mod events;
 pub(crate) mod routes;
 pub(crate) mod routes_control;

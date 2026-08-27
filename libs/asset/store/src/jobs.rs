@@ -546,6 +546,18 @@ impl<'a> Jobs<'a> {
             .ok_or(ServerError::InvalidState { what: "job row", state: "unknown" })
     }
 
+    /// The durable, bounded enqueue payload for an existing job. Host
+    /// projections use this to expose selected safe metadata (currently the
+    /// generation prompt) without duplicating payload storage.
+    pub fn payload(&self, job_id: &JobId) -> ServerResult<Option<Vec<u8>>> {
+        let mut s = self.db.prepare("job payload", "SELECT payload FROM jobs WHERE job_id = ?1")?;
+        s.bind_blob(1, &job_id.0)?;
+        if !s.step()? {
+            return Ok(None);
+        }
+        Ok(Some(s.column_blob(0)))
+    }
+
     pub fn attempts(&self, job_id: &JobId) -> ServerResult<Vec<AttemptRow>> {
         let mut s = self.db.prepare(
             "job attempts",

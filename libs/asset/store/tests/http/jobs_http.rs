@@ -22,7 +22,7 @@ fn enqueue(client: &mut Client, kind: &str, extra: Vec<(&str, Value)>) -> String
     let mut pairs = vec![
         ("namespace", jstr("demo")),
         ("kind", jstr(kind)),
-        ("body", jobj(vec![("step", jstr(kind))])),
+        ("body", jobj(vec![("step", jstr(kind)), ("prompt", jstr(format!("make {kind}")))])),
     ];
     pairs.extend(extra);
     let r = client.post_json("/v1/jobs", &jobj(pairs));
@@ -251,6 +251,11 @@ fn job_listing_scopes() {
         .map(|j| j.get("job").unwrap().as_str().unwrap().to_string())
         .collect();
     assert!(ids.contains(&j1) && ids.contains(&j2));
+    assert!(jobs.iter().all(|job| {
+        job.get("prompt")
+            .and_then(Value::as_str)
+            .is_some_and(|prompt| prompt.starts_with("make list."))
+    }));
 
     // Namespace listing requires a job capability on that namespace.
     let r = enqueuer.get("/v1/jobs?ns=demo&limit=1");

@@ -171,6 +171,11 @@ pub struct GlobalType {
 impl Decode for GlobalType {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let val = decoder.decode()?;
+        // v128 globals are not supported: a v128 value cannot flow through
+        // the global entity storage or the global.get/set register paths.
+        if val == ValType::V128 {
+            return Err(DecodeError::new("v128 globals are not supported"));
+        }
         let mut_ = decoder.decode()?;
         Ok(Self { val, mut_ })
     }

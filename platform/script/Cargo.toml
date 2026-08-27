@@ -15,6 +15,7 @@ check_gen = []
 
 [dependencies]
 makepad-error-log = {path = "../../libs/error_log", version = "1.0.0" }
+makepad-stitch = {path = "../../libs/stitch", version = "0.1.0" }
 makepad-math = {path = "../../libs/math", version = "1.0.0" }
 makepad-live-id = {path = "../../libs/live_id", version = "1.0.0" }
 makepad-script-derive = {path = "./derive", version = "1.0.0" }

@@ -313,6 +313,31 @@ static REGISTRY: &[OperationDef] = &[
                 name: "title",
                 kind: ParamSpecKind::Text { max_bytes: 120, default: "" },
             },
+            // The physical size the expand step declared, metres as text
+            // (params are flat typed values): the worker calibrates the
+            // unitless generated mesh to it and publishes an
+            // `asset-dimensions` sidecar (`FileRole::Source`). Empty =
+            // undeclared, no sidecar.
+            OperationParamSpec {
+                name: "dim_class",
+                kind: ParamSpecKind::Text { max_bytes: 16, default: "" },
+            },
+            OperationParamSpec {
+                name: "dim_height",
+                kind: ParamSpecKind::Text { max_bytes: 16, default: "" },
+            },
+            OperationParamSpec {
+                name: "dim_length",
+                kind: ParamSpecKind::Text { max_bytes: 16, default: "" },
+            },
+            OperationParamSpec {
+                name: "dim_width",
+                kind: ParamSpecKind::Text { max_bytes: 16, default: "" },
+            },
+            OperationParamSpec {
+                name: "dim_preset",
+                kind: ParamSpecKind::Text { max_bytes: 16, default: "" },
+            },
         ],
         outputs: &[OperationOutputSpec {
             name: "mesh",
@@ -324,6 +349,8 @@ static REGISTRY: &[OperationDef] = &[
                 FileRole::Normal,
                 FileRole::Orm,
                 FileRole::Collider,
+                // The `asset-dimensions` text sidecar.
+                FileRole::Source,
             ],
         }],
         supports_seed: true,

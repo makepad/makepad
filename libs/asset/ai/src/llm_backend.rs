@@ -1683,6 +1683,13 @@ mod llama_worker {
                 // and the two disagreeing means ingesting a delta at position 0
                 // of a lane that holds none of the history.
                 let prompt_tokens = tokens.len();
+                // The reply budget is physical, not policy: whatever the
+                // client asked for, a lane can only decode into the context
+                // it has left after this prompt. Clamping HERE (not at the
+                // params layer) keeps the progress meter's denominator and
+                // the scheduler's stop condition the same honest number.
+                let max_new = (job.max_tokens.max(1) as usize)
+                    .min((context_per_lane() as usize).saturating_sub(prompt_tokens).max(1));
                 let request = LaneRequest {
                     job: id,
                     session: job.kind.clone(),
@@ -1690,7 +1697,7 @@ mod llama_worker {
                     // Never a veto from here: the scheduler decides whether a
                     // lane can be resumed, and it is the only thing that knows.
                     reset_first: false,
-                    max_new: job.max_tokens.max(1) as usize,
+                    max_new,
                     sampling: LlamaSamplingParams {
                         temperature: job.temperature.max(0.0),
                         top_p: 0.95,
@@ -1722,7 +1729,7 @@ mod llama_worker {
                         cancel,
                         token_ids: Vec::new(),
                         streamed: String::new(),
-                        max_tokens: job.max_tokens.max(1) as usize,
+                        max_tokens: max_new,
                         prompt_tokens,
                         lane: None,
                         phase: TurnPhase::Waiting,

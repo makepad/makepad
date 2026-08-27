@@ -45,6 +45,27 @@ pub struct XlibChildWindow {
 }*/
 
 impl XlibWindow {
+    pub fn set_title(&self, title: &str) {
+        let Some(window) = self.window else { return };
+        unsafe {
+            let display = get_xlib_app_global().display;
+            let title = format!("{}\0", title);
+            let title_ptr = title.as_ptr() as *mut c_char;
+            x11_sys::Xutf8SetWMProperties(
+                display,
+                window,
+                title_ptr,
+                title_ptr,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            x11_sys::XFlush(display);
+        }
+    }
+
     pub fn new(window_id: WindowId) -> XlibWindow {
         XlibWindow {
             window: None,

@@ -236,7 +236,9 @@ impl Cx {
     /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
     /// (Headless builds write frames to files on their own; this is for the
     /// live GPU-rendered app.)
-    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) {
+    /// Returns the capture's request id, so the caller can later
+    /// [`cancel_frame_capture`](Self::cancel_frame_capture) it.
+    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) -> u64 {
         let request_id = SCREENSHOT_FILE_NEXT_ID
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         screenshot_file_sinks().lock().unwrap().insert(request_id, path);
@@ -246,6 +248,28 @@ impl Cx {
                 kind_id: 0,
             });
         self.redraw_all();
+        request_id
+    }
+
+    /// Forget a pending [`capture_next_frame_to_file`]. The GPU readback
+    /// cannot be recalled once its frame presents, so a request that has
+    /// already been drained keeps its sink entry but with an EMPTY path —
+    /// the writer discards those bytes instead of writing a file the
+    /// caller has stopped watching (and never mistakes them for a studio
+    /// response). A request whose frame has not presented yet is dropped
+    /// outright.
+    pub fn cancel_frame_capture(&mut self, request_id: u64) {
+        let queued = self
+            .screenshot_requests
+            .iter()
+            .any(|request| request.request_id == request_id);
+        let mut sinks = screenshot_file_sinks().lock().unwrap();
+        if queued {
+            self.screenshot_requests.retain(|request| request.request_id != request_id);
+            sinks.remove(&request_id);
+        } else if sinks.contains_key(&request_id) {
+            sinks.insert(request_id, std::path::PathBuf::new());
+        }
     }
 
     #[allow(dead_code)]
@@ -307,6 +331,10 @@ impl Cx {
             let mut sinks = screenshot_file_sinks().lock().unwrap();
             for id in request_ids {
                 if let Some(path) = sinks.remove(&id) {
+                    if path.as_os_str().is_empty() {
+                        // Cancelled after its frame was drained: discard.
+                        continue;
+                    }
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }

@@ -563,6 +563,13 @@ impl OperationFinalizeRequest {
 }
 
 /// Open a broker-owned chat session bound to one explicit provider.
+///
+/// With BOTH `client_key` and `context_key` set the call is
+/// CREATE-OR-RESUME: the server keeps one durable conversation per
+/// `(principal, client_key, context_key)` and answers with that session —
+/// same `session` id, transcript intact across worker eviction and server
+/// restarts — instead of a fresh one. Without them the session is
+/// ephemeral, exactly as before.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatCreateRequest {
     pub namespace: String,
@@ -570,16 +577,46 @@ pub struct ChatCreateRequest {
     /// Declared app profile ("game", "vj"); the broker selects the
     /// session's taught context and tool surface from it. `None` = general.
     pub client: Option<String>,
+    /// Who is talking: an opaque display-safe id the app chooses for this
+    /// player/device (the sandbox sends `ip:<lan-ip>`; a multiplayer player
+    /// id later). See [`wire::chat_key_ok`] for the shape.
+    pub client_key: Option<String>,
+    /// What the conversation is about: the GAME asset id the chat belongs
+    /// to. One conversation per (client, game) — never shared across games.
+    pub context_key: Option<String>,
 }
 
 impl ChatCreateRequest {
     pub fn new(namespace: impl Into<String>, provider: crate::dto::ChatProviderKind) -> Self {
-        ChatCreateRequest { namespace: namespace.into(), provider, client: None }
+        ChatCreateRequest {
+            namespace: namespace.into(),
+            provider,
+            client: None,
+            client_key: None,
+            context_key: None,
+        }
     }
 
     pub fn with_client(mut self, client: impl Into<String>) -> Self {
         self.client = Some(client.into());
         self
+    }
+
+    /// See [`ChatCreateRequest::client_key`].
+    pub fn with_client_key(mut self, key: impl Into<String>) -> Self {
+        self.client_key = Some(key.into());
+        self
+    }
+
+    /// See [`ChatCreateRequest::context_key`].
+    pub fn with_context_key(mut self, key: impl Into<String>) -> Self {
+        self.context_key = Some(key.into());
+        self
+    }
+
+    /// True when this request resumes-or-creates a durable keyed session.
+    pub fn is_keyed(&self) -> bool {
+        self.client_key.is_some() && self.context_key.is_some()
     }
 
     fn body(&self) -> ClientResult<Value> {
@@ -597,6 +634,18 @@ impl ChatCreateRequest {
             }
             pairs.push(("client", json::s(client.clone())));
         }
+        if let Some(key) = &self.client_key {
+            if !wire::chat_key_ok(key) {
+                return Err(ClientError::InvalidInput { what: "chat client key" });
+            }
+            pairs.push(("client_key", json::s(key.clone())));
+        }
+        if let Some(key) = &self.context_key {
+            if !wire::chat_key_ok(key) {
+                return Err(ClientError::InvalidInput { what: "chat context key" });
+            }
+            pairs.push(("context_key", json::s(key.clone())));
+        }
         Ok(json::obj(pairs))
     }
 }
@@ -611,11 +660,17 @@ pub struct ChatAttachment {
 pub struct ChatSendRequest {
     pub text: String,
     pub attachments: Vec<ChatAttachment>,
+    pub dynamic_context: Option<String>,
 }
 
 impl ChatSendRequest {
     pub fn text(text: impl Into<String>) -> Self {
-        ChatSendRequest { text: text.into(), attachments: Vec::new() }
+        ChatSendRequest { text: text.into(), attachments: Vec::new(), dynamic_context: None }
+    }
+
+    pub fn with_dynamic_context(mut self, context: impl Into<String>) -> Self {
+        self.dynamic_context = Some(context.into());
+        self
     }
 
     fn body(&self) -> ClientResult<Value> {
@@ -625,7 +680,15 @@ impl ChatSendRequest {
         if self.attachments.len() > wire::MAX_CHAT_ATTACHMENTS {
             return Err(ClientError::InvalidInput { what: "chat attachments" });
         }
+        if self.dynamic_context.as_ref().is_some_and(|context| {
+            context.is_empty() || context.len() > 4096 || context.contains('\0')
+        }) {
+            return Err(ClientError::InvalidInput { what: "chat dynamic context" });
+        }
         let mut pairs = vec![("text", json::s(self.text.clone()))];
+        if let Some(context) = &self.dynamic_context {
+            pairs.push(("dynamic_context", json::s(context.clone())));
+        }
         if !self.attachments.is_empty() {
             let mut atts = Vec::with_capacity(self.attachments.len());
             for a in &self.attachments {
@@ -1259,7 +1322,30 @@ impl Api {
         token: &str,
         ttl_ms: u64,
     ) -> ClientResult<crate::dto::RoomDto> {
-        let body = self.room_token_body(room, token, Some(ttl_ms))?;
+        self.room_heartbeat_with(room, token, ttl_ms, None)
+    }
+
+    /// Heartbeat that also reports the head count in the world (host
+    /// included) so a games list can show who is playing. `None` leaves the
+    /// server's last count alone.
+    pub fn room_heartbeat_with(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+        players: Option<u32>,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        let mut body = self.room_token_body(room, token, Some(ttl_ms))?;
+        if let Some(players) = players {
+            // Splice the count into the bounded body rather than rebuild it:
+            // the token body is the one place the room proof is spelled.
+            let count = players.clamp(1, 1024);
+            let mut v = json::parse(&body).map_err(|_| ClientError::Protocol { what: "room body" })?;
+            if let Value::Obj(pairs) = &mut v {
+                pairs.push(("players".to_string(), Value::Int(count as i64)));
+            }
+            body = v.to_json().into_bytes();
+        }
         let path = wire::path_room_heartbeat(room);
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
@@ -1682,6 +1768,166 @@ impl Api {
     pub fn upload_blob(&self, ns: &str, bytes: &[u8]) -> ClientResult<BlobId> {
         let local = BlobId::hash_of(bytes);
         self.upload_blob_with_digest(ns, bytes, local)
+    }
+
+    /// Announce one in-memory LocalGen preview session. Mesh parts follow on
+    /// the data plane; none of these calls create a durable blob/revision.
+    pub fn open_model_preview(
+        &self,
+        alias: &AssetAlias,
+        session: &str,
+        program: &str,
+    ) -> ClientResult<()> {
+        if !alias.as_str().starts_with("gen/csg/") {
+            return Err(ClientError::InvalidInput { what: "model preview alias" });
+        }
+        validate_preview_session(session)?;
+        if program.len() > 12_000 {
+            return Err(ClientError::InvalidInput { what: "model preview program" });
+        }
+        let body = json::obj(vec![
+            ("op", json::s("open")),
+            ("alias", json::s(alias.as_str())),
+            ("session", json::s(session)),
+            ("program", json::s(program)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    pub fn update_model_preview(
+        &self,
+        session: &str,
+        program: Option<&str>,
+        removed: &[String],
+        renamed: &[crate::dto::ModelPreviewRenameDto],
+    ) -> ClientResult<()> {
+        validate_preview_session(session)?;
+        if program.is_some_and(|program| program.len() > 12_000) {
+            return Err(ClientError::InvalidInput { what: "model preview program" });
+        }
+        if removed.len() > 32 || renamed.len() > 32 {
+            return Err(ClientError::InvalidInput { what: "model preview delta" });
+        }
+        for name in removed {
+            validate_preview_part(name)?;
+        }
+        for rename in renamed {
+            validate_preview_part(&rename.from)?;
+            validate_preview_part(&rename.to)?;
+        }
+        let body = json::obj(vec![
+            ("op", json::s("delta")),
+            ("session", json::s(session)),
+            (
+                "program",
+                program.map_or(Value::Null, |program| json::s(program)),
+            ),
+            (
+                "removed",
+                Value::Arr(removed.iter().map(|name| json::s(name)).collect()),
+            ),
+            (
+                "renamed",
+                Value::Arr(
+                    renamed
+                        .iter()
+                        .map(|rename| {
+                            json::obj(vec![
+                                ("from", json::s(&rename.from)),
+                                ("to", json::s(&rename.to)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    pub fn clear_model_preview(&self, session: &str) -> ClientResult<()> {
+        validate_preview_session(session)?;
+        let body = json::obj(vec![
+            ("op", json::s("clear")),
+            ("session", json::s(session)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    /// Upload one changed part directly into the server's bounded preview
+    /// memory and return its opaque fetch token.
+    pub fn upload_model_preview_part(
+        &self,
+        session: &str,
+        part: &str,
+        bytes: &[u8],
+    ) -> ClientResult<String> {
+        validate_preview_session(session)?;
+        validate_preview_part(part)?;
+        if bytes.is_empty() {
+            return Err(ClientError::InvalidInput { what: "model preview mesh" });
+        }
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(ClientError::OverBudget {
+                what: "model preview mesh",
+                limit: 16 * 1024 * 1024,
+                found: bytes.len() as u64,
+            });
+        }
+        let path = wire::path_model_preview_part(session, part);
+        let mut req = Request::put(&path, bytes);
+        req.body_content_type = "model/gltf-binary";
+        req.bearer = self.bearer();
+        let value = self.call_json(self.endpoints.data, req)?;
+        let token = value
+            .get("mesh_token")
+            .and_then(Value::as_str)
+            .ok_or(ClientError::Protocol { what: "model preview mesh token" })?;
+        validate_preview_mesh_token(token)?;
+        Ok(token.to_string())
+    }
+
+    pub fn fetch_model_preview_mesh(&self, token: &str) -> ClientResult<Vec<u8>> {
+        validate_preview_mesh_token(token)?;
+        let path = wire::path_model_preview_mesh(token);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let response = http::http_call_pooled(
+            self.endpoints.data,
+            &req,
+            &self.limits,
+            self.pool(),
+        )?;
+        let response = self.accept(response, &[200])?;
+        const MAX_PREVIEW_MESH_BYTES: u64 = 16 * 1024 * 1024;
+        if response.head().content_length > MAX_PREVIEW_MESH_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "model preview mesh",
+                limit: MAX_PREVIEW_MESH_BYTES,
+                found: response.head().content_length,
+            });
+        }
+        if response.head().content_type.as_deref() != Some("model/gltf-binary") {
+            return Err(ClientError::Protocol { what: "model preview mesh content type" });
+        }
+        response.read_full(MAX_PREVIEW_MESH_BYTES)
     }
 
     /// As [`Self::upload_blob`], but `digest` is supplied by the caller
@@ -2548,12 +2794,49 @@ impl Api {
         let path = wire::path_chat_sessions();
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
-        let v = self.call_json_accept(self.endpoints.control, req, &[201])?;
+        // 201 = created fresh; 200 = an existing keyed session came back
+        // (create-or-resume). Both carry the same session document.
+        let v = self.call_json_accept(self.endpoints.control, req, &[200, 201])?;
         let session = dto::parse_chat_session(&v)?;
         if session.namespace != request.namespace || session.provider != request.provider {
             return Err(ClientError::Protocol { what: "chat create echo" });
         }
+        if request.is_keyed()
+            && (session.client_key != request.client_key
+                || session.context_key != request.context_key)
+        {
+            return Err(ClientError::Protocol { what: "chat create key echo" });
+        }
         Ok(session)
+    }
+
+    /// The durable conversation of one session as a client renders it:
+    /// user/assistant text rows and one `tool` row per executed tool (a
+    /// short chip title), thinking stripped. Bounded by the server (last
+    /// rows within its byte budget); `truncated` on the full form says
+    /// whether older rows were dropped.
+    pub fn chat_transcript(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<Vec<crate::dto::ChatTranscriptRowDto>> {
+        Ok(self.chat_transcript_full(id)?.messages)
+    }
+
+    /// [`Api::chat_transcript`] with the session's provider, turn counter
+    /// and the truncation flag.
+    pub fn chat_transcript_full(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<crate::dto::ChatTranscriptDto> {
+        let path = wire::path_chat_transcript(&id.to_string());
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        let transcript = dto::parse_chat_transcript(&v)?;
+        if transcript.session != *id {
+            return Err(ClientError::Protocol { what: "chat transcript id mismatch" });
+        }
+        Ok(transcript)
     }
 
     pub fn chat_get(
@@ -3139,6 +3422,48 @@ fn check_cursor_out(c: &str) -> ClientResult<()> {
     Ok(())
 }
 
+fn validate_preview_session(value: &str) -> ClientResult<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidInput { what: "model preview session" })
+    }
+}
+
+fn validate_preview_part(value: &str) -> ClientResult<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 24
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidInput { what: "model preview part" })
+    }
+}
+
+fn validate_preview_mesh_token(value: &str) -> ClientResult<()> {
+    let valid = value.strip_prefix("pmesh_").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::Protocol { what: "model preview mesh token" })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3186,6 +3511,59 @@ mod tests {
         let body = q.body(None);
         assert_eq!(body.get("tag").unwrap().as_str(), Some("keep"));
         assert_eq!(body.get("exclude_tag").unwrap().as_str(), Some("intermediate"));
+    }
+
+    #[test]
+    fn chat_create_body_carries_keys_only_when_set_and_refuses_bad_ones() {
+        use crate::dto::ChatProviderKind;
+        let plain = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen);
+        assert!(!plain.is_keyed());
+        let body = plain.body().unwrap();
+        assert_eq!(body.get("api_version").unwrap().as_i64(), Some(1));
+        assert_eq!(body.get("namespace").unwrap().as_str(), Some("gen"));
+        assert_eq!(body.get("provider").unwrap().as_str(), Some("fleet-qwen"));
+        assert!(body.get("client").is_none());
+        assert!(body.get("client_key").is_none());
+        assert!(body.get("context_key").is_none());
+
+        let keyed = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+            .with_client("game")
+            .with_client_key("ip:10.0.0.7")
+            .with_context_key("ast_0123456789abcdef0123456789abcdef");
+        assert!(keyed.is_keyed());
+        let body = keyed.body().unwrap();
+        assert_eq!(body.get("client").unwrap().as_str(), Some("game"));
+        assert_eq!(body.get("client_key").unwrap().as_str(), Some("ip:10.0.0.7"));
+        assert_eq!(
+            body.get("context_key").unwrap().as_str(),
+            Some("ast_0123456789abcdef0123456789abcdef")
+        );
+        // One key alone is not a keyed request, but still travels.
+        let half = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+            .with_client_key("ip:10.0.0.7");
+        assert!(!half.is_keyed());
+        assert!(half.body().unwrap().get("client_key").is_some());
+
+        // Keys are refused LOCALLY, before any socket: empty, spaces,
+        // slashes (a path), control bytes, over-long.
+        for bad in ["", "a b", "a/b", "..", "x\n", &"k".repeat(wire::MAX_CHAT_KEY_BYTES + 1)] {
+            match ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+                .with_client_key(bad)
+                .with_context_key("g")
+                .body()
+            {
+                Err(ClientError::InvalidInput { what: "chat client key" }) => {}
+                other => panic!("{bad:?}: {other:?}"),
+            }
+            match ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+                .with_client_key("c")
+                .with_context_key(bad)
+                .body()
+            {
+                Err(ClientError::InvalidInput { what: "chat context key" }) => {}
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
     }
 
     #[test]

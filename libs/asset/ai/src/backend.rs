@@ -324,7 +324,12 @@ impl GenerateParams {
             target_domain,
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),
             style: request.style.clone().unwrap_or_default(),
-            max_tokens: request.max_tokens.unwrap_or(512).clamp(16, 4096),
+            // No policy ceiling (2026-08-27, user: "if the ai wants to
+            // write 20k tokens it should be able to"). The reply budget is
+            // physics: the LLM lane clamps to its context minus the prompt
+            // at admission. The default stays modest for the non-chat
+            // domains (captions, expansions) that never asked for a number.
+            max_tokens: request.max_tokens.unwrap_or(512).max(16),
             temperature: if temperature.is_finite() {
                 temperature.clamp(0.0, 2.0) as f32
             } else {

@@ -31,8 +31,9 @@ pub use crate::skin_augmentation::{
 pub use crate::writer::{
     compute_vertex_normals, write_glb_mesh, write_glb_mesh_colored, write_glb_mesh_skinned,
     write_glb_mesh_textured, write_glb_mesh_textured_parts, write_glb_mesh_unwrapped,
+    write_glb_named_parts,
     GlbAnimChannel, GlbAnimClip, GlbAnimPath, GlbJoint, GlbSkinnedMesh, GlbTexturedMesh,
-    GlbTexturedPart,
+    GlbNamedPart, GlbPartAnimation, GlbPartAnimationKind, GlbTexturedPart,
 };
 pub use makepad_math::DecodedPrimitive;
 pub use makepad_micro_serde::JsonValue;

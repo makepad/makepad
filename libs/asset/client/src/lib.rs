@@ -67,15 +67,18 @@ pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
 pub use dto::{
+    ChatProviderLocality,
     AliasDto, AliasStatusDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
     CatalogEventDto,
     CatalogEventKind, CatalogFacet, CatalogHit, ClaimedJobDto, EventsPageDto, FacetKind,
+    ModelPreviewDto, ModelPreviewPartDto, ModelPreviewRenameDto,
     GameAliasDto, GcPhaseDto,
     GcStatusDto, HealthDto, ImportEntryDto, RetireDto,
     ImportReportDto, ImportStatusDto, JobAttemptDto, JobDetailDto, JobId, JobProfileDto,
     ChatEventBodyDto, ChatEventDto, ChatEventsPageDto, ChatProviderDto, ChatProviderKind,
     JobProgressDto, JobResultDto, JobRowDto, JobStateDto, JobStatusDto, OperationEventDto,
     ChatProviderStateDto, ChatSessionDto, ChatSessionId, ChatSessionStateDto, ChatToolOutcomeDto,
+    ChatTranscriptDto, ChatTranscriptRole, ChatTranscriptRowDto,
     OperationEventsPageDto, OperationId, OperationInputDto, OperationProgressDto, OperationStateDto,
     OperationStatusDto, OperationTypeDto, PrincipalDto, ResolvedVariantMapDto,
     RoomClaimDto, RoomDto,

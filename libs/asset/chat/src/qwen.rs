@@ -83,6 +83,13 @@ struct ActiveJob {
     /// re-emit. Compared as a whole: warmth arrives before any token exists,
     /// so keying only on the token count would swallow it.
     think_tokens: Option<u32>,
+    /// We emitted a synthetic `<think>` for this turn. The service's chat
+    /// template opens the think block ITSELF, so the streamed text starts
+    /// inside it with no tag: clients rendered the whole chain-of-thought
+    /// as the visible answer until `</think>` arrived (the "bouncy,
+    /// second-guessing" reply). The box's `think_tokens` says when the
+    /// model is reasoning; we open the block the client can see.
+    think_opened: bool,
     visible_tokens: Option<u32>,
     prefix_ingested: Option<u32>,
     /// Consecutive failed polls. A single dropped TCP connect must not
@@ -234,10 +241,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         FleetQwenChatProvider {
             transport,
             bases,
-            // A LEVEL-BUILDING turn carries reasoning plus a complete splash
-            // source; 2048 was observed cutting the build mid-thought. The
-            // serving tier's total context still bounds the sum.
-            max_tokens: 3072,
+            // NOT a policy number: the client requests the maximum and the
+            // serving lane clamps to its physics (context minus prompt).
+            // Every policy cap tried here got observed cutting a real
+            // level-building turn mid-source (2048, then 3072 on 2026-08-27,
+            // dog-shop interior). Boxes serving an older build clamp this to
+            // their fixed ceiling, which is merely what they did before.
+            max_tokens: u32::MAX,
             active: None,
             picks,
         }
@@ -515,6 +525,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             last_note: String::new(),
             gen_tokens: 0,
             think_tokens: None,
+            think_opened: false,
             visible_tokens: None,
             prefix_ingested: None,
             poll_fails: 0,
@@ -623,14 +634,43 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             return events;
         };
         let partial = status.get("partial_text").and_then(Value::as_str).unwrap_or("");
+        if !active.think_opened
+            && active.delivered == 0
+            && active.think_tokens.is_some_and(|n| n > 0)
+            && !partial.starts_with("<think>")
+        {
+            // First tokens of a reasoning turn, template-opened: give the
+            // client the tag the template swallowed.
+            events.push(ProviderEvent::Delta("<think>".to_string()));
+            active.think_opened = true;
+        }
         if partial.len() > active.delivered {
             events.push(ProviderEvent::Delta(partial[active.delivered..].to_string()));
             active.delivered = partial.len();
         }
+        let unclosed_think = active.think_opened && !partial.contains("</think>");
         match status.get("state").and_then(Value::as_str) {
             Some("done") => {
-                tap_completion(partial);
-                events.push(ProviderEvent::Done { text: partial.to_string() });
+                if unclosed_think {
+                    // The model never closed what the template opened;
+                    // close it so the client's split sees a finished block.
+                    events.push(ProviderEvent::Delta("</think>\n".to_string()));
+                }
+                // Done.text is what the session PERSISTS (it prefers a
+                // non-empty Done text over accumulated deltas), so the
+                // synthetic tags must be in it too: without them a
+                // template-opened think block reads as visible answer and
+                // reasoning lands in the durable history.
+                let mut full = String::with_capacity(partial.len() + 20);
+                if active.think_opened {
+                    full.push_str("<think>");
+                }
+                full.push_str(partial);
+                if unclosed_think {
+                    full.push_str("</think>\n");
+                }
+                tap_completion(&full);
+                events.push(ProviderEvent::Done { text: full });
                 self.active = None;
             }
             Some("error") => {

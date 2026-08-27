@@ -16,10 +16,16 @@
 //! 6/7/8 are the X-flipped drawings of 4/3/2. A frame line may also end
 //! with `flip` when the PNG itself is the mirrored pair (Doom `A2A8`).
 
+use crate::actor_def::{ActorDef, ResourceKind, WeaponDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const MANIFEST_VERSION: u32 = 1;
+/// Version 2: a classic-family character's clips come from its own engine's
+/// state table (see [`classic_clips`]). A version-1 manifest carried one
+/// letter map for the whole cast; [`StatefulBillboard::parse`] re-derives
+/// its clips on the way in, so nothing already published has to be
+/// re-imported to die on the right frame.
+pub const MANIFEST_VERSION: u32 = 2;
 pub const MAGIC: &str = "stateful-billboard";
 pub const CONTENT_TYPE: &str = "text/x-stateful-billboard";
 
@@ -109,7 +115,7 @@ pub struct AnimState {
     pub fps: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StatefulBillboard {
     pub prefix: String,
     pub role: SpriteRole,
@@ -123,6 +129,21 @@ pub struct StatefulBillboard {
     /// Present when every frame lives in one packed sheet PNG beside the
     /// manifest (`sheet <cols> <cell_w> <cell_h>`).
     pub sheet: Option<SheetLayout>,
+    /// What this thing IS when a level places it — health, speed, body,
+    /// attack, sounds, pickup, burst — carried on the asset itself (see
+    /// [`ActorDef::to_manifest`]) so the engine that resolves the artwork by
+    /// alias reads the behaviour off the same manifest and never consults a
+    /// table keyed by game. Absent on scenery and on manifests written
+    /// before the definition rode along.
+    pub actor: Option<ActorDef>,
+    /// For a `role weapon` sheet: the gun this is the view of.
+    pub weapon: Option<WeaponDef>,
+    /// World metres one sprite pixel covers when the frame is drawn at its
+    /// authored size — the source game's map unit (Doom draws a texel per
+    /// map unit, so this is `DOOM_UNIT`), or the Build sprite's own repeat
+    /// scale. Declared by the writer so a reader never has to calibrate
+    /// pixels against a walker; `0` on manifests written before it existed.
+    pub metres_per_pixel: f32,
 }
 
 impl StatefulBillboard {
@@ -136,6 +157,9 @@ impl StatefulBillboard {
         );
         if self.mirrors >= 8 {
             out.push_str("mirrors 8\n");
+        }
+        if self.metres_per_pixel > 0.0 {
+            out.push_str(&format!("metres_per_pixel {:.6}\n", self.metres_per_pixel));
         }
         if let Some(sheet) = self.sheet {
             out.push_str(&format!(
@@ -168,6 +192,16 @@ impl StatefulBillboard {
             }
             out.push('\n');
         }
+        // The definition lines are written with their resource references
+        // already in namespace-relative key form (the importer mapped them
+        // when it attached the def), so the writer passes them through.
+        let verbatim = |s: &str, _k: ResourceKind| s.to_string();
+        if let Some(actor) = &self.actor {
+            out.push_str(&actor.to_manifest(&verbatim));
+        }
+        if let Some(weapon) = &self.weapon {
+            out.push_str(&weapon.to_manifest(&verbatim));
+        }
         out
     }
 
@@ -177,6 +211,7 @@ impl StatefulBillboard {
         if !header.starts_with(MAGIC) {
             return Err("not a stateful-billboard".into());
         }
+        let version: u32 = header[MAGIC.len()..].trim().parse().unwrap_or(1);
         let mut prefix = String::new();
         let mut role = SpriteRole::Character;
         let mut preview = String::new();
@@ -185,6 +220,9 @@ impl StatefulBillboard {
         let mut states = Vec::new();
         let mut frames = Vec::new();
         let mut sheet = None;
+        let mut def_lines: Vec<(String, String)> = Vec::new();
+        let mut weapon = None;
+        let mut metres_per_pixel = 0.0f32;
         for line in lines {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -192,9 +230,20 @@ impl StatefulBillboard {
             }
             let mut parts = line.split_whitespace();
             match parts.next() {
+                Some(tag @ ("actor" | "attack" | "sound" | "give" | "explode" | "projectile")) => {
+                    def_lines.push((tag.to_string(), line[tag.len()..].trim().to_string()));
+                }
+                Some("weapon") => weapon = WeaponDef::from_manifest(line["weapon".len()..].trim()),
                 Some("prefix") => prefix = parts.next().unwrap_or("").to_ascii_lowercase(),
                 Some("role") => role = SpriteRole::parse(parts.next().unwrap_or("")),
                 Some("preview") => preview = parts.next().unwrap_or("").to_string(),
+                Some("metres_per_pixel") => {
+                    metres_per_pixel = parts
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                        .unwrap_or(0.0);
+                }
                 Some("facings") => {
                     facings = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
@@ -272,12 +321,35 @@ impl StatefulBillboard {
         if prefix.is_empty() || frames.is_empty() {
             return Err("billboard missing prefix or frames".into());
         }
+        // A version-1 writer filed every classic character under one letter
+        // map, which ended an Imp's death on the first frame of its gib
+        // burst. The letters themselves were always right; only the clip
+        // table was generic. Re-derive it from the actor's own table.
+        if version < 2 && role == SpriteRole::Character && classic_clips(&prefix).is_some() {
+            states = infer_states(&frames, role, &prefix);
+        }
+        // Fireball sheets published before projectile presentation existed
+        // were valid v2 effects, but their whole A..E lump run was one
+        // looping `idle` clip. Upgrade those manifests while reading them:
+        // the asset schema, rather than a renderer keyed to a game, owns the
+        // distinction between travelling and impact artwork. A freshly
+        // imported manifest already carries these names and is left alone.
+        if role == SpriteRole::Effect
+            && classic_effect_clips(&prefix).is_some()
+            && !(states.iter().any(|s| s.name == "fly")
+                && states.iter().any(|s| s.name == "burst"))
+        {
+            states = infer_states(&frames, role, &prefix);
+            preview = "fly".into();
+        }
         if preview.is_empty() {
             preview = states
                 .first()
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| "idle".into());
         }
+        let refs: Vec<(&str, &str)> = def_lines.iter().map(|(t, r)| (t.as_str(), r.as_str())).collect();
+        let actor = ActorDef::from_manifest(&refs);
         Ok(Self {
             prefix,
             role,
@@ -287,6 +359,9 @@ impl StatefulBillboard {
             states,
             frames,
             sheet,
+            actor,
+            weapon,
+            metres_per_pixel,
         })
     }
 
@@ -760,6 +835,11 @@ pub fn sprite_role(prefix: &str) -> SpriteRole {
 /// answer to "which artwork is the gun in your hands", and a level that
 /// picks it arms the player with a puff of light and no gun.
 fn crate_weapon(p: &str) -> bool {
+    // Fists (PUNG) and the super shotgun (SHT2) are held weapons too — an
+    // "item" role made the fist view sprite fall back to the stock mesh.
+    if p.starts_with("PUNG") || p.starts_with("SHT2") {
+        return true;
+    }
     ["PISG", "SHTG", "CHGG", "MISG", "SAWG", "PLSG", "BFGG"]
         .iter()
         .any(|s| p.starts_with(s))
@@ -815,7 +895,7 @@ pub fn assemble(
             .then(a.file.cmp(&b.file))
     });
     frames.dedup_by(|a, b| a.letter == b.letter && a.rot == b.rot && a.file == b.file);
-    let states = infer_states(&frames, role);
+    let states = infer_states(&frames, role, prefix);
     let preview = states
         .iter()
         .find(|s| s.name == "walk" || s.name == "idle" || s.name == "see")
@@ -832,10 +912,242 @@ pub fn assemble(
         states,
         frames,
         sheet: None,
+        actor: None,
+        weapon: None,
+        metres_per_pixel: 0.0,
     })
 }
 
-fn infer_states(frames: &[SpriteFrame], role: SpriteRole) -> Vec<AnimState> {
+/// One clip of a classic-family actor: the letters its engine's state table
+/// steps through, whether it cycles, and the cadence those states ran at
+/// (35 tics a second in the source; `fps` is the rounded letter rate).
+struct ClassicClip {
+    name: &'static str,
+    from: char,
+    to: char,
+    looping: bool,
+    fps: u8,
+}
+
+const fn clip(name: &'static str, from: char, to: char, looping: bool, fps: u8) -> ClassicClip {
+    ClassicClip { name, from, to, looping, fps }
+}
+
+/// The classic family's own state tables, per sprite prefix: which letters
+/// are the walk, the attack, the flinch, the death and the gib burst.
+///
+/// The source engine hard-codes these per actor (`info.c`), and no two
+/// actors agree. The Imp flinches on H and dies I–M with N–U its burst; the
+/// Zombieman flinches on G, dies H–L, bursts M–U; the Cacodemon has a single
+/// standing frame, bites on B–D and dies G–L; the Baron dies I–O and never
+/// bursts. One letter map across the cast is therefore wrong for nearly
+/// every member — the old `H–N` death ran the Imp through its pain frame,
+/// its five death frames and then the FIRST FRAME OF ITS GIB BURST, and
+/// held that: every killed Imp stood as a red splatter for the rest of the
+/// level. The last letter of each `death` below is the corpse.
+///
+/// Doom and Freedoom share these tables exactly — Freedoom replaces the
+/// artwork under the same lump names and runs on the same state machine.
+fn classic_clips(prefix: &str) -> Option<&'static [ClassicClip]> {
+    let p = prefix.to_ascii_lowercase();
+    Some(match p.as_str() {
+        // Marine.
+        "play" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 9),
+                clip("attack", 'E', 'F', false, 6),
+                clip("pain", 'G', 'G', false, 4),
+                clip("death", 'H', 'N', false, 4),
+                clip("xdeath", 'O', 'W', false, 7),
+            ];
+            C
+        }
+        // Zombieman, Shotgun guy.
+        "poss" | "spos" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 4),
+                clip("attack", 'E', 'F', false, 4),
+                clip("pain", 'G', 'G', false, 6),
+                clip("death", 'H', 'L', false, 7),
+                clip("xdeath", 'M', 'U', false, 7),
+            ];
+            C
+        }
+        // Chaingunner.
+        "cpos" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 4),
+                clip("attack", 'E', 'F', false, 6),
+                clip("pain", 'G', 'G', false, 6),
+                clip("death", 'H', 'N', false, 7),
+                clip("xdeath", 'O', 'T', false, 7),
+            ];
+            C
+        }
+        // Wolfenstein SS.
+        "sswv" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 6),
+                clip("attack", 'E', 'F', false, 5),
+                clip("pain", 'G', 'G', false, 6),
+                clip("death", 'H', 'L', false, 7),
+                clip("xdeath", 'M', 'U', false, 7),
+            ];
+            C
+        }
+        // Imp.
+        "troo" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 4),
+                clip("attack", 'E', 'G', false, 4),
+                clip("pain", 'H', 'H', false, 9),
+                clip("death", 'I', 'M', false, 5),
+                clip("xdeath", 'N', 'U', false, 7),
+            ];
+            C
+        }
+        // Demon / Spectre.
+        "sarg" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 9),
+                clip("attack", 'E', 'G', false, 4),
+                clip("pain", 'H', 'H', false, 9),
+                clip("death", 'I', 'N', false, 6),
+            ];
+            C
+        }
+        // Cacodemon.
+        "head" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'A', true, 4),
+                clip("attack", 'B', 'D', false, 7),
+                clip("pain", 'E', 'F', false, 6),
+                clip("death", 'G', 'L', false, 4),
+            ];
+            C
+        }
+        // Baron of Hell, Hell knight.
+        "boss" | "bos2" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 6),
+                clip("attack", 'E', 'G', false, 4),
+                clip("pain", 'H', 'H', false, 9),
+                clip("death", 'I', 'O', false, 4),
+            ];
+            C
+        }
+        // Lost soul.
+        "skul" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'B', true, 6),
+                clip("attack", 'C', 'D', false, 5),
+                clip("pain", 'E', 'E', false, 6),
+                clip("death", 'F', 'K', false, 6),
+            ];
+            C
+        }
+        // Cyberdemon.
+        "cybr" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'D', true, 6),
+                clip("attack", 'E', 'F', false, 6),
+                clip("pain", 'G', 'G', false, 4),
+                clip("death", 'H', 'P', false, 4),
+            ];
+            C
+        }
+        // Spiderdemon.
+        "spid" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'F', true, 6),
+                clip("attack", 'G', 'H', false, 9),
+                clip("pain", 'I', 'I', false, 6),
+                clip("death", 'J', 'S', false, 4),
+            ];
+            C
+        }
+        // Arachnotron.
+        "bspi" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'F', true, 6),
+                clip("attack", 'G', 'H', false, 9),
+                clip("pain", 'I', 'I', false, 6),
+                clip("death", 'J', 'P', false, 5),
+            ];
+            C
+        }
+        // Arch-vile: its death starts on the same letter it flinches on.
+        "vile" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'F', true, 9),
+                clip("attack", 'G', 'P', false, 4),
+                clip("pain", 'Q', 'Q', false, 4),
+                clip("death", 'Q', 'Z', false, 5),
+            ];
+            C
+        }
+        // Revenant: punch G–I, rocket J–K, and it dies from its pain letter.
+        "skel" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'F', true, 9),
+                clip("attack", 'G', 'K', false, 5),
+                clip("pain", 'L', 'L', false, 4),
+                clip("death", 'L', 'Q', false, 5),
+            ];
+            C
+        }
+        // Mancubus.
+        "fatt" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'F', true, 4),
+                clip("attack", 'G', 'I', false, 5),
+                clip("pain", 'J', 'J', false, 6),
+                clip("death", 'K', 'T', false, 6),
+            ];
+            C
+        }
+        // Pain elemental.
+        "pain" => {
+            const C: &[ClassicClip] = &[
+                clip("walk", 'A', 'C', true, 6),
+                clip("attack", 'D', 'F', false, 7),
+                clip("pain", 'G', 'G', false, 3),
+                clip("death", 'H', 'M', false, 4),
+            ];
+            C
+        }
+        // Commander Keen: hangs still, dies B–L, flinches on M.
+        "keen" => {
+            const C: &[ClassicClip] = &[
+                clip("idle", 'A', 'A', true, 4),
+                clip("pain", 'M', 'M', false, 4),
+                clip("death", 'B', 'L', false, 6),
+            ];
+            C
+        }
+        _ => return None,
+    })
+}
+
+/// Projectile sprite families whose source lumps contain both the looping
+/// travelling frames and the one-shot impact in one prefix. Doom's three
+/// ordinary monster fireballs all use A/B in flight and C/D/E on contact;
+/// treating the whole sheet as a looping `idle` makes an airborne fireball
+/// repeatedly explode before it reaches anything.
+fn classic_effect_clips(prefix: &str) -> Option<&'static [ClassicClip]> {
+    match prefix.to_ascii_lowercase().as_str() {
+        "bal1" | "bal2" | "bal7" => {
+            const C: &[ClassicClip] = &[
+                clip("fly", 'A', 'B', true, 9),
+                clip("burst", 'C', 'E', false, 6),
+            ];
+            Some(C)
+        }
+        _ => None,
+    }
+}
+
+fn infer_states(frames: &[SpriteFrame], role: SpriteRole, prefix: &str) -> Vec<AnimState> {
     let mut letters: Vec<char> = Vec::new();
     for f in frames {
         if !letters.contains(&f.letter) {
@@ -882,7 +1194,23 @@ fn infer_states(frames: &[SpriteFrame], role: SpriteRole) -> Vec<AnimState> {
         }
     };
 
+    let classic = if role == SpriteRole::Character { classic_clips(prefix) } else { None };
+    let classic_effect = if role == SpriteRole::Effect {
+        classic_effect_clips(prefix)
+    } else {
+        None
+    };
     match role {
+        SpriteRole::Character if classic.is_some() => {
+            for c in classic.unwrap_or_default() {
+                push(&mut states, c.name, span(c.from, c.to), c.looping, c.fps);
+            }
+            // An actor whose sheet is missing its whole walk still needs a
+            // rest pose to stand in.
+            if states.iter().all(|s| s.name != "walk" && s.name != "idle") {
+                push(&mut states, "idle", span(letters[0], letters[0]), true, 6);
+            }
+        }
         SpriteRole::Character if letters.len() >= 4 => {
             push(&mut states, "walk", span('A', 'D'), true, 8);
             push(&mut states, "attack", span('E', 'F'), false, 10);
@@ -898,6 +1226,11 @@ fn infer_states(frames: &[SpriteFrame], role: SpriteRole) -> Vec<AnimState> {
             push(&mut states, "ready", span('A', 'A'), true, 6);
             push(&mut states, "fire", span('A', 'G'), false, 12);
             push(&mut states, "flash", span('A', 'B'), false, 16);
+        }
+        SpriteRole::Effect if classic_effect.is_some() => {
+            for c in classic_effect.unwrap_or_default() {
+                push(&mut states, c.name, span(c.from, c.to), c.looping, c.fps);
+            }
         }
         _ => {
             let last = *letters.last().unwrap_or(&'A');
@@ -935,6 +1268,9 @@ pub fn sequential_idle(prefix: &str, frames: Vec<SpriteFrame>, role: SpriteRole)
         }],
         frames,
         sheet: None,
+        actor: None,
+        weapon: None,
+        metres_per_pixel: 0.0,
     }
 }
 
@@ -1119,6 +1455,202 @@ mod tests {
             "sheet letters are frames, not poses: {:?}",
             again.states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    /// A full Imp sheet, one front frame per letter A..U, as the WAD ships.
+    fn imp_lumps() -> Vec<(DoomSpriteName, String, u32, u32)> {
+        ('A'..='U')
+            .map(|letter| {
+                (
+                    DoomSpriteName {
+                        prefix: "troo".into(),
+                        pairs: vec![(letter, if letter <= 'H' { 1 } else { 0 })],
+                    },
+                    format!("troo{}.png", letter.to_ascii_lowercase()),
+                    40,
+                    55,
+                )
+            })
+            .collect()
+    }
+
+    fn state<'a>(bb: &'a StatefulBillboard, name: &str) -> &'a AnimState {
+        bb.states
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from {:?}", bb.states))
+    }
+
+    fn letters_of(bb: &StatefulBillboard, name: &str) -> String {
+        let s = state(bb, name);
+        (s.first..s.last).map(|i| bb.frames[i].letter).collect()
+    }
+
+    #[test]
+    fn doom_monster_fireballs_loop_ab_then_burst_cde_once() {
+        for prefix in ["bal1", "bal2", "bal7"] {
+            let lumps: Vec<_> = ('A'..='E')
+                .map(|letter| {
+                    (
+                        DoomSpriteName {
+                            prefix: prefix.into(),
+                            pairs: vec![(letter, 0)],
+                        },
+                        format!("{prefix}{}.png", letter.to_ascii_lowercase()),
+                        24,
+                        24,
+                    )
+                })
+                .collect();
+            let bb = assemble(prefix, &lumps).expect("fireball sheet");
+            assert_eq!(bb.role, SpriteRole::Effect, "{prefix}");
+            assert_eq!(bb.preview, "fly", "{prefix}");
+            assert_eq!(letters_of(&bb, "fly"), "AB", "{prefix}");
+            assert!(state(&bb, "fly").r#loop, "{prefix}");
+            assert_eq!(letters_of(&bb, "burst"), "CDE", "{prefix}");
+            assert!(!state(&bb, "burst").r#loop, "{prefix}");
+        }
+    }
+
+    #[test]
+    fn already_published_fireball_manifest_upgrades_without_reimport() {
+        let old = r#"stateful-billboard 2
+prefix bal1
+role effect
+preview idle
+facings 1
+sheet 5 24 24
+state idle 0 5 1 8
+frame 0 A 0 24 24 sheet.png cell 0
+frame 1 B 0 24 24 sheet.png cell 1
+frame 2 C 0 24 24 sheet.png cell 2
+frame 3 D 0 24 24 sheet.png cell 3
+frame 4 E 0 24 24 sheet.png cell 4
+"#;
+        let bb = StatefulBillboard::parse(old).expect("legacy v2 fireball");
+        assert_eq!(bb.preview, "fly");
+        assert_eq!(letters_of(&bb, "fly"), "AB");
+        assert!(state(&bb, "fly").r#loop);
+        assert_eq!(letters_of(&bb, "burst"), "CDE");
+        assert!(!state(&bb, "burst").r#loop);
+    }
+
+    /// The bug: one letter map for the whole cast filed the Imp's death as
+    /// H–N — its pain frame, its five death frames and the first frame of
+    /// its gib burst, which it then held forever. Each classic actor's
+    /// clips come from its own state table, so the corpse is the last
+    /// death letter and the burst is its own clip.
+    #[test]
+    fn an_imp_dies_on_m_and_bursts_from_n() {
+        let bb = assemble("troo", &imp_lumps()).unwrap();
+        assert_eq!(letters_of(&bb, "walk"), "ABCD");
+        assert_eq!(letters_of(&bb, "attack"), "EFG");
+        assert_eq!(letters_of(&bb, "pain"), "H");
+        assert_eq!(letters_of(&bb, "death"), "IJKLM");
+        assert_eq!(letters_of(&bb, "xdeath"), "NOPQRSTU");
+        assert!(!state(&bb, "death").r#loop);
+        assert!(bb.states.iter().all(|s| s.name != "raise"));
+        // The header says which table wrote it.
+        assert!(bb.to_text().starts_with("stateful-billboard 2\n"));
+    }
+
+    /// The cast disagrees on nearly every letter: the table is per actor.
+    #[test]
+    fn each_classic_actor_keeps_its_own_death_letters() {
+        let sheet = |prefix: &str, last: char| -> StatefulBillboard {
+            let lumps: Vec<_> = ('A'..=last)
+                .map(|letter| {
+                    (
+                        DoomSpriteName {
+                            prefix: prefix.into(),
+                            pairs: vec![(letter, 1)],
+                        },
+                        format!("{prefix}{}.png", letter.to_ascii_lowercase()),
+                        40,
+                        55,
+                    )
+                })
+                .collect();
+            assemble(prefix, &lumps).unwrap()
+        };
+        let poss = sheet("poss", 'U');
+        assert_eq!(letters_of(&poss, "pain"), "G");
+        assert_eq!(letters_of(&poss, "death"), "HIJKL");
+        assert_eq!(letters_of(&poss, "xdeath"), "MNOPQRSTU");
+        let sarg = sheet("sarg", 'N');
+        assert_eq!(letters_of(&sarg, "death"), "IJKLMN");
+        assert!(sarg.states.iter().all(|s| s.name != "xdeath"));
+        let head = sheet("head", 'L');
+        assert_eq!(letters_of(&head, "walk"), "A");
+        assert_eq!(letters_of(&head, "attack"), "BCD");
+        assert_eq!(letters_of(&head, "pain"), "EF");
+        assert_eq!(letters_of(&head, "death"), "GHIJKL");
+        let boss = sheet("boss", 'O');
+        assert_eq!(letters_of(&boss, "death"), "IJKLMNO");
+        let vile = sheet("vile", 'Z');
+        assert_eq!(letters_of(&vile, "pain"), "Q");
+        assert_eq!(letters_of(&vile, "death"), "QRSTUVWXYZ");
+    }
+
+    /// Everything already published carries the version-1 clip table. The
+    /// parser re-derives a classic character's clips from its letters, so
+    /// the running store's Imps die right without a re-import; a manifest
+    /// that already says 2 is taken as written.
+    #[test]
+    fn a_version_one_imp_manifest_is_re_clipped_on_parse() {
+        let mut bb = assemble("troo", &imp_lumps()).unwrap();
+        // Forge what the old writer put on disk: one generic map.
+        bb.states = vec![
+            AnimState { name: "walk".into(), first: 0, last: 4, r#loop: true, fps: 8 },
+            AnimState { name: "death".into(), first: 7, last: 14, r#loop: false, fps: 6 },
+        ];
+        let v1 = bb.to_text().replacen("stateful-billboard 2", "stateful-billboard 1", 1);
+        let upgraded = StatefulBillboard::parse(&v1).unwrap();
+        assert_eq!(letters_of(&upgraded, "death"), "IJKLM");
+        assert_eq!(letters_of(&upgraded, "xdeath"), "NOPQRSTU");
+        assert_eq!(upgraded.preview, "walk");
+        // Written back, it is a version-2 manifest and parses as itself.
+        let again = StatefulBillboard::parse(&upgraded.to_text()).unwrap();
+        assert_eq!(again.states, upgraded.states);
+        // A version-2 manifest is the author's word: hand-edited clips stay.
+        let mut authored = upgraded.clone();
+        authored.states.retain(|s| s.name != "xdeath");
+        let kept = StatefulBillboard::parse(&authored.to_text()).unwrap();
+        assert!(kept.states.iter().all(|s| s.name != "xdeath"));
+        // A version-1 manifest of something the table does not know keeps
+        // whatever its writer said.
+        let other = "stateful-billboard 1\nprefix zzzz\nrole character\npreview walk\nfacings 1\nstate walk 0 1 1 8\nframe 0 A 1 4 4 z.png\n";
+        let other = StatefulBillboard::parse(other).unwrap();
+        assert_eq!(other.states.len(), 1);
+    }
+
+    /// The behaviour rides on the artwork's own manifest: attach a class to
+    /// an assembled sheet, write it, read it back, and the engine-facing
+    /// fields are all there — sounds already as the pack's keys.
+    #[test]
+    fn a_character_manifest_carries_its_own_definition() {
+        let mut bb = assemble("troo", &imp_lumps()).unwrap();
+        let key = |s: &str, k: ResourceKind| match k {
+            ResourceKind::Sound => format!("sfx/doom1/{s}"),
+            ResourceKind::Sprite => format!("billboards/doom1/{s}"),
+        };
+        let imp = crate::actor_def::doom_actor_def(3001).unwrap();
+        // Attached the way the importer does it: keys mapped once, on the
+        // way in, so the manifest text is the contract.
+        let text = imp.to_manifest(&key);
+        let lines: Vec<(&str, &str)> =
+            text.lines().filter_map(|l| l.split_once(' ')).collect();
+        bb.actor = ActorDef::from_manifest(&lines);
+        let again = StatefulBillboard::parse(&bb.to_text()).unwrap();
+        let def = again.actor.expect("definition rode along");
+        assert_eq!(def.health, 60.0);
+        assert_eq!(def.role, crate::actor_def::ActorRole::Monster);
+        assert_eq!(def.sounds.sight, "sfx/doom1/dsbgsit1");
+        assert_eq!(def.attack.map(|a| a.kind), Some(crate::actor_def::AttackKind::Projectile));
+        assert_eq!(again.frames.len(), bb.frames.len());
+        // A manifest without the lines is scenery with no opinion.
+        let bare = StatefulBillboard::parse(&assemble("troo", &imp_lumps()).unwrap().to_text()).unwrap();
+        assert!(bare.actor.is_none());
     }
 
     #[test]

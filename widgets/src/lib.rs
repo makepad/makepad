@@ -52,6 +52,7 @@ pub mod desktop_button;
 pub mod gauss_view;
 pub mod keyboard_view;
 pub mod nav_control;
+pub mod tweaker;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
@@ -68,6 +69,7 @@ pub mod text_input;
 pub mod drop_slider;
 pub mod tip;
 pub mod value_input;
+pub mod fab_controls;
 
 pub mod splitter;
 
@@ -82,6 +84,7 @@ pub mod turtle_step;
 
 pub mod data_grid;
 pub mod portal_list;
+pub mod reorder_list;
 pub mod text_flow;
 
 pub mod cached_widget;
@@ -182,6 +185,7 @@ pub use crate::{
     popup_notification::*,
     data_grid::*,
     portal_list::*,
+    reorder_list::*,
     radio_button::*,
     root::*,
 
@@ -554,6 +558,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     });
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
+    crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
     crate::window::script_mod(vm);
 
@@ -565,6 +570,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_slider::script_mod(vm);
     crate::tip::script_mod(vm);
     crate::value_input::script_mod(vm);
+    crate::fab_controls::script_mod(vm);
     crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);
@@ -580,6 +586,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::data_grid::script_mod(vm);
     crate::portal_list::script_mod(vm);
+    crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 
     crate::cached_widget::script_mod(vm);
@@ -664,8 +671,11 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
+    makepad_platform::startup_trace("widgets: theme_mod begin");
     theme_mod(vm);
+    makepad_platform::startup_trace("widgets: theme_mod done");
     widgets_mod(vm);
+    makepad_platform::startup_trace("widgets: widgets_mod done");
 }
 
 #[cfg(test)]

@@ -272,6 +272,7 @@ pub enum CxOsOp {
     /// it) so a maximized window reads as a clean fullscreen picture
     /// rather than a decorated window pinned to the work area.
     SetChromelessWhenMaximized(WindowId, bool),
+    SetWindowTitle(WindowId, String),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
@@ -461,6 +462,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
+            Self::SetWindowTitle(..) => write!(f, "SetWindowTitle"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),

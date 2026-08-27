@@ -2904,6 +2904,7 @@ script_mod! {
                                                     width: Fill height: Fit flow: Right spacing: 6
                                                     align: Align{y: 0.5}
                                                     detail_analyse_btn := GhostButton{ text: "Analyse stems" }
+                                                    detail_reveal_btn := GhostButton{ text: "Reveal file" }
                                                     detail_analyse_lyrics := CheckBox{
                                                         text: "+ lyrics"
                                                         active: false
@@ -4053,6 +4054,19 @@ impl App {
         }
         // One shared, real Asset Server session. Discovery/auth/retry happen
         // off-thread; this call only starts the lifecycle.
+        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
+        // fleet so the sandbox `game` box (.123) never lands in this UI.
+        // Resolved BEFORE the store starts: the embedded server's chat broker
+        // listens for the same fleet name (start_embedded_asset_server_at),
+        // and it used to be pinned to `default` while this panel showed the
+        // `gen` boxes 2/2 up — every game chat got "no fleet nodes configured".
+        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
+            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
+        }
+        log!(
+            "fleet: listening for '{}' beacons (MAKEPAD_AI_FLEET)",
+            makepad_asset_ai::discovery::wanted_fleet()
+        );
         // The store hosts the embedded Asset Server; hand it the library it
         // must publish. Library::open ran above, so the product backfill is
         // already on disk when the watcher's first poll reads index.json.
@@ -4070,11 +4084,6 @@ impl App {
         // empty library changes nothing.
         self.refresh_gallery(cx, true);
 
-        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
-        // fleet so the sandbox `game` box (.123) never lands in this UI.
-        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
-            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
-        }
         self.discovered = Some(makepad_asset_ai::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
         self.maybe_connect_chat(cx);
@@ -13190,6 +13199,21 @@ impl MatchEvent for App {
             let lyrics = self.ui.check_box(cx, ids!(detail_analyse_lyrics)).active(cx);
             if let Some((asset, title)) = self.selected_audio() {
                 self.enqueue_analysis(cx, vec![(analysis::BakeTarget::Asset(asset), title)], lyrics);
+            }
+        }
+        // "Reveal file": the selected track's materialised payload, selected
+        // in Finder — from there it drags into a chat app or a DAW.
+        if self.ui.button(cx, ids!(detail_reveal_btn)).clicked(actions) {
+            if let Some(asset) = self.store.selected {
+                let file = store_file_id(&asset);
+                match self.catalog_work.get(&file).and_then(|item| item.payload.clone()) {
+                    Some(path) => {
+                        let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+                    }
+                    None => {
+                        log!("library: no materialised file yet for {file} — select it and let the preview load, then reveal");
+                    }
+                }
             }
         }
         if self
