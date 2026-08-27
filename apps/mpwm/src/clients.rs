@@ -98,7 +98,6 @@ impl AppDef {
 fn curated() -> Vec<AppDef> {
     use LaunchPolicy::*;
     vec![
-        AppDef::app("terminal", "Terminal", "mpterm", "apps/mpterm", "mpterm", AlwaysNew),
         AppDef::app("browser", "Browser", "mpbrowser", "apps/mpbrowser", "mpbrowser", OrFocus),
         {
             // Recording default: the Files row in the menu opens the demo
@@ -111,6 +110,8 @@ fn curated() -> Vec<AppDef> {
             }
             files
         },
+        AppDef::app("terminal", "Terminal", "mpterm", "apps/mpterm", "mpterm", AlwaysNew),
+        AppDef::app("mixer", "Mixer", "makepad-mixer", "apps/mixer", "makepad-mixer", OrFocus),
         AppDef::app("task", "Task Manager", "mptask", "apps/mptask", "mptask", OrFocus),
         AppDef::app("sheets", "Sheets", "mpsheets", "apps/mpsheets", "mpsheets", OrFocus),
         // A viewer instance per file, so previews never steal each other's
@@ -127,7 +128,6 @@ fn curated() -> Vec<AppDef> {
             "makepad-app-route",
             OrFocus,
         ),
-        AppDef::app("mixer", "Mixer", "makepad-mixer", "apps/mixer", "makepad-mixer", OrFocus),
         AppDef::app("vj", "VJ", "makepad-vj", "apps/vj", "makepad-vj", OrFocus),
         AppDef::app("fab", "Fab", "makepad-fab", "apps/fab", "makepad-fab", OrFocus),
         AppDef::app(
@@ -657,16 +657,16 @@ mod tests {
         assert_eq!(
             order,
             [
-                "Terminal",
                 "Browser",
                 "Files",
+                "Terminal",
+                "Mixer",
                 "Task Manager",
                 "Sheets",
                 "Image Viewer",
                 "Video Player",
                 "PDF Viewer",
                 "Route",
-                "Mixer",
                 "VJ",
                 "Fab",
                 "Studio",

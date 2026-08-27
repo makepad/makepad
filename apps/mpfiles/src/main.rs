@@ -60,8 +60,8 @@ script_mod! {
     use mod.widgets.*
 
     let ToolButton = View{
-        width: 34
-        height: 30
+        width: 28
+        height: 28
         flow: Overlay
         align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
@@ -408,7 +408,7 @@ script_mod! {
 
                         top_bar := SolidView{
                             width: Fill
-                            height: 48
+                            height: 38
                             flow: Right
                             spacing: 4
                             padding: Inset{right: 10}
@@ -424,14 +424,14 @@ script_mod! {
                                     text: "Files"
                                     draw_text +: {
                                         color: mod.mpf.fg_bright
-                                        text_style: theme.font_bold{font_size: 13.0}
+                                        text_style: theme.font_bold{font_size: 11.0}
                                     }
                                 }
                             }
 
                             back_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/back.svg")
                                         color: mod.mpf.fg
@@ -440,7 +440,7 @@ script_mod! {
                             }
                             forward_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/forward.svg")
                                         color: mod.mpf.fg
@@ -450,7 +450,7 @@ script_mod! {
 
                             path_box := RectView{
                                 width: Fill
-                                height: 30
+                                height: 28
                                 flow: Right
                                 margin: Inset{left: 4 right: 4}
                                 padding: Inset{left: 5 right: 5}
@@ -497,7 +497,7 @@ script_mod! {
 
                             icons_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 16 height: 16}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/grid.svg")
                                         color: mod.mpf.fg
@@ -506,7 +506,7 @@ script_mod! {
                             }
                             list_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/list.svg")
                                         color: mod.mpf.fg
@@ -515,7 +515,7 @@ script_mod! {
                             }
                             compact_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/compact.svg")
                                         color: mod.mpf.fg
@@ -524,7 +524,7 @@ script_mod! {
                             }
                             treemap_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 16 height: 16}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/treemap.svg")
                                         color: mod.mpf.fg
@@ -536,7 +536,7 @@ script_mod! {
 
                             newfolder_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/newfolder.svg")
                                         color: mod.mpf.fg
@@ -545,7 +545,7 @@ script_mod! {
                             }
                             terminal_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 16 height: 16}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/terminal.svg")
                                         color: mod.mpf.fg
@@ -554,7 +554,7 @@ script_mod! {
                             }
                             props_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 16 height: 16}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/info.svg")
                                         color: mod.mpf.fg
@@ -563,7 +563,7 @@ script_mod! {
                             }
                             search_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/search.svg")
                                         color: mod.mpf.fg
@@ -572,7 +572,7 @@ script_mod! {
                             }
                             preview_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 17 height: 17}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/eye.svg")
                                         color: mod.mpf.fg
@@ -581,7 +581,7 @@ script_mod! {
                             }
                             menu_button := ToolButton{
                                 Icon{
-                                    icon_walk: Walk{width: 16 height: 16}
+                                    icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/menu-dots.svg")
                                         color: mod.mpf.fg
@@ -593,7 +593,7 @@ script_mod! {
                         tab_strip := SolidView{
                             visible: false
                             width: Fill
-                            height: 30
+                            height: 26
                             flow: Right
                             spacing: 1
                             padding: Inset{left: 1}

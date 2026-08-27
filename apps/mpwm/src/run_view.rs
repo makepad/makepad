@@ -583,8 +583,16 @@ impl MpRunView {
     }
 
     /// Focus the compositor keyboard on this tile.
-    pub fn focus_keyboard(&mut self, cx: &mut Cx) {
+    /// Claim the compositor's key focus for this tile. False while the
+    /// tile has never drawn (its Area is still empty — focusing it would
+    /// be a no-op); the WM keeps such a focus PENDING and retries when the
+    /// child's first frame arrives.
+    pub fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
+        if self.area == Area::Empty {
+            return false;
+        }
         cx.set_key_focus(self.area);
+        true
     }
 
     /// The newest line the child (or the cargo wrapper building it) wrote.

@@ -127,6 +127,25 @@ pub fn apply(vm: &mut ScriptVm) {
             "mod.theme.color_bevel_outset_1{state} = {muted}\nmod.theme.color_bevel_outset_2{state} = {muted}\n"
         ));
     }
+    // Buttons: FLAT blueish fills — both gradient stops identical per
+    // state (the stock two-stop bevel look reads as "terrible gradient
+    // buttons"). Idle = the theme's raised surface, hover = muted, down/
+    // active = the accent (text stays readable via color_text roles).
+    for (state, fill) in [
+        ("", field),
+        ("_hover", &muted),
+        ("_down", &accent),
+        ("_active", &accent),
+        ("_focus", field),
+        ("_drag", &muted),
+    ] {
+        flat.push_str(&format!(
+            "mod.theme.color_outset_1{state} = {fill}\nmod.theme.color_outset_2{state} = {fill}\n"
+        ));
+    }
+    flat.push_str(&format!(
+        "mod.theme.color_outset_1_disabled = {bg}\nmod.theme.color_outset_2_disabled = {bg}\n"
+    ));
     flat.push_str(&format!(
         "mod.theme.color_bevel_outset_1_down = {accent}\nmod.theme.color_bevel_outset_2_down = {accent}\n\
          mod.theme.color_bevel_outset_1_disabled = {bg}\nmod.theme.color_bevel_outset_2_disabled = {bg}\n"

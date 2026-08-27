@@ -270,10 +270,18 @@ pub struct WmLayout {
     pub active: usize,
     /// The previously active workspace (SUPER+CTRL+TAB "former").
     pub former: usize,
+    /// Focus history, most recent LAST (Hyprland's focus fallback):
+    /// closing a window returns focus to the one focused before it, so
+    /// repeated closes unwind in reverse creation/focus order.
+    focus_history: Vec<ClientId>,
     /// Floating clients, back to front (the last one draws on top).
     floats: Vec<FloatEntry>,
     /// Where an unfloated window goes back to when it floats again.
     float_memory: Vec<(ClientId, LRect)>,
+    /// The tiled NEIGHBOR a window sat next to when it floated/popped out,
+    /// so un-floating returns it to where it came from instead of the
+    /// current focus's split.
+    tile_origin: Vec<(ClientId, ClientId)>,
     /// Pseudo-tiled clients and the natural size they keep.
     pseudo: Vec<(ClientId, f64, f64)>,
     /// `fullscreenstate 0 2`: reported to the client, no layout change.
@@ -300,8 +308,10 @@ impl WmLayout {
             workspaces: (0..WORKSPACES + 1).map(|_| Workspace::default()).collect(),
             active: 0,
             former: 0,
+            focus_history: Vec::new(),
             floats: Vec::new(),
             float_memory: Vec::new(),
+            tile_origin: Vec::new(),
             pseudo: Vec::new(),
             client_fullscreen: Vec::new(),
             scratchpad_open: false,
@@ -371,6 +381,27 @@ impl WmLayout {
             }
         }
         None
+    }
+
+    /// Hyprland's `e+1`/`e-1`: the next OCCUPIED workspace in cyclic
+    /// order (never a march through empty ones), the current workspace
+    /// included in the ring. With no other occupied workspace this
+    /// returns `from` — the cycle is a no-op, not a jump to nowhere.
+    pub fn cycle_occupied(&self, from: usize, forward: bool) -> usize {
+        for step in 1..=WORKSPACES {
+            let ws = if forward {
+                (from + step) % WORKSPACES
+            } else {
+                (from + WORKSPACES - step % WORKSPACES) % WORKSPACES
+            };
+            if ws == from {
+                break;
+            }
+            if !self.clients_on(ws).is_empty() {
+                return ws;
+            }
+        }
+        from
     }
 
     /// Every client on a workspace — tiled (group members included) and
@@ -603,7 +634,16 @@ impl WmLayout {
     }
 
     /// Remove a client wherever it is; collapses its parent split.
+    /// Record `client` as the most recently focused (call on every focus
+    /// change — the close fallback walks this history newest-first).
+    pub fn note_focus(&mut self, client: ClientId) {
+        self.focus_history.retain(|c| *c != client);
+        self.focus_history.push(client);
+    }
+
     pub fn remove(&mut self, client: ClientId) {
+        self.focus_history.retain(|c| *c != client);
+        self.tile_origin.retain(|(c, _)| *c != client);
         self.floats.retain(|f| f.client != client);
         self.float_memory.retain(|(c, _)| *c != client);
         self.pseudo.retain(|(c, _, _)| *c != client);
@@ -615,8 +655,18 @@ impl WmLayout {
                 self.workspaces[i].fullscreen_mode = FullscreenMode::None;
             }
             if self.workspaces[i].focus == Some(client) {
+                // The previously focused survivor first (focus history,
+                // newest-first) — repeated ⌘Q unwinds windows in reverse
+                // creation/focus order instead of jumping to the oldest
+                // tile. Tree order only as the last resort.
                 let survivors = self.visible_clients_on(i);
-                self.workspaces[i].focus = survivors.first().copied();
+                let from_history = self
+                    .focus_history
+                    .iter()
+                    .rev()
+                    .find(|c| survivors.contains(c))
+                    .copied();
+                self.workspaces[i].focus = from_history.or_else(|| survivors.first().copied());
             }
         }
         if ws == Some(SCRATCHPAD) && self.clients_on(SCRATCHPAD).is_empty() {
@@ -1196,6 +1246,11 @@ impl WmLayout {
                     .map(|(_, r)| *r)
             })
             .unwrap_or_else(|| base.centered(base.w * FLOAT_SHARE, base.h * FLOAT_SHARE));
+        // Remember the tiled neighbor so a later unfloat returns HERE.
+        self.tile_origin.retain(|(c, _)| *c != client);
+        if let Some(neighbor) = self.tiled_sibling_of(client) {
+            self.tile_origin.push((client, neighbor));
+        }
         self.detach(client);
         if self.workspaces[ws].fullscreen == Some(client) {
             self.workspaces[ws].fullscreen = None;
@@ -1217,8 +1272,42 @@ impl WmLayout {
         let entry = self.floats.remove(i);
         self.float_memory.retain(|(c, _)| *c != client);
         self.float_memory.push((client, entry.rect));
-        // Reinsert at the focus of its own workspace.
-        self.insert_on(entry.ws, client, area, gap);
+        // Back where it came from: split the remembered old neighbor if it
+        // is still tiled on that workspace; the current focus only as the
+        // fallback (insert_on's default).
+        let origin = self
+            .tile_origin
+            .iter()
+            .find(|(c, _)| *c == client)
+            .map(|(_, n)| *n)
+            .filter(|n| {
+                self.workspace_of(*n) == Some(entry.ws) && !self.is_float(*n)
+            });
+        if let Some(neighbor) = origin {
+            let kept = self.workspaces[entry.ws].focus;
+            self.workspaces[entry.ws].focus = Some(neighbor);
+            self.insert_on(entry.ws, client, area, gap);
+            let _ = kept; // insert focuses the returning client itself
+        } else {
+            self.insert_on(entry.ws, client, area, gap);
+        }
+        self.tile_origin.retain(|(c, _)| *c != client);
+    }
+
+    /// The nearest tiled neighbor of a tiled client: the first client of
+    /// its leaf's SIBLING subtree (None for floats or a lone tile).
+    fn tiled_sibling_of(&self, client: ClientId) -> Option<ClientId> {
+        let ws = self.workspace_of(client)?;
+        let root = self.workspaces[ws].root?;
+        let leaf = self.find_leaf(root, client)?;
+        let (parent, client_is_a) = self.find_parent(root, leaf)?;
+        let Some(Node::Split { a, b, .. }) = self.nodes[parent].as_ref() else {
+            return None;
+        };
+        let sibling = if client_is_a { *b } else { *a };
+        let mut out = Vec::new();
+        self.collect_clients(sibling, &mut out);
+        out.into_iter().find(|c| *c != client)
     }
 
     /// SUPER+O — `bin/omarchy-hyprland-window-pop`: float + 1300x900 +
@@ -1900,6 +1989,69 @@ mod tests {
         assert!(l.resize(Axis::Horizontal, 0.1));
         assert_eq!(rect_of(&l, 1).w, 600.0);
         assert_eq!(rect_of(&l, 2).w, 400.0);
+    }
+
+    #[test]
+    fn pop_out_returns_to_its_old_neighbor() {
+        let mut l = WmLayout::new();
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0); // splits 1 → neighbor of 2 is 1
+        l.insert(3, AREA, 0.0); // splits 2
+        // 3's nearest neighbor is 2 (they share the deepest split). Pop 3
+        // out, move focus to 1, pop back in: 3 must return NEXT TO 2 —
+        // not split the focused 1.
+        assert_eq!(l.tiled_sibling_of(3), Some(2));
+        l.pop_out(3, AREA, 0.0);
+        l.workspaces[0].focus = Some(1);
+        l.pop_out(3, AREA, 0.0);
+        assert!(!l.is_float(3));
+        assert_eq!(l.tiled_sibling_of(3), Some(2));
+    }
+
+    #[test]
+    fn closing_unwinds_in_reverse_focus_order() {
+        let mut l = WmLayout::new();
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0);
+        l.insert(3, AREA, 0.0);
+        // Created (and focused) 1 → 2 → 3.
+        l.note_focus(1);
+        l.note_focus(2);
+        l.note_focus(3);
+        l.remove(3);
+        assert_eq!(l.workspaces[0].focus, Some(2));
+        l.remove(2);
+        assert_eq!(l.workspaces[0].focus, Some(1));
+        // Refocusing an older window reorders the unwind.
+        let mut l = WmLayout::new();
+        for c in 1..=3 {
+            l.insert(c, AREA, 0.0);
+            l.note_focus(c);
+        }
+        l.note_focus(1); // user went back to 1
+        l.workspaces[0].focus = Some(1);
+        l.remove(1);
+        assert_eq!(l.workspaces[0].focus, Some(3));
+    }
+
+    #[test]
+    fn workspace_cycle_visits_only_occupied() {
+        let mut l = WmLayout::new();
+        l.insert(1, AREA, 0.0); // ws 0
+        l.insert_on(4, 2, AREA, 0.0); // ws 4
+        // From 0 forward: skip 1..3 (empty), land on 4; again wraps to 0.
+        assert_eq!(l.cycle_occupied(0, true), 4);
+        assert_eq!(l.cycle_occupied(4, true), 0);
+        // Backward from 0 wraps to 4 directly.
+        assert_eq!(l.cycle_occupied(0, false), 4);
+        // From an EMPTY workspace (the "cleared screen" case) either
+        // direction reaches an occupied one — Tab always brings you back.
+        assert_eq!(l.cycle_occupied(2, true), 4);
+        assert_eq!(l.cycle_occupied(2, false), 0);
+        // A lone occupied workspace cycles to itself.
+        let mut solo = WmLayout::new();
+        solo.insert(9, AREA, 0.0);
+        assert_eq!(solo.cycle_occupied(0, true), 0);
     }
 
     #[test]

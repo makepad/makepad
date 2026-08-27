@@ -12,6 +12,7 @@ use makepad_widgets::*;
 
 mod binds;
 mod clients;
+mod demo_home;
 mod desk;
 mod hub;
 mod layout;
@@ -162,6 +163,10 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     state: Option<WmState>,
+    /// A keyboard focus that could not land yet (the tile hadn't drawn);
+    /// re-asserted when that client's first frame arrives.
+    #[rust]
+    pending_focus: Option<ClientId>,
     /// `--gallery`: the shell-surface gallery instead of a desktop.
     #[rust]
     gallery: bool,
@@ -363,7 +368,16 @@ impl App {
         self.next_id += 1;
         let state = self.state_mut();
         let cwd = if app.id == "terminal" {
-            state.focused_terminal_cwd()
+            // Focused terminal's cwd (the omarchy rule); in demo mode a
+            // FIRST terminal opens inside the generated demo home so `ls`
+            // shows plausible content, never the user's real files.
+            state.focused_terminal_cwd().or_else(|| {
+                if std::env::var("MPWM_FILES_REAL").is_err() {
+                    crate::demo_home::ensure_demo_home()
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };
@@ -809,10 +823,18 @@ impl App {
                 state.layout.switch_workspace(ws);
             }
             state.layout.workspaces[ws].focus = Some(client);
+            state.layout.note_focus(client);
         }
-        self.desk(cx)
+        // The tile widget only exists once the desk has drawn it, and its
+        // Area only after its first draw — a focus at launch time lands on
+        // nothing. Keep it pending and re-assert when the child's first
+        // frame arrives (the PresentableDraw path below).
+        let focused = self
+            .desk(cx)
             .borrow_mut::<WmDesk>()
-            .map(|mut d| d.with_run_view(cx, client, |cx, v| v.focus_keyboard(cx)));
+            .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.focus_keyboard(cx)))
+            .unwrap_or(false);
+        self.pending_focus = if focused { None } else { Some(client) };
         self.update_bar(cx);
         self.redraw_all(cx);
     }
@@ -940,19 +962,39 @@ impl App {
     fn on_app_msg(&mut self, cx: &mut Cx, client: ClientId, msg: AppToStudio) {
         match msg {
             AppToStudio::CreateWindow { window_id, .. } => {
-                if let Some(slot) = self.state_mut().clients.get_mut(&client) {
-                    slot.window_id = window_id;
-                    slot.ready = true;
+                // A multi-window app (the VJ: console + output window)
+                // announces every window; the tile hosts the FIRST — the
+                // app's main UI — never a later output/aux window.
+                let first = self
+                    .state_mut()
+                    .clients
+                    .get_mut(&client)
+                    .map(|slot| {
+                        if slot.ready {
+                            false
+                        } else {
+                            slot.window_id = window_id;
+                            slot.ready = true;
+                            true
+                        }
+                    })
+                    .unwrap_or(false);
+                if first {
+                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                        d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
+                    });
                 }
-                self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
-                    d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
-                });
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
                 crate::run_view::trace_host(&format!("rx-flip c{}", client));
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
+                // A focus that couldn't land at launch (tile not yet
+                // drawn) lands now that the client has a frame.
+                if self.pending_focus == Some(client) {
+                    self.focus_client(cx, client);
+                }
             }
             AppToStudio::SetCursor(cursor) => {
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
@@ -1525,13 +1567,16 @@ impl App {
                     .move_focused_to_ex(n, false, area, gap);
             }
             WmAction::WorkspaceNext => {
-                let n = (self.state_mut().layout.active + 1) % layout::WORKSPACES;
+                // Hyprland `e+1`: cycle occupied workspaces, not a march
+                // through the empty ones.
+                let layout = &self.state_mut().layout;
+                let n = layout.cycle_occupied(layout.active, true);
                 self.state_mut().layout.switch_workspace(n);
                 self.focus_after_layout(cx);
             }
             WmAction::WorkspacePrev => {
-                let active = self.state_mut().layout.active;
-                let n = (active + layout::WORKSPACES - 1) % layout::WORKSPACES;
+                let layout = &self.state_mut().layout;
+                let n = layout.cycle_occupied(layout.active, false);
                 self.state_mut().layout.switch_workspace(n);
                 self.focus_after_layout(cx);
             }
@@ -1910,12 +1955,8 @@ impl App {
 
     /// SUPER + wheel: `focus({ workspace = "e+1" / "e-1" })`.
     fn scroll_workspace(&mut self, cx: &mut Cx, down: bool) {
-        let active = self.state_mut().layout.active;
-        let n = if down {
-            (active + 1) % layout::WORKSPACES
-        } else {
-            (active + layout::WORKSPACES - 1) % layout::WORKSPACES
-        };
+        let layout = &self.state_mut().layout;
+        let n = layout.cycle_occupied(layout.active, down);
         self.state_mut().layout.switch_workspace(n);
         self.focus_after_layout(cx);
         self.sync_bar_for_fullscreen(cx);

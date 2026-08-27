@@ -68,8 +68,9 @@ fn icon_for(id: &str) -> Option<Ico> {
 }
 
 /// The `apps` provider rows: every registry app whose binary exists, not
-/// hidden, alphabetical by label (`AppSearch.js` alphabetizes once at merge
-/// time — the live filter never reorders).
+/// hidden, in the CURATED registry order (the user's: browser/files/
+/// terminal first, then by rarity — a deliberate deviation from omarchy's
+/// alphabetical provider). The live filter never reorders.
 pub fn apps() -> Vec<MenuItem> {
     let hides = hides();
     let mut items: Vec<MenuItem> = clients::registry()
@@ -87,7 +88,6 @@ pub fn apps() -> Vec<MenuItem> {
             aliases: vec![app.id.clone(), app.package.clone()],
         })
         .collect();
-    items.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
     items
 }
 
@@ -106,12 +106,16 @@ mod tests {
     }
 
     #[test]
-    fn the_apps_provider_is_alphabetical() {
+    fn the_apps_provider_keeps_the_curated_order() {
         let items = apps();
-        let labels: Vec<String> = items.iter().map(|i| i.label.to_lowercase()).collect();
-        let mut sorted = labels.clone();
-        sorted.sort();
-        assert_eq!(labels, sorted);
+        // Rows appear in registry order (available subset preserves it).
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        let registry_order: Vec<String> = clients::registry()
+            .iter()
+            .filter(|a| labels.contains(&a.label))
+            .map(|a| a.label.clone())
+            .collect();
+        assert_eq!(labels, registry_order);
         // Every row is an app row under the `apps` parent.
         assert!(items
             .iter()
