@@ -723,9 +723,33 @@ impl Default for ImageCache {
 }
 
 impl ImageCache {
-    /// Max distinct cached images before eviction kicks in. Each `Loaded` entry can hold a
-    /// decoded GPU texture, so without a cap this `HashMap` grows for the process lifetime.
-    const MAX_ENTRIES: usize = 512;
+    /// Byte budget for cached GPU textures before eviction kicks in.
+    ///
+    /// This used to be a cap on the *number* of entries (512), which is the right
+    /// unit for an IDE full of 32px icons — 512 of those are about 2 MB — and the
+    /// wrong one everywhere else. The same 512 entries are **~5.6 GB** of 1080p
+    /// photos, or **~65 GB** of 24 Mpx RAW: the cap never fires and the process
+    /// grows until the OS kills it. A limit in the wrong unit doesn't report an
+    /// error; it reports nothing.
+    ///
+    /// 256 MB is a deliberately modest default: it comfortably holds an icon set
+    /// or a page of thumbnails, and forces recycling on a photo grid — which is
+    /// exactly what you want there.
+    pub const MAX_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Hard ceiling on entry count, kept as a backstop for the pathological case
+    /// (thousands of tiny images), where the byte budget alone would still let the
+    /// `HashMap` grow unbounded.
+    pub const MAX_ENTRIES: usize = 4096;
+
+    /// Bytes a decoded RGBA texture of `width * height` occupies, mipmaps included.
+    ///
+    /// The 4/3 factor is the sum of the mipmap pyramid series (1 + 1/4 + 1/16 …),
+    /// and static images *are* mipmapped here (see `ImageBuffer::into_new_texture`),
+    /// so counting only the base level would undershoot by a third.
+    pub fn texture_bytes(width: usize, height: usize) -> usize {
+        width.saturating_mul(height).saturating_mul(4) / 3 * 4
+    }
 
     pub fn new() -> Self {
         Self {
@@ -738,7 +762,6 @@ impl ImageCache {
     /// Insert a freshly-loaded texture, then bound the cache size if it has grown too large.
     pub fn insert_loaded(&mut self, image_path: PathBuf, texture: Texture) {
         self.map.insert(image_path, ImageCacheEntry::Loaded(texture));
-        self.evict_loaded_if_oversized();
     }
 
     /// Forget one path, returning the entry it held (`None` if it held none).
@@ -752,28 +775,68 @@ impl ImageCache {
     pub fn evict(&mut self, image_path: &Path) -> Option<ImageCacheEntry> {
         self.map.remove(image_path)
     }
+}
 
-    /// Drop `Loaded` entries once the cache exceeds its cap. This is safe because widgets keep
-    /// their own clone of any texture they're currently displaying (via `set_texture`), so
-    /// eviction never affects a visible image — a later *fresh* request for an evicted path
-    /// simply re-loads it. In-flight `Loading` entries are preserved so decode work isn't
-    /// orphaned. There is no per-entry access timestamp, so eviction order is unspecified; the
-    /// cap is generous enough that this rarely triggers in practice.
-    fn evict_loaded_if_oversized(&mut self) {
-        if self.map.len() <= Self::MAX_ENTRIES {
-            return;
+/// Drop `Loaded` entries until the cache is back under its byte budget.
+///
+/// Safe by construction: every widget keeps its own clone of the texture it is
+/// currently displaying (via `set_texture`), so eviction never affects a visible
+/// image — a later *fresh* request for an evicted path simply re-loads it.
+/// In-flight `Loading` entries are preserved so decode work isn't orphaned.
+///
+/// Biggest textures go first: when the problem is memory, evicting a hundred
+/// icons doesn't help if what's over budget is a single 96 MB RAW.
+///
+/// This is a free function and not a method because measuring a texture needs
+/// `&mut Cx`, and reaching the cache goes through `cx.get_global`, which already
+/// borrows it — the two don't fit inside one method.
+pub fn evict_image_cache_if_oversized(cx: &mut Cx) {
+    if !cx.has_global::<ImageCache>() {
+        return;
+    }
+
+    let paths: Vec<(PathBuf, Texture)> = cx
+        .get_global::<ImageCache>()
+        .map
+        .iter()
+        .filter_map(|(k, e)| match e {
+            ImageCacheEntry::Loaded(t) => Some((k.clone(), t.clone())),
+            ImageCacheEntry::Loading(..) => None,
+        })
+        .collect();
+
+    let entries = cx.get_global::<ImageCache>().map.len();
+    let mut sized: Vec<(PathBuf, usize)> = paths
+        .into_iter()
+        .map(|(k, t)| {
+            let bytes = t
+                .get_format(cx)
+                .vec_width_height()
+                .map(|(w, h)| ImageCache::texture_bytes(w, h))
+                .unwrap_or(0);
+            (k, bytes)
+        })
+        .collect();
+
+    let total: usize = sized.iter().map(|(_, b)| b).sum();
+    if total <= ImageCache::MAX_BYTES && entries <= ImageCache::MAX_ENTRIES {
+        return;
+    }
+
+    sized.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let target_bytes = ImageCache::MAX_BYTES * 3 / 4;
+    let target_entries = ImageCache::MAX_ENTRIES * 3 / 4;
+    let mut remaining = total;
+    let mut count = entries;
+    let cache = cx.get_global::<ImageCache>();
+    for (path, bytes) in sized {
+        if remaining <= target_bytes && count <= target_entries {
+            break;
         }
-        let excess = self.map.len() - (Self::MAX_ENTRIES * 3 / 4);
-        let to_remove: Vec<PathBuf> = self
-            .map
-            .iter()
-            .filter(|(_, e)| matches!(e, ImageCacheEntry::Loaded(_)))
-            .map(|(k, _)| k.clone())
-            .take(excess)
-            .collect();
-        for k in to_remove {
-            self.map.remove(&k);
-        }
+        cache.map.remove(&path);
+        remaining = remaining.saturating_sub(bytes);
+        count = count.saturating_sub(1);
     }
 }
 
@@ -1227,6 +1290,47 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
 fn ensure_image_cache_inner(cx: &mut Cx) {
     if !cx.has_global::<ImageCache>() {
         cx.set_global(ImageCache::new());
+    }
+}
+
+#[cfg(test)]
+mod byte_budget_tests {
+    use super::*;
+
+    /// The numbers that motivated moving the cap from entries to bytes.
+    ///
+    /// The old cap was 512 *entries*, which is fine for icons and meaningless for
+    /// photographs. These asserts spell out why, so the reasoning survives the
+    /// commit message.
+    #[test]
+    fn an_entry_cap_means_gigabytes_once_the_images_are_photos() {
+        let gb = 1024usize * 1024 * 1024;
+
+        // 512 32px icons: about 2 MB. The old cap was right for this.
+        assert!(ImageCache::texture_bytes(32, 32) * 512 < 3 * 1024 * 1024);
+
+        // 512 1080p photos: over 5 GB, and the entry cap never fires.
+        assert!(ImageCache::texture_bytes(1920, 1080) * 512 > 5 * gb);
+
+        // 512 24 Mpx RAWs: over 60 GB.
+        assert!(ImageCache::texture_bytes(6000, 4000) * 512 > 60 * gb);
+    }
+
+    /// A realistic photo grid stays *under* the old entry cap while being far
+    /// over any sane memory budget — which is exactly the hole being closed.
+    #[test]
+    fn a_photo_grid_never_trips_the_old_entry_cap() {
+        let batch = ImageCache::texture_bytes(1920, 1080) * 240;
+        assert!(240 < 512, "under the old entry cap");
+        assert!(batch > 2 * 1024 * 1024 * 1024, "and over 2 GB");
+        assert!(batch > ImageCache::MAX_BYTES, "and over the byte budget");
+    }
+
+    /// Mipmaps are counted; ignoring them undershoots by a third.
+    #[test]
+    fn mipmaps_are_counted() {
+        let base = 1920 * 1080 * 4;
+        assert_eq!(ImageCache::texture_bytes(1920, 1080), base / 3 * 4);
     }
 }
 
@@ -1793,6 +1897,7 @@ pub fn process_async_image_load(
         }
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture);
+        evict_image_cache_if_oversized(cx);
     } else {
         if image_decode_debug_enabled() {
             log!(
@@ -1913,6 +2018,7 @@ where
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture);
+        evict_image_cache_if_oversized(cx);
         return Ok(AsyncLoadResult::Loaded);
     }
 
@@ -2210,6 +2316,7 @@ pub trait ImageCacheImpl {
         ensure_image_cache(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture.clone());
+        evict_image_cache_if_oversized(cx);
         self.set_texture(Some(texture), id);
         Ok(())
     }
