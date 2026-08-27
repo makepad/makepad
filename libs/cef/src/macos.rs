@@ -1121,10 +1121,17 @@ fn ensure_initialized() -> Result<()> {
         .to_string_lossy()
         .to_string();
     let log_file = synthetic_bundle.log_file.to_string_lossy().to_string();
-    let root_cache_path = temp_root_cache_path()?;
+    // A STABLE on-disk profile by default, so cookies/logins/localStorage
+    // survive restarts (the per-pid temp dir made every launch incognito:
+    // the Google cookie banner on each start). MAKEPAD_CEF_EPHEMERAL=1
+    // restores the throwaway profile; MAKEPAD_CEF_PROFILE_DIR overrides
+    // the location. Chromium locks the profile, so a second concurrent
+    // instance of the same app should run ephemeral.
+    let root_cache_path = profile_root_cache_path()?;
 
     let browser_subprocess_path = CefString::new(&runtime.api, helper_executable)?;
     let log_file = CefString::new(&runtime.api, log_file)?;
+    let cache_path = CefString::new(&runtime.api, root_cache_path.to_string_lossy())?;
     let root_cache_path = CefString::new(&runtime.api, root_cache_path.to_string_lossy())?;
 
     let mut settings = ffi::cef_settings_t {
@@ -1137,9 +1144,11 @@ fn ensure_initialized() -> Result<()> {
         external_message_pump: 1,
         windowless_rendering_enabled: 1,
         command_line_args_disabled: 0,
-        cache_path: ffi::cef_string_t::default(),
+        // cache_path == root_cache_path: a real persistent profile (an
+        // empty cache_path would be incognito regardless of the root).
+        cache_path: cache_path.raw(),
         root_cache_path: root_cache_path.raw(),
-        persist_session_cookies: 0,
+        persist_session_cookies: 1,
         user_agent: ffi::cef_string_t::default(),
         user_agent_product: ffi::cef_string_t::default(),
         locale: ffi::cef_string_t::default(),
@@ -1194,6 +1203,62 @@ fn temp_root_cache_path() -> Result<PathBuf> {
     std::fs::create_dir_all(&path)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
     Ok(path)
+}
+
+/// The browser profile directory: stable across launches so cookies and
+/// logins persist. `MAKEPAD_CEF_PROFILE_DIR` overrides; `MAKEPAD_CEF_
+/// EPHEMERAL=1` (or no resolvable home) falls back to the per-pid temp
+/// profile. Chromium locks a profile per process — if the stable dir is
+/// locked by a live sibling (SingletonLock points at a running pid on this
+/// host), fall back to ephemeral instead of failing CEF init.
+fn profile_root_cache_path() -> Result<PathBuf> {
+    if env::var("MAKEPAD_CEF_EPHEMERAL").is_ok() {
+        return temp_root_cache_path();
+    }
+    if let Ok(dir) = env::var("MAKEPAD_CEF_PROFILE_DIR") {
+        let path = PathBuf::from(dir);
+        std::fs::create_dir_all(&path)
+            .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
+        return Ok(path);
+    }
+    let Ok(home) = env::var("HOME") else {
+        return temp_root_cache_path();
+    };
+    let exe = env::current_exe()
+        .map_err(|err| Error::new(format!("failed to resolve current executable: {err}")))?;
+    let stem = exe
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("makepad-cef")
+        .to_string();
+    let path = PathBuf::from(home).join(".makepad-cef").join(&stem);
+    std::fs::create_dir_all(&path)
+        .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
+    // Live-lock check: Chromium's SingletonLock is a symlink "host-pid".
+    let lock = path.join("SingletonLock");
+    if let Ok(target) = std::fs::read_link(&lock) {
+        let alive = target
+            .to_string_lossy()
+            .rsplit('-')
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+            .map(|pid| unsafe { libc_kill_probe(pid) })
+            .unwrap_or(false);
+        if alive {
+            return temp_root_cache_path();
+        }
+        // Stale lock from a dead process: clear it.
+        let _ = std::fs::remove_file(&lock);
+    }
+    Ok(path)
+}
+
+/// True when `pid` is alive (signal 0 probe).
+unsafe fn libc_kill_probe(pid: i32) -> bool {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    kill(pid, 0) == 0
 }
 
 fn ensure_symlink(source: &PathBuf, destination: &PathBuf) -> Result<()> {

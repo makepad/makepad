@@ -181,7 +181,7 @@ script_mod! {
                                     width: 86
                                     height: 22
                                     labels: ["0.1 s" "0.2 s" "0.5 s" "1 s" "2 s" "5 s" "10 s"]
-                                    selected_item: 3
+                                    selected_item: 0
                                 }
                             }
                             process_table := ProcessTable{}
@@ -310,8 +310,8 @@ const HISTORY: usize = 60;
 
 /// The refresh-rate picker, in the order the drop-down lists them.
 const REFRESH_CHOICES_MS: [u64; 7] = [100, 200, 500, 1000, 2000, 5000, 10_000];
-/// Index of the default (1 s) — must match `selected_item` in the DSL.
-const DEFAULT_REFRESH: usize = 3;
+/// Index of the default (0.1 s) — must match `selected_item` in the DSL.
+const DEFAULT_REFRESH: usize = 0;
 
 /// Height of the metrics band when the process table is on screen. Matches
 /// `top_row`'s height in the DSL.
