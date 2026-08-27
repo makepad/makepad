@@ -32,12 +32,73 @@ pub type cef_process_id_t = c_int;
 pub type cef_process_message_t = c_void;
 pub type cef_runtime_style_t = c_int;
 pub type cef_paint_element_type_t = c_int;
-pub type cef_size_t = c_void;
 pub type cef_state_t = c_int;
 pub type cef_text_input_mode_t = c_int;
 pub type cef_touch_event_type_t = c_int;
 pub type cef_touch_handle_state_t = c_void;
 pub type cef_composition_underline_t = c_void;
+pub type cef_color_type_t = c_int;
+pub type cef_alpha_type_t = c_int;
+pub type cef_transition_type_t = c_int;
+pub type cef_errorcode_t = c_int;
+pub type cef_window_open_disposition_t = c_int;
+pub type cef_cursor_type_t = c_int;
+pub type cef_cursor_handle_t = *mut c_void;
+pub type cef_cursor_info_t = c_void;
+pub type cef_zoom_command_t = c_int;
+pub type cef_file_dialog_mode_t = c_int;
+pub type cef_point_t = c_void;
+pub type cef_pdf_print_settings_t = c_void;
+pub type cef_registration_t = c_void;
+pub type cef_dev_tools_message_observer_t = c_void;
+pub type cef_navigation_entry_visitor_t = c_void;
+pub type cef_run_file_dialog_callback_t = c_void;
+pub type cef_pdf_print_callback_t = c_void;
+
+pub const CEF_COLOR_TYPE_RGBA_8888: cef_color_type_t = 0;
+pub const CEF_COLOR_TYPE_BGRA_8888: cef_color_type_t = 1;
+pub const CEF_ALPHA_TYPE_OPAQUE: cef_alpha_type_t = 0;
+pub const CEF_ALPHA_TYPE_PREMULTIPLIED: cef_alpha_type_t = 1;
+pub const CEF_ALPHA_TYPE_POSTMULTIPLIED: cef_alpha_type_t = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct cef_size_t {
+    pub width: c_int,
+    pub height: c_int,
+}
+
+/// `cef_accelerated_paint_info_common_t` (include/internal/cef_types_osr.h,
+/// CEF 138 layout).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct cef_accelerated_paint_info_common_t {
+    pub size: usize,
+    pub timestamp: u64,
+    pub coded_size: cef_size_t,
+    pub visible_rect: cef_rect_t,
+    pub content_rect: cef_rect_t,
+    pub source_size: cef_size_t,
+    pub capture_update_rect: cef_rect_t,
+    pub region_capture_rect: cef_rect_t,
+    pub capture_counter: u64,
+    pub has_capture_update_rect: u8,
+    pub has_region_capture_rect: u8,
+    pub has_source_size: u8,
+    pub has_capture_counter: u8,
+}
+
+/// `cef_accelerated_paint_info_t` for macOS (include/internal/cef_types_mac.h):
+/// the shared texture handle is an `IOSurfaceRef` out of CEF's pool. It is
+/// only valid for the duration of `on_accelerated_paint`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_info_t {
+    pub size: usize,
+    pub shared_texture_io_surface: *mut c_void,
+    pub format: cef_color_type_t,
+    pub extra: cef_accelerated_paint_info_common_t,
+}
 
 pub const LOGSEVERITY_DEFAULT: cef_log_severity_t = 0;
 pub const LOGSEVERITY_INFO: cef_log_severity_t = 2;
@@ -161,7 +222,7 @@ pub struct cef_main_args_t {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct cef_rect_t {
     pub x: c_int,
     pub y: c_int,
@@ -565,6 +626,291 @@ pub struct cef_app_t {
 }
 
 #[repr(C)]
+pub struct cef_display_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_address_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            frame: *mut cef_frame_t,
+            url: *const cef_string_t,
+        ),
+    >,
+    pub on_title_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            title: *const cef_string_t,
+        ),
+    >,
+    pub on_favicon_urlchange: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            icon_urls: cef_string_list_t,
+        ),
+    >,
+    pub on_fullscreen_mode_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            fullscreen: c_int,
+        ),
+    >,
+    pub on_tooltip: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            text: *mut cef_string_t,
+        ) -> c_int,
+    >,
+    pub on_status_message: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            value: *const cef_string_t,
+        ),
+    >,
+    pub on_console_message: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            level: cef_log_severity_t,
+            message: *const cef_string_t,
+            source: *const cef_string_t,
+            line: c_int,
+        ) -> c_int,
+    >,
+    pub on_auto_resize: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            new_size: *const cef_size_t,
+        ) -> c_int,
+    >,
+    pub on_loading_progress_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            progress: f64,
+        ),
+    >,
+    pub on_cursor_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            cursor: cef_cursor_handle_t,
+            type_: cef_cursor_type_t,
+            custom_cursor_info: *const cef_cursor_info_t,
+        ) -> c_int,
+    >,
+    pub on_media_access_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            has_video_access: c_int,
+            has_audio_access: c_int,
+        ),
+    >,
+    // CEF_API_ADDED(13700) — present for the 13800 API version we target.
+    pub on_contents_bounds_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            new_bounds: *const cef_rect_t,
+        ) -> c_int,
+    >,
+    pub get_root_window_screen_rect: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_display_handler_t,
+            browser: *mut cef_browser_t,
+            rect: *mut cef_rect_t,
+        ) -> c_int,
+    >,
+}
+
+#[repr(C)]
+pub struct cef_load_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_loading_state_change: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_load_handler_t,
+            browser: *mut cef_browser_t,
+            is_loading: c_int,
+            can_go_back: c_int,
+            can_go_forward: c_int,
+        ),
+    >,
+    pub on_load_start: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_load_handler_t,
+            browser: *mut cef_browser_t,
+            frame: *mut cef_frame_t,
+            transition_type: cef_transition_type_t,
+        ),
+    >,
+    pub on_load_end: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_load_handler_t,
+            browser: *mut cef_browser_t,
+            frame: *mut cef_frame_t,
+            http_status_code: c_int,
+        ),
+    >,
+    pub on_load_error: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_load_handler_t,
+            browser: *mut cef_browser_t,
+            frame: *mut cef_frame_t,
+            error_code: cef_errorcode_t,
+            error_text: *const cef_string_t,
+            failed_url: *const cef_string_t,
+        ),
+    >,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_popup_features_t {
+    pub size: usize,
+    pub x: c_int,
+    pub x_set: c_int,
+    pub y: c_int,
+    pub y_set: c_int,
+    pub width: c_int,
+    pub width_set: c_int,
+    pub height: c_int,
+    pub height_set: c_int,
+    pub is_popup: c_int,
+}
+
+#[repr(C)]
+pub struct cef_life_span_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_before_popup: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_life_span_handler_t,
+            browser: *mut cef_browser_t,
+            frame: *mut cef_frame_t,
+            popup_id: c_int,
+            target_url: *const cef_string_t,
+            target_frame_name: *const cef_string_t,
+            target_disposition: cef_window_open_disposition_t,
+            user_gesture: c_int,
+            popup_features: *const cef_popup_features_t,
+            window_info: *mut cef_window_info_t,
+            client: *mut *mut cef_client_t,
+            settings: *mut cef_browser_settings_t,
+            extra_info: *mut *mut cef_dictionary_value_t,
+            no_javascript_access: *mut c_int,
+        ) -> c_int,
+    >,
+    pub on_before_popup_aborted: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_life_span_handler_t,
+            browser: *mut cef_browser_t,
+            popup_id: c_int,
+        ),
+    >,
+    pub on_before_dev_tools_popup: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_life_span_handler_t,
+            browser: *mut cef_browser_t,
+            window_info: *mut cef_window_info_t,
+            client: *mut *mut cef_client_t,
+            settings: *mut cef_browser_settings_t,
+            extra_info: *mut *mut cef_dictionary_value_t,
+            use_default_window: *mut c_int,
+        ),
+    >,
+    pub on_after_created: Option<
+        unsafe extern "system" fn(self_: *mut cef_life_span_handler_t, browser: *mut cef_browser_t),
+    >,
+    pub do_close: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_life_span_handler_t,
+            browser: *mut cef_browser_t,
+        ) -> c_int,
+    >,
+    pub on_before_close: Option<
+        unsafe extern "system" fn(self_: *mut cef_life_span_handler_t, browser: *mut cef_browser_t),
+    >,
+}
+
+#[repr(C)]
+pub struct cef_binary_value_t {
+    pub base: cef_base_ref_counted_t,
+    pub is_valid: Option<unsafe extern "system" fn(self_: *mut cef_binary_value_t) -> c_int>,
+    pub is_owned: Option<unsafe extern "system" fn(self_: *mut cef_binary_value_t) -> c_int>,
+    pub is_same: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_binary_value_t,
+            that: *mut cef_binary_value_t,
+        ) -> c_int,
+    >,
+    pub is_equal: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_binary_value_t,
+            that: *mut cef_binary_value_t,
+        ) -> c_int,
+    >,
+    pub copy: Option<
+        unsafe extern "system" fn(self_: *mut cef_binary_value_t) -> *mut cef_binary_value_t,
+    >,
+    pub get_raw_data:
+        Option<unsafe extern "system" fn(self_: *mut cef_binary_value_t) -> *const c_void>,
+    pub get_size: Option<unsafe extern "system" fn(self_: *mut cef_binary_value_t) -> usize>,
+    pub get_data: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_binary_value_t,
+            buffer: *mut c_void,
+            buffer_size: usize,
+            data_offset: usize,
+        ) -> usize,
+    >,
+}
+
+#[repr(C)]
+pub struct cef_image_t {
+    pub base: cef_base_ref_counted_t,
+    pub is_empty: Option<unsafe extern "system" fn(self_: *mut cef_image_t) -> c_int>,
+    pub is_same: cef_unused_callback_t,
+    pub add_bitmap: cef_unused_callback_t,
+    pub add_png: cef_unused_callback_t,
+    pub add_jpeg: cef_unused_callback_t,
+    pub get_width: Option<unsafe extern "system" fn(self_: *mut cef_image_t) -> usize>,
+    pub get_height: Option<unsafe extern "system" fn(self_: *mut cef_image_t) -> usize>,
+    pub has_representation: cef_unused_callback_t,
+    pub remove_representation: cef_unused_callback_t,
+    pub get_representation_info: cef_unused_callback_t,
+    pub get_as_bitmap: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_image_t,
+            scale_factor: f32,
+            color_type: cef_color_type_t,
+            alpha_type: cef_alpha_type_t,
+            pixel_width: *mut c_int,
+            pixel_height: *mut c_int,
+        ) -> *mut cef_binary_value_t,
+    >,
+    pub get_as_png: cef_unused_callback_t,
+    pub get_as_jpeg: cef_unused_callback_t,
+}
+
+#[repr(C)]
+pub struct cef_download_image_callback_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_download_image_finished: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_download_image_callback_t,
+            image_url: *const cef_string_t,
+            http_status_code: c_int,
+            image: *mut cef_image_t,
+        ),
+    >,
+}
+
+#[repr(C)]
 pub struct cef_frame_t {
     pub base: cef_base_ref_counted_t,
     pub is_valid: cef_unused_callback_t,
@@ -582,6 +928,9 @@ pub struct cef_frame_t {
     pub load_request: cef_unused_callback_t,
     pub load_url:
         Option<unsafe extern "system" fn(self_: *mut cef_frame_t, url: *const cef_string_t)>,
+    pub execute_java_script: cef_unused_callback_t,
+    pub is_main: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
+    pub is_focused: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
 }
 
 #[repr(C)]
@@ -590,15 +939,15 @@ pub struct cef_browser_t {
     pub is_valid: cef_unused_callback_t,
     pub get_host:
         Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> *mut cef_browser_host_t>,
-    pub can_go_back: cef_unused_callback_t,
-    pub go_back: cef_unused_callback_t,
-    pub can_go_forward: cef_unused_callback_t,
-    pub go_forward: cef_unused_callback_t,
-    pub is_loading: cef_unused_callback_t,
-    pub reload: cef_unused_callback_t,
-    pub reload_ignore_cache: cef_unused_callback_t,
-    pub stop_load: cef_unused_callback_t,
-    pub get_identifier: cef_unused_callback_t,
+    pub can_go_back: Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> c_int>,
+    pub go_back: Option<unsafe extern "system" fn(self_: *mut cef_browser_t)>,
+    pub can_go_forward: Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> c_int>,
+    pub go_forward: Option<unsafe extern "system" fn(self_: *mut cef_browser_t)>,
+    pub is_loading: Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> c_int>,
+    pub reload: Option<unsafe extern "system" fn(self_: *mut cef_browser_t)>,
+    pub reload_ignore_cache: Option<unsafe extern "system" fn(self_: *mut cef_browser_t)>,
+    pub stop_load: Option<unsafe extern "system" fn(self_: *mut cef_browser_t)>,
+    pub get_identifier: Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> c_int>,
     pub is_same: cef_unused_callback_t,
     pub is_popup: cef_unused_callback_t,
     pub has_document: cef_unused_callback_t,
@@ -628,7 +977,16 @@ pub struct cef_browser_host_t {
     pub set_zoom_level: cef_unused_callback_t,
     pub run_file_dialog: cef_unused_callback_t,
     pub start_download: cef_unused_callback_t,
-    pub download_image: cef_unused_callback_t,
+    pub download_image: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_browser_host_t,
+            image_url: *const cef_string_t,
+            is_favicon: c_int,
+            max_image_size: u32,
+            bypass_cache: c_int,
+            callback: *mut cef_download_image_callback_t,
+        ),
+    >,
     pub print: cef_unused_callback_t,
     pub print_to_pdf: cef_unused_callback_t,
     pub find: cef_unused_callback_t,

@@ -310,10 +310,17 @@ impl Widget for KeyboardView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self
-            .draw_state
-            .begin_with(cx, &(), |cx, _| self.view.walk(cx))
-        {
+        if self.draw_state.begin_with(cx, &(), |cx, _| {
+            // The parent already placed this widget with its full walk —
+            // margin included — through the outer turtle in `begin`. The
+            // inner view re-uses the same walk for the content, so its
+            // margin must be stripped here or any margin on a KeyboardView
+            // is applied twice (the tweaker's body compression made this
+            // latent bug visible: margin.right 280 vacated 560).
+            let mut walk = self.view.walk(cx);
+            walk.margin = Inset::default();
+            walk
+        }) {
             self.begin(cx, walk);
         }
         if let Some(walk) = self.draw_state.get() {

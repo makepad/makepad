@@ -461,12 +461,33 @@ impl Cx {
                 .collect::<Vec<_>>()
         };
 
+        let _mp_t0 = std::time::Instant::now();
+        let _mp_n = handles.len();
         for handle in handles {
             self.load_script_resource_impl(
                 handle,
                 #[cfg(target_arch = "wasm32")]
                 &crate_manifests,
             );
+        }
+        if crate::startup_trace_enabled() {
+            let bytes: usize = self
+                .script_data
+                .resources
+                .resources
+                .borrow()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    CxScriptResourceData::Loaded(d) => Some(d.len()),
+                    _ => None,
+                })
+                .sum();
+            crate::startup_trace(&format!(
+                "load_all_script_resources ({} files, {:.2} MB, {:.2} ms)",
+                _mp_n,
+                bytes as f64 / (1024.0 * 1024.0),
+                _mp_t0.elapsed().as_secs_f64() * 1000.0
+            ));
         }
     }
 }

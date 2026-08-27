@@ -99,6 +99,9 @@ impl AssetServer {
             // The broker's `assets.query` reads this server's OWN catalog
             // file (read-only WAL snapshots) — same process, same root.
             Some(cfg.root.join("catalog.sqlite3")),
+            // Keyed (per client, per game) transcripts live under
+            // `<root>/chat/` and outlive workers and restarts.
+            &cfg.root,
             cfg.log,
             stop.clone(),
         )?;

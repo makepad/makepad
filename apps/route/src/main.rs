@@ -1979,6 +1979,7 @@ impl AppMain for App {
         // voice Metal library has no quantized matmul kernels, so q5_0/q8_0
         // models fail every GPU op. Port the kernels before re-quantizing.
         crate::makepad_widgets::script_mod(vm);
+        mp_theme::apply(vm);
         self::script_mod(vm)
     }
 

@@ -239,6 +239,82 @@ pub fn kenney_page(name: &str) -> String {
 /// Source/rights spec for one Kenney pack. Unknown slugs still use the same
 /// explicit CC-BY-4.0 Kenney grant (never CC0); only the pack name / page
 /// change. Refuse empty or illegal slugs so a caller cannot invent rights.
+/// Metres per native model unit for a catalogued pack — the `real` scale
+/// calibration ([`crate::dimensions`]). Kenney kits are authored at several
+/// deliberate tabletop scales; each row states the measured object that
+/// pins its factor, so the number can be argued with. A pack not listed
+/// here is taken at its word (1 unit = 1 m) and its manifest says so.
+///
+/// The factor does NOT rescale the GLB: it is published as the manifest's
+/// `units_per_meter` plus the `dim_*`/`scale_*` anchors, and the engine
+/// applies the preset factor it picks (characters default `real`, vehicles
+/// their authored `comic` play size — a Kenney car is purposely short so
+/// it is fun to drive).
+pub struct PackScale {
+    pub pack: &'static str,
+    pub metres_per_unit: f32,
+    pub pin: &'static str,
+}
+
+pub const PACK_SCALES: &[PackScale] = &[
+    // Authored metric — asserted, not assumed.
+    PackScale { pack: "blaster-kit", metres_per_unit: 1.0, pin: "blaster-a 0.80 long = a 0.8 m carbine" },
+    PackScale { pack: "building-kit", metres_per_unit: 1.0, pin: "door 2.10 m, wall 2.40 m as authored" },
+    PackScale { pack: "minigolf-kit", metres_per_unit: 1.0, pin: "course wall 0.15 m as authored" },
+    PackScale { pack: "modular-dungeon-kit", metres_per_unit: 1.0, pin: "gate door 4.40 m as authored" },
+    PackScale { pack: "modular-cave-kit", metres_per_unit: 1.0, pin: "gate rock 4.05 m as authored" },
+    PackScale { pack: "modular-space-kit", metres_per_unit: 1.0, pin: "gate door 4.62 m as authored" },
+    // Humanoid-pinned: the pack's own character stands 1.75 m.
+    PackScale { pack: "mini-characters", metres_per_unit: 2.5, pin: "character 0.70 tall = 1.75 m" },
+    PackScale { pack: "mini-arcade", metres_per_unit: 2.5, pin: "character-gamer 0.77 tall = 1.75 m (mini family)" },
+    PackScale { pack: "mini-dungeon", metres_per_unit: 2.5, pin: "character-human 0.76 tall = 1.75 m (mini family)" },
+    PackScale { pack: "mini-forest", metres_per_unit: 2.5, pin: "character-archer 0.82 tall (mini family)" },
+    PackScale { pack: "mini-market", metres_per_unit: 2.5, pin: "character-employee 0.72 tall (mini family)" },
+    PackScale { pack: "mini-skate", metres_per_unit: 2.5, pin: "character-skate-boy 0.77 tall (mini family)" },
+    PackScale { pack: "platformer-kit", metres_per_unit: 1.9, pin: "character-oobi 0.91 tall = 1.75 m" },
+    PackScale { pack: "graveyard-kit", metres_per_unit: 2.0, pin: "character-keeper 0.86 tall = 1.75 m" },
+    PackScale { pack: "space-kit", metres_per_unit: 2.2, pin: "astronaut 0.79 tall = 1.75 m" },
+    // Furniture / props pinned by a known real object.
+    PackScale { pack: "furniture-kit", metres_per_unit: 1.8, pin: "single bed 1.12 long = 2.0 m" },
+    PackScale { pack: "survival-kit", metres_per_unit: 2.8, pin: "bedroll 0.61 long = 1.8 m" },
+    PackScale { pack: "nature-kit", metres_per_unit: 2.5, pin: "camp bed 0.75 long = 1.9 m" },
+    PackScale { pack: "coaster-kit", metres_per_unit: 1.8, pin: "park bench 0.49 seat = 0.9 m" },
+    PackScale { pack: "holiday-kit", metres_per_unit: 2.1, pin: "cabin door module 1.00 = 2.1 m" },
+    PackScale { pack: "space-station-kit", metres_per_unit: 1.9, pin: "single bed 1.00 long = 1.9 m" },
+    PackScale { pack: "food-kit", metres_per_unit: 0.35, pin: "milk carton 0.59 tall = 0.2 m (giant-food kit)" },
+    // Architecture kits: one wall module = one storey, doors walkable.
+    PackScale { pack: "fantasy-town-kit", metres_per_unit: 2.0, pin: "wall module 1.00 = a 2 m storey" },
+    PackScale { pack: "retro-fantasy-kit", metres_per_unit: 2.0, pin: "wall module 1.00 = a 2 m storey" },
+    PackScale { pack: "retro-urban-kit", metres_per_unit: 3.0, pin: "door 0.63 tall = 1.9 m" },
+    PackScale { pack: "modular-buildings", metres_per_unit: 4.8, pin: "storey block 0.62 tall = 3 m" },
+    // Tabletop city / strategy kits.
+    PackScale { pack: "city-kit-suburban", metres_per_unit: 5.5, pin: "two-storey house 1.14 tall = 6.3 m" },
+    PackScale { pack: "city-kit-commercial", metres_per_unit: 5.5, pin: "office block 1.29 tall = 7 m" },
+    PackScale { pack: "city-kit-industrial", metres_per_unit: 5.5, pin: "hall 1.47 tall = 8 m" },
+    PackScale { pack: "city-kit-roads", metres_per_unit: 8.0, pin: "road tile 1.00 = an 8 m carriageway" },
+    // Engine-tuned (socket.rs canonical_scale, live session): a strategy
+    // board, not walk-in architecture — cottages 2.4 m at this factor.
+    PackScale { pack: "hexagon-kit", metres_per_unit: 4.0, pin: "engine-tuned board scale; cottage 0.60 = 2.4 m" },
+    PackScale { pack: "tower-defense-kit", metres_per_unit: 6.0, pin: "tree 0.76 tall = 4.6 m (weak pin)" },
+    // Vehicles: `real` by length; their DEFAULT preset stays the authored
+    // comic size (dimensions::SizeClass::Vehicle → ScalePreset::Comic).
+    PackScale { pack: "car-kit", metres_per_unit: 1.7647, pin: "sedan 2.55 long = 4.5 m" },
+    // Engine-tuned (socket.rs): the single-lane paved band is 0.69 of the
+    // module, so x8 is 5.5 m of tarmac between kerbs. Its own racecars at
+    // `real` are parade floats — drive them through the vehicle rig, or at
+    // `comic`.
+    PackScale { pack: "racing-kit", metres_per_unit: 8.0, pin: "engine-tuned track: paved band 0.69 module = 5.5 m tarmac" },
+    PackScale { pack: "toy-car-kit", metres_per_unit: 4.8, pin: "racer 0.875 long = a drivable 4.2 m car" },
+    PackScale { pack: "watercraft-kit", metres_per_unit: 1.5, pin: "rowboat 2.37 long = 3.5 m" },
+    // Deliberate toys: authored units stand.
+    PackScale { pack: "marble-kit", metres_per_unit: 1.0, pin: "a marble run is a toy by design" },
+    PackScale { pack: "brick-kit", metres_per_unit: 1.0, pin: "toy bricks by design" },
+];
+
+pub fn pack_scale(pack_name: &str) -> Option<&'static PackScale> {
+    PACK_SCALES.iter().find(|s| s.pack == pack_name)
+}
+
 pub fn kenney_spec(pack_name: &str) -> Result<PackSourceSpec, PackImportError> {
     let name = pack_name.trim();
     if name.is_empty()
@@ -2922,7 +2998,14 @@ fn build_manifest(
                 let nav = nav_for_glb
                     .get(&file.discovered.key)
                     .and_then(|&i| hashed[i].nav.as_ref());
-                mesh_asset(file, &hashed[thumb_idx], albedo, &sidecars, nav)?
+                mesh_asset(
+                    file,
+                    &hashed[thumb_idx],
+                    albedo,
+                    &sidecars,
+                    nav,
+                    pack_scale(&source.pack_name),
+                )?
             }
             MediaKind::AoMesh
             | MediaKind::AoPng
@@ -3612,6 +3695,7 @@ fn mesh_asset(
     albedo: Option<&HashedFile>,
     sidecars: &[&HashedFile],
     nav: Option<&WorldNav>,
+    scale: Option<&PackScale>,
 ) -> Result<ImportAsset, PackImportError> {
     let measure = glb.glb.as_ref().ok_or_else(|| {
         PackImportError::new(
@@ -3710,6 +3794,29 @@ fn mesh_asset(
             PackImportError::new(PackImportErrorKind::Malformed, "file byte_len sum")
         })?;
     }
+    // The asset's physical size: calibrated by the pack's measured factor
+    // (or taken at its authored word), stated once as `units_per_meter`
+    // plus the `dim_*`/`scale_*` anchors. Worlds are baked metric by their
+    // converters and carry navigation anchors instead.
+    let dimensions = if measure.kind == AssetKind::World {
+        None
+    } else {
+        let extent = [
+            measure.bounds.max.x - measure.bounds.min.x,
+            measure.bounds.max.y - measure.bounds.min.y,
+            measure.bounds.max.z - measure.bounds.min.z,
+        ];
+        let (metres_per_unit, pin) = match scale {
+            Some(s) => (s.metres_per_unit, s.pin),
+            None => (1.0, "uncalibrated: authored units taken as metres"),
+        };
+        Some(crate::dimensions::Dimensions::measure(
+            crate::dimensions::SizeClass::of_kind(measure.kind),
+            metres_per_unit,
+            extent,
+            pin,
+        ))
+    };
     Ok(ImportAsset {
         key: parse_key(&glb.discovered.key)?,
         kind: measure.kind,
@@ -3734,14 +3841,26 @@ fn mesh_asset(
             max_texture_dim,
             media_millis: 0,
         },
-        coordinate_system: PACK_COORD,
+        coordinate_system: match &dimensions {
+            Some(d) => CoordinateSystem {
+                units_per_meter: d.units_per_meter(),
+                ..PACK_COORD
+            },
+            None => PACK_COORD,
+        },
         bounds: measure.bounds,
         // Navigation facts of a converted map: where a player spawns, the
         // floor under them, the eye and step heights. Without these a walker
         // has to guess, and guesses walk on the ceiling.
-        anchors: nav
-            .map(WorldNav::anchors)
-            .unwrap_or_else(|| measure.anchors.clone()),
+        anchors: {
+            let mut anchors = nav
+                .map(WorldNav::anchors)
+                .unwrap_or_else(|| measure.anchors.clone());
+            if let Some(d) = &dimensions {
+                anchors.extend(d.anchors());
+            }
+            anchors
+        },
         capabilities: Capabilities {
             rigged: measure.rigged,
             animated: measure.animated,
@@ -6767,6 +6886,8 @@ fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -6988,7 +7109,12 @@ mod tests {
     }
 
     fn tiny_glb() -> Vec<u8> {
-        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        glb_with_positions([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    }
+
+    /// One triangle spanning chosen extents, so a pack's calibration is
+    /// measurable from its published bounds.
+    fn glb_with_positions(positions: [f32; 9]) -> Vec<u8> {
         let mut bin: Vec<u8> = Vec::new();
         for f in positions {
             bin.extend_from_slice(&f.to_le_bytes());
@@ -9063,6 +9189,83 @@ mod tests {
             ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
         assert_eq!(report.assets, 2, "a ui/sprite pack is its images");
         assert!(manifest.assets.iter().all(|a| a.kind == AssetKind::Texture));
+    }
+
+
+    #[test]
+    fn a_calibrated_kenney_pack_publishes_metric_dimensions() {
+        // space-kit is calibrated at 2.2 m per native unit (its astronaut
+        // pin), so a mesh with the astronaut's 0.795-unit height publishes
+        // the shared 1.75 m person in metres — the law every importer pins
+        // to, so a Kenney astronaut and a Doom imp mash up at one scale.
+        let pack = test_root("kscale");
+        let out = test_bundle("kscale_out");
+        fs::create_dir_all(pack.join("models")).unwrap();
+        fs::write(
+            pack.join("models/astronaut.glb"),
+            glb_with_positions([0.0, 0.0, 0.0, 0.48, 0.0, 0.0, 0.0, 0.795, 0.33]),
+        )
+        .unwrap();
+        fs::write(pack.join("models/astronaut.png"), valid_png(512, 512)).unwrap();
+        let report = compile(&pack, &out, licensed_spec());
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        let mesh = &manifest.assets[0];
+        // The coordinate system tells the truth: 2.2 metres per native unit.
+        assert!(
+            (mesh.coordinate_system.units_per_meter - 1.0 / 2.2).abs() < 1e-4,
+            "{}",
+            mesh.coordinate_system.units_per_meter
+        );
+        let find = |name: &str| {
+            mesh.anchors
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", mesh.anchors))
+        };
+        assert!(
+            (find("dim_height").transform.pos.y - 1.75).abs() < 0.01,
+            "an astronaut-sized mesh is a 1.75 m person: {}",
+            find("dim_height").transform.pos.y
+        );
+        assert!((find("scale_real").transform.scale.y - 2.2).abs() < 1e-4);
+        assert!((find("scale_comic").transform.scale.y - 1.0).abs() < 1e-6);
+        assert!((find("scale_small").transform.scale.y - 0.4 / 0.795).abs() < 1e-4);
+        assert!((find("scale_handheld").transform.scale.y - 0.25 / 0.795).abs() < 1e-4);
+    }
+
+    #[test]
+    fn an_uncatalogued_pack_is_taken_at_its_word_but_still_states_its_size() {
+        let pack = test_root("noscale");
+        let out = test_bundle("noscale_out");
+        fs::create_dir_all(pack.join("models")).unwrap();
+        // A door-sized mesh in a pack the calibration table does not know:
+        // its authored units are taken as metres, and the manifest still
+        // carries the measured dimensions and presets.
+        fs::write(
+            pack.join("models/door.glb"),
+            glb_with_positions([0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 2.1, 0.1]),
+        )
+        .unwrap();
+        fs::write(pack.join("models/door.png"), valid_png(512, 512)).unwrap();
+        let mut spec = licensed_spec();
+        spec.pack_name = Some("mystery-kit".into());
+        assert!(pack_scale("mystery-kit").is_none(), "the table must not know it");
+        let report = compile(&pack, &out, spec);
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        let mesh = &manifest.assets[0];
+        assert_eq!(mesh.coordinate_system.units_per_meter, 1.0);
+        let find = |name: &str| {
+            mesh.anchors
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", mesh.anchors))
+        };
+        assert!((find("dim_height").transform.pos.y - 2.1).abs() < 1e-4);
+        assert!((find("scale_real").transform.scale.y - 1.0).abs() < 1e-6);
+        // Small and handheld shrink by the largest extent (2.1 m).
+        assert!((find("scale_small").transform.scale.y - 0.4 / 2.1).abs() < 1e-4);
     }
 
     #[test]

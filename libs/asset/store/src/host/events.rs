@@ -28,7 +28,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Closed event-kind vocabulary. Clients refuse unknown kinds rather than
@@ -54,13 +54,54 @@ pub const KIND_GAME_PUBLISHED: &str = "game_published";
 pub const KIND_GAME_QUARANTINED: &str = "game_quarantined";
 pub const KIND_GAME_ALIAS_SET: &str = "game_alias_set";
 pub const KIND_GAME_ALIAS_CLEARED: &str = "game_alias_cleared";
+/// An in-progress LocalGen part delta. It names an alias but creates no
+/// revision; subscribers keep it only in memory. v4 vocabulary.
+pub const KIND_MODEL_PREVIEW: &str = "model_preview";
+/// Drop an in-memory preview session and restore the alias's durable head.
+/// v4 vocabulary.
+pub const KIND_MODEL_PREVIEW_CLEAR: &str = "model_preview_clear";
+
+const MAX_MODEL_PREVIEW_SESSIONS: usize = 12;
+const MAX_MODEL_PREVIEW_PARTS: usize = 32;
+const MAX_MODEL_PREVIEW_SESSION_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MODEL_PREVIEW_GLOBAL_BYTES: usize = 256 * 1024 * 1024;
 
 /// Condvar wait slice; mirrors the connection loop's idle-slice stop checks.
 const WAIT_SLICE_MS: u64 = 250;
 
 /// The newest event vocabulary a subscriber can ask for. A request without
 /// `ev` gets vocabulary 1.
-pub const EVENT_VOCABULARY: u32 = 2;
+pub const EVENT_VOCABULARY: u32 = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewPart {
+    pub name: String,
+    /// Opaque content token used only by the in-memory preview fetch route.
+    pub token: String,
+    /// Never rendered into the JSON event page. The journal/session owns the
+    /// bytes so delayed readers can fetch the exact delta they observed.
+    pub bytes: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewRename {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelPreviewEvent {
+    pub session: String,
+    /// True only for the one session announcement. Late-join snapshots are
+    /// rendered as announcements too, with the cumulative current part set.
+    pub open: bool,
+    pub program: Option<String>,
+    /// Only changed parts for ordinary events; all current parts for a
+    /// synthetic late-join announcement.
+    pub parts: Vec<ModelPreviewPart>,
+    pub removed: Vec<String>,
+    pub renamed: Vec<ModelPreviewRename>,
+}
 
 /// Render an event kind for a subscriber that asked for vocabulary
 /// `vocabulary`. Kinds introduced later are downgraded to the nearest v1
@@ -89,6 +130,7 @@ pub struct CatalogEvent {
     pub game_id: Option<String>,
     pub game_revision: Option<String>,
     pub alias: Option<String>,
+    pub model_preview: Option<ModelPreviewEvent>,
     /// Lowercase content kind (`video`, `audio`, …) when the transport knew
     /// it at emit time (from the asset's annotation); `None` otherwise.
     pub content_kind: Option<&'static str>,
@@ -105,6 +147,7 @@ pub struct EventBody {
     pub game_id: Option<String>,
     pub game_revision: Option<String>,
     pub alias: Option<String>,
+    pub model_preview: Option<ModelPreviewEvent>,
     pub content_kind: Option<&'static str>,
     pub ts_ms: u64,
 }
@@ -119,6 +162,7 @@ impl EventBody {
             game_id: None,
             game_revision: None,
             alias: None,
+            model_preview: None,
             content_kind: None,
             ts_ms,
         }
@@ -133,6 +177,7 @@ impl EventBody {
             game_id: Some(game_id),
             game_revision: None,
             alias: None,
+            model_preview: None,
             content_kind: None,
             ts_ms,
         }
@@ -157,6 +202,7 @@ impl EventBody {
         self.content_kind = kind;
         self
     }
+
 }
 
 /// A parsed resume cursor: journal epoch + highest sequence already seen.
@@ -205,6 +251,19 @@ struct Journal {
     buf: VecDeque<CatalogEvent>,
     /// Sequence the NEXT event will get; first event of a journal gets 1.
     next_seq: u64,
+    previews: Vec<ModelPreviewSession>,
+}
+
+#[derive(Clone)]
+struct ModelPreviewSession {
+    namespace: String,
+    alias: String,
+    session: String,
+    program: String,
+    parts: Vec<ModelPreviewPart>,
+    announced: bool,
+    last_seq: u64,
+    ts_ms: u64,
 }
 
 impl Journal {
@@ -230,7 +289,11 @@ impl EventHub {
             epoch,
             cap: cap.max(1),
             max_waiters: max_waiters.max(1),
-            journal: Mutex::new(Journal { buf: VecDeque::new(), next_seq: 1 }),
+            journal: Mutex::new(Journal {
+                buf: VecDeque::new(),
+                next_seq: 1,
+                previews: Vec::new(),
+            }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
             waiters: AtomicUsize::new(0),
@@ -243,25 +306,337 @@ impl EventHub {
     pub fn publish(&self, body: EventBody) {
         {
             let mut j = self.journal.lock().unwrap();
-            let seq = j.next_seq;
-            j.next_seq += 1;
-            j.buf.push_back(CatalogEvent {
-                seq,
-                kind: body.kind,
-                namespace: body.namespace,
-                asset_id: body.asset_id,
-                revision: body.revision,
-                game_id: body.game_id,
-                game_revision: body.game_revision,
-                alias: body.alias,
-                content_kind: body.content_kind,
-                ts_ms: body.ts_ms,
-            });
-            while j.buf.len() > self.cap {
-                j.buf.pop_front();
-            }
+            self.append_locked(&mut j, body);
         }
         self.wake.notify_all();
+    }
+
+    fn append_locked(&self, j: &mut Journal, body: EventBody) -> u64 {
+        let seq = j.next_seq;
+        j.next_seq += 1;
+        j.buf.push_back(CatalogEvent {
+            seq,
+            kind: body.kind,
+            namespace: body.namespace,
+            asset_id: body.asset_id,
+            revision: body.revision,
+            game_id: body.game_id,
+            game_revision: body.game_revision,
+            alias: body.alias,
+            model_preview: body.model_preview,
+            content_kind: body.content_kind,
+            ts_ms: body.ts_ms,
+        });
+        while j.buf.len() > self.cap {
+            j.buf.pop_front();
+        }
+        seq
+    }
+
+    /// Reserve one live model session. Its first mesh upload carries the one
+    /// announcement (program header + initial part set); later uploads are
+    /// deltas. The server retains no catalog/CAS record—only this bounded
+    /// process-memory state.
+    pub fn open_model_preview(
+        &self,
+        namespace: String,
+        alias: String,
+        session: String,
+        program: String,
+        ts_ms: u64,
+    ) -> Result<(), &'static str> {
+        {
+            let mut j = self.journal.lock().unwrap();
+            if j.previews.iter().any(|preview| preview.session == session) {
+                return Err("model preview session already exists");
+            }
+            if j.previews.iter().any(|preview| preview.alias == alias) {
+                return Err("model preview alias already has a live session");
+            }
+            if j.previews.len() >= MAX_MODEL_PREVIEW_SESSIONS {
+                return Err("model preview session limit");
+            }
+            let last_seq = j.next_seq - 1;
+            j.previews.push(ModelPreviewSession {
+                namespace,
+                alias,
+                session,
+                program,
+                parts: Vec::new(),
+                announced: false,
+                last_seq,
+                ts_ms,
+            });
+        }
+        Ok(())
+    }
+
+    /// Namespace of a live session, used to authorize a byte upload before
+    /// consuming its body.
+    pub fn model_preview_namespace(&self, session: &str) -> Option<String> {
+        self.journal
+            .lock()
+            .unwrap()
+            .previews
+            .iter()
+            .find(|preview| preview.session == session)
+            .map(|preview| preview.namespace.clone())
+    }
+
+    /// Apply one changed part and publish a delta containing only that part.
+    pub fn update_model_preview_part(
+        &self,
+        session: &str,
+        name: String,
+        token: String,
+        bytes: Arc<[u8]>,
+        ts_ms: u64,
+    ) -> Result<(), &'static str> {
+        {
+            let mut j = self.journal.lock().unwrap();
+            let Some(index) = j.previews.iter().position(|preview| preview.session == session)
+            else {
+                return Err("model preview session not found");
+            };
+            let replaced_bytes = j.previews[index]
+                .parts
+                .iter()
+                .find(|part| part.name == name)
+                .map_or(0, |part| part.bytes.len());
+            let session_bytes = j.previews[index]
+                .parts
+                .iter()
+                .map(|part| part.bytes.len())
+                .sum::<usize>()
+                .saturating_sub(replaced_bytes)
+                .saturating_add(bytes.len());
+            if session_bytes > MAX_MODEL_PREVIEW_SESSION_BYTES {
+                return Err("model preview session byte limit");
+            }
+            let global_bytes = j
+                .previews
+                .iter()
+                .flat_map(|preview| preview.parts.iter())
+                .map(|part| part.bytes.len())
+                .sum::<usize>()
+                .saturating_sub(replaced_bytes)
+                .saturating_add(bytes.len());
+            if global_bytes > MAX_MODEL_PREVIEW_GLOBAL_BYTES {
+                return Err("model preview global byte limit");
+            }
+            let part = ModelPreviewPart { name: name.clone(), token, bytes };
+            let preview = &mut j.previews[index];
+            if let Some(existing) = preview.parts.iter_mut().find(|part| part.name == name) {
+                *existing = part.clone();
+            } else {
+                if preview.parts.len() >= MAX_MODEL_PREVIEW_PARTS {
+                    return Err("model preview part limit");
+                }
+                preview.parts.push(part.clone());
+            }
+            let namespace = preview.namespace.clone();
+            let alias = preview.alias.clone();
+            let session = preview.session.clone();
+            let open = !preview.announced;
+            let event_part = |part: &ModelPreviewPart| ModelPreviewPart {
+                name: part.name.clone(),
+                token: part.token.clone(),
+                bytes: Arc::from([]),
+            };
+            let event = ModelPreviewEvent {
+                session,
+                open,
+                program: open.then(|| preview.program.clone()),
+                parts: if open {
+                    preview.parts.iter().map(event_part).collect()
+                } else {
+                    vec![event_part(&part)]
+                },
+                removed: Vec::new(),
+                renamed: Vec::new(),
+            };
+            let seq = self.append_locked(
+                &mut j,
+                EventBody {
+                    kind: KIND_MODEL_PREVIEW,
+                    namespace,
+                    asset_id: None,
+                    revision: None,
+                    game_id: None,
+                    game_revision: None,
+                    alias: Some(alias),
+                    model_preview: Some(event),
+                    content_kind: Some("model-program"),
+                    ts_ms,
+                },
+            );
+            j.previews[index].announced = true;
+            j.previews[index].last_seq = seq;
+            j.previews[index].ts_ms = ts_ms;
+        }
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    /// Apply metadata-only edits. Mesh changes travel through
+    /// [`Self::update_model_preview_part`], keeping each byte body off JSON.
+    pub fn update_model_preview_metadata(
+        &self,
+        session: &str,
+        program: Option<String>,
+        removed: Vec<String>,
+        renamed: Vec<ModelPreviewRename>,
+        ts_ms: u64,
+    ) -> Result<(), &'static str> {
+        {
+            let mut j = self.journal.lock().unwrap();
+            let Some(index) = j.previews.iter().position(|preview| preview.session == session)
+            else {
+                return Err("model preview session not found");
+            };
+            let preview = &mut j.previews[index];
+            for rename in &renamed {
+                if rename.from == rename.to {
+                    continue;
+                }
+                if preview.parts.iter().any(|part| part.name == rename.to) {
+                    return Err("model preview rename target exists");
+                }
+                let Some(part) = preview.parts.iter_mut().find(|part| part.name == rename.from)
+                else {
+                    return Err("model preview rename source not found");
+                };
+                part.name = rename.to.clone();
+            }
+            for name in &removed {
+                preview.parts.retain(|part| part.name != *name);
+            }
+            if let Some(program) = &program {
+                preview.program = program.clone();
+            }
+            let namespace = preview.namespace.clone();
+            let alias = preview.alias.clone();
+            let session = preview.session.clone();
+            let open = !preview.announced;
+            let event = ModelPreviewEvent {
+                session,
+                open,
+                program: if open { Some(preview.program.clone()) } else { program },
+                parts: if open { preview.parts.clone() } else { Vec::new() },
+                removed: if open { Vec::new() } else { removed },
+                renamed: if open { Vec::new() } else { renamed },
+            };
+            let seq = self.append_locked(
+                &mut j,
+                EventBody {
+                    kind: KIND_MODEL_PREVIEW,
+                    namespace,
+                    asset_id: None,
+                    revision: None,
+                    game_id: None,
+                    game_revision: None,
+                    alias: Some(alias),
+                    model_preview: Some(event),
+                    content_kind: Some("model-program"),
+                    ts_ms,
+                },
+            );
+            j.previews[index].announced = true;
+            j.previews[index].last_seq = seq;
+            j.previews[index].ts_ms = ts_ms;
+        }
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    /// End/cancel a live session. Its cumulative part bytes become
+    /// unreachable immediately; the journal keeps only still-retained
+    /// deltas long enough for already-resumed readers.
+    pub fn clear_model_preview(&self, session: &str, ts_ms: u64) -> Result<(), &'static str> {
+        {
+            let mut j = self.journal.lock().unwrap();
+            let Some(index) = j.previews.iter().position(|preview| preview.session == session)
+            else {
+                return Err("model preview session not found");
+            };
+            let preview = j.previews.remove(index);
+            if !preview.announced {
+                return Ok(());
+            }
+            self.append_locked(
+                &mut j,
+                EventBody {
+                    kind: KIND_MODEL_PREVIEW_CLEAR,
+                    namespace: preview.namespace,
+                    asset_id: None,
+                    revision: None,
+                    game_id: None,
+                    game_revision: None,
+                    alias: Some(preview.alias),
+                    model_preview: Some(ModelPreviewEvent {
+                        session: preview.session,
+                        open: false,
+                        program: None,
+                        parts: Vec::new(),
+                        removed: Vec::new(),
+                        renamed: Vec::new(),
+                    }),
+                    content_kind: Some("model-program"),
+                    ts_ms,
+                },
+            );
+        }
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    /// Cumulative announcements for a cursor-less late joiner.
+    pub fn active_model_previews(&self, content_kind: Option<&str>, limit: usize) -> Vec<CatalogEvent> {
+        if matches!(content_kind, Some(kind) if kind != "model-program") {
+            return Vec::new();
+        }
+        let j = self.journal.lock().unwrap();
+        let mut events: Vec<_> = j
+            .previews
+            .iter()
+            .filter(|preview| preview.announced)
+            .map(|preview| CatalogEvent {
+                seq: preview.last_seq,
+                kind: KIND_MODEL_PREVIEW,
+                namespace: preview.namespace.clone(),
+                asset_id: None,
+                revision: None,
+                game_id: None,
+                game_revision: None,
+                alias: Some(preview.alias.clone()),
+                model_preview: Some(ModelPreviewEvent {
+                    session: preview.session.clone(),
+                    open: true,
+                    program: Some(preview.program.clone()),
+                    parts: preview.parts.clone(),
+                    removed: Vec::new(),
+                    renamed: Vec::new(),
+                }),
+                content_kind: Some("model-program"),
+                ts_ms: preview.ts_ms,
+            })
+            .collect();
+        events.sort_by_key(|event| event.seq);
+        events.truncate(limit);
+        events
+    }
+
+    /// Fetch one current in-memory mesh token. Historical deltas carry only
+    /// metadata; superseded/removed/cancelled bytes disappear immediately.
+    /// No filesystem/CAS lookup exists.
+    pub fn model_preview_mesh(&self, token: &str) -> Option<Arc<[u8]>> {
+        let j = self.journal.lock().unwrap();
+        for preview in &j.previews {
+            if let Some(part) = preview.parts.iter().find(|part| part.token == token) {
+                return Some(part.bytes.clone());
+            }
+        }
+        None
     }
 
     /// The resume cursor a fresh (cursor-less) subscriber starts from: the
@@ -475,6 +850,75 @@ mod tests {
         assert_eq!(poll.cursor.seq, 2);
         let rest = hub.poll_after(poll.cursor, None, 100);
         assert_eq!(rest.events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn model_preview_sessions_announce_accumulate_sync_and_cancel_in_memory() {
+        let hub = EventHub::new([6; 8], 16, 4);
+        hub.open_model_preview(
+            "gen".into(),
+            "gen/csg/mug".into(),
+            "session-a".into(),
+            "program-v1".into(),
+            7,
+        )
+        .unwrap();
+        hub.update_model_preview_part(
+            "session-a",
+            "body".into(),
+            "pmesh_body".into(),
+            Arc::from(&b"body-glb"[..]),
+            8,
+        )
+        .unwrap();
+        hub.update_model_preview_part(
+            "session-a",
+            "handle".into(),
+            "pmesh_handle".into(),
+            Arc::from(&b"handle-glb"[..]),
+            9,
+        )
+        .unwrap();
+        hub.update_model_preview_metadata(
+            "session-a",
+            Some("program-v2".into()),
+            vec!["handle".into()],
+            vec![ModelPreviewRename { from: "body".into(), to: "shell".into() }],
+            10,
+        )
+        .unwrap();
+
+        let poll = hub.poll_after(EventCursor { epoch: [6; 8], seq: 0 }, None, 10);
+        assert_eq!(poll.events.len(), 3);
+        assert!(poll.events[0].model_preview.as_ref().unwrap().open);
+        assert_eq!(poll.events[0].model_preview.as_ref().unwrap().parts[0].name, "body");
+        assert_eq!(poll.events[0].model_preview.as_ref().unwrap().program.as_deref(), Some("program-v1"));
+        assert_eq!(poll.events[1].model_preview.as_ref().unwrap().parts.len(), 1);
+        assert_eq!(poll.events[2].model_preview.as_ref().unwrap().removed, ["handle"]);
+        for event in &poll.events {
+            assert_eq!(event.alias.as_deref(), Some("gen/csg/mug"));
+            assert_eq!(event.asset_id, None);
+            assert_eq!(event.revision, None);
+            assert_eq!(event.content_kind, Some("model-program"));
+        }
+        assert_eq!(hub.model_preview_mesh("pmesh_body").as_deref(), Some(&b"body-glb"[..]));
+
+        // A cursor-less late joiner gets one cumulative announcement, not
+        // the historical deltas: renamed shell present, removed handle gone.
+        let sync = hub.active_model_previews(None, 10);
+        assert_eq!(sync.len(), 1);
+        let preview = sync[0].model_preview.as_ref().unwrap();
+        assert!(preview.open);
+        assert_eq!(preview.program.as_deref(), Some("program-v2"));
+        assert_eq!(preview.parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>(), ["shell"]);
+
+        hub.clear_model_preview("session-a", 11).unwrap();
+        assert!(hub.active_model_previews(None, 10).is_empty());
+        assert!(hub.model_preview_namespace("session-a").is_none());
+        assert!(hub.model_preview_mesh("pmesh_body").is_none());
+        let clear = hub.poll_after(EventCursor { epoch: [6; 8], seq: 3 }, None, 10);
+        assert_eq!(clear.events.len(), 1);
+        assert_eq!(clear.events[0].kind, KIND_MODEL_PREVIEW_CLEAR);
     }
 
     #[test]

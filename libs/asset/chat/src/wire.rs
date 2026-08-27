@@ -120,14 +120,56 @@ pub enum ProviderKind {
     OpenAi,
     /// xAI Grok Responses API (`grok-4.5` by default).
     Grok,
+    /// The `claude` CLI installed and logged in on the broker host, run
+    /// headless ([`crate::claude`]). No key passes through us: the host
+    /// has the CLI or the provider is unavailable.
+    ClaudeCli,
+    /// The `codex` CLI on the broker host ([`crate::codex_cli`]).
+    CodexCli,
+    /// The `grok` CLI on the broker host ([`crate::grok_cli`]).
+    GrokCli,
+}
+
+/// Where the model actually runs. `Local` = our own asset-ai fleet on the
+/// LAN; `Cloud` = a frontier vendor, reached either by API key (OpenAi,
+/// Grok) or through a logged-in CLI on the broker host. Frontends that
+/// promise "local AI only" filter on this, and the wire carries it per
+/// provider row so a client never has to know which kinds are which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locality {
+    Local,
+    Cloud,
+}
+
+impl Locality {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Locality::Local => "local",
+            Locality::Cloud => "cloud",
+        }
+    }
 }
 
 impl ProviderKind {
+    /// Every kind the broker can be asked for, in the order the providers
+    /// route lists them.
+    pub const ALL: [ProviderKind; 6] = [
+        ProviderKind::FleetQwen,
+        ProviderKind::OpenAi,
+        ProviderKind::Grok,
+        ProviderKind::ClaudeCli,
+        ProviderKind::CodexCli,
+        ProviderKind::GrokCli,
+    ];
+
     pub fn slug(&self) -> &'static str {
         match self {
             ProviderKind::FleetQwen => "fleet-qwen",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Grok => "grok",
+            ProviderKind::ClaudeCli => "claude-cli",
+            ProviderKind::CodexCli => "codex-cli",
+            ProviderKind::GrokCli => "grok-cli",
         }
     }
 
@@ -136,12 +178,27 @@ impl ProviderKind {
             "fleet-qwen" => Some(ProviderKind::FleetQwen),
             "openai" => Some(ProviderKind::OpenAi),
             "grok" => Some(ProviderKind::Grok),
+            "claude-cli" => Some(ProviderKind::ClaudeCli),
+            "codex-cli" => Some(ProviderKind::CodexCli),
+            "grok-cli" => Some(ProviderKind::GrokCli),
             _ => None,
         }
     }
 
-    /// Native function calling (OpenAI / Grok). Fleet Qwen keeps the
-    /// textual `<<tool>>` marker contract.
+    pub fn locality(self) -> Locality {
+        match self {
+            ProviderKind::FleetQwen => Locality::Local,
+            _ => Locality::Cloud,
+        }
+    }
+
+    /// A vendor CLI on the broker host (no key anywhere in our stack).
+    pub fn is_cli(self) -> bool {
+        matches!(self, ProviderKind::ClaudeCli | ProviderKind::CodexCli | ProviderKind::GrokCli)
+    }
+
+    /// Native function calling (OpenAI / Grok APIs). Fleet Qwen and the
+    /// CLIs keep the textual `<<tool>>` marker contract.
     pub fn uses_native_tools(self) -> bool {
         matches!(self, ProviderKind::OpenAi | ProviderKind::Grok)
     }

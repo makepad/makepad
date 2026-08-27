@@ -256,7 +256,14 @@ impl SurfaceBinder {
             let rgb = scribble_rgb(idx);
             set_view_instance(cx, &slot.name_plate, "plate_rgb", &rgb);
             set_view_instance(cx, &slot.name_plate, "plate_filled", &[filled]);
-            let text_rgb = if filled > 0.5 { [0.04, 0.05, 0.07] } else { rgb };
+            // A filled plate carries the console's own scribble colour, so
+            // its text is the theme's deepest background — the one colour
+            // guaranteed to read on every scribble hue.
+            let text_rgb = if filled > 0.5 {
+                crate::theme::Palette::shared().rgb3("bg_dark")
+            } else {
+                rgb
+            };
             set_label_color(cx, &slot.name_lbl, text_rgb);
         }
 

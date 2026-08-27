@@ -48,7 +48,8 @@ use std::collections::BTreeMap;
 /// created before schema v2 (tests/migration.rs proves the parity).
 const KIND_DDL: &str = "kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game','vjeffect'))";
+'audio','video','skybox','world','prefab','billboard','game','vjeffect',\
+'data','model-program'))";
 
 /// The canonical-alias column's definition. Must stay identical in the CREATE
 /// below and in `canon_alias_migration_sql()`, which retrofits the column onto
@@ -63,7 +64,8 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect',\
+'data','model-program')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -182,6 +184,8 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -202,6 +206,8 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "billboard" => AssetKind::Billboard,
         "game" => AssetKind::Game,
         "vjeffect" => AssetKind::VjEffect,
+        "data" => AssetKind::Data,
+        "model-program" => AssetKind::ModelProgram,
         _ => return None,
     })
 }
@@ -233,16 +239,19 @@ CREATE INDEX IF NOT EXISTS search_annotations_by_canon
 ";
 
 /// Rebuild `search_annotations` so the kind CHECK matches this build's
-/// `KIND_DDL` (v5 -> v6 added `billboard`, v6 -> v7 added `game`). SQLite
-/// cannot ALTER a CHECK; copy + rename is the retrofit, and re-running it
-/// is harmless, so every kind-widening step reuses this one statement.
+/// `KIND_DDL` (v5 -> v6 added `billboard`, v6 -> v7 added `game`,
+/// v10 -> v11 added `vjeffect`, v11 -> v12 added `data`, v12 -> v13 added
+/// `model-program`). SQLite cannot
+/// ALTER a CHECK; copy + rename is the retrofit, and re-running it is
+/// harmless, so every kind-widening step reuses this one statement.
 pub(crate) const KIND_CHECK_REBUILD_SQL: &str = "
 CREATE TABLE search_annotations_rebuild(
     asset_id BLOB PRIMARY KEY,
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
+'audio','video','skybox','world','prefab','billboard','game','vjeffect',\
+'data','model-program')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -1475,6 +1484,9 @@ mod tests {
             AssetKind::Prefab,
             AssetKind::Billboard,
             AssetKind::Game,
+            AssetKind::VjEffect,
+            AssetKind::Data,
+            AssetKind::ModelProgram,
         ];
         for kind in all {
             assert_eq!(kind_parse(kind_name(kind)), Some(kind));

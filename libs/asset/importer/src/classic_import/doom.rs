@@ -181,7 +181,18 @@ pub(crate) fn convert_wad(
             if lump.data.is_empty() || lump.name.starts_with("S_") {
                 continue;
             }
-            if let Ok(png) = doom_patch_to_png(&lump.data, palette) {
+            if let Ok(mut png) = doom_patch_to_png(&lump.data, palette) {
+                // A held weapon's frames are positioned by the patch's own
+                // origin (`R_DrawPSprite` subtracts it from the hand's
+                // screen position). Keep it on the frame, in the `grAb`
+                // chunk every Doom-family tool reads, so the pack's
+                // view-weapon lines can be written when the frames are
+                // collapsed into one sheet.
+                if is_weapon_sprite(&lump.name) {
+                    if let Some((left, top)) = doom_patch_offsets(&lump.data) {
+                        png = png_with_grab(png, left, top);
+                    }
+                }
                 let key = format!("billboards/{wad_slug}/{}", sanitize_slug(&lump.name));
                 let rel_path = format!("{key}.png");
                 let dest = staged.join(&rel_path);
@@ -384,7 +395,9 @@ pub(crate) fn dmx_to_wav(sound: &DmxSound) -> Vec<u8> {
 
 pub(crate) fn is_weapon_sprite(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    n.starts_with("PISG")
+    n.starts_with("PUNG")
+        || n.starts_with("SHT2")
+        || n.starts_with("PISG")
         || n.starts_with("PISF")
         || n.starts_with("SHTG")
         || n.starts_with("SHTF")
@@ -705,7 +718,22 @@ pub(crate) fn fill_colors(colors: &mut Vec<[f32; 3]>, n: usize, rgb: [f32; 3]) {
 }
 
 /// Metres per Doom map unit in every converted Doom GLB.
-pub(crate) const DOOM_UNIT: f32 = 1.0 / 64.0;
+///
+/// Pinned on the player: Doom's marine is 56 map units tall
+/// (`mobjinfo[MT_PLAYER].height`) and stands [`PERSON_HEIGHT`] metres, so a
+/// unit is 1/32 m. The same number sizes the sprites — `R_ProjectSprite`
+/// draws one patch texel per map unit — and the actor table
+/// (`actor_def.rs`, imp radius 20 u = 0.625 m) was always written at it.
+/// It was 1/64 until 2026-08-26, which published a 0.875 m marine, 0.64 m
+/// eyes and a runtime `world_scale` patch to halve every creature to fit.
+///
+/// The classic 4:3 CRT stretched every rendered pixel 1.2× vertically —
+/// walls and sprites alike — so an original-monitor Doom looks 20 % taller
+/// than these metres. That is a display artefact, not a map fact; the
+/// units are isotropic, as they are inside the engine.
+pub(crate) const DOOM_UNIT: f32 = 1.0 / 32.0;
+/// A standing person in the metres every importer shares.
+pub(crate) const PERSON_HEIGHT: f32 = crate::dimensions::PERSON_HEIGHT;
 
 /// Doom's map plane is X east, Y north, with sector heights up — a
 /// RIGHT-handed frame (east × north = up). The GLB the renderer consumes is
@@ -942,6 +970,136 @@ pub(crate) fn doom_thing_spawns_on_hmp(typ: u16, flags: u16) -> bool {
     flags & DOOM_SKILL_HMP != 0 && flags & DOOM_MULTIPLAYER_ONLY == 0
 }
 
+/// Searchable human names for a Doom/Freedoom sprite prefix — what a person
+/// (or a model) calls the thing, never the lump mnemonic. These become
+/// search labels on the published actor sheet: without them the catalog
+/// knows the imp only as TROO and a chat search for "imp" finds nothing.
+pub(crate) fn doom_prefix_names(prefix: &str) -> &'static [&'static str] {
+    match prefix {
+        "poss" => &["zombieman", "zombie"],
+        "spos" => &["shotgun-guy", "sergeant", "zombie"],
+        "cpos" => &["chaingunner", "zombie"],
+        "sswv" => &["soldier"],
+        "troo" => &["imp"],
+        "sarg" => &["demon", "pinky"],
+        "skul" => &["lost-soul", "skull"],
+        "head" => &["cacodemon"],
+        "boss" => &["baron-of-hell", "baron"],
+        "bos2" => &["hell-knight"],
+        "cybr" => &["cyberdemon"],
+        "spid" => &["spider-mastermind"],
+        "bspi" => &["arachnotron"],
+        "pain" => &["pain-elemental"],
+        "fatt" => &["mancubus"],
+        "skel" => &["revenant"],
+        "vile" => &["arch-vile", "archvile"],
+        "keen" => &["keen"],
+        "play" => &["marine", "player"],
+        "bar1" => &["barrel", "explosive-barrel"],
+        _ => &[],
+    }
+}
+
+/// The behaviour a sprite prefix carries onto its billboard asset: the
+/// first THING class drawn by that prefix, with every resource stem mapped
+/// to the key this WAD publishes it under (`sfx/{wad}/dsposit1`,
+/// `billboards/{wad}/bexp`). This is the one place the engine's knowledge
+/// of what an Imp IS gets written down — on the Imp's own asset.
+pub(crate) fn doom_prefix_actor(
+    wad_slug: &str,
+    prefix: &str,
+) -> Option<makepad_asset_data::actor_def::ActorDef> {
+    use makepad_asset_data::actor_def::{actor_def, ActorDef};
+    let class = (1u16..=3010)
+        .find(|t| crate::world_place::doom_thing_actor(*t).is_some_and(|(_, p)| p == prefix))?;
+    let def = actor_def("doom", &class.to_string())?;
+    let text = def.to_manifest(&doom_resource_key(wad_slug));
+    let lines: Vec<(&str, &str)> = text.lines().filter_map(|l| l.split_once(' ')).collect();
+    ActorDef::from_manifest(&lines)
+}
+
+/// The gun a weapon view-sprite prefix is the view of, keys mapped as above.
+pub(crate) fn doom_prefix_weapon(
+    wad_slug: &str,
+    prefix: &str,
+) -> Option<makepad_asset_data::actor_def::WeaponDef> {
+    use makepad_asset_data::actor_def::{weapon_def, WeaponDef};
+    let id = DOOM_WEAPON_IDS
+        .iter()
+        .copied()
+        .find(|id| weapon_def("doom", id).is_some_and(|w| w.view_sprite == prefix))?;
+    let text = weapon_def("doom", id)?.to_manifest(&doom_resource_key(wad_slug));
+    WeaponDef::from_manifest(text.trim_start_matches("weapon ").trim())
+}
+
+const DOOM_WEAPON_IDS: &[&str] = &[
+    "fist", "chainsaw", "pistol", "shotgun", "supershotgun", "chaingun", "rocket", "plasma", "bfg",
+];
+
+/// Stem → the key this WAD's converter stages that resource under.
+fn doom_resource_key(
+    wad_slug: &str,
+) -> impl Fn(&str, makepad_asset_data::actor_def::ResourceKind) -> String {
+    use makepad_asset_data::actor_def::ResourceKind;
+    let wad = wad_slug.to_string();
+    move |stem: &str, kind: ResourceKind| match kind {
+        ResourceKind::Sound => format!("sfx/{wad}/{}", sanitize_slug(stem)),
+        ResourceKind::Sprite => format!("billboards/{wad}/{}", sanitize_slug(stem)),
+    }
+}
+
+/// The level-side facts of the family, written onto every map's placement
+/// sidecar: the player's height, loadout, where each weapon's definition
+/// lives, the ammo pools and the level/player event sounds.
+pub(crate) fn doom_family(wad_slug: &str) -> crate::world_place::Family {
+    use makepad_asset_data::actor_def::{
+        ammo_pools, event_sound, person_height, starting_weapons, weapon_def, ResourceKind,
+    };
+    let key = doom_resource_key(wad_slug);
+    let mut family = crate::world_place::Family {
+        person_height: person_height("doom"),
+        person_health: 100.0,
+        person_health_max: 200.0,
+        loadout: starting_weapons("doom").iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
+    for id in DOOM_WEAPON_IDS {
+        if let Some(w) = weapon_def("doom", id) {
+            family
+                .weapons
+                .push((id.to_string(), key(w.view_sprite, ResourceKind::Sprite)));
+        }
+    }
+    for pool in ammo_pools("doom") {
+        family
+            .pools
+            .push((pool.id.to_string(), pool.title.to_string(), pool.max, pool.start));
+    }
+    for event in [
+        "gib",
+        "player_pain",
+        "player_death",
+        "player_land",
+        "pickup_item",
+        "pickup_weapon",
+        "pickup_power",
+        "refused",
+        "door_open",
+        "door_close",
+        "platform_start",
+        "platform_stop",
+        "switch",
+        "teleport",
+        "explosion",
+    ] {
+        let stem = event_sound("doom", event);
+        if !stem.is_empty() {
+            family.events.push((event.to_string(), key(stem, ResourceKind::Sound)));
+        }
+    }
+    family
+}
+
 pub(crate) fn doom_map_place(
     lumps: &[WadLump],
     map: &str,
@@ -998,11 +1156,13 @@ pub(crate) fn doom_map_place(
         world: world_key.into(),
         spawn,
         places,
+        family: doom_family(wad_slug),
     }
 }
 
-/// Metres per Quake map unit in every converted Quake GLB.
-pub(crate) const QUAKE_UNIT: f32 = 1.0 / 32.0;
+/// Metres per Quake map unit in every converted Quake GLB: the 56-unit
+/// player (`VEC_HULL_MAX.z - VEC_HULL_MIN.z`) stands [`PERSON_HEIGHT`].
+pub(crate) const QUAKE_UNIT: f32 = PERSON_HEIGHT / 56.0;
 /// Quake `DEFAULT_VIEWHEIGHT` above the entity origin, in map units.
 pub(crate) const QUAKE_VIEW_OFFSET: f32 = 22.0;
 /// The player bbox reaches 24 units below its origin, so a spawn entity sits
@@ -1244,6 +1404,7 @@ pub(crate) fn quake_bsp_place(bytes: &[u8], source: &str, world_key: &str) -> cr
         world: world_key.into(),
         spawn,
         places,
+        family: Default::default(),
     }
 }
 
@@ -1391,7 +1552,7 @@ pub(crate) fn doom_map_to_mesh(
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    let scale = 1.0 / 64.0; // Doom units → rough meters
+    let scale = DOOM_UNIT;
 
     // Floors / ceilings. Vanilla SSECTORs are not closed polygons — the
     // node builder only stores linedef segs, so a leaf can be one seg plus
@@ -1992,9 +2153,11 @@ pub(crate) fn pack_atlas(images: &BTreeMap<String, RgbaImage>) -> (Vec<u8>, BTre
     (png, uv_map)
 }
 
-/// Snap world positions to 1/16 Doom unit so floors and walls share edges.
+/// Snap world positions to 1/16 Doom unit (1/512 m) so floors and walls
+/// share edges. The quantum is DERIVED from the unit so the whole snapping
+/// and welding stack scales with the world it serves.
 pub(crate) fn snap_pos(p: [f32; 3]) -> [f32; 3] {
-    const Q: f32 = 1.0 / 1024.0;
+    const Q: f32 = DOOM_UNIT / 16.0;
     [
         (p[0] / Q).round() * Q,
         (p[1] / Q).round() * Q,
@@ -5254,5 +5417,445 @@ mod tests {
         let sound = decode_dmx_sound(&pistol.data).expect("pistol");
         assert_eq!(sound.sample_rate, 11025);
         assert_eq!(sound.samples.len(), pistol.data.len() - DMX_HEADER - DMX_PAD * 2);
+    }
+
+    #[test]
+    fn imported_weapon_manifests_pin_the_doom_combat_table() {
+        use makepad_asset_data::actor_def::{WeaponDelivery, WeaponTrigger};
+
+        let pistol = doom_prefix_weapon("doom1", "pisg").unwrap();
+        assert_eq!((pistol.trigger, pistol.delivery), (WeaponTrigger::Semi, WeaponDelivery::Hitscan));
+        assert_eq!((pistol.damage_min, pistol.damage_max, pistol.rate), (5.0, 15.0, 1.9));
+
+        let shotgun = doom_prefix_weapon("doom1", "shtg").unwrap();
+        assert_eq!((shotgun.pellets, shotgun.damage_min, shotgun.damage_max), (7, 5.0, 15.0));
+        assert_eq!((shotgun.rate, shotgun.spread), (1.05, 5.6));
+
+        let super_shotgun = doom_prefix_weapon("doom2", "sht2").unwrap();
+        assert_eq!((super_shotgun.pellets, super_shotgun.rate, super_shotgun.spread), (20, 0.85, 11.0));
+
+        let chaingun = doom_prefix_weapon("doom1", "chgg").unwrap();
+        assert_eq!((chaingun.trigger, chaingun.rate), (WeaponTrigger::Auto, 8.7));
+
+        let rocket = doom_prefix_weapon("doom1", "misg").unwrap();
+        assert_eq!(rocket.delivery, WeaponDelivery::Projectile);
+        assert_eq!((rocket.damage_min, rocket.damage_max, rocket.projectile_speed), (20.0, 160.0, 20.0));
+        assert_eq!((rocket.splash_radius, rocket.splash_damage), (4.0, 128.0));
+        assert_eq!(rocket.projectile_sprite, "billboards/doom1/misl");
+        assert_eq!(rocket.impact_sprite, "billboards/doom1/misl-burst");
+
+        let plasma = doom_prefix_weapon("doom1", "plsg").unwrap();
+        assert_eq!((plasma.trigger, plasma.rate, plasma.projectile_speed), (WeaponTrigger::Auto, 11.6, 25.0));
+        let bfg = doom_prefix_weapon("doom1", "bfgg").unwrap();
+        assert_eq!((bfg.damage_min, bfg.damage_max, bfg.splash_radius, bfg.splash_damage),
+            (100.0, 800.0, 6.0, 200.0));
+    }
+
+    #[test]
+    fn imported_projectile_monsters_publish_their_fireball_specs() {
+        use makepad_asset_data::actor_def::{AttackKind, ProjectileDef};
+
+        for (wad, prefix, sprite) in [
+            ("doom1", "troo", "bal1"),
+            ("doom1", "head", "bal2"),
+            ("doom1", "boss", "bal7"),
+            ("doom2", "bos2", "bal7"),
+        ] {
+            let def = doom_prefix_actor(wad, prefix).expect("actor definition");
+            assert_eq!(def.attack.map(|a| a.kind), Some(AttackKind::Projectile), "{prefix}");
+            assert_eq!(
+                def.projectile,
+                Some(ProjectileDef {
+                    sprite: match sprite {
+                        "bal1" => "billboards/doom1/bal1",
+                        "bal2" => "billboards/doom1/bal2",
+                        _ if wad == "doom1" => "billboards/doom1/bal7",
+                        _ => "billboards/doom2/bal7",
+                    },
+                    launch: if wad == "doom1" {
+                        "sfx/doom1/dsfirsht"
+                    } else {
+                        "sfx/doom2/dsfirsht"
+                    },
+                    fly: "",
+                    hit: if wad == "doom1" {
+                        "sfx/doom1/dsfirxpl"
+                    } else {
+                        "sfx/doom2/dsfirxpl"
+                    },
+                }),
+                "{prefix}"
+            );
+        }
+
+        let lost_soul = doom_prefix_actor("doom1", "skul").expect("lost soul");
+        assert_eq!(lost_soul.attack.map(|a| a.kind), Some(AttackKind::Melee));
+        assert!(lost_soul.projectile.is_none(), "the lost soul charges; it is not a shot");
+    }
+
+    #[test]
+    fn doom_map_family_writes_the_player_vitals() {
+        let family = doom_family("doom1");
+        assert_eq!((family.person_health, family.person_health_max), (100.0, 200.0));
+        let place = crate::world_place::WorldPlace { family, ..Default::default() };
+        let text = place.to_text();
+        assert!(text.contains("person 1.75 health=100 max=200\n"), "{text}");
+        let back = crate::world_place::WorldPlace::parse(&text).unwrap();
+        assert_eq!((back.family.person_health, back.family.person_health_max), (100.0, 200.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View weapons: the gun in the player's hands
+// ---------------------------------------------------------------------------
+
+/// A patch's origin — `leftoffset`, `topoffset` from its header.
+pub(crate) fn doom_patch_offsets(data: &[u8]) -> Option<(i32, i32)> {
+    (data.len() >= 8).then(|| (i16_le(data, 4) as i32, i16_le(data, 6) as i32))
+}
+
+/// Stamp a patch origin into a PNG as a `grAb` chunk — two big-endian
+/// i32s, x then y — right after IHDR. Ancillary and private by its name,
+/// so every decoder that does not know it steps over it.
+pub(crate) fn png_with_grab(mut png: Vec<u8>, left: i32, top: i32) -> Vec<u8> {
+    const AFTER_IHDR: usize = 8 + 4 + 4 + 13 + 4;
+    if png.len() < AFTER_IHDR || &png[12..16] != b"IHDR" {
+        return png;
+    }
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(b"grAb");
+    body.extend_from_slice(&left.to_be_bytes());
+    body.extend_from_slice(&top.to_be_bytes());
+    let mut chunk = Vec::with_capacity(20);
+    chunk.extend_from_slice(&8u32.to_be_bytes());
+    chunk.extend_from_slice(&body);
+    chunk.extend_from_slice(&png_crc(&body).to_be_bytes());
+    png.splice(AFTER_IHDR..AFTER_IHDR, chunk);
+    png
+}
+
+/// The origin [`png_with_grab`] stamped, if this PNG carries one.
+pub(crate) fn png_grab(png: &[u8]) -> Option<(i32, i32)> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let mut off = 8usize;
+    while off + 12 <= png.len() {
+        let n = u32::from_be_bytes(png[off..off + 4].try_into().ok()?) as usize;
+        let typ = &png[off + 4..off + 8];
+        if typ == b"grAb" && n >= 8 && off + 8 + n <= png.len() {
+            let d = &png[off + 8..off + 16];
+            return Some((
+                i32::from_be_bytes(d[0..4].try_into().ok()?),
+                i32::from_be_bytes(d[4..8].try_into().ok()?),
+            ));
+        }
+        if typ == b"IEND" {
+            break;
+        }
+        off = off.checked_add(12 + n)?;
+    }
+    None
+}
+
+/// One psprite state as `info.c` lists it: the frame letter, its tics,
+/// whether entering it lights the muzzle flash (and from which flash
+/// state), and the sound its `p_pspr.c` action makes.
+struct Psp {
+    letter: char,
+    tics: u32,
+    flash: Option<makepad_asset_data::view_weapon::FlashStart>,
+    sound: &'static str,
+}
+
+const fn psp(letter: char, tics: u32) -> Psp {
+    Psp { letter, tics, flash: None, sound: "" }
+}
+
+const fn psp_sound(letter: char, tics: u32, sound: &'static str) -> Psp {
+    Psp { letter, tics, flash: None, sound }
+}
+
+const fn psp_flash(letter: char, tics: u32, flash: usize, sound: &'static str) -> Psp {
+    Psp {
+        letter,
+        tics,
+        flash: Some(makepad_asset_data::view_weapon::FlashStart::At(flash)),
+        sound,
+    }
+}
+
+/// One held weapon of the vanilla roster: its ready loop (`A_WeaponReady`
+/// states), the fire sequence from the trigger to `A_ReFire`, the flash
+/// sequence, and the sounds outside the fire sequence. Tics are the
+/// 35 Hz values of `info.c`; a 0-tic state (`A_ReFire`) is simply omitted.
+struct DoomViewWeapon {
+    prefix: &'static str,
+    /// The sibling lump family the flash frames live in; `None` when they
+    /// are frames of the gun's own family (the super shotgun's I/J).
+    flash_prefix: Option<&'static str>,
+    ready: &'static [Psp],
+    fire: &'static [Psp],
+    flash: &'static [Psp],
+    raise_sound: &'static str,
+    idle_sound: &'static str,
+}
+
+const DOOM_VIEW_WEAPONS: &[DoomViewWeapon] = &[
+    DoomViewWeapon {
+        // S_PUNCH1..5 — A_Punch's sound plays only on a hit, from the target.
+        prefix: "pung",
+        flash_prefix: None,
+        ready: &[psp('A', 1)],
+        fire: &[psp('B', 4), psp('C', 4), psp('D', 5), psp('C', 4), psp('B', 5)],
+        flash: &[],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_PISTOL1..4, flash S_PISTOLFLASH lit by A_FirePistol.
+        prefix: "pisg",
+        flash_prefix: Some("pisf"),
+        ready: &[psp('A', 1)],
+        fire: &[psp('A', 4), psp_flash('B', 6, 0, "dspistol"), psp('C', 4), psp('B', 5)],
+        flash: &[psp('A', 7)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_SGUN1..9, flash S_SGUNFLASH1..2 lit by A_FireShotgun.
+        prefix: "shtg",
+        flash_prefix: Some("shtf"),
+        ready: &[psp('A', 1)],
+        fire: &[
+            psp('A', 3),
+            psp_flash('A', 7, 0, "dsshotgn"),
+            psp('B', 5),
+            psp('C', 5),
+            psp('D', 4),
+            psp('C', 5),
+            psp('B', 5),
+            psp('A', 3),
+            psp('A', 7),
+        ],
+        flash: &[psp('A', 4), psp('B', 3)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_DSGUN1..10: the pump is A_OpenShotgun2 / A_LoadShotgun2 /
+        // A_CloseShotgun2, each with its own sound; the flash frames are
+        // the family's own I and J.
+        prefix: "sht2",
+        flash_prefix: None,
+        ready: &[psp('A', 1)],
+        fire: &[
+            psp('A', 3),
+            psp_flash('A', 7, 0, "dsdshtgn"),
+            psp('B', 7),
+            psp('C', 7),
+            psp_sound('D', 7, "dsdbopn"),
+            psp('E', 7),
+            psp_sound('F', 7, "dsdbload"),
+            psp('G', 6),
+            psp_sound('H', 6, "dsdbcls"),
+            psp('A', 5),
+        ],
+        flash: &[psp('I', 5), psp('J', 4)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_CHAIN1..2: A_FireCGun fires from both, lighting the flash
+        // state that matches its own.
+        prefix: "chgg",
+        flash_prefix: Some("chgf"),
+        ready: &[psp('A', 1)],
+        fire: &[psp_flash('A', 4, 0, "dspistol"), psp_flash('B', 4, 1, "dspistol")],
+        flash: &[psp('A', 5), psp('B', 5)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_MISSILE1 lights the flash (A_GunFlash), S_MISSILE2 launches;
+        // the rocket's own see-sound is the launch.
+        prefix: "misg",
+        flash_prefix: Some("misf"),
+        ready: &[psp('A', 1)],
+        fire: &[psp_flash('B', 8, 0, ""), psp_sound('B', 12, "dsrlaunc")],
+        flash: &[psp('A', 3), psp('B', 4), psp('C', 4), psp('D', 4)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_SAW/S_SAWB idle between C and D humming; S_SAW1..2 cut with
+        // A_Saw (sawhit on a hit comes from the target side).
+        prefix: "sawg",
+        flash_prefix: None,
+        ready: &[psp_sound('C', 4, "dssawidl"), psp('D', 4)],
+        fire: &[psp_sound('A', 4, "dssawful"), psp_sound('B', 4, "dssawful")],
+        flash: &[],
+        raise_sound: "dssawup",
+        idle_sound: "dssawidl",
+    },
+    DoomViewWeapon {
+        // S_PLASMA1 fires and picks ONE of the two flash states at random.
+        prefix: "plsg",
+        flash_prefix: Some("plsf"),
+        ready: &[psp('A', 1)],
+        fire: &[
+            Psp {
+                letter: 'A',
+                tics: 3,
+                flash: Some(makepad_asset_data::view_weapon::FlashStart::Random),
+                sound: "dsplasma",
+            },
+            psp('B', 20),
+        ],
+        flash: &[psp('A', 4), psp('B', 4)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+    DoomViewWeapon {
+        // S_BFG1 sounds (A_BFGsound), S_BFG2 lights the flash, S_BFG3 fires.
+        prefix: "bfgg",
+        flash_prefix: Some("bfgf"),
+        ready: &[psp('A', 1)],
+        fire: &[
+            psp_sound('A', 20, "dsbfg"),
+            psp_flash('B', 10, 0, ""),
+            psp('B', 10),
+            psp('B', 20),
+        ],
+        flash: &[psp('A', 11), psp('B', 6)],
+        raise_sound: "",
+        idle_sound: "",
+    },
+];
+
+/// Muzzle-flash families: no clips of their own, only their placements.
+const DOOM_FLASH_PACKS: &[&str] = &["pisf", "shtf", "chgf", "misf", "plsf", "bfgf"];
+
+/// The `view…` manifest lines for one collapsed sprite family, or `None`
+/// when it is not something the player holds. `key` is the pack key
+/// (`billboards/doom1/shtg`); `frames` are its letters with pixel size and
+/// the origin [`png_grab`] recovered from each frame.
+///
+/// Placement follows `R_DrawPSprite`: with the hand at rest — `sx` 1,
+/// `sy` WEAPONTOP 32 — a frame's left is `sx - leftoffset` and its top
+/// `sy - topoffset`, in the 320×200 screen the psprite scale maps onto the
+/// view. A frame that lost its origin sits bottom-centred instead.
+pub(crate) fn view_weapon_lines(
+    key: &str,
+    frames: &[(char, u32, u32, Option<(i32, i32)>)],
+) -> Option<String> {
+    use makepad_asset_data::view_weapon::{ViewClip, ViewStep, ViewWeapon};
+    let (folder, prefix) = key.rsplit_once('/')?;
+    let wad_slug = folder.rsplit('/').next()?;
+    let mut def = ViewWeapon {
+        key: key.to_string(),
+        ..ViewWeapon::default()
+    };
+    for &(letter, w, h, grab) in frames {
+        let at = match grab {
+            Some((left, top)) => (def.rest.0 - left as f32, def.rest.1 - top as f32),
+            None => (
+                (def.screen.0 as f32 - w as f32) * 0.5,
+                def.screen.1 as f32 - h as f32,
+            ),
+        };
+        def.places.entry(letter.to_ascii_uppercase()).or_insert(at);
+    }
+    let sfx = |lump: &str| (!lump.is_empty()).then(|| format!("sfx/{wad_slug}/{lump}"));
+    let clip = |name: &str, looping: bool, steps: &[Psp]| ViewClip {
+        name: name.to_string(),
+        looping,
+        steps: steps
+            .iter()
+            .map(|s| ViewStep {
+                letter: s.letter,
+                tics: s.tics,
+                flash: s.flash,
+                sound: sfx(s.sound),
+            })
+            .collect(),
+    };
+    if let Some(gun) = DOOM_VIEW_WEAPONS.iter().find(|d| d.prefix == prefix) {
+        def.flash = gun.flash_prefix.map(|p| format!("{folder}/{p}"));
+        def.clips.push(clip("ready", true, gun.ready));
+        def.clips.push(clip("fire", false, gun.fire));
+        if !gun.flash.is_empty() {
+            def.clips.push(clip("flash", false, gun.flash));
+        }
+        if let Some(s) = sfx(gun.raise_sound) {
+            def.sounds.insert("raise".into(), s);
+        }
+        if let Some(s) = sfx(gun.idle_sound) {
+            def.sounds.insert("idle".into(), s);
+        }
+    } else if !DOOM_FLASH_PACKS.contains(&prefix) {
+        return None;
+    }
+    Some(def.to_text())
+}
+
+#[cfg(test)]
+mod view_weapon_tests {
+    use super::*;
+    use makepad_asset_data::view_weapon::{FlashStart, ViewWeapon};
+
+    #[test]
+    fn grab_chunk_round_trips_through_the_png() {
+        let png = encode_png_rgba(&[0, 0, 0, 0], 1, 1).unwrap();
+        assert_eq!(png_grab(&png), None);
+        let stamped = png_with_grab(png, -121, -108);
+        assert_eq!(png_grab(&stamped), Some((-121, -108)));
+        // Still a PNG the importer's own decoder reads.
+        let (_, w, h) = decode_png_stored(&stamped).unwrap();
+        assert_eq!((w, h), (1, 1));
+    }
+
+    /// The shotgun as `info.c` and `R_DrawPSprite` put it on screen: frame
+    /// A (79×60, origin −121/−108) rests at 122,140 — centred, its bottom on
+    /// the last row — and fires at tic 3 with the SHTF flash and DSSHOTGN.
+    #[test]
+    fn shotgun_lines_follow_the_state_table() {
+        let text = view_weapon_lines(
+            "billboards/doom1/shtg",
+            &[('A', 79, 60, Some((-121, -108))), ('B', 119, 121, None)],
+        )
+        .unwrap();
+        let def = ViewWeapon::parse(&text).unwrap();
+        assert_eq!(def.key, "billboards/doom1/shtg");
+        assert_eq!(def.flash.as_deref(), Some("billboards/doom1/shtf"));
+        assert_eq!(def.places[&'A'], (122.0, 140.0));
+        assert_eq!(def.places[&'B'], (100.5, 79.0));
+        let fire = def.clip("fire").unwrap();
+        assert_eq!(fire.steps.len(), 9);
+        assert_eq!(fire.steps[0].tics, 3);
+        assert_eq!(fire.steps[1].flash, Some(FlashStart::At(0)));
+        assert_eq!(fire.steps[1].sound.as_deref(), Some("sfx/doom1/dsshotgn"));
+        assert_eq!(fire.steps.iter().map(|s| s.tics).sum::<u32>(), 44);
+        assert_eq!(def.clip("flash").unwrap().steps.len(), 2);
+        assert!(def.fire_has_sound());
+    }
+
+    #[test]
+    fn flash_packs_carry_placements_only_and_monsters_nothing() {
+        let text = view_weapon_lines("billboards/doom1/shtf", &[('A', 44, 31, Some((-141, -95)))]).unwrap();
+        let def = ViewWeapon::parse(&text).unwrap();
+        assert!(def.clips.is_empty());
+        assert_eq!(def.places[&'A'], (142.0, 127.0));
+        assert!(view_weapon_lines("billboards/doom1/troo", &[('A', 1, 1, None)]).is_none());
+    }
+
+    #[test]
+    fn chainsaw_hums_and_the_plasma_picks_a_random_flash() {
+        let saw = ViewWeapon::parse(&view_weapon_lines("billboards/doom1/sawg", &[]).unwrap()).unwrap();
+        assert_eq!(saw.sounds["raise"], "sfx/doom1/dssawup");
+        assert_eq!(saw.clip("ready").unwrap().steps.len(), 2);
+        let plasma = ViewWeapon::parse(&view_weapon_lines("billboards/doom/plsg", &[]).unwrap()).unwrap();
+        assert_eq!(plasma.clip("fire").unwrap().steps[0].flash, Some(FlashStart::Random));
+        assert_eq!(plasma.flash.as_deref(), Some("billboards/doom/plsf"));
     }
 }

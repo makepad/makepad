@@ -447,6 +447,12 @@ const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
 
 impl Cx {
     fn update_macos_pointer_capture_pacing(&mut self) {
+        // Capture pacing drives the AppKit display link. A --stdin-loop
+        // child has no AppKit app and is paced by its host's Tick, so the
+        // whole dance is moot there — and touching MACOS_APP would panic.
+        if self.in_makepad_studio {
+            return;
+        }
         let active = self.fingers.any_areas_captured()
             || with_macos_app(|app| app.mouse_pointer_lock);
         if active == self.os.pointer_capture_pacing {
@@ -476,6 +482,10 @@ impl Cx {
     /// `orderFrontRegardless` raises the windows even when macOS's cooperative
     /// activation rules deny the app focus.
     pub fn macos_activate_app(&mut self) {
+        if !super::macos_app::focus_allowed() {
+            // The process was launched to stay out of the user's way.
+            return;
+        }
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
@@ -493,7 +503,9 @@ impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
+        crate::startup_trace("event_loop: MetalCx::new begin");
         let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        crate::startup_trace("event_loop: MetalCx::new done");
 
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
@@ -532,6 +544,7 @@ impl Cx {
         if cx.borrow().need_redrawing() {
             cx.borrow_mut().ensure_timer0_started();
         }
+        crate::startup_trace("event_loop: entering AppKit loop");
         MacosApp::event_loop();
     }
 
@@ -543,6 +556,12 @@ impl Cx {
         metal_windows: &mut Vec<MetalWindow>,
         metal_cx: &mut MetalCx,
     ) {
+        {
+            static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                crate::startup_trace("handle_repaint #1 begin");
+            }
+        }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         // Safety flush: if a previous repaint batched offscreen passes but
@@ -716,6 +735,14 @@ impl Cx {
                             msg_send![
                                 drawable,
                                 addPresentedHandler: &objc_block!(move | drawable_: ObjcId | {
+                                    {
+                                        static FIRST: std::sync::atomic::AtomicBool =
+                                            std::sync::atomic::AtomicBool::new(true);
+                                        if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                            crate::startup_trace("FIRST PRESENT ON GLASS");
+                                            crate::startup_trace_flush("cumulative at first present");
+                                        }
+                                    }
                                     // RIG (MAKEPAD_PRESENT_TRACE=1): actual
                                     // GLASS times — the CPU trace's blind
                                     // spot where dropped/slipped frames live.
@@ -1078,6 +1105,8 @@ impl Cx {
                 self.call_event_handler(&Event::WindowGotFocus(window_id));
             }
             MacosEvent::WindowLostFocus(window_id) => {
+                // The pointer lock cannot outlive the window's focus.
+                with_macos_app(|app| app.release_pointer_lock_on_focus_loss());
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
             MacosEvent::PopupDismissed(event) => {
@@ -1681,6 +1710,13 @@ impl Cx {
                             metal_window.cocoa_window.get_window_geom();
                     }
                 }
+                CxOsOp::SetWindowTitle(window_id, title) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        metal_window.cocoa_window.set_title(&title);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
                     if let Some(metal_window) =
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -2273,7 +2309,12 @@ impl CxOsApi for Cx {
     }
 
     fn activate_window_on_pointer_down(&mut self, window_id: WindowId) {
-        let window = with_macos_app(|app| app.cocoa_window_for_id(window_id));
+        // A --stdin-loop child never installs the AppKit app: it has no
+        // cocoa windows to activate, and forwarded clicks must not unwrap
+        // the missing global.
+        let window =
+            super::macos_app::try_with_macos_app(|app| app.cocoa_window_for_id(window_id))
+                .flatten();
         if let Some(window) = window {
             if activate_cocoa_window_on_pointer_down(window) {
                 // AppKit's delegate callback is synchronous and bridge input

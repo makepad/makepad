@@ -41,6 +41,21 @@ pub enum AssetKind {
     /// A VJ effect document: splash source text (`FileRole::Source`,
     /// `Text`) evaluated by the vj effect runtime (apps/vj/src/effects).
     VjEffect,
+    /// An opaque app-state or configuration document: one
+    /// `FileRole::Source` file of `MediaType::Text` that the app which
+    /// wrote it is the only reader of (the sandbox's game-ordering list is
+    /// the first). Carries no mesh, so it needs no thumbnail and no render
+    /// role.
+    ///
+    /// It is NOT content: not playable, not rendered, and never a primary
+    /// browse surface — a client listing content kinds must leave it out,
+    /// and only the app that owns a given document resolves it (by alias).
+    Data,
+    /// A generated editable CAD asset: Splash source (`Source`/`Text`) is
+    /// the authority and an exact-polygonal CSG evaluation supplies its
+    /// derived render GLB. The authored named parts remain separate GLB
+    /// nodes, including their pivots.
+    ModelProgram,
 }
 
 canon_enum!(AssetKind {
@@ -59,6 +74,8 @@ canon_enum!(AssetKind {
     Billboard = 12,
     Game = 13,
     VjEffect = 14,
+    Data = 15,
+    ModelProgram = 16,
 });
 
 impl AssetKind {
@@ -72,7 +89,26 @@ impl AssetKind {
                 | AssetKind::Weapon
                 | AssetKind::Vehicle
                 | AssetKind::Prop
+                | AssetKind::ModelProgram
         )
+    }
+}
+
+#[cfg(test)]
+mod asset_kind_tests {
+    use super::AssetKind;
+
+    #[test]
+    fn appended_kinds_round_trip_without_changing_legacy_tags() {
+        assert_eq!(AssetKind::Data.tag(), 15);
+        assert_eq!(AssetKind::from_tag(AssetKind::Data.tag()).unwrap(), AssetKind::Data);
+        assert!(!AssetKind::Data.has_mesh());
+        assert_eq!(AssetKind::ModelProgram.tag(), 16);
+        assert_eq!(
+            AssetKind::from_tag(AssetKind::ModelProgram.tag()).unwrap(),
+            AssetKind::ModelProgram
+        );
+        assert!(AssetKind::ModelProgram.has_mesh());
     }
 }
 
@@ -1391,6 +1427,16 @@ impl AssetManifest {
                 .any(|f| f.role == FileRole::Source && f.media == MediaType::Text)
         {
             return Err(AssetDataError::Missing { what: "game source role" });
+        }
+        if self.kind == AssetKind::ModelProgram
+            && !self
+                .files
+                .iter()
+                .any(|f| f.role == FileRole::Source && f.media == MediaType::Text)
+        {
+            return Err(AssetDataError::Missing {
+                what: "model-program source role",
+            });
         }
         if matches!(
             self.kind,

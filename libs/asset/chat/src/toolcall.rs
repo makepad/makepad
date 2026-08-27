@@ -192,10 +192,10 @@ fn extract_native(text: &str) -> Extract {
     // several <tool_call> blocks back to back, and an unbounded scan walked
     // into the second block's parameters (observed live: the second query's
     // sql rode along as a duplicate key).
-    let block_end = body_after_name
+    let closing = body_after_name
         .find("</function>")
-        .or_else(|| body_after_name.find("</tool_call>"))
-        .unwrap_or(body_after_name.len());
+        .or_else(|| body_after_name.find("</tool_call>"));
+    let block_end = closing.unwrap_or(body_after_name.len());
     let mut rest = &body_after_name[..block_end];
     while let Some(p_at) = rest.find("<parameter=") {
         let after_p = &rest[p_at + "<parameter=".len()..];
@@ -205,7 +205,12 @@ fn extract_native(text: &str) -> Extract {
         let key = after_p[..key_end].trim().to_string();
         let value_body = &after_p[key_end + 1..];
         let Some(v_end) = value_body.find("</parameter>") else {
-            return Extract::Malformed { clean, reason: "unterminated parameter value".to_string() };
+            let reason = if closing.is_none() {
+                "your tool call was cut off mid-value — send a smaller chunk"
+            } else {
+                "unterminated parameter value"
+            };
+            return Extract::Malformed { clean, reason: reason.to_string() };
         };
         let raw = value_body[..v_end]
             .strip_prefix('\n')
@@ -478,4 +483,37 @@ pub fn render_attachments(attachments: &[AttachmentBinding]) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_native_call_cut_off_inside_a_value_gets_an_actionable_retry() {
+        let output = "<tool_call>\n<function=world_set_source>\n\
+                      <parameter=source>\ngame.terrain({size: 120})\n\
+                      game.box({pos: vec3(0, 0";
+        assert_eq!(
+            extract(output),
+            Extract::Malformed {
+                clean: String::new(),
+                reason: "your tool call was cut off mid-value — send a smaller chunk".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_closed_call_that_omits_the_parameter_end_keeps_the_structural_error() {
+        let output = "<tool_call>\n<function=world_set_source>\n\
+                      <parameter=source>\ngame.terrain({size: 120})\n\
+                      </function>\n</tool_call>";
+        assert_eq!(
+            extract(output),
+            Extract::Malformed {
+                clean: String::new(),
+                reason: "unterminated parameter value".into(),
+            }
+        );
+    }
 }

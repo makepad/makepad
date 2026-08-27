@@ -2,6 +2,7 @@ use {
     crate::{
         code::{CompiledCode, UncompiledCode},
         compile::Compiler,
+        config::Extensions,
         decode::DecodeError,
         func::{Func, FuncType},
         instance::Instance,
@@ -21,12 +22,24 @@ pub struct Engine {
 impl Engine {
     /// Creates a new [`Engine`].
     pub fn new() -> Engine {
+        Self::new_with_extensions(Extensions::default())
+    }
+
+    /// Creates a new [`Engine`] with the given nonstandard [`Extensions`]
+    /// enabled.
+    pub fn new_with_extensions(extensions: Extensions) -> Engine {
         Engine {
             inner: Arc::new(EngineInner {
+                extensions,
                 validators: Mutex::new(Pool::new()),
                 compilers: Mutex::new(Pool::new()),
             }),
         }
+    }
+
+    /// The nonstandard [`Extensions`] enabled for this [`Engine`].
+    pub fn extensions(&self) -> Extensions {
+        self.inner.extensions
     }
 
     pub(crate) fn validate(
@@ -36,7 +49,7 @@ impl Engine {
         code: &UncompiledCode,
     ) -> Result<(), DecodeError> {
         let mut validator = self.inner.validators.lock().unwrap().pop_or_default();
-        let result = validator.validate(type_, module, code);
+        let result = validator.validate(type_, module, code, self.inner.extensions);
         self.inner.validators.lock().unwrap().push(validator);
         result
     }
@@ -49,7 +62,7 @@ impl Engine {
         code: &UncompiledCode,
     ) -> CompiledCode {
         let mut compiler = self.inner.compilers.lock().unwrap().pop_or_default();
-        let result = compiler.compile(store, func, instance, code);
+        let result = compiler.compile(store, func, instance, code, self.inner.extensions);
         self.inner.compilers.lock().unwrap().push(compiler);
         result
     }
@@ -63,6 +76,7 @@ impl Default for Engine {
 
 #[derive(Debug)]
 struct EngineInner {
+    extensions: Extensions,
     validators: Mutex<Pool<Validator>>,
     compilers: Mutex<Pool<Compiler>>,
 }

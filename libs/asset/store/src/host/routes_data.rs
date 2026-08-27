@@ -24,6 +24,7 @@ use super::routes::{require_cap,
 use super::util::now_ms;
 use crate::{CandidateState, Capability, ServerError};
 use makepad_asset_data::{AssetAlias, AssetManifest, AssetRevisionId, BlobId, ThumbnailMedia};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CACHE_IMMUTABLE: &str = "private, max-age=31536000, immutable";
@@ -58,6 +59,12 @@ pub fn dispatch(
         // Admit a server-local file BY REFERENCE. Matched before the blob-id
         // arm for the same reason `fetch` is.
         ["v1", "blobs", "ref"] if m == Method::Post => blob_ref_admit(conn, head, rc),
+        ["v1", "model-preview-sessions", session, "parts", part] if m == Method::Put => {
+            model_preview_part_put(conn, head, rc, session, part)
+        }
+        ["v1", "model-preview-meshes", token] if m == Method::Get => {
+            model_preview_mesh_get(head, rc, token)
+        }
         ["v1", "blobs", b] if is_read(m) => {
             let id: BlobId = b.parse().map_err(|_| Fail::Http(400, "malformed blob id"))?;
             blob_get(conn, head, rc, force_close, id)
@@ -74,6 +81,95 @@ pub fn dispatch(
         }
         _ => not_found(),
     }
+}
+
+fn preview_session_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+}
+
+fn preview_part_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 24
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn preview_mesh_token_ok(value: &str) -> bool {
+    value
+        .strip_prefix("pmesh_")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+}
+
+/// Store one changed part in the bounded event hub and emit its delta. The
+/// body is intentionally never admitted to CAS or written to a temporary
+/// file: preview transport is process-memory-only.
+fn model_preview_part_put(
+    conn: &mut Conn,
+    head: &mut Head,
+    rc: &RouteCtx,
+    session: &str,
+    part: &str,
+) -> RouteResult<Outcome> {
+    if !preview_session_ok(session) {
+        return Err(Fail::Http(400, "malformed model preview session"));
+    }
+    if !preview_part_ok(part) {
+        return Err(Fail::Http(400, "malformed model preview part"));
+    }
+    let secret = secret_of(head)?;
+    let session = session.to_string();
+    let part = part.to_string();
+    let namespace = rc
+        .events
+        .model_preview_namespace(&session)
+        .ok_or(Fail::Http(404, "model preview session not found"))?;
+    let now = now_ms();
+    call_state(&rc.state, move |ctx| {
+        let principal = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_cap(ctx, &principal, Capability::AssetPublish, &namespace)
+    })?;
+    let max = rc.cfg.budgets.max_blob_bytes.min(16 * 1024 * 1024);
+    let bytes = match super::routes::read_body(conn, head, max, rc.cfg.data_body_deadline_ms) {
+        Ok(bytes) => bytes,
+        Err(outcome) => return Ok(outcome),
+    };
+    if bytes.is_empty() {
+        return Err(Fail::Http(400, "empty model preview mesh"));
+    }
+    let token = format!("pmesh_{}", makepad_asset_data::sha256_hex(&bytes));
+    rc.events
+        .update_model_preview_part(&session, part, token.clone(), Arc::from(bytes), now_ms())
+        .map_err(|what| ServerError::Conflict { what })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("mesh_token", s(token))]),
+    )))
+}
+
+fn model_preview_mesh_get(head: &Head, rc: &RouteCtx, token: &str) -> RouteResult<Outcome> {
+    if !preview_mesh_token_ok(token) {
+        return Err(Fail::Http(400, "malformed model preview mesh token"));
+    }
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    call_state(&rc.state, move |ctx| {
+        ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        Ok(())
+    })?;
+    let bytes = rc
+        .events
+        .model_preview_mesh(token)
+        .ok_or(Fail::Http(404, "model preview mesh not found"))?;
+    Ok(Outcome::Resp(Resp::bytes(
+        200,
+        "model/gltf-binary",
+        bytes.as_ref().to_vec(),
+    )))
 }
 
 // ---------------------------------------------------------------------------
