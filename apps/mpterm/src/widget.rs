@@ -247,6 +247,10 @@ pub struct MpTerm {
     pub command: Option<String>,
     #[rust]
     area: Area,
+    /// Key focus grabbed on the first draw (a terminal owns the keyboard
+    /// without needing a click).
+    #[rust]
+    took_focus: bool,
     #[rust]
     rect: Rect,
     #[rust]
@@ -1245,6 +1249,15 @@ impl Widget for MpTerm {
         self.draw_terminal(cx);
 
         cx.end_turtle_with_area(&mut self.area);
+        // A terminal OWNS the keyboard from its first frame — standalone
+        // and hosted alike. Without this a hosted tile that was never
+        // clicked silently dropped every forwarded key (the WM decides
+        // which tile receives keys; inside the child this widget must
+        // hold its own key focus for them to land).
+        if !self.took_focus {
+            self.took_focus = true;
+            cx.set_key_focus(self.area);
+        }
         if self.session.is_some() && cx.has_key_focus(self.area) {
             let s = self
                 .session

@@ -1714,6 +1714,7 @@ fn seek_bounce_playback(
                 // hand's position by itself; from any other mode the
                 // machine exits, seeking the stream to the hand.
                 scratching = false;
+                _ = scratching;
                 shared.travel_forward.store(false, Ordering::Release);
                 if !matches!(
                     PlayMode::from_u8(shared.mode.load(Ordering::Acquire)),

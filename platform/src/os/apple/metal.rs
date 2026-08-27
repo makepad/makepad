@@ -3488,6 +3488,13 @@ impl CxTexture {
     }
 
     fn update_render_target(&mut self, metal_cx: &MetalCx, width: usize, height: usize) {
+        // Metal forbids zero-size textures. A hosted (--stdin-loop) child
+        // can draw its first frame before the host's WindowGeomChange
+        // arrives, with 0×0 passes throughout — allocate 1×1 instead of
+        // aborting on the MTLTextureDescriptor validation; the target
+        // reallocates at the real size the moment geometry lands.
+        let width = width.max(1);
+        let height = height.max(1);
         if self.alloc_render(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
             let descriptor = RcObjcId::from_owned(
@@ -3528,6 +3535,9 @@ impl CxTexture {
     }
 
     fn update_depth_stencil(&mut self, metal_cx: &MetalCx, width: usize, height: usize) {
+        // Same zero-size guard as update_render_target (hosted first frame).
+        let width = width.max(1);
+        let height = height.max(1);
         if self.alloc_depth(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
             let descriptor = RcObjcId::from_owned(
