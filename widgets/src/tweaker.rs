@@ -185,7 +185,7 @@ struct TweakSession {
     last_sidebar_log: Option<(String, String, f64)>,
     /// Vibecode prompts sent this session: (sel path, layer, prompt).
     /// Surfaced in /tweak/state as the agent's work queue.
-    vibes: Vec<(String, String, String)>,
+    vibes: Vec<(String, String, String, String)>,
     /// Ctrl+Space note cards, keyed by widget path (one per widget).
     notes: Vec<TweakNote>,
     /// The undo stack over edit gestures (Cmd+Z / Cmd+Shift+Z).
@@ -1347,6 +1347,47 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
 /// a preview quad — the swatch then renders with the selection's actual
 /// compiled shader (fn-hash cache) at its live-tweaked values. Quad-family
 /// layers only; anything else leaves the preview untouched.
+/// The script-defined shader fns of a widget's draw layer — `pixel` and
+/// `vertex` when the layer (or a proto in its chain) sets one — as
+/// (name, "file:line", source text). What the Shader tab shows under the
+/// well and what a code-only prompt rewrites.
+fn layer_fn_sources(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let source = widget.script_source();
+    if source == ScriptObject::ZERO {
+        return out;
+    }
+    let layer_id = LiveId::from_str(layer);
+    cx.with_vm(|vm| {
+        let value = vm.bx.heap.value(source, layer_id.into(), NoTrap);
+        if value.as_object().is_none() {
+            return;
+        }
+        // Closest level first: the fn the widget actually runs is the
+        // nearest definition up the layer's construction chain (a `+:`
+        // merge in the widget's script, else the draw type's own).
+        let chain = vm.construction_chain(value);
+        for (name, key) in [("pixel", id!(pixel)), ("vertex", id!(vertex))] {
+            for lvl in &chain {
+                if !lvl.own_keys.contains(&key) {
+                    continue;
+                }
+                let f = vm.bx.heap.value(lvl.object, key.into(), NoTrap);
+                let Some(fobj) = f.as_object() else { break };
+                let Some(makepad_script::ScriptFnPtr::Script(ip)) = vm.bx.heap.as_fn(fobj) else {
+                    break;
+                };
+                if let Some((loc, text)) = vm.bx.code.fn_source_text(ip) {
+                    let base = loc.file.rsplit('/').next().unwrap_or(&loc.file).to_string();
+                    out.push((name.to_string(), format!("{base}:{}", loc.line), text));
+                }
+                break;
+            }
+        }
+    });
+    out
+}
+
 /// One live draw call's inputs, copied from a widget's area: what the
 /// material swatch draws so it shows exactly what the widget shows.
 struct MaterialMirror {
@@ -2148,15 +2189,16 @@ pub fn tweak_callback(
                 let vibes = session().lock().unwrap().vibes.clone();
                 if !vibes.is_empty() {
                     out.push_str(",\"vibe\":[");
-                    for (i, (vpath, vlayer, vprompt)) in vibes.iter().enumerate() {
+                    for (i, (vpath, vlayer, vprompt, vfns)) in vibes.iter().enumerate() {
                         if i > 0 {
                             out.push(',');
                         }
                         out.push_str(&format!(
-                            "{{\"path\":{},\"layer\":{},\"prompt\":{}}}",
+                            "{{\"path\":{},\"layer\":{},\"prompt\":{},\"fns\":{}}}",
                             json_str(vpath),
                             json_str(vlayer),
-                            json_str(vprompt)
+                            json_str(vprompt),
+                            json_str(vfns)
                         ));
                     }
                     out.push(']');
@@ -2832,6 +2874,8 @@ pub struct Tweaker {
     /// The panel's note button: the same note as the Insert key, for
     /// keyboards without one.
     note_uid: u64,
+    /// The shown layer's script-defined fns: (name, file:line, source).
+    vibe_fn_sources: Vec<(String, String, String)>,
     /// Set by the note button; the next event opens the card.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
@@ -3110,10 +3154,28 @@ impl Tweaker {
                             width: Fill
                             height: 150
                         }
+                        src_scroll := ScrollYView {
+                            width: Fill
+                            height: Fill
+                            show_bg: true
+                            draw_bg +: { color: #x1b1b1b }
+                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                            shader_src := Label {
+                                width: Fill
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    color: #xd0d0d0
+                                    text_style: theme.font_code
+                                    text_style +: { font_size: 7.5 }
+                                }
+                            }
+                        }
                         prompt := TextInput {
                             width: Fill
                             height: 64
-                            empty_text: "describe the change\u{2026} Enter sends to the AI"
+                            is_multiline: true
+                            empty_text: "what should this shader's CODE do differently\u{2026} Ctrl+Enter sends"
                             draw_bg +: {
                                 color: #x1b1b1b
                                 border_radius: 3.0
@@ -3125,7 +3187,7 @@ impl Tweaker {
                         }
                         vibe_hint := FabLabelSmall {
                             width: Fill
-                            text: "Enter sends \u{00b7} the agent rewrites just this shader"
+                            text: "Ctrl+Enter sends \u{00b7} the agent rewrites only the fn code \u{00b7} colours and sizes stay in Props"
                         }
                     }
                     tree_wrap := View {
@@ -3978,6 +4040,30 @@ impl Tweaker {
                 col.child(live_id!(shader_doc))
                     .set_text(cx, doc.lines().next().unwrap_or(""));
                 self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
+                // The shader as written: pixel (and vertex when the layer
+                // sets its own) with their docs — what the prompt rewrites.
+                {
+                    let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                    let fns = if widget.is_empty() {
+                        Vec::new()
+                    } else {
+                        layer_fn_sources(cx, &widget, &layer)
+                    };
+                    let mut text = String::new();
+                    for (name, loc, src) in &fns {
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(&format!("// {name} \u{2014} {loc}\n{src}"));
+                    }
+                    if text.is_empty() {
+                        text = "(no script-defined pixel/vertex fn on this layer \u{2014} the type's own shader)".to_string();
+                    }
+                    self.vibe_fn_sources = fns;
+                    col.child(live_id!(src_scroll))
+                        .child(live_id!(shader_src))
+                        .set_text(cx, &text);
+                }
                 let sw_ref = col.child(live_id!(big));
                 let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
                 if let Some(mut sw) = sw_opt {
@@ -4820,8 +4906,16 @@ impl Tweaker {
                         // The execute bundle, on the AI's ear (the TWEAK
                         // log + /tweak/state carry it to the driving
                         // agent): scope = exactly this draw layer.
-                        log!("TWEAK vibe sel={path} layer={layer} prompt={text}");
-                        session().lock().unwrap().vibes.push((path, layer, text));
+                        // Code only: the fn sources (with their file:line)
+                        // ride along; colours/sizes are the Props rows'.
+                        let fns = self
+                            .vibe_fn_sources
+                            .iter()
+                            .map(|(name, loc, src)| format!("// {name} \u{2014} {loc}\n{src}"))
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        log!("TWEAK vibe sel={path} layer={layer} fns={} prompt={text}", self.vibe_fn_sources.iter().map(|(n, l, _)| format!("{n}@{l}")).collect::<Vec<_>>().join(","));
+                        session().lock().unwrap().vibes.push((path, layer, text, fns));
                     }
                 }
             }
