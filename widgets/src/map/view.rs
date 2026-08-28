@@ -2028,8 +2028,18 @@ impl Widget for MapView {
                         self.gesture_panned = true;
                     }
                     // Screen drag maps to a world pan through the inverse of
-                    // the heading-up rotation and camera tilt.
-                    let world_delta = self.screen_delta_to_world(delta);
+                    // the heading-up rotation and camera tilt. Under the
+                    // fold that inverse is NON-AFFINE, so a lone screen
+                    // delta means nothing: invert BOTH endpoints and pan by
+                    // the ground offset between them (grab-pan — the point
+                    // under the finger at press stays under it).
+                    let world_delta = if self.space_warp_eff.is_on() {
+                        let camera = self.overlay_camera();
+                        camera.screen_to_world_rel(fe.abs)
+                            - camera.screen_to_world_rel(start_abs)
+                    } else {
+                        self.screen_delta_to_world(delta)
+                    };
                     let world_size = tile_world_size_zoom(self.view_zoom());
                     self.center_norm = self.drag_start_center_norm
                         - dvec2(world_delta.x / world_size, world_delta.y / world_size);
@@ -3943,15 +3953,23 @@ impl MapView {
         let old_world_size = tile_world_size_zoom(current_zoom);
         let new_world_size = tile_world_size_zoom(new_zoom);
         let rect_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        // Anchor into world-aligned space (undo rotation + tilt).
-        let anchor_rel = self.screen_delta_to_world(anchor_abs - rect_center);
-        let old_center_world = self.center_norm * old_world_size;
-        let anchor_world = old_center_world + anchor_rel;
-        let anchor_norm = anchor_world / old_world_size;
-        let new_center_world = anchor_norm * new_world_size - anchor_rel;
+        // Anchor into world-aligned space (undo rotation + tilt — and the
+        // fold, when it is on: the point under the cursor is only where the
+        // WARP inverse says it is, otherwise zooming on the wall slides the
+        // map out from under the pointer).
+        let anchor_rel = if self.space_warp_eff.is_on() {
+            self.overlay_camera().screen_to_world_rel(anchor_abs)
+        } else {
+            self.screen_delta_to_world(anchor_abs - rect_center)
+        };
 
         self.zoom = new_zoom;
-        self.center_norm = new_center_world / new_world_size;
+        self.center_norm = zoom_anchor_center_norm(
+            self.center_norm,
+            anchor_rel,
+            old_world_size,
+            new_world_size,
+        );
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
         self.last_zoom_change_time = Some(std::time::Instant::now());
@@ -5583,28 +5601,51 @@ impl MapView {
     /// 2D) — the baked per-marker lift converted through the current tilt
     /// and meters-per-pixel.
     fn lift_screen_px(&self, lift_m: f32, view_zoom: f64) -> f64 {
+        self.lift_ground_px(lift_m, view_zoom)
+            * self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().sin()
+    }
+
+    /// The same lift in GROUND px (pre-tilt, the unit `SpaceWarp::project`
+    /// takes): the warp rides it along the fold's LOCAL normal and through
+    /// the perspective divide, so a flat `lift·sin(tilt)` screen offset is
+    /// only correct when the fold is off.
+    fn lift_ground_px(&self, lift_m: f32, view_zoom: f64) -> f64 {
         if !self.buildings_3d || self.tilt <= 0.0 || lift_m <= 0.0 {
             return 0.0;
         }
         let world_size = TILE_SIZE * 2f64.powf(view_zoom);
         let (_, lat) = normalized_to_lon_lat(self.center_norm);
         let px_per_meter = world_size / (40_075_016.686 * lat.to_radians().cos());
-        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().sin()
+        lift_m as f64 * px_per_meter
     }
 
     fn pin_at(&self, abs: Vec2d) -> Option<(f64, f64, Vec<(String, String)>)> {
         let camera = self.overlay_camera();
+        let view_zoom = self.view_zoom();
         let mut best: Option<(f64, &PinHit)> = None;
         for entry in self.tiles.values() {
             let TileLoadState::Ready { pin_hits, .. } = &entry.state else {
                 continue;
             };
             for hit in pin_hits {
-                let screen = camera.norm_to_screen(dvec2(hit.norm.0, hit.norm.1));
+                let norm = dvec2(hit.norm.0, hit.norm.1);
+                // Where the SHADER put this pin. Flying pins lift along the
+                // fold normal and shrink with the divide once the warp is
+                // on, so hit-testing has to project them the same way —
+                // a flat straight-up lift misses by tens of px on the wall.
+                let screen = if camera.warp.is_on() {
+                    camera
+                        .norm_to_screen_lifted(norm, self.lift_ground_px(hit.lift_m, view_zoom))
+                        .0
+                } else {
+                    let ground = camera.norm_to_screen(norm);
+                    dvec2(
+                        ground.x,
+                        ground.y - self.lift_screen_px(hit.lift_m, view_zoom),
+                    )
+                };
                 let dx = abs.x - screen.x;
                 let dy = abs.y - screen.y;
-                let lift = self.lift_screen_px(hit.lift_m, self.view_zoom());
-                let dy = dy + lift;
                 if dx.abs() <= 18.0 && dy >= -26.0 && dy <= 6.0 {
                     let dist = dx * dx + dy * dy;
                     if best.as_ref().is_none_or(|(d, _)| dist < *d) {
@@ -5756,12 +5797,13 @@ impl MapView {
         );
     }
 
+    /// Screen point → map coordinate: the exact inverse of the camera that
+    /// drew the frame. With the Inception fold on this runs the piecewise
+    /// warp inverse (`SpaceWarp::unproject`), so taps and long presses land
+    /// on the feature under the finger even up on the wall; with it off it
+    /// is the legacy rotation + `1/tilt_cos` path, unchanged.
     pub fn screen_to_lon_lat(&self, abs: Vec2d) -> (f64, f64) {
-        let camera = self.overlay_camera();
-        let pivot = camera.rot_pivot;
-        let unrotated = self.screen_delta_to_world(abs - pivot) + pivot;
-        let norm = (unrotated - camera.offset) / camera.world_size;
-        normalized_to_lon_lat(norm)
+        normalized_to_lon_lat(self.overlay_camera().screen_to_norm(abs))
     }
 
     pub fn lon_lat_to_screen(&self, lon: f64, lat: f64) -> Vec2d {
