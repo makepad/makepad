@@ -668,6 +668,9 @@ pub fn window_intercept(
             })
             .unwrap_or(false);
         if note_hit {
+            if kind == PointerKind::Down {
+                log!("TWEAK press {:.0},{:.0} on the note card: not a pick", abs.x, abs.y);
+            }
             return false;
         }
     }
@@ -675,26 +678,42 @@ pub fn window_intercept(
     // churn at the virtual abs (the "keeps highlighting things while I
     // drag" bug), and never a consumed up (the wedge). The pick pass
     // stands down until the pin releases; stale hover chrome clears once.
+    // A NEW press while a pin stands means the pin's release was lost (the
+    // button cannot be held twice): drop it and pick, instead of feeding
+    // one whole click to a gesture that ended.
     if cx.fingers.has_pinned_capture() {
-        let had_hover = {
-            let mut s = session().lock().unwrap();
-            s.hover.take().is_some()
-        };
-        if had_hover {
-            cx.redraw_all();
+        if kind == PointerKind::Down {
+            log!("TWEAK press {:.0},{:.0} with a stale scrub pin: released, picking", abs.x, abs.y);
+            cx.unpin_pointer_capture();
+        } else {
+            let had_hover = {
+                let mut s = session().lock().unwrap();
+                s.hover.take().is_some()
+            };
+            if had_hover {
+                cx.redraw_all();
+            }
+            return false;
         }
-        return false;
     }
     // A splitter drag owns the pointer outright: the pick path must not
     // eat the Move that resizes or the Up that releases — releasing
-    // OUTSIDE the band swallowed the Up and wedged the drag forever.
+    // OUTSIDE the band swallowed the Up and wedged the drag forever. The
+    // same stale-gesture rule as the pin: a new press ends it.
     {
         let dragging = tweaker
             .borrow::<Tweaker>()
             .map(|tw| tw.splitter_drag)
             .unwrap_or(false);
         if dragging {
-            return false;
+            if kind == PointerKind::Down {
+                log!("TWEAK press {:.0},{:.0} with a stale splitter drag: ended, picking", abs.x, abs.y);
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    tw.splitter_drag = false;
+                }
+            } else {
+                return false;
+            }
         }
     }
     // A mouse-up always pairs with the down that started it: if we swallowed
@@ -702,6 +721,12 @@ pub fn window_intercept(
     let finish_consumed_down = kind == PointerKind::Up && session().lock().unwrap().down_consumed;
     if !body_rect.contains(abs) && !finish_consumed_down {
         // Outside the body (caption bar, sidebar band): ordinary dispatch.
+        if kind == PointerKind::Down {
+            log!(
+                "TWEAK press {:.0},{:.0} outside the body {:.0},{:.0} {:.0}x{:.0}: not a pick",
+                abs.x, abs.y, body_rect.pos.x, body_rect.pos.y, body_rect.size.x, body_rect.size.y
+            );
+        }
         return false;
     }
     // The tweaker's own UI is never a pick target. A body that was not
@@ -715,6 +740,9 @@ pub fn window_intercept(
             .map(|tw| tw.band.size.x > 0.0 && tw.band.contains(abs))
             .unwrap_or(false);
         if in_band {
+            if kind == PointerKind::Down {
+                log!("TWEAK press {:.0},{:.0} in the panel band: not a pick", abs.x, abs.y);
+            }
             return false;
         }
     }
@@ -1887,6 +1915,121 @@ fn template_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
     out
 }
 
+/// Values survive an apply (they live in the Rust draw vars) but the
+/// SHADER is recomputed from the chain of the object just applied — and
+/// every chunk derives a fresh object from the widget's untouched source,
+/// so `draw_bg +: {color: #00f}` after a live `pixel: fn` edit compiled the
+/// file's pixel back in (the fn edit vanished on the next colour tweak).
+/// After a chunk that touches a layer with live fn edits, put those fns
+/// back on top; their text is unchanged, so the compiled shader is a cache
+/// hit.
+fn reinject_fn_overrides(cx: &mut Cx, widget: &WidgetRef, chunk: &str) {
+    let uid = widget.widget_uid().0;
+    let overrides: Vec<((u64, String, String), String)> = session()
+        .lock()
+        .unwrap()
+        .fn_overrides
+        .iter()
+        .filter(|((owner, _, _), _)| *owner == uid)
+        .map(|(key, text)| (key.clone(), text.clone()))
+        .collect();
+    if overrides.is_empty() {
+        return;
+    }
+    let mut layers: Vec<String> = Vec::new();
+    for ((_, layer, name), _) in &overrides {
+        let touches_layer = chunk.contains(&format!("{layer} +:"))
+            || chunk.contains(&format!("{layer}:"))
+            || chunk.contains(&format!("{layer}."));
+        let defines_fn = chunk.contains(&format!("{name}:"));
+        if touches_layer && !defines_fn && !layers.contains(layer) {
+            layers.push(layer.clone());
+        }
+    }
+    for layer in layers {
+        let mut body = String::new();
+        for ((_, l, _), text) in &overrides {
+            if *l == layer {
+                body.push_str(text);
+                body.push('\n');
+            }
+        }
+        let _ = makepad_platform::shader_error::take();
+        if let Err(error) = eval_chunk(cx, widget, &format!("{layer} +: {{\n{body}}}")) {
+            log!("TWEAK re-applying the live {layer} fns failed: {error}");
+        }
+        if let Some(error) = makepad_platform::shader_error::take() {
+            log!("TWEAK re-applied live {layer} fns did not compile: {}", terse_shader_error(&error));
+        }
+    }
+}
+
+/// The first problem of a draw-shader compile report, without the
+/// compiler's own source pointers; says how many more there were.
+fn terse_shader_error(report: &str) -> String {
+    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
+    let first = lines.first().copied().unwrap_or(report);
+    // `DrawQuad: shader field …` — the type name is the layer's, keep it.
+    let first = match first.find(" (platform/") {
+        Some(at) => &first[..at],
+        None => first,
+    };
+    let first: String = first.chars().take(160).collect();
+    if lines.len() > 1 {
+        format!("{first} (+{} more)", lines.len() - 1)
+    } else {
+        first
+    }
+}
+
+/// Undo a chunk whose shader failed to compile: an fn chunk puts the
+/// layer's fns back (the last text applied from the view or the AI, else
+/// the fn as written); a single-property chunk puts the property back.
+fn revert_failed_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str, before: &[(String, String, bool)]) {
+    if chunk.contains("fn") {
+        if let Some(open) = chunk.find("+:") {
+            let layer = chunk[..open].trim().to_string();
+            revert_layer_fns(cx, widget, &layer);
+            return;
+        }
+    }
+    if let Some((prop, _)) = single_prop_chunk(chunk) {
+        if let Some((_, old, quoted)) = before.iter().find(|(name, _, _)| *name == prop) {
+            let text = if *quoted { format!("{old:?}") } else { old.clone() };
+            let _ = makepad_platform::shader_error::take();
+            if let Err(error) = eval_chunk(cx, widget, &format!("{prop}: {text}")) {
+                log!("TWEAK revert of {prop} failed: {error}");
+            }
+            let _ = makepad_platform::shader_error::take();
+        }
+    }
+}
+
+fn revert_layer_fns(cx: &mut Cx, widget: &WidgetRef, layer: &str) {
+    let uid = widget.widget_uid().0;
+    let sources = layer_fn_sources(cx, widget, layer);
+    let overrides = session().lock().unwrap().fn_overrides.clone();
+    let mut body = String::new();
+    for (name, _loc, src) in &sources {
+        let text = overrides
+            .get(&(uid, layer.to_string(), name.clone()))
+            .cloned()
+            .unwrap_or_else(|| src.clone());
+        body.push_str(&text);
+        body.push('\n');
+    }
+    if body.trim().is_empty() {
+        return;
+    }
+    let _ = makepad_platform::shader_error::take();
+    if let Err(error) = eval_chunk(cx, widget, &format!("{layer} +: {{\n{body}}}")) {
+        log!("TWEAK revert of {layer} fns failed: {error}");
+    }
+    if let Some(error) = makepad_platform::shader_error::take() {
+        log!("TWEAK revert of {layer} fns did not compile either: {}", terse_shader_error(&error));
+    }
+}
+
 /// Rewrite every `tweak://apply:LINE:COL` in an error into the chunk's own
 /// line numbers.
 fn relocate_chunk_error(error: &str, callsite: u32) -> String {
@@ -1984,7 +2127,17 @@ pub fn apply_splash_chunk(
 ) -> Result<Vec<TweakDiffEntry>, String> {
     let chunk = chunk.trim();
     let before = reflect_flat(cx, widget);
+    // The draw shader compiles inside the apply itself, so an fn that names
+    // a field this layer does not have fails RIGHT HERE. Never answer ok
+    // with a widget that stopped drawing: put the layer back and say why.
+    let _ = makepad_platform::shader_error::take();
     eval_chunk(cx, widget, chunk)?;
+    if let Some(error) = makepad_platform::shader_error::take() {
+        revert_failed_chunk(cx, widget, chunk, &before);
+        let terse = terse_shader_error(&error);
+        log!("TWEAK {} {} rejected, shader did not compile: {}", origin, path, terse);
+        return Err(format!("shader compile error: {terse}"));
+    }
     // Template-built widgets (tabs, list items) share one source object;
     // an edit to one is an edit to the template, so every live sibling
     // takes it too — and the ledger names the template's site as the
@@ -2005,10 +2158,12 @@ pub fn apply_splash_chunk(
     } else {
         template_siblings(cx, widget)
     };
+    reinject_fn_overrides(cx, widget, chunk);
     let mut siblings = 0u32;
     for sibling in fan_out {
         if eval_chunk(cx, &sibling, chunk).is_ok() {
             siblings += 1;
+            reinject_fn_overrides(cx, &sibling, chunk);
         }
     }
 
@@ -2456,6 +2611,11 @@ pub fn tweak_callback(
             out.push_str(&diff_json(&diff));
             out.push_str(",\"ann\":");
             out.push_str(&strokes_json(&strokes));
+            // The repaint counter, read WITHOUT causing a frame: two reads
+            // apart in time tell whether the window animates on its own
+            // (a shader that reads draw_pass.time keeps every live pass
+            // repainting — the platform's time repaint, the spinner's too).
+            out.push_str(&format!(",\"f\":{}", cx.repaint_id()));
             out.push('}');
             Ok(out)
         }

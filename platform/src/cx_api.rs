@@ -978,6 +978,12 @@ impl Cx {
     /// Cancel a scrub pin while the button is still held (Escape /
     /// right-click cancel): clears the capture's pin flag and restores the
     /// cursor at the press point.
+    /// The repaint counter: one step per presented frame. Two reads apart
+    /// in time say whether the app paints on its own.
+    pub fn repaint_id(&self) -> u64 {
+        self.repaint_id
+    }
+
     pub fn unpin_pointer_capture(&mut self) {
         if self.fingers.unpin_captures() {
             self.platform_ops.push_back(CxOsOp::PinMousePointer(false));
