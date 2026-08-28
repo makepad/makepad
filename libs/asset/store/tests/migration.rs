@@ -86,7 +86,13 @@ fn ann(title: &str) -> AssetAnnotation {
 }
 
 fn q(text: &str) -> SearchQuery<'_> {
-    SearchQuery { text, filters: SearchFilters::default(), page_size: 10, facets: 0 }
+    SearchQuery {
+        text,
+        filters: SearchFilters::default(),
+        expand: false,
+        page_size: 10,
+        facets: 0,
+    }
 }
 
 const ANYONE: SearchViewer<'static> = SearchViewer { principal: None, scope: ViewerScope::All };
