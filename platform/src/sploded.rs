@@ -40,6 +40,13 @@ use crate::{
 /// so `set_ortho_matrix` — which has no `Cx` — can consume it.
 #[derive(Clone, Copy, Debug)]
 pub struct SplodedParams {
+    /// +1: this pass displays directly. -1: this pass renders to a texture
+    /// that the compositor samples Y-FLIPPED (the gauss scene pass on
+    /// backends where `gauss_render_texture_y_flip_for_os` says so). The
+    /// value comes from the pass REGISTRATION — one source of truth — and
+    /// `camera_view` compensates numerically, so a pass restructure can
+    /// never silently flip the explode direction again.
+    pub v_flip: f32,
     /// Rotation about the vertical screen axis, radians.
     pub yaw: f32,
     /// Tilt about the horizontal screen axis, radians.
@@ -90,14 +97,104 @@ impl SplodedParams {
         let m22 = self.z_scale;
 
         // Mat4f is column major: v[4 * col + row].
-        Mat4f {
+        let m = Mat4f {
             v: [
                 m00, m10, 0.0, 0.0, //
                 m01, m11, 0.0, 0.0, //
                 m02, m12, m22, 0.0, //
                 m03, m13, 0.0, 1.0,
             ],
+        };
+        if self.v_flip >= 0.0 {
+            return m;
         }
+        // The compositor will flip this pass vertically; pre-compose the
+        // inverse flip (about the pass centre) so the DISPLAYED result is
+        // identical to the direct-display case: F * M, F: v -> 2*cy - v.
+        let mut v = m.v;
+        v[1] = -v[1];
+        v[5] = -v[5];
+        v[9] = -v[9];
+        v[13] = 2.0 * cy - v[13];
+        Mat4f { v }
+    }
+}
+
+#[cfg(test)]
+mod sploded_convention_tests {
+    use super::*;
+    use crate::makepad_math::dvec2;
+
+    /// THE ANTI-FLIP GATE: for any point and depth, the y-flipped-texture
+    /// path composed with the compositor's flip must land on EXACTLY the
+    /// same screen position as the direct path — the explode direction is
+    /// invariant under pass restructures by construction. Runs as
+    /// `cargo test -p makepad-platform sploded` and must pass before any
+    /// user-instance refresh of this mode.
+    #[test]
+    fn explode_direction_invariant_under_texture_y_flip() {
+        let offset = dvec2(0.0, 0.0);
+        let size = dvec2(1200.0, 800.0);
+        let base = SplodedParams {
+            v_flip: 1.0,
+            yaw: 0.35,
+            pitch: 0.38,
+            gain: 12.0,
+            fit: 0.8,
+            z_center: 5.0,
+            z_scale: 0.01,
+        };
+        let flipped = SplodedParams {
+            v_flip: -1.0,
+            ..base
+        };
+        let md = base.camera_view(offset, size);
+        let mf = flipped.camera_view(offset, size);
+        let cy = (size.y * 0.5) as f32;
+        let apply = |m: &Mat4f, p: [f32; 3]| -> [f32; 2] {
+            let x = m.v[0] * p[0] + m.v[4] * p[1] + m.v[8] * p[2] + m.v[12];
+            let y = m.v[1] * p[0] + m.v[5] * p[1] + m.v[9] * p[2] + m.v[13];
+            [x, y]
+        };
+        for point in [
+            [100.0f32, 100.0, 0.0],
+            [600.0, 400.0, 5.0],
+            [1100.0, 700.0, 12.0],
+            [600.0, 100.0, 20.0],
+        ] {
+            let direct = apply(&md, point);
+            let via_texture = {
+                let p = apply(&mf, point);
+                // the compositor's vertical flip about the pass centre
+                [p[0], 2.0 * cy - p[1]]
+            };
+            assert!(
+                (direct[0] - via_texture[0]).abs() < 0.01
+                    && (direct[1] - via_texture[1]).abs() < 0.01,
+                "convention flip leaked: {direct:?} vs {via_texture:?} at {point:?}"
+            );
+        }
+        // And the direction law itself: with positive yaw, a DEEPER point
+        // at the same screen position must displace toward positive u
+        // (toward the camera side), never away.
+        let shallow = apply(&md, [600.0, 400.0, 0.0]);
+        let deep = apply(&md, [600.0, 400.0, 20.0]);
+        assert!(
+            deep[0] > shallow[0],
+            "deeper must parallax toward the camera side: {shallow:?} vs {deep:?}"
+        );
+        // Rotation direction law: mirroring the yaw mirrors the parallax.
+        let neg = SplodedParams {
+            yaw: -base.yaw,
+            ..base
+        };
+        let mn = neg.camera_view(offset, size);
+        let deep_neg = apply(&mn, [600.0, 400.0, 20.0]);
+        let shallow_neg = apply(&mn, [600.0, 400.0, 0.0]);
+        assert!(
+            deep_neg[0] < shallow_neg[0],
+            "negative yaw must parallax the deep layer the other way"
+        );
     }
 }
 
@@ -113,6 +210,13 @@ struct SplodedDrag {
 /// false, which is the byte-identical-rendering gate.
 pub struct SplodedView {
     active: bool,
+    /// The pass the exploded camera applies to, WITH its display
+    /// y-convention (+1 direct, -1 sampled-flipped): registered each frame
+    /// by the window widget from the one authority for that convention.
+    /// Never the window pass itself, so panels/overlays stay flat.
+    pub target_pass: Option<crate::draw_pass::DrawPassId>,
+    /// The registered pass's display y-flip (see target_pass).
+    pub target_v_flip: f32,
     /// A toggle requested from WITHIN event dispatch (the tweaker's panel
     /// button): performed by the intercept at the next event, pre-dispatch —
     /// set_active clears hovers via nested dispatch and must never run
@@ -155,6 +259,8 @@ impl Default for SplodedView {
         Self {
             active: false,
             pending_toggle: false,
+            target_pass: None,
+            target_v_flip: 1.0,
             yaw: DEFAULT_YAW,
             pitch: DEFAULT_PITCH,
             spread: DEFAULT_SPREAD,
@@ -189,6 +295,7 @@ impl SplodedView {
         let fit = (w / ext_u.max(1.0)).min(h / ext_v.max(1.0)) * FIT_MARGIN;
 
         SplodedParams {
+            v_flip: 1.0,
             yaw: self.yaw,
             pitch: self.pitch,
             gain,
@@ -347,13 +454,50 @@ impl Cx {
 
     /// Push the current state onto every window pass and get a frame out of
     /// it. Cheap enough to run on each drag step.
+    /// The window widget registers its body-content (scene) pass here each
+    /// frame while the mode is on; the exploded camera then applies to
+    /// THAT pass only, and everything at window level (the tweak panel,
+    /// tooltips, modals) composites flat.
+    pub fn sploded_set_target_pass(
+        &mut self,
+        pass: Option<crate::draw_pass::DrawPassId>,
+        v_flip: f32,
+    ) {
+        if self.sploded.target_pass != pass || self.sploded.target_v_flip != v_flip {
+            self.sploded.target_pass = pass;
+            self.sploded.target_v_flip = v_flip;
+            self.sploded_sync();
+        }
+    }
+
     fn sploded_sync(&mut self) {
         let active = self.sploded.active;
         if active {
             self.sploded.layers = self.sploded_count_layers();
         }
+        let target = self.sploded.target_pass;
         for draw_pass_id in self.passes.id_iter() {
-            if !matches!(self.passes[draw_pass_id].parent, CxDrawPassParent::Window(_)) {
+            let is_target = target == Some(draw_pass_id);
+            let is_window_parent = matches!(
+                self.passes[draw_pass_id].parent,
+                CxDrawPassParent::Window(_)
+            );
+            // With a registered target, ONLY that pass explodes; without
+            // one (no window began its scene pass yet this toggle), fall
+            // back to window passes so the mode is never a silent no-op.
+            if target.is_some() {
+                if !is_target {
+                    // ensure anything previously marked (e.g. the window
+                    // pass from the fallback frame) is cleared
+                    if self.passes[draw_pass_id].sploded.is_some() {
+                        let saved = self.sploded.saved_zbias_step;
+                        let pass = &mut self.passes[draw_pass_id];
+                        pass.sploded = None;
+                        pass.zbias_step = saved;
+                    }
+                    continue;
+                }
+            } else if !is_window_parent {
                 continue;
             }
             if active {
@@ -361,7 +505,10 @@ impl Cx {
                     .get_pass_rect(draw_pass_id, 1.0)
                     .map(|r| r.size)
                     .unwrap_or(dvec2(1.0, 1.0));
-                let params = self.sploded.params(size);
+                let mut params = self.sploded.params(size);
+                if Some(draw_pass_id) == self.sploded.target_pass {
+                    params.v_flip = self.sploded.target_v_flip;
+                }
                 let pass = &mut self.passes[draw_pass_id];
                 if pass.sploded.is_none() {
                     self.sploded.saved_zbias_step = pass.zbias_step;
