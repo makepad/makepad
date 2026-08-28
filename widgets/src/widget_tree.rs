@@ -1855,6 +1855,14 @@ impl WidgetTree {
         }
     }
 
+    pub fn parent_of(&self, uid: WidgetUid) -> Option<WidgetUid> {
+        self.inner.borrow().graph.get(&uid).and_then(|n| n.parent)
+    }
+
+    pub fn name_of(&self, uid: WidgetUid) -> Option<LiveId> {
+        self.inner.borrow().graph.get(&uid).map(|n| n.name)
+    }
+
     /// The plane a widget last drew on while the exploded view was up.
     pub fn nesting_depth(&self, uid: WidgetUid) -> Option<usize> {
         let inner = self.inner.borrow();
