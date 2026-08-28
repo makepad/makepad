@@ -65,10 +65,34 @@ use std::time::{Duration, Instant};
 const LEASE_MS: u64 = 60_000;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 /// Fleet poll cadence + Asset-Server cancel check cadence.
+#[cfg(not(test))]
 const FLEET_POLL_EVERY: Duration = Duration::from_millis(1_200);
+/// The tests drive this same loop against fakes that answer instantly; the
+/// real cadence would only make the suite sleep.
+#[cfg(test)]
+const FLEET_POLL_EVERY: Duration = Duration::from_millis(20);
 const CANCEL_CHECK_EVERY: Duration = Duration::from_secs(3);
 /// Idle sleep between claim attempts when the queue is empty.
 const IDLE_SLEEP: Duration = Duration::from_secs(2);
+/// How long a job may sit on the box its claim loop is pinned to — waiting
+/// for that box's VRAM, or queued behind its current run — before the
+/// coordinator looks at the rest of the fleet.
+///
+/// The trade is a cold load against a serialized run: an idle box that
+/// already holds the weights starts in ~30 s, while sitting behind a clip
+/// costs minutes. Anything past this is worth moving, and moving is safe:
+/// the Asset Server job and its lease never change, so nothing the person
+/// enqueued fails, restarts, or burns an attempt.
+#[cfg(not(test))]
+fn migrate_after() -> Duration {
+    Duration::from_secs(20)
+}
+/// The same decision on a test clock — the migration tests drive the real
+/// loop, and a 20 s threshold would only make them slow.
+#[cfg(test)]
+fn migrate_after() -> Duration {
+    Duration::from_millis(60)
+}
 /// Hard wall-clock ceiling for one generation (queue + render).
 const JOB_DEADLINE: Duration = Duration::from_secs(45 * 60);
 /// The prompt expander's own budget, covering the wait for a text model to
@@ -116,6 +140,13 @@ pub struct GenArtifact {
 #[derive(Clone, Debug)]
 pub enum FleetPoll {
     Running { stage: String, progress: f64 },
+    /// Accepted by the box but not started: it sits in that node's queue.
+    /// Deliberately distinct from `Running` — a queued job has not spent a
+    /// second of GPU time, so it is still free to be moved to an idle box,
+    /// and the person watching it deserves to be told that it is waiting on
+    /// a queue rather than rendering. `ahead` is how many of the box's own
+    /// runs are in front of it, when the node's health says.
+    Queued { stage: String, ahead: Option<u64> },
     /// Finished. `text` is the completed answer of a text-answering job
     /// (the service's `text`, falling back to the streamed `partial_text`);
     /// `None` on jobs that produce artifacts instead.
@@ -163,6 +194,26 @@ pub trait GenFleet {
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String>;
     fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String>;
     fn cancel(&mut self, fleet_job: &str);
+
+    /// Look past the box this adapter is pinned to, for the job in hand, and
+    /// name the idle box that could start it NOW (a short label, never a
+    /// URL). `None` means nothing elsewhere is both idle and able to admit
+    /// this request, so the caller keeps waiting exactly as it did before.
+    ///
+    /// Latching on purpose: once an answer is given, this adapter's
+    /// selection stays widened for the rest of the job — the job has already
+    /// proved that its own box cannot take it.
+    fn widen_to_idle(&mut self, _request: &GenRequest) -> Option<String> {
+        None
+    }
+
+    /// Consider the whole fleet for this job from the start, without
+    /// waiting for the pinned box to fail it — see [`FleetReach`].
+    fn widen_all(&mut self) {}
+
+    /// Undo any widening. Called once per job, before its first dispatch, so
+    /// one stuck job never changes where the next one goes.
+    fn narrow(&mut self) {}
 }
 
 /// A source payload relayed from the catalog into the fleet request.
@@ -265,6 +316,23 @@ enum StageStyle {
     /// has no stages worth showing, so the line says which model on which
     /// box, and how long it has been thinking.
     Vision,
+}
+
+/// Which boxes one job's dispatch may choose between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FleetReach {
+    /// This worker's own box, until the job proves that box cannot take it
+    /// (see [`GenFleet::widen_to_idle`]). One claim loop per box IS the
+    /// concurrency rule: it is what stops every loop piling onto the same
+    /// warm GPU.
+    OwnBox,
+    /// The whole fleet from the first attempt. For work that is not this
+    /// box's speciality but the fleet's: the prompt expander needs the box
+    /// where a text model is already resident, and a video box that loads a
+    /// 27B LLM to write one sentence is a video box with no room left for
+    /// video — which is exactly how an expansion failed on a 24 GB node
+    /// while the chat box sat idle.
+    WholeFleet,
 }
 
 /// One finished fleet dispatch.
@@ -430,7 +498,14 @@ impl<'f> Coordinator<'f> {
         }
 
         let style = if kind.is_text() { StageStyle::Vision } else { StageStyle::Fleet };
-        let answer = match self.dispatch_and_wait(claimed, &request, style, JOB_DEADLINE, stop)? {
+        let answer = match self.dispatch_and_wait(
+            claimed,
+            &request,
+            style,
+            FleetReach::OwnBox,
+            JOB_DEADLINE,
+            stop,
+        )? {
             FleetRun::Done(answer) => answer,
             FleetRun::Outcome(outcome) => return Ok(outcome),
         };
@@ -485,11 +560,15 @@ impl<'f> Coordinator<'f> {
             job_hex.trim_start_matches("job_").chars().take(16).collect::<String>()
         );
         publish.alias = AssetAlias::from_str(&alias_text).ok();
-        publish.prompt = request.prompt.clone();
+        // An EXPANDED prompt is model output: newlines, tabs and the odd
+        // stray control byte are normal in it, and the store refuses any
+        // annotation field carrying one. Cleaning it here is not cosmetic —
+        // the alternative was losing a finished clip at the last step.
+        publish.prompt = annotation_text(&request.prompt, MAX_PROMPT_BYTES);
         // Both prompts survive: the expanded one generated the pixels, the
         // original is the only thing the person can search for.
         if let Some(original) = &request.original_prompt {
-            publish.provenance = format!("expanded from: {}", bounded(original, 500));
+            publish.provenance = format!("expanded from: {}", annotation_text(original, 500));
         }
         publish.generator = "asset-worker".to_string();
         publish.backend = answer.backend;
@@ -511,7 +590,23 @@ impl<'f> Coordinator<'f> {
                 params_digest: None,
             });
         }
-        match self.client.publish_artifact(&publish) {
+        let mut published = self.client.publish_artifact(&publish);
+        if let Err(error) = &published {
+            // The GPU spend already happened. A row the store refuses over
+            // TEXT must never cost the person their render: strip the
+            // annotation to what the store accepts, say so, and publish the
+            // same bytes once more. Only text refusals retry — a rejected
+            // artifact is a real failure.
+            if is_annotation_text_refusal(error) {
+                self.log(&format!(
+                    "job {}: publish refused ({error}) — retrying with plain annotation text",
+                    claimed.job
+                ));
+                scrub_annotation(&mut publish);
+                published = self.client.publish_artifact(&publish);
+            }
+        }
+        match published {
             Ok(published) => {
                 self.log(&format!(
                     "job {}: published {} rev {}",
@@ -633,9 +728,14 @@ impl<'f> Coordinator<'f> {
                 content_type: "image/jpeg".to_string(),
             }),
         };
-        let answer =
-            match self.dispatch_and_wait(claimed, &request, StageStyle::Vision, JOB_DEADLINE, stop)?
-            {
+        let answer = match self.dispatch_and_wait(
+            claimed,
+            &request,
+            StageStyle::Vision,
+            FleetReach::OwnBox,
+            JOB_DEADLINE,
+            stop,
+        )? {
             FleetRun::Done(answer) => answer,
             FleetRun::Outcome(outcome) => return Ok(outcome),
         };
@@ -760,8 +860,8 @@ impl<'f> Coordinator<'f> {
             kind: &EXPAND_KIND,
             prompt: original.clone(),
             original_prompt: None,
-            // Affinity picks the box's own text model; a video pin means
-            // nothing here.
+            // Affinity picks the fleet's warmest text model; a video pin
+            // means nothing here.
             model: String::new(),
             seed: None,
             body,
@@ -779,13 +879,16 @@ impl<'f> Coordinator<'f> {
             claimed,
             &expand_request,
             StageStyle::Vision,
+            // The expansion goes where a text model already lives, not
+            // wherever this claim loop happens to be pinned.
+            FleetReach::WholeFleet,
             EXPAND_DEADLINE,
             stop,
         )? {
             FleetRun::Done(answer) => {
                 match answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                     Some(text) => {
-                        request.prompt = bounded(text, MAX_EXPANDED_PROMPT_BYTES);
+                        request.prompt = annotation_text(text, MAX_EXPANDED_PROMPT_BYTES);
                         request.original_prompt = Some(original);
                         self.log(&format!(
                             "job {}: expanded to \"{}\"",
@@ -824,6 +927,7 @@ impl<'f> Coordinator<'f> {
         claimed: &ClaimedJobDto,
         request: &GenRequest,
         style: StageStyle,
+        reach: FleetReach,
         deadline: Duration,
         stop: &AtomicBool,
     ) -> Result<FleetRun, ClientError> {
@@ -832,6 +936,18 @@ impl<'f> Coordinator<'f> {
         let mut last_cancel_check = Instant::now();
         let mut wait_stage: Option<String> = None;
         let mut retry_not_before: Option<Instant> = None;
+        // This job's own box is the only candidate until it proves it cannot
+        // take the job; one stuck job never widens the next one's selection.
+        self.fleet.narrow();
+        if reach == FleetReach::WholeFleet {
+            self.fleet.widen_all();
+        }
+        // At most ONE migration per job, whatever the reason: a job that
+        // bounces between boxes finishes nowhere.
+        let mut migrated = false;
+        // When the current stuckness started — a VRAM wait before dispatch,
+        // or a node-side queue after it.
+        let mut stuck_since: Option<Instant> = None;
         'generation: loop {
             // Selection is refreshed while a compatible GPU is temporarily
             // below its advertised admission target. This is also the retry
@@ -891,6 +1007,24 @@ impl<'f> Coordinator<'f> {
                             self.log(&format!("job {}: {stage}", claimed.job));
                         }
                         wait_stage = Some(stage);
+                        // Spread before stacking: a box that cannot admit
+                        // this job keeps it only as long as no other box is
+                        // idle and ready to run it.
+                        let waited = stuck_since.get_or_insert_with(Instant::now).elapsed();
+                        if !migrated && waited >= migrate_after() {
+                            match self.fleet.widen_to_idle(request) {
+                                Some(idle) => {
+                                    migrated = true;
+                                    self.log(&format!(
+                                        "job {}: {:.0}s waiting for its own box — {idle} is \
+                                         idle and can run it now, moving it there",
+                                        claimed.job,
+                                        waited.as_secs_f64()
+                                    ));
+                                }
+                                None => stuck_since = Some(Instant::now()),
+                            }
+                        }
                     }
                     Err(error) => {
                         return Ok(FleetRun::Outcome(JobOutcome::Failed {
@@ -904,6 +1038,9 @@ impl<'f> Coordinator<'f> {
             let node_tag = self.fleet.route_label(&fleet_job);
             let node_host = self.fleet.route_host(&fleet_job);
             let dispatched_at = Instant::now();
+            // A new box, a new clock: what counts now is how long THIS node
+            // leaves the job in its queue.
+            stuck_since = None;
             let mut heartbeat_stage = match style {
                 StageStyle::Fleet => match &node_tag {
                     Some(tag) => format!("@{tag} queued-on-fleet"),
@@ -1009,12 +1146,50 @@ impl<'f> Coordinator<'f> {
                         }))
                     }
                     Ok(FleetPoll::Running { stage, progress }) => {
+                        // It is running: whatever it waited for is over.
+                        stuck_since = None;
                         heartbeat_permille = (progress.clamp(0.0, 1.0) * 1000.0) as u16;
                         if style == StageStyle::Fleet {
                             heartbeat_stage = match &node_tag {
                                 Some(tag) => format!("@{tag} {stage}"),
                                 None => stage,
                             };
+                        }
+                    }
+                    Ok(FleetPoll::Queued { stage, ahead }) => {
+                        // Say WHY it is not moving: a queue behind another
+                        // run is a different thing from a VRAM wait, and an
+                        // operator deciding whether to wait needs to know
+                        // which one this is and on which box.
+                        heartbeat_permille = 0;
+                        if style == StageStyle::Fleet {
+                            heartbeat_stage = queued_note(&stage, ahead, node_tag.as_deref());
+                        }
+                        let waited = stuck_since.get_or_insert_with(Instant::now).elapsed();
+                        if !migrated && waited >= migrate_after() {
+                            match self.fleet.widen_to_idle(request) {
+                                Some(idle) => {
+                                    migrated = true;
+                                    self.log(&format!(
+                                        "job {}: {:.0}s queued on {} — moving it to {idle}",
+                                        claimed.job,
+                                        waited.as_secs_f64(),
+                                        node_tag.as_deref().unwrap_or("that box")
+                                    ));
+                                    // Take it off the queue it is stuck in
+                                    // BEFORE re-dispatching: the same job
+                                    // must never be live on two boxes.
+                                    self.fleet.cancel(&fleet_job);
+                                    wait_stage =
+                                        Some(format!("waiting-for-fleet: moving to {idle}"));
+                                    stuck_since = None;
+                                    continue 'generation;
+                                }
+                                // Nothing better exists right now. Ask again
+                                // after another full interval, not on every
+                                // poll: the question costs a fleet probe.
+                                None => stuck_since = Some(Instant::now()),
+                            }
                         }
                     }
                     Err(error) => {
@@ -1215,7 +1390,7 @@ fn build_product(
     // paragraph of camera language; a person looking for their run scans for
     // their own words.
     let titled_from = request.original_prompt.as_deref().unwrap_or(&request.prompt);
-    let mut title = makepad_asset_client::util::sanitize_text(titled_from, 120);
+    let mut title = annotation_text(titled_from, 120);
     if title.is_empty() {
         title = format!("Generated {}", kind.action);
     }
@@ -1368,6 +1543,74 @@ fn bounded(text: &str, max: usize) -> String {
     makepad_asset_client::util::sanitize_text(text, max)
 }
 
+/// Longest prompt recorded on a published row (the job body itself refuses
+/// anything past 4 000, so this only ever bounds an expansion).
+const MAX_PROMPT_BYTES: usize = 4_000;
+
+/// Text on its way into a searchable annotation.
+///
+/// Every annotation field is refused by the store if it carries a control
+/// character, and the expander's answer is a paragraph with newlines in it.
+/// A control character becomes ONE SPACE rather than nothing: dropping the
+/// newline between two lines would run their words together and make the
+/// prompt unsearchable. Whitespace runs collapse, the ends trim, and the
+/// cut happens on a word boundary so the last word is a word.
+fn annotation_text(text: &str, max: usize) -> String {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out = String::with_capacity(spaced.len().min(max));
+    for word in spaced.split_whitespace() {
+        let sep = usize::from(!out.is_empty());
+        if out.len() + sep + word.len() > max {
+            break;
+        }
+        if sep == 1 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        // One word longer than the whole budget: cut it mid-word rather
+        // than publish an empty field.
+        out = bounded(spaced.trim(), max);
+    }
+    out
+}
+
+/// Did the store refuse this publication over annotation TEXT (as opposed
+/// to the artifact, the rights, or the network)? Only that class is worth
+/// republishing with plainer words.
+fn is_annotation_text_refusal(error: &ClientError) -> bool {
+    match error {
+        ClientError::InvalidInput { what } => what.starts_with("annotation"),
+        // The server's own validator, reported through its error document.
+        ClientError::Server { detail: Some(detail), .. } => {
+            detail.contains("annotation") && !detail.contains("artifact")
+        }
+        _ => false,
+    }
+}
+
+/// Last-resort annotation: exactly what the store's validator accepts —
+/// no control characters anywhere, a title that exists, and labels within
+/// the charset. Used only after a refusal, on work that is already paid for.
+fn scrub_annotation(publish: &mut PublishRequest) {
+    publish.title = annotation_text(&publish.title, 120);
+    if publish.title.is_empty() {
+        publish.title = "Generated asset".to_string();
+    }
+    publish.description = annotation_text(&publish.description, 1_000);
+    publish.prompt = annotation_text(&publish.prompt, MAX_PROMPT_BYTES);
+    publish.provenance = annotation_text(&publish.provenance, 500);
+    let label_ok = |label: &String| {
+        !label.is_empty() && label.len() <= 128 && !label.chars().any(char::is_control)
+    };
+    publish.categories.retain(label_ok);
+    publish.tags.retain(label_ok);
+}
+
 /// Bound an ANSWER for the job result document. Line breaks survive — a
 /// nine-line record and a paragraph are different answers, and the client
 /// that asked gets what the model actually wrote — while every other
@@ -1476,7 +1719,23 @@ pub struct AssetAiFleet {
     log: bool,
     /// The box a dispatched job lives on: `fleet_job -> base_url`.
     routes: std::collections::HashMap<String, String>,
+    /// The rest of the fleet, kept live by whoever owns the claim loops.
+    /// A pinned adapter dispatches ONLY to its own box — that pinning is
+    /// what stops every loop from piling onto the same warm GPU — until a
+    /// job proves its box cannot take it. Then, and only for that job, these
+    /// boxes join the selection.
+    overflow: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Latched by [`GenFleet::widen_to_idle`], cleared by
+    /// [`GenFleet::narrow`] at the start of every job.
+    widened: bool,
+    /// Throttled `jobs_pending` reading per box, for the "queued behind N
+    /// runs" note: `base_url -> (read at, depth)`. Only a job actually
+    /// sitting in a node queue ever asks, and then at most this often.
+    queue_depth: std::collections::HashMap<String, (Instant, u64)>,
 }
+
+/// How often a queued job may ask its box how deep its queue is.
+const QUEUE_DEPTH_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GenRoute {
@@ -1486,7 +1745,10 @@ enum GenRoute {
         backend: String,
         version: String,
     },
-    Waiting { stage: String },
+    /// Nothing can run this yet. `on` is the box being held for, when there
+    /// is one — the scheduler needs to know whether that box is merely
+    /// short of memory for a moment, or busy for the next several minutes.
+    Waiting { stage: String, on: Option<usize> },
 }
 
 impl AssetAiFleet {
@@ -1501,6 +1763,9 @@ impl AssetAiFleet {
             discovered: None,
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         })
     }
 
@@ -1510,6 +1775,9 @@ impl AssetAiFleet {
             discovered: Some(makepad_asset_ai::discovery::start_listener()),
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         }
     }
 
@@ -1519,7 +1787,24 @@ impl AssetAiFleet {
             discovered: None,
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         }
+    }
+
+    /// Name the rest of the fleet for a PINNED adapter (one box, one claim
+    /// loop). The list is read live, so a box that joins later is a valid
+    /// destination without respawning anything. Nothing here changes where
+    /// jobs normally go: these boxes enter selection only after
+    /// [`GenFleet::widen_to_idle`] finds one of them idle for a job its own
+    /// box is holding up.
+    pub fn with_overflow(
+        mut self,
+        boxes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> AssetAiFleet {
+        self.overflow = Some(boxes);
+        self
     }
 
     pub fn boxes(&self) -> Vec<String> {
@@ -1534,14 +1819,40 @@ impl AssetAiFleet {
         boxes
     }
 
+    /// The boxes one dispatch may choose between: this adapter's own, plus
+    /// the rest of the fleet once a job has been widened onto it.
+    fn dispatch_boxes(&self) -> Vec<String> {
+        let mut boxes = self.boxes();
+        if self.widened {
+            for url in self.overflow_boxes() {
+                if !boxes.contains(&url) {
+                    boxes.push(url);
+                }
+            }
+        }
+        boxes
+    }
+
+    /// The wider fleet as it stands right now (empty when this adapter was
+    /// never given one).
+    fn overflow_boxes(&self) -> Vec<String> {
+        self.overflow
+            .as_ref()
+            .and_then(|boxes| boxes.lock().ok().map(|boxes| boxes.clone()))
+            .unwrap_or_default()
+    }
+
     /// Health + model snapshot of every box this adapter can reach.
     pub fn snapshots(&self) -> (Vec<makepad_asset_ai::fleet::BoxSnapshot>, bool) {
+        self.snapshots_of(&self.boxes())
+    }
+
+    fn snapshots_of(&self, boxes: &[String]) -> (Vec<makepad_asset_ai::fleet::BoxSnapshot>, bool) {
         use makepad_asset_ai::client::{ContentProvider, LocalService};
         use makepad_asset_ai::fleet::BoxSnapshot;
-        let boxes = self.boxes();
         let mut snapshots = Vec::with_capacity(boxes.len());
         let mut probe_incomplete = false;
-        for url in &boxes {
+        for url in boxes {
             let provider = LocalService::new(url);
             let mut snapshot = BoxSnapshot::new(url);
             match provider.health() {
@@ -1596,14 +1907,38 @@ impl AssetAiFleet {
     /// facts pass admission. A hardware-compatible target under transient
     /// pressure remains a wait candidate instead of becoming an error or a
     /// fallback submission.
-    fn pick_box(&self, domain: &str, want_model: &str) -> Result<GenRoute, String> {
-        let (snapshots, probe_incomplete) = self.snapshots();
+    fn pick_box(
+        &self,
+        boxes: &[String],
+        domain: &str,
+        want_model: &str,
+    ) -> Result<GenRoute, String> {
+        let (snapshots, probe_incomplete) = self.snapshots_of(boxes);
         match select_route(&snapshots, domain, want_model) {
             Err(_) if probe_incomplete => Ok(GenRoute::Waiting {
                 stage: "waiting-for-fleet: capability probe incomplete".to_string(),
+                on: None,
             }),
             result => result,
         }
+    }
+
+    /// How many of a box's own runs are in front of a job queued there.
+    /// Throttled: a queued job polls every second or so and the answer only
+    /// changes when a run ends. `None` = the box did not say.
+    fn runs_ahead(&mut self, base_url: &str) -> Option<u64> {
+        use makepad_asset_ai::client::{ContentProvider, LocalService};
+        if let Some((at, depth)) = self.queue_depth.get(base_url) {
+            if at.elapsed() < QUEUE_DEPTH_EVERY {
+                return Some(*depth);
+            }
+        }
+        let pending = LocalService::new(base_url).health().ok()?.jobs_pending?;
+        // `jobs_pending` counts this job too.
+        let ahead = pending.saturating_sub(1);
+        self.queue_depth
+            .insert(base_url.to_string(), (Instant::now(), ahead));
+        Some(ahead)
     }
 }
 
@@ -1615,7 +1950,7 @@ const WARM_AFFINITY: u32 = 3;
 
 /// Route one request: an explicit model pin is honoured whenever a
 /// compatible GPU already HOLDS it, otherwise the box's own best model for
-/// the domain wins.
+/// the domain wins — and an IDLE box beats a busy one either way.
 ///
 /// A pin is a preference, not an instruction to fetch. A picker's profile
 /// carries one model id fleet-wide, so a pin that is merely *capable* on
@@ -1626,7 +1961,72 @@ const WARM_AFFINITY: u32 = 3;
 /// cached here, and otherwise the domain's warm model on this box runs
 /// instead. Nothing waits for a download that a resident model makes
 /// unnecessary.
+///
+/// SPREAD BEFORE STACKING. Warmth alone picked the busiest GPU in the
+/// fleet: a box running a clip is maximally warm, so every following job
+/// queued behind it while boxes with the same weights on disk sat empty.
+/// Warmth is a ~30 s question (loading cached weights); a queue is a
+/// minutes question (the run in front has to finish). So an idle box that
+/// can start now beats a warm busy one — but only when it can genuinely
+/// start: weights it already holds (`ready` or better), never a download,
+/// and never a synthetic test backend.
 fn select_route(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+) -> Result<GenRoute, String> {
+    use makepad_asset_ai::fleet::{affinity, is_synthetic_backend};
+    let route = warm_route(snapshots, domain, want_model)?;
+    // Which box is this route standing on, and is that box busy? An idle
+    // box holding the job is not a stacking problem: its memory frees on
+    // its own, and moving would only cost a load somewhere else.
+    let held_by = match &route {
+        GenRoute::Admitted { index, .. } => Some(*index),
+        GenRoute::Waiting { on, .. } => *on,
+    };
+    let busy = held_by.is_some_and(|index| !is_idle(&snapshots[index]));
+    if !busy {
+        return Ok(route);
+    }
+    let idle: Vec<makepad_asset_ai::fleet::BoxSnapshot> = snapshots
+        .iter()
+        .map(|snapshot| {
+            if is_idle(snapshot) {
+                snapshot.clone()
+            } else {
+                // Same index, nothing to offer: every picker skips a box
+                // that advertises no model, so the indices a route carries
+                // still point at the real snapshot list.
+                let mut hidden = snapshot.clone();
+                hidden.models.clear();
+                hidden
+            }
+        })
+        .collect();
+    if let Ok(GenRoute::Admitted { index, model, backend, version }) =
+        warm_route(&idle, domain, want_model)
+    {
+        let warm = affinity(&snapshots[index], &model).is_some_and(|score| score >= WARM_AFFINITY);
+        if warm && !is_synthetic_backend(&backend) {
+            return Ok(GenRoute::Admitted { index, model, backend, version });
+        }
+    }
+    Ok(route)
+}
+
+/// A box with nothing queued or running on it.
+///
+/// Free VRAM is NOT this signal and must not be confused with it: a box
+/// holding a resident model reports little free memory and is still the
+/// fastest place to start (the service evicts to admit), while a box
+/// mid-clip has plenty of free memory between steps and none of it for
+/// anyone else.
+fn is_idle(snapshot: &makepad_asset_ai::fleet::BoxSnapshot) -> bool {
+    snapshot.is_up() && snapshot.jobs_pending() == 0
+}
+
+/// The warm/cold pin rules, over whatever set of boxes it is given.
+fn warm_route(
     snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
     domain: &str,
     want_model: &str,
@@ -1664,7 +2064,9 @@ fn select_route(
                 stage: waiting_stage(
                     want_model,
                     model_admission(&snapshots[index], want_model),
+                    &short_label(&snapshots[index].base_url),
                 ),
+                on: Some(index),
             });
         }
     }
@@ -1676,23 +2078,69 @@ fn select_route(
     }
     if let Some((index, model, _)) = pick_for_domain_scored(snapshots, domain) {
         let admission = model_admission(&snapshots[index], &model);
-        return Ok(GenRoute::Waiting { stage: waiting_stage(&model, admission) });
+        return Ok(GenRoute::Waiting {
+            stage: waiting_stage(&model, admission, &short_label(&snapshots[index].base_url)),
+            on: Some(index),
+        });
     }
     Err(format!(
         "no fleet box advertises a hardware-compatible {domain} model"
     ))
 }
 
+/// Short, URL-free name for a box: the last octet of a LAN address
+/// (".166"), else the host itself. Worker status documents are visible to
+/// Asset Server clients, so the address never appears in one — but WHICH
+/// box a job is stuck on is exactly what the person watching needs.
+fn short_label(base_url: &str) -> String {
+    let host = base_url
+        .rsplit('/')
+        .next()
+        .unwrap_or(base_url)
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    match host.rsplit_once('.') {
+        Some((_, last)) if !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) => {
+            format!(".{last}")
+        }
+        _ => host.to_string(),
+    }
+}
+
+/// How a job that a box has accepted but not started reads in the RUNS
+/// list. Honest about which of the two very different stalls this is: a
+/// queue behind that box's own runs, not a memory wait — and about WHICH
+/// box, because the person watching has a fleet, not a machine.
+fn queued_note(stage: &str, ahead: Option<u64>, tag: Option<&str>) -> String {
+    use makepad_asset_ai::protocol::JOB_STATE_QUEUED;
+    let note = match ahead {
+        Some(ahead) if ahead > 0 => {
+            format!("queued behind {ahead} run{}", if ahead == 1 { "" } else { "s" })
+        }
+        // The node named its own waiting stage: say that instead of
+        // inventing a queue depth it did not report.
+        _ if !stage.is_empty() && stage != JOB_STATE_QUEUED => stage.to_string(),
+        _ => "queued-on-fleet".to_string(),
+    };
+    match tag {
+        Some(tag) => format!("@{tag} {note}"),
+        None => note,
+    }
+}
+
 fn waiting_stage(
     model: &str,
     admission: Option<makepad_asset_ai::fleet::VramAdmission>,
+    on: &str,
 ) -> String {
     use makepad_asset_ai::fleet::VramAdmission;
     match admission {
         Some(VramAdmission::Waiting { required_free_mb, free_mb }) => format!(
-            "waiting-for-vram: model {model} has {free_mb} MiB free, {required_free_mb} MiB required"
+            "waiting-for-vram: model {model} on {on} has {free_mb} MiB free, \
+             {required_free_mb} MiB required"
         ),
-        _ => format!("waiting-for-vram: model {model} awaits a fresh admission snapshot"),
+        _ => format!("waiting-for-vram: model {model} on {on} awaits a fresh admission snapshot"),
     }
 }
 
@@ -1801,7 +2249,7 @@ fn wire_request(
 
 impl GenFleet for AssetAiFleet {
     fn route_label(&self, fleet_job: &str) -> Option<String> {
-        Some(format!(".{}", self.route_host(fleet_job)?.rsplit('.').next()?))
+        Some(short_label(self.routes.get(fleet_job)?))
     }
 
     fn route_host(&self, fleet_job: &str) -> Option<String> {
@@ -1813,14 +2261,17 @@ impl GenFleet for AssetAiFleet {
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String> {
         use makepad_asset_ai::client::{ContentProvider, LocalService};
         use makepad_asset_ai::registry::Domain;
+        // ONE list, chosen once: the index a route carries points into it,
+        // and a box joining mid-decision must not shift what it means.
+        let boxes = self.dispatch_boxes();
         let (index, model, backend, version) =
-            match self.pick_box(request.kind.domain, &request.model)? {
+            match self.pick_box(&boxes, request.kind.domain, &request.model)? {
                 GenRoute::Admitted { index, model, backend, version } => {
                     (index, model, backend, version)
                 }
-                GenRoute::Waiting { stage } => return Ok(FleetDispatch::Waiting { stage }),
+                GenRoute::Waiting { stage, .. } => return Ok(FleetDispatch::Waiting { stage }),
             };
-        let base_url = self.boxes()[index].clone();
+        let base_url = boxes[index].clone();
         if self.log {
             // Say out loud when a pin was NOT what ran: a picker's profile
             // pins one model id for the whole fleet, and a box swapping in
@@ -1910,10 +2361,72 @@ impl GenFleet for AssetAiFleet {
                 error: status.error.unwrap_or_else(|| status.state.clone()),
             });
         }
+        if status.state == makepad_asset_ai::protocol::JOB_STATE_QUEUED {
+            // Accepted, not started. Ask the box how much of its own work is
+            // in front of this job, so the note can say so.
+            let ahead = self.runs_ahead(&base_url);
+            return Ok(FleetPoll::Queued {
+                stage: status.stage.unwrap_or_else(|| status.state.clone()),
+                ahead,
+            });
+        }
         Ok(FleetPoll::Running {
             stage: status.stage.unwrap_or_else(|| status.state.clone()),
             progress: status.progress.unwrap_or(0.0),
         })
+    }
+
+    fn widen_to_idle(&mut self, request: &GenRequest) -> Option<String> {
+        use makepad_asset_ai::fleet::{affinity, is_synthetic_backend};
+        let own = self.boxes();
+        let mut wider = own.clone();
+        for url in self.overflow_boxes() {
+            if !wider.contains(&url) {
+                wider.push(url);
+            }
+        }
+        if wider.len() == own.len() {
+            // Nothing else to offer: this adapter already sees the fleet
+            // (the single-shot worker), or it was never given one.
+            return None;
+        }
+        let (snapshots, _) = self.snapshots_of(&wider);
+        // Only boxes that are somewhere ELSE and idle: the box this job is
+        // already stuck on has had its turn.
+        let elsewhere: Vec<makepad_asset_ai::fleet::BoxSnapshot> = snapshots
+            .iter()
+            .map(|snapshot| {
+                if !own.contains(&snapshot.base_url) && is_idle(snapshot) {
+                    snapshot.clone()
+                } else {
+                    let mut hidden = snapshot.clone();
+                    hidden.models.clear();
+                    hidden
+                }
+            })
+            .collect();
+        let Ok(GenRoute::Admitted { index, model, backend, .. }) =
+            select_route(&elsewhere, request.kind.domain, &request.model)
+        else {
+            return None;
+        };
+        // Moving costs a load; it must not also cost a download or hand the
+        // job to a test pattern.
+        if is_synthetic_backend(&backend)
+            || !affinity(&snapshots[index], &model).is_some_and(|score| score >= WARM_AFFINITY)
+        {
+            return None;
+        }
+        self.widened = true;
+        Some(short_label(&snapshots[index].base_url))
+    }
+
+    fn widen_all(&mut self) {
+        self.widened = true;
+    }
+
+    fn narrow(&mut self) {
+        self.widened = false;
     }
 
     fn cancel(&mut self, fleet_job: &str) {
@@ -2174,7 +2687,7 @@ mod tests {
             snapshot("http://small", 24 * 1024, 24 * 1024, vec![h3]),
         ];
         match select_route(&snapshots, "video", "minimax-h3").unwrap() {
-            GenRoute::Waiting { stage } => {
+            GenRoute::Waiting { stage, .. } => {
                 assert!(!stage.contains("http://"), "worker status must not leak fleet URLs");
                 assert!(stage.contains("94208 MiB required"));
             }
@@ -3174,6 +3687,494 @@ mod tests {
             JobStateDto::Failed
         );
 
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------- spread before stacking
+
+    /// A box's queue depth: the ONLY honest "is this box busy" signal.
+    fn busy(mut snapshot: BoxSnapshot, jobs: u64) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().jobs_pending = Some(jobs);
+        snapshot
+    }
+
+    fn in_state(id: &str, domain: &str, vram_gb: f64, state: &str) -> ModelInfoJson {
+        let mut info = model(id, domain, vram_gb);
+        info.state = state.to_string();
+        info
+    }
+
+    /// Tonight's incident, in one assertion: .166 was running a clip with
+    /// the pinned quant LOADED (maximally warm), .165 was idle with its own
+    /// tier cached on disk, and every queued job stacked behind .166. Warmth
+    /// is a ~30 s question; a queue is a minutes question.
+    #[test]
+    fn an_idle_box_that_holds_the_weights_beats_a_warm_busy_one() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                2,
+            ),
+            snapshot(
+                "http://10.0.0.165:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+            ),
+        ];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 1,
+                model: "minimax-h3".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            },
+            "the idle box runs it, even though the busy one is warmer"
+        );
+        // With no pin at all the answer is the same: idle wins.
+        assert!(matches!(
+            select_route(&snapshots, "video", "").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+    }
+
+    /// Spreading buys a LOAD, never a download and never a placeholder. An
+    /// idle box that would have to fetch 20 GB is slower than the queue it
+    /// was supposed to relieve, and a test pattern is not the thing anyone
+    /// asked for.
+    #[test]
+    fn spreading_never_starts_a_download_or_a_test_pattern() {
+        let cold = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&cold, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 0, .. }
+            ),
+            "a download is not a rescue"
+        );
+
+        let mut fake = in_state("testpattern-video", "video", 0.5, MODEL_STATE_LOADED);
+        fake.backend = "testpattern".to_string();
+        let synthetic = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                3,
+            ),
+            snapshot("http://10.0.0.99:8123", 23 * 1024, 24 * 1024, vec![fake]),
+        ];
+        assert!(
+            matches!(
+                select_route(&synthetic, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 0, model, .. } if model == "minimax-h3-q4-24g"
+            ),
+            "a test pattern is never worth spreading to"
+        );
+    }
+
+    /// When the whole fleet is busy there is nothing to spread to, and the
+    /// warm/cold pin rules decide exactly as they did before.
+    #[test]
+    fn when_every_box_is_busy_the_pin_still_decides() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            busy(
+                snapshot(
+                    "http://10.0.0.165:8123",
+                    95 * 1024,
+                    96 * 1024,
+                    vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+                ),
+                1,
+            ),
+        ];
+        assert!(matches!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 0, .. }
+        ));
+    }
+
+    /// A BUSY box holding a job for memory it does not have loses it. An
+    /// IDLE box short of memory keeps it: its VRAM frees on its own, and
+    /// V4's rule stands — a pinned tier under transient pressure is never
+    /// silently downgraded.
+    #[test]
+    fn a_busy_box_loses_a_vram_wait_that_an_idle_box_could_run() {
+        // Cached, not resident: it still has to be loaded, and there is no
+        // room to load it (a model already RESIDENT is admitted on its own
+        // allocation — a different case, and not a stall).
+        let stuck = snapshot(
+            "http://10.0.0.166:8123",
+            9_821,
+            24 * 1024,
+            vec![in_state("minimax-h3-q4-24g", "video", 21.0, MODEL_STATE_READY)],
+        );
+        let idle_elsewhere = snapshot(
+            "http://10.0.0.165:8123",
+            95 * 1024,
+            96 * 1024,
+            vec![in_state("minimax-h3-q4-24g", "video", 21.0, MODEL_STATE_READY)],
+        );
+        // Busy and short of memory: the job moves.
+        let snapshots = vec![busy(stuck.clone(), 2), idle_elsewhere.clone()];
+        assert!(matches!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+        // Idle and short of memory, alone: it waits, exactly as before.
+        let alone = vec![stuck];
+        match select_route(&alone, "video", "minimax-h3-q4-24g").unwrap() {
+            GenRoute::Waiting { stage, on } => {
+                assert_eq!(on, Some(0));
+                assert!(stage.starts_with("waiting-for-vram:"), "{stage}");
+                assert!(stage.contains("on .166"), "the note must name the box: {stage}");
+                assert!(!stage.contains("http"), "worker status must not leak fleet URLs");
+            }
+            other => panic!("expected a VRAM wait, got {other:?}"),
+        }
+    }
+
+    /// The two stalls read differently, and both say which box.
+    #[test]
+    fn the_progress_note_says_which_stall_this_is_and_where() {
+        assert_eq!(short_label("http://10.0.0.166:8123"), ".166");
+        assert_eq!(short_label("http://box-a"), "box-a");
+        assert_eq!(
+            queued_note("queued", Some(2), Some(".166")),
+            "@.166 queued behind 2 runs"
+        );
+        assert_eq!(
+            queued_note("queued", Some(1), Some(".166")),
+            "@.166 queued behind 1 run"
+        );
+        // Nothing in front of it, or a box that does not count: the old
+        // words, unchanged, so a client parsing them keeps working.
+        assert_eq!(queued_note("queued", Some(0), Some(".166")), "@.166 queued-on-fleet");
+        assert_eq!(queued_note("queued", None, None), "queued-on-fleet");
+        // A node that named its own waiting stage is quoted, not overruled.
+        assert_eq!(queued_note("download", None, Some(".100")), "@.100 download");
+        // And a VRAM wait is a VRAM wait — a different sentence entirely.
+        let stage = waiting_stage(
+            "minimax-h3-q4-24g",
+            Some(makepad_asset_ai::fleet::VramAdmission::Waiting {
+                required_free_mb: 21_504,
+                free_mb: 9_821,
+            }),
+            ".166",
+        );
+        assert_eq!(
+            stage,
+            "waiting-for-vram: model minimax-h3-q4-24g on .166 has 9821 MiB free, \
+             21504 MiB required"
+        );
+    }
+
+    // ------------------------------------------------ a job that migrates
+
+    /// A fleet whose own box will not take the job, and one idle box
+    /// elsewhere that will. Records what the coordinator did about it.
+    #[derive(Default)]
+    struct StuckFleet {
+        /// Node-side job ids handed out, in order.
+        dispatched: Vec<String>,
+        /// Node-side cancels: a migration must take the job OFF the box it
+        /// was stuck on.
+        cancelled: Vec<String>,
+        /// How many times the coordinator asked for somewhere else.
+        widen_calls: usize,
+        widened: bool,
+        /// Refuse to admit anything until the coordinator widens.
+        admit_only_when_widened: bool,
+        /// Answer "queued" this many polls per node job, then finish.
+        queued_polls: usize,
+        /// No idle box anywhere: every ask answers None.
+        nowhere_to_go: bool,
+        polls: std::collections::HashMap<String, usize>,
+    }
+
+    impl GenFleet for StuckFleet {
+        fn route_label(&self, _fleet_job: &str) -> Option<String> {
+            Some(if self.widened { ".165".to_string() } else { ".166".to_string() })
+        }
+
+        fn dispatch(&mut self, _request: &GenRequest) -> Result<FleetDispatch, String> {
+            if self.admit_only_when_widened && !self.widened {
+                return Ok(FleetDispatch::Waiting {
+                    stage: "waiting-for-vram: model minimax-h3-q4-24g on .166 has 9821 MiB \
+                            free, 21504 MiB required"
+                        .to_string(),
+                });
+            }
+            let job = format!("node-job-{}", self.dispatched.len() + 1);
+            self.dispatched.push(job.clone());
+            Ok(FleetDispatch::Started {
+                job,
+                model: "minimax-h3-q4-24g".to_string(),
+                backend: "h3".to_string(),
+                version: "0.2.0-test".to_string(),
+            })
+        }
+
+        fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String> {
+            let seen = self.polls.entry(fleet_job.to_string()).or_insert(0);
+            *seen += 1;
+            if *seen <= self.queued_polls {
+                return Ok(FleetPoll::Queued {
+                    stage: "queued".to_string(),
+                    ahead: Some(1),
+                });
+            }
+            Ok(FleetPoll::Done {
+                text: None,
+                artifacts: vec![GenArtifact {
+                    content_type: "image/png".to_string(),
+                    bytes: tiny_png(),
+                }],
+            })
+        }
+
+        fn cancel(&mut self, fleet_job: &str) {
+            self.cancelled.push(fleet_job.to_string());
+        }
+
+        fn widen_to_idle(&mut self, _request: &GenRequest) -> Option<String> {
+            self.widen_calls += 1;
+            if self.nowhere_to_go {
+                return None;
+            }
+            self.widened = true;
+            Some(".165".to_string())
+        }
+
+        fn narrow(&mut self) {
+            self.widened = false;
+        }
+    }
+
+    /// Enqueue one image job on a real Asset Server and run it to the end
+    /// against `fleet`. Returns the outcome and the server-side job state.
+    fn run_one_job(
+        name: &str,
+        prompt: &str,
+        fleet: &mut dyn GenFleet,
+    ) -> (JobOutcome, PathBuf, AssetServer, String, String) {
+        let root = test_root(name);
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s(prompt.to_string())),
+            ("model", s("minimax-h3-q4-24g")),
+        ]);
+        let job = submitter.enqueue_job("gen", "image.generate", &body).expect("enqueue");
+        drop(submitter);
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet,
+                suffix: "box-166".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the job")
+        };
+        (outcome, root, server, token, job.to_string())
+    }
+
+    /// The job the fleet could not admit on its own box: it moves, and the
+    /// person never sees a failure — same Asset Server job, same lease, no
+    /// attempt burned.
+    #[test]
+    fn a_job_its_own_box_cannot_admit_moves_to_an_idle_one() {
+        let mut fleet = StuckFleet {
+            admit_only_when_widened: true,
+            ..Default::default()
+        };
+        let (outcome, root, server, token, job) =
+            run_one_job("migrate_vram", "a wireframe panther", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert_eq!(fleet.widen_calls, 1, "asked exactly once, then moved");
+        assert_eq!(fleet.dispatched.len(), 1, "nothing ran before the move");
+        assert!(fleet.cancelled.is_empty(), "nothing was on a box to cancel");
+
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let status = submitter
+            .job_status(&makepad_asset_client::dto::JobId::parse(&job).unwrap())
+            .expect("status");
+        assert_eq!(status.state, JobStateDto::Succeeded);
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A job sitting in a box's queue behind another run is taken OFF that
+    /// box before it is re-dispatched — and moved at most once, whatever
+    /// the new box does, because a job that bounces finishes nowhere.
+    #[test]
+    fn a_queued_job_is_taken_off_that_box_and_moved_exactly_once() {
+        let mut fleet = StuckFleet { queued_polls: 8, ..Default::default() };
+        let (outcome, root, server, _token, _job) =
+            run_one_job("migrate_queued", "a slow neon tunnel", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert_eq!(fleet.cancelled, vec!["node-job-1".to_string()]);
+        assert_eq!(fleet.dispatched.len(), 2, "it ran on the second box");
+        assert_eq!(fleet.widen_calls, 1, "one move per job, never two");
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Nothing idle anywhere: the job stays exactly where it is (and keeps
+    /// asking, on its own clock, rather than on every poll).
+    #[test]
+    fn a_job_with_nowhere_better_to_go_stays_where_it_is() {
+        let mut fleet = StuckFleet {
+            queued_polls: 8,
+            nowhere_to_go: true,
+            ..Default::default()
+        };
+        let (outcome, root, server, _token, _job) =
+            run_one_job("migrate_nowhere", "a patient render", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert!(fleet.cancelled.is_empty(), "never cancel what cannot be moved");
+        assert_eq!(fleet.dispatched.len(), 1);
+        assert!(fleet.widen_calls >= 1, "it did ask");
+        assert!(
+            fleet.widen_calls < 4,
+            "asking costs a fleet probe: {} asks in 8 polls",
+            fleet.widen_calls
+        );
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------- annotation text survives
+
+    /// An expanded prompt is model output. The store refuses a control
+    /// character in ANY annotation field, and refusing it after the GPU
+    /// spend cost a finished clip.
+    #[test]
+    fn an_expanded_prompt_keeps_its_words_when_its_newlines_go() {
+        assert_eq!(
+            annotation_text("a neon city\nseen from above\r\n\tat dusk", 200),
+            "a neon city seen from above at dusk"
+        );
+        assert!(!annotation_text("a\u{7}b\u{0}c", 200).chars().any(char::is_control));
+        // The cut lands on a word boundary...
+        assert_eq!(annotation_text("alpha beta gamma", 12), "alpha beta");
+        // ...unless the first word is longer than the whole budget.
+        assert_eq!(annotation_text("aaaaaaaaaaaaaaa", 4), "aaaa");
+        assert_eq!(annotation_text("   \n\t  ", 40), "");
+    }
+
+    #[test]
+    fn a_text_refusal_republishes_the_same_bytes_with_plainer_words() {
+        assert!(is_annotation_text_refusal(&ClientError::InvalidInput {
+            what: "annotation control chars"
+        }));
+        assert!(is_annotation_text_refusal(&ClientError::Server {
+            status: 400,
+            detail: Some("invalid annotation label".to_string()),
+        }));
+        // A refusal about the BYTES is a real failure and must not retry.
+        assert!(!is_annotation_text_refusal(&ClientError::InvalidInput {
+            what: "publish rights control chars"
+        }));
+        assert!(!is_annotation_text_refusal(&ClientError::Timeout { op: "publish" }));
+
+        let mut publish = PublishRequest::new(
+            "gen",
+            AssetKind::Texture,
+            "\u{7}\u{7}",
+            PublishFile {
+                bytes: tiny_png(),
+                media: MediaType::Png,
+                role: FileRole::Texture,
+                media_millis: 0,
+                dims: None,
+            },
+            PublishThumbnail {
+                bytes: tiny_png(),
+                media: ThumbnailMedia::Png,
+                width: 1,
+                height: 1,
+                views: Vec::new(),
+            },
+        );
+        publish.prompt = "one\ntwo".to_string();
+        publish.provenance = "expanded from: a\u{0}b".to_string();
+        publish.tags = vec!["loop".to_string(), "bad\u{7}tag".to_string()];
+        scrub_annotation(&mut publish);
+        assert_eq!(publish.title, "Generated asset");
+        assert_eq!(publish.prompt, "one two");
+        assert_eq!(publish.provenance, "expanded from: a b");
+        assert_eq!(publish.tags, vec!["loop".to_string()]);
+    }
+
+    /// End to end: a prompt full of newlines publishes, instead of losing
+    /// the render at the last step.
+    #[test]
+    fn a_control_char_prompt_still_publishes_its_row() {
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, _job) = run_one_job(
+            "publish_control_chars",
+            "a wireframe panther\nprowling a neon grid\r\n\tat dusk",
+            &mut fleet,
+        );
+        let JobOutcome::Published { revision, .. } = outcome else {
+            panic!("expected publication, got {outcome:?}")
+        };
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let revision = AssetRevisionId::from_str(&revision).expect("revision");
+        let manifest = submitter.fetch_asset_manifest(&revision).expect("manifest");
+        assert_eq!(manifest.kind, AssetKind::Texture);
         drop(submitter);
         drop(server);
         let _ = std::fs::remove_dir_all(root);

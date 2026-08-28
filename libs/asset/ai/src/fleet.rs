@@ -554,7 +554,14 @@ pub fn pick_for_domain(snapshots: &[BoxSnapshot], domain: &str) -> Option<(usize
 
 /// True for synthetic test backends that only exist for plumbing tests.
 fn is_synthetic_fallback(model: &ModelInfoJson) -> bool {
-    model.backend == "testpattern"
+    is_synthetic_backend(&model.backend)
+}
+
+/// [`is_synthetic_fallback`] by backend NAME — what a caller holding an
+/// already-chosen route has in hand. A scheduler that is about to move a job
+/// somewhere needs this: a test pattern is never worth moving to.
+pub fn is_synthetic_backend(backend: &str) -> bool {
+    backend == "testpattern"
 }
 
 /// Reference/oracle backends are intentionally callable by exact model id,
