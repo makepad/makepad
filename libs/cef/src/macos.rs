@@ -12,7 +12,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 extern "C" {
@@ -181,6 +181,17 @@ struct AccelStats {
     last_blit_micros: u64,
     total_blit_micros: u64,
     dropped_no_target: u64,
+    /// Blits into the target that is registered *right now*, reset to 0 the
+    /// moment a different IOSurface is registered. The embedder needs this to
+    /// know when a freshly handed-over surface holds a page frame: until it
+    /// does, the surface is blank and must not be shown.
+    target_frames: u64,
+    /// The region of the target the last blit actually filled — `min(paint,
+    /// target)`. A target bigger than the page (the embedder over-allocates so
+    /// a resize does not need a new surface every step) only holds pixels in
+    /// this sub-rect; everything outside it is stale or never written.
+    last_copy_width: usize,
+    last_copy_height: usize,
 }
 
 const CEF_API_VERSION: c_int = parse_api_version(env!("MAKEPAD_CEF_API_VERSION"));
@@ -525,6 +536,14 @@ pub struct AcceleratedStats {
     pub last_blit_micros: u64,
     pub total_blit_micros: u64,
     pub dropped_no_target: u64,
+    /// Blits into the currently registered target since it was registered.
+    /// `0` means the surface handed to `set_accelerated_target` is still
+    /// blank — show the previous one until this turns non-zero.
+    pub target_frames: u64,
+    /// The sub-rect of the target the last blit filled (`min(paint, target)`);
+    /// the region outside it holds no page pixels. Sample only this part.
+    pub last_copy_width: usize,
+    pub last_copy_height: usize,
 }
 
 unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
@@ -1023,6 +1042,25 @@ fn env_flag(name: &str) -> Option<bool> {
 /// `on_paint` path (kept for A/B measurement).
 pub fn accelerated_paint_requested() -> bool {
     !env_flag("MAKEPAD_CEF_SOFTWARE").unwrap_or(false)
+}
+
+/// `cef_browser_settings_t::background_color` for browsers created from now
+/// on. Zero (the default) makes the windowless path composite its first
+/// frames on BLACK — a page opens dark and jumps bright once the site paints,
+/// and area the page has not laid out yet (mid-resize, before the reflow
+/// lands) is black too. An embedder sets its theme colour here once, before
+/// creating browsers, and gets a themed fill instead.
+static BACKGROUND_COLOR: AtomicU32 = AtomicU32::new(0);
+
+/// Set the opaque ARGB (0xAARRGGBB, alpha 0xFF) CEF fills unpainted page area
+/// with. Takes effect for browsers created afterwards.
+pub fn set_background_color(argb: u32) {
+    BACKGROUND_COLOR.store(argb, Ordering::Release);
+}
+
+/// The colour `set_background_color` installed (0 = CEF's own default).
+pub fn background_color() -> u32 {
+    BACKGROUND_COLOR.load(Ordering::Acquire)
 }
 
 /// The `--use-angle=` value handed to Chromium, or `None` for Chromium's own
@@ -2215,6 +2253,7 @@ unsafe extern "system" fn render_on_accelerated_paint(
 
     let started = std::time::Instant::now();
     let mut blitted = false;
+    let mut copied = (0usize, 0usize);
     if let Some(metal) = metal_blit() {
         let target = state.accel_target.lock().unwrap();
         if let Some(target) = target.as_ref() {
@@ -2256,6 +2295,7 @@ unsafe extern "system" fn render_on_accelerated_paint(
                 let () = msg_send![command_buffer, commit];
                 let () = msg_send![command_buffer, waitUntilCompleted];
                 let () = msg_send![source, release];
+                copied = (copy_width as usize, copy_height as usize);
                 blitted = true;
             }
         }
@@ -2271,6 +2311,9 @@ unsafe extern "system" fn render_on_accelerated_paint(
         if blitted {
             stats.last_blit_micros = micros;
             stats.total_blit_micros += micros;
+            stats.target_frames += 1;
+            stats.last_copy_width = copied.0;
+            stats.last_copy_height = copied.1;
         } else {
             stats.dropped_no_target += 1;
         }
@@ -2858,6 +2901,10 @@ impl Browser {
         let mut browser_settings = ffi::cef_browser_settings_t {
             size: std::mem::size_of::<ffi::cef_browser_settings_t>(),
             windowless_frame_rate: 60,
+            // Themed, not black: what the page area shows before the site
+            // has composited anything, and behind area a reflow has not
+            // reached yet.
+            background_color: background_color(),
             ..Default::default()
         };
 
@@ -2926,12 +2973,23 @@ impl Browser {
             last_blit_micros: stats.last_blit_micros,
             total_blit_micros: stats.total_blit_micros,
             dropped_no_target: stats.dropped_no_target,
+            target_frames: stats.target_frames,
+            last_copy_width: stats.last_copy_width,
+            last_copy_height: stats.last_copy_height,
         }
     }
 
     /// Register the client-owned IOSurface that accelerated paints are copied
     /// into. `iosurface` is an `IOSurfaceRef` the embedder keeps alive (it is
     /// retained here as well); its pixel format must be BGRA8.
+    ///
+    /// The surface may be LARGER than the browser view — the blit fills its
+    /// top-left `min(paint, target)` corner and `AcceleratedStats::
+    /// last_copy_*` says how much of it holds page pixels. Over-allocating is
+    /// how an embedder survives a drag-resize without a new surface (and a
+    /// blank frame) at every step. A newly registered surface starts blank:
+    /// `target_frames` counts blits into it, so keep showing the previous one
+    /// until it is non-zero.
     pub fn set_accelerated_target(
         &mut self,
         iosurface: *mut c_void,
@@ -2970,6 +3028,14 @@ impl Browser {
         }
         unsafe {
             CFRetain(iosurface as *const c_void);
+        }
+        // A brand-new surface holds nothing yet; the fill counter starts over
+        // so the embedder can tell "blank" from "painted".
+        {
+            let mut stats = self.state.accel.lock().unwrap();
+            stats.target_frames = 0;
+            stats.last_copy_width = 0;
+            stats.last_copy_height = 0;
         }
         *self.state.accel_target.lock().unwrap() = Some(AccelTarget {
             iosurface: iosurface as usize,

@@ -21,9 +21,14 @@ mod run_view;
 mod shell;
 mod theme;
 
+use std::collections::HashMap;
+
 use binds::{combo_text, keymap, match_bind_armed, WmAction};
 use desk::{WmDesk, WmDeskAction, WmState};
-use clients::{registry, spawn_client, ClientLine, LaunchPolicy};
+use clients::{spawn_client, ClientLine, LaunchPolicy, WarmPool, WarmStatus};
+use makepad_widgets::makepad_platform::shared_framebuf::{
+    shared_swapchain_from_host_swapchain, HostSwapchain,
+};
 use hub::{send_to_app, ClientId, HubEvent, WmHub};
 use layout::{Axis, Dir, DividerHit, FullscreenMode, LRect};
 use makepad_studio_protocol::{AppToStudio, StudioToApp};
@@ -222,7 +227,61 @@ pub struct App {
     /// Quick Look's warm-viewer cache (see `preview::PreviewCache`).
     #[rust]
     preview_cache: PreviewCache,
+    /// The warm-instance pool: which standby processes exist, per app.
+    #[rust]
+    warm_pool: WarmPool,
+    /// The off-desk framebuffer each warm instance draws into before it has
+    /// a tile (see `WarmFrame`).
+    #[rust]
+    warm_frames: HashMap<ClientId, WarmFrame>,
+    /// Drives the dormant instances (see `pump_warm`).
+    #[rust]
+    warm_tick: Timer,
+    /// When each warm client was last ticked. Kept apart from `WarmFrame`
+    /// because the FIRST ticks are what make a frame possible at all — see
+    /// `pump_warm`.
+    #[rust]
+    warm_last_tick: HashMap<ClientId, std::time::Instant>,
+    /// The desktop window's dpi factor, as the platform last reported it —
+    /// a warm instance is configured with the same one its tile will use,
+    /// so the glyph atlas and shaders it warms up are the right ones.
+    #[rust]
+    dpi_factor: f64,
 }
+
+/// A warm instance's own swapchain: the host end of the frames a DORMANT
+/// client draws while it has no tile.
+///
+/// This is what makes the pool worth more than a running process. Handed a
+/// geometry and a framebuffer, the child does its FIRST full draw pass
+/// while nobody is waiting — compiling its shaders, rasterizing its glyph
+/// atlas, laying out its UI — so adoption costs one geometry message and a
+/// repaint by an app that is already warm all the way to the GPU.
+pub struct WarmFrame {
+    /// `None` on Linux, where sharing a framebuffer needs the aux-chan
+    /// socket a TILE owns; a warm instance there is process-warm only and
+    /// gets its framebuffer at adoption.
+    swapchain: Option<HostSwapchain>,
+    /// The instance drew at least once: it is warm all the way through,
+    /// and drops to the heartbeat tick rate.
+    presented: bool,
+    /// Set at adoption. The tile has its own swapchain from that moment,
+    /// but the child may still have a frame in flight against this one, so
+    /// it is held briefly before being dropped — the same hazard
+    /// `MpRunView::last_swapchain_with_completed_draws` covers on resize.
+    retired: Option<std::time::Instant>,
+}
+
+/// How long a retired warm swapchain is kept after adoption.
+const WARM_FRAME_RETIRE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The pump interval: fast enough that a warm instance reaches its first
+/// frame promptly, slow enough to be nothing on the WM's own clock.
+const WARM_PUMP: f64 = 0.05;
+
+/// What a DORMANT instance gets once it has drawn: enough to keep its
+/// watchdog and any app-side timer alive, little enough to be free.
+const WARM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The channel every client's reader thread writes its output into.
 pub struct ClientLines {
@@ -350,8 +409,12 @@ impl App {
                 .clients
                 .iter()
                 .filter(|(_, slot)| {
-                    clients::word_match(&slot.app, pattern)
-                        || clients::word_match(&slot.title, pattern)
+                    // A warm instance is NOT a window: matching one here
+                    // would "focus" something invisible and the app would
+                    // never open at all.
+                    !slot.warm
+                        && (clients::word_match(&slot.app, pattern)
+                            || clients::word_match(&slot.title, pattern))
                 })
                 .map(|(id, _)| *id)
                 .collect();
@@ -364,23 +427,16 @@ impl App {
             }
         }
 
+        // THE POOL: a standby instance of this app becomes the window now,
+        // already drawn, and the pool tops itself back up behind it.
+        if self.adopt_warm(cx, app_id) {
+            return;
+        }
+
         let id = self.next_id;
         self.next_id += 1;
+        let cwd = self.launch_cwd(app_id, true);
         let state = self.state_mut();
-        let cwd = if app.id == "terminal" {
-            // Focused terminal's cwd (the omarchy rule); in demo mode a
-            // FIRST terminal opens inside the generated demo home so `ls`
-            // shows plausible content, never the user's real files.
-            state.focused_terminal_cwd().or_else(|| {
-                if std::env::var("MPWM_FILES_REAL").is_err() {
-                    crate::demo_home::ensure_demo_home()
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
         let term_env = state.term_env.clone();
         let lines = self.line_sender();
         let state = self.state_mut();
@@ -391,6 +447,7 @@ impl App {
             cwd.as_ref(),
             (app.id == "terminal").then_some(term_env.as_str()),
             &[],
+            false,
             lines,
         ) {
             Ok(slot) => {
@@ -411,6 +468,318 @@ impl App {
                 log!("mpwm: launch {} failed: {}", app.id, err);
             }
         }
+    }
+
+    // --------------------------------------------------------------
+    // The warm pool
+    //
+    // A new terminal or browser should APPEAR, not launch. One dormant
+    // instance of each pooled app (two for terminals) is already running,
+    // connected and drawn into a framebuffer of its own; opening a window
+    // hands it a tile and wakes it up, and the pool immediately starts its
+    // replacement for the next time.
+    //
+    // The mechanisms are Quick Look's, not new ones: a client that is not
+    // in the LAYOUT has no tile, is not drawn, and is invisible to
+    // everything the desk enumerates (alt-tab, workspace counts, the bar's
+    // active window) — exactly how a hidden warm viewer waits between
+    // panels — plus `takes_focus: false`, which is what keeps a preview
+    // from stealing the keyboard, and the same `spawn_client` path with
+    // the same cargo, env and per-client log.
+    // --------------------------------------------------------------
+
+    /// Where a new window of `app_id` opens.
+    ///
+    /// `inherit` is omarchy's terminal rule (`omarchy-cmd-terminal-cwd`):
+    /// a new terminal opens in the FOCUSED terminal's directory. A warm
+    /// instance passes `false` — its shell started long before the launch
+    /// and cannot be moved after the fact — which is exactly why the pool
+    /// stands aside whenever there is a cwd to inherit.
+    fn launch_cwd(&mut self, app_id: &str, inherit: bool) -> Option<std::path::PathBuf> {
+        if app_id != "terminal" {
+            return None;
+        }
+        let focused = if inherit {
+            self.state_mut().focused_terminal_cwd()
+        } else {
+            None
+        };
+        focused.or_else(|| {
+            // In demo mode a terminal with nothing to inherit opens inside
+            // the generated demo home so `ls` shows plausible content,
+            // never the user's real files.
+            if std::env::var("MPWM_FILES_REAL").is_err() {
+                crate::demo_home::ensure_demo_home()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The pool's half of a launch. True when a standby instance became
+    /// the window (the caller is done); false to launch cold exactly as
+    /// before — the pool is an optimization and never the only path.
+    fn adopt_warm(&mut self, cx: &mut Cx, app_id: &str) -> bool {
+        if !WarmPool::is_warm_app(app_id) {
+            return false;
+        }
+        // THE CWD CARVE-OUT: correctness beats instant. A new terminal
+        // opened from a terminal must land in that terminal's directory,
+        // and no warm shell can claim to have started there.
+        let cwd_override = app_id == "terminal" && self.state_mut().focused_terminal_cwd().is_some();
+        let status: Vec<WarmStatus> = self
+            .state_mut()
+            .clients
+            .iter()
+            .map(|(id, slot)| WarmStatus {
+                client: *id,
+                alive: true,
+                // Connected AND past CreateWindow: it has a window and a
+                // frame, so a tile can show it this instant.
+                connected: slot.sender.is_some() && slot.ready,
+            })
+            .collect();
+        let Some(client) = self.warm_pool.adopt(app_id, cwd_override, &status) else {
+            if cwd_override {
+                log!("mpwm: warm {} skipped — new terminal inherits a cwd", app_id);
+            }
+            return false;
+        };
+
+        // It is a real window from here: out of the pool, into the layout
+        // at the ordinary insertion point, focused like any launch.
+        let area = self.desk_area(cx);
+        let window_id = self
+            .state_mut()
+            .clients
+            .get(&client)
+            .map(|s| s.window_id)
+            .unwrap_or(0);
+        {
+            let state = self.state_mut();
+            if let Some(slot) = state.clients.get_mut(&client) {
+                slot.warm = false;
+                slot.takes_focus = true;
+                slot.open_at = Some(std::time::Instant::now());
+                slot.opened_warm = true;
+            }
+            let gap = state.gap;
+            state.layout.insert(client, area, gap);
+        }
+        let hub_port = self.state_mut().hub_port;
+        // The tile configures the child to its REAL rect on its next tick
+        // (one WindowGeomChange plus the tile's own swapchain) — the same
+        // bootstrap every launched client gets, except this one is already
+        // running, so the arrival crossfade is all the user sees.
+        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+            d.with_run_view(cx, client, |cx, v| {
+                v.set_run_target(cx, client, window_id, hub_port);
+                v.app_ready(cx, client, window_id);
+            })
+        });
+        self.focus_client(cx, client);
+        // Wake it: samplers, refresh timers, everything a dormant instance
+        // was told to hold back (`mp_wm_api::warm_start`).
+        self.send_wm_event(client, WmEvent::Adopted);
+        // The tile owns the framebuffer now; the warm one is held briefly
+        // in case a frame is still in flight against it.
+        if let Some(frame) = self.warm_frames.get_mut(&client) {
+            frame.retired = Some(std::time::Instant::now());
+        }
+        log!("mpwm: adopted warm {} as client {}", app_id, client);
+        self.redraw_all(cx);
+        // …and the next one starts warming immediately.
+        self.spawn_warm(app_id);
+        true
+    }
+
+    /// Put one dormant instance of `app_id` in the pool. Quiet by design:
+    /// the pool is invisible infrastructure, and anything it cannot do
+    /// simply means the next launch of that app is a cold one.
+    fn spawn_warm(&mut self, app_id: &str) {
+        if !self.warm_pool.wants(app_id, std::time::Instant::now()) {
+            return;
+        }
+        let Some(app) = crate::clients::find_app(app_id) else {
+            return;
+        };
+        let hub_port = self.state_mut().hub_port;
+        if hub_port == 0 {
+            // No hub: a child could never connect, so warming is pointless.
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let cwd = self.launch_cwd(app_id, false);
+        let term_env = self.state_mut().term_env.clone();
+        let lines = self.line_sender();
+        match spawn_client(
+            &app,
+            id,
+            hub_port,
+            cwd.as_ref(),
+            (app.id == "terminal").then_some(term_env.as_str()),
+            &[],
+            true,
+            lines,
+        ) {
+            Ok(slot) => {
+                self.state_mut().clients.insert(id, slot);
+                self.warm_pool.note_spawned(app_id, id);
+                log!("mpwm: warming {} as client {}", app_id, id);
+            }
+            Err(err) => log!("mpwm: warming {} failed: {}", app_id, err),
+        }
+    }
+
+    /// Top the pool up, ONE spawn per tick: a cold desktop otherwise forks
+    /// four cargo builds into the same target-dir lock at once, and they
+    /// would only queue behind each other anyway.
+    fn top_up_warm_pool(&mut self) {
+        let Some(app) = self.warm_pool.next_missing(std::time::Instant::now()) else {
+            return;
+        };
+        self.spawn_warm(&app);
+    }
+
+    /// Hand a dormant instance a geometry and a framebuffer of its own so
+    /// it does its FIRST FULL DRAW now, with nobody waiting: shaders
+    /// compiled, glyph atlas rasterized, UI laid out. Sized at the desk's
+    /// full-tile rect — the common case is a first window, and any other
+    /// size costs exactly one reconfigure at adoption.
+    fn warm_bootstrap(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
+        // Linux shares a swapchain over an aux-chan socket owned by the
+        // TILE (`MpRunView::setup_aux_chan`), and a warm instance has no
+        // tile; there an instance stays process-warm and gets its
+        // framebuffer at adoption. mac and Windows share by IOSurface /
+        // HANDLE, which needs no channel.
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        let swapchain: Option<HostSwapchain> = {
+            let _ = (window_id, &cx);
+            None
+        };
+        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+        let swapchain: Option<HostSwapchain> = {
+            let rect = self.desk_area(cx);
+            let dpi = if self.dpi_factor > 0.0 {
+                self.dpi_factor
+            } else {
+                1.0
+            };
+            let (w, h) = (rect.w.max(1.0), rect.h.max(1.0));
+            // The tile's own allocation rule, so a warm instance warms up
+            // at the size a full-desk tile would have asked for.
+            let alloc = |px: f64| ((px * dpi).ceil() as u32).max(64).next_power_of_two();
+            let swapchain = HostSwapchain::new(window_id, alloc(w), alloc(h), cx);
+            let shared = shared_swapchain_from_host_swapchain(&swapchain, cx);
+            let msgs = vec![
+                StudioToApp::WindowGeomChange {
+                    window_id,
+                    dpi_factor: dpi,
+                    left: 0.0,
+                    top: 0.0,
+                    width: w,
+                    height: h,
+                },
+                StudioToApp::Swapchain(shared),
+            ];
+            if let Some(sender) = self
+                .state_mut()
+                .clients
+                .get(&client)
+                .and_then(|s| s.sender.clone())
+            {
+                send_to_app(&sender, msgs);
+            }
+            Some(swapchain)
+        };
+        self.warm_frames.insert(
+            client,
+            WarmFrame {
+                swapchain,
+                presented: false,
+                retired: None,
+            },
+        );
+    }
+
+    /// Drive the dormant instances, and only as far as they need driving.
+    ///
+    /// A `--stdin-loop` child does ALL of its work inside
+    /// `StudioToApp::Tick` — it flushes its platform ops there (which is
+    /// how a window is ANNOUNCED at all), runs its timers, draws and
+    /// repaints — and between ticks it blocks on its socket at no cost
+    /// whatsoever. A tile pumps its child every 8ms; a warm instance has
+    /// no tile, so the WM pumps it here instead: at the pump rate until it
+    /// has drawn its first frame — without those first ticks it would
+    /// never even send `CreateWindow`, and the pool would deadlock waiting
+    /// for a window that needs a tick to exist — and a once-a-second
+    /// heartbeat after that. Together with `MPWM_WARM_START` (the app's
+    /// own half of the deal: no samplers, no refresh while dormant) that
+    /// is what keeps a cached task manager from burning a core in the
+    /// background.
+    fn pump_warm(&mut self, _cx: &mut Cx) {
+        let now = std::time::Instant::now();
+        // A retired framebuffer outlives adoption only long enough for any
+        // frame still in flight against it.
+        self.warm_frames.retain(|_, frame| {
+            frame
+                .retired
+                .map(|t| now.saturating_duration_since(t) < WARM_FRAME_RETIRE)
+                .unwrap_or(true)
+        });
+        let warm = self.warm_pool.clients();
+        self.warm_last_tick.retain(|client, _| warm.contains(client));
+        let due: Vec<ClientId> = warm
+            .into_iter()
+            .filter(|client| {
+                // Still coming up (no window yet), or it has a framebuffer
+                // and has not drawn into it: full rate. Anything else —
+                // drawn, or a platform where a warm instance cannot be
+                // handed a framebuffer at all — only needs the heartbeat.
+                let warming = match self.warm_frames.get(client) {
+                    None => true,
+                    Some(frame) => frame.swapchain.is_some() && !frame.presented,
+                };
+                match self.warm_last_tick.get(client) {
+                    Some(t) if !warming => now.saturating_duration_since(*t) >= WARM_HEARTBEAT,
+                    _ => true,
+                }
+            })
+            .collect();
+        for client in due {
+            let Some(sender) = self
+                .state_mut()
+                .clients
+                .get(&client)
+                .and_then(|s| s.sender.clone())
+            else {
+                // Not connected yet (still building, still starting): the
+                // pump has nothing to send it down.
+                continue;
+            };
+            self.warm_last_tick.insert(client, now);
+            send_to_app(&sender, vec![StudioToApp::Tick]);
+        }
+    }
+
+    /// The pool's honest measurement: how long from the launch gesture to
+    /// this window's first frame ON THE DESK, and by which path.
+    fn note_first_frame(&mut self, client: ClientId) {
+        let Some(slot) = self.state_mut().clients.get_mut(&client) else {
+            return;
+        };
+        let Some(at) = slot.open_at.take() else {
+            return;
+        };
+        let (app, warm) = (slot.app.clone(), slot.opened_warm);
+        log!(
+            "mpwm: {} client {} first frame in {} ms ({})",
+            app,
+            client,
+            at.elapsed().as_millis(),
+            if warm { "warm" } else { "cold" }
+        );
     }
 
     /// The channel children write their output into (created lazily so
@@ -460,7 +829,9 @@ impl App {
             if text.is_empty() {
                 continue;
             }
+            let mut warm = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                warm = slot.warm;
                 slot.status = text.clone();
                 // cargo's last word before the app takes over. macOS then
                 // scans a freshly linked binary on its FIRST exec, which
@@ -471,6 +842,13 @@ impl App {
                 if slot.linked {
                     slot.linked_at = Some(std::time::Instant::now());
                 }
+            }
+            // A warm instance has no tile to put a status line on, and
+            // asking the desk for one would BUILD it — a widget nothing
+            // draws, with an 8ms child-tick timer behind it. The pool's
+            // invariant is literal: no tile until adoption.
+            if warm {
+                continue;
             }
             self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                 d.with_run_view(cx, client, |cx, v| v.set_status_line(cx, &text))
@@ -783,8 +1161,38 @@ impl App {
         self.redraw_all(cx);
     }
 
+    /// A client the pool is holding: no tile, no focus, invisible.
+    fn is_warm(&mut self, client: ClientId) -> bool {
+        self.state_mut()
+            .clients
+            .get(&client)
+            .map(|s| s.warm)
+            .unwrap_or(false)
+    }
+
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("mpwm: removing client {}", client);
+        // A dying warm instance clears its pool slot, so the next launch
+        // of that app falls back to a cold spawn instead of talking to a
+        // dead socket, and the pool heals itself. A death nobody asked for
+        // is a crash and is counted: three of those a minute and the pool
+        // gives that app up quietly rather than respawning forever.
+        let asked_for_it = self
+            .state_mut()
+            .clients
+            .get(&client)
+            .map(|s| s.closing.is_some())
+            .unwrap_or(false);
+        if let Some(app) = self.warm_pool.forget(client) {
+            if !asked_for_it {
+                self.warm_pool.note_crash(&app, std::time::Instant::now());
+                log!("mpwm: warm {} (client {}) died", app, client);
+            }
+            // The top-up runs on the tick — one spawn at a time, and it
+            // will only happen at all if the crash budget allows it.
+        }
+        self.warm_frames.remove(&client);
+        self.warm_last_tick.remove(&client);
         self.state_mut().layout.remove(client);
         self.state_mut().clients.remove(&client);
         // A dying warm viewer (or its requester) clears the cache's
@@ -865,7 +1273,10 @@ impl App {
             .clients
             .iter()
             .filter(|(_, s)| {
-                s.linked
+                // Warm instances excluded: nobody is watching a tile that
+                // does not exist, and asking for one would build it.
+                !s.warm
+                    && s.linked
                     && s.sender.is_none()
                     && s.linked_at.map(|t| t.elapsed() > GRACE).unwrap_or(false)
             })
@@ -996,9 +1407,16 @@ impl App {
                     })
                     .unwrap_or(false);
                 if first {
-                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
-                        d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
-                    });
+                    // A warm instance has no tile to be ready IN: it gets
+                    // a framebuffer of its own instead, and draws into it
+                    // until someone adopts it.
+                    if self.is_warm(client) {
+                        self.warm_bootstrap(cx, client, window_id);
+                    } else {
+                        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                            d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
+                        });
+                    }
                 }
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
@@ -1015,9 +1433,23 @@ impl App {
                 if closing {
                     return;
                 }
+                // A dormant instance's frames land in its own off-desk
+                // framebuffer; there is no tile to present them in, and
+                // touching the desk here would build one. The first frame
+                // is the moment it is warm all the way through.
+                if self.is_warm(client) {
+                    if let Some(frame) = self.warm_frames.get_mut(&client) {
+                        if !frame.presented {
+                            frame.presented = true;
+                            log!("mpwm: warm client {} drew its first frame", client);
+                        }
+                    }
+                    return;
+                }
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
+                self.note_first_frame(client);
                 // A focus that couldn't land at launch (tile not yet
                 // drawn) lands now that the client has a frame.
                 if self.pending_focus == Some(client) {
@@ -1453,6 +1885,12 @@ impl App {
 
     /// CTRL+ALT+DELETE — `omarchy-hyprland-window-close-all`: close every
     /// client the same polite way, one by one, then focus workspace 1.
+    ///
+    /// The pool's dormant instances go too. They are ordinary children and
+    /// "close everything" must not leave four of them running; the pool
+    /// notices they were asked to go (not that they crashed) and refills
+    /// itself on the ticks that follow, so the desktop is empty AND the
+    /// next window still opens instantly.
     fn close_all_windows(&mut self, cx: &mut Cx) {
         let all: Vec<ClientId> = self.state_mut().clients.keys().copied().collect();
         for client in all {
@@ -2183,6 +2621,12 @@ impl MatchEvent for App {
         });
         self.next_id = 1;
         self.tick = cx.start_interval(1.0);
+        // The warm pool's pump. Started even when the pool is off: it
+        // costs one no-op wakeup and keeps the timer id stable.
+        self.warm_tick = cx.start_interval(WARM_PUMP);
+        if !self.warm_pool.enabled() {
+            log!("mpwm: warm pool disabled (MPWM_NO_WARM)");
+        }
 
         // `--gallery`: the shell surfaces with fixture data instead of a
         // desktop, so the port is verifiable over --remote (shell/gallery.rs).
@@ -2439,6 +2883,9 @@ impl AppMain for App {
         if let Event::WindowGeomChange(ev) = event {
             // The bar is the caption: keep it around the OS buttons.
             self.update_bar_chrome(cx, &ev.new_geom);
+            // A warm instance is configured with the desktop's own dpi, so
+            // what it warms up is what its tile will use.
+            self.dpi_factor = ev.new_geom.dpi_factor;
         }
         if let Event::WindowDragQuery(dq) = event {
             // Caption-less window: the bar strip is the drag handle; the
@@ -2555,6 +3002,16 @@ impl AppMain for App {
                 self.explain_first_exec_scan(cx);
                 self.update_status(cx);
                 self.update_bar(cx);
+                // The pool fills itself here: at startup, after an
+                // adoption, and after any death it healed from. One spawn
+                // per second, so a cold desktop never forks four cargo
+                // builds at once.
+                if !self.gallery {
+                    self.top_up_warm_pool();
+                }
+            }
+            if self.warm_tick.is_timer(te).is_some() && self.state.is_some() {
+                self.pump_warm(cx);
             }
         }
         if let Event::Signal = event {

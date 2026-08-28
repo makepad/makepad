@@ -55,6 +55,11 @@ pub enum WmEvent {
     CloseRequested,
     /// Focus moved onto / off this window.
     Focus { focused: bool },
+    /// This warm-pool instance was ADOPTED into a real tile: wake up.
+    /// A warm instance is spawned with `MPWM_WARM_START=1` and must idle
+    /// until this arrives — no samplers, no timers beyond a heartbeat, no
+    /// background refresh (a cached task manager must not burn CPU).
+    Adopted,
     /// Quick Look retarget: this WARM preview viewer must now show `path`
     /// (same viewer type as it was spawned for). The viewer swaps content
     /// in place — no respawn, no focus change.
@@ -117,6 +122,13 @@ impl WmEvent {
 /// True when this process is hosted as an mpwm tile (or a Studio run view).
 pub fn hosted(cx: &Cx) -> bool {
     cx.in_makepad_studio()
+}
+
+/// True when this process was spawned as a DORMANT warm-pool instance:
+/// heavy periodic work (samplers, refresh timers) must wait for
+/// [`WmEvent::Adopted`]. Checked once — adoption never re-reads the env.
+pub fn warm_start() -> bool {
+    std::env::var("MPWM_WARM_START").is_ok()
 }
 
 /// Send a request to the window manager. Returns false when not hosted

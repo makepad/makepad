@@ -9,7 +9,11 @@
 //! fallback (`MAKEPAD_CEF_SOFTWARE=1`, or a CEF build without GPU paint).
 
 use crate::tabs::{TabId, TabModel, TabSummary};
-use makepad_widgets::browser::Browser as BrowserKeys;
+// The surface policy is the stock Browser widget's — one source of truth for
+// how a CEF page survives a resize.
+use makepad_widgets::browser::{
+    needs_new_surface, surface_alloc, Browser as BrowserKeys, RESIZE_INTERVAL, SETTLE,
+};
 use makepad_widgets::image::DrawImage;
 use makepad_widgets::*;
 
@@ -96,6 +100,21 @@ pub struct WebView {
     suppress_next_paste_shortcut: bool,
     #[rust]
     pump_started: bool,
+}
+
+/// Env-gated resize tracing (`MPB_TRACE=1`): timestamps + sizes on every
+/// draw, resize and target swap. Debug rig — not for committing.
+pub fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MPB_TRACE").is_some())
+}
+
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if crate::webview::trace_on() {
+            eprintln!("[mpb-trace {:>7}us] {}", crate::uptime_us(), format!($($arg)*));
+        }
+    };
 }
 
 impl WebView {
@@ -281,46 +300,142 @@ impl WebView {
                 }
             }
         }
-        let Some(browser) = &mut tab.browser else {
+        if tab.browser.is_none() {
             return;
-        };
-        let _ = browser.set_hidden(false);
-        if let Err(err) = browser.resize(width, height, dpi) {
-            log!("CEF resize failed: {err}");
+        }
+        if let Some(browser) = &mut tab.browser {
+            let _ = browser.set_hidden(false);
         }
 
-        // GPU path: hand the browser a Makepad-owned IOSurface to copy into.
+        let now = std::time::Instant::now();
+        if tab.wanted_size != Some((width, height)) {
+            tab.wanted_size = Some((width, height));
+            tab.wanted_at = Some(now);
+        }
+        Self::sync_browser_size(tab, width, height, dpi, now);
+        Self::sync_accel_surface(cx, tab, width, height, now);
+    }
+
+    /// Tell CEF the page size, at most once per `RESIZE_INTERVAL`; anything
+    /// faster is remembered and applied by the next pump, so the final size of
+    /// a drag always lands.
+    fn sync_browser_size(
+        tab: &mut crate::tabs::Tab,
+        width: usize,
+        height: usize,
+        dpi: f32,
+        now: std::time::Instant,
+    ) {
+        if tab.resized_to == Some((width, height)) {
+            // `Browser::resize` no-ops on an unchanged size; this still lets a
+            // dpi change through.
+            if let Some(browser) = &mut tab.browser {
+                if let Err(err) = browser.resize(width, height, dpi) {
+                    log!("CEF resize failed: {err}");
+                }
+            }
+            tab.deferred_resize = None;
+            return;
+        }
+        let due = tab
+            .resized_at
+            .is_none_or(|last| now.duration_since(last) >= RESIZE_INTERVAL);
+        if !due {
+            tab.deferred_resize = Some((width, height, dpi));
+            return;
+        }
+        if let Some(browser) = &mut tab.browser {
+            if let Err(err) = browser.resize(width, height, dpi) {
+                log!("CEF resize failed: {err}");
+            }
+        }
+        trace!("was_resized {}x{}", width, height);
+        tab.resized_to = Some((width, height));
+        tab.resized_at = Some(now);
+        tab.deferred_resize = None;
+    }
+
+    /// GPU path: hand the browser a Makepad-owned IOSurface to copy into.
+    ///
+    /// The surface is over-allocated (grid-rounded) and grows only when the
+    /// page outgrows it; it shrinks only once the size has settled. A new
+    /// surface is BLANK, so it goes to `pending_texture` and the last good one
+    /// keeps being drawn until CEF has put a frame in the new one — that is
+    /// what keeps a drag-resize from flashing the themed ground.
+    fn sync_accel_surface(
+        cx: &mut Cx,
+        tab: &mut crate::tabs::Tab,
+        width: usize,
+        height: usize,
+        now: std::time::Instant,
+    ) {
         #[cfg(target_os = "macos")]
-        if browser.is_accelerated()
-            && (tab.accel_target_size != Some((width, height)) || tab.texture.is_none())
         {
-            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(width, height);
-            match browser.set_accelerated_target(iosurface, width, height) {
+            if !tab.browser.as_ref().is_some_and(|b| b.is_accelerated()) {
+                return;
+            }
+            let want = surface_alloc(width, height);
+            let settled = tab
+                .wanted_at
+                .is_some_and(|since| now.duration_since(since) >= SETTLE);
+            if !needs_new_surface(tab.accel_target_size, tab.pending_alloc, want, settled) {
+                return;
+            }
+            trace!(
+                "surface {:?} -> {}x{} for page {}x{}",
+                tab.accel_target_size,
+                want.0,
+                want.1,
+                width,
+                height
+            );
+            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(want.0, want.1);
+            let Some(browser) = &mut tab.browser else {
+                return;
+            };
+            match browser.set_accelerated_target(iosurface, want.0, want.1) {
                 Ok(()) => {
-                    tab.texture = Some(texture);
-                    tab.accel_target_size = Some((width, height));
+                    tab.accel_target_size = Some(want);
+                    if tab.painted && tab.texture.is_some() {
+                        // Keep showing the last good frame until this one has
+                        // one of its own.
+                        tab.pending_texture = Some(texture);
+                        tab.pending_alloc = Some(want);
+                    } else {
+                        tab.texture = Some(texture);
+                        tab.texture_alloc = Some(want);
+                        tab.texture_valid = None;
+                        tab.pending_texture = None;
+                        tab.pending_alloc = None;
+                    }
                 }
                 Err(err) => {
                     log!("accelerated target failed, software frames only: {err}");
                     tab.accel_target_size = None;
+                    tab.pending_texture = None;
+                    tab.pending_alloc = None;
                 }
             }
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = cx;
+        {
+            let _ = (cx, tab, width, height, now);
+        }
     }
 
     fn apply_software_frame(cx: &mut Cx, tab: &mut crate::tabs::Tab, frame: makepad_cef::Frame) {
+        let size = (frame.width, frame.height);
         match &tab.texture {
             Some(texture)
                 if tab.accel_target_size.is_none()
-                    && texture.get_format(cx).vec_width_height()
-                        == Some((frame.width, frame.height)) =>
+                    && texture.get_format(cx).vec_width_height() == Some(size) =>
             {
                 texture.set_data_u32(cx, frame.width, frame.height, frame.pixels);
             }
             _ => {
                 tab.accel_target_size = None;
+                tab.pending_texture = None;
+                tab.pending_alloc = None;
                 tab.texture = Some(Texture::new_with_format(
                     cx,
                     TextureFormat::VecBGRAu8_32 {
@@ -332,6 +447,10 @@ impl WebView {
                 ));
             }
         }
+        // An upload texture is exactly the page: the whole thing is valid.
+        tab.texture_alloc = Some(size);
+        tab.texture_valid = Some(size);
+        tab.painted = true;
     }
 
     fn favicon_texture(cx: &mut Cx, frame: makepad_cef::Frame) -> Texture {
@@ -364,6 +483,37 @@ impl WebView {
             }
             let counter = browser.accelerated_frame_counter();
             if counter != tab.accel_frame_counter {
+                let stats = browser.accelerated_stats();
+                let valid = (stats.last_copy_width, stats.last_copy_height);
+                if stats.target_frames > 0 && valid.0 > 0 && valid.1 > 0 {
+                    // The surface CEF is painting into now holds a real frame:
+                    // if it was the pending one, this is the moment to swap —
+                    // never before, so the page area never goes blank.
+                    if let (Some(texture), Some(alloc)) =
+                        (tab.pending_texture.take(), tab.pending_alloc.take())
+                    {
+                        trace!(
+                            "promote pending {}x{} (valid {}x{})",
+                            alloc.0,
+                            alloc.1,
+                            valid.0,
+                            valid.1
+                        );
+                        tab.texture = Some(texture);
+                        tab.texture_alloc = Some(alloc);
+                    }
+                    tab.texture_valid = Some(valid);
+                    tab.painted = true;
+                }
+                if i == active {
+                    trace!(
+                        "paint landed {}x{} (+{} frames, surface {:?})",
+                        stats.last_width,
+                        stats.last_height,
+                        counter - tab.accel_frame_counter,
+                        tab.accel_target_size
+                    );
+                }
                 tab.accel_frame_counter = counter;
                 if i == active {
                     redraw = true;
@@ -398,6 +548,14 @@ impl WebView {
             }
             if let Some(frame) = latest {
                 Self::apply_software_frame(cx, tab, frame);
+                if i == active {
+                    redraw = true;
+                }
+            }
+            // A resize that arrived faster than CEF can take them: apply the
+            // last one now, so the end of a drag always reaches the page.
+            if let Some((w, h, dpi)) = tab.deferred_resize {
+                Self::sync_browser_size(tab, w, h, dpi, std::time::Instant::now());
                 if i == active {
                     redraw = true;
                 }
@@ -683,7 +841,11 @@ impl Widget for WebView {
 
         self.ensure_active_browser(cx, width, height, dpi);
 
-        let texture = self.tabs.active().and_then(|t| t.texture.clone());
+        let shown = self.tabs.active().filter(|t| t.painted).and_then(|t| {
+            t.texture
+                .clone()
+                .map(|texture| (texture, t.texture_alloc, t.texture_valid))
+        });
         // Themed ground under the page, so a tab that has not painted yet
         // (or a transparent page) never shows black.
         self.draw_empty.draw_abs(cx, rect);
@@ -699,18 +861,106 @@ impl Widget for WebView {
                 self.cef_init_frame = cx.new_next_frame();
             }
         }
-        match texture {
-            Some(texture) => {
+        match shown {
+            Some((texture, alloc, valid)) => {
+                // Sample only the part of the surface that holds page pixels
+                // and stretch it over the current rect: mid-drag that is the
+                // last good frame at a slightly older size (a fraction of a
+                // percent of scale), never a blank margin.
+                let scale = match (alloc, valid) {
+                    (Some((aw, ah)), Some((vw, vh))) if aw > 0 && ah > 0 && vw > 0 && vh > 0 => {
+                        vec2(
+                            (vw as f32 / aw as f32).min(1.0),
+                            (vh as f32 / ah as f32).min(1.0),
+                        )
+                    }
+                    _ => vec2(1.0, 1.0),
+                };
+                self.draw_bg.image_scale = scale;
                 self.draw_bg.draw_vars.set_texture(0, &texture);
                 self.draw_bg.opacity = 1.0;
             }
             None => {
+                self.draw_bg.image_scale = vec2(1.0, 1.0);
                 self.draw_bg.draw_vars.empty_texture(0);
                 self.draw_bg.opacity = 0.0;
             }
         }
+        if let Some(tab) = self.tabs.active() {
+            trace!(
+                "draw rect {}x{} px, surface {:?}, valid {:?}, pending {:?}, painted={}",
+                width,
+                height,
+                tab.accel_target_size,
+                tab.texture_valid,
+                tab.pending_alloc,
+                tab.painted
+            );
+        }
         self.draw_bg.draw_walk(cx, walk);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use makepad_widgets::browser::SURFACE_GRID;
+
+    #[test]
+    fn surface_is_grid_rounded() {
+        assert_eq!(surface_alloc(1280, 860), (1280, 1024));
+        assert_eq!(surface_alloc(1281, 1025), (1536, 1280));
+        assert_eq!(surface_alloc(0, 0), (SURFACE_GRID, SURFACE_GRID));
+    }
+
+    /// The whole point of the grid: a drag walks many page sizes inside one
+    /// surface instead of handing CEF a blank one at every step (which is
+    /// what made the page area flash the themed ground for a whole drag).
+    #[test]
+    fn a_drag_walks_many_sizes_per_surface() {
+        let mut current = Some(surface_alloc(1600, 900));
+        let mut steps = 0;
+        let mut swaps = 0;
+        for w in (1600..2600).step_by(8) {
+            let want = surface_alloc(w, 900);
+            steps += 1;
+            if needs_new_surface(current, None, want, false) {
+                swaps += 1;
+                current = Some(want);
+            }
+        }
+        assert_eq!(steps, 125);
+        // 1600 -> 2592 crosses the 1792 / 2048 / 2304 / 2560 lines: four
+        // surfaces for 125 drag steps, instead of 125.
+        assert_eq!(swaps, 4);
+    }
+
+    #[test]
+    fn surface_grows_at_once_and_shrinks_only_when_settled() {
+        let current = Some((1536, 1024));
+        // Outgrowing the surface would clip the blit: no waiting.
+        assert!(needs_new_surface(current, None, (1792, 1024), false));
+        // Smaller page, still moving: keep the surface (and the frame in it).
+        assert!(!needs_new_surface(current, None, (1024, 1024), false));
+        // Settled: hand back the slack.
+        assert!(needs_new_surface(current, None, (1024, 1024), true));
+        // A bigger surface is already on its way; do not queue another.
+        assert!(!needs_new_surface(
+            current,
+            Some((1792, 1024)),
+            (1792, 1024),
+            true
+        ));
+        assert!(needs_new_surface(
+            current,
+            Some((1792, 1024)),
+            (2048, 1024),
+            false
+        ));
+        // Nothing yet: allocate.
+        assert!(needs_new_surface(None, None, (1280, 1024), false));
     }
 }

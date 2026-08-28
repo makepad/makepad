@@ -79,6 +79,11 @@ pub fn uptime_ms() -> u128 {
     START.get_or_init(std::time::Instant::now).elapsed().as_millis()
 }
 
+/// Microseconds since `main` started (resize tracing).
+pub fn uptime_us() -> u128 {
+    START.get_or_init(std::time::Instant::now).elapsed().as_micros()
+}
+
 fn palette() -> Palette {
     PALETTE.with(|p| {
         p.borrow_mut()
@@ -151,6 +156,7 @@ pub struct App {
     #[rust]
     focus_retries: u32,
 }
+
 
 impl App {
     fn with_webview<R>(&self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut WebView) -> R) -> Option<R> {
@@ -589,6 +595,10 @@ pub fn app_main() {
     if Cx::pre_start() {
         return;
     }
+    // Chromium composites the page on this colour. Left at CEF's default the
+    // first frames of every page are BLACK — a dark dip then a bright jump on
+    // open, and a black margin wherever a resize outruns the reflow.
+    makepad_cef::set_background_color(palette().page_background_argb());
     // Only the cheap NSApp/pump preparation here: the window goes up first,
     // the WebView runs `cef_initialize` on the frame after it is drawn.
     if let Err(err) = makepad_cef::prepare() {
