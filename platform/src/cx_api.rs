@@ -983,7 +983,7 @@ impl Cx {
         self.platform_ops
             .retain(|op| !matches!(op, CxOsOp::SetScreenOrientation(_)));
         self.platform_ops
-            .push(CxOsOp::SetScreenOrientation(orientation));
+            .push_back(CxOsOp::SetScreenOrientation(orientation));
     }
 
     /// Last requested orientation lock (see [`Self::set_screen_orientation`]).
