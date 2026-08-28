@@ -3465,6 +3465,9 @@ impl Cx {
         unsafe {
             let env = attach_jni_env();
             let Some(bridge) = android_jni::to_java_create_oes_decode_surface(env, tex) else {
+                crate::log!(
+                    "VIDEO: MediaCodec OES bridge unavailable; software path will use YUV upload"
+                );
                 return (None, None, tex);
             };
             let Some(surface_local) =
