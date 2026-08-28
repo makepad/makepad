@@ -27,6 +27,12 @@ use std::collections::{HashMap, HashSet};
 // ---------------------------------------------------------------------------
 
 /// Image canvas presets; entry 0 is the chain default. Flux wants /16 dims.
+/// What a run says when its expander could not deliver. The run itself
+/// carries on with the prompt the person typed — an expansion is a
+/// courtesy, never a precondition.
+pub const EXPAND_FALLBACK_NOTE: &str = "expand failed, used raw prompt";
+
+/// Poll cadence per active job.
 pub const IMAGE_SIZES: &[(u32, u32)] = &[
     (512, 512),
     (768, 768),
@@ -1197,27 +1203,35 @@ impl Pipeline {
     /// identity anchor supplied on its request: `yoshi` can be elaborated,
     /// never replaced.
     fn prompt_for_stage(&self, stage: usize) -> Result<String, String> {
-        for earlier in self.stages[..stage].iter().rev() {
+        for (index, earlier) in self.stages[..stage].iter().enumerate().rev() {
             if earlier.domain == "text" {
+                // An expansion that came back with nothing usable is a
+                // missing improvement, not a missing input: the person's own
+                // prompt still says what they want. A CHARACTER chain is the
+                // exception — its later stages are gated on the brief, so
+                // there the refusal stands (see `expander_is_optional`).
+                let optional = self.expander_is_optional(index);
+                let unusable = |reason: &str| -> Result<String, String> {
+                    if optional {
+                        log!("pipeline: {EXPAND_FALLBACK_NOTE} ({reason})");
+                        Ok(self.prompt.clone())
+                    } else {
+                        Err(format!("LLM prompt expansion {reason}; refusing terse-prompt fallback"))
+                    }
+                };
                 let Some((_, bytes)) = earlier
                     .outputs
                     .iter()
                     .find(|(ct, _)| ct.starts_with("text/plain"))
                 else {
-                    return Err(
-                        "LLM prompt expansion produced no text/plain artifact; refusing terse-prompt fallback"
-                            .to_string(),
-                    );
+                    return unusable("produced no text/plain artifact");
                 };
-                let text = std::str::from_utf8(bytes).map_err(|_| {
-                    "LLM prompt expansion artifact is not UTF-8; refusing terse-prompt fallback"
-                        .to_string()
-                })?;
+                let Ok(text) = std::str::from_utf8(bytes) else {
+                    return unusable("artifact is not UTF-8");
+                };
                 let text = text.trim();
                 if text.is_empty() {
-                    return Err(
-                        "LLM prompt expansion was empty; refusing terse-prompt fallback".to_string(),
-                    );
+                    return unusable("was empty");
                 }
                 if self.is_character_pipeline() {
                     let words = text.split_whitespace().count();
@@ -2325,10 +2339,54 @@ impl Pipeline {
         if let Some(retry_stage) = self.prepare_character_mesh_retry(stage, &error) {
             events.push(PipelineEvent::Changed);
             events.extend(self.start_stage(cx, retry_stage, snapshots, avoid));
-            events
-        } else {
-            self.fail_stage(stage, error, events)
+            return events;
         }
+        self.fail_stage_or_skip_expander(cx, stage, error, snapshots, avoid, events)
+    }
+
+    /// Is `stage` an expansion the run can do WITHOUT?
+    ///
+    /// A `text` stage in front of other stages is a rewording courtesy: its
+    /// product is a better prompt, and the person already supplied a
+    /// perfectly usable one. Two cases are NOT optional and stay hard
+    /// failures: a chain whose only stage is the expansion (the text IS the
+    /// product), and a character chain, whose later stages are gated on the
+    /// brief keeping the named identity — see `prompt_for_stage`.
+    fn expander_is_optional(&self, stage: usize) -> bool {
+        self.stages[stage].domain == "text"
+            && stage + 1 < self.stages.len()
+            && !self.is_character_pipeline()
+    }
+
+    /// End the run — UNLESS the stage that failed was an optional expander,
+    /// in which case the run carries on from the prompt the person typed.
+    ///
+    /// A lost expansion used to lose the whole run: the text box hiccuped
+    /// (busy, evicted, timed out) and a queued video that had nothing to do
+    /// with the expander simply never happened, with the reason buried in a
+    /// failed stage nobody was looking at.
+    fn fail_stage_or_skip_expander(
+        &mut self,
+        cx: &mut Cx,
+        stage: usize,
+        error: String,
+        snapshots: &[BoxSnapshot],
+        avoid: &[String],
+        mut events: Vec<PipelineEvent>,
+    ) -> Vec<PipelineEvent> {
+        if !self.expander_is_optional(stage) {
+            return self.fail_stage(stage, error, events);
+        }
+        log!("pipeline: {EXPAND_FALLBACK_NOTE} ({error})");
+        self.stages[stage].state =
+            StageState::Failed(format!("{EXPAND_FALLBACK_NOTE} ({error})"));
+        self.stages[stage].detail = EXPAND_FALLBACK_NOTE.to_string();
+        self.stages[stage].finished = Some(std::time::Instant::now());
+        self.stages[stage].progress = 0.0;
+        events.push(PipelineEvent::StageFailed { stage });
+        events.push(PipelineEvent::Changed);
+        events.extend(self.start_stage(cx, stage + 1, snapshots, avoid));
+        events
     }
 
     /// Issue the next /job poll if the current stage is waiting on one.
@@ -3342,7 +3400,8 @@ impl Pipeline {
                         if Self::is_vram_admission_error(&message) {
                             return self.wait_after_vram_rejection(stage, &message, events);
                         }
-                        return self.fail_stage(stage, message, events);
+                        return self
+                            .fail_stage_or_skip_expander(cx, stage, message, snapshots, avoid, events);
                     }
                 }
             }
@@ -3352,9 +3411,12 @@ impl Pipeline {
                         .and_then(|r| r.get_string_body())
                         .is_some_and(|body| body.contains("no such job"))
                 {
-                    return self.fail_stage(
+                    return self.fail_stage_or_skip_expander(
+                        cx,
                         stage,
                         "box lost the job (service restarted or the job expired)".to_string(),
+                        snapshots,
+                        avoid,
                         events,
                     );
                 }
@@ -3415,9 +3477,12 @@ impl Pipeline {
                     .filter(|r| !failed && r.status_code == 200)
                     .and_then(|r| r.body.clone());
                 let Some(bytes) = bytes else {
-                    return self.fail_stage(
+                    return self.fail_stage_or_skip_expander(
+                        cx,
                         stage,
                         format!("artifact {} fetch failed", artifact.id),
+                        snapshots,
+                        avoid,
                         events,
                     );
                 };
@@ -4172,6 +4237,78 @@ mod tests {
                     .iter()
                     .any(|pin| *pin == ("paint", "pbr-testpattern"))
         }));
+    }
+
+    /// AN EXPANSION CAN NEVER LOSE A RUN. The expander is a rewording
+    /// courtesy; when it comes back with nothing the video still gets made,
+    /// from the words the person typed.
+    #[test]
+    fn a_useless_expansion_falls_back_to_the_prompt_the_person_typed() {
+        let mut pipeline = Pipeline::new(
+            "scanning electron microscope art",
+            &["text", "video"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(pipeline.expander_is_optional(0));
+
+        // Answered with nothing at all.
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+        // Answered with whitespace.
+        put_output(&mut pipeline, 0, "text/plain; charset=utf-8", b"   \n  ");
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+        // A real expansion is still what wins when there is one.
+        pipeline.stages[0].outputs.clear();
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            b"a false-colour scanning electron micrograph of a pollen grain",
+        );
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("a false-colour scanning electron micrograph of a pollen grain")
+        );
+    }
+
+    /// The two chains where the expansion is NOT optional keep refusing: a
+    /// text-only run has no other product, and a character chain's later
+    /// stages are gated on the brief holding the named identity.
+    #[test]
+    fn an_expansion_that_is_the_product_still_refuses_to_be_skipped() {
+        let text_only = Pipeline::new(
+            "scanning electron microscope art",
+            &["text"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(!text_only.expander_is_optional(0));
+
+        let mut character = Pipeline::new(
+            "Boba Fett",
+            &["text", "image", "mesh", "rig", "motion"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(character.is_character_pipeline());
+        assert!(!character.expander_is_optional(0));
+        put_output(&mut character, 0, "text/plain; charset=utf-8", b"  ");
+        assert!(character.request_for_stage(1).is_err());
     }
 
     #[test]
