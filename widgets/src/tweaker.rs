@@ -96,6 +96,14 @@ pub struct TweakDiffEntry {
     pub prop: String,
     pub old: String,
     pub new: String,
+    /// Where the widget's source object was constructed — `file:line` of
+    /// the literal to edit. For a widget built from a template (a tab, a
+    /// list item) this is the TEMPLATE's `:=` site, not the instance: that
+    /// is what the AI rewrites so every instance follows.
+    pub origin: String,
+    /// How many other live widgets share that source object and received
+    /// the same edit (0 for an ordinary, one-off widget).
+    pub siblings: u32,
 }
 
 /// A Ctrl+Space note card, attached to a widget by path: it rides with
@@ -258,14 +266,16 @@ fn pick_candidate(
     Some(rect)
 }
 
-/// The draw lists on screen in the pass a widget draws into.
-fn attached_lists_of(cx: &Cx, widget: &WidgetRef) -> HashSet<DrawListId> {
-    widget
-        .area()
-        .draw_list_id()
-        .and_then(|id| cx.draw_lists[id].draw_pass_id)
-        .map(|pass| cx.attached_draw_lists(pass))
-        .unwrap_or_default()
+/// The draw lists on screen this frame, over every pass: a hidden page's
+/// list hangs off no pass at all, so the union is exactly "visible". (A
+/// widget's own list does not reliably know its pass — the Dock's tab
+/// strip list did not — so this never asks it.)
+fn attached_lists_of(cx: &Cx, _widget: &WidgetRef) -> HashSet<DrawListId> {
+    let mut out = HashSet::new();
+    for pass_id in cx.passes.id_iter() {
+        out.extend(cx.attached_draw_lists(pass_id));
+    }
+    out
 }
 
 /// A widget's on-screen rect this frame: empty when it is not drawn (its
@@ -275,8 +285,11 @@ fn live_rect(cx: &Cx, widget: &WidgetRef) -> Rect {
     if !widget.area().is_attached(cx, &attached) {
         return Rect::default();
     }
-    widget.area().clipped_rect_union(cx)
+    // Attached = on screen; read the geometry even if a retained list left
+    // the area one redraw stale (the tab strip does).
+    widget.area().clipped_rect_union_attached(cx)
 }
+
 
 /// Navigation-class widgets keep working under the pick: "since tabs show
 /// whole new chunks of clickable UI", a plain click on a tab, fold button,
@@ -334,8 +347,7 @@ fn walk_pick(
     // that plane sits on another sheet, however its 2D rect overlaps the
     // un-projected point — that is what makes a covered parent selectable.
     let on_deeper_plane = max_level.is_some_and(|max| {
-        cx.widget_tree()
-            .nesting_depth(widget.widget_uid())
+        cx.sploded_depth_of(widget.widget_uid().0)
             .is_some_and(|level| level > max)
     });
     if !on_deeper_plane && !is_design_transparent(widget) {
@@ -477,7 +489,7 @@ fn resolve_pick(
     });
     let (widget, rect, _depth) = best?;
     let uid = widget.widget_uid();
-    let level = cx.widget_tree().nesting_depth(uid).unwrap_or(0);
+    let level = cx.sploded_depth_of(uid.0).unwrap_or(0);
     let path_ids = cx.widget_tree().path_to(uid);
     let path = if path_ids.is_empty() {
         format!("uid:{}", uid.0)
@@ -1546,6 +1558,40 @@ fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
     Err(format!("no widget at path {path:?}"))
 }
 
+/// `file:line` of the site that constructed the widget's source object —
+/// the first level of its construction chain. A template instance answers
+/// with the template's `:=` literal; a one-off widget with its own literal.
+fn source_origin(cx: &mut Cx, widget: &WidgetRef) -> String {
+    cascade_levels(cx, widget)
+        .first()
+        .filter(|l| !l.file.is_empty())
+        .map(|l| format!("{}:{}", l.file, l.line))
+        .unwrap_or_default()
+}
+
+/// Every other live widget built from the same source object (the same
+/// template): the tabs beside a tab, the rows beside a list row.
+fn template_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
+    let source = widget.script_source();
+    if source == ScriptObject::ZERO {
+        return Vec::new();
+    }
+    let me = widget.widget_uid();
+    let rows = cx.widget_tree().flat_tree(cx);
+    let mut out = Vec::new();
+    for row in rows {
+        if row.uid == me.0 {
+            continue;
+        }
+        let other = cx.widget_tree().widget(WidgetUid(row.uid));
+        if other.is_empty() || other.script_source() != source {
+            continue;
+        }
+        out.push(other);
+    }
+    out
+}
+
 /// The bare eval-apply: evaluate a splash chunk with the widget's own
 /// `__script_source__` scope and apply it through the ordinary machinery.
 /// No diff, no log — [`apply_splash_chunk`] wraps this for user-visible
@@ -1598,6 +1644,17 @@ pub fn apply_splash_chunk(
     let chunk = chunk.trim();
     let before = reflect_flat(cx, widget);
     eval_chunk(cx, widget, chunk)?;
+    // Template-built widgets (tabs, list items) share one source object;
+    // an edit to one is an edit to the template, so every live sibling
+    // takes it too — and the ledger names the template's site as the
+    // place to change in source.
+    let origin_site = source_origin(cx, widget);
+    let mut siblings = 0u32;
+    for sibling in template_siblings(cx, widget) {
+        if eval_chunk(cx, &sibling, chunk).is_ok() {
+            siblings += 1;
+        }
+    }
 
     let after = reflect_flat(cx, widget);
     let now = cx.seconds_since_app_start();
@@ -1637,6 +1694,8 @@ pub fn apply_splash_chunk(
                     prop: name.clone(),
                     old: old_value,
                     new: new_value.clone(),
+                    origin: origin_site.clone(),
+                    siblings,
                 };
                 if should_log(&mut s, &entry.prop) {
                     log!(
@@ -1685,6 +1744,8 @@ pub fn apply_splash_chunk(
                         prop: prop_name,
                         old,
                         new: value_text,
+                        origin: origin_site.clone(),
+                        siblings,
                     }
                 }
                 None => {
@@ -1695,6 +1756,8 @@ pub fn apply_splash_chunk(
                         prop: "(splash)".to_string(),
                         old: "-".to_string(),
                         new: chunk.to_string(),
+                        origin: origin_site.clone(),
+                        siblings,
                     }
                 }
             };
@@ -1807,11 +1870,13 @@ fn diff_json(entries: &[TweakDiffEntry]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"path\":{},\"prop\":{},\"old\":{},\"new\":{}}}",
+            "{{\"path\":{},\"prop\":{},\"old\":{},\"new\":{},\"origin\":{},\"siblings\":{}}}",
             json_str(&entry.path),
             json_str(&entry.prop),
             json_str(&entry.old),
-            json_str(&entry.new)
+            json_str(&entry.new),
+            json_str(&entry.origin),
+            entry.siblings
         ));
     }
     out.push(']');
@@ -5654,18 +5719,17 @@ impl Widget for Tweaker {
         // the body pass, not flat on the window pass — hand them to the
         // pass owner as marks and draw nothing here.
         if cx.sploded_active() {
-            let mark = |pick: &TweakPick| {
+            let max_level = cx.sploded_max_level();
+            let mark = |cx: &mut Cx, pick: &TweakPick| {
                 if Some(pick.window_id) != window_id || pick.rect.size.x <= 0.0 {
                     return None;
                 }
-                let level = cx
-                    .widget_tree()
-                    .nesting_depth(WidgetUid(pick.uid))
-                    .unwrap_or(pick.level);
+                let level = cx.sploded_depth_of(pick.uid).unwrap_or(pick.level);
+                let _ = max_level;
                 Some(makepad_platform::sploded::SplodedMark { rect: pick.rect, level: level as f32 })
             };
-            let hover_mark = if quiet { None } else { hover.as_ref().and_then(mark) };
-            let pinned_mark = pinned.as_ref().and_then(mark);
+            let hover_mark = if quiet { None } else { hover.as_ref().and_then(|p| mark(cx, p)) };
+            let pinned_mark = pinned.as_ref().and_then(|p| mark(cx, p));
             cx.sploded_set_marks(hover_mark, pinned_mark);
         }
         // NOT an early return: the overlay list and its root turtle were
@@ -5766,6 +5830,8 @@ mod tests {
 
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
         TweakDiffEntry {
+            origin: String::new(),
+            siblings: 0,
             seq,
             path: path.to_string(),
             prop: prop.to_string(),

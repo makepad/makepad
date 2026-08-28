@@ -275,6 +275,11 @@ pub struct SplodedView {
     pinned_mark: Option<SplodedMark>,
     /// The draw list the marks live in, so a mark change redraws only it.
     mark_list: Option<DrawListId>,
+    /// Nesting depth per widget uid, stamped at the draw seam this frame.
+    /// The widget tree is rebuilt mid-frame (sync_dirty), which wiped a
+    /// per-node stamp, so the plane a widget sits on lives here instead —
+    /// beside `nesting_depth_max`, which works for the same reason.
+    depth_by_uid: std::collections::HashMap<u64, usize>,
 }
 
 /// World-z units per nesting level while the mode is up.
@@ -330,6 +335,7 @@ impl Default for SplodedView {
             hover_mark: None,
             pinned_mark: None,
             mark_list: None,
+            depth_by_uid: std::collections::HashMap::new(),
         }
     }
 }
@@ -385,6 +391,27 @@ impl Cx {
         if self.nesting_depth > self.nesting_depth_max {
             self.nesting_depth_max = self.nesting_depth;
         }
+    }
+
+    /// Record which plane a widget drew on this frame (exploded view only),
+    /// keyed by uid. Reset each time the mode syncs; the map is only ever
+    /// read while the mode is up. The first stamp per uid per frame wins —
+    /// a widget's own `draw_walk` seam, before its children deepen the
+    /// counter.
+    pub fn sploded_note_depth(&mut self, uid: u64, depth: usize) {
+        if uid != 0 {
+            // Last write per frame wins: a widget's own draw_walk seam
+            // stamps it once, and a widget that moved planes (a tab switch)
+            // overwrites its old value. Entries for widgets NOT drawn this
+            // frame go stale, but the pick and the marks require a live
+            // on-screen rect, so a stale depth is never acted on.
+            self.sploded.depth_by_uid.insert(uid, depth);
+        }
+    }
+
+    /// The plane a widget drew on this frame, if it drew at all.
+    pub fn sploded_depth_of(&self, uid: u64) -> Option<usize> {
+        self.sploded.depth_by_uid.get(&uid).copied()
     }
 
     pub fn exit_nesting_depth(&mut self) {
@@ -814,6 +841,7 @@ impl Cx {
         self.sploded.hit_level = None;
         self.sploded.hover_mark = None;
         self.sploded.pinned_mark = None;
+        self.sploded.depth_by_uid.clear();
         if active {
             // Drop hover/pressed visuals the app was showing when the mode
             // opened, so the frozen picture is not stuck mid-hover.

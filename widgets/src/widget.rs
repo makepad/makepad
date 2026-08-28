@@ -1028,7 +1028,8 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
-                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+                let depth = cx.nesting_depth;
+                cx.sploded_note_depth(uid.0, depth);
             }
             let step = inner.widget.draw_walk(cx, scope, walk).step();
             cx.exit_nesting_depth();
@@ -1047,7 +1048,8 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
-                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+                let depth = cx.nesting_depth;
+                cx.sploded_note_depth(uid.0, depth);
             }
             inner.widget.draw_walk_all(cx, scope, walk);
             cx.exit_nesting_depth();
@@ -1077,7 +1079,8 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
-                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+                let depth = cx.nesting_depth;
+                cx.sploded_note_depth(uid.0, depth);
             }
             let step = inner.widget.draw(cx, scope).step();
             cx.exit_nesting_depth();
@@ -1096,7 +1099,8 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
-                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+                let depth = cx.nesting_depth;
+                cx.sploded_note_depth(uid.0, depth);
             }
             let step = inner.widget.draw(cx, &mut Scope::empty()).step();
             cx.exit_nesting_depth();
