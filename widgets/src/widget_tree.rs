@@ -143,6 +143,9 @@ struct GraphNode {
     skip_search: bool,
     parent: Option<WidgetUid>,
     children: Vec<WidgetUid>,
+    /// `Cx::nesting_depth` at this widget's last draw while the exploded view
+    /// was up — the plane it renders on. 0 = never stamped.
+    nesting_depth: u32,
 }
 
 #[derive(Clone)]
@@ -325,6 +328,7 @@ impl WidgetTree {
                         skip_search,
                         parent,
                         children: Vec::new(),
+                    nesting_depth: 0,
                     },
                 );
                 node_is_new = true;
@@ -445,6 +449,7 @@ impl WidgetTree {
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
+                    nesting_depth: 0,
                 },
             );
             if inner.root_uid == WidgetUid(0) {
@@ -491,6 +496,7 @@ impl WidgetTree {
                         skip_search: child_skip_search,
                         parent: Some(parent_uid),
                         children: Vec::new(),
+                        nesting_depth: 0,
                     },
                 );
                 child_is_new = true;
@@ -684,6 +690,7 @@ impl WidgetTree {
                 skip_search,
                 parent: None,
                 children: Vec::new(),
+                    nesting_depth: 0,
             },
         );
         if inner.root_uid == WidgetUid(0) {
@@ -746,6 +753,7 @@ impl WidgetTree {
                         skip_search,
                         parent: None,
                         children: Vec::new(),
+                    nesting_depth: 0,
                     },
                 );
                 node_is_new = true;
@@ -829,6 +837,7 @@ impl WidgetTree {
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
+                    nesting_depth: 0,
                 },
             );
             if inner.root_uid == WidgetUid(0) {
@@ -1433,6 +1442,7 @@ impl WidgetTree {
                             skip_search: child_skip_search,
                             parent: Some(uid),
                             children: Vec::new(),
+                    nesting_depth: 0,
                         },
                     );
                     child_is_new = true;
@@ -1836,6 +1846,25 @@ impl WidgetTree {
     }
 
     /// Build the path of LiveIds from root to the node with the given UID.
+    /// Stamp the plane a widget drew on (exploded view only — see
+    /// `WidgetRef::draw_walk`).
+    pub fn note_nesting_depth(&self, uid: WidgetUid, depth: usize) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = inner.graph.get_mut(&uid) {
+            node.nesting_depth = depth as u32;
+        }
+    }
+
+    /// The plane a widget last drew on while the exploded view was up.
+    pub fn nesting_depth(&self, uid: WidgetUid) -> Option<usize> {
+        let inner = self.inner.borrow();
+        inner
+            .graph
+            .get(&uid)
+            .filter(|n| n.nesting_depth > 0)
+            .map(|n| n.nesting_depth as usize)
+    }
+
     pub fn path_to(&self, uid: WidgetUid) -> Vec<LiveId> {
         self.sync_dirty();
         let mut inner = self.inner.borrow_mut();
