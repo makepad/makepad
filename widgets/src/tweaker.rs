@@ -105,6 +105,9 @@ pub struct TweakDiffEntry {
     /// How many other live widgets share that source object and received
     /// the same edit (0 for an ordinary, one-off widget).
     pub siblings: u32,
+    /// "this" — specialise this instance (origin = its own site) — or
+    /// "all" — every widget of the type (origin = the type's definition).
+    pub scope: String,
 }
 
 /// A Ctrl+Space note card, attached to a widget by path: it rides with
@@ -177,6 +180,13 @@ struct TweakSession {
     /// What the panel says under the prompt: "sent … waiting", "applied",
     /// or an error — the send must be visible, and so must the landing.
     vibe_status: String,
+    /// Bumped by every fn apply that did NOT come from the source view (the
+    /// AI, /tweak/apply): the view re-reads its text for those only —
+    /// otherwise a person's half-typed edit would be replaced under them.
+    fn_override_gen: u64,
+    /// Edit scope: false = "this" (specialise this instance), true = "all"
+    /// (every live widget of the type; the ledger names the type's site).
+    scope_all: bool,
     /// A prompt is out and unanswered (path, layer).
     vibe_pending: Option<(String, String)>,
     /// A sample in flight: (probe id, prop). Answered from the next frame.
@@ -861,7 +871,15 @@ pub fn window_intercept(
                 s.hold_up = true;
                 drop(s);
                 redraw_tweaker(cx, &tweaker);
-                return true;
+                // A press on the tweaker's own chrome over the body (the
+                // colour popover) stops here. A press on the APP both ends
+                // the field/popover and picks what it landed on — one
+                // click, like a click with nothing focused; the first click
+                // after typing in a field used to be swallowed.
+                let attached = attached_lists_of(cx, &tweaker);
+                if chrome_hit(cx, &tweaker, abs, &attached, 0) {
+                    return true;
+                }
             }
             if annotate {
                 let mut stroke = TweakStroke::default();
@@ -951,6 +969,28 @@ enum PointerKind {
     Down,
     Up,
     Scroll,
+}
+
+/// Does a point land on the tweaker's own widgets (below its root overlay,
+/// which spans the window)?
+fn chrome_hit(
+    cx: &Cx,
+    widget: &WidgetRef,
+    abs: Vec2d,
+    attached: &HashSet<DrawListId>,
+    depth: usize,
+) -> bool {
+    if depth > 0 && pick_candidate(cx, widget, abs, attached).is_some() {
+        return true;
+    }
+    if depth > 24 {
+        return false;
+    }
+    let mut kids: Vec<WidgetRef> = Vec::new();
+    widget.children(&mut |_id, child| kids.push(child));
+    kids
+        .iter()
+        .any(|child| chrome_hit(cx, child, abs, attached, depth + 1))
 }
 
 fn redraw_tweaker(cx: &mut Cx, tweaker: &WidgetRef) {
@@ -1423,6 +1463,7 @@ fn record_fn_overrides(uid: u64, chunk: &str) {
     let Some(body) = chunk[open..].find('{').map(|i| &chunk[open + i + 1..]) else { return };
     let body = body.trim_end().trim_end_matches('}');
     let mut s = session().lock().unwrap();
+    s.fn_override_gen += 1;
     for name in ["pixel", "vertex"] {
         if let Some(seg) = body.split(&format!("{name}:")).nth(1) {
             let seg = format!("{name}:{seg}");
@@ -1433,9 +1474,9 @@ fn record_fn_overrides(uid: u64, chunk: &str) {
 
 /// Ctrl+Enter in the source view: apply the fn as edited to the pinned
 /// widget's layer, live — no AI needed for a hand edit.
-fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) {
+fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) -> Result<(), String> {
     let Some(sel) = session().lock().unwrap().pinned.clone() else {
-        return;
+        return Err("nothing pinned".to_string());
     };
     let layer = tweaker.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
     // Strip the `// name — loc` header lines the view adds; what is left is
@@ -1457,8 +1498,12 @@ fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) {
                     s.fn_overrides.insert((sel.uid, layer.clone(), name.clone()), seg.trim_end().to_string());
                 }
             }
+            Ok(())
         }
-        Err(error) => log!("TWEAK editor apply failed: {error}"),
+        Err(error) => {
+            log!("TWEAK editor apply failed: {error}");
+            Err(error)
+        }
     }
 }
 
@@ -1775,6 +1820,50 @@ fn source_origin(cx: &mut Cx, widget: &WidgetRef) -> String {
         .unwrap_or_default()
 }
 
+/// The type's definition site: the deepest cascade level that has a file
+/// location — `mod.widgets.Button = set_type_default() do …` in the widget
+/// library — where an "all Buttons" edit belongs in source.
+fn type_origin(cx: &mut Cx, widget: &WidgetRef) -> String {
+    cascade_levels(cx, widget)
+        .iter()
+        .rev()
+        .find(|l| !l.file.is_empty())
+        .map(|l| format!("{}:{}", l.file, l.line))
+        .unwrap_or_else(|| source_origin(cx, widget))
+}
+
+/// Every other live widget of the same widget type — "every Button in the
+/// system".
+fn type_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
+    let Some(ty) = widget.widget_type_id() else {
+        return Vec::new();
+    };
+    let me = widget.widget_uid();
+    let rows = cx.widget_tree().flat_tree(cx);
+    let mut out = Vec::new();
+    for row in rows {
+        if row.uid == me.0 {
+            continue;
+        }
+        let other = cx.widget_tree().widget(WidgetUid(row.uid));
+        if other.is_empty() || other.widget_type_id() != Some(ty) {
+            continue;
+        }
+        // The panel's own buttons/labels are the same types as the app's;
+        // "all Button" means the app's buttons.
+        let in_tweaker = cx
+            .widget_tree()
+            .path_to(WidgetUid(row.uid))
+            .iter()
+            .any(|id| *id == live_id!(tweaker));
+        if in_tweaker {
+            continue;
+        }
+        out.push(other);
+    }
+    out
+}
+
 /// Every other live widget built from the same source object (the same
 /// template): the tabs beside a tab, the rows beside a list row.
 fn template_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
@@ -1798,6 +1887,43 @@ fn template_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
     out
 }
 
+/// Rewrite every `tweak://apply:LINE:COL` in an error into the chunk's own
+/// line numbers.
+fn relocate_chunk_error(error: &str, callsite: u32) -> String {
+    let mut out = String::new();
+    let mut rest = error;
+    while let Some(at) = rest.find("tweak://apply:") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + "tweak://apply:".len()..];
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        match digits.parse::<u32>() {
+            Ok(line) if line > callsite => {
+                // The parser counts the `use` line and one more for the
+                // wrapper: measured, `@@` on chunk line 4 reports callsite+5.
+                out.push_str(&format!("line {}", line - callsite - 1));
+                rest = &tail[digits.len()..];
+            }
+            _ => {
+                out.push_str("tweak://apply:");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A stable pseudo-line for a chunk: FNV-1a of its text, so each distinct
+/// chunk is its own script body (and its own fn ScriptIps).
+fn chunk_callsite_line(code: &str) -> u32 {
+    let mut h: u32 = 2166136261;
+    for b in code.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    (h % 1_000_000) + 2
+}
+
 /// The bare eval-apply: evaluate a splash chunk with the widget's own
 /// `__script_source__` scope and apply it through the ordinary machinery.
 /// No diff, no log — [`apply_splash_chunk`] wraps this for user-visible
@@ -1810,6 +1936,7 @@ fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String
         format!("{{{chunk}}}")
     };
     let code = format!("use mod.prelude.widgets.*\n__script_source__{body};");
+    let callsite = chunk_callsite_line(&code);
     let errors = cx.with_vm(|vm| {
         // Install a captured-error sink so parse/apply problems come back to
         // the caller instead of only landing in the log.
@@ -1817,11 +1944,13 @@ fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String
         let script_mod = ScriptMod {
             cargo_manifest_path: String::new(),
             module_path: "tweak".to_string(),
-            // One synthetic callsite: the body dedups by file/line/column and
-            // resets itself whenever the code differs, so repeated applies
-            // don't grow the body table.
+            // The callsite is keyed by the chunk's own text: the draw-shader
+            // cache hashes each fn's ScriptIp, and one fixed callsite reused
+            // its body across applies — same ip, same hash, so the SECOND
+            // `pixel: fn` rewrite on a widget was recorded everywhere and
+            // never recompiled. Identical chunks still dedup to one body.
             file: "tweak://apply".to_string(),
-            line: 1,
+            line: callsite as usize,
             column: 1,
             code,
             values: Vec::new(),
@@ -1832,6 +1961,12 @@ fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String
         vm.take_errors()
     });
     if !errors.is_empty() {
+        // `tweak://apply:<callsite+n>:<col>` → `line <n>:<col>` of the chunk
+        // (chunk line 1 sits on code line 2, right after the `use`).
+        let errors: Vec<String> = errors
+            .iter()
+            .map(|e| relocate_chunk_error(e, callsite))
+            .collect();
         return Err(format!("splash error: {}", errors.join("; ")));
     }
     Ok(())
@@ -1854,9 +1989,24 @@ pub fn apply_splash_chunk(
     // an edit to one is an edit to the template, so every live sibling
     // takes it too — and the ledger names the template's site as the
     // place to change in source.
-    let origin_site = source_origin(cx, widget);
+    // Scope decides who else takes the edit and which site the ledger
+    // names: "this" = template siblings only (a tab is every tab) and the
+    // instance's own site; "all" = every live widget of the TYPE and the
+    // type's definition site.
+    let scope_all = session().lock().unwrap().scope_all;
+    let scope_name = if scope_all { "all" } else { "this" };
+    let origin_site = if scope_all {
+        type_origin(cx, widget)
+    } else {
+        source_origin(cx, widget)
+    };
+    let fan_out = if scope_all {
+        type_siblings(cx, widget)
+    } else {
+        template_siblings(cx, widget)
+    };
     let mut siblings = 0u32;
-    for sibling in template_siblings(cx, widget) {
+    for sibling in fan_out {
         if eval_chunk(cx, &sibling, chunk).is_ok() {
             siblings += 1;
         }
@@ -1902,6 +2052,7 @@ pub fn apply_splash_chunk(
                     new: new_value.clone(),
                     origin: origin_site.clone(),
                     siblings,
+                    scope: scope_name.to_string(),
                 };
                 if should_log(&mut s, &entry.prop) {
                     log!(
@@ -1952,6 +2103,7 @@ pub fn apply_splash_chunk(
                         new: value_text,
                         origin: origin_site.clone(),
                         siblings,
+                        scope: scope_name.to_string(),
                     }
                 }
                 None => {
@@ -1964,6 +2116,7 @@ pub fn apply_splash_chunk(
                         new: chunk.to_string(),
                         origin: origin_site.clone(),
                         siblings,
+                        scope: scope_name.to_string(),
                     }
                 }
             };
@@ -2076,13 +2229,14 @@ fn diff_json(entries: &[TweakDiffEntry]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"path\":{},\"prop\":{},\"old\":{},\"new\":{},\"origin\":{},\"siblings\":{}}}",
+            "{{\"path\":{},\"prop\":{},\"old\":{},\"new\":{},\"origin\":{},\"siblings\":{},\"scope\":{}}}",
             json_str(&entry.path),
             json_str(&entry.prop),
             json_str(&entry.old),
             json_str(&entry.new),
             json_str(&entry.origin),
-            entry.siblings
+            entry.siblings,
+            json_str(&entry.scope)
         ));
     }
     out.push(']');
@@ -3050,6 +3204,30 @@ pub struct Tweaker {
     /// The panel's note button: the same note as the Insert key, for
     /// keyboards without one.
     note_uid: u64,
+    /// The scope toggle's buttons.
+    #[rust]
+    scope_this_uid: u64,
+    #[rust]
+    scope_all_uid: u64,
+    /// The Shader tab's editor and the live-code loop: every change arms a
+    /// short debounce; at settle the fn text is applied through the ledger
+    /// (one entry per settle, like a scrub gesture). A compile error keeps
+    /// the last good text running and shows the message under the editor.
+    #[rust]
+    shader_src_uid: u64,
+    #[rust]
+    live_timer: Timer,
+    #[rust]
+    live_last_applied: String,
+    #[rust]
+    live_last_good: String,
+    #[rust]
+    live_error_pending: bool,
+    /// (widget, layer) the source view currently holds text for.
+    #[rust]
+    live_key: (u64, String),
+    #[rust]
+    fn_external_seen: u64,
     /// The shown layer's script-defined fns: (name, file:line, source).
     vibe_fn_sources: Vec<(String, String, String)>,
     /// An apply just happened: redraw the panel one frame later so the
@@ -3295,6 +3473,17 @@ impl Tweaker {
                         width: Fill
                         margin: Inset{left: 4 top: 0 right: 0 bottom: 2}
                         text: "click a widget to inspect it"
+                    }
+                    scope_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 4
+                        align: Align{x: 0.0 y: 0.5}
+                        margin: Inset{left: 4 top: 0 right: 0 bottom: 2}
+                        scope_this := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "[this]" }
+                        scope_all := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "all" }
+                        scope_origin := FabLabelSmall { width: Fill text: "" }
                     }
                     filter_row := View {
                         width: Fill
@@ -4150,6 +4339,23 @@ impl Tweaker {
                     .child(live_id!(title_label))
                     .set_text(cx, &head);
                 sidebar.child(live_id!(path_label)).set_text(cx, &sel.path);
+                {
+                    let all = session().lock().unwrap().scope_all;
+                    let row = sidebar.child(live_id!(scope_row));
+                    row.child(live_id!(scope_this)).set_text(cx, if all { "this" } else { "[this]" });
+                    let all_label = format!("{}all {}s{}", if all { "[" } else { "" }, sel.ty, if all { "]" } else { "" });
+                    row.child(live_id!(scope_all)).set_text(cx, &all_label);
+                    let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+                    let origin = if widget.is_empty() {
+                        String::new()
+                    } else if all {
+                        type_origin(cx, &widget)
+                    } else {
+                        source_origin(cx, &widget)
+                    };
+                    let base = origin.rsplit('/').next().unwrap_or(&origin).to_string();
+                    row.child(live_id!(scope_origin)).set_text(cx, &format!("\u{2192} {base}"));
+                }
             }
             None => {
                 sidebar.child(live_id!(title_label)).set_text(cx, "TWEAK");
@@ -4174,6 +4380,8 @@ impl Tweaker {
             .child(live_id!(note))
             .widget_uid()
             .0;
+        self.scope_this_uid = sidebar.child(live_id!(scope_row)).child(live_id!(scope_this)).widget_uid().0;
+        self.scope_all_uid = sidebar.child(live_id!(scope_row)).child(live_id!(scope_all)).widget_uid().0;
         let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
         let spread = spread_wrap.child(live_id!(spread));
         self.spread_uid = spread.widget_uid().0;
@@ -4247,8 +4455,19 @@ impl Tweaker {
                 self.vibe_layer = Some(layer.clone());
                 col.child(live_id!(shader_title)).set_text(cx, &layer);
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
-                col.child(live_id!(shader_doc))
-                    .set_text(cx, doc.lines().next().unwrap_or(""));
+                // One terse line, never a wrapped paragraph.
+                let doc_line: String = doc.lines().next().unwrap_or("").chars().take(64).collect();
+                let doc_line = if doc.lines().next().map_or(0, |l| l.chars().count()) > 64 {
+                    format!("{doc_line}\u{2026}")
+                } else {
+                    doc_line
+                };
+                col.child(live_id!(shader_doc)).set_text(cx, &doc_line);
+                self.shader_src_uid = col
+                    .child(live_id!(src_scroll))
+                    .child(live_id!(shader_src))
+                    .widget_uid()
+                    .0;
                 self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
                 // The shader as written: pixel (and vertex when the layer
                 // sets its own) with their docs — what the prompt rewrites.
@@ -4275,9 +4494,25 @@ impl Tweaker {
                         text = "(no script-defined pixel/vertex fn on this layer \u{2014} the type's own shader)".to_string();
                     }
                     self.vibe_fn_sources = fns;
-                    col.child(live_id!(src_scroll))
-                        .child(live_id!(shader_src))
-                        .set_text(cx, &text);
+                    let editor = col.child(live_id!(src_scroll)).child(live_id!(shader_src));
+                    // While a person types here, the view is the source of
+                    // truth: same widget+layer, no outside apply since, and
+                    // the editor focused or holding exactly what it last
+                    // applied (a failed edit stays on screen to be fixed).
+                    let key = (self.rows_uid, layer.clone());
+                    let external = session().lock().unwrap().fn_override_gen;
+                    let typing = self.live_key == key
+                        && self.fn_external_seen == external
+                        && (cx.has_key_focus(editor.area()) || editor.text() == self.live_last_applied);
+                    if editor.text() != text && !typing {
+                        editor.set_text(cx, &text);
+                        // Column 0 visible: new text, viewport home.
+                        editor.set_scroll_pos(cx, dvec2(0.0, 0.0));
+                        self.live_last_applied = text.clone();
+                        self.live_last_good = text.clone();
+                    }
+                    self.live_key = key;
+                    self.fn_external_seen = external;
                 }
                 let sw_ref = col.child(live_id!(big));
                 let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
@@ -4839,6 +5074,55 @@ impl Tweaker {
 
     /// Apply one sidebar-originated chunk to the selection (same path the
     /// AI uses, same diff log; TWEAK log lines throttle to one per pause).
+    /// Live code: apply the editor's text as it stands; a compile error
+    /// puts the last good text back (the app never shows a blank widget)
+    /// and says why under the editor.
+    fn live_apply(&mut self, cx: &mut Cx) {
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let editor = sidebar
+            .child(live_id!(shader_col))
+            .child(live_id!(src_scroll))
+            .child(live_id!(shader_src));
+        let text = editor.text();
+        if text == self.live_last_applied || !text.contains("fn") {
+            return;
+        }
+        let _ = makepad_platform::shader_error::take();
+        self.live_last_applied = text.clone();
+        if let Err(error) = apply_fn_edit(cx, self, &text) {
+            self.live_revert(cx, &error);
+            return;
+        }
+        match makepad_platform::shader_error::take() {
+            Some(err) => self.live_revert(cx, &err),
+            None => {
+                self.live_last_good = text;
+                session().lock().unwrap().vibe_status = "live \u{2713}".to_string();
+                self.live_error_pending = true;
+                self.next_frame = cx.new_next_frame();
+                self.redraw_sidebar(cx);
+            }
+        }
+    }
+
+    fn live_revert(&mut self, cx: &mut Cx, err: &str) {
+        let first = err.trim().trim_start_matches("splash error:").trim();
+        let first = first.split("; ").next().unwrap_or(first);
+        let first = match first.find(" (from:") {
+            Some(at) => &first[..at],
+            None => first,
+        };
+        let first: String = first.chars().take(140).collect();
+        session().lock().unwrap().vibe_status = format!("shader error: {first}");
+        log!("TWEAK live shader error: {err}");
+        if !self.live_last_good.is_empty() && self.live_last_good != self.live_last_applied {
+            let good = self.live_last_good.clone();
+            let _ = apply_fn_edit(cx, self, &good);
+            let _ = makepad_platform::shader_error::take();
+        }
+        self.redraw_sidebar(cx);
+    }
+
     fn sidebar_apply(&mut self, cx: &mut Cx, sel: &TweakPick, chunk: &str) {
         let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
         if widget.is_empty() {
@@ -5260,6 +5544,22 @@ impl Tweaker {
             };
             let action_uid = widget_action.widget_uid.0;
             // The exploded view's spread knob: level separation, live.
+            if self.shader_src_uid != 0 && action_uid == self.shader_src_uid {
+                // The editor only reports document changes: live code
+                // settles 200ms after the last keystroke.
+                self.live_timer = cx.start_timeout(0.2);
+                continue;
+            }
+            if action_uid != 0 && (action_uid == self.scope_this_uid || action_uid == self.scope_all_uid) {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let all = action_uid == self.scope_all_uid;
+                    session().lock().unwrap().scope_all = all;
+                    log!("TWEAK scope {}", if all { "all — every widget of the type" } else { "this — specialise this instance" });
+                    self.rows_uid = 0;
+                    self.redraw_sidebar(cx);
+                }
+                continue;
+            }
             if self.note_uid != 0 && action_uid == self.note_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.note_request = true;
@@ -5817,6 +6117,17 @@ impl Widget for Tweaker {
                 }
             }
         }
+        if self.live_timer.is_event(event).is_some() {
+            self.live_apply(cx);
+        }
+        if self.live_error_pending && self.next_frame.is_event(event).is_some() {
+            // The backend compile happens at draw: an error there shows up
+            // one frame after the apply.
+            self.live_error_pending = false;
+            if let Some(err) = makepad_platform::shader_error::take() {
+                self.live_revert(cx, &err);
+            }
+        }
         if self.swatch_refresh && self.next_frame.is_event(event).is_some() {
             self.swatch_refresh = false;
             self.redraw_sidebar(cx);
@@ -5970,7 +6281,12 @@ impl Widget for Tweaker {
                     .map(|s| cx.has_key_focus(s.child(live_id!(shader_col)).child(live_id!(prompt)).area()))
                     .unwrap_or(false);
                 if !prompt_focused && text.contains("fn") {
-                    apply_fn_edit(cx, self, &text);
+                    if let Err(error) = apply_fn_edit(cx, self, &text) {
+                        self.live_revert(cx, &error);
+                    } else {
+                        self.live_last_applied = text.clone();
+                        self.live_last_good = text;
+                    }
                 }
             }
             Event::KeyDown(ke) if ke.key_code == KeyCode::Insert && tweak_is_on() => {
@@ -6448,6 +6764,7 @@ mod tests {
         TweakDiffEntry {
             origin: String::new(),
             siblings: 0,
+            scope: "this".to_string(),
             seq,
             path: path.to_string(),
             prop: prop.to_string(),

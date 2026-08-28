@@ -143,10 +143,12 @@ impl DrawVars {
             .object_type_name_in_chain(io_self)
             .map(|id| format!("{}", id))
             .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+        let report = output.error_report();
+        crate::shader_error::note(format!("{name}: {report}"));
         crate::error!(
             "draw shader '{}' failed to compile and will NOT be drawn:\n{}",
             name,
-            output.error_report()
+            report
         );
     }
 
