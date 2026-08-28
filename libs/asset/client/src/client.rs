@@ -1054,6 +1054,35 @@ impl AssetClient {
         self.api.worker_fail(job, suffix, retry_delay_ms, error)
     }
 
+    // ---- the vision-annotation queue ---------------------------------------
+
+    /// Counts behind the annotation bar; `category` narrows to one kit.
+    pub fn annotate_summary(
+        &self,
+        category: Option<&str>,
+    ) -> ClientResult<crate::dto::AnnotateSummaryDto> {
+        self.api.annotate_summary(category)
+    }
+
+    /// Queue what the vision pass still owes — one request, whole library.
+    pub fn annotate_backlog(
+        &self,
+        limit: u64,
+        category: Option<&str>,
+        epoch: u64,
+    ) -> ClientResult<crate::dto::AnnotateBacklogDto> {
+        self.api.annotate_backlog(limit, category, epoch)
+    }
+
+    /// The annotation record as it stands, for a pass that owns only part
+    /// of it and must carry the rest through.
+    pub fn get_annotation(
+        &self,
+        asset: &makepad_asset_data::AssetId,
+    ) -> ClientResult<crate::dto::AnnotationDto> {
+        self.api.get_annotation(asset)
+    }
+
     fn wrap_cursor(&self, raw: Option<String>) -> Option<PageCursor> {
         raw.map(|token| PageCursor { server_id: self.server_id, token })
     }

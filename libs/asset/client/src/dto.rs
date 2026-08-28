@@ -1538,6 +1538,138 @@ pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
     Ok(out)
 }
 
+/// `GET /v1/annotate/summary`: how much of the catalog the vision pass has
+/// described, and what its queue is doing about the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotateSummaryDto {
+    /// The tag that means "described at the current annotator version".
+    pub version_tag: String,
+    /// Annotatable, live, still undescribed.
+    pub owed: u64,
+    pub annotated: u64,
+    pub pending: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
+impl AnnotateSummaryDto {
+    /// Assets the queue is working on or waiting to work on.
+    pub fn queued(&self) -> u64 {
+        self.pending + self.running
+    }
+}
+
+pub fn parse_annotate_summary(v: &Value) -> ClientResult<AnnotateSummaryDto> {
+    let version_tag = need_str(v, "version_tag", 48, "annotate version tag")?.to_string();
+    check_display(&version_tag, "annotate version tag")?;
+    let jobs = need(v, "jobs", "annotate jobs")?;
+    Ok(AnnotateSummaryDto {
+        version_tag,
+        owed: need_u64(v, "owed", "annotate owed")?,
+        annotated: need_u64(v, "annotated", "annotate annotated")?,
+        pending: need_u64(jobs, "pending", "annotate pending")?,
+        running: need_u64(jobs, "running", "annotate running")?,
+        succeeded: need_u64(jobs, "succeeded", "annotate succeeded")?,
+        failed: need_u64(jobs, "failed", "annotate failed")?,
+        cancelled: need_u64(jobs, "cancelled", "annotate cancelled")?,
+    })
+}
+
+/// `POST /v1/annotate/backlog`: what one sweep queued, and what is left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotateBacklogDto {
+    pub enqueued: u64,
+    /// Already queued or already described — the idempotent no-op.
+    pub skipped: u64,
+    pub remaining: u64,
+    pub annotated: u64,
+}
+
+pub fn parse_annotate_backlog(v: &Value) -> ClientResult<AnnotateBacklogDto> {
+    Ok(AnnotateBacklogDto {
+        enqueued: need_u64(v, "enqueued", "backlog enqueued")?,
+        skipped: need_u64(v, "skipped", "backlog skipped")?,
+        remaining: need_u64(v, "remaining", "backlog remaining")?,
+        annotated: need_u64(v, "annotated", "backlog annotated")?,
+    })
+}
+
+/// `GET /v1/assets/{ast}/annotation`: the record as it stands, so a pass
+/// that owns only some of its fields can carry the rest through unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationDto {
+    pub title: String,
+    pub description: String,
+    pub kind: Option<AssetKind>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub creator: String,
+    pub generator: String,
+    pub backend: String,
+    pub model: String,
+    /// Owner-only fields; empty for a viewer who is not the owner or root.
+    pub prompt: String,
+    pub provenance: String,
+    pub private: bool,
+}
+
+pub fn parse_annotation(v: &Value) -> ClientResult<AnnotationDto> {
+    let text = |key: &'static str, max: usize, what: &'static str| -> ClientResult<String> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+                if s.len() > max {
+                    return Err(ClientError::Protocol { what });
+                }
+                Ok(s.to_string())
+            }
+        }
+    };
+    let labels = |key: &'static str, what: &'static str| -> ClientResult<Vec<String>> {
+        let Some(arr) = v.get(key).and_then(Value::as_arr) else {
+            return Ok(Vec::new());
+        };
+        if arr.len() > 64 {
+            return Err(ClientError::Protocol { what });
+        }
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let s = item.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.len() > 64 {
+                return Err(ClientError::Protocol { what });
+            }
+            check_display(s, what)?;
+            out.push(s.to_string());
+        }
+        Ok(out)
+    };
+    let kind = match v.get("kind") {
+        None | Some(Value::Null) => None,
+        Some(x) => Some(
+            x.as_str()
+                .and_then(kind_parse)
+                .ok_or(ClientError::Protocol { what: "annotation kind" })?,
+        ),
+    };
+    Ok(AnnotationDto {
+        title: text("title", 200, "annotation title")?,
+        description: text("description", 4096, "annotation description")?,
+        kind,
+        categories: labels("categories", "annotation categories")?,
+        tags: labels("tags", "annotation tags")?,
+        creator: text("creator", 128, "annotation creator")?,
+        generator: text("generator", 128, "annotation generator")?,
+        backend: text("backend", 128, "annotation backend")?,
+        model: text("model", 128, "annotation model")?,
+        prompt: text("prompt", 8192, "annotation prompt")?,
+        provenance: text("provenance", 4096, "annotation provenance")?,
+        private: matches!(v.get("visibility").and_then(Value::as_str), Some("private")),
+    })
+}
+
 /// One claimed job from `POST /v1/worker/claim` — everything a fleet
 /// dispatcher needs to run it. `body` is the enqueuer's job document
 /// (bounded by the transport's JSON caps before it ever reaches here).

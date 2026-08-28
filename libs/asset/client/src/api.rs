@@ -2627,6 +2627,62 @@ impl Api {
         Ok(())
     }
 
+    /// Read the annotation record as it stands.
+    ///
+    /// The vision pass owns two of its fields and must carry the rest
+    /// through untouched, and the route is a whole-record PUT — so "carry
+    /// through" means read, recompute the owned fields, write the whole
+    /// thing back. Without this a worker would need the store's SQLite file
+    /// on its own disk, which is exactly the coupling the job queue exists
+    /// to remove.
+    pub fn get_annotation(&self, asset: &AssetId) -> ClientResult<dto::AnnotationDto> {
+        let path = wire::path_annotation(asset);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotation(&v)
+    }
+
+    /// Counts behind the annotation bar; `category` narrows to one kit.
+    pub fn annotate_summary(
+        &self,
+        category: Option<&str>,
+    ) -> ClientResult<dto::AnnotateSummaryDto> {
+        let path = wire::path_annotate_summary(category);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotate_summary(&v)
+    }
+
+    /// Queue what the vision pass still owes, up to `limit` assets.
+    ///
+    /// ONE request fires a whole library's backlog: the server picks the
+    /// assets and mints the jobs, so nothing depends on a client loop
+    /// surviving the window it was started from. `epoch` is 0 unless an
+    /// operator is deliberately re-driving assets whose jobs failed
+    /// terminally.
+    pub fn annotate_backlog(
+        &self,
+        limit: u64,
+        category: Option<&str>,
+        epoch: u64,
+    ) -> ClientResult<dto::AnnotateBacklogDto> {
+        let mut pairs: Vec<(&str, Value)> = vec![("limit", Value::Int(limit as i64))];
+        if let Some(c) = category {
+            pairs.push(("category", json::s(c)));
+        }
+        if epoch != 0 {
+            pairs.push(("epoch", Value::Int(epoch.min(i64::MAX as u64) as i64)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_annotate_backlog();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotate_backlog(&v)
+    }
+
     /// Open a blob body stream, optionally resuming from `range_start`.
     /// Returns the raw response (status 200, 206 or 416); the caller owns the
     /// resume math and digest accounting.
