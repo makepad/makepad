@@ -107,6 +107,7 @@ use crate::{
         },
     },
 };
+use std::cell::Cell;
 
 impl Cx {
     fn render_view(
@@ -285,19 +286,30 @@ impl Cx {
                         d3d11_cx.context.RSSetState(raster_state);
                     }
 
-                    let geom_ibuf = geometry.os.geom_ibuf.buffer.as_ref().unwrap();
+                    // A geometry whose buffers could not be built — the device died between
+                    // frames, so `create_buffer_or_update` bailed — skips its draw call
+                    // instead of panicking a few lines before `DrawIndexedInstanced`. Binding
+                    // a null vertex buffer would be worse than either: it draws nothing and
+                    // reports nothing. The recovery sweep is what puts these back.
+                    let (Some(geom_ibuf), Some(geom_vbuf)) = (
+                        geometry.os.geom_ibuf.buffer.clone(),
+                        geometry.os.geom_vbuf.buffer.clone(),
+                    ) else {
+                        debug_assert!(
+                            d3d11_cx.device_lost.get(),
+                            "geometry buffers missing while the device is healthy"
+                        );
+                        continue;
+                    };
                     d3d11_cx
                         .context
-                        .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
+                        .IASetIndexBuffer(&geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
 
                     let geom_slots = sh.mapping.geometries.total_slots;
                     let inst_slots = sh.mapping.instances.total_slots;
                     let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
                     let offsets = [0u32, 0u32];
-                    let buffers = [
-                        geometry.os.geom_vbuf.buffer.clone(),
-                        draw_item.os.inst_vbuf.buffer.clone(),
-                    ];
+                    let buffers = [Some(geom_vbuf), draw_item.os.inst_vbuf.buffer.clone()];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
                         2,
@@ -864,6 +876,13 @@ impl Cx {
                 let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
                 cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                 self.draw_shaders.os_shaders.push(shp);
+            } else {
+                // `compile_set` was drained into `sync_ids`, so a shader dropped here is never
+                // asked for again and everything drawn with it silently stops rendering for
+                // the life of the process. Creation fails for a whole frame's worth of shaders
+                // when the device dies mid-compile, so put it back and let the next frame,
+                // against a rebuilt device, create it.
+                self.draw_shaders.compile_set.insert(draw_shader_id);
             }
         }
 
@@ -1305,6 +1324,16 @@ unsafe fn get_frame_statistics(
     unsafe {
         (Interface::vtable(base).GetFrameStatistics)(Interface::as_raw(base), stats as *mut _)
     }
+}
+
+/// `ID3D11Device::GetDeviceRemovedReason` has a vtable slot in the vendored bindings but no
+/// generated wrapper, so it is called through the vtable the way `get_frame_statistics` is.
+///
+/// It is the authoritative answer to "is this device still usable": it latches the real cause
+/// and keeps reporting it, and unlike a `Present` HRESULT it is available when the call that
+/// failed was a `CreateBuffer` on a window that never got as far as presenting.
+unsafe fn device_removed_reason(device: &ID3D11Device) -> windows_core::HRESULT {
+    unsafe { (Interface::vtable(device).GetDeviceRemovedReason)(Interface::as_raw(device)) }
 }
 
 /// Swap-chain headroom for a vsync-paced main window: 3 buffers with a maximum
@@ -1839,13 +1868,29 @@ pub struct D3d11Cx {
     pub context: ID3D11DeviceContext,
     pub query: ID3D11Query,
     pub factory: IDXGIFactory2,
+    /// The device has been removed or reset, so every object created from it is dead and the
+    /// recovery driver owns the window until it has rebuilt them. A `Cell` because every
+    /// resource-creation site in this file holds only a `&D3d11Cx`.
+    pub device_lost: Cell<bool>,
+    /// Once-per-outage latch for failures the device itself says it survived, so a call site
+    /// that runs every frame cannot fill the log.
+    other_error_logged: Cell<bool>,
 }
 
 impl D3d11Cx {
-    pub fn new() -> D3d11Cx {
+    /// Builds the device tier: factory, adapter, device, immediate context and event query.
+    ///
+    /// Fallible because recovery calls it while the display driver may still be restarting,
+    /// when `EnumAdapters` and `D3D11CreateDevice` fail transiently for a few hundred
+    /// milliseconds. Every argument is a literal, so nothing here depends on retained state.
+    fn create_device_tier(
+    ) -> windows_core::Result<(IDXGIFactory2, ID3D11Device, ID3D11DeviceContext, ID3D11Query)> {
         unsafe {
-            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
-            let adapter = factory.EnumAdapters(0).unwrap();
+            // A DXGI factory snapshots its adapter enumeration when it is created, so one made
+            // before a hybrid-GPU transition or a driver reinstall keeps handing back the
+            // adapter that went away. Recovery always starts from a fresh factory.
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let adapter = factory.EnumAdapters(0)?;
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut query: Option<ID3D11Query> = None;
@@ -1859,8 +1904,7 @@ impl D3d11Cx {
                 Some(&mut device),
                 None,
                 Some(&mut context),
-            )
-            .unwrap();
+            )?;
 
             let device = device.unwrap();
             let context = context.unwrap();
@@ -1871,24 +1915,72 @@ impl D3d11Cx {
             // render loop. The old device-level IDXGIDevice1::SetMaximumFrameLatency
             // call has been removed so the two mechanisms don't conflict.
 
-            device
-                .CreateQuery(
-                    &D3D11_QUERY_DESC {
-                        Query: D3D11_QUERY_EVENT,
-                        MiscFlags: 0,
-                    },
-                    Some(&mut query),
-                )
-                .unwrap();
+            device.CreateQuery(
+                &D3D11_QUERY_DESC {
+                    Query: D3D11_QUERY_EVENT,
+                    MiscFlags: 0,
+                },
+                Some(&mut query),
+            )?;
 
-            let query = query.unwrap();
+            Ok((factory, device, context, query.unwrap()))
+        }
+    }
 
-            D3d11Cx {
-                device,
-                context,
-                factory,
-                query,
+    pub fn new() -> D3d11Cx {
+        let (factory, device, context, query) =
+            Self::create_device_tier().expect("D3D11: could not create the initial device");
+        D3d11Cx {
+            device,
+            context,
+            factory,
+            query,
+            device_lost: Cell::new(false),
+            other_error_logged: Cell::new(false),
+        }
+    }
+
+    /// Replaces the four COM handles with a freshly created device tier, leaving the rest of
+    /// the struct alone. `false` means the driver is not ready yet and the caller should retry
+    /// on a later tick.
+    pub fn recreate_device(&mut self) -> bool {
+        match Self::create_device_tier() {
+            Ok((factory, device, context, query)) => {
+                self.factory = factory;
+                self.device = device;
+                self.context = context;
+                self.query = query;
+                self.other_error_logged.set(false);
+                true
             }
+            Err(e) => {
+                crate::error!("D3D11 device recreation failed, will retry: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Whether the current device is still usable, asked of the device itself.
+    pub fn device_is_alive(&self) -> bool {
+        unsafe { device_removed_reason(&self.device).is_ok() }
+    }
+
+    /// Where every fallible D3D11 call in this file reports its failure.
+    ///
+    /// The HRESULT a creation call returns is not always one of the two DXGI device-lost
+    /// codes, so the device is asked directly instead of the error being pattern-matched.
+    /// Nothing on the healthy path reaches this.
+    pub fn note_error(&self, what: &str, err: &windows_core::Error) {
+        if unsafe { device_removed_reason(&self.device) }.is_err() {
+            if !self.device_lost.replace(true) {
+                crate::error!(
+                    "D3D11 DEVICE LOST: {} failed ({}). Rebuilding the device and every GPU                      resource; the window will keep its last frame until that succeeds.",
+                    what,
+                    err
+                );
+            }
+        } else if !self.other_error_logged.replace(true) {
+            crate::error!("D3D11 {} failed, device still alive: {}", what, err);
         }
     }
 
@@ -1907,6 +1999,13 @@ impl D3d11Cx {
                 0,
             )
         };
+        if hresult.is_err() {
+            // A removed device fails `GetData` rather than answering it, and `!= S_FALSE` would
+            // read that as "the GPU finished this frame" forever — the only device-loss signal
+            // the studio-hosted path has, since it renders to a texture and never presents.
+            self.note_error("ID3D11DeviceContext::GetData", &windows_core::Error::from(hresult));
+            return true;
+        }
         hresult != S_FALSE
     }
 }
@@ -1948,31 +2047,41 @@ impl D3d11Buffer {
             let mut exact_desc = *buffer_desc;
             exact_desc.ByteWidth = (len_slots * 4) as u32;
             let mut new_buffer = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateBuffer(&exact_desc, None, Some(&mut new_buffer))
-                    .unwrap()
-            };
+            } {
+                // Draw-list and pass uniforms come through here every frame with no dirty
+                // gate, so a device that died between frames is seen here first — many times
+                // over, before any window reaches `present`. Leave the slot empty and zero the
+                // size memo, which would otherwise hand the dead buffer straight back, so the
+                // ordinary path rebuilds it once there is a live device again.
+                d3d11_cx.note_error("ID3D11Device::CreateBuffer", &e);
+                self.buffer = None;
+                self.last_size = 0;
+                return;
+            }
             self.last_size = len_slots;
             self.buffer = new_buffer;
         }
 
+        let Some(buffer) = self.buffer.clone() else {
+            return;
+        };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let p_mapped: *mut _ = &mut mapped;
         unsafe {
-            d3d11_cx
+            if let Err(e) = d3d11_cx
                 .context
-                .Map(
-                    self.buffer.as_ref().unwrap(),
-                    0,
-                    D3D11_MAP_WRITE_DISCARD,
-                    0,
-                    Some(p_mapped),
-                )
-                .unwrap();
+                .Map(&buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+            {
+                // Nothing was mapped, so there is no `Unmap` to pair on this path.
+                d3d11_cx.note_error("ID3D11DeviceContext::Map", &e);
+                return;
+            }
             std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-            d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
+            d3d11_cx.context.Unmap(&buffer, 0);
         }
     }
 
@@ -2203,6 +2312,13 @@ impl CxTexture {
                 };
 
             if width == 0 || height == 0 || data_ptr.is_null() {
+                // The pixel buffer is out on loan: `Texture::take_vec_*` leaves `data` as
+                // `None` until the matching `put_back_*`, which is the glyph atlas's normal
+                // state for a whole frame whenever `Fonts::prepare_textures` takes an early
+                // return. `take_updated` above already consumed the dirty flag, so re-arm it —
+                // dropping it here would mean this texture is never uploaded again and all
+                // text disappears permanently. The Metal backend guards the same case.
+                self.set_updated(updated);
                 return;
             }
             let row_pitch = (width * bpp) as u32;
@@ -2287,13 +2403,25 @@ impl CxTexture {
                 MiscFlags: 0,
             };
             let mut texture = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                    .unwrap()
+            } {
+                // Re-arm the update rather than dropping it: this texture is an atlas or an
+                // image whose pixels are still in memory, so the next frame against a live
+                // device uploads it in full.
+                d3d11_cx.note_error("CreateTexture2D(vec)", &e);
+                self.set_updated(TextureUpdated::Full);
+                return;
+            }
+            let Some(resource) = texture
+                .as_ref()
+                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+            else {
+                self.set_updated(TextureUpdated::Full);
+                return;
             };
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             // Upload the logical rows (0..height) into the freshly-allocated (possibly taller)
             // texture. Rows height..cap_height stay unused — the glyph shader addresses by absolute
             // texel index, so the extra capacity is never sampled.
@@ -2311,12 +2439,17 @@ impl CxTexture {
                 );
             }
             let mut shader_resource_view = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-                    .unwrap()
-            };
+            } {
+                // Publishing the texture without its view would leave the alloc bookkeeping
+                // claiming a usable texture that nothing can sample.
+                d3d11_cx.note_error("CreateShaderResourceView(vec)", &e);
+                self.set_updated(TextureUpdated::Full);
+                return;
+            }
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
             self.os.vec_alloc_width = width;
@@ -2355,13 +2488,24 @@ impl CxTexture {
             };
 
             let mut texture = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                    .unwrap()
+            } {
+                // A render target has no CPU-side contents to preserve, so there is nothing to
+                // re-arm: clearing the alloc record is what makes the next pass rebuild it.
+                d3d11_cx.note_error("CreateTexture2D(render target)", &e);
+                self.alloc = None;
+                return;
+            }
+            let Some(resource) = texture
+                .as_ref()
+                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+            else {
+                self.alloc = None;
+                return;
             };
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
                 if is_cube {
@@ -2414,13 +2558,14 @@ impl CxTexture {
                     }
                     .unwrap();
                 }
-            } else {
-                unsafe {
-                    d3d11_cx
-                        .device
-                        .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
-                        .unwrap()
-                };
+            } else if let Err(e) = unsafe {
+                d3d11_cx
+                    .device
+                    .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+            } {
+                d3d11_cx.note_error("CreateRenderTargetView(render target)", &e);
+                self.alloc = None;
+                return;
             }
 
             self.os.texture = texture;
@@ -3298,12 +3443,12 @@ impl CxOsDrawShader {
             hlsl,
         ) {
             Err(msg) => {
-                println!(
+                crate::error!(
                     "Cannot compile vertexshader\n{}\n{}",
                     msg,
                     split_source(hlsl)
                 );
-                std::process::exit(1);
+                return None;
             }
             Ok(bytes) => bytes,
         };
@@ -3317,31 +3462,38 @@ impl CxOsDrawShader {
             hlsl,
         ) {
             Err(msg) => {
-                println!(
+                crate::error!(
                     "Cannot compile pixelshader\n{}\n{}",
                     msg,
                     split_source(hlsl)
                 );
-                std::process::exit(1);
+                return None;
             }
             Ok(bytes) => bytes,
         };
 
         let mut vs = None;
-        unsafe {
+        if let Err(e) = unsafe {
             d3d11_cx
                 .device
                 .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
-                .unwrap()
-        };
+        } {
+            // The DXBC is valid — it just came from the compiler or the on-disk cache — so a
+            // failure here is the device, not the shader. Returning `None` puts this shader
+            // back in the compile queue for a later frame.
+            d3d11_cx.note_error("ID3D11Device::CreateVertexShader", &e);
+            return None;
+        }
 
         let mut ps = None;
-        unsafe {
+        if let Err(e) = unsafe {
             d3d11_cx
                 .device
                 .CreatePixelShader(&ps_bytes, None, Some(&mut ps))
-                .unwrap()
-        };
+        } {
+            d3d11_cx.note_error("ID3D11Device::CreatePixelShader", &e);
+            return None;
+        }
 
         let mut layout_desc = Vec::new();
         let mut layout_debug = Vec::new();
@@ -3450,17 +3602,21 @@ impl CxOsDrawShader {
                 .CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout))
         };
         if let Err(err) = input_layout_res {
-            println!("Cannot create input layout: {:?}", err);
-            println!("Input layout descriptors:");
+            // A mismatched layout is a build-time bug worth shouting about, but a device that
+            // died mid-compile fails here too, and killing the process is the one outcome no
+            // recovery can undo. Report it and give the shader back to the compile queue.
+            crate::error!("Cannot create input layout: {:?}", err);
+            crate::error!("Input layout descriptors:");
             for item in &layout_debug {
-                println!("  {}", item);
+                crate::error!("  {}", item);
             }
             if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                println!("HLSL source\n{}", split_source(hlsl));
+                crate::error!("HLSL source\n{}", split_source(hlsl));
             } else {
-                println!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
+                crate::error!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
             }
-            std::process::exit(1);
+            d3d11_cx.note_error("ID3D11Device::CreateInputLayout", &err);
+            return None;
         }
 
         let live_uniforms = D3d11Buffer::default();
