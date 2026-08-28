@@ -14,7 +14,7 @@
 use makepad_asset_data::AssetId;
 use makepad_widgets::*;
 use crate::decks::{FadeCurve, FADE_CURVES};
-use crate::gen::{GenJob, GenJobState, GenJobTone};
+use crate::gen::{GenJob, GenJobState, GenJobTone, StageChip};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -723,6 +723,30 @@ script_mod! {
                         draw_text.text_style.font_size: 8
                     }
                     job_cancel := Button{text: "Stop"}
+                }
+                job_chips := View{
+                    visible: false
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 8
+                    align: Align{y: 0.5}
+                    job_chip0 := Label{text: "" draw_text.text_style.font_size: 8}
+                    job_chip1 := Label{text: "" draw_text.text_style.font_size: 8}
+                    job_chip2 := Label{text: "" draw_text.text_style.font_size: 8}
+                    View{width: Fill height: 1}
+                    job_canvas := Label{
+                        visible: false
+                        text: ""
+                        draw_text.color: #x8a97a6
+                        draw_text.text_style.font_size: 8
+                    }
+                }
+                job_still := Image{
+                    visible: false
+                    width: 132
+                    height: 74
+                    fit: ImageFit.Smallest
                 }
                 job_stage := Label{visible: false width: Fill text: ""}
                 job_message := Label{visible: false width: Fill text: ""}
@@ -1690,6 +1714,14 @@ pub struct JobRowEntry {
     /// Engine tag the cancel button reports back.
     pub tag: u64,
     pub title: String,
+    /// A chained run's stages, left to right; empty for a plain job.
+    pub stages: Vec<StageChip>,
+    /// "960x544 · 73f · 3.0 s loop" — what this run is making.
+    pub canvas: String,
+    /// The flux still this run made, once its picture is decoded. This is
+    /// the INPUT IMAGE the video is grown from, and seeing it is how the
+    /// operator knows the dream is going the way they meant.
+    pub still: Option<Texture>,
     pub stage: String,
     pub message: String,
     pub meta: String,
@@ -1701,12 +1733,18 @@ pub struct JobRowEntry {
 }
 
 impl JobRowEntry {
-    pub fn from_job(job: &GenJob, now_ms: u64, queue_ahead: Option<usize>) -> JobRowEntry {
+    pub fn from_job(
+        job: &GenJob,
+        now_ms: u64,
+        queue_ahead: Option<usize>,
+        still: Option<Texture>,
+    ) -> JobRowEntry {
         let display = job.display(now_ms);
         let progress = display.progress_permille.map(|value| value as f32 / 1000.0);
         let progress_text = match display.progress_permille {
             Some(value) => format!("{:.1}%", value as f32 / 10.0),
             None => match &job.state {
+                    GenJobState::Expanding => "EXPAND".to_string(),
                 GenJobState::Submitting => "SENDING".to_string(),
                 // A busy fleet is not a broken one: say WHERE the job
                 // stands instead of a vague wait.
@@ -1724,6 +1762,9 @@ impl JobRowEntry {
         JobRowEntry {
             tag: job.tag,
             title: job.title.clone(),
+            stages: display.stages,
+            canvas: display.canvas,
+            still,
             stage: display.stage,
             message: display.message,
             meta: format!("profile: {} · {}", job.profile_label, display.assignment),
@@ -1817,11 +1858,60 @@ impl Widget for VjJobList {
                     bar.set_uniform(cx, live_id!(color_fill), &fill);
                     item.button(cx, ids!(job_cancel))
                         .set_visible(cx, entry.cancellable);
+                    // The canvas line, and the stage chips for a chained
+                    // run. Three chips because a DREAM run has exactly
+                    // three stages — this is the run's shape, not a
+                    // general-purpose pipeline widget.
+                    let canvas = item.label(cx, ids!(job_canvas));
+                    canvas.set_text(cx, &entry.canvas);
+                    canvas.set_visible(cx, !entry.canvas.is_empty());
+                    let chips = item.view(cx, ids!(job_chips));
+                    chips.set_visible(cx, !entry.stages.is_empty());
+                    for (i, path) in
+                        [ids!(job_chip0), ids!(job_chip1), ids!(job_chip2)].into_iter().enumerate()
+                    {
+                        let mut chip = item.label(cx, path);
+                        match entry.stages.get(i) {
+                            Some(StageChip { label, tone }) => {
+                                chip.set_visible(cx, true);
+                                chip.set_text(cx, label);
+                                // `draw_text +:` (merge), never `draw_text:`
+                                // — replacing a typed DrawText with a plain
+                                // object is a runtime type error.
+                                let color = chip_color(*tone);
+                                script_apply_eval!(cx, chip, {
+                                    draw_text +: { color: #(color) }
+                                });
+                            }
+                            None => chip.set_visible(cx, false),
+                        }
+                    }
+                    // The still, the moment its picture is decoded.
+                    let still = item.image(cx, ids!(job_still));
+                    still.set_texture(cx, entry.still.clone());
+                    still.set_visible(cx, entry.still.is_some());
                 }
                 item.draw_all(cx, &mut Scope::empty());
             }
         }
         DrawStep::done()
+    }
+}
+
+/// A stage chip's ink: the same five tones the progress bar uses, so a
+/// chip and a bar never disagree about how a stage is going.
+fn chip_color(tone: GenJobTone) -> Vec4f {
+    let [r, g, b, a] = chip_rgba(tone);
+    Vec4f { x: r, y: g, z: b, w: a }
+}
+
+fn chip_rgba(tone: GenJobTone) -> [f32; 4] {
+    match tone {
+        GenJobTone::Waiting => [0.45, 0.50, 0.57, 1.0],
+        GenJobTone::Active => [0.31, 0.62, 0.91, 1.0],
+        GenJobTone::Success => [0.35, 0.77, 0.63, 1.0],
+        GenJobTone::Failed => [0.88, 0.34, 0.31, 1.0],
+        GenJobTone::Cancelled => [0.42, 0.47, 0.53, 1.0],
     }
 }
 
