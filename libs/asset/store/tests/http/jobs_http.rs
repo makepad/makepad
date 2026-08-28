@@ -268,6 +268,79 @@ fn job_listing_scopes() {
     assert_eq!(r.json().get("jobs").unwrap().as_arr().unwrap().len(), 0);
 }
 
+/// A listing narrowed by kind and state, which is how a UI asks a QUEUE a
+/// question ("what vision work is running", "what is still pending") without
+/// paging everything first.
+#[test]
+fn job_listing_filters_by_kind_and_state() {
+    let (_ts, _admin, mut enqueuer, mut worker) = setup();
+    let pending = enqueue(&mut enqueuer, "annotate.asset", vec![]);
+    let _other = enqueue(&mut enqueuer, "image.generate", vec![]);
+    // One of the two annotate jobs goes running, with a progress note.
+    let running = enqueue(&mut enqueuer, "annotate.asset", vec![]);
+    let claimed = worker.post_json(
+        "/v1/worker/claim",
+        &jobj(vec![
+            ("lease_ms", Value::Int(60_000)),
+            ("kinds", Value::Arr(vec![jstr("annotate.asset")])),
+        ]),
+    );
+    assert_eq!(claimed.status, 200);
+    let claimed_job = claimed.json().get("job").unwrap().as_str().unwrap().to_string();
+    let r = worker.post_json(
+        "/v1/worker/heartbeat",
+        &jobj(vec![
+            ("job", jstr(claimed_job.clone())),
+            ("extend_ms", Value::Int(60_000)),
+            (
+                "progress",
+                jobj(vec![
+                    ("permille", Value::Int(420)),
+                    ("note", jstr("vision · qwen3.8-27b-vision @ 10.0.0.203 · 3.4 s")),
+                ]),
+            ),
+        ]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+
+    // Kind only: both annotate jobs, never the image one.
+    let jobs = enqueuer.get("/v1/jobs?kind=annotate.asset").json();
+    let jobs = jobs.get("jobs").unwrap().as_arr().unwrap().to_vec();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs
+        .iter()
+        .all(|j| j.get("kind").unwrap().as_str() == Some("annotate.asset")));
+
+    // Kind + state: exactly the one a box is working on, and its heartbeat
+    // rides along so a status board needs no second request per row.
+    let jobs = enqueuer.get("/v1/jobs?kind=annotate.asset&state=running").json();
+    let jobs = jobs.get("jobs").unwrap().as_arr().unwrap().to_vec();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].get("job").unwrap().as_str(), Some(claimed_job.as_str()));
+    let progress = jobs[0].get("progress").expect("the worker's last heartbeat");
+    assert_eq!(progress.get("permille").unwrap().as_i64(), Some(420));
+    assert!(progress
+        .get("note")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("qwen3.8-27b-vision @ 10.0.0.203"));
+
+    // The other annotate job is the pending one (whichever the queue gave
+    // the worker, the two states partition the pair).
+    let jobs = enqueuer.get("/v1/jobs?kind=annotate.asset&state=pending").json();
+    let jobs = jobs.get("jobs").unwrap().as_arr().unwrap().to_vec();
+    assert_eq!(jobs.len(), 1);
+    let still_pending = jobs[0].get("job").unwrap().as_str().unwrap().to_string();
+    assert!(still_pending == pending || still_pending == running);
+    assert_ne!(still_pending, claimed_job);
+    // Nothing succeeded yet.
+    let jobs = enqueuer.get("/v1/jobs?state=succeeded").json();
+    assert!(jobs.get("jobs").unwrap().as_arr().unwrap().is_empty());
+    // A state nobody can be in is refused, not silently ignored.
+    assert_eq!(enqueuer.get("/v1/jobs?state=sleeping").status, 400);
+}
+
 // ---------------------------------------------------------------------------
 // advertised job profiles
 // ---------------------------------------------------------------------------

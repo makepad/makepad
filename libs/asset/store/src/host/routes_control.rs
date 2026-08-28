@@ -1784,6 +1784,12 @@ fn alias_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, alias: AssetAlias)
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         require_cap(ctx, &p, Capability::AliasWrite, alias.namespace())?;
         ctx.core.catalog().set_asset_alias(&alias, &target, now)?;
+        // The LAST moment an asset becomes describable, and for the split
+        // single-asset publish (register → annotate → publish → alias) the
+        // only one that works: the pass fetches a sheet BY ALIAS, so at the
+        // two earlier seams this asset still had none and was skipped. The
+        // derived job id makes the overlap with them a no-op.
+        annotate::enqueue_published(ctx, &p, &target.asset_id, now);
         hub.publish(
             EventBody::asset(
                 events::KIND_ALIAS_SET,
@@ -3107,22 +3113,74 @@ fn job_prompt(payload: &[u8]) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Most queue rows one narrowed listing looks at before it stops. The
+/// scope (namespace or enqueuer) lives in the metadata table and the state
+/// lives in the queue, so a narrowed page is "the newest matching queue
+/// rows, then what this caller may see" — bounded, so one busy tenant can
+/// never make this route walk the whole queue.
+const MAX_JOB_SCAN: u64 = 2_000;
+
+/// `GET /v1/jobs?ns=&kind=&state=&limit=` — one page of the scoped job
+/// listing, newest first.
+///
+/// `kind` and `state` exist so a client can ask a QUEUE a question ("what
+/// vision work is running", "what annotation work is still pending")
+/// instead of paging everything and filtering client-side, which runs out
+/// of page long before it reaches the pending tail of a 4000-job backlog.
 fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let ns = head.query_get("ns").map(str::to_string);
+    let kind = match head.query_get("kind") {
+        None => None,
+        Some(kind) => {
+            if kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) {
+                return Err(Fail::Http(400, "malformed job kind"));
+            }
+            Some(kind.to_string())
+        }
+    };
+    let state = match head.query_get("state") {
+        None => None,
+        Some(text) => {
+            Some(JobState::parse(text).ok_or(Fail::Http(400, "unknown job state"))?)
+        }
+    };
     let limit = parse_limit(head.query_get("limit"), 50, 500)?;
     let now = now_ms();
     let rows = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
-        let metas = match &ns {
-            Some(ns) => {
-                if !holds_any(ctx, &p, ns, &JOB_VIEW_CAPS)? {
-                    return Err(ServerError::Denied { capability: "job_enqueue" });
-                }
-                ctx.meta_list_ns(ns, limit)?
+        // The namespace scope is one capability check, not one per row.
+        if let Some(ns) = &ns {
+            if !holds_any(ctx, &p, ns, &JOB_VIEW_CAPS)? {
+                return Err(ServerError::Denied { capability: "job_enqueue" });
             }
-            // No namespace filter: the caller's own jobs.
-            None => ctx.meta_list_by(&p, limit)?,
+        }
+        let metas = if kind.is_none() && state.is_none() {
+            match &ns {
+                Some(ns) => ctx.meta_list_ns(ns, limit)?,
+                // No namespace filter: the caller's own jobs.
+                None => ctx.meta_list_by(&p, limit)?,
+            }
+        } else {
+            let scan = limit.saturating_mul(4).clamp(limit, MAX_JOB_SCAN);
+            let ids = ctx.core.jobs().list_ids(kind.as_deref(), state, scan)?;
+            let mut out = Vec::new();
+            for id in ids {
+                // Crash-window orphan (queue row without routing metadata):
+                // ungated, so invisible.
+                let Some(meta) = ctx.meta_get(&id)? else { continue };
+                let visible = match &ns {
+                    Some(ns) => meta.ns == *ns,
+                    None => meta.enqueued_by == p,
+                };
+                if visible {
+                    out.push(meta);
+                }
+                if out.len() as u64 >= limit {
+                    break;
+                }
+            }
+            out
         };
         let mut rows = Vec::with_capacity(metas.len());
         for meta in metas {
@@ -3133,14 +3191,15 @@ fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
                     .jobs()
                     .payload(&meta.job_id)?
                     .and_then(|payload| job_prompt(&payload));
-                rows.push((meta, state, prompt));
+                let progress = ctx.progress_get(&meta.job_id)?;
+                rows.push((meta, state, prompt, progress));
             }
         }
         Ok(rows)
     })?;
     let jobs = rows
         .iter()
-        .map(|(meta, state, prompt)| {
+        .map(|(meta, state, prompt, progress)| {
             let mut pairs = vec![
                 ("job", s(super::api::job_str(&meta.job_id))),
                 ("namespace", s(meta.ns.clone())),
@@ -3151,6 +3210,16 @@ fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
             ];
             if let Some(prompt) = prompt {
                 pairs.push(("prompt", s(prompt.clone())));
+            }
+            // The worker's last heartbeat: which box, how far, how long.
+            // A status board asking per row would be N more requests for
+            // the page it already has.
+            if let Some(pr) = progress {
+                pairs.push(("progress", obj(vec![
+                    ("permille", Value::Int(pr.permille as i64)),
+                    ("note", s(pr.note.clone())),
+                    ("updated_ms", Value::Int(pr.updated_ms as i64)),
+                ])));
             }
             obj(pairs)
         })

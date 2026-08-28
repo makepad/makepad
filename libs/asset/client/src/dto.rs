@@ -1425,6 +1425,27 @@ impl JobDetailDto {
     }
 }
 
+/// The typed progress block of a job document, wherever it appears (the
+/// detail read and every row of the listing report the same shape).
+fn parse_progress(v: &Value) -> ClientResult<Option<JobProgressDto>> {
+    let Some(p) = v.get("progress").filter(|p| !matches!(p, Value::Null)) else {
+        return Ok(None);
+    };
+    let permille = need_u64(p, "permille", "job progress permille")?;
+    if permille > 1000 {
+        return Err(ClientError::Protocol { what: "job progress permille" });
+    }
+    let note = match p.get("note") {
+        None | Some(Value::Null) => String::new(),
+        Some(n) => {
+            let text = n.as_str().ok_or(ClientError::Protocol { what: "job note" })?;
+            sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
+        }
+    };
+    let updated_ms = opt_u64(p, "updated_ms", "job progress updated_ms")?;
+    Ok(Some(JobProgressDto { permille: permille as u16, note, updated_ms }))
+}
+
 pub fn parse_job_detail(v: &Value) -> ClientResult<JobDetailDto> {
     let status = parse_job_status(v)?;
     let enqueued_by = opt_principal(v, "enqueued_by", "job enqueued_by")?;
@@ -1452,24 +1473,7 @@ pub fn parse_job_detail(v: &Value) -> ClientResult<JobDetailDto> {
             out
         }
     };
-    let progress = match v.get("progress") {
-        None | Some(Value::Null) => None,
-        Some(p) => {
-            let permille = need_u64(p, "permille", "job progress permille")?;
-            if permille > 1000 {
-                return Err(ClientError::Protocol { what: "job progress permille" });
-            }
-            let note = match p.get("note") {
-                None | Some(Value::Null) => String::new(),
-                Some(n) => {
-                    let text = n.as_str().ok_or(ClientError::Protocol { what: "job note" })?;
-                    sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
-                }
-            };
-            let updated_ms = opt_u64(p, "updated_ms", "job progress updated_ms")?;
-            Some(JobProgressDto { permille: permille as u16, note, updated_ms })
-        }
-    };
+    let progress = parse_progress(v)?;
     let result = match v.get("result") {
         None | Some(Value::Null) => None,
         Some(r) => {
@@ -1504,6 +1508,11 @@ pub struct JobRowDto {
     /// Bounded display prompt when the enqueued body carries one. Optional
     /// for compatibility with older servers and non-generation jobs.
     pub prompt: Option<String>,
+    /// Last worker heartbeat on this job, when the server reports one. A
+    /// listing of running work is a status board — "which box, how far,
+    /// how long" lives in the note, and asking per row would be N more
+    /// requests for the same page.
+    pub progress: Option<JobProgressDto>,
 }
 
 pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
@@ -1533,7 +1542,17 @@ pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
                 Some(sanitize_text(prompt, 256))
             }
         };
-        out.push(JobRowDto { job, namespace, kind, state, enqueued_by, created_ms, prompt });
+        let progress = parse_progress(r)?;
+        out.push(JobRowDto {
+            job,
+            namespace,
+            kind,
+            state,
+            enqueued_by,
+            created_ms,
+            prompt,
+            progress,
+        });
     }
     Ok(out)
 }

@@ -61,9 +61,11 @@ fn presets_for(domain: &str) -> &'static [Preset] {
 }
 
 /// Profile ids are restricted to `[a-z0-9-_]`; model ids are not (`.` shows
-/// up in `ace-step-1.5-xl`). Fold anything else to `-` and collapse runs so
-/// two models can never collide on a shared prefix.
-fn slug(text: &str) -> String {
+/// up in `ace-step-1.5-xl` and in `qwen3.8-27b-vision`). Fold anything else
+/// to `-` and collapse runs so two models can never collide on a shared
+/// prefix. Also the label-safe model identity the annotation pass publishes
+/// as its `vlm-m-<tag>` tag: same charset rule, same answer.
+pub fn slug(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         let c = ch.to_ascii_lowercase();
@@ -104,9 +106,18 @@ fn hardware_fits(snapshots: &[BoxSnapshot], model_id: &str) -> bool {
     })
 }
 
-/// Every domain this worker is authoritative for (the whole wired table).
+/// Every domain this worker is authoritative for (the whole wired table),
+/// each named once — a domain that carries two kinds (`vision`: the
+/// client's question and the catalog's annotation pass) is still one
+/// capability the worker covers.
 pub fn covered_domains() -> Vec<String> {
-    GEN_KINDS.iter().map(|k| k.domain.to_string()).collect()
+    let mut out: Vec<String> = Vec::new();
+    for row in GEN_KINDS {
+        if !out.iter().any(|d| d == row.domain) {
+            out.push(row.domain.to_string());
+        }
+    }
+    out
 }
 
 /// Build the advertisement for one fleet snapshot, in table order. `ns` is
@@ -114,6 +125,12 @@ pub fn covered_domains() -> Vec<String> {
 pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto> {
     let mut out: Vec<JobProfileDto> = Vec::new();
     for row in GEN_KINDS {
+        // An annotation job is minted by the server for an asset that
+        // already exists: there is no prompt for a human to write and
+        // nothing for a picker to offer.
+        if !row.advertised() {
+            continue;
+        }
         for model in executable_models(snapshots, row) {
             for preset in presets_for(row.domain) {
                 if let Some(profile) = profile_of(row, &model, preset, ns) {
@@ -368,7 +385,9 @@ mod tests {
     #[test]
     fn the_worker_covers_every_wired_domain() {
         let domains = covered_domains();
-        assert_eq!(domains.len(), GEN_KINDS.len());
+        assert_eq!(domains.len(), GEN_KINDS.iter().filter(|k| k.advertised()).count());
+        // Named once, even though `vision` carries two kinds.
+        assert_eq!(domains.iter().filter(|d| *d == "vision").count(), 1);
         assert!(domains.iter().any(|d| d == "video"));
         // Covering `video` while advertising nothing is what withdraws the
         // deployment's stock H3 profiles when no box holds those weights.

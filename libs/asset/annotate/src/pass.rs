@@ -1,11 +1,11 @@
 //! One asset's trip through the pass: turntable sheet in, model-ready image
 //! and question out.
 //!
-//! Both hosts share this — the operator CLI and the job worker — so a
-//! change to how a sheet is framed, exposed or introduced to the model
-//! reaches them at the same moment. Nothing here talks to a model or to the
-//! catalog; it prepares what [`crate::executor`] runs and what
-//! [`crate::plan_upload`] publishes.
+//! Nothing here talks to a model or to the catalog. It prepares what the
+//! fleet coordinator sends to a `vision` box — the framed, exposed,
+//! downscaled sheet and the two halves of the question (the prompt and the
+//! per-asset context line) — and [`crate::plan_upload`] turns the reply
+//! into the record that is written back.
 
 use crate::sheet;
 use std::io::{Read, Write};
@@ -28,22 +28,33 @@ impl Default for SheetPrep {
     }
 }
 
-/// Decode a published turntable sheet and produce the PPM the executor
-/// reads.
+/// Decode a published turntable sheet into the pixels the vision tower is
+/// shown.
 ///
 /// `person` zooms each of the 16 cells onto its subject first: a character
 /// is small in its cell, and the tower's patch budget was landing on empty
 /// background instead of the face. Kit pieces keep their true in-cell size,
 /// because that is what the `size` line reports.
-pub fn sheet_to_ppm(png: &[u8], person: bool, prep: &SheetPrep) -> Result<Vec<u8>, String> {
-    let mut img = sheet::decode_png(png)?;
+///
+/// The caller encodes the result for the wire (the fleet takes a base64
+/// PNG/JPEG); this stays a plain RGB buffer so the framing decisions and
+/// the transport encoding cannot drift into one function.
+pub fn sheet_to_rgb(png: &[u8], person: bool, prep: &SheetPrep) -> Result<sheet::Rgb, String> {
+    Ok(frame_sheet(sheet::decode_png(png)?, person, prep))
+}
+
+/// The framing itself, for a caller that already decoded the sheet (a
+/// generated asset publishes a JPEG thumbnail where an imported one
+/// publishes the PNG turntable; both are pictures of the asset and both are
+/// framed the same way).
+pub fn frame_sheet(mut img: sheet::Rgb, person: bool, prep: &SheetPrep) -> sheet::Rgb {
     if person {
         img = sheet::zoom_to_subject(&img, 4, 0.15);
     }
     // Lift BEFORE downscaling: the box filter then averages corrected
     // values rather than correcting an already-averaged shadow.
     sheet::lift_exposure(&mut img, prep.exposure);
-    Ok(sheet::to_ppm(&sheet::downscale(&img, prep.sheet_size)))
+    sheet::downscale(&img, prep.sheet_size)
 }
 
 /// The prompt asked about this asset.
@@ -93,11 +104,6 @@ pub fn context_line(alias: &str, person: bool) -> String {
         "The kit calls this piece \"{name}\".{frame} Trust the images over the name \
          where they disagree."
     )
-}
-
-/// One line of the executor's jobs TSV.
-pub fn job_line(id: &str, ppm_path: &std::path::Path, context: &str) -> String {
-    format!("{id}\t{}\t{context}\n", ppm_path.display())
 }
 
 /// Minimal GET against the store's data plane, which the asset client does
@@ -161,10 +167,4 @@ mod tests {
         assert!(!line.contains("Kenney"), "{line}");
     }
 
-    #[test]
-    fn a_job_line_is_one_tsv_row() {
-        let line = job_line("abc", std::path::Path::new("/w/abc.ppm"), "ctx");
-        assert_eq!(line, "abc\t/w/abc.ppm\tctx\n");
-        assert_eq!(line.matches('\t').count(), 2);
-    }
 }

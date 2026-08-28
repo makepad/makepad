@@ -1554,11 +1554,16 @@ impl Api {
 
     /// One page of the scoped job listing. `namespace` requires a job
     /// capability on that namespace server-side; `None` lists the caller's
-    /// own jobs. The server returns newest first, capped at
+    /// own jobs. `kind` and `state` narrow the page to one queue — the
+    /// server answers a state filter from the QUEUE index, so "the pending
+    /// annotate jobs" is exact rather than whatever survived a page of
+    /// everything. The server returns newest first, capped at
     /// [`MAX_LIST_LIMIT`].
     pub fn list_jobs(
         &self,
         namespace: Option<&str>,
+        kind: Option<&str>,
+        state: Option<crate::dto::JobStateDto>,
         limit: u64,
     ) -> ClientResult<Vec<JobRowDto>> {
         if limit == 0 || limit > MAX_LIST_LIMIT {
@@ -1569,7 +1574,12 @@ impl Api {
                 return Err(ClientError::InvalidInput { what: "job list namespace" });
             }
         }
-        let path = wire::path_jobs_list(namespace, limit);
+        if let Some(kind) = kind {
+            if kind.is_empty() || kind.len() > 64 || !wire::query_value_ok(kind) {
+                return Err(ClientError::InvalidInput { what: "job list kind" });
+            }
+        }
+        let path = wire::path_jobs_list(namespace, kind, state.map(|s| s.as_str()), limit);
         let mut req = Request::get(&path);
         req.bearer = self.bearer();
         let v = self.call_json(self.endpoints.control, req)?;
@@ -2644,6 +2654,49 @@ impl Api {
     }
 
     /// Counts behind the annotation bar; `category` narrows to one kit.
+    /// The published thumbnail sheet of an alias, from the DATA plane.
+    ///
+    /// One request, bytes as served — no digest to verify against and
+    /// nothing to cache: this is the picture a vision model is about to be
+    /// shown, and the caller wants exactly what the catalog is publishing
+    /// right now.
+    pub fn thumbnail_alias_bytes(&self, alias: &AssetAlias) -> ClientResult<Vec<u8>> {
+        let path = wire::path_thumbnail_alias(alias);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
+        let mut resp = self.accept(resp, &[200])?;
+        let declared = resp.head().content_length;
+        if declared > wire::MAX_THUMBNAIL_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "thumbnail sheet",
+                limit: wire::MAX_THUMBNAIL_BYTES,
+                found: declared,
+            });
+        }
+        let mut out = Vec::with_capacity(declared as usize);
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = resp.read_chunk(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
+            if out.len() as u64 > wire::MAX_THUMBNAIL_BYTES {
+                return Err(ClientError::OverBudget {
+                    what: "thumbnail sheet",
+                    limit: wire::MAX_THUMBNAIL_BYTES,
+                    found: out.len() as u64,
+                });
+            }
+        }
+        if out.is_empty() {
+            return Err(ClientError::Protocol { what: "empty thumbnail sheet" });
+        }
+        Ok(out)
+    }
+
     pub fn annotate_summary(
         &self,
         category: Option<&str>,

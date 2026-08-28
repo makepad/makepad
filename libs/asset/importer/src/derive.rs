@@ -520,6 +520,9 @@ impl<'d> DeriveCoordinator<'d> {
             }
             // Cancelled upstream: the server already terminated the job.
             Ok(JobOutcome::CancelledUpstream) => {}
+            // A derive job publishes or fails; the answer-shaped outcomes
+            // belong to the vision kinds and cannot arrive here.
+            Ok(JobOutcome::Answered { .. }) | Ok(JobOutcome::Described { .. }) => {}
             Err(_) => {}
         }
         outcome.map(Some)
@@ -1093,20 +1096,20 @@ mod tests {
         assert_eq!(detail.status.result_revision, Some(revision));
 
         // Scoped job listing: own jobs and namespace-scoped both see it.
-        let own = submitter.list_jobs(None, 50).expect("own jobs");
+        let own = submitter.list_jobs(None, None, None, 50).expect("own jobs");
         let row = own.iter().find(|r| r.job == job).expect("own listing has the job");
         assert_eq!(row.kind, DERIVE_KIND);
         assert_eq!(row.state, JobStateDto::Succeeded);
         assert_eq!(row.enqueued_by, Some(enqueuer));
         assert!(own.iter().any(|r| r.job == foreign), "foreign job listed too");
-        let scoped = submitter.list_jobs(Some("gen"), 50).expect("namespace jobs");
+        let scoped = submitter.list_jobs(Some("gen"), None, None, 50).expect("namespace jobs");
         assert!(scoped.iter().any(|r| r.job == job));
         assert!(matches!(
-            submitter.list_jobs(Some("gen"), 0),
+            submitter.list_jobs(Some("gen"), None, None, 0),
             Err(ClientError::InvalidInput { .. })
         ));
         assert!(matches!(
-            submitter.list_jobs(None, 501),
+            submitter.list_jobs(None, None, None, 501),
             Err(ClientError::InvalidInput { .. })
         ));
 

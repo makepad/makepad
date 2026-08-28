@@ -1,5 +1,7 @@
 //! The generation service: everything a host needs to turn an Asset
-//! Server's job queue into published catalog rows on the GPU fleet.
+//! Server's job queue into answered work on the GPU fleet — published
+//! catalog rows for the generating kinds, and text answers or rewritten
+//! annotation records for the `vision` ones.
 //!
 //! Two hosts run exactly this loop — the standalone worker binary and the
 //! Asset UI, which coordinates jobs in-process against its own embedded
@@ -9,7 +11,8 @@
 //!   advertised capabilities. That is both the fan-out (N queued jobs of a
 //!   kind drain across the N boxes that serve it) and the concurrency rule
 //!   (a box's own queue is its limit — this side never puts two jobs on one
-//!   GPU), and it is why a chat-only node never swallows an image job.
+//!   GPU), and it is why a chat-only node never swallows an image job and a
+//!   vision box drains both the questions and the annotation backlog.
 //! - **one profile announcer**, so `GET /v1/job-profiles` advertises what
 //!   the fleet can execute right now instead of what a config file hoped
 //!   for at boot.

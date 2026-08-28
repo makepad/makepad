@@ -84,7 +84,8 @@ impl JobState {
             Self::Cancelled => "cancelled",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    /// The wire spelling of a state, as a client query filter writes it.
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
@@ -633,6 +634,50 @@ impl<'a> Jobs<'a> {
             }
         }
         Ok(c)
+    }
+
+    /// Newest-first job ids narrowed by kind and/or state.
+    ///
+    /// The transport's metadata table carries the namespace and the
+    /// enqueuer; the QUEUE carries the kind and the state. A listing
+    /// filtered on state must therefore start here — scanning the newest
+    /// metadata rows instead would silently miss a pending job that is
+    /// older than the window, which is exactly the job an operator asking
+    /// "what is still queued" wants to see.
+    pub fn list_ids(
+        &self,
+        kind: Option<&str>,
+        state: Option<JobState>,
+        limit: u64,
+    ) -> ServerResult<Vec<JobId>> {
+        let mut sql = String::from("SELECT job_id FROM jobs WHERE 1=1");
+        let mut next = 0i32;
+        if kind.is_some() {
+            next += 1;
+            sql.push_str(&format!(" AND kind = ?{next}"));
+        }
+        if state.is_some() {
+            next += 1;
+            sql.push_str(&format!(" AND state = ?{next}"));
+        }
+        next += 1;
+        sql.push_str(&format!(" ORDER BY created_ms DESC, job_id DESC LIMIT ?{next}"));
+        let mut s = self.db.prepare("job list ids", &sql)?;
+        let mut at = 0i32;
+        if let Some(kind) = kind {
+            at += 1;
+            s.bind_text(at, kind)?;
+        }
+        if let Some(state) = state {
+            at += 1;
+            s.bind_text(at, state.as_str())?;
+        }
+        s.bind_u64(at + 1, limit)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(JobId(crate::catalog::fixed16(&s.column_blob(0), "job row")?));
+        }
+        Ok(out)
     }
 
     pub fn state(&self, job_id: &JobId) -> ServerResult<Option<JobState>> {

@@ -16,7 +16,8 @@
 
 use makepad_asset_client::{
     Api, ApiEndpoints, AnnotationUpload, AssetClient, ClientConfig, HttpLimits, PublishBundle,
-    PublishBundleFile, PublishRights, PublishStats, PublishThumbnail,
+    PublishBundleFile, PublishFile, PublishRequest, PublishRights, PublishStats,
+    PublishThumbnail,
 };
 use makepad_asset_data::{AssetKind, DeviceTier, FileRole, MediaType, ThumbnailMedia};
 use makepad_asset_store::host::annotate;
@@ -154,6 +155,45 @@ fn publishing_an_annotatable_asset_queues_its_description() {
     let summary = api.annotate_summary(None).expect("summary");
     assert_eq!(summary.pending, 2, "a new revision is not a second job");
     assert_eq!(summary.owed, 2);
+}
+
+/// The SPLIT single-asset publish queues its description too.
+///
+/// It cannot be queued where a batch publish is: that flow is register →
+/// annotate → publish → alias, and at both earlier seams the asset has no
+/// alias yet, while the pass fetches its sheet BY alias. Until the alias
+/// write became a seam, everything published this way — every generation,
+/// every ai-library import — owed a description that only a manual backlog
+/// sweep would ever find.
+#[test]
+fn a_split_publish_queues_its_description_when_the_alias_lands() {
+    let (server, token) = start_server("split_publish");
+    let mut client = connect(&server, &token, "split_cache");
+    let api = api(&server, &token);
+
+    let thumb: Vec<u8> = (0..1024).map(|b| (b % 251) as u8).collect();
+    let mut request = PublishRequest::new(
+        "kenney",
+        AssetKind::Mesh,
+        "split piece".to_string(),
+        PublishFile {
+            bytes: b"mesh bytes".to_vec(),
+            media: MediaType::Glb,
+            role: FileRole::RenderGlb,
+            media_millis: 0,
+            dims: None,
+        },
+        PublishThumbnail::plain(thumb, ThumbnailMedia::Jpeg, 512, 512),
+    );
+    request.stats = PublishStats { triangles: 12, vertices: 8, ..PublishStats::default() };
+    request.rights = PublishRights::generated_cc0();
+    request.alias = "kenney/split-kit/piece-000".parse().ok();
+    client.publish_artifact(&request).expect("publish");
+
+    let summary = api.annotate_summary(None).expect("summary");
+    assert_eq!(summary.owed, 1);
+    assert_eq!(summary.pending, 1, "the alias write is the seam that queues it");
+    assert_eq!(summary.version_tag, annotate::version_tag());
 }
 
 #[test]
