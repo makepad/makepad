@@ -77,6 +77,7 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub mod remote;
+pub mod pixel_probe;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 // Working-tree startup instrumentation (MAKEPAD_STARTUP_TRACE=1).
 pub use crate::cx::{
