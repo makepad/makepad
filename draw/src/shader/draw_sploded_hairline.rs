@@ -183,8 +183,13 @@ impl DrawSplodedHairline {
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw_clip = vec4(-1.0e6, -1.0e6, 1.0e6, 1.0e6);
+        // In-plane, but above everything the widget itself painted there:
+        // a selected container's outline must not vanish under its own
+        // background. 100 stays well inside the per-level headroom.
+        self.draw_depth = 100.0;
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.add_instance(&self.draw_vars);
         self.emphasis = 0.0;
+        self.draw_depth = 0.0;
     }
 }

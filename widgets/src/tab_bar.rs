@@ -7,6 +7,7 @@ use crate::{
     widget::*,
 };
 use std::collections::HashMap;
+use crate::widget_tree::CxWidgetExt;
 
 /// A sample of finger position and time, used for flick velocity calculation.
 #[derive(Copy, Clone)]
@@ -241,8 +242,15 @@ pub struct TabBar {
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
+    /// Each tab is a widget of its own, registered in the widget tree as
+    /// this bar's child under its tab id (the design tweaker picks them).
     #[rust]
-    tabs: ComponentMap<LiveId, (Tab, LiveId)>,
+    tabs: ComponentMap<LiveId, (WidgetRef, LiveId)>,
+    /// The widget-tree node the tabs hang under. A bar embedded in a Dock
+    /// is not a tree node itself (the Dock owns it by value), so the Dock
+    /// hands in its own uid and the tabs read as `dock.<tab_id>`.
+    #[rust]
+    pub tree_parent: WidgetUid,
 
     #[rust]
     active_tab: Option<usize>,
@@ -309,6 +317,9 @@ impl ScriptHook for TabBar {
         // Update existing tabs if templates changed
         if apply.is_reload() {
             for (_, (tab, templ_id)) in self.tabs.iter_mut() {
+                let Some(mut tab) = tab.borrow_mut::<Tab>() else {
+                    continue;
+                };
                 if let Some(template_ref) = self.templates.get(templ_id) {
                     let template_value: ScriptValue = template_ref.as_object().into();
                     tab.script_apply(vm, apply, scope, template_value);
@@ -332,6 +343,9 @@ impl Widget for TabBar {
             cx.widget_action(uid, TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, (tab, _)) in self.tabs.iter_mut() {
+            let Some(mut tab) = tab.borrow_mut::<Tab>() else {
+                continue;
+            };
             tab.handle_event_with(cx, event, &mut |cx, action| match action {
                 TabAction::WasPressed => {
                     cx.widget_action(uid, TabBarAction::TabWasPressed(*tab_id));
@@ -555,45 +569,55 @@ impl TabBar {
     }
 
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, template: LiveId) {
-        if let Some(active_tab) = self.active_tab {
-            let tab_order_len = self.tab_order.len();
-            let tab = self.get_or_create_tab(cx, tab_id, template);
-            if tab_order_len == active_tab {
-                tab.set_is_active(cx, true, Animate::No);
-            } else {
-                tab.set_is_active(cx, false, Animate::No);
+        let tab_order_len = self.tab_order.len();
+        let is_active = self.active_tab == Some(tab_order_len);
+        let tab = self.get_or_create_tab(cx, tab_id, template);
+        if let Some(mut tab) = tab.borrow_mut::<Tab>() {
+            if self.active_tab.is_some() {
+                tab.set_is_active(cx, is_active, Animate::No);
             }
-            tab.draw(cx, name);
-            if tab_order_len == active_tab {
-                self.active_tab_id = Some(tab_id);
-            }
-            self.tab_order.push(tab_id);
-        } else {
-            self.tab_order.push(tab_id);
-            let tab = self.get_or_create_tab(cx, tab_id, template);
-            tab.draw(cx, name);
+            tab.name = name.to_string();
         }
+        // Through the widget seam, so the tab counts as its own nesting
+        // level and the design tweaker's plane pick lands on it.
+        tab.draw_all(cx, &mut Scope::empty());
+        if is_active {
+            self.active_tab_id = Some(tab_id);
+        }
+        self.tab_order.push(tab_id);
     }
 
-    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template: LiveId) -> &mut Tab {
+    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: LiveId, template: LiveId) -> WidgetRef {
         let template_value: Option<ScriptValue> =
             self.templates.get(&template).map(|r| r.as_object().into());
+        let bar_uid = if self.tree_parent == WidgetUid(0) {
+            self.uid
+        } else {
+            self.tree_parent
+        };
         let (tab, _) = self.tabs.get_or_insert(cx, tab_id, |cx| {
             let tab = if let Some(value) = template_value {
-                cx.with_vm(|vm| Tab::script_from_value(vm, value))
+                cx.with_vm(|vm| WidgetRef::script_from_value(vm, value))
             } else {
-                cx.with_vm(|vm| Tab::script_new(vm))
+                let tab = cx.with_vm(|vm| Tab::script_new(vm));
+                WidgetRef::new_with_inner(Box::new(tab))
             };
+            cx.widget_tree_insert_child(bar_uid, tab_id, tab.clone());
             (tab, template)
         });
-        tab
+        tab.clone()
+    }
+
+    /// The tabs as widgets, for whoever enumerates children (the Dock).
+    pub fn tab_refs(&self) -> impl Iterator<Item = (LiveId, WidgetRef)> + '_ {
+        self.tabs.iter().map(|(id, (tab, _))| (*id, tab.clone()))
     }
 
     /// Creates a new Tab from the same template as the given tab, with the same active state.
     /// Returns `None` if the tab_id isn't found.
     pub fn create_ghost_tab(&self, cx: &mut Cx, tab_id: LiveId) -> Option<Tab> {
         let (tab, template_id) = self.tabs.get(&tab_id)?;
-        let is_active = tab.is_active();
+        let is_active = tab.borrow::<Tab>()?.is_active();
         let template_value: ScriptValue = self.templates.get(template_id)?.as_object().into();
         let mut ghost = cx.with_vm(|vm| Tab::script_from_value(vm, template_value));
         ghost.set_is_active(cx, is_active, Animate::No);
@@ -610,12 +634,16 @@ impl TabBar {
         }
         if let Some(tab_id) = self.active_tab_id {
             let (tab, _) = &mut self.tabs[tab_id];
-            tab.set_is_active(cx, false, animate);
+            if let Some(mut tab) = tab.borrow_mut::<Tab>() {
+                tab.set_is_active(cx, false, animate);
+            }
         }
         self.active_tab_id = tab_id;
         if let Some(tab_id) = self.active_tab_id {
             let (tab, _) = &mut self.tabs[tab_id];
-            tab.set_is_active(cx, true, animate);
+            if let Some(mut tab) = tab.borrow_mut::<Tab>() {
+                tab.set_is_active(cx, true, animate);
+            }
         }
         self.view_area.redraw(cx);
     }
