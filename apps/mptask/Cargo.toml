@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 mp-theme = { path = "../../libs/mp_theme" }
+mp-wm-api = { path = "../../libs/mp_wm_api" }

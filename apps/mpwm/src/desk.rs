@@ -163,6 +163,32 @@ fn fade_color(c: Vec4f, alpha: f64) -> Vec4f {
     }
 }
 
+/// The starting wash's alpha while the arriving content fades in over it.
+///
+/// The naive complement (`glass * (1 - arrival)`) FLICKERS: the two layers
+/// stack, so the wallpaper still visible through the pair is
+/// `(1 - wash) * (1 - arrival)`, which at `arrival = 0.5` is 0.28 against
+/// 0.12 at either end — the tile blooms BRIGHTER halfway through the
+/// crossfade than it is before or after, and over a bright wallpaper that
+/// reads as a flash (measured: a terminal opening went 33 → 42 → 35 mean
+/// luma, a browser 33 → 37 → 17).
+///
+/// Coverage must stay put instead. The content lands over the wash, so the
+/// pair covers `arrival + wash * (1 - arrival)`; holding that at `glass`
+/// gives `wash = glass * (1 - arrival) / (1 - glass * arrival)` — the wash
+/// retreats exactly as fast as the content fills in, never faster. It still
+/// starts at `glass` and still reaches 0 at `arrival = 1`, so the ends are
+/// unchanged; only the middle stops leaking.
+fn wash_alpha(glass: f32, arrival: f32) -> f32 {
+    let arrival = arrival.clamp(0.0, 1.0);
+    let glass = glass.clamp(0.0, 1.0);
+    let denom = 1.0 - glass * arrival;
+    if denom <= 1.0e-4 {
+        return 0.0;
+    }
+    (glass * (1.0 - arrival) / denom).clamp(0.0, 1.0)
+}
+
 /// Split a tile's interior into (tab strip, child). A grouped leaf gives
 /// `GROUPBAR_H` at the top to the strip and the rest to the child; anything
 /// else hands the whole interior back. Capped at a third of the tile so a
@@ -393,8 +419,8 @@ script_mod! {
     // so the wallpaper reads through exactly like the running window.
     set_type_default() do #(DrawTilePanel::script_shader(vm)) {
         ..mod.draw.DrawQuad
-        color: mod.mpwm_theme.darker_background
-        alpha: 0.55
+        color: mod.mpwm_theme.background
+        alpha: 0.88
         pixel: fn() {
             return vec4(self.color.rgb * self.alpha, self.alpha)
         }
@@ -921,13 +947,27 @@ impl WmDesk {
 
         // A translucent panel only while the child has nothing to show —
         // once it has a frame the desk paints nothing behind it.
-        let has_frame = self
+        // The dark starting wash CROSSFADES with the arriving content:
+        // full while no frame exists, then fading out exactly as the
+        // first frames fade in — the tile's darkness stays continuous,
+        // never a bright wallpaper flash between the two.
+        let (has_frame, arrival) = self
             .items
             .get(&client)
-            .and_then(|item| item.borrow::<MpRunView>().map(|v| v.has_frame()))
-            .unwrap_or(false);
-        if !has_frame {
-            self.draw_panel.alpha = 0.55 * fade as f32;
+            .and_then(|item| {
+                item.borrow::<MpRunView>()
+                    .map(|v| (v.has_frame(), v.arrival_fade()))
+            })
+            .unwrap_or((false, 1.0));
+        // The wash IS the terminal glass (same color, same focus
+        // opacity), so a terminal's first frame changes nothing but
+        // the prompt appearing. (Omarchy shows no placeholder at all
+        // — windows map only with their first buffer — this is our
+        // equivalent for cargo-launched children.)
+        let glass = if focus > 0.5 { 0.88 } else { 0.84 };
+        let wash = wash_alpha(glass, if has_frame { arrival } else { 0.0 });
+        if wash > 0.004 {
+            self.draw_panel.alpha = wash * fade as f32;
             self.draw_panel.draw_abs(cx, inner);
         }
 
@@ -1413,6 +1453,49 @@ mod tests {
     /// wide, so a width is just a character count.
     fn mono(s: &str) -> f64 {
         s.chars().count() as f64
+    }
+
+    #[test]
+    fn the_wash_starts_at_the_glass_and_ends_gone() {
+        for glass in [0.84f32, 0.88] {
+            assert!((wash_alpha(glass, 0.0) - glass).abs() < 1.0e-6);
+            assert_eq!(wash_alpha(glass, 1.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn the_wash_never_lets_more_wallpaper_through_than_the_glass_does() {
+        // The flicker this replaces: with `glass * (1 - arrival)` the pair
+        // uncovers 0.28 of the wallpaper mid-crossfade against 0.12 at the
+        // ends. Coverage must never dip below the glass while the content
+        // is opaque, at any point of the fade.
+        for glass in [0.84f32, 0.88] {
+            let mut prev = f32::INFINITY;
+            for step in 0..=200 {
+                let arrival = step as f32 / 200.0;
+                let covered = arrival + wash_alpha(glass, arrival) * (1.0 - arrival);
+                assert!(
+                    covered >= glass - 1.0e-4,
+                    "glass {glass} arrival {arrival}: covered {covered}"
+                );
+                // ...and it only ever grows, so nothing brightens on the way.
+                if prev.is_finite() {
+                    assert!(covered >= prev - 1.0e-4, "arrival {arrival} went backwards");
+                }
+                prev = covered;
+            }
+            assert!((prev - 1.0).abs() < 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn the_wash_retreats_monotonically() {
+        let mut prev = 1.0f32;
+        for step in 0..=100 {
+            let wash = wash_alpha(0.88, step as f32 / 100.0);
+            assert!(wash <= prev + 1.0e-6, "step {step}: {wash} > {prev}");
+            prev = wash;
+        }
     }
 
     #[test]

@@ -111,6 +111,14 @@ impl Palette {
         }
     }
 
+    /// What CEF fills the page with before the site has composited anything,
+    /// and behind area a reflow has not reached yet. The same colour as the
+    /// ground the page quad sits on, so neither a cold tab nor a mid-resize
+    /// page shows a black hole.
+    pub fn page_background_argb(&self) -> u32 {
+        parse_argb(&self.darker_background).unwrap_or(0xff20_2124)
+    }
+
     /// The new-tab page: a data URL in the theme's colours, so a fresh tab
     /// never flashes white.
     pub fn new_tab_url(&self) -> String {
@@ -146,6 +154,17 @@ pub fn parse_hex(s: &str) -> Option<Vec4f> {
         b as f32 / 255.0,
         1.0,
     ))
+}
+
+/// A `#rrggbb` role as opaque ARGB (`0xFFRRGGBB`) — the form CEF wants for
+/// `cef_browser_settings_t::background_color`.
+pub fn parse_argb(s: &str) -> Option<u32> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let rgb = u32::from_str_radix(s, 16).ok()?;
+    Some(0xff00_0000 | rgb)
 }
 
 /// Minimal percent-encoding for a `data:` URL payload.
@@ -184,5 +203,19 @@ mod tests {
         let c = parse_hex("#8ab4f8").unwrap();
         assert!((c.x - 0x8a as f32 / 255.0).abs() < 1e-6);
         assert!(parse_hex("#12345").is_none());
+    }
+
+    #[test]
+    fn argb_is_opaque() {
+        // CEF paints the page on this before the site composites; a
+        // transparent (or zero) colour is what makes a page open black.
+        assert_eq!(parse_argb("#202124"), Some(0xff20_2124));
+        assert_eq!(parse_argb("202124"), Some(0xff20_2124));
+        assert_eq!(parse_argb("#nope"), None);
+        assert_eq!(
+            Palette::chrome_dark().page_background_argb(),
+            0xff20_2124,
+            "the CEF fill must match the themed ground the page sits on"
+        );
     }
 }
