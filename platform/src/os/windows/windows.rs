@@ -33,7 +33,7 @@ use {
         window::{CxWindowPool, WindowId},
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     },
-    std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
+    std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}},
 };
 
 impl Cx {
@@ -86,6 +86,7 @@ impl Cx {
         // and `&mut Vec<D3d11Window>` exclusively while nothing is mid-render — the wndproc
         // queues re-entrant events, `handle_platform_ops` only borrows the Cx immutably, and
         // `present` runs with the passes and the window list already borrowed.
+        self.inject_test_device_loss(d3d11_cx);
         if d3d11_cx.device_lost.get() {
             self.recover_lost_d3d11_device(d3d11_cx, d3d11_windows);
         }
@@ -620,6 +621,36 @@ impl Cx {
     }
 
     /// Repaints all dirty passes. Returns whether any window pass actually presented a
+    /// Fault injection for the recovery path: `MAKEPAD_D3D11_TEST_DEVICE_LOSS=<seconds>` trips
+    /// the loss latch every that many seconds and forces a full device recreation.
+    ///
+    /// A real device removal needs a driver reset, which cannot be provoked from inside the
+    /// process, so this stands in for it. It is a stronger test than merely setting the latch:
+    /// the device really is replaced, so every GPU object the sweep fails to rebuild still
+    /// belongs to the old device and will not render against the new one. What it cannot cover
+    /// is the detection itself, which only a genuine `DXGI_ERROR_DEVICE_REMOVED` exercises.
+    fn inject_test_device_loss(&mut self, d3d11_cx: &D3d11Cx) {
+        static PERIOD: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+        let Some(period) = PERIOD.get_or_init(|| {
+            std::env::var("MAKEPAD_D3D11_TEST_DEVICE_LOSS")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|secs| *secs > 0.0)
+                .map(Duration::from_secs_f64)
+        }) else {
+            return;
+        };
+        let now = Instant::now();
+        let due = *self.os.d3d11_test_loss_next.get_or_insert(now + *period);
+        if now < due {
+            return;
+        }
+        self.os.d3d11_test_loss_next = Some(now + *period);
+        self.os.d3d11_force_recreate = true;
+        d3d11_cx.device_lost.set(true);
+        crate::log!("MAKEPAD_D3D11_TEST_DEVICE_LOSS: forcing a device loss now");
+    }
+
     /// Rebuilds the D3D11 device and everything created from it after the device was removed
     /// or reset — a GPU driver restart, a TDR, a driver update, or the hybrid-GPU transition a
     /// laptop makes across suspend/resume.
@@ -640,7 +671,7 @@ impl Cx {
         // 250ms doubling to 4s. The first attempt is immediate; this only spaces the retries.
         let backoff = (250u64 << self.os.d3d11_recovery_attempts.min(4)).min(4000);
         self.os.d3d11_next_recovery_attempt =
-            Some(now + std::time::Duration::from_millis(backoff));
+            Some(now + Duration::from_millis(backoff));
         self.os.d3d11_recovery_attempts = self.os.d3d11_recovery_attempts.saturating_add(1);
 
         // Every window drops its swap chain, back buffer, view and beat registration first:
@@ -649,6 +680,10 @@ impl Cx {
         for window in d3d11_windows.iter_mut() {
             window.release_gpu_resources();
         }
+        // Only now are the old chains really gone: the context held the last references to
+        // their back-buffer views, and a chain that still exists keeps its claim on the HWND,
+        // which would make every rebuild below fail with E_ACCESSDENIED.
+        d3d11_cx.clear_and_flush_context();
         // A pending studio grab can never be answered from a dead device, and leaving it
         // pending would both block its requester and hold the event loop in `Poll`.
         // A pending studio or `/g` grab can never be answered from a dead device. Answering
@@ -662,7 +697,8 @@ impl Cx {
             .collect();
         Self::send_studio_screenshot_response(pending, 0, 0, Vec::new());
 
-        if !d3d11_cx.device_is_alive() {
+        if self.os.d3d11_force_recreate || !d3d11_cx.device_is_alive() {
+            self.os.d3d11_force_recreate = false;
             self.os.d3d11_device = None;
             self.unpublish_d3d11_device_for_media();
             if !d3d11_cx.recreate_device() {
@@ -693,7 +729,13 @@ impl Cx {
         // Nothing on the GPU survived, so every pass has to be re-rendered, not just the
         // window passes a repaint would reach.
         for pass_id in self.passes.id_iter() {
-            self.passes[pass_id].paint_dirty = true;
+            // Only passes that have actually been set up: a slot with no main draw list is one
+            // nothing has drawn into, and painting it would be an immediate `unwrap` on `None`
+            // in `draw_pass_to_texture`. `redraw_all` plus `repaint_windows` below reach the
+            // window passes; this is what also reaches the offscreen ones.
+            if self.passes[pass_id].main_draw_list_id.is_some() {
+                self.passes[pass_id].paint_dirty = true;
+            }
         }
         self.redraw_all();
         self.repaint_windows();
@@ -1356,4 +1398,8 @@ pub struct CxOs {
     /// timer of its own, so this is what spaces the attempts.
     pub(crate) d3d11_next_recovery_attempt: Option<Instant>,
     pub(crate) d3d11_recovery_attempts: u32,
+    /// Next scheduled fault injection; see `MAKEPAD_D3D11_TEST_DEVICE_LOSS`.
+    pub(crate) d3d11_test_loss_next: Option<Instant>,
+    /// Recreate the device even though it reports itself alive. Set only by fault injection.
+    pub(crate) d3d11_force_recreate: bool,
 }

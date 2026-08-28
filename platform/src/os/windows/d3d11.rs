@@ -1347,6 +1347,21 @@ unsafe fn device_removed_reason(device: &ID3D11Device) -> windows_core::HRESULT 
     unsafe { (Interface::vtable(device).GetDeviceRemovedReason)(Interface::as_raw(device)) }
 }
 
+/// Unbinds everything from the immediate context and flushes it.
+///
+/// DXGI allows only one flip-model swap chain per HWND at a time, and D3D11 destroys resources
+/// lazily: the context keeps its own references to whatever is bound — the back-buffer render
+/// target view above all — so dropping the application's handles is not enough to dissolve the
+/// old chain's association with its window. Without this, recreating a swap chain on the same
+/// HWND fails with `E_ACCESSDENIED`. `ClearState` has a vtable slot but no generated wrapper in
+/// the vendored bindings; `Flush` does.
+unsafe fn clear_and_flush(context: &ID3D11DeviceContext) {
+    unsafe {
+        (Interface::vtable(context).ClearState)(Interface::as_raw(context));
+        context.Flush();
+    }
+}
+
 /// Swap-chain headroom for a vsync-paced main window: 3 buffers with a maximum
 /// frame latency of 2 lets the CPU build frame N+1 while the compositor still
 /// holds N, which is what keeps a beat-paced loop from stalling on every hitch.
@@ -1966,11 +1981,19 @@ impl Cx {
     /// DXBC blobs plus the on-disk cache, so nothing here needs recompiling.
     pub(crate) fn d3d11_forget_gpu_resources(&mut self) {
         for item in &mut self.textures.0.pool {
-            item.item.os.forget_gpu_objects();
-            // A render target has no CPU-side contents; clearing its alloc record is what makes
-            // the next pass rebuild it at the right size.
-            item.item.alloc = None;
-            item.item.set_updated(TextureUpdated::Full);
+            let texture = &mut item.item;
+            texture.os.forget_gpu_objects();
+            if texture.format.is_vec() {
+                // The pixels are still in the format's own `data`, so re-arming the dirty rect
+                // is all it takes for the ordinary upload path to put the whole texture back.
+                // `set_updated` is only defined for these formats and panics for the rest.
+                texture.set_updated(TextureUpdated::Full);
+            } else {
+                // A render target, depth buffer or shared texture has no CPU-side contents to
+                // restore; clearing the alloc record is what makes the next pass rebuild it at
+                // the right size.
+                texture.alloc = None;
+            }
         }
         for item in &mut self.geometries.0.pool {
             item.item.os.geom_vbuf = D3d11Buffer::default();
@@ -2124,6 +2147,13 @@ impl D3d11Cx {
                 false
             }
         }
+    }
+
+    /// Releases the immediate context's references to everything currently bound, so the
+    /// resources the application has already dropped are actually destroyed. See
+    /// [`clear_and_flush`].
+    pub fn clear_and_flush_context(&self) {
+        unsafe { clear_and_flush(&self.context) };
     }
 
     /// Whether the current device is still usable, asked of the device itself.
