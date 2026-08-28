@@ -63,6 +63,7 @@ mod fx_slot;
 // already knows how to animate (digest-keyed disk cache; see fx_thumbs.rs).
 mod fx_thumbs;
 mod import_ui;
+mod expand;
 mod gen;
 mod lanes;
 // LIVECODING: the observed effect-document origins, and the compile answer
@@ -91,6 +92,7 @@ mod stems;
 mod wave_analysis;
 mod pads;
 mod local_store;
+mod loop_close;
 mod media_scan;
 mod service;
 // Stems/lyrics the STORE already holds: fetch instead of separate, and give
@@ -143,6 +145,7 @@ use crate::fx_slot::{
 };
 use crate::midi_learn::{LearnEvent, LearnWrapAction, MidiLearn, VjLearnWrap};
 use makepad_asset_widgets::{VideoAction, VideoView};
+use crate::expand::Expander;
 use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
@@ -2298,8 +2301,21 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
-                                    gen_profile := DropDown{labels: ["…"]}
+                                    gen_profile := DropDown{width: Fill labels: ["…"]}
+                                }
+                                // The pickers get their own row: a pipe
+                                // name is long ("DREAM: expand → image →
+                                // video") and sharing one row squeezed the
+                                // canvas picker to nothing.
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
                                     gen_len := DropDown{labels: ["…"]}
+                                    gen_res := DropDown{labels: ["…"]}
+                                    View{width: Fill height: 1}
                                     gen_go := ChromeButton{text: "Queue"}
                                 }
                                 View{
@@ -2309,6 +2325,9 @@ script_mod! {
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
                                     gen_blast := ChromeButton{text: "BLAST"}
+                                    // Close the wrap of EVERY looping clip,
+                                    // not just the ones this app dreamed.
+                                    gen_closeall := CheckBox{text: "LOOP FIX"}
                                     // Keep the queue topped up from the same
                                     // prompt for as long as it is checked.
                                     gen_loop := CheckBox{text: "CONT"}
@@ -3616,6 +3635,11 @@ enum CatPurpose {
         asset: AssetId,
         revision: AssetRevisionId,
     },
+    /// A DREAM run's still: its manifest, asked for one fact — the blob id
+    /// of a picture small enough to show on the run's row. The blob itself
+    /// then rides the ordinary `Thumb` purpose into the shared thumbnail
+    /// cache, so the row costs no second decode path.
+    DreamThumb { revision: AssetRevisionId },
     JobProfiles,
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
@@ -6181,6 +6205,28 @@ pub struct App {
     // Generate surface UI mirrors.
     #[rust]
     gen_profile_labels: Vec<String>,
+    #[rust]
+    gen_size_labels: Vec<String>,
+    /// The DREAM runs' prompt expander (broker turns on worker threads).
+    /// Bare type name, not a path: the Script derive's field parser refuses
+    /// `foo::Bar`.
+    #[rust]
+    expander: Expander,
+    /// Still revisions a dream run wants a thumbnail for: the manifest hop
+    /// that turns a published image into a blob id the thumb cache can
+    /// fetch. Bounded by the job list itself (one entry per live run).
+    #[rust]
+    dream_thumb_wanted: HashSet<AssetRevisionId>,
+    /// Videos this session's DREAM runs published. Their loops are closed
+    /// on cue; bounded, and session-only by design — the flag says "this
+    /// app made this clip to be a loop", which is not a fact about the
+    /// catalog and does not belong in it.
+    #[rust]
+    dream_loops: HashSet<AssetId>,
+    /// Operator override: close EVERY looping clip's wrap, not just the
+    /// dreamed ones. Off unless asked.
+    #[rust]
+    close_all_loops: bool,
 
     // The native output surface can be destroyed independently of the main
     // console. Keep the widget/pass alive and recreate that native surface on
@@ -10677,6 +10723,9 @@ p2 {}
         // brings the connection back without anyone noticing twice.
         let now = now_ms();
         let mut runtime_down = false;
+        // Rows whose expansion could not even be started; they go ahead on
+        // the raw prompt as soon as this borrow ends.
+        let mut expand_now: Vec<u64> = Vec::new();
         {
             let Some(up) = self.up.as_mut() else { return };
             for cmd in cmds {
@@ -10719,12 +10768,76 @@ p2 {}
                             runtime_down = true;
                         }
                     }
+                    GenCmd::Expand { tag, prompt } => {
+                        // Off the catalog runtime entirely: the expander is
+                        // a chat turn, and the runtime speaks catalog and
+                        // jobs. A full expander pool means this run starts
+                        // on the raw prompt NOW rather than waiting — the
+                        // clip is the thing that must not be lost.
+                        let started = self.expander.start(
+                            up.endpoints,
+                            up.token.clone(),
+                            tag,
+                            prompt,
+                        );
+                        if !started {
+                            expand_now.push(tag);
+                        }
+                    }
                 }
             }
+        }
+        for tag in expand_now {
+            let cmds = self.gen.expand_arrived(
+                tag,
+                None,
+                Some("expander busy — using the prompt as typed".to_string()),
+            );
+            self.run_gen_cmds(cmds);
         }
         if runtime_down && self.session_loss_since.is_none() {
             self.session_loss_since =
                 Some(Instant::now() - Duration::from_secs_f64(SESSION_LOSS_GRACE_S));
+        }
+    }
+
+    /// Ask for the manifest of any dream still whose picture the rows do
+    /// not have yet. One hop per revision, ever: the wanted set is only
+    /// cleared when the manifest lands or fails.
+    fn pump_dream_thumbs(&mut self) {
+        let wanted: Vec<AssetRevisionId> = self
+            .gen
+            .jobs()
+            .filter_map(|job| job.input_revision())
+            .filter(|rev| {
+                !self.thumbs.contains_key(rev)
+                    && !self.thumb_inflight.contains(rev)
+                    && !self.dream_thumb_wanted.contains(rev)
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(up) = self.up.as_mut() else { return };
+        for revision in wanted {
+            if let Ok(id) = up.catalog.submit_with(
+                ClientRequest::FetchAssetManifest { rev: revision },
+                makepad_asset_client::SubmitOptions::newest_first(),
+            ) {
+                self.cat_reqs.insert(id, CatPurpose::DreamThumb { revision });
+                self.dream_thumb_wanted.insert(revision);
+            }
+        }
+    }
+
+    /// Finished expansions become stage-one enqueues.
+    fn pump_expander(&mut self) {
+        for done in self.expander.drain() {
+            let cmds = self.gen.expand_arrived(done.tag, done.expanded, done.note);
+            if !cmds.is_empty() {
+                self.run_gen_cmds(cmds);
+                self.grids_dirty = true;
+            }
         }
     }
 
@@ -10968,6 +11081,20 @@ p2 {}
                                     self.slot_trim[index] = profile.trim;
                                     self.slot_tween_mode[index] = profile.tween;
                                     player.set_mode(self.slot_play_mode(index));
+                                    // A DREAM clip is meant to cycle on a
+                                    // pad, and an i2v clip's last frame is
+                                    // nowhere near its first, so its wrap
+                                    // is closed when the loop window fills
+                                    // (see loop_close.rs). Only clips this
+                                    // session dreamed, unless the operator
+                                    // asked for all of them: silently
+                                    // shortening somebody's own footage is
+                                    // not this feature's business.
+                                    let close = self.close_all_loops
+                                        || self.dream_loops.contains(&item.asset);
+                                    player.set_seam_close(
+                                        if close { crate::loop_close::DEFAULT_WRAP } else { 0 },
+                                    );
                                     player.set_muted(profile.muted);
                                     player.set_trim(profile.trim.0, profile.trim.1);
                                     // Everything above repaints from shape.
@@ -11897,6 +12024,11 @@ p2 {}
                                 self.model(surface).resolve_failed(gen, asset, error.to_string());
                             self.run_cat_cmds(surface, cmds);
                         }
+                        CatPurpose::DreamThumb { revision } => {
+                            // Retry on a later tick: a manifest read right
+                            // after a publish can race the commit.
+                            self.dream_thumb_wanted.remove(&revision);
+                        }
                         CatPurpose::Thumb { revision } => {
                             // A failed blob is NOT cached as "no thumbnail":
                             // clearing the in-flight mark lets the next grid
@@ -12250,6 +12382,48 @@ p2 {}
                 });
                 self.thumb_decodes_out += 1;
             }
+            (
+                CatPurpose::DreamThumb { revision },
+                ClientOutput::AssetManifest(manifest),
+            ) => {
+                self.dream_thumb_wanted.remove(&revision);
+                // The published preview if there is one; otherwise the
+                // still ITSELF, which for a flux1 image at these canvases
+                // is a small PNG and is its own best thumbnail.
+                let picture = manifest
+                    .thumbnail
+                    .as_ref()
+                    .map(|t| (t.blob, t.byte_len))
+                    .or_else(|| {
+                        manifest
+                            .files
+                            .iter()
+                            .find(|f| {
+                                matches!(f.media, MediaType::Png | MediaType::Jpeg)
+                                    && f.byte_len <= media::MAX_THUMB_BYTES
+                            })
+                            .map(|f| (f.blob, f.byte_len))
+                    });
+                let fresh = !self.thumbs.contains_key(&revision)
+                    && !self.thumb_inflight.contains(&revision);
+                if let (Some((blob, len)), true, Some(up)) =
+                    (picture, fresh, self.up.as_mut())
+                {
+                    if let Ok(id) = up.catalog.submit_with(
+                        ClientRequest::FetchBlob {
+                            blob,
+                            expected_len: Some(len),
+                            pin: false,
+                        },
+                        makepad_asset_client::SubmitOptions::newest_first(),
+                    ) {
+                        // The ORDINARY thumb purpose from here on: same
+                        // fetch, same worker decode, same texture cache.
+                        self.cat_reqs.insert(id, CatPurpose::Thumb { revision });
+                        self.thumb_inflight.insert(revision);
+                    }
+                }
+            }
             (CatPurpose::JobProfiles, ClientOutput::JobProfiles(profiles)) => {
                 self.gen.profiles_arrived(profiles);
                 self.sync_gen_profiles(cx);
@@ -12263,6 +12437,16 @@ p2 {}
                 if !chain_cmds.is_empty() {
                     self.run_gen_cmds(chain_cmds);
                     self.grids_dirty = true;
+                }
+                // Remember what this session dreamed: those clips get their
+                // wrap closed when a pad cues them.
+                let dreamed: Vec<AssetId> =
+                    self.gen.jobs().filter_map(|job| job.dream_video_product()).collect();
+                for asset in dreamed {
+                    if self.dream_loops.len() >= 64 {
+                        self.dream_loops.clear();
+                    }
+                    self.dream_loops.insert(asset);
                 }
             }
             (CatPurpose::JobCancel { job }, ClientOutput::JobCancelled(count)) => {
@@ -15903,10 +16087,13 @@ p2 {}
             prompt,
             u8::from(self.gen_panel_open),
         ) + &format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             u8::from(self.lights_tab),
             u8::from(self.monitor_audio),
             u8::from(self.import.convert_video),
+            // Appended last: a file written before the canvas picker
+            // existed simply has no line here and reads as the default.
+            self.gen.size_index(),
         );
         let path = Self::gen_panel_path();
         if let Some(dir) = path.parent() {
@@ -15941,8 +16128,14 @@ p2 {}
             self.import.convert_video = true;
             self.ui.check_box(cx, ids!(import_flow)).set_active(cx, true, Animate::No);
         }
+        let size: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
+        // After the pipe, so the canvas lands in the right table, and after
+        // the length, so a restored pair that no longer fits is corrected
+        // on the way in rather than queued and refused.
+        self.gen.set_video_size(size);
+        self.sync_gen_pickers(cx);
         self.ui
             .drop_down(cx, ids!(gen_profile))
             .set_selected_item(cx, self.gen.selected);
@@ -15958,6 +16151,36 @@ p2 {}
             self.run_gen_cmds(cmds);
             self.ui.check_box(cx, ids!(gen_loop)).set_active(cx, true, Animate::No);
         }
+    }
+
+    /// Re-read BOTH sub-pickers from the model.
+    ///
+    /// They are coupled: the canvas table depends on the pipe, and canvas
+    /// and length constrain each other (see `GenModel::set_video_size`).
+    /// Pushing the model's answer back into both widgets after any change
+    /// is what keeps the drawer from showing a pair the fleet would refuse.
+    fn sync_gen_pickers(&mut self, cx: &mut Cx) {
+        let labels = self.gen.size_labels();
+        let sized = !labels.is_empty();
+        // A pipe with no canvas of its own (enhance takes the source clip's,
+        // music has none) shows no canvas picker at all rather than a dead
+        // one — the drawer only offers what this pipe can actually do.
+        self.ui.drop_down(cx, ids!(gen_res)).set_visible(cx, sized);
+        self.ui
+            .drop_down(cx, ids!(gen_len))
+            .set_visible(cx, self.gen.selected_pipe().has_length());
+        if sized {
+            if labels != self.gen_size_labels {
+                self.gen_size_labels = labels.clone();
+                self.ui.drop_down(cx, ids!(gen_res)).set_labels(cx, labels);
+            }
+            self.ui
+                .drop_down(cx, ids!(gen_res))
+                .set_selected_item(cx, self.gen.size_index());
+        }
+        self.ui
+            .drop_down(cx, ids!(gen_len))
+            .set_selected_item(cx, self.gen.video_length());
     }
 
     fn sync_gen_profiles(&mut self, cx: &mut Cx) {
@@ -15977,6 +16200,7 @@ p2 {}
             self.ui
                 .drop_down(cx, ids!(gen_len))
                 .set_selected_item(cx, self.gen.video_length());
+            self.sync_gen_pickers(cx);
         }
     }
 
@@ -16514,7 +16738,12 @@ p2 {}
                         })
                         .count()
                 });
-                JobRowEntry::from_job(job, now, ahead)
+                // The still, once its picture has been decoded into the
+                // shared thumbnail cache by the ordinary thumb path.
+                let still = job
+                    .input_revision()
+                    .and_then(|rev| self.thumbs.get(&rev).cloned());
+                JobRowEntry::from_job(job, now, ahead, still)
             })
             .collect();
         let widget = self.ui.widget(cx, ids!(gen_jobs));
@@ -16525,9 +16754,13 @@ p2 {}
         let status = match &self.gen.profiles_state {
             ProfilesState::Idle => "".to_string(),
             ProfilesState::Loading => "loading profiles…".to_string(),
-            ProfilesState::Ready => match &self.gen.last_error {
-                Some(error) => error.clone(),
-                None => {
+            ProfilesState::Ready => match (&self.gen.last_error, &self.gen.fit_note) {
+                (Some(error), _) => error.clone(),
+                // A picker that moved the other picker says so, in full:
+                // silently changing what the operator chose is exactly the
+                // kind of thing that gets found out mid-set.
+                (None, Some(note)) => note.clone(),
+                (None, None) => {
                     let n = self.gen.active_jobs();
                     if n == 0 {
                         String::new()
@@ -21599,10 +21832,23 @@ impl MatchEvent for App {
         // ---- generate surface ----
         if let Some(index) = self.ui.drop_down(cx, ids!(gen_profile)).selected(actions) {
             self.gen.select_profile(index);
+            // A different pipe offers a different canvas table (a video
+            // canvas is not an image canvas), so the picker is rebuilt
+            // rather than left showing the previous pipe's sizes.
+            self.sync_gen_pickers(cx);
             self.save_gen_panel();
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(gen_len)).selected(actions) {
             self.gen.set_video_length(index);
+            // Either picker may have moved the other to keep the pair
+            // renderable; both are re-read from the model so the drawer
+            // always shows the pair that will actually be queued.
+            self.sync_gen_pickers(cx);
+            self.save_gen_panel();
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(gen_res)).selected(actions) {
+            self.gen.set_video_size(index);
+            self.sync_gen_pickers(cx);
             self.save_gen_panel();
         }
         if let Some(text) = self.ui.text_input(cx, ids!(gen_prompt)).changed(actions) {
@@ -21633,6 +21879,11 @@ impl MatchEvent for App {
             let cmds = self.gen.generate(now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(gen_closeall)).changed(actions) {
+            // Takes effect on the next cue: the wrap is closed when a
+            // clip's loop window is decoded, not while it is playing.
+            self.close_all_loops = on;
         }
         if let Some(on) = self.ui.check_box(cx, ids!(gen_loop)).changed(actions) {
             // Arming reads whatever is in the prompt box right now, so the
@@ -22854,6 +23105,8 @@ impl AppMain for App {
             // Bounded generation-status polling.
             let cmds = self.gen.tick(now_ms());
             self.run_gen_cmds(cmds);
+            self.pump_expander();
+            self.pump_dream_thumbs();
             let cmds = self.gen.ensure_profiles();
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
