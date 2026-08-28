@@ -29,6 +29,7 @@
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
     fab_controls::{format_hex, parse_hex, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     file_tree::{FileTree, FileTreeAction},
     label::Label,
     makepad_derive_widget::*,
@@ -228,6 +229,16 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             s.hover = None;
             s.down_consumed = false;
             s.live_stroke = None;
+            drop(s);
+            // F12 closes the whole design surface: the exploded view goes
+            // with the panel (deferred toggle — performed pre-dispatch at
+            // the next event), the marks and the flat band with it, so
+            // the app is never left tilted without its panel.
+            if cx.sploded_will_be_active() {
+                cx.sploded_toggle();
+            }
+            cx.sploded_set_marks(None, None);
+            cx.sploded_set_flat_band(None);
         }
         log!("TWEAK mode {}", if on { "on" } else { "off" });
         cx.redraw_all();
@@ -266,23 +277,39 @@ fn pick_candidate(
     Some(rect)
 }
 
-/// The draw lists on screen this frame, over every pass: a hidden page's
-/// list hangs off no pass at all, so the union is exactly "visible". (A
-/// widget's own list does not reliably know its pass — the Dock's tab
-/// strip list did not — so this never asks it.)
+/// The draw lists on screen, over every pass: a hidden page's list hangs
+/// off no pass at all, so the union is exactly "visible". Computed at EVENT
+/// time (between frames, when every list has linked into its parent) and
+/// cached for the overlay draw, which runs mid-frame — while a list is
+/// still open it has not linked into its parent yet, so a walk taken then
+/// missed every page inside the dock (the "only tabs light up" bug).
 fn attached_lists_of(cx: &Cx, _widget: &WidgetRef) -> HashSet<DrawListId> {
     let mut out = HashSet::new();
     for pass_id in cx.passes.id_iter() {
         out.extend(cx.attached_draw_lists(pass_id));
     }
+    *attached_cache().lock().unwrap() = out.clone();
     out
+}
+
+fn attached_cache() -> &'static Mutex<HashSet<DrawListId>> {
+    static CACHE: OnceLock<Mutex<HashSet<DrawListId>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// A widget's on-screen rect this frame: empty when it is not drawn (its
 /// page is hidden), whatever its retained draw list still holds.
-fn live_rect(cx: &Cx, widget: &WidgetRef) -> Rect {
-    let attached = attached_lists_of(cx, widget);
-    if !widget.area().is_attached(cx, &attached) {
+/// A widget's on-screen rect this frame: empty when it is not drawn (its
+/// page is hidden), whatever its retained draw list still holds. Draw-time
+/// variant: the lists still open right now count as attached, because a
+/// list links into its parent only when it ends.
+/// A widget's on-screen rect this frame: empty when it is not drawn (its
+/// page is hidden), whatever its retained draw list still holds. Uses the
+/// attachment set the last EVENT computed (see `attached_lists_of`): the
+/// overlay draws mid-frame, when open lists are not yet linked.
+fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
+    let attached = attached_cache().lock().unwrap().clone();
+    if !attached.is_empty() && !widget.area().is_attached(cx, &attached) {
         return Rect::default();
     }
     // Attached = on screen; read the geometry even if a retained list left
@@ -1320,37 +1347,102 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
 /// a preview quad — the swatch then renders with the selection's actual
 /// compiled shader (fn-hash cache) at its live-tweaked values. Quad-family
 /// layers only; anything else leaves the preview untouched.
+/// One live draw call's inputs, copied from a widget's area: what the
+/// material swatch draws so it shows exactly what the widget shows.
+struct MaterialMirror {
+    /// The swatch's own DrawVars re-pointed at the widget's shader, with
+    /// the widget's draw call uniforms, textures and geometry copied in.
+    draw_vars: DrawVars,
+    instance: Vec<f32>,
+    rect_pos: Option<usize>,
+    rect_size: Option<usize>,
+    draw_clip: Option<usize>,
+}
+
+impl MaterialMirror {
+    fn draw(&self, cx: &mut Cx2d, rect: Rect) {
+        let draw_vars = &self.draw_vars;
+        let Some(mut many) = cx.begin_many_instances(draw_vars) else {
+            return;
+        };
+        let mut inst = self.instance.clone();
+        if let Some(rp) = self.rect_pos {
+            inst[rp] = rect.pos.x as f32;
+            inst[rp + 1] = rect.pos.y as f32;
+        }
+        if let Some(rs) = self.rect_size {
+            inst[rs] = rect.size.x as f32;
+            inst[rs + 1] = rect.size.y as f32;
+        }
+        if let Some(dc) = self.draw_clip {
+            inst[dc] = rect.pos.x as f32;
+            inst[dc + 1] = rect.pos.y as f32;
+            inst[dc + 2] = (rect.pos.x + rect.size.x) as f32;
+            inst[dc + 3] = (rect.pos.y + rect.size.y) as f32;
+        }
+        many.instances.extend_from_slice(&inst);
+        cx.end_many_instances(many);
+    }
+}
+
+/// Read a widget's live draw call through its area: the first instance's
+/// values plus the call's shader, geometry, uniforms and textures.
+fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, base: &DrawVars) -> Option<MaterialMirror> {
+    let Area::Instance(inst) = widget.area() else {
+        return None;
+    };
+    if inst.instance_count == 0 {
+        return None;
+    }
+    let draw_list = &cx.draw_lists[inst.draw_list_id];
+    let draw_item = &draw_list.draw_items[inst.draw_item_id];
+    let draw_call = draw_item.draw_call()?;
+    let buf = draw_item.instances.as_ref()?;
+    let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
+    let stride = sh.mapping.instances.total_slots;
+    if stride == 0 || inst.instance_offset + stride > buf.len() {
+        return None;
+    }
+    let mut draw_vars = base.clone();
+    draw_vars.area = Area::Empty;
+    draw_vars.draw_shader_id = Some(draw_call.draw_shader_id);
+    draw_vars.geometry_id = draw_call.geometry_id;
+    draw_vars.options = draw_call.options.clone();
+    draw_vars.dyn_uniforms = draw_call.dyn_uniforms;
+    draw_vars.texture_slots = draw_call.texture_slots.clone();
+    draw_vars.uniform_buffer_slots = draw_call.uniform_buffer_slots.clone();
+    Some(MaterialMirror {
+        draw_vars,
+        instance: buf[inst.instance_offset..inst.instance_offset + stride].to_vec(),
+        rect_pos: sh.mapping.rect_pos,
+        rect_size: sh.mapping.rect_size,
+        draw_clip: sh.mapping.draw_clip,
+    })
+}
+
+/// Drive the swatch with the SAME inputs the real widget has right now:
+/// the layer's current value object (every instance value — colours,
+/// border sizes, the hover/focus/down mix factors at their live values —
+/// and its type, which is what binds the shader). Only the rect differs,
+/// and the swatch sets that when it draws. Re-evaluating the widget's
+/// SOURCE here was wrong twice over: the eval scope did not carry
+/// `__script_source__` for a sub-object (the swatch stayed a bare
+/// checkerboard), and a fresh instantiation shows defaults, not the
+/// widget's live state ("you do kinda have to feed it similar inputs as
+/// the actual widget").
 fn apply_material_preview(
     cx: &mut Cx,
     widget: &WidgetRef,
     preview: &mut DrawQuad,
     layer: &str,
-    sel_path: &str,
+    _sel_path: &str,
 ) {
-    let overlay: Vec<(String, String)> = {
-        let session = session().lock().unwrap();
-        let prefix = format!("{layer}.");
-        let mut latest: Vec<(String, String)> = Vec::new();
-        for entry in session
-            .diff
-            .iter()
-            .filter(|e| e.path == sel_path && e.prop.starts_with(&prefix))
-        {
-            let leaf = entry.prop[prefix.len()..].to_string();
-            if let Some(slot) = latest.iter_mut().find(|(l, _)| *l == leaf) {
-                slot.1 = entry.new.clone();
-            } else {
-                latest.push((leaf, entry.new.clone()));
-            }
-        }
-        latest
-    };
     let layer_id = LiveId::from_str(layer);
     cx.with_vm(|vm| {
         vm.bx.captured_errors = Some(Vec::new());
-        let source = widget.script_source();
-        if source != ScriptObject::ZERO {
-            let value = vm.bx.heap.value(source, layer_id.into(), NoTrap);
+        let current = widget.current_to_value(vm);
+        if let Some(obj) = current.as_object() {
+            let value = vm.bx.heap.value(obj, layer_id.into(), NoTrap);
             if let Some(vobj) = value.as_object() {
                 let quadish = !vm
                     .bx
@@ -1358,34 +1450,13 @@ fn apply_material_preview(
                     .value(vobj, id!(rect_pos).into(), NoTrap)
                     .is_nil();
                 if quadish {
-                    let mut body = String::from("{");
-                    for (leaf, val) in &overlay {
-                        body.push_str(&format!("{leaf}: {val}\n"));
-                    }
-                    body.push('}');
-                    let merged = vm.eval_with_source(
-                        ScriptMod {
-                            cargo_manifest_path: String::new(),
-                            module_path: "tweak".to_string(),
-                            file: "tweak://swatch".to_string(),
-                            line: 1,
-                            column: 1,
-                            code: format!(
-                                "use mod.prelude.widgets.*\n__script_source__{body};"
-                            ),
-                            values: Vec::new(),
-                        },
-                        vobj,
+                    use crate::makepad_script::traits::ScriptApply;
+                    preview.script_apply(
+                        vm,
+                        &crate::makepad_script::apply::Apply::Eval,
+                        &mut Scope::default(),
+                        value,
                     );
-                    if merged.as_object().is_some() {
-                        use crate::makepad_script::traits::ScriptApply;
-                        preview.script_apply(
-                            vm,
-                            &crate::makepad_script::apply::Apply::Eval,
-                            &mut Scope::default(),
-                            merged,
-                        );
-                    }
                 }
             }
         }
@@ -2280,6 +2351,13 @@ pub struct TweakMaterialSwatch {
     preview: DrawQuad,
     #[live]
     checker: DrawTweakChecker,
+    /// The widget whose material this swatch mirrors (0 = none): the well
+    /// re-reads that widget's live draw call every time it draws, so a
+    /// scrub on the widget shows in the well the same frame.
+    #[rust]
+    mirror_uid: u64,
+    #[rust]
+    mirror_layer: String,
     #[rust]
     area: Area,
     /// Which draw layer this swatch currently previews.
@@ -2295,7 +2373,22 @@ impl Widget for TweakMaterialSwatch {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         self.checker.draw_abs(cx, rect);
-        self.preview.draw_abs(cx, rect);
+        // Same shader, same inputs: copy the widget's live draw call (its
+        // shader id, uniforms, textures and this instance's values —
+        // colours, border sizes, hover/focus/down mix factors as they are
+        // right now) and draw one instance of it here with only the
+        // geometry substituted. "you do kinda have to feed it similar
+        // inputs as the actual widget probably like colors and things".
+        let mirrored = if self.mirror_uid != 0 && self.mirror_layer == "draw_bg" {
+            let widget = cx.widget_tree().widget(WidgetUid(self.mirror_uid));
+            capture_material_mirror(cx, &widget, &self.preview.draw_vars)
+        } else {
+            None
+        };
+        match mirrored {
+            Some(mirror) => mirror.draw(cx, rect),
+            None => self.preview.draw_abs(cx, rect),
+        }
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
@@ -2733,6 +2826,14 @@ pub struct Tweaker {
     /// The exploded-view toggle button beside the filter.
     #[rust]
     sploded_uid: u64,
+    /// The exploded view's level-separation scrub field (visible only
+    /// while the mode is up).
+    spread_uid: u64,
+    /// The panel's note button: the same note as the Insert key, for
+    /// keyboards without one.
+    note_uid: u64,
+    /// Set by the note button; the next event opens the card.
+    note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
     /// renderer; until then this is the mode flag + visual state).
     #[rust]
@@ -2961,6 +3062,23 @@ impl Tweaker {
                             draw_icon +: {
                                 color: #xd8d8d8
                                 svg: crate_resource("self:resources/icons/sploded.svg")
+                            }
+                        }
+                        note := Button {
+                            width: Fit
+                            height: 24
+                            padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: "note"
+                        }
+                        spread_wrap := View {
+                            width: Fit
+                            height: Fit
+                            visible: false
+                            spread := FabValueInput {
+                                width: 44
+                                height: 18
+                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
                             }
                         }
                     }
@@ -3380,7 +3498,7 @@ impl Tweaker {
                     note_text := TextInput {
                         width: Fill
                         height: 54
-                        empty_text: "note for the AI\u{2026}"
+                        empty_text: "note on this item \u{2014} Insert or the note button: pinned, else hovered \u{00b7} Esc closes"
                         draw_bg +: {
                             color: #x22222a
                         }
@@ -3751,9 +3869,21 @@ impl Tweaker {
 
         match sel {
             Some(sel) => {
+                let head = {
+                    let mut head = format!("{}  \u{2022}  {} props", sel.ty, self.rows.len());
+                    // Depth readout: which plane the selection sits on in
+                    // the exploded view ("is it stacked deep, or is the
+                    // z-step just insane?").
+                    if cx.sploded_active() {
+                        if let Some(level) = cx.sploded_depth_of(sel.uid) {
+                            head.push_str(&format!("  \u{2022}  L{level}/{}", cx.sploded_max_level()));
+                        }
+                    }
+                    head
+                };
                 sidebar
                     .child(live_id!(title_label))
-                    .set_text(cx, &format!("{}  \u{2022}  {} props", sel.ty, self.rows.len()));
+                    .set_text(cx, &head);
                 sidebar.child(live_id!(path_label)).set_text(cx, &sel.path);
             }
             None => {
@@ -3774,6 +3904,25 @@ impl Tweaker {
             .child(live_id!(sploded))
             .widget_uid()
             .0;
+        self.note_uid = sidebar
+            .child(live_id!(filter_row))
+            .child(live_id!(note))
+            .widget_uid()
+            .0;
+        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
+        let spread = spread_wrap.child(live_id!(spread));
+        self.spread_uid = spread.widget_uid().0;
+        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
+            field.set_hint(
+                Some(SPLODED_SPREAD_MIN as f64),
+                Some(SPLODED_SPREAD_MAX as f64),
+                Some(0.01),
+            );
+            let spread_now = cx.sploded_spread() as f64;
+            field.set_value(cx, spread_now);
+        }
+        let spread_on = cx.sploded_will_be_active();
+        spread_wrap.set_visible(cx, spread_on);
         if self.focus_search_pending {
             let input = sidebar
                 .child(live_id!(filter_row))
@@ -3842,13 +3991,17 @@ impl Tweaker {
                                 .as_ref()
                                 .map(|p| p.path.clone())
                                 .unwrap_or_default();
-                            apply_material_preview(
-                                cx,
-                                &widget,
-                                &mut sw.preview,
-                                &layer,
-                                &sel_path,
-                            );
+                            if layer != "draw_bg" {
+                                apply_material_preview(
+                                    cx,
+                                    &widget,
+                                    &mut sw.preview,
+                                    &layer,
+                                    &sel_path,
+                                );
+                            }
+                            sw.mirror_uid = widget.widget_uid().0;
+                            sw.mirror_layer = layer.clone();
                             sw.applied_gen = self.rows_gen;
                             sw.layer = layer;
                         }
@@ -4075,13 +4228,17 @@ impl Tweaker {
                                         .as_ref()
                                         .map(|p| p.path.clone())
                                         .unwrap_or_default();
-                                    apply_material_preview(
-                                        cx,
-                                        &widget,
-                                        &mut sw.preview,
-                                        &layer,
-                                        &sel_path,
-                                    );
+                                    if layer != "draw_bg" {
+                                        apply_material_preview(
+                                            cx,
+                                            &widget,
+                                            &mut sw.preview,
+                                            &layer,
+                                            &sel_path,
+                                        );
+                                    }
+                                    sw.mirror_uid = widget.widget_uid().0;
+                                    sw.mirror_layer = layer.clone();
                                     sw.applied_gen = self.rows_gen;
                                     sw.layer = layer;
                                 }
@@ -4759,6 +4916,15 @@ impl Tweaker {
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
                     self.sploded_armed = cx.sploded_will_be_active();
+                    if let Some(sidebar) = self.sidebar.as_ref() {
+                        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
+                        let spread = spread_wrap.child(live_id!(spread));
+                        let spread_now = cx.sploded_spread() as f64;
+                        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
+                            field.set_value(cx, spread_now);
+                        };
+                        spread_wrap.set_visible(cx, self.sploded_armed);
+                    }
                     log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
                 }
             }
@@ -4801,6 +4967,35 @@ impl Tweaker {
                 continue;
             };
             let action_uid = widget_action.widget_uid.0;
+            // The exploded view's spread knob: level separation, live.
+            if self.note_uid != 0 && action_uid == self.note_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.note_request = true;
+                    cx.redraw_all();
+                }
+                continue;
+            }
+            if self.spread_uid != 0 && action_uid == self.spread_uid {
+                match widget_action.cast::<FabValueInputAction>() {
+                    FabValueInputAction::Changed(v) | FabValueInputAction::Ended(v) => {
+                        cx.sploded_set_spread(v as f32);
+                    }
+                    FabValueInputAction::Reset => {
+                        cx.sploded_set_spread(SPLODED_SPREAD_DEFAULT);
+                        if let Some(sidebar) = self.sidebar.as_ref() {
+                            let spread = sidebar
+                                .child(live_id!(filter_row))
+                                .child(live_id!(spread_wrap))
+                                .child(live_id!(spread));
+                            if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
+                                field.set_value(cx, SPLODED_SPREAD_DEFAULT as f64);
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             // Composite-row fields (size pair, box legs, spacing, align
             // dots, link toggles) are not rows; resolve them first.
             if let Some((_, prop)) = self
@@ -5414,18 +5609,58 @@ impl Widget for Tweaker {
                     }
                 }
             }
-            Event::KeyDown(ke)
-                if ke.key_code == KeyCode::Space
-                    && ke.modifiers.control
-                    && tweak_is_on() =>
-            {
-                // Ctrl+Space: the note card for the SELECTED widget.
-                let sel_path = session()
-                    .lock()
-                    .unwrap()
-                    .pinned
-                    .as_ref()
-                    .map(|p| p.path.clone());
+            Event::KeyDown(ke) if ke.key_code == KeyCode::Insert && tweak_is_on() => {
+                // Insert: a note on the item we are IN — the pinned
+                // selection, else the widget under the hover (which becomes
+                // the selection so the card has something to ride with).
+                // (Ctrl+Space is macOS's input-source switch; the user
+                // picked Insert, with the panel's note button as the
+                // fallback for keyboards without one.)
+                let sel_path = {
+                    let mut s = session().lock().unwrap();
+                    if s.pinned.is_none() {
+                        if let Some(h) = s.hover.clone() {
+                            s.pinned = Some(h);
+                        }
+                    }
+                    s.pinned.as_ref().map(|p| p.path.clone())
+                };
+                if let Some(path) = sel_path {
+                    self.note_open = !self.note_open;
+                    if self.note_open {
+                        let mut s = session().lock().unwrap();
+                        if !s.notes.iter().any(|n| n.path == path) {
+                            s.notes.push(TweakNote {
+                                path,
+                                text: String::new(),
+                                dx: 8.0,
+                                dy: -78.0,
+                            });
+                        }
+                        self.note_seed_pending = true;
+                    } else {
+                        self.note_rect = None;
+                    }
+                    self.redraw_overlay(cx);
+                }
+            }
+            _ if self.note_request && tweak_is_on() => {
+                self.note_request = false;
+                // Insert: a note on the item we are IN — the pinned
+                // selection, else the widget under the hover (which becomes
+                // the selection so the card has something to ride with).
+                // (Ctrl+Space is macOS's input-source switch; the user
+                // picked Insert, with the panel's note button as the
+                // fallback for keyboards without one.)
+                let sel_path = {
+                    let mut s = session().lock().unwrap();
+                    if s.pinned.is_none() {
+                        if let Some(h) = s.hover.clone() {
+                            s.pinned = Some(h);
+                        }
+                    }
+                    s.pinned.as_ref().map(|p| p.path.clone())
+                };
                 if let Some(path) = sel_path {
                     self.note_open = !self.note_open;
                     if self.note_open {
@@ -5642,6 +5877,21 @@ impl Widget for Tweaker {
         let desired = if on { sidebar_width() } else { 0.0 };
         self.ensure_body_margin(cx, desired);
         if !on {
+            // Tear the surface down for real: both overlay lists are
+            // RETAINED by the window's overlay (a stored sub-list keeps its
+            // slot and its last items), so skipping them here left the
+            // panel, the outlines and the note card painted after F12.
+            // Begin and end them empty so nothing of the mode remains.
+            for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                list.begin_overlay_reuse(cx);
+                let size = cx.current_pass_size();
+                cx.begin_root_turtle(size, Layout::flow_down());
+                cx.end_pass_sized_turtle();
+                list.end(cx);
+            }
             return DrawStep::done();
         }
         let (hover, pinned, strokes, live_stroke, suppress_until, edit_hold) = {

@@ -378,7 +378,7 @@ pub enum PopupMenuPosition {
     BelowInput,
 }
 
-#[derive(Script, Widget, Animator)]
+#[derive(Script, WidgetRegister, WidgetRef, WidgetSet, Animator)]
 pub struct DropDown {
     #[uid]
     uid: WidgetUid,
@@ -387,7 +387,9 @@ pub struct DropDown {
     #[apply_default]
     animator: Animator,
 
-    #[redraw]
+    // `redraw`/`walk`/`uid`/`action_data` are the `Widget` derive's helper
+    // attributes; this widget hand-writes `WidgetNode` (for `children`), so
+    // they are wired by hand below instead.
     #[live]
     draw_bg: DrawQuad,
     #[live]
@@ -413,13 +415,17 @@ pub struct DropDown {
     #[rust]
     is_active: bool,
 
+    /// The menu store this dropdown draws from, kept so `children()` (which
+    /// gets no `Cx`) can surface the open menu's items to the widget tree.
+    #[rust]
+    popup_global: PopupMenuGlobal,
+
     #[live]
     selected_item: usize,
 
     #[layout]
     layout: Layout,
 
-    #[action_data]
     #[rust]
     action_data: WidgetActionData,
 }
@@ -453,6 +459,7 @@ impl ScriptHook for DropDown {
         }
         vm.with_cx_mut(|cx| {
             let global = cx.global::<PopupMenuGlobal>().clone();
+            self.popup_global = global.clone();
             // Use try_borrow_mut to avoid panic if already borrowed (can happen during
             // nested on_after_apply calls when PopupMenu creation triggers another DropDown apply)
             let Ok(mut map) = global.map.try_borrow_mut() else {
@@ -529,6 +536,9 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let popup_menu = map.get_mut(&self.popup_menu).unwrap();
 
+            // One menu instance serves every dropdown with the same template,
+            // so claim its items for this dropdown while they draw.
+            popup_menu.tree_parent = self.uid;
             popup_menu.begin(cx);
 
             match self.popup_menu_position {
@@ -563,6 +573,50 @@ impl DropDown {
                     popup_menu.end(cx, self.draw_bg.area(), shift);
                 }
             }
+        }
+    }
+}
+
+impl WidgetNode for DropDown {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn set_action_data(&mut self, action_data: std::sync::Arc<dyn ActionTrait>) {
+        self.action_data.set_box(action_data)
+    }
+
+    fn action_data(&self) -> Option<std::sync::Arc<dyn ActionTrait>> {
+        self.action_data.clone_data()
+    }
+
+    fn area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_bg.redraw(cx);
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        // The open menu's items are widgets too (the design tweaker picks and
+        // styles them); the menu that owns them is not a tree node, so they
+        // surface here — only while this dropdown is the one showing them.
+        if !self.is_active || self.popup_menu.is_nil() {
+            return;
+        }
+        let Ok(map) = self.popup_global.map.try_borrow() else {
+            return;
+        };
+        let Some(menu) = map.get(&self.popup_menu) else {
+            return;
+        };
+        for (id, item) in menu.item_refs() {
+            visit(id, item);
         }
     }
 }
