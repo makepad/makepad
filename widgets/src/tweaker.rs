@@ -44,6 +44,7 @@ use crate::makepad_platform::remote;
 use crate::makepad_script::script_eval;
 use crate::Animate;
 use crate::ButtonAction;
+use crate::tooltip::Tooltip;
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
 use std::collections::{HashMap, HashSet};
@@ -855,6 +856,11 @@ pub fn window_intercept(
 
     match kind {
         PointerKind::Move => {
+            // The doc tooltip closes when the pointer leaves into the body
+            // (the panel never sees these moves).
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.doc_tip_hover(cx, abs);
+            }
             let eyedrop = session().lock().unwrap().eyedrop.is_some();
             cx.set_cursor(if annotate || eyedrop {
                 MouseCursor::Crosshair
@@ -3386,6 +3392,11 @@ pub struct Tweaker {
     /// (widget, layer) the source view currently holds text for.
     #[rust]
     live_key: (u64, String),
+    /// The layer doc in full when the terse line had to cut it.
+    #[rust]
+    shader_doc_full: String,
+    #[rust]
+    doc_tip_shown: bool,
     #[rust]
     fn_external_seen: u64,
     /// The shown layer's script-defined fns: (name, file:line, source).
@@ -3705,12 +3716,14 @@ impl Tweaker {
                         shader_doc := FabLabelSmall {
                             width: Fill
                             text: ""
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
                         }
                         big := TweakMaterialSwatch {
                             width: Fill
                             height: 150
                         }
-                        src_scroll := ScrollYView {
+                        src_scroll := View {
                             width: Fill
                             height: Fill
                             show_bg: true
@@ -3740,6 +3753,27 @@ impl Tweaker {
                         vibe_hint := FabLabelSmall {
                             width: Fill
                             text: "Ctrl+Enter sends \u{00b7} the agent rewrites only the fn code \u{00b7} colours and sizes stay in Props"
+                        }
+                        doc_tip := Tooltip {
+                            width: 0
+                            height: 0
+                            clip_x: false
+                            clip_y: false
+                            content := RoundedView {
+                                width: Fit
+                                height: Fit
+                                padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                                draw_bg +: {
+                                    color: #x2a2a2a
+                                    border_size: 1.0
+                                    border_color: #x555555
+                                    radius: 3.
+                                }
+                                tooltip_label := FabLabelSmall {
+                                    width: 220
+                                    text: ""
+                                }
+                            }
                         }
                     }
                     tree_wrap := View {
@@ -4615,14 +4649,18 @@ impl Tweaker {
                 self.vibe_layer = Some(layer.clone());
                 col.child(live_id!(shader_title)).set_text(cx, &layer);
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
-                // One terse line, never a wrapped paragraph.
-                let doc_line: String = doc.lines().next().unwrap_or("").chars().take(64).collect();
-                let doc_line = if doc.lines().next().map_or(0, |l| l.chars().count()) > 64 {
-                    format!("{doc_line}\u{2026}")
-                } else {
-                    doc_line
-                };
+                // One line: the label ellipsises at its own width (max_lines
+                // 1); the whole doc rides on hover as a tooltip.
+                let doc_line = doc.lines().next().unwrap_or("").trim().to_string();
                 col.child(live_id!(shader_doc)).set_text(cx, &doc_line);
+                // Flowing text: the source comment's hard breaks are not
+                // paragraph breaks.
+                let doc_full = doc.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                self.shader_doc_full = if doc_full.chars().count() > 40 || doc.trim().lines().count() > 1 {
+                    doc_full
+                } else {
+                    String::new()
+                };
                 self.shader_src_uid = col
                     .child(live_id!(src_scroll))
                     .child(live_id!(shader_src))
@@ -5234,6 +5272,33 @@ impl Tweaker {
 
     /// Apply one sidebar-originated chunk to the selection (same path the
     /// AI uses, same diff log; TWEAK log lines throttle to one per pause).
+    /// The terse doc line under the layer name shows the whole doc while
+    /// the pointer rests on it.
+    fn doc_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let col = sidebar.child(live_id!(shader_col));
+        let over = if self.shader_doc_full.is_empty() || !tweak_is_on() {
+            false
+        } else {
+            // A label's area is its first glyph: the union is the line.
+            let rect = col.child(live_id!(shader_doc)).area().clipped_rect_union(cx);
+            rect.size.x > 0.0 && rect.contains(abs)
+        };
+        if over == self.doc_tip_shown {
+            return;
+        }
+        self.doc_tip_shown = over;
+        let tip = col.child(live_id!(doc_tip));
+        let Some(mut tip) = tip.borrow_mut::<Tooltip>() else { return };
+        if over {
+            let rect = col.child(live_id!(shader_doc)).area().clipped_rect_union(cx);
+            let pos = dvec2(rect.pos.x, rect.pos.y + rect.size.y + 2.0);
+            tip.show_with_options(cx, pos, &self.shader_doc_full);
+        } else {
+            tip.hide(cx);
+        }
+    }
+
     /// Live code: apply the editor's text as it stands; a compile error
     /// puts the last good text back (the app never shows a blank widget)
     /// and says why under the editor.
@@ -6279,6 +6344,9 @@ impl Widget for Tweaker {
         }
         if self.live_timer.is_event(event).is_some() {
             self.live_apply(cx);
+        }
+        if let Event::MouseMove(e) = event {
+            self.doc_tip_hover(cx, e.abs);
         }
         if self.live_error_pending && self.next_frame.is_event(event).is_some() {
             // The backend compile happens at draw: an error there shows up
