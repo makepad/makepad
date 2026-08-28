@@ -72,6 +72,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);
+    crate::shader::draw_sploded_hairline::script_mod(vm);
     crate::shader::draw_text_3d::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_pbr::script_mod(vm);

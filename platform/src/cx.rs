@@ -172,6 +172,14 @@ pub struct Cx {
     pub perf_monitor: PerfMonitor,
     /// The F10 exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
+    /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
+    /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
+    /// its siblings, stamped onto every draw call at creation, and used as the
+    /// z axis of the exploded view: one plane per selectable node.
+    pub nesting_depth: usize,
+    /// Deepest `nesting_depth` reached during the last draw. The exploded
+    /// view sizes its fan from this instead of a draw-call count.
+    pub nesting_depth_max: usize,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     #[allow(dead_code)]
@@ -506,6 +514,8 @@ impl Cx {
             performance_stats: Default::default(),
             perf_monitor: Default::default(),
             sploded: Default::default(),
+            nesting_depth: 0,
+            nesting_depth_max: 0,
 
             display_context: Default::default(),
             pending_script_reapply: false,
