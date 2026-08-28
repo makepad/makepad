@@ -3376,15 +3376,21 @@ fn d3d_compile_hlsl(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, 
     }
 }
 
-/// Whether a blob looks like a complete DXBC container.
+/// Whether a blob is a complete DXBC container.
 ///
-/// The header is a `DXBC` magic, a 16-byte digest, a version, the total size and a chunk count
-/// — 32 bytes before any payload. The cache is a plain directory that any number of processes
-/// read and write, so a blob can also be a file another process is still writing; handing a
-/// truncated one to `CreateVertexShader` is how that turns into a broken window rather than a
+/// The header is a `DXBC` magic, a 16-byte digest, a version, the container's own total size
+/// and a chunk count — 32 bytes before any payload. The cache is a plain directory that any
+/// number of processes read and write, so a blob can also be a file another process is still
+/// writing, or one an older build left behind before entries were published atomically. The
+/// size field is what catches a blob truncated after its header; handing either kind to
+/// `CreateVertexShader` is how a shared cache turns into a broken window rather than a
 /// recompile.
 fn is_complete_dxbc(bytes: &[u8]) -> bool {
-    bytes.len() >= 32 && bytes.starts_with(b"DXBC")
+    if bytes.len() < 32 || !bytes.starts_with(b"DXBC") {
+        return false;
+    }
+    let total = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]) as usize;
+    total == bytes.len()
 }
 
 /// Publishes a cache entry by writing a temporary file and renaming it into place.
@@ -3890,5 +3896,41 @@ impl CxOsDrawShader {
             custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod shader_cache_tests {
+    use super::is_complete_dxbc;
+
+    /// A minimal well-formed container: magic, digest, version, total size, chunk count.
+    fn dxbc(total_len: usize, payload: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"DXBC");
+        v.extend_from_slice(&[0u8; 16]);
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend_from_slice(&(total_len as u32).to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend(std::iter::repeat(0u8).take(payload));
+        v
+    }
+
+    #[test]
+    fn a_whole_container_is_accepted() {
+        assert!(is_complete_dxbc(&dxbc(48, 16)));
+    }
+
+    #[test]
+    fn a_container_cut_short_after_its_header_is_rejected() {
+        // The shape a half-written cache entry takes: header intact, payload missing.
+        assert!(!is_complete_dxbc(&dxbc(4096, 16)));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_container_is_rejected() {
+        assert!(!is_complete_dxbc(b""));
+        assert!(!is_complete_dxbc(b"DXBC"));
+        assert!(!is_complete_dxbc(&[0u8; 64]));
+        assert!(!is_complete_dxbc(&dxbc(48, 16)[..31]));
     }
 }
