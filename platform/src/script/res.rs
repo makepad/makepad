@@ -247,6 +247,10 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 
 /// Try to load a resource from the packaged location on desktop.
 /// Returns None when not in packaged mode (package_root is None).
+///
+/// A relative `package_root` (the desktop packagers use `.` beside the executable) is searched
+/// both from the working directory and from the executable's own directory, because a launcher
+/// is free to start the process anywhere — see `crate::os::cx_native::exe_relative_path`.
 #[cfg(all(
     not(target_arch = "wasm32"),
     not(any(target_os = "android", target_os = "ios", target_os = "tvos")),
@@ -255,10 +259,7 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let root = cx.package_root.as_deref()?;
     let full_path = format!("{}/{}", root, dep_path);
-    let mut file = File::open(&full_path).ok()?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).ok()?;
-    Some(Rc::new(data))
+    crate::os::cx_native::read_file_cwd_or_exe_relative(&full_path).map(Rc::new)
 }
 
 /// Load a file directly from the filesystem (desktop/mobile only, not wasm).
