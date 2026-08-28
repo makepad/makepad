@@ -375,6 +375,9 @@ impl ShellGallery {
 
 impl Widget for ShellGallery {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.started {
+            self.start(cx);
+        }
         cx.begin_turtle(walk, self.layout);
         let r = cx.turtle().rect();
         let tok = self.tokens;
@@ -494,9 +497,13 @@ impl Widget for ShellGallery {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Never self-start from EVENTS: an invisible widget still receives
+        // them, so the hidden desktop-mode gallery was opening its fixture
+        // menus and answering stray keys with real Activate actions — the
+        // ghost app launches and the menu-card flash. Fixtures start on
+        // the first DRAW (which only happens when the gallery is shown).
         if !self.started {
-            self.start(cx);
-            self.redraw(cx);
+            return;
         }
         // The toasts really do expire (8s Normal, 5s Low, never for
         // Critical); the gallery re-posts the set once any of them goes, so

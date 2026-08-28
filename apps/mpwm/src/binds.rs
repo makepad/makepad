@@ -27,6 +27,9 @@ use makepad_widgets::*;
 pub enum WmAction {
     // Applications (bindings/applications.lua).
     LaunchTerminal,
+    /// SUPER+SHIFT+RETURN / SUPER+SHIFT+B (applications.lua) —
+    /// launch-or-focus the browser.
+    LaunchBrowser,
     // Window management (bindings/tiling.lua).
     CloseWindow,
     CloseAllWindows,
@@ -134,6 +137,8 @@ pub fn keymap() -> Vec<Bind> {
     let mut binds = vec![
         // ---- applications.lua
         Bind { layer: Super, key: ReturnKey, action: WmAction::LaunchTerminal, help: "Terminal" },
+        Bind { layer: SuperShift, key: ReturnKey, action: WmAction::LaunchBrowser, help: "Browser" },
+        Bind { layer: SuperShift, key: KeyB, action: WmAction::LaunchBrowser, help: "Browser" },
         // ---- tiling.lua
         Bind { layer: Super, key: KeyW, action: WmAction::CloseWindow, help: "Close window" },
         Bind { layer: Super, key: KeyQ, action: WmAction::CloseWindow, help: "Close window" },

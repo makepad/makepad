@@ -116,10 +116,9 @@ fn curated() -> Vec<AppDef> {
         AppDef::app("sheets", "Sheets", "mpsheets", "apps/mpsheets", "mpsheets", OrFocus),
         // A viewer instance per file, so previews never steal each other's
         // window.
-        AppDef::app("mpimage", "Image Viewer", "mpimage", "apps/mpimage", "mpimage", AlwaysNew),
-        // Same contract as the image viewer, including `--preview <path>`.
+        // Image and PDF viewers are NOT menu rows — they open through
+        // Files / previews (see find_app's hidden entries).
         AppDef::app("mpvideo", "Video Player", "mpvideo", "apps/mpvideo", "mpvideo", AlwaysNew),
-        AppDef::app("mppdf", "PDF Viewer", "mppdf", "apps/mppdf", "mppdf", AlwaysNew),
         AppDef::app(
             "route",
             "Route",
@@ -129,7 +128,19 @@ fn curated() -> Vec<AppDef> {
             OrFocus,
         ),
         AppDef::app("vj", "VJ", "makepad-vj", "apps/vj", "makepad-vj", OrFocus),
-        AppDef::app("fab", "Fab", "makepad-fab", "apps/fab", "makepad-fab", OrFocus),
+        {
+            // Fab opens the pretty house when the converted model is
+            // around (children run with cwd = repo root); the built-in
+            // demo house otherwise.
+            let mut fab = AppDef::app("fab", "Fab", "makepad-fab", "apps/fab", "makepad-fab", OrFocus);
+            let house = "local/fab/models/woodside.glb";
+            let exists = repo_root().map(|r| r.join(house).exists()).unwrap_or(false);
+            if exists {
+                fab.args.push("--open".to_string());
+                fab.args.push(house.to_string());
+            }
+            fab
+        },
         AppDef::app(
             "studio",
             "Studio",
@@ -182,6 +193,24 @@ pub fn find_app(id: &str) -> Option<AppDef> {
     }
     use LaunchPolicy::*;
     match id {
+        // The file viewers: launchable (previews, Open With) but not menu
+        // rows.
+        "mpimage" => Some(AppDef::app(
+            "mpimage",
+            "Image Viewer",
+            "mpimage",
+            "apps/mpimage",
+            "mpimage",
+            AlwaysNew,
+        )),
+        "mppdf" => Some(AppDef::app(
+            "mppdf",
+            "PDF Viewer",
+            "mppdf",
+            "apps/mppdf",
+            "mppdf",
+            AlwaysNew,
+        )),
         // A continuously animating client: the pacing/hiccup instrument.
         "splash" => Some(AppDef::app(
             "splash",
@@ -663,9 +692,7 @@ mod tests {
                 "Mixer",
                 "Task Manager",
                 "Sheets",
-                "Image Viewer",
                 "Video Player",
-                "PDF Viewer",
                 "Route",
                 "VJ",
                 "Fab",
@@ -684,11 +711,14 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), len, "duplicate registry ids");
         // The terminal and the per-file viewers are the always-new ones.
+        // The delisted viewers stay launchable through find_app.
+        for id in ["mpimage", "mppdf"] {
+            let app = find_app(id).expect(id);
+            assert_eq!(app.policy, LaunchPolicy::AlwaysNew, "{}", id);
+        }
         for (id, policy) in [
             ("terminal", LaunchPolicy::AlwaysNew),
-            ("mpimage", LaunchPolicy::AlwaysNew),
             ("mpvideo", LaunchPolicy::AlwaysNew),
-            ("mppdf", LaunchPolicy::AlwaysNew),
             ("vj", LaunchPolicy::OrFocus),
             ("fab", LaunchPolicy::OrFocus),
             ("studio", LaunchPolicy::OrFocus),

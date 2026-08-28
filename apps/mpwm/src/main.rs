@@ -436,14 +436,30 @@ impl App {
             }
         }
         for (client, raw) in latest {
-            // Cargo's real state, in the user's words. Anything else it
-            // prints (Compiling, warnings, the app's own output) is shown
-            // as it came.
+            // Cargo's real state, in the user's words — but NEVER raw
+            // pathnames on screen (they leak the machine's layout into
+            // recordings). Known states get a clean phrase; anything
+            // path-shaped is summarized.
             let text = if raw.starts_with("Blocking waiting for file lock") {
                 "waiting for another build\u{2026}".to_string()
+            } else if raw.starts_with("Running ") || raw.starts_with("Finished ") {
+                "launching\u{2026}".to_string()
+            } else if let Some(rest) = raw.strip_prefix("   Compiling ") {
+                // "Compiling foo v0.1.0 (/path/…)" → keep crate + version.
+                let head = rest.split(" (").next().unwrap_or(rest).trim();
+                format!("compiling {}\u{2026}", head)
+            } else if let Some(rest) = raw.trim_start().strip_prefix("Compiling ") {
+                let head = rest.split(" (").next().unwrap_or(rest).trim();
+                format!("compiling {}\u{2026}", head)
+            } else if raw.contains('/') {
+                // The app's own chatter with a path in it: not on the desk.
+                String::new()
             } else {
                 raw.clone()
             };
+            if text.is_empty() {
+                continue;
+            }
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                 slot.status = text.clone();
                 // cargo's last word before the app takes over. macOS then
@@ -1466,6 +1482,7 @@ impl App {
         let focus = self.state_mut().layout.focused_client();
         match action {
             WmAction::LaunchTerminal => self.launch_app(cx, "terminal"),
+            WmAction::LaunchBrowser => self.launch_app(cx, "browser"),
             WmAction::CloseWindow => self.close_focused(cx),
             WmAction::CloseAllWindows => self.close_all_windows(cx),
             WmAction::ToggleSplit => {
@@ -2284,10 +2301,15 @@ impl MatchEvent for App {
                 }
                 ShellBarAction::None => {}
             }
-            match wa.cast::<ShellMenuAction>() {
-                ShellMenuAction::Activate(target) => self.shell_menu_activate(cx, &target),
-                ShellMenuAction::Cancel => self.close_shell_menu(cx),
-                ShellMenuAction::None => {}
+            // ONLY the overlay's own menu instance may drive the desktop —
+            // the gallery embeds fixture menus whose actions must never
+            // launch apps or open the real card (the ghost-launch bug).
+            if wa.widget_uid == self.ui.widget(cx, ids!(shell_menu)).widget_uid() {
+                match wa.cast::<ShellMenuAction>() {
+                    ShellMenuAction::Activate(target) => self.shell_menu_activate(cx, &target),
+                    ShellMenuAction::Cancel => self.close_shell_menu(cx),
+                    ShellMenuAction::None => {}
+                }
             }
             match wa.cast::<ShellPanelAction>() {
                 ShellPanelAction::SetVolume(v) => self.set_volume(cx, v),
