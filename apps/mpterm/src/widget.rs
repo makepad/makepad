@@ -308,13 +308,6 @@ impl MpTerm {
     /// job — dropping the session kills the PTY child — and run a new one
     /// in place, same process, same window.
     pub fn restart_with(&mut self, cx: &mut Cx, cwd: Option<PathBuf>, command: Option<String>) {
-        log!(
-            "mpterm DEBUG restart_with cmd={:?} area={:?} before will_redraw={} lists={:?}",
-            command,
-            self.area,
-            cx.new_draw_event.will_redraw(),
-            cx.new_draw_event.draw_lists
-        );
         self.session = None;
         self.cwd = cwd;
         self.command = command;
@@ -324,11 +317,6 @@ impl MpTerm {
         self.sel_cursor = None;
         self.selecting = false;
         self.area.redraw(cx);
-        log!(
-            "mpterm DEBUG restart_with after will_redraw={} lists={:?}",
-            cx.new_draw_event.will_redraw(),
-            cx.new_draw_event.draw_lists
-        );
     }
 
     /// Quick Look unload (`WmEvent::PreviewUnload`): drop the job and idle
@@ -347,11 +335,6 @@ impl MpTerm {
         if self.session.is_some() || self.dormant {
             return;
         }
-        log!(
-            "mpterm DEBUG ensure_session spawning cmd={:?} cwd={:?}",
-            self.command,
-            self.cwd
-        );
         let cols = 80;
         let rows = 24;
         if let Ok(spec) = std::env::var("MPTERM_OPACITY") {
@@ -1293,12 +1276,6 @@ impl Widget for MpTerm {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         self.rect = cx.turtle().rect();
-        log!(
-            "mpterm DEBUG draw_walk session={} dormant={} cmd={:?}",
-            self.session.is_some(),
-            self.dormant,
-            self.command
-        );
         self.refresh_metrics(cx);
         self.ensure_session(cx);
 
