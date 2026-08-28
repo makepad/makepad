@@ -171,6 +171,9 @@ struct TweakSession {
     /// Eyedropper armed for this prop: the next press in the body samples
     /// the pixel under it instead of picking.
     eyedrop: Option<String>,
+    /// Shader fns applied live from the source view: (uid, layer, fn name)
+    /// → the text as applied, shown in place of the file's version.
+    fn_overrides: HashMap<(u64, String, String), String>,
     /// A sample in flight: (probe id, prop). Answered from the next frame.
     eyedrop_probe: Option<(u64, String)>,
     /// The press went to a navigation widget (tab, fold, dropdown) and was
@@ -1383,6 +1386,60 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
 /// a preview quad — the swatch then renders with the selection's actual
 /// compiled shader (fn-hash cache) at its live-tweaked values. Quad-family
 /// layers only; anything else leaves the preview untouched.
+/// Re-indent a fn's source for the view: drop the common leading indent and
+/// turn every remaining 4-space (or tab) step into 2 spaces — "much less
+/// aggressive indenting like 2 spaces per tab".
+fn reindent_two(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let common = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>())
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            let indent: usize = l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum();
+            let rest = l.trim_start_matches([' ', '\t']);
+            let level = indent.saturating_sub(common) / 4;
+            format!("{}{}", "  ".repeat(level), rest)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Ctrl+Enter in the source view: apply the fn as edited to the pinned
+/// widget's layer, live — no AI needed for a hand edit.
+fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) {
+    let Some(sel) = session().lock().unwrap().pinned.clone() else {
+        return;
+    };
+    let layer = tweaker.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+    // Strip the `// name — loc` header lines the view adds; what is left is
+    // one or more `name: fn() { … }` entries — a valid layer body.
+    let body: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("// "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let chunk = format!("{layer} +: {{\n{body}\n}}");
+    match apply_splash_chunk(cx, &cx.widget_tree().widget(WidgetUid(sel.uid)), &sel.path, &chunk, "editor") {
+        Ok(_) => {
+            log!("TWEAK editor applied {} fn edit to {}", layer, sel.path);
+            let mut s = session().lock().unwrap();
+            for (name, _, _) in &tweaker.vibe_fn_sources {
+                // Remember the applied text per fn so the view shows it.
+                if let Some(seg) = body.split(&format!("{name}:")).nth(1) {
+                    let seg = format!("{name}:{seg}");
+                    s.fn_overrides.insert((sel.uid, layer.clone(), name.clone()), seg.trim_end().to_string());
+                }
+            }
+        }
+        Err(error) => log!("TWEAK editor apply failed: {error}"),
+    }
+}
+
 /// The script-defined shader fns of a widget's draw layer — `pixel` and
 /// `vertex` when the layer (or a proto in its chain) sets one — as
 /// (name, "file:line", source text). What the Shader tab shows under the
@@ -3148,7 +3205,35 @@ impl Tweaker {
         if self.sidebar.is_some() {
             return;
         }
+        // The shader source view is the real code editor (syntax highlight,
+        // selection, editing) when the app registered `makepad_code_editor`
+        // — the tweaker lives below it and can only ask for it by name.
+        let has_code_view = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            let v = script_eval!(vm, { mod.widgets.CodeView });
+            let _ = vm.take_errors();
+            v.as_object().is_some()
+        });
+        // `mod.widgets.X` by full path: the prelude is a snapshot and does
+        // not carry widgets registered after it (the code editor is).
+        let shader_src_code = if has_code_view {
+            "use mod.prelude.widgets.*\nmod.widgets.CodeView { tab_column_count: 2 editor +: { width: Fill height: Fill read_only: false } }"
+        } else {
+            "use mod.prelude.widgets.*\nmod.widgets.Label { width: Fill height: Fit text: \"\" draw_text +: { color: #xd0d0d0 text_style: theme.font_code text_style +: { font_size: 7.5 } } }"
+        };
         let sidebar = cx.with_vm(|vm| {
+            let shader_src_value = vm.eval_with_source(
+                ScriptMod {
+                    cargo_manifest_path: String::new(),
+                    module_path: "tweak".to_string(),
+                    file: "tweak://shader_src".to_string(),
+                    line: 1,
+                    column: 1,
+                    code: shader_src_code.to_string(),
+                    values: Vec::new(),
+                },
+                ScriptObject::ZERO,
+            );
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
@@ -3243,16 +3328,7 @@ impl Tweaker {
                             show_bg: true
                             draw_bg +: { color: #x1b1b1b }
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                            shader_src := Label {
-                                width: Fill
-                                height: Fit
-                                text: ""
-                                draw_text +: {
-                                    color: #xd0d0d0
-                                    text_style: theme.font_code
-                                    text_style +: { font_size: 7.5 }
-                                }
-                            }
+                            shader_src := #(shader_src_value)
                         }
                         prompt := TextInput {
                             width: Fill
@@ -4133,11 +4209,16 @@ impl Tweaker {
                         layer_fn_sources(cx, &widget, &layer)
                     };
                     let mut text = String::new();
+                    let overrides = session().lock().unwrap().fn_overrides.clone();
                     for (name, loc, src) in &fns {
                         if !text.is_empty() {
                             text.push_str("\n\n");
                         }
-                        text.push_str(&format!("// {name} \u{2014} {loc}\n{src}"));
+                        // A fn applied live from this view shows as applied,
+                        // not as the file has it.
+                        let key = (self.rows_uid, layer.clone(), name.clone());
+                        let body = overrides.get(&key).cloned().unwrap_or_else(|| reindent_two(src));
+                        text.push_str(&format!("// {name} \u{2014} {loc}\n{body}"));
                     }
                     if text.is_empty() {
                         text = "(no script-defined pixel/vertex fn on this layer \u{2014} the type's own shader)".to_string();
@@ -5800,6 +5881,33 @@ impl Widget for Tweaker {
                             }
                         }
                     }
+                }
+            }
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::ReturnKey
+                    && (ke.modifiers.control || ke.modifiers.logo)
+                    && tweak_is_on()
+                    && self.panel_tab == PanelTab::Shader =>
+            {
+                let text = self
+                    .sidebar
+                    .as_ref()
+                    .map(|s| {
+                        s.child(live_id!(shader_col))
+                            .child(live_id!(src_scroll))
+                            .child(live_id!(shader_src))
+                            .text()
+                    })
+                    .unwrap_or_default();
+                // The prompt box owns Ctrl+Enter when IT has focus (the AI
+                // loop); the editor's edit applies otherwise.
+                let prompt_focused = self
+                    .sidebar
+                    .as_ref()
+                    .map(|s| cx.has_key_focus(s.child(live_id!(shader_col)).child(live_id!(prompt)).area()))
+                    .unwrap_or(false);
+                if !prompt_focused && text.contains("fn") {
+                    apply_fn_edit(cx, self, &text);
                 }
             }
             Event::KeyDown(ke) if ke.key_code == KeyCode::Insert && tweak_is_on() => {
