@@ -34,6 +34,10 @@ pub struct CodeView {
     pub session: Option<CodeSession>,
     #[live(false)]
     keep_cursor_at_end: bool,
+    /// Indent width in columns; 4 by default, 2 where the host wants a
+    /// lighter indent (the design tweaker's shader view).
+    #[live(4)]
+    tab_column_count: usize,
 
     #[live]
     text: ArcStringMut,
@@ -158,6 +162,10 @@ impl CodeView {
             let dec = DecorationSet::new();
             let doc = CodeDocument::new(self.text.as_ref().into(), dec);
             self.session = Some(CodeSession::new(doc));
+            self.session
+                .as_mut()
+                .unwrap()
+                .set_tab_column_count(self.tab_column_count);
             self.session.as_mut().unwrap().handle_changes();
             if self.keep_cursor_at_end {
                 self.session.as_mut().unwrap().set_cursor_at_file_end();
@@ -225,7 +233,12 @@ impl Widget for CodeView {
     }
 
     fn text(&self) -> String {
-        self.text.as_ref().to_string()
+        // The document is the truth once the view is editable: what the
+        // person typed, not what was handed in.
+        match &self.session {
+            Some(session) => session.document().as_text().to_string(),
+            None => self.text.as_ref().to_string(),
+        }
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
