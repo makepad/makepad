@@ -2463,6 +2463,7 @@ impl CxOsDrawShader {
                 None => {
                     let description: ObjcId = unsafe { msg_send![error, localizedDescription] };
                     let string = nsstring_to_string(description);
+                    crate::shader_error::note(string.clone());
                     let mut out = format!("{}\n", string);
                     for (index, line) in mtlsl.split("\n").enumerate() {
                         out.push_str(&format!("{}: {}\n", index + 1, line));

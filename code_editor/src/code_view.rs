@@ -1,5 +1,5 @@
 use crate::{
-    code_editor::KeepCursorInView, decoration::DecorationSet, history::NewGroup,
+    code_editor::{CodeEditorAction, KeepCursorInView}, decoration::DecorationSet, history::NewGroup,
     makepad_widgets::*, selection::Affinity, session::SelectionMode, text::Position, CodeDocument,
     CodeEditor, CodeSession,
 };
@@ -21,6 +21,15 @@ script_mod! {
     }
 
     mod.widgets.CodeView = mod.widgets.CodeViewBase {}
+}
+
+/// What a CodeView tells its host.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum CodeViewAction {
+    /// The document changed (a keystroke, a paste, an undo).
+    Changed,
+    #[default]
+    None,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
@@ -56,6 +65,9 @@ impl WidgetNode for CodeView {
     }
     fn redraw(&mut self, cx: &mut Cx) {
         self.editor.redraw(cx)
+    }
+    fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
+        self.editor.set_scroll_pos(cx, v)
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -222,13 +234,16 @@ impl Widget for CodeView {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.lazy_init_session();
+        let uid = self.uid;
         let session = self.session.as_mut().unwrap();
-        for _action in self
+        for action in self
             .editor
             .handle_event(cx, event, &mut Scope::empty(), session)
         {
-            //cx.widget_action(uid, &scope.path, action);
             session.handle_changes();
+            if let CodeEditorAction::TextDidChange = action {
+                cx.widget_action(uid, CodeViewAction::Changed);
+            }
         }
     }
 
