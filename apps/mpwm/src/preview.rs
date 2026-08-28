@@ -69,7 +69,9 @@ impl OpenRequest {
 /// The registry entry for an app id, with the file (and `--preview`)
 /// appended to its args.
 pub fn app_for_request(req: &OpenRequest) -> Option<(AppDef, Vec<String>)> {
-    let app = registry().iter().find(|a| a.id == req.app)?.clone();
+    // find_app, not the menu list: the image/pdf viewers are launchable
+    // without being menu rows.
+    let app = crate::clients::find_app(&req.app)?;
     let mut extra = Vec::new();
     if req.preview {
         extra.push("--preview".to_string());
