@@ -6,6 +6,25 @@ pub struct QuadVertex {
     pub pos: Vec2f,
 }
 
+/// One vertex of a closed frame ring: a corner of the unit square, plus which
+/// side of the strip it belongs to (0 = outer edge, 1 = inner edge).
+///
+/// Used by the exploded view's container outlines. They are strips, not quads:
+/// a drawless container must submit no full-plane geometry at all — both
+/// because a plane covered in alpha reads as fog over the layers behind it,
+/// and because the mode doubles as an overdraw instrument, where a covered
+/// pixel has to mean the app painted it.
+#[derive(Clone, Script, ScriptHook)]
+pub struct OutlineVertex {
+    #[live]
+    pub pos: Vec2f,
+    #[live]
+    pub inner: f32,
+    /// std140 wants a 16-byte stride; the generator writes this slot too.
+    #[live]
+    pub pad: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct VectorVertex {
     #[live]
@@ -250,6 +269,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     // now lets also build a quad vertexbuffer
     let gen = shared(vm, id!(QuadGeom), || GeometryGen::from_quad_2d(0., 0., 1., 1.));
     set_script_value!(vm, geom.QuadGeom = gen);
+    // Frame-ring strip for the exploded view's container outlines.
+    set_script_value_to_pod!(vm, geom.OutlineVertex);
+    let ogen = shared(vm, id!(OutlineGeom), GeometryGen::from_outline_ring);
+    set_script_value!(vm, geom.OutlineGeom = ogen);
     // Vector geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.VectorVertex);
     let vgen = shared(vm, id!(VectorGeom), GeometryGen::from_triangle_2d);
@@ -351,6 +374,32 @@ impl GeometryGen {
     pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {
         let mut g = Self::default();
         g.add_quad_2d(x1, y1, x2, y2);
+        g
+    }
+
+    /// A closed frame ring as a triangle strip: four outer corners of the unit
+    /// square paired with four inner ones, eight triangles round the loop.
+    ///
+    /// Vertex layout is `OutlineVertex` — `(corner.x, corner.y, inner)`. The
+    /// shader places the outer ring on the rect's border and pushes the inner
+    /// ring in by the stroke width, so the only geometry submitted is the
+    /// frame itself; the middle of the container is never rasterized.
+    pub fn from_outline_ring() -> GeometryGen {
+        let mut g = Self::default();
+        let corners = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for (x, y) in corners {
+            g.vertices.extend_from_slice(&[x, y, 0.0, 0.0]); // outer
+            g.vertices.extend_from_slice(&[x, y, 1.0, 0.0]); // inner
+        }
+        // Two triangles per side, wrapping the last side back to corner 0.
+        for c in 0..4u32 {
+            let a = c * 2; // this corner, outer
+            let b = a + 1; // this corner, inner
+            let n = ((c + 1) % 4) * 2; // next corner, outer
+            let m = n + 1; // next corner, inner
+            g.indices.extend_from_slice(&[a, n, b]);
+            g.indices.extend_from_slice(&[b, n, m]);
+        }
         g
     }
 
