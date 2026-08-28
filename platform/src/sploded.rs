@@ -769,6 +769,14 @@ impl Cx {
                         self.sploded.spread = DEFAULT_SPREAD;
                         self.sploded_sync();
                     }
+                    // True isometric: 45 degrees of yaw, the classic
+                    // 35.264-degree pitch (atan(1/sqrt 2)), so the three
+                    // axes foreshorten equally.
+                    KeyCode::KeyI => {
+                        self.sploded.yaw = std::f32::consts::FRAC_PI_4;
+                        self.sploded.pitch = 0.6154797;
+                        self.sploded_sync();
+                    }
                     // Cycle the hairline frames: all scopes / none.
                     KeyCode::KeyH => {
                         self.sploded.hairlines = !self.sploded.hairlines;
@@ -853,7 +861,7 @@ impl Cx {
         self.sploded_sync();
         if active {
             crate::log!(
-                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, 0 resets, esc/F10 exits",
+                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, I = isometric, 0 resets, esc/F10 exits",
                 self.sploded.layers as u32
             );
         } else {
