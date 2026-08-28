@@ -292,8 +292,8 @@ impl Cx {
                     // a null vertex buffer would be worse than either: it draws nothing and
                     // reports nothing. The recovery sweep is what puts these back.
                     let (Some(geom_ibuf), Some(geom_vbuf)) = (
-                        geometry.os.geom_ibuf.buffer.clone(),
-                        geometry.os.geom_vbuf.buffer.clone(),
+                        geometry.os.geom_ibuf.buffer.as_ref(),
+                        geometry.os.geom_vbuf.buffer.as_ref(),
                     ) else {
                         debug_assert!(
                             d3d11_cx.device_lost.get(),
@@ -303,13 +303,13 @@ impl Cx {
                     };
                     d3d11_cx
                         .context
-                        .IASetIndexBuffer(&geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
+                        .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
 
                     let geom_slots = sh.mapping.geometries.total_slots;
                     let inst_slots = sh.mapping.instances.total_slots;
                     let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
                     let offsets = [0u32, 0u32];
-                    let buffers = [Some(geom_vbuf), draw_item.os.inst_vbuf.buffer.clone()];
+                    let buffers = [Some(geom_vbuf.clone()), draw_item.os.inst_vbuf.buffer.clone()];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
                         2,
@@ -2232,7 +2232,7 @@ impl D3d11Buffer {
             self.buffer = new_buffer;
         }
 
-        let Some(buffer) = self.buffer.clone() else {
+        let Some(buffer) = self.buffer.as_ref() else {
             return;
         };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -2240,14 +2240,14 @@ impl D3d11Buffer {
         unsafe {
             if let Err(e) = d3d11_cx
                 .context
-                .Map(&buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+                .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
             {
                 // Nothing was mapped, so there is no `Unmap` to pair on this path.
                 d3d11_cx.note_error("ID3D11DeviceContext::Map", &e);
                 return;
             }
             std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-            d3d11_cx.context.Unmap(&buffer, 0);
+            d3d11_cx.context.Unmap(buffer, 0);
         }
     }
 
