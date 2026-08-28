@@ -265,10 +265,13 @@ const DRAG_RADIANS_PER_PX: f32 = 0.0035;
 
 const DEFAULT_YAW: f32 = 0.50;
 const DEFAULT_PITCH: f32 = 0.38;
-/// Fraction of the window's smaller dimension the WHOLE stack spans. Kept
-/// deliberately gentle — the point is to read structure, not to fling the
-/// levels apart; the panel binds a scrub field to `sploded_set_spread`.
-const DEFAULT_SPREAD: f32 = 0.30;
+/// Fraction of the window's smaller dimension the WHOLE stack spans.
+///
+/// Deliberately tight: the levels should read as one fanned deck you can count
+/// at a glance, not as sheets scattered across an empty screen. At 0.12 a
+/// 15-level tree in an 800pt-tall window steps about 6pt per level before the
+/// fit scale. The panel binds a scrub field to `sploded_set_spread`.
+const DEFAULT_SPREAD: f32 = 0.12;
 /// The scrub range the panel knob should offer.
 pub const SPLODED_SPREAD_MIN: f32 = 0.0;
 pub const SPLODED_SPREAD_MAX: f32 = 2.0;
