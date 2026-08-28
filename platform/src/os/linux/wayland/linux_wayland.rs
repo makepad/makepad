@@ -634,6 +634,7 @@ impl WaylandCx {
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
                     let window = &cx.windows[window_id];
+                    let (create_position, create_inner_size) = window.create_geom();
                     let app_id = if window.create_app_id.is_empty() {
                         "Makepad"
                     } else {
@@ -650,8 +651,8 @@ impl WaylandCx {
                         state.shm.as_ref(),
                         self.qhandle.as_ref().unwrap(),
                         gl_cx,
-                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
-                        window.create_position,
+                        create_inner_size,
+                        create_position,
                         &window.create_title,
                         app_id,
                         window.is_fullscreen,
@@ -765,6 +766,9 @@ impl WaylandCx {
                     }
                 }
                 CxOsOp::ResizeWindow(window_id, size) => {}
+                // A Wayland client is not told where its windows are and cannot move them;
+                // the compositor owns placement, so a window here is never left off-screen
+                // by a restored position the way it can be on Windows, macOS and X11.
                 CxOsOp::RepositionWindow(window_id, size) => {}
                 CxOsOp::SetWindowTitle(window_id, title) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {

@@ -1587,11 +1587,12 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
+                    let (create_position, create_inner_size) = window.create_geom();
                     let mut metal_window = MetalWindow::new(
                         window_id,
                         &metal_cx,
-                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
-                        window.create_position,
+                        create_inner_size,
+                        create_position,
                         &window.create_title,
                         window.is_fullscreen,
                         window.macos,
