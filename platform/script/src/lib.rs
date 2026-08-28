@@ -14,6 +14,7 @@ macro_rules! script_eval {
 }
 
 pub mod colorhex;
+pub mod docs;
 pub mod gen_index;
 pub mod heap;
 pub mod mod_gc;
@@ -79,6 +80,7 @@ pub mod vm;
 
 pub use apply::*;
 pub use array::*;
+pub use docs::*;
 pub use function::*;
 pub use gc::*;
 pub use handle::*;

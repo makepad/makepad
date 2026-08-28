@@ -317,10 +317,26 @@ script_mod! {
                                     tint_color: #xf8fbff
                                     tint_alpha: 0.30
                                 }
+                                // View-effects group first: these two act
+                                // on the CAMERA/rendering, not on map data
+                                // — the divider separates them from the
+                                // content layers below (same unlabeled
+                                // hairline idiom as the theme group).
+                                tilt_check := LayerCheck{text: "Tilt-shift"}
+                                // Grayed (not hidden) outside the
+                                // near-first-person regime — the stock
+                                // disabled label washes out on the glass
+                                // popover, so keep it readable.
+                                warp_check := LayerCheck{
+                                    text: "Space warp"
+                                    draw_text +: { color_disabled: #x8a8f98 }
+                                }
+                                Hr{
+                                    height: 16
+                                }
                                 layer_rain := LayerCheck{text: "Rain radar"}
                                 layer_wind := LayerCheck{text: "Wind"}
                                 layer_terrain := LayerCheck{text: "Terrain"}
-                                tilt_check := LayerCheck{text: "Tilt-shift"}
                                 layer_chargers := LayerCheck{text: "EV chargers"}
                                 layer_transit := LayerCheck{text: "Transit"}
                                 layer_nature := LayerCheck{text: "Nature"}
@@ -732,6 +748,11 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    /// Last pushed disabled-state of the Space-warp row (None = never
+    /// pushed): the row grays out whenever the camera leaves the
+    /// near-first-person regime and re-enables when it returns.
+    #[rust]
+    warp_check_disabled: Option<bool>,
     #[rust]
     chat: ChatState,
     #[rust]
@@ -1760,6 +1781,10 @@ impl App {
         self.ui
             .check_box(cx, ids!(tilt_check))
             .set_active(cx, self.layers.tilt_shift, Animate::No);
+        let warp_on = self.ui.map_view(cx, ids!(map)).space_warp();
+        self.ui
+            .check_box(cx, ids!(warp_check))
+            .set_active(cx, warp_on, Animate::No);
         self.ui
             .check_box(cx, ids!(theme_night))
             .set_active(cx, self.layers.theme == 1, Animate::No);
@@ -2006,6 +2031,21 @@ impl MatchEvent for App {
                 self.apply_layers(cx);
             }
         }
+        // The Inception fold: a live rendering mode on the map itself, not
+        // a data layer — MapView owns the tween and the close-3D gating
+        // (the setting remembers intent while the camera is elsewhere).
+        // Grayed = inert: CheckBox still fires Change while disabled, so
+        // outside the regime the mark snaps back and nothing arms.
+        if let Some(on) = self.ui.check_box(cx, ids!(warp_check)).changed(actions) {
+            let map = self.ui.map_view(cx, ids!(map));
+            if map.space_warp_available() {
+                map.set_space_warp(cx, on);
+            } else {
+                self.ui
+                    .check_box(cx, ids!(warp_check))
+                    .set_active(cx, map.space_warp(), Animate::No);
+            }
+        }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             let _ = self.layers.set_theme_name(if on { "night" } else { "light" });
             self.layers.dirty = false;
@@ -2075,6 +2115,17 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        // The Space-warp row tracks the camera live: grayed (but visible,
+        // so it stays discoverable) outside the near-first-person regime,
+        // re-enabled the moment tilt + zoom qualify. Cached so the
+        // animator only toggles on transitions.
+        let warp_avail = self.ui.map_view(cx, ids!(map)).space_warp_available();
+        if self.warp_check_disabled != Some(!warp_avail) {
+            self.warp_check_disabled = Some(!warp_avail);
+            self.ui
+                .check_box(cx, ids!(warp_check))
+                .set_disabled(cx, !warp_avail);
+        }
         match event {
             Event::Shutdown => {
                 self.drive_log.close();

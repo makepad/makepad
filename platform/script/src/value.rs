@@ -23,6 +23,19 @@ pub struct ScriptIp {
 }
 
 impl ScriptIp {
+    /// Sentinel for "no source construction site" (Rust-built objects,
+    /// recycled-slot default). Never a valid ip: bodies are indexed far
+    /// below u16::MAX. Deliberately NOT u40-packable — this is a struct
+    /// field sentinel, not a tag value.
+    pub const UNKNOWN: Self = Self {
+        body: u16::MAX,
+        index: u32::MAX,
+    };
+
+    pub const fn is_unknown(&self) -> bool {
+        self.body == u16::MAX && self.index == u32::MAX
+    }
+
     pub const fn from_u40(value: u64) -> Self {
         Self {
             body: ((value >> 28) & 0xFFF) as u16,

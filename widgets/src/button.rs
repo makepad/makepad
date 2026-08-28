@@ -15,6 +15,8 @@ script_mod! {
 
     mod.widgets.ButtonBase = #(Button::register_widget(vm))
 
+    /** The flat button: the standard face with no outset gradient; the
+     * other button variants inherit from it. */
     mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         text: "Button"
         width: Fit
@@ -55,15 +57,21 @@ script_mod! {
 
         icon_walk: Walk{width: 22.0, height: Fit}
 
+        /** The button face material: an SDF box with a bevel stroke and an
+         * optional two-stop gradient fill, state-mixed by the animator's
+         * hover/down/focus/disabled instances. */
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
             down: instance(0.0)
             disabled: instance(0.0)
 
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** corner rounding radius 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
             gradient_border_horizontal: uniform(0.0)
             gradient_fill_horizontal: uniform(0.0)
@@ -273,6 +281,8 @@ script_mod! {
         }
     }
 
+    /** The standard button: the flat face plus the outset gradient fill
+     * and bevel colors from the theme. */
     mod.widgets.Button = mod.widgets.ButtonFlat{
         draw_bg +: {
             border_color: theme.color_bevel_outset_1

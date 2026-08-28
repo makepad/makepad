@@ -32,9 +32,12 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    /** The terminal cell background: one flat premultiplied quad per run
+     * of same-colored cells, batched into its own draw-call group. */
     set_type_default() do #(DrawTermBg::script_shader(vm)) {
         ..mod.draw.DrawQuad
         draw_call_group: @term_cell_bg
+        /** default cell background */
         color: #x1a1b26
         pixel: fn() {
             return vec4(self.color.rgb * self.color.a, self.color.a)
@@ -104,11 +107,16 @@ script_mod! {
 
     mod.widgets.MpTermBase = #(MpTerm::register_widget(vm))
 
+    /** The terminal widget: cell-background, glyph, underline and cursor
+     * draw layers over a monospace grid. */
     mod.widgets.MpTerm = set_type_default() do mod.widgets.MpTermBase {
         width: Fill
         height: Fill
+        /** terminal font size in points 6..24 step 0.5 */
         font_size: 10.0
+        /** horizontal inner padding in pixels 0..32 step 1 */
         pad_x: 6.0
+        /** vertical inner padding in pixels 0..32 step 1 */
         pad_y: 4.0
         draw_bg +: {
             color: uniform(#x1a1b26)

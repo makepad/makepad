@@ -387,11 +387,18 @@ script_mod! {
     // own defaults stay plain literals — a theme writing `45` instead of
     // `45.0` would otherwise type the instance as an int and the shader
     // would not compile.
+    /** The tile focus border: a hard square ring carrying the two-stop
+     * gradient (Hyprland's axis convention), fed per tile from BorderTheme
+     * and animated with focus. */
     set_type_default() do #(DrawTileBorder::script_shader(vm)) {
         ..mod.draw.DrawQuad
+        /** gradient start color */
         color: #7aa2f7
+        /** gradient end color */
         color_end: #7aa2f7
+        /** gradient axis in degrees clockwise 0..360 step 15 */
         angle: 0.0
+        /** ring thickness in pixels 1..8 step 0.5 */
         border_size: 2.0
         // A hard square ring, measured straight off the quad edges. NOT an
         // Sdf2d box + stroke: with radius 0 that box has no interior
@@ -401,7 +408,7 @@ script_mod! {
             let p = self.pos * self.rect_size
             let bs = self.border_size
             let d = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
-            let cov = clamp((bs - d) * 3.0 + 0.5, 0.0, 1.0)
+            let cov = clamp((bs - d) * /**edge sharpness 1..8 step 0.5*/ 3.0 + 0.5, 0.0, 1.0)
             // Hyprland's gradient axis: degrees clockwise in screen space,
             // 0 = left→right, 90 = top→bottom (45 runs down-right).
             let rad = self.angle * 0.017453292
