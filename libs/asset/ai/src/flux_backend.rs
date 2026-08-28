@@ -146,11 +146,40 @@ impl ContentBackend for FluxBackend {
     /// and pool). The server verifies the freed VRAM via fresh NVML reads
     /// before admitting the next heavy load.
     fn unload(&mut self) -> Result<(), AssetAiError> {
-        if let Some((generation, worker)) = self.worker.take() {
-            flux_worker::FluxWorker::retire_shared(generation);
-            drop(worker);
+        let Some((generation, worker)) = self.worker.take() else {
+            return Ok(());
+        };
+        // Ask the pipeline thread to free its own residency and WAIT for the
+        // acknowledgement before reporting the model retired.
+        //
+        // Dropping the handle is not a release. The device weight cache and
+        // the CUDA idle pool are thread-locals of the pipeline thread, so the
+        // only thing a drop does is ask that thread to exit eventually — and
+        // on the fleet it returned nothing at all: a retired flux1-schnell
+        // left 16.6 GB of a 24 GB card allocated while `/models` reported
+        // `models_loaded: []`, the server's own `vram-release` on the WRONG
+        // thread said "evicted 0 cached weight buffers", and every heavy job
+        // after it died on "insufficient VRAM ... only 6901 MB free".
+        let released = worker.release();
+        flux_worker::FluxWorker::retire_shared(generation);
+        drop(worker);
+        match released {
+            Ok(line) => {
+                eprintln!("[asset-ai] {line}");
+                Ok(())
+            }
+            // Already dead: its own exit path ran the same release.
+            Err(flux_worker::FluxWorkerError::WorkerGone(message)) => {
+                eprintln!("[asset-ai] flux release skipped: {message}");
+                Ok(())
+            }
+            Err(flux_worker::FluxWorkerError::Cancelled) => Ok(()),
+            // A release that did not happen must fail the retire loudly: the
+            // admission gate is about to promise the VRAM to another model.
+            Err(flux_worker::FluxWorkerError::Other(message)) => {
+                Err(AssetAiError::Backend(message))
+            }
         }
-        Ok(())
     }
 
     fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
@@ -329,6 +358,21 @@ mod flux_worker {
         events: mpsc::Sender<WorkerEvent>,
     }
 
+    /// What the backend may ask the pipeline thread to do.
+    ///
+    /// `Release` is the whole point of this enum: the device weight cache and
+    /// the CUDA idle block pool are THREAD-LOCALS of the pipeline thread, so
+    /// nothing on the server's worker thread can free them. Retiring the model
+    /// used to consist of dropping this handle and hoping the thread noticed;
+    /// that returned no VRAM the admission gate could see.
+    enum WorkerCmd {
+        Run(WorkerMsg),
+        /// Free every device allocation this thread owns and acknowledge with
+        /// a one-line summary. Sent by `FluxBackend::unload`, which BLOCKS on
+        /// the acknowledgement.
+        Release(mpsc::Sender<String>),
+    }
+
     /// Handle to the dedicated pipeline thread. `FluxPipeline` is not `Send`
     /// (Metal runtime types on macOS), so it is built and used only on that
     /// thread; this handle is Send. There is ONE such thread per process,
@@ -340,7 +384,7 @@ mod flux_worker {
     /// and its resident weights — live for the rest of the process.
     #[derive(Clone)]
     pub struct FluxWorker {
-        tx: mpsc::Sender<WorkerMsg>,
+        tx: mpsc::Sender<WorkerCmd>,
     }
 
     /// The process-shared worker: `generation` counts respawns so a backend
@@ -348,6 +392,47 @@ mod flux_worker {
     /// successor another backend already respawned).
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<FluxWorker>)> =
         std::sync::Mutex::new((0, None));
+
+    /// Upper bound on a release acknowledgement. Generous because the release
+    /// queues behind whatever the thread is doing; a real free of a resident
+    /// FP8 stack is well under a second.
+    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Frees EVERY device allocation this pipeline thread owns — on this
+    /// thread, the only place they can be freed from.
+    ///
+    /// Three separate owners, and the old teardown reached none of them from
+    /// the outside: the resident pipeline's four checkpoint weight-cache
+    /// namespaces (`evict_device_caches`), any other dense-linear weight
+    /// buffer left on this thread, and the idle CUDA block pool that every
+    /// activation is recycled through. Dropping the pipeline alone releases
+    /// only its HOST arenas by design.
+    ///
+    /// Safe to call at any point where nothing is generating: the caches are
+    /// re-uploaded on the next miss, which is what they are for. Returns the
+    /// one-line summary that goes into the service log.
+    fn release_device_residency(warm: &mut Option<FluxPipeline>) -> String {
+        let checkpoint = match warm.take() {
+            Some(pipeline) => {
+                let freed = pipeline.evict_device_caches();
+                // Host weight arenas (~16 GB raw payload) go with the drop.
+                drop(pipeline);
+                freed
+            }
+            None => 0,
+        };
+        // `_if_loaded` semantics: a thread that never touched CUDA must not
+        // initialize a device merely to discover it has nothing to release.
+        let (residual, trouble) =
+            match makepad_ai_common::backend::release_gpu_runtime_namespaces(&[""]) {
+                Ok(count) => (count, String::new()),
+                Err(error) => (0, format!(", release error: {error}")),
+            };
+        makepad_ai_common::backend::gpu_pool_clear();
+        format!(
+            "flux vram-release on the pipeline thread: {checkpoint} checkpoint weight buffers,              {residual} residual weight buffers, idle pool cleared{trouble}"
+        )
+    }
 
     impl FluxWorker {
         /// Returns (generation, handle) of the process-shared worker,
@@ -375,7 +460,7 @@ mod flux_worker {
         }
 
         fn spawn() -> Result<Self, AssetAiError> {
-            let (tx, rx) = mpsc::channel::<WorkerMsg>();
+            let (tx, rx) = mpsc::channel::<WorkerCmd>();
             std::thread::Builder::new()
                 .name("flux-pipeline".to_string())
                 .spawn(move || {
@@ -383,15 +468,50 @@ mod flux_worker {
                     // backend instance. Dropped early only on a model-file/
                     // size change (rebuild) or a non-cancel run failure.
                     let mut warm: Option<FluxPipeline> = None;
-                    while let Ok(WorkerMsg { job, cancel, events }) = rx.recv() {
-                        let result = run_generate(&mut warm, job, &cancel, &events);
-                        let _ = events.send(WorkerEvent::Done(result));
+                    while let Ok(cmd) = rx.recv() {
+                        match cmd {
+                            WorkerCmd::Run(WorkerMsg { job, cancel, events }) => {
+                                let result = run_generate(&mut warm, job, &cancel, &events);
+                                let _ = events.send(WorkerEvent::Done(result));
+                            }
+                            WorkerCmd::Release(ack) => {
+                                let _ = ack.send(release_device_residency(&mut warm));
+                            }
+                        }
                     }
-                    // Sender dropped -> backend dropped: pipeline (and its
-                    // host weight arena) unloads here.
+                    // Every sender dropped -> the backend retired without
+                    // waiting for a release (a panic path, or a process
+                    // teardown). Free on the way out too, and SAY so: a thread
+                    // that exits silently here is how 16.6 GB stayed on a 24 GB
+                    // card with `models_loaded: []`.
+                    eprintln!(
+                        "[asset-ai] flux worker thread exiting: {}",
+                        release_device_residency(&mut warm)
+                    );
                 })
                 .map_err(|e| AssetAiError::Backend(format!("spawn flux worker: {e}")))?;
             Ok(Self { tx })
+        }
+
+        /// Frees the thread's device residency and BLOCKS for the
+        /// acknowledgement, so the caller can honestly report the VRAM back.
+        /// Queues behind an in-flight generation like any other command.
+        pub fn release(&self) -> Result<String, FluxWorkerError> {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            self.tx.send(WorkerCmd::Release(ack_tx)).map_err(|_| {
+                FluxWorkerError::WorkerGone("flux worker thread is gone".to_string())
+            })?;
+            ack_rx
+                .recv_timeout(RELEASE_TIMEOUT)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Disconnected => FluxWorkerError::WorkerGone(
+                        "flux worker dropped the release reply".to_string(),
+                    ),
+                    mpsc::RecvTimeoutError::Timeout => FluxWorkerError::Other(format!(
+                        "flux worker did not acknowledge the device release within {}s",
+                        RELEASE_TIMEOUT.as_secs()
+                    )),
+                })
         }
 
         /// Blocks until the generation finishes, forwarding progress events
@@ -405,11 +525,11 @@ mod flux_worker {
         ) -> Result<FluxPipelineGenerateRun, FluxWorkerError> {
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
-                .send(WorkerMsg {
+                .send(WorkerCmd::Run(WorkerMsg {
                     job,
                     cancel,
                     events: event_tx,
-                })
+                }))
                 .map_err(|_| {
                     FluxWorkerError::WorkerGone("flux worker thread is gone".to_string())
                 })?;
@@ -541,5 +661,49 @@ mod flux_worker {
                 Err(worker_err(err))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flux_worker::{FluxWorker, FluxWorkerError};
+
+    /// The retire path's contract, and the whole bug in one assertion:
+    /// `release()` runs ON the pipeline thread and BLOCKS for its
+    /// acknowledgement. Dropping the handle — all the old `unload` did — is
+    /// not a release, because the device weight cache and the CUDA idle block
+    /// pool are that thread's thread-locals and nothing outside it can free
+    /// them.
+    ///
+    /// Runs everywhere: on a machine with no CUDA the release is a no-op, and
+    /// it must not initialize a device merely to discover that.
+    #[test]
+    fn release_round_trips_on_the_pipeline_thread() {
+        let (_generation, worker) = FluxWorker::shared().expect("spawn flux worker");
+        let line = match worker.release() {
+            Ok(line) => line,
+            Err(FluxWorkerError::Other(message))
+            | Err(FluxWorkerError::WorkerGone(message)) => {
+                panic!("release was not acknowledged: {message}")
+            }
+            Err(FluxWorkerError::Cancelled) => panic!("release reported cancellation"),
+        };
+        assert!(
+            line.contains("vram-release on the pipeline thread"),
+            "release must say what it freed and where: {line}"
+        );
+        assert!(
+            line.contains("idle pool cleared"),
+            "the CUDA idle block pool is part of the residency: {line}"
+        );
+    }
+
+    /// Two releases in a row are safe: an idle worker holds nothing and says
+    /// so, so an eviction that races the idle sweep cannot fail a retire.
+    #[test]
+    fn release_is_idempotent() {
+        let (_generation, worker) = FluxWorker::shared().expect("spawn flux worker");
+        assert!(worker.release().is_ok());
+        assert!(worker.release().is_ok());
     }
 }

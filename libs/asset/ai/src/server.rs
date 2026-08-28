@@ -1972,7 +1972,7 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
     {
         match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
             Ok(count) => progress(&format!(
-                "vram-release: evicted {count} cached weight buffers + idle pool"
+                "vram-release: evicted {count} cached weight buffers + idle pool on the service worker thread"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }
