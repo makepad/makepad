@@ -397,7 +397,10 @@ pub struct Button {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_icon: DrawSvg,
+    /// Public so a host can recolour the mark directly. Going through a
+    /// script apply instead re-applies the whole object and drops the loaded
+    /// document, which renders the icon as a white silhouette.
+    pub draw_icon: DrawSvg,
     #[live]
     icon_walk: Walk,
     #[live]
