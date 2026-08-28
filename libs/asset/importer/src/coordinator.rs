@@ -1406,13 +1406,19 @@ impl AssetAiFleet {
         (snapshots, probe_incomplete)
     }
 
-    /// Domains every reachable box advertises, deduplicated.
+    /// Domains every reachable box advertises, deduplicated — minus what
+    /// each box's ROLE forbids. This is what the claim filter is built
+    /// from, so a dedicated chat box never claims a video job in the first
+    /// place: it advertises `video` honestly, and its role says no.
     pub fn capabilities(&self) -> Vec<String> {
         let (snapshots, _) = self.snapshots();
         let mut out: Vec<String> = Vec::new();
         for snapshot in &snapshots {
             let Some(health) = snapshot.health.as_ref() else { continue };
             for domain in health.capabilities.iter().flatten() {
+                if !makepad_asset_ai::fleet::role_allows(&snapshot.base_url, domain) {
+                    continue;
+                }
                 if !out.contains(domain) {
                     out.push(domain.clone());
                 }
@@ -1436,8 +1442,25 @@ impl AssetAiFleet {
     }
 }
 
-/// Route one request: an explicit model pin is honoured whenever any
-/// compatible GPU advertises it, otherwise the domain's best model wins.
+/// Affinity score of a model whose weights are already ON the box
+/// (`ready`), the threshold between "run it now" and "pull gigabytes
+/// first". `loaded` scores above it; `downloading`/`absent` below.
+/// See `makepad_asset_ai::fleet::affinity_reason`.
+const WARM_AFFINITY: u32 = 3;
+
+/// Route one request: an explicit model pin is honoured whenever a
+/// compatible GPU already HOLDS it, otherwise the box's own best model for
+/// the domain wins.
+///
+/// A pin is a preference, not an instruction to fetch. A picker's profile
+/// carries one model id fleet-wide, so a pin that is merely *capable* on
+/// this box (`absent`/`downloading`) used to make every box start the same
+/// multi-GB download — including a node whose own native tier of the same
+/// domain sat `ready` beside it, and a 24 GB node that then could not fit
+/// the result. Warm weights win: the pin is honoured when it is loaded or
+/// cached here, and otherwise the domain's warm model on this box runs
+/// instead. Nothing waits for a download that a resident model makes
+/// unnecessary.
 fn select_route(
     snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
     domain: &str,
@@ -1448,13 +1471,29 @@ fn select_route(
         pick_for_domain_admitted_scored, pick_for_domain_scored,
     };
 
-    // An explicit/requested model remains a pin whenever any compatible GPU
-    // advertises it. Prefer any admitted copy; otherwise hold for the best
-    // compatible copy instead of silently changing models.
+    // An explicit/requested model remains a pin whenever a compatible GPU
+    // already holds it. Prefer an admitted WARM copy; otherwise hold for the
+    // best compatible copy instead of silently changing models.
     if !want_model.is_empty() {
-        if let Some((index, _)) = pick_box_admitted_scored(snapshots, want_model) {
+        if let Some((index, score)) = pick_box_admitted_scored(snapshots, want_model) {
+            if score >= WARM_AFFINITY {
+                return Ok(admitted_route(snapshots, index, want_model.to_string()));
+            }
+            // The pin is cold here. A warm model of the same domain on an
+            // admitted box beats waiting out a download.
+            if let Some((warm_index, warm_model, warm_score)) =
+                pick_for_domain_admitted_scored(snapshots, domain)
+            {
+                if warm_score >= WARM_AFFINITY && warm_model != want_model {
+                    return Ok(admitted_route(snapshots, warm_index, warm_model));
+                }
+            }
             return Ok(admitted_route(snapshots, index, want_model.to_string()));
         }
+        // Not admittable anywhere: HOLD for it. A pinned tier that is merely
+        // under transient VRAM pressure must not be silently downgraded —
+        // that is a different failure from "not on this box yet", and the
+        // caller asked for this model.
         if let Some((index, _)) = pick_box_scored(snapshots, want_model) {
             return Ok(GenRoute::Waiting {
                 stage: waiting_stage(
@@ -1615,6 +1654,16 @@ impl GenFleet for AssetAiFleet {
             };
         let base_url = self.boxes()[index].clone();
         if self.log {
+            // Say out loud when a pin was NOT what ran: a picker's profile
+            // pins one model id for the whole fleet, and a box swapping in
+            // its own resident tier must be visible, never a mystery.
+            if !request.model.is_empty() && request.model != model {
+                eprintln!(
+                    "[asset-worker] {base_url}: {} not resident here — running {model} instead \
+                     (a warm model beats downloading a pinned one)",
+                    request.model
+                );
+            }
             eprintln!(
                 "[asset-worker] dispatch {} to {base_url} model {model}",
                 request.kind.kind
@@ -1721,7 +1770,9 @@ mod tests {
     use super::*;
     use crate::gen_kinds::kind_of;
     use makepad_asset_ai::fleet::BoxSnapshot;
-    use makepad_asset_ai::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_READY};
+    use makepad_asset_ai::protocol::{
+        HealthJson, ModelInfoJson, MODEL_STATE_ABSENT, MODEL_STATE_LOADED, MODEL_STATE_READY,
+    };
     use makepad_asset_client::{ApiEndpoints, ClientConfig};
     use makepad_asset_data::{AssetId, AssetKind};
     use makepad_asset_store::{AssetServer, ServerConfig};
@@ -1965,6 +2016,78 @@ mod tests {
             GenRoute::Admitted {
                 index: 1,
                 model: "minimax-h3-q4".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            }
+        );
+    }
+
+    /// The .165 case, exactly: a picker's profile pinned the fleet's most
+    /// common quant, and the RTX 6000 — whose own native tier sat READY —
+    /// started pulling 17 GB of a model it did not need. A pin says which
+    /// model is preferred; it does not say "fetch it first".
+    #[test]
+    fn a_cold_pin_never_downloads_past_a_warm_model_on_the_same_box() {
+        let mut native = model("minimax-h3", "video", 74.0);
+        native.state = MODEL_STATE_READY.to_string();
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_ABSENT.to_string();
+        let snapshots = vec![snapshot(
+            "http://big",
+            95 * 1024,
+            96 * 1024,
+            vec![native, quant],
+        )];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            },
+            "a ready native tier beats downloading the pinned quant"
+        );
+    }
+
+    /// The same pin on a box that HOLDS it is still the pin — the rule is
+    /// about downloads, not about second-guessing the caller.
+    #[test]
+    fn a_warm_pin_is_still_exactly_what_runs() {
+        let mut native = model("minimax-h3", "video", 20.0);
+        native.state = MODEL_STATE_LOADED.to_string();
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_READY.to_string();
+        let snapshots = vec![snapshot(
+            "http://quant-box",
+            23 * 1024,
+            24 * 1024,
+            vec![native, quant],
+        )];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3-q4-24g".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            }
+        );
+    }
+
+    /// A cold pin with NOTHING warm behind it still downloads — the fleet
+    /// has to acquire the weights sometime, and refusing would just make
+    /// the job impossible.
+    #[test]
+    fn a_cold_pin_with_no_warm_alternative_still_runs_the_pin() {
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_ABSENT.to_string();
+        let snapshots = vec![snapshot("http://fresh-box", 23 * 1024, 24 * 1024, vec![quant])];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3-q4-24g".to_string(),
                 backend: "h3".to_string(),
                 version: "test".to_string(),
             }
