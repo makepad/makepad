@@ -1437,6 +1437,14 @@ struct MaterialMirror {
 }
 
 impl MaterialMirror {
+    /// The widget's own rect size, from the copied instance.
+    fn native_size(&self) -> Vec2d {
+        match self.rect_size {
+            Some(rs) => dvec2(self.instance[rs] as f64, self.instance[rs + 1] as f64),
+            None => dvec2(64.0, 24.0),
+        }
+    }
+
     fn draw(&self, cx: &mut Cx2d, rect: Rect) {
         let draw_vars = &self.draw_vars;
         let Some(mut many) = cx.begin_many_instances(draw_vars) else {
@@ -1458,7 +1466,14 @@ impl MaterialMirror {
             inst[dc + 3] = (rect.pos.y + rect.size.y) as f32;
         }
         many.instances.extend_from_slice(&inst);
-        cx.end_many_instances(many);
+        let area = cx.end_many_instances(many);
+        if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
+            if let Area::Instance(ia) = area {
+                if let Some(dc) = cx.draw_lists[ia.draw_list_id].draw_items[ia.draw_item_id].draw_call() {
+                    log!("TWEAK trace swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
+                }
+            }
+        }
     }
 }
 
@@ -1479,6 +1494,16 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, base: &DrawVars) -> Opti
     let stride = sh.mapping.instances.total_slots;
     if stride == 0 || inst.instance_offset + stride > buf.len() {
         return None;
+    }
+    if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
+        log!(
+            "TWEAK trace swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
+            widget.widget_uid().0,
+            draw_call.draw_shader_id,
+            stride,
+            &buf[inst.instance_offset..inst.instance_offset + stride],
+            &draw_call.dyn_uniforms[..24]
+        );
     }
     let mut draw_vars = base.clone();
     draw_vars.area = Area::Empty;
@@ -2406,6 +2431,16 @@ pub struct TweakMaterialSwatch {
     mirror_uid: u64,
     #[rust]
     mirror_layer: String,
+    /// True when `mirror_layer` is the widget's primary material — the one
+    /// its area belongs to (draw_bg for most, draw_slider for a Slider…).
+    #[rust]
+    mirror_primary: bool,
+    /// The well's own draw list: the mirrored instance is drawn at the
+    /// widget's NATIVE size (so px-sized shader internals — a checkbox's
+    /// 14px mark box, a border width — stay true) and the list's view
+    /// transform magnifies it into the well. A magnifier, not a stretch.
+    #[rust]
+    well_list: Option<DrawList2d>,
     #[rust]
     area: Area,
     /// Which draw layer this swatch currently previews.
@@ -2427,14 +2462,44 @@ impl Widget for TweakMaterialSwatch {
         // right now) and draw one instance of it here with only the
         // geometry substituted. "you do kinda have to feed it similar
         // inputs as the actual widget probably like colors and things".
-        let mirrored = if self.mirror_uid != 0 && self.mirror_layer == "draw_bg" {
+        let mirrored = if self.mirror_uid != 0 && self.mirror_primary {
             let widget = cx.widget_tree().widget(WidgetUid(self.mirror_uid));
             capture_material_mirror(cx, &widget, &self.preview.draw_vars)
         } else {
             None
         };
         match mirrored {
-            Some(mirror) => mirror.draw(cx, rect),
+            Some(mirror) => {
+                let native = mirror.native_size();
+                if self.well_list.is_none() {
+                    self.well_list = Some(DrawList2d::new(cx));
+                }
+                let list = self.well_list.as_mut().unwrap();
+                // The swatch only draws when its panel redraws, and every such
+                // draw is a new capture: the well list must redraw with it, or
+                // it keeps showing the previous selection's material.
+                let well_id = list.id();
+                cx.redraw_list(well_id);
+                if list.begin(cx, Walk::abs_rect(rect)).is_redrawing() {
+                    // Integer zoom when it fits, a shrink when it does not.
+                    let fit = (rect.size.x / native.x.max(1.0)).min(rect.size.y / native.y.max(1.0));
+                    let k = if fit >= 1.0 { fit.floor().min(8.0) } else { fit };
+                    let tx = rect.pos.x + (rect.size.x - native.x * k) * 0.5;
+                    let ty = rect.pos.y + (rect.size.y - native.y * k) * 0.5;
+                    let m = Mat4f {
+                        v: [
+                            k as f32, 0.0, 0.0, 0.0, //
+                            0.0, k as f32, 0.0, 0.0, //
+                            0.0, 0.0, 1.0, 0.0, //
+                            tx as f32, ty as f32, 0.0, 1.0,
+                        ],
+                    };
+                    let id = list.id();
+                    cx.draw_lists[id].draw_list_uniforms.view_transform = m;
+                    mirror.draw(cx, Rect { pos: dvec2(0.0, 0.0), size: native });
+                    list.end(cx);
+                }
+            }
             None => self.preview.draw_abs(cx, rect),
         }
         cx.end_turtle_with_area(&mut self.area);
@@ -2882,6 +2947,9 @@ pub struct Tweaker {
     note_uid: u64,
     /// The shown layer's script-defined fns: (name, file:line, source).
     vibe_fn_sources: Vec<(String, String, String)>,
+    /// An apply just happened: redraw the panel one frame later so the
+    /// swatch mirrors the widget AFTER it redrew with the new value.
+    swatch_refresh: bool,
     /// Set by the note button; the next event opens the card.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
@@ -4073,10 +4141,11 @@ impl Tweaker {
                 let sw_ref = col.child(live_id!(big));
                 let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
                 if let Some(mut sw) = sw_opt {
-                    if sw.applied_gen != self.rows_gen || sw.layer != layer {
+                    if sw.applied_gen != self.rows_gen || sw.layer != layer || sw.mirror_uid != self.rows_uid {
                         let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
                         if !widget.is_empty() {
-sw.mirror_uid = widget.widget_uid().0;
+                            sw.mirror_uid = widget.widget_uid().0;
+                            sw.mirror_primary = self.materials.first().is_some_and(|m| *m == layer);
                             sw.mirror_layer = layer.clone();
                             sw.applied_gen = self.rows_gen;
                             sw.layer = layer;
@@ -4293,11 +4362,12 @@ sw.mirror_uid = widget.widget_uid().0;
                         let sw_ref = item.child(live_id!(swatch_bg)).child(live_id!(swatch));
                         let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
                         if let Some(mut sw) = sw_opt {
-                            if sw.applied_gen != self.rows_gen || sw.layer != layer {
+                            if sw.applied_gen != self.rows_gen || sw.layer != layer || sw.mirror_uid != self.rows_uid {
                                 let widget =
                                     cx.widget_tree().widget(WidgetUid(self.rows_uid));
                                 if !widget.is_empty() {
-sw.mirror_uid = widget.widget_uid().0;
+                                    sw.mirror_uid = widget.widget_uid().0;
+                                    sw.mirror_primary = self.materials.first().is_some_and(|m| *m == layer);
                                     sw.mirror_layer = layer.clone();
                                     sw.applied_gen = self.rows_gen;
                                     sw.layer = layer;
@@ -5594,6 +5664,10 @@ impl Widget for Tweaker {
                 }
             }
         }
+        if self.swatch_refresh && self.next_frame.is_event(event).is_some() {
+            self.swatch_refresh = false;
+            self.redraw_sidebar(cx);
+        }
         // The suppression window expired: bring the solid outline back.
         if self.next_frame.is_event(event).is_some() {
             let (until, hold) = {
@@ -6035,6 +6109,8 @@ impl Widget for Tweaker {
                 let path = sel_pick.path.clone();
                 self.rebuild_rows(cx, sel_pick.uid, &path);
                 self.rows_gen = apply_gen;
+                self.swatch_refresh = true;
+                self.next_frame = cx.new_next_frame();
             }
         } else {
             self.rows.clear();
