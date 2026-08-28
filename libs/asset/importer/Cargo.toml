@@ -43,6 +43,11 @@ makepad-splat = { path = "../../splat" }
 jpeg-encoder = { path = "../../jpeg-encoder" }
 # Fleet dispatch client (default features = [] — the light client side only).
 makepad-asset-ai = { path = "../ai", default-features = false }
+# The annotation pass's knowledge: the prompts, the sheet framing, the reply
+# parser and the record planner. The coordinator EXECUTES `annotate.asset`
+# on a vision box; what an answer means stays in that crate, so a CLI and a
+# fleet job cannot describe the same asset differently.
+makepad-asset-annotate = { path = "../annotate" }
 # Base64 for relaying a catalog input into a fleet generate request.
 makepad-base64 = { path = "../../base64" }
 # Hardware mp4 decode for representative first-frame thumbnails + measured

@@ -1,24 +1,18 @@
-//! The annotation pass runner.
+//! The annotation pass's operator tool.
 //!
-//! Reads the store's catalog to pick assets, pulls each one's turntable sheet
-//! over the store's data plane, hands the batch to a vision executor, and
-//! publishes the parsed result back through `PUT /v1/assets/{id}/annotation`.
+//! The pass itself does not run here any more: it is an Asset Server job
+//! (`annotate.asset`) that a `vision` fleet box claims off the queue. What
+//! is left is what an operator still needs a command for — QUEUE the work
+//! for a kit or the whole catalog, CURATE a kind, and WIPE what the pass
+//! wrote — plus `--list-kits`, which the Asset UI reads.
 //!
 //! Nothing here creates an asset revision, uploads a blob, or touches an
 //! alias: the pass writes only the mutable annotation record, so a full wipe
 //! and redo of annotations leaves the imported library byte-identical.
 //! `--verify-nondestructive` asserts exactly that.
-//!
-//! The executor is a subprocess speaking the batch protocol in
-//! `libs/ai/llm/src/bin/vlm_annotate.rs`. That is the one seam to change when
-//! the model moves from Metal-local to the CUDA fleet: point `--executor` at a
-//! different program and bump `--version`.
 
-use makepad_asset_annotate::pass::{self, SheetPrep};
 use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
-use makepad_asset_annotate::{
-    executor, needs_annotation, parse_record, plan_upload, worker, ANNOTATOR_VERSION,
-};
+use makepad_asset_annotate::{needs_annotation, ANNOTATOR_VERSION};
 use makepad_asset_client::api::{AnnotationUpload, Api, ApiEndpoints};
 use makepad_asset_client::http::HttpLimits;
 use makepad_asset_data::{AssetId, AssetKind};
@@ -31,19 +25,14 @@ const DEFAULT_STORE: &str = "local/asset-ui/asset-server";
 
 struct Config {
     store: PathBuf,
-    work: PathBuf,
     kit: Option<String>,
     kind: Option<String>,
-    person: bool,
     aliases: Vec<String>,
-    limit: usize,
-    sheet_size: usize,
-    exposure: f32,
+    limit: u64,
     version: u32,
-    model_tag: String,
-    executor: Vec<String>,
-    all: bool,
     dry_run: bool,
+    /// Fresh job ids for assets whose annotate jobs failed terminally.
+    epoch: u64,
     /// Curation: rewrite ONLY the catalog kind of the selected assets (no
     /// VLM, everything else carried). `quake3 rig fragments published as
     /// kind=character` is the shape this exists for.
@@ -56,37 +45,26 @@ struct Config {
     list_kits: bool,
     /// The collection label whose kits are listed (`kenney`).
     source: String,
-    /// Drain the store's `annotate.asset` job queue instead of running one
-    /// filtered pass. This is the mode that matters: the queue is central,
-    /// the server fills it on every publish, and nobody has to remember to
-    /// run anything.
-    worker: bool,
-    /// Sheets per executor invocation in worker mode.
-    batch: usize,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: makepad-asset-annotate [options]
 
+With no verb: QUEUE the annotation work the catalog still owes as
+`annotate.asset` jobs, which a vision fleet box claims and runs.
+
   --store DIR         asset-server state dir (default {DEFAULT_STORE})
-  --work DIR          scratch dir for sheets and batch files
-  --kit NAME          annotate assets carrying this category label
-  --kind K            annotate assets of this catalog kind (e.g. character)
-  --person            person-description prompt variant (for characters)
-  --alias A           annotate exactly this canon alias (repeatable)
-  --limit N           stop after N assets (default 10)
-  --sheet-size N      downscale sheets to NxN before the model (default 512)
-  --exposure G        gamma lift on subject pixels, 1.0 disables (default 1.8)
+  --kit NAME          queue/select only assets carrying this category label
+  --kind K            select assets of this catalog kind (e.g. character)
+  --alias A           select exactly this canon alias (repeatable)
+  --limit N           most assets to queue in one sweep (default 500)
   --version N         annotator version (default {ANNOTATOR_VERSION})
-  --model-tag SLUG    label-safe model identity (default qwen35-9b)
-  --executor CMD...   executor argv; everything after it is the command
-  --all               re-annotate even assets already at this version
-  --dry-run           do everything except the publish
-  --verify-nondestructive  snapshot the import, wipe+redo, prove it untouched
+  --epoch N           mint fresh job ids (re-drive terminally failed jobs)
+  --dry-run           say what would change, change nothing
+  --set-kind K        rewrite ONLY the catalog kind of the selected assets
   --wipe              remove this pass's tags and clear its descriptions
-  --worker            drain the store's annotate.asset job queue and stay
-  --batch N           sheets per executor invocation in --worker (default 16)
+  --verify-nondestructive  fingerprint the import, wipe, prove it untouched
   --list-kits         print `<kit>\\t<live>\\t<needing>` per kit and exit
   --source LABEL      collection label --list-kits groups under (default kenney)
 "
@@ -97,31 +75,23 @@ fn usage() -> ! {
 fn parse_config() -> Config {
     let mut c = Config {
         store: PathBuf::from(DEFAULT_STORE),
-        work: PathBuf::from("local/annotate"),
         kit: None,
         kind: None,
-        person: false,
         aliases: Vec::new(),
-        limit: 10,
-        sheet_size: 512,
-        exposure: 1.8,
+        limit: 500,
         version: ANNOTATOR_VERSION,
-        model_tag: "qwen35-9b".to_string(),
-        executor: Vec::new(),
-        all: false,
         dry_run: false,
+        epoch: 0,
         set_kind: None,
         verify: false,
         wipe: false,
         list_kits: false,
         source: "kenney".to_string(),
-        worker: false,
-        batch: 16,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
-        let mut next = |i: &mut usize| -> String {
+        let next = |i: &mut usize| -> String {
             *i += 1;
             if *i >= args.len() {
                 usage();
@@ -130,32 +100,18 @@ fn parse_config() -> Config {
         };
         match args[i].as_str() {
             "--store" => c.store = PathBuf::from(next(&mut i)),
-            "--work" => c.work = PathBuf::from(next(&mut i)),
             "--kit" => c.kit = Some(next(&mut i)),
             "--kind" => c.kind = Some(next(&mut i)),
-            "--person" => c.person = true,
             "--alias" => c.aliases.push(next(&mut i)),
             "--limit" => c.limit = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--sheet-size" => c.sheet_size = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--exposure" => c.exposure = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--version" => c.version = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--model-tag" => c.model_tag = next(&mut i),
-            "--all" => c.all = true,
+            "--epoch" => c.epoch = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--dry-run" => c.dry_run = true,
             "--set-kind" => c.set_kind = Some(next(&mut i)),
             "--verify-nondestructive" => c.verify = true,
             "--wipe" => c.wipe = true,
-            "--worker" => c.worker = true,
-            "--batch" => c.batch = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--list-kits" => c.list_kits = true,
             "--source" => c.source = next(&mut i),
-            "--executor" => {
-                c.executor = args[i + 1..].to_vec();
-                if c.executor.is_empty() {
-                    usage();
-                }
-                break;
-            }
             "-h" | "--help" => usage(),
             other => {
                 eprintln!("unknown argument {other}");
@@ -387,118 +343,58 @@ fn run() -> Result<(), String> {
         Some(token.clone()),
     )
     .map_err(|e| format!("api: {e:?}"))?;
-    if cfg.worker {
-        return run_worker(&cfg, token, control, data);
-    }
-    let annotator = Annotator { version: cfg.version, model: cfg.model_tag.clone() };
+    let annotator = Annotator { version: cfg.version, model: String::new() };
     let mut db = open_catalog(&cfg.store)?;
 
     if cfg.verify {
-        return verify_nondestructive(&mut db, &cfg, &api, &annotator, &token, data);
+        return verify_nondestructive(&mut db, &cfg, &api, &annotator);
     }
-
-    let candidates = load_candidates(&mut db, &cfg)?;
     if let Some(kind) = &cfg.set_kind {
+        let candidates = load_candidates(&mut db, &cfg)?;
         return set_kind(&api, &candidates, kind, cfg.dry_run);
     }
     if cfg.wipe {
+        let candidates = load_candidates(&mut db, &cfg)?;
         return wipe(&api, &candidates, cfg.dry_run);
     }
-
-    let todo: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|c| cfg.all || needs_annotation(&c.base.tags, &annotator))
-        .take(cfg.limit)
-        .collect();
-    println!(
-        "{} candidates, {} need annotation at v{} (limit {})",
-        candidates.len(),
-        todo.len(),
-        cfg.version,
-        cfg.limit
-    );
-    if todo.is_empty() {
-        return Ok(());
-    }
-
-    let replies = run_executor(&cfg, &api, &todo, &token, data)?;
-
-    let mut published = 0usize;
-    let mut skipped = 0usize;
-    for c in &todo {
-        let Some(reply) = replies.get(&c.asset_hex) else {
-            eprintln!("  {} — no reply", c.alias);
-            skipped += 1;
-            continue;
-        };
-        let rec = parse_record(reply);
-        if !rec.is_useful() {
-            eprintln!("  {} — unusable reply, left unannotated", c.alias);
-            skipped += 1;
-            continue;
-        }
-        let up = plan_upload(&c.base, &rec, &annotator);
-        println!("  {} -> {}", c.alias, up.description);
-        if cfg.dry_run {
-            continue;
-        }
-        put(&api, &c.asset_hex, &up)?;
-        published += 1;
-    }
-    println!("published {published}, skipped {skipped}");
-    Ok(())
+    queue(&api, &cfg)
 }
 
-/// `--worker`: claim, annotate, publish, repeat, until killed.
+/// Queue what the catalog still owes, as jobs the fleet claims.
 ///
-/// The executor is `--executor` when the operator pinned one, else the
-/// standard ladder (env override, then the fleet box, then this machine's
-/// Metal tower) — so a worker started with no flags at all still picks the
-/// best model actually present.
-fn run_worker(
-    cfg: &Config,
-    token: String,
-    control: SocketAddr,
-    data: SocketAddr,
-) -> Result<(), String> {
-    let (executor, model_tag) = if cfg.executor.is_empty() {
-        let repo = std::env::var("MAKEPAD_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| repo.join("target/release"));
-        let choice = executor::choose_real(&executor::ExecutorEnv::from_env(repo, exe_dir))?;
-        let tag = choice.model_tag.clone();
-        (choice, tag)
-    } else {
-        (
-            executor::ExecutorChoice {
-                argv: cfg.executor.clone(),
-                model_tag: cfg.model_tag.clone(),
-                source: "flag".to_string(),
-            },
-            cfg.model_tag.clone(),
-        )
-    };
-    let _ = model_tag;
-    let stop = std::sync::atomic::AtomicBool::new(false);
-    let wcfg = worker::WorkerConfig {
-        endpoints: ApiEndpoints { control, data },
-        server_id: None,
-        token,
-        cache_root: cfg.work.join("worker"),
-        work: cfg.work.join("worker-batch"),
-        data,
-        executor,
-        batch: cfg.batch.max(1),
-        suffix: "annotate".to_string(),
-        version: cfg.version,
-        prep: SheetPrep { sheet_size: cfg.sheet_size, exposure: cfg.exposure },
-        log: true,
-    };
-    worker::run(&wcfg, &stop);
+/// ONE request: the server picks the assets (`annotation_backlog`), mints a
+/// job id derived from asset + annotator version so a second sweep is a
+/// no-op, and the vision boxes drain it. That is the whole reason this is
+/// not a loop in a command any more — the work has to outlive the shell it
+/// was asked from.
+fn queue(api: &Api, cfg: &Config) -> Result<(), String> {
+    let before = api
+        .annotate_summary(cfg.kit.as_deref())
+        .map_err(|e| format!("annotate summary: {e:?}"))?;
+    let label = cfg.kit.as_deref().unwrap_or("the whole catalog");
+    println!(
+        "{label}: {} described at {}, {} owed · queue {} pending / {} running / {} failed",
+        before.annotated,
+        before.version_tag,
+        before.owed,
+        before.pending,
+        before.running,
+        before.failed
+    );
+    if cfg.dry_run {
+        println!("dry run: would queue up to {} of them", cfg.limit.min(before.owed));
+        return Ok(());
+    }
+    if before.owed == 0 {
+        return Ok(());
+    }
+    let queued = api
+        .annotate_backlog(cfg.limit, cfg.kit.as_deref(), cfg.epoch)
+        .map_err(|e| format!("annotate backlog: {e:?}"))?;
+    println!(
+        "queued {} · {} already queued or done · {} still owed",
+        queued.enqueued, queued.skipped, queued.remaining
+    );
     Ok(())
 }
 
@@ -558,66 +454,6 @@ fn put(
         private: up.private,
     };
     api.put_annotation(&id, &upload).map_err(|e| format!("put {asset_hex}: {e:?}"))
-}
-
-/// Fetch sheets, write the batch files, run the executor, collect replies.
-///
-/// Every step here is [`makepad_asset_annotate::pass`] and
-/// [`makepad_asset_annotate::executor`] — the same code the queue worker
-/// runs — so an operator run and a queued run cannot describe the same
-/// asset differently.
-fn run_executor(
-    cfg: &Config,
-    _api: &Api,
-    todo: &[&Candidate],
-    token: &str,
-    data: SocketAddr,
-) -> Result<BTreeMap<String, String>, String> {
-    if cfg.executor.is_empty() {
-        return Err("--executor is required (see --help)".to_string());
-    }
-    let sheets = cfg.work.join("sheets");
-    std::fs::create_dir_all(&sheets).map_err(|e| format!("mkdir {}: {e}", sheets.display()))?;
-    let prep = SheetPrep { sheet_size: cfg.sheet_size, exposure: cfg.exposure };
-
-    let mut jobs = String::new();
-    for c in todo {
-        let png = pass::thumbnail_sheet(data, token, &c.alias)?;
-        let ppm = pass::sheet_to_ppm(&png, cfg.person, &prep)?;
-        let path = sheets.join(format!("{}.ppm", c.asset_hex));
-        std::fs::write(&path, ppm).map_err(|e| format!("write {}: {e}", path.display()))?;
-        jobs.push_str(&pass::job_line(
-            &c.asset_hex,
-            &path,
-            &pass::context_line(&c.alias, cfg.person),
-        ));
-    }
-    let jobs_path = cfg.work.join("jobs.tsv");
-    let prompt_path = cfg.work.join("prompt.txt");
-    let out_path = cfg.work.join("replies.tsv");
-    std::fs::write(&jobs_path, &jobs).map_err(|e| format!("write jobs: {e}"))?;
-    std::fs::write(&prompt_path, pass::prompt_for(cfg.person))
-        .map_err(|e| format!("write prompt: {e}"))?;
-
-    println!("running executor over {} sheets...", todo.len());
-    let never = std::sync::atomic::AtomicBool::new(false);
-    let mut on_line = |line: &str, _parsed: executor::ExecutorLine| {
-        if !line.trim().is_empty() {
-            eprintln!("{}", line.trim());
-        }
-    };
-    let replies = executor::run_batch(
-        &cfg.executor,
-        &jobs_path,
-        &prompt_path,
-        &out_path,
-        &never,
-        &mut on_line,
-    )?;
-    for (id, why) in &replies.err {
-        eprintln!("  executor error for {id}: {why}");
-    }
-    Ok(replies.ok)
 }
 
 /// Clear the pass's own footprint: drop every `vlm-` tag and blank the
@@ -718,8 +554,6 @@ fn verify_nondestructive(
     cfg: &Config,
     api: &Api,
     annotator: &Annotator,
-    _token: &str,
-    _data: SocketAddr,
 ) -> Result<(), String> {
     const IMPORT_TABLES: &[&str] = &["assets", "asset_revisions", "asset_aliases", "blobs"];
     let fingerprint = |db: &mut Database| -> Result<Vec<String>, String> {

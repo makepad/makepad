@@ -40,10 +40,10 @@ makepad-asset-store = { path = "../../libs/asset/store" }
 # Local licensed-pack compiler (Kenney Import). Same fail-closed walk as
 # `makepad-asset-importer --import-pack`; no network fetch.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
-# The vision-annotation pass. This app HOSTS its worker in-process (the same
-# loop the standalone `makepad-asset-annotate --worker` daemon runs), so the
-# descriptions the catalog search needs are written by whoever is running
-# the store — no separate daemon to remember.
+# The vision-annotation pass, for its VERSION only: this app draws the
+# annotation bar and must agree with the store on which annotator version
+# the catalog owes. The work itself is `annotate.asset`, a vision job the
+# fleet coordinator claims — nothing here runs a model.
 makepad-asset-annotate = { path = "../../libs/asset/annotate" }
 # The library is 241 MP3s and 4 WAVs: the transport has to be able to play
 # what the catalog actually holds, and the container has to be knowable from

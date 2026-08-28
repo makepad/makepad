@@ -960,7 +960,7 @@ fn normalize_tex_name(name: &str) -> String {
     n
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     use makepad_zune_jpeg::makepad_zune_core::bytestream::ZCursor;
     use makepad_zune_jpeg::makepad_zune_core::colorspace::ColorSpace;
     use makepad_zune_jpeg::makepad_zune_core::options::DecoderOptions;

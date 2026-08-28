@@ -309,6 +309,17 @@ pub const MAX_ROOM_TTL_MS: u64 = 10 * 60 * 1000;
 /// Most rooms one listing may carry — the server caps at 64 games.
 pub const MAX_ROOMS_PAGE: usize = 64;
 
+/// The published turntable/preview sheet of an alias, on the DATA plane.
+/// The alias is a validated path, segments and all.
+pub fn path_thumbnail_alias(alias: &AssetAlias) -> String {
+    format!("/v1/thumbnails/alias/{alias}")
+}
+
+/// Ceiling on one fetched thumbnail sheet. Sheets are published at
+/// 1024x1024 PNG (a 4x4 turntable grid); a megabyte over that is a server
+/// this client should refuse rather than buffer.
+pub const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+
 // ---- the vision-annotation queue -------------------------------------------
 
 /// Counts behind the annotation bar. `category` narrows to one kit.
@@ -349,11 +360,28 @@ pub fn path_job_cancel(job: &str) -> String {
 
 /// Scoped job listing. With `ns` the server requires a job capability on
 /// that namespace; without it the caller's own jobs are listed.
-pub fn path_jobs_list(ns: Option<&str>, limit: u64) -> String {
+///
+/// `kind` and `state` narrow the page to one queue: "what vision work is
+/// running right now" is one request, not a page of everything followed by
+/// a client-side filter that runs out of page before it finds any.
+pub fn path_jobs_list(
+    ns: Option<&str>,
+    kind: Option<&str>,
+    state: Option<&str>,
+    limit: u64,
+) -> String {
     let mut p = format!("/v1/jobs?limit={limit}");
     if let Some(ns) = ns {
         p.push_str("&ns=");
         p.push_str(ns);
+    }
+    if let Some(kind) = kind {
+        p.push_str("&kind=");
+        p.push_str(kind);
+    }
+    if let Some(state) = state {
+        p.push_str("&state=");
+        p.push_str(state);
     }
     p
 }

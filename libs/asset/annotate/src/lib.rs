@@ -1,6 +1,18 @@
 //! Asset annotation pass: turntable sheet -> vision model -> queryable store
 //! metadata.
 //!
+//! # Who runs it
+//!
+//! Nobody, here. This crate is the pass's KNOWLEDGE — the prompts, the
+//! closed vocabularies its replies are parsed into, and the record it plans
+//! from a reply. The work itself is an Asset Server job (`annotate.asset`,
+//! minted by `makepad_asset_store::host::annotate` on every publish) claimed
+//! by the same fleet coordinator that runs every other GPU kind
+//! (`makepad_asset_importer::coordinator`), on a box whose `/health`
+//! advertises the `vision` capability. There is no separate worker, no
+//! subprocess executor and no tunnel: one queue, one claim loop, one GPU at
+//! a time per box.
+//!
 //! # What the pass owns
 //!
 //! Exactly two things on an asset's annotation record:
@@ -29,12 +41,10 @@
 //! `vlm-v<N>` tag, used to skip already-current assets and to invalidate
 //! everything when the prompt or the model changes.
 
-pub mod executor;
 pub mod parse;
 pub mod pass;
 pub mod plan;
 pub mod sheet;
-pub mod worker;
 
 pub use parse::{parse_record, Record};
 pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload, VLM_PREFIX};
@@ -95,6 +105,13 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 /// so the two cannot drift); `desc` asks for 12 words of concrete
 /// searchable facts instead of 10 of "visual detail", and PROMPT_PERSON
 /// gets the same framing paragraph without touching its 14-line shape.
+///
+/// v7 also became the version the FLEET answers. The pass stopped being a
+/// subprocess reached over a tunnel and became `annotate.asset`, a vision
+/// job claimed off the store's queue like every other GPU kind — same
+/// prompts, same parser, same planned record, so the version that describes
+/// the OUTPUT contract did not move and the 4531 assets already described
+/// at v7 are not re-run.
 pub const ANNOTATOR_VERSION: u32 = 7;
 
 /// The question put to the vision model about one turntable sheet.
