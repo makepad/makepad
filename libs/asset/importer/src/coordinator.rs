@@ -104,6 +104,15 @@ const JOB_DEADLINE: Duration = Duration::from_secs(45 * 60);
 const EXPAND_DEADLINE: Duration = Duration::from_secs(90);
 /// Token budget for one expansion (the same 512 the interactive chains use).
 const EXPAND_MAX_TOKENS: u32 = 512;
+/// Music asks for more, because a music expansion is not a paragraph: it is
+/// a JSON body carrying a structured caption AND a full lyric script, and
+/// the contract says it may reach 3 300 bytes. At 512 tokens the composer
+/// was being cut off mid-song — which is not a worse prompt, it is an
+/// unparseable one.
+const EXPAND_MUSIC_MAX_TOKENS: u32 = 1_600;
+/// …and correspondingly longer to write it. Still bounded, and still in
+/// front of a generation that itself takes a minute.
+const EXPAND_MUSIC_DEADLINE: Duration = Duration::from_secs(180);
 /// Longest expanded prompt forwarded to a model; `GenRequest::from_body`
 /// refuses anything past 4 000, so an over-eager expander cannot make the
 /// generation itself unrunnable.
@@ -856,11 +865,22 @@ impl<'f> Coordinator<'f> {
             return Ok(None);
         }
         let original = request.prompt.clone();
+        let music = request.kind.domain == "music";
         // The expander is told what the expansion is FOR: a video brief and
-        // a mesh brief are not the same piece of writing.
+        // a mesh brief are not the same piece of writing — and a seamless
+        // VJ loop is not the same request as a song (no intro, no outro, no
+        // final cadence, always instrumental), so it has its own writer.
+        let target_domain = if music && wants_loop(&request.body) {
+            "music_loop"
+        } else {
+            request.kind.domain
+        };
         let body = obj(vec![
-            ("target_domain", s(request.kind.domain.to_string())),
-            ("max_tokens", Value::Int(EXPAND_MAX_TOKENS as i64)),
+            ("target_domain", s(target_domain.to_string())),
+            (
+                "max_tokens",
+                Value::Int(if music { EXPAND_MUSIC_MAX_TOKENS } else { EXPAND_MAX_TOKENS } as i64),
+            ),
         ]);
         let expand_request = GenRequest {
             kind: &EXPAND_KIND,
@@ -888,13 +908,28 @@ impl<'f> Coordinator<'f> {
             // The expansion goes where a text model already lives, not
             // wherever this claim loop happens to be pinned.
             FleetReach::WholeFleet,
-            EXPAND_DEADLINE,
+            if music { EXPAND_MUSIC_DEADLINE } else { EXPAND_DEADLINE },
             stop,
         )? {
             FleetRun::Done(answer) => {
                 match answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                     Some(text) => {
-                        request.prompt = annotation_text(text, MAX_EXPANDED_PROMPT_BYTES);
+                        // A MUSIC expansion is not prose: the writer answers
+                        // with the request BODY, and the lyric script is a
+                        // field of its own. Parsed before anything is bounded
+                        // — the whole answer has to be seen to be read.
+                        let composed = music.then(|| compose_music_body(text)).flatten();
+                        if let Some(composed) = composed {
+                            self.log(&format!(
+                                "job {}: composed a music body ({} byte prompt, {} byte lyrics)",
+                                claimed.job,
+                                composed.prompt.len(),
+                                composed.lyrics.len()
+                            ));
+                            composed.apply(request);
+                        } else {
+                            request.prompt = annotation_text(text, MAX_EXPANDED_PROMPT_BYTES);
+                        }
                         request.original_prompt = Some(original.clone());
                         self.log(&format!(
                             "job {}: expanded to \"{}\"",
@@ -910,8 +945,11 @@ impl<'f> Coordinator<'f> {
                             model: &answer.model,
                             at: answer.host.as_deref().unwrap_or_default(),
                             prompt: &original,
-                            params: &format!("target_domain={}", request.kind.domain),
-                            output: &request.prompt,
+                            params: &format!("target_domain={target_domain}"),
+                            // What it ANSWERED, whole — for music that is
+                            // the composed body, lyrics included, which is
+                            // exactly what the next stage will be handed.
+                            output: text,
                         };
                         let _ = self.client.worker_heartbeat_stage(
                             &claimed.job,
@@ -1586,6 +1624,124 @@ fn build_product(
     }
     request_out.stats = stats;
     Ok(request_out)
+}
+
+/// A music request body composed by the expander.
+///
+/// THE DEFECT THIS EXISTS TO FIX: the music expander was told to write a
+/// caption and then lyrics after a `Lyrics:` marker, and told that the
+/// pipeline split on it. Nothing did — the whole answer became the caption
+/// and the `lyrics` field stayed empty, so MiniMax substituted
+/// `[Instrumental]` and EVERY expanded vocal request came back as an
+/// instrumental. The writer now answers with the body itself and it is
+/// parsed here, which is the only way `lyrics` can ever be filled.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MusicBody {
+    prompt: String,
+    lyrics: String,
+    seconds: Option<f64>,
+    steps: Option<u64>,
+    seed: Option<u64>,
+}
+
+impl MusicBody {
+    /// Merge onto the job body so the wire request picks the fields up. The
+    /// person's own body WINS on duration and seed: they asked for those,
+    /// the writer only proposed them.
+    fn apply(self, request: &mut GenRequest) {
+        request.prompt = annotation_text(&self.prompt, MAX_EXPANDED_PROMPT_BYTES);
+        let mut body = request.body.clone();
+        set_key(&mut body, "lyrics", s(self.lyrics.clone()));
+        if let Some(seconds) = self.seconds {
+            if request.body.get("seconds").is_none() {
+                set_key(&mut body, "seconds", Value::F64(seconds));
+            }
+        }
+        if let Some(steps) = self.steps {
+            if request.body.get("steps").is_none() {
+                set_key(&mut body, "steps", Value::Int(steps as i64));
+            }
+        }
+        if let Some(seed) = self.seed {
+            if request.seed.is_none() {
+                set_key(&mut body, "seed", Value::Int(seed as i64));
+                request.seed = Some(seed);
+            }
+        }
+        request.body = body;
+    }
+}
+
+/// Set (or replace) one key on a JSON object value.
+fn set_key(value: &mut Value, key: &str, new: Value) {
+    if let Value::Obj(pairs) = value {
+        if let Some(pair) = pairs.iter_mut().find(|(k, _)| k == key) {
+            pair.1 = new;
+            return;
+        }
+        pairs.push((key.to_string(), new));
+    }
+}
+
+/// Parse the writer's answer into a music body. `None` = it did not answer
+/// with one, and the caller falls back to using the whole answer as the
+/// prompt exactly as before — a bad expansion never costs the run.
+///
+/// Salvages a fenced or chatty answer by reading from the first `{` to the
+/// last `}`: a model that says "Here you go:" first is still usable. Only
+/// the keys the body actually has are taken; `model` is deliberately NOT
+/// among them, because which model runs is a scheduling decision and never
+/// a thing the writer gets to change.
+fn compose_music_body(answer: &str) -> Option<MusicBody> {
+    let start = answer.find('{')?;
+    let end = answer.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let value = makepad_asset_client::json::parse(answer[start..=end].as_bytes()).ok()?;
+    let prompt = value.get("prompt").and_then(Value::as_str)?.trim().to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    let number = |key: &str| -> Option<f64> {
+        match value.get(key)? {
+            Value::F64(f) => Some(*f),
+            Value::Int(i) => Some(*i as f64),
+            Value::Str(text) => text.trim().parse().ok(),
+            _ => None,
+        }
+    };
+    Some(MusicBody {
+        prompt,
+        // An absent or empty lyric field means instrumental, and the models
+        // want that said rather than left blank.
+        lyrics: value
+            .get("lyrics")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("[Instrumental]")
+            .to_string(),
+        seconds: number("seconds").filter(|v| (5.0..=300.0).contains(v)),
+        steps: number("steps").filter(|v| (1.0..=64.0).contains(v)).map(|v| v as u64),
+        seed: number("seed").filter(|v| *v >= 0.0).map(|v| v as u64),
+    })
+}
+
+/// Does this body ask for a seamless LOOP rather than a song? The VJ tags
+/// its loop clips, and a loop request wants the writer that knows a loop
+/// has no intro, no outro and no final cadence.
+fn wants_loop(body: &Value) -> bool {
+    if body.get("loop").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    body.get("tags")
+        .and_then(Value::as_arr)
+        .is_some_and(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .any(|tag| tag.eq_ignore_ascii_case("loop"))
+        })
 }
 
 fn bounded(text: &str, max: usize) -> String {
@@ -4467,6 +4623,118 @@ mod tests {
         );
         drop(server);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------ the music body composer
+
+    /// The defect, in one test: the expander wrote lyrics, nothing parsed
+    /// them, and every expanded vocal request came back instrumental
+    /// because MiniMax substitutes `[Instrumental]` for an empty field.
+    #[test]
+    fn a_music_expansion_fills_the_lyrics_field_it_writes() {
+        let answer = r#"{"model":"minimax-music3","prompt":"Global Metadata\nDreamy shoegaze at a slow tempo.\nVocal Details\nWhispery female lead.\nArrangement\nGuitar motif opens alone.","lyrics":"[Verse]\nPlatform lights dissolve in rain\n\n[Chorus]\nI missed the last train home","seconds":90}"#;
+        let body = compose_music_body(answer).expect("a composed body");
+        assert!(body.prompt.starts_with("Global Metadata"));
+        assert_eq!(
+            body.lyrics,
+            "[Verse]\nPlatform lights dissolve in rain\n\n[Chorus]\nI missed the last train home",
+            "the lyric script is its own field, tags and line breaks intact"
+        );
+        assert_eq!(body.seconds, Some(90.0));
+
+        // Applied to the job, the lyrics reach the wire — which is the
+        // whole point: this is what was silently empty before.
+        let kind = kind_of("music.generate").unwrap();
+        let mut request = GenRequest::from_body(
+            kind,
+            &obj(vec![("prompt", s("a shoegaze song")), ("model", s("minimax-music3"))]),
+        )
+        .unwrap();
+        body.clone().apply(&mut request);
+        let wire = wire_request(&request, "minimax-music3".to_string());
+        assert_eq!(wire.lyrics.as_deref(), Some(body.lyrics.as_str()));
+        assert_eq!(wire.seconds, Some(90.0));
+        assert!(wire.prompt.as_deref().unwrap().contains("Whispery female lead"));
+        assert!(
+            !wire.prompt.as_deref().unwrap().contains("Platform lights"),
+            "lyrics never leak back into the caption"
+        );
+        // …and BOTH halves are inspectable on the job: the caption is the
+        // stage's prompt, the lyric script rides its parameters, so opening
+        // the run shows exactly what the music model was handed.
+        let params = stage_params(&wire, &request);
+        assert!(params.contains("lyrics=[Verse]"), "{params}");
+        assert!(params.contains("seconds=90"), "{params}");
+    }
+
+    /// The writer is a writer, not a scheduler: it never gets to change the
+    /// model, and the person's own duration and seed outrank its proposal.
+    #[test]
+    fn the_composer_never_overrules_what_the_person_asked_for() {
+        let answer = r#"{"model":"ace-step-1.5-xl","prompt":"Neo-soul, warm Rhodes.","lyrics":"[Verse]\nMorning settles on the floor","seconds":30,"steps":8,"seed":5}"#;
+        let kind = kind_of("music.generate").unwrap();
+        let mut request = GenRequest::from_body(
+            kind,
+            &obj(vec![
+                ("prompt", s("neo soul")),
+                ("model", s("minimax-music3")),
+                ("seconds", Value::Int(120)),
+                ("seed", Value::Int(77)),
+            ]),
+        )
+        .unwrap();
+        compose_music_body(answer).expect("composed").apply(&mut request);
+        assert_eq!(request.model, "minimax-music3", "the pin still decides");
+        assert_eq!(request.seed, Some(77));
+        let wire = wire_request(&request, request.model.clone());
+        assert_eq!(wire.seconds, Some(120.0), "the person asked for two minutes");
+        assert_eq!(wire.seed, Some(77));
+        // What the writer DID get to say still lands.
+        assert_eq!(wire.steps, Some(8));
+        assert!(wire.lyrics.is_some());
+    }
+
+    /// An answer that is not a body never costs the run: it falls back to
+    /// being the prompt, exactly as it did before there was a composer.
+    #[test]
+    fn an_answer_that_is_not_a_body_is_salvaged_or_refused_cleanly() {
+        // Chatty preamble and a code fence: still a body.
+        let fenced = "Sure! Here you go:\n```json\n{\"prompt\":\"warm house\",\"lyrics\":\"[Instrumental]\",\"seconds\":60}\n```";
+        let body = compose_music_body(fenced).expect("salvaged");
+        assert_eq!(body.prompt, "warm house");
+        // Prose, malformed JSON, and an empty prompt are all "not a body".
+        assert_eq!(compose_music_body("Global Metadata\nDreamy shoegaze"), None);
+        assert_eq!(compose_music_body("{\"prompt\": }"), None);
+        assert_eq!(compose_music_body("{\"prompt\":\"   \"}"), None);
+        // A body with no lyrics is an INSTRUMENTAL, said out loud — an
+        // empty field is the thing that used to make everything a hum.
+        let instrumental = compose_music_body("{\"prompt\":\"taiko score\",\"seconds\":45}")
+            .expect("composed");
+        assert_eq!(instrumental.lyrics, "[Instrumental]");
+        // Out-of-range numbers are dropped, not clamped into a lie.
+        let silly = compose_music_body(
+            "{\"prompt\":\"x\",\"seconds\":99999,\"steps\":900,\"seed\":-1}",
+        )
+        .expect("composed");
+        assert_eq!((silly.seconds, silly.steps, silly.seed), (None, None, None));
+    }
+
+    /// A loop request gets the writer that knows a loop has no intro, no
+    /// outro and no final cadence — the VJ's own tag is the signal.
+    #[test]
+    fn a_loop_request_asks_the_loop_writer() {
+        assert!(wants_loop(&obj(vec![("loop", Value::Bool(true))])));
+        assert!(wants_loop(&obj(vec![(
+            "tags",
+            Value::Arr(vec![s("neon"), s("Loop")])
+        )])));
+        assert!(!wants_loop(&obj(vec![("prompt", s("a song"))])));
+        assert!(!wants_loop(&obj(vec![("loop", Value::Bool(false))])));
+        // And the writer exists for that name.
+        assert!(
+            makepad_asset_ai::llm_backend::default_system_prompt("music_loop")
+                .contains("[Instrumental]")
+        );
     }
 
     // -------------------------------------------- stages are inspectable
