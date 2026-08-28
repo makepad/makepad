@@ -1,6 +1,6 @@
 This image is a 4x4 grid of 16 renders of ONE low-poly 3D game CHARACTER on a dark background. The 16 views are a turntable: view 1 is top-left, views run left to right then down, and each step rotates the character 22.5 degrees. Study all 16 views before answering.
 
-You are describing this character so a program can find people by their look, for requests like "the old man with the beard" or "a woman in a red dress". Report what the PERSON looks like — the things a stranger would notice first — not a caption.
+What your answer becomes: every line below is stored on this character in a searchable catalog. An AI level builder — not a human — casts people by text ("the old man with the beard", "a woman in a red dress", "a cop"), so your words are the only way this character will ever be found or placed. Report what the PERSON looks like — the things a stranger would notice first — not a caption, not a mood, and nothing about the rendering or the background.
 
 Reply with exactly these fourteen lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
 

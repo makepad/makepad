@@ -41,6 +41,7 @@ use crate::error::{ServerError, ServerResult};
 use crate::sqlite::{Db, Stmt};
 use makepad_asset_data::limits::MAX_ALIAS_BYTES;
 use makepad_asset_data::{sha256, AssetId, AssetKind};
+
 use std::collections::BTreeMap;
 
 /// The `kind` column's constraint. Must stay identical in the CREATE below
@@ -140,6 +141,83 @@ const W_PROMPT: u64 = 10;
 const W_PROVENANCE: u64 = 5;
 
 // ---- types -----------------------------------------------------------------
+
+/// Catalog kinds the vision-annotation pass can describe — the ones an
+/// import gives a turntable thumbnail sheet. A billboard sprite sheet or an
+/// audio waveform is not sixteen views of one object, and the prompt that
+/// reads one would be describing something that is not there.
+pub const ANNOTATABLE_KINDS: &[&str] =
+    &["mesh", "character", "weapon", "vehicle", "prop", "prefab"];
+
+/// One asset the vision pass still owes a description.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BacklogRow {
+    pub asset_id: AssetId,
+    pub namespace: String,
+    /// Canonical alias; the pass fetches the turntable sheet by it.
+    pub alias: String,
+    pub kind: Option<AssetKind>,
+}
+
+/// The annotatable-and-live predicate both backlog reads share. Kinds are
+/// a compile-time list, never caller input, so they are inlined; the tag
+/// and the category are bound.
+fn backlog_where(category: Option<&str>, tag_param: i32, cat_param: i32) -> String {
+    let kinds = ANNOTATABLE_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut w = format!(
+        "live = 1 AND canon_alias <> '' AND kind IN ({kinds}) \
+         AND NOT EXISTS (SELECT 1 FROM search_labels l \
+             WHERE l.asset_id = search_annotations.asset_id \
+             AND l.kind = 'tag' AND l.label = ?{tag_param})"
+    );
+    if category.is_some() {
+        w.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM search_labels c \
+               WHERE c.asset_id = search_annotations.asset_id \
+               AND c.kind = 'category' AND c.label = ?{cat_param})"
+        ));
+    }
+    w
+}
+
+fn backlog_sql(category: Option<&str>, count_only: bool) -> String {
+    let w = backlog_where(category, 1, 2);
+    if count_only {
+        return format!("SELECT COUNT(*) FROM search_annotations WHERE {w}");
+    }
+    let limit_param = if category.is_some() { 3 } else { 2 };
+    format!(
+        "SELECT asset_id, namespace, canon_alias, kind FROM search_annotations \
+         WHERE {w} ORDER BY canon_alias LIMIT ?{limit_param}"
+    )
+}
+
+/// The complement: annotatable, live, and already carrying the tag.
+fn annotated_sql(category: Option<&str>) -> String {
+    let kinds = ANNOTATABLE_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut w = format!(
+        "live = 1 AND canon_alias <> '' AND kind IN ({kinds}) \
+         AND EXISTS (SELECT 1 FROM search_labels l \
+             WHERE l.asset_id = search_annotations.asset_id \
+             AND l.kind = 'tag' AND l.label = ?1)"
+    );
+    if category.is_some() {
+        w.push_str(
+            " AND EXISTS (SELECT 1 FROM search_labels c \
+               WHERE c.asset_id = search_annotations.asset_id \
+               AND c.kind = 'category' AND c.label = ?2)",
+        );
+    }
+    format!("SELECT COUNT(*) FROM search_annotations WHERE {w}")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -1146,6 +1224,104 @@ impl<'a> Search<'a> {
             }
         }
         Ok(Some(ann))
+    }
+
+    // ---- annotation backlog ------------------------------------------------
+
+    /// Live assets of an annotatable kind that do not carry `version_tag`.
+    ///
+    /// The vision-annotation queue's admission list: it is a catalog read,
+    /// not a search, because "everything still un-described" is a set no
+    /// text query can name and the answer has to be exact.
+    pub fn annotation_backlog(
+        &self,
+        version_tag: &str,
+        category: Option<&str>,
+        limit: u64,
+    ) -> ServerResult<Vec<BacklogRow>> {
+        let mut s = self.db.prepare("annotation backlog", &backlog_sql(category, false))?;
+        s.bind_text(1, version_tag)?;
+        let mut next = 2;
+        if let Some(c) = category {
+            s.bind_text(next, c)?;
+            next += 1;
+        }
+        s.bind_u64(next, limit)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(BacklogRow {
+                asset_id: AssetId::from_bytes(fixed16(&s.column_blob(0), "backlog asset id")?),
+                namespace: s.column_text(1),
+                alias: s.column_text(2),
+                kind: read_kind_column(&s, 3)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The backlog row for ONE asset, or `None` when it owes nothing: not
+    /// live, no alias, not an annotatable kind, or already carrying the
+    /// tag. The publish-time enqueue asks exactly this question.
+    pub fn backlog_row_for(
+        &self,
+        asset_id: &AssetId,
+        version_tag: &str,
+    ) -> ServerResult<Option<BacklogRow>> {
+        let mut s = self.db.prepare(
+            "annotation backlog row",
+            "SELECT namespace, canon_alias, kind, live FROM search_annotations \
+             WHERE asset_id = ?1",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        if !s.step()? {
+            return Ok(None);
+        }
+        let namespace = s.column_text(0);
+        let alias = s.column_text(1);
+        let kind = read_kind_column(&s, 2)?;
+        let live = s.column_i64(3) != 0;
+        drop(s);
+        if !live || alias.is_empty() {
+            return Ok(None);
+        }
+        let Some(k) = kind else {
+            return Ok(None);
+        };
+        if !ANNOTATABLE_KINDS.contains(&kind_name(k)) {
+            return Ok(None);
+        }
+        let mut s = self.db.prepare(
+            "annotation tag probe",
+            "SELECT 1 FROM search_labels WHERE asset_id = ?1 AND kind = 'tag' AND label = ?2",
+        )?;
+        s.bind_blob(1, asset_id.as_bytes())?;
+        s.bind_text(2, version_tag)?;
+        if s.step()? {
+            return Ok(None);
+        }
+        Ok(Some(BacklogRow { asset_id: *asset_id, namespace, alias, kind }))
+    }
+
+    /// `(still owed, already annotated)` over the same annotatable set.
+    pub fn annotation_backlog_counts(
+        &self,
+        version_tag: &str,
+        category: Option<&str>,
+    ) -> ServerResult<(u64, u64)> {
+        let count = |sql: String| -> ServerResult<u64> {
+            let mut s = self.db.prepare("annotation backlog count", &sql)?;
+            s.bind_text(1, version_tag)?;
+            if let Some(c) = category {
+                s.bind_text(2, c)?;
+            }
+            if !s.step()? {
+                return Ok(0);
+            }
+            Ok(s.column_u64(0))
+        };
+        let owed = count(backlog_sql(category, true))?;
+        let done = count(annotated_sql(category))?;
+        Ok((owed, done))
     }
 
     // ---- search ------------------------------------------------------------

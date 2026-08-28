@@ -31,6 +31,7 @@
 //! set, enforced at enqueue). That is the strongest scoping the current core
 //! contract supports.
 
+use super::annotate;
 use super::api::{
     body_str, body_u64, parse_capability, parse_job, parse_json_body, parse_limit,
     parse_principal, principal_str, Fail, RouteResult, TOKEN_PREFIX,
@@ -58,6 +59,10 @@ use makepad_asset_data::{
 /// Largest worker-supplied result/error document the transport records.
 const MAX_RESULT_BYTES: usize = 16 * 1024;
 const MAX_PROGRESS_NOTE_BYTES: usize = 200;
+/// Most assets one backlog sweep may queue. The 4023-asset Kenney library
+/// is nine sweeps, and the ceiling is what keeps one request from holding
+/// the state thread while it writes thousands of rows.
+const MAX_ANNOTATE_BACKLOG: u64 = 1000;
 const CACHE_IMMUTABLE: &str = "private, max-age=31536000, immutable";
 
 pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
@@ -231,6 +236,10 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
             let job = parse_job(j).ok_or(Fail::Http(400, "malformed job id"))?;
             job_get(head, rc, job)
         }
+        // ---- the vision-annotation queue -----------------------------------
+        ["v1", "annotate", "summary"] if is_read(m) => annotate_summary(head, rc),
+        ["v1", "annotate", "backlog"] if m == Method::Post => annotate_backlog(conn, head, rc),
+
         ["v1", "jobs", j, "cancel"] if m == Method::Post => {
             let job = parse_job(j).ok_or(Fail::Http(400, "malformed job id"))?;
             job_cancel(head, rc, job)
@@ -902,6 +911,9 @@ fn asset_lifecycle(
         if publish {
             require_cap(ctx, &p, Capability::AssetPublish, &ns)?;
             ctx.core.catalog().publish_asset(&ast, &rev, now)?;
+            // The split publish flow reaches the same queue as the batch
+            // one: a revision is live here too.
+            annotate::enqueue_published(ctx, &p, &ast, now);
         } else {
             require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
             ctx.core.catalog().quarantine_asset(&ast, &rev, now)?;
@@ -1505,6 +1517,14 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
             }
             Ok(())
         })?;
+        // Every newly live asset that can be described gets its vision
+        // annotation queued, whoever published it — an import, a
+        // generation, a game agent. Best effort: the asset is in the
+        // catalog either way, and a backlog sweep finds what a failed
+        // enqueue missed.
+        for outcome in &outcomes {
+            annotate::enqueue_published(ctx, &p, &outcome.asset_id, now);
+        }
         // Events after commit, in commit order, mirroring the split flow:
         // annotation_set, asset_published, alias_set per item.
         for (item, outcome) in parsed.iter().zip(&outcomes) {
@@ -2648,6 +2668,16 @@ fn annotation_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId)
             visibility,
         };
         ctx.core.search().set_annotation(&ast, &ann, now)?;
+        // The OTHER moment an asset becomes describable. A publish that
+        // carries its annotation (the batch route) is queued there; the
+        // split flow — register, publish, then PUT the annotation — has no
+        // kind, no alias and no categories at publish time, so the pack
+        // importer's whole library would have queued nothing. Queue here
+        // too; the derived job id makes the overlap a no-op.
+        //
+        // The annotation the vision worker itself writes carries the
+        // version tag, so it does not re-queue the asset it just described.
+        annotate::enqueue_published(ctx, &p, &ast, now);
         hub.publish(
             EventBody::asset(events::KIND_ANNOTATION_SET, &ns, ast.to_string(), now)
                 .with_content_kind(ann.kind.map(kind_name)),
@@ -3176,6 +3206,119 @@ pub(crate) fn worker_name(p: &PrincipalId, suffix: &Option<String>) -> String {
         None => principal_str(p),
         Some(sfx) => format!("{}/{}", principal_str(p), sfx),
     }
+}
+
+// ---------------------------------------------------------------------------
+// the vision-annotation queue
+// ---------------------------------------------------------------------------
+
+/// Counts behind the annotation bar: how much of the catalog is described,
+/// and what the queue is doing about the rest.
+///
+/// One route rather than a client loop, because the honest answer is two
+/// catalog counts and one grouped job read, and a UI that had to page
+/// thousands of jobs to draw a bar would simply not draw one.
+fn annotate_summary(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let category = head.query_get("category").map(str::to_string);
+    let now = now_ms();
+    let (owed, annotated, counts) = call_state(&rc.state, move |ctx| {
+        // Counts, not content: any authenticated principal may read them.
+        ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let tag = annotate::version_tag();
+        let (owed, annotated) = ctx
+            .core
+            .search()
+            .annotation_backlog_counts(&tag, category.as_deref())?;
+        let counts = ctx.core.jobs().count_by_state(annotate::JOB_KIND)?;
+        Ok((owed, annotated, counts))
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("version_tag", s(annotate::version_tag())),
+            ("owed", Value::Int(owed as i64)),
+            ("annotated", Value::Int(annotated as i64)),
+            ("jobs", obj(vec![
+                ("pending", Value::Int(counts.pending as i64)),
+                ("running", Value::Int(counts.running as i64)),
+                ("succeeded", Value::Int(counts.succeeded as i64)),
+                ("failed", Value::Int(counts.failed as i64)),
+                ("cancelled", Value::Int(counts.cancelled as i64)),
+            ])),
+        ]),
+    )))
+}
+
+/// `POST /v1/annotate/backlog` — queue every asset the vision pass still
+/// owes, up to `limit`.
+///
+/// The button that fires the 4023-asset backlog is ONE request. A client
+/// that had to enqueue per asset would be a loop that dies with the window
+/// it runs in, and the whole point of moving this into the store's job
+/// queue is that the work outlives whoever asked for it.
+///
+/// Body: `{"limit":500, "category":"nature-kit"?, "epoch":0?}`.
+/// `category` narrows to one kit (the Kenney card's per-kit button);
+/// `epoch` mints fresh job ids so an operator can re-drive assets whose
+/// jobs failed terminally.
+fn annotate_backlog(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let limit = match body.get("limit") {
+        None => 500u64,
+        Some(v) => v.as_u64().ok_or(Fail::Http(400, "malformed limit"))?,
+    };
+    if limit == 0 || limit > MAX_ANNOTATE_BACKLOG {
+        return Err(Fail::Http(400, "limit out of bounds"));
+    }
+    let category = match body.get("category") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .filter(|c| !c.is_empty() && c.len() <= crate::search::MAX_LABEL_BYTES)
+                .ok_or(Fail::Http(400, "malformed category"))?
+                .to_string(),
+        ),
+    };
+    let epoch = body_u64(&body, "epoch").unwrap_or(0);
+    let now = now_ms();
+    let (enqueued, skipped, remaining, annotated) = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        // Admin action: it commits the whole deployment's GPU time.
+        if !ctx.is_root(&p)? {
+            return Err(ServerError::Denied { capability: "root" });
+        }
+        let tag = annotate::version_tag();
+        let rows = ctx
+            .core
+            .search()
+            .annotation_backlog(&tag, category.as_deref(), limit)?;
+        let mut enqueued = 0u64;
+        let mut skipped = 0u64;
+        for row in &rows {
+            if annotate::enqueue(ctx, &p, row, epoch, now)? {
+                enqueued += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        let (remaining, annotated) = ctx
+            .core
+            .search()
+            .annotation_backlog_counts(&tag, category.as_deref())?;
+        Ok((enqueued, skipped, remaining, annotated))
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("enqueued", Value::Int(enqueued as i64)),
+            ("skipped", Value::Int(skipped as i64)),
+            ("remaining", Value::Int(remaining as i64)),
+            ("annotated", Value::Int(annotated as i64)),
+            ("version_tag", s(annotate::version_tag())),
+        ]),
+    )))
 }
 
 /// Bounded worker-supplied JSON document (result or error) as stored bytes.

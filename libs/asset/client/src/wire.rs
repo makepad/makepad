@@ -309,6 +309,21 @@ pub const MAX_ROOM_TTL_MS: u64 = 10 * 60 * 1000;
 /// Most rooms one listing may carry — the server caps at 64 games.
 pub const MAX_ROOMS_PAGE: usize = 64;
 
+// ---- the vision-annotation queue -------------------------------------------
+
+/// Counts behind the annotation bar. `category` narrows to one kit.
+pub fn path_annotate_summary(category: Option<&str>) -> String {
+    match category {
+        Some(c) => format!("/v1/annotate/summary?category={c}"),
+        None => "/v1/annotate/summary".to_string(),
+    }
+}
+
+/// Queue everything the vision pass still owes (root only).
+pub fn path_annotate_backlog() -> String {
+    "/v1/annotate/backlog".to_string()
+}
+
 // ---- jobs (generation scheduling) ------------------------------------------
 
 /// Advertised generation capabilities; `domain` filters (`video`, `audio`…).
