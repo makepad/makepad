@@ -2449,13 +2449,21 @@ impl Widget for PortalList {
             }
         }
 
-        // A pointer move only matters to items when the pointer is over the list,
-        // or just left it (so the last hovered item still sees its hover-out).
-        // One rect test here guards the entire item subtree from high-rate
-        // mouse-move fan-out.
+        // A pointer move only matters to items when the pointer is over the
+        // list, or just left it (so the last hovered item still sees its
+        // hover-out). One rect test here guards the entire item subtree
+        // from high-rate mouse-move fan-out — but ONLY while no button is
+        // held: with a button down a captured child may be mid-drag, and
+        // its FingerMoves must keep flowing wherever the pointer (or a
+        // scrub pin's virtual abs) goes. Gating those dropped every move
+        // once a drag left the list rect — the "scrubbing goes lossy when
+        // the pointer leaves the panel" bug.
         if let Event::MouseMove(e) = event {
             let inside = self.area.is_valid(cx) && self.area.clipped_rect(cx).contains(e.abs);
-            if !inside && !self.pointer_was_inside {
+            if !inside
+                && !self.pointer_was_inside
+                && cx.fingers.first_mouse_button.is_none()
+            {
                 pass_through_to_children = false;
             }
             self.pointer_was_inside = inside;

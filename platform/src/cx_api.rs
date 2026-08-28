@@ -958,14 +958,30 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::RepinMousePointer);
     }
 
-    /// Widget-scoped pointer pin (value scrubbing): hides the cursor AT its
-    /// current position and detaches it so deltas keep flowing with
-    /// infinite range; `pin_mouse_pointer(false)` restores the cursor at
-    /// the press point. Engage only when the drag actually starts (the
-    /// 3px threshold crossing), never on the initial press. Focus loss
-    /// releases the pin automatically.
-    pub fn pin_mouse_pointer(&mut self, on: bool) {
-        self.platform_ops.push_back(CxOsOp::PinMousePointer(on));
+    /// Pin the CURRENT mouse capture for value scrubbing: the hardware
+    /// cursor hides AT its position and detaches so deltas keep flowing
+    /// with infinite range; the drag owner keeps receiving FingerMove
+    /// through its ordinary capture, and nothing else in the window sees
+    /// the pointer (no hover, no new captures). Engage only when the drag
+    /// actually starts (the 3px threshold crossing), never on the initial
+    /// press. Release is AUTOMATIC: the pin rides on the capture, and the
+    /// hardware button-up releases both (plus focus-loss and the platform
+    /// layer's own unconditional release) — the cursor restores at the
+    /// press point. Call `unpin_pointer_capture` only to cancel EARLY
+    /// (Escape / right-click) while the button is still held.
+    pub fn pin_pointer_capture(&mut self) {
+        if self.fingers.pin_mouse_capture() {
+            self.platform_ops.push_back(CxOsOp::PinMousePointer(true));
+        }
+    }
+
+    /// Cancel a scrub pin while the button is still held (Escape /
+    /// right-click cancel): clears the capture's pin flag and restores the
+    /// cursor at the press point.
+    pub fn unpin_pointer_capture(&mut self) {
+        if self.fingers.unpin_captures() {
+            self.platform_ops.push_back(CxOsOp::PinMousePointer(false));
+        }
     }
 
     pub fn show_in_dock(&mut self, show: bool) {

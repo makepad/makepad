@@ -94,6 +94,39 @@ pub struct TweakDiffEntry {
     pub new: String,
 }
 
+/// A Ctrl+Space note card, attached to a widget by path: it rides with
+/// the widget's live rect at (dx, dy) offset and is the human's text
+/// channel to the AI (/tweak/state carries it).
+#[derive(Clone, Debug)]
+pub struct TweakNote {
+    pub path: String,
+    pub text: String,
+    pub dx: f64,
+    pub dy: f64,
+}
+
+/// One undoable edit gesture. Value: a contiguous run of applies to one
+/// prop (a scrub down->up, a text commit, chevron steps) — old is the
+/// pre-gesture value, new the latest. Reset: a double-click reset, with
+/// the pruned ledger entries so undo can restore them.
+#[derive(Clone, Debug)]
+enum UndoStep {
+    Value {
+        path: String,
+        prop: String,
+        old: String,
+        new: String,
+        /// seq of the gesture's first ledger entry: undo removes every
+        /// entry for (path, prop) from here on — as if never touched.
+        seq_start: u64,
+    },
+    Reset {
+        path: String,
+        prop: String,
+        removed: Vec<TweakDiffEntry>,
+    },
+}
+
 /// One freehand annotation stroke, in window-local points, tagged with the
 /// widget paths it touches.
 #[derive(Clone, Debug, Default)]
@@ -134,6 +167,17 @@ struct TweakSession {
     /// Throttle for sidebar TWEAK log lines: (path, prop, time) of the last
     /// emitted line, so a typing/scrubbing burst logs once per pause.
     last_sidebar_log: Option<(String, String, f64)>,
+    /// Vibecode prompts sent this session: (sel path, layer, prompt).
+    /// Surfaced in /tweak/state as the agent's work queue.
+    vibes: Vec<(String, String, String)>,
+    /// Ctrl+Space note cards, keyed by widget path (one per widget).
+    notes: Vec<TweakNote>,
+    /// The undo stack over edit gestures (Cmd+Z / Cmd+Shift+Z).
+    undo: Vec<UndoStep>,
+    redo: Vec<UndoStep>,
+    /// True while the current gesture may still merge into the top undo
+    /// step (closed by HoldOff so two scrubs never merge).
+    undo_open: bool,
     /// Bumped by every applied change (any origin) and by resets/clears:
     /// the sidebar rebuilds its rows when it sees a new generation.
     apply_gen: u64,
@@ -428,6 +472,59 @@ pub fn window_intercept(
     };
     let body_rect = body.area().clipped_rect(cx);
 
+    // Scroll routes by REGION, exclusively. Over the panel band: the
+    // tweaker tree alone gets it (the body extends under the panel and
+    // double-scrolled otherwise). Over the body: ordinary dispatch — the
+    // app scrolls, and the overlay re-reads live rects each frame so the
+    // outlines follow the content.
+    if kind == PointerKind::Scroll {
+        let in_band = tweaker
+            .borrow::<Tweaker>()
+            .map(|tw| tw.band.size.x > 0.0 && tw.band.contains(abs))
+            .unwrap_or(false);
+        if in_band {
+            tweaker.handle_event(cx, event, &mut Scope::empty());
+            return true;
+        }
+        return false;
+    }
+
+    // The note card lives on the CANVAS but belongs to the tweaker: input
+    // inside it goes to ordinary dispatch (never picked through).
+    {
+        let note_hit = tweaker
+            .borrow::<Tweaker>()
+            .and_then(|tw| tw.note_rect)
+            .map(|rect| {
+                if let Event::MouseDown(e) = event {
+                    rect.contains(e.abs)
+                } else if let Event::MouseMove(e) = event {
+                    rect.contains(e.abs)
+                } else if let Event::MouseUp(e) = event {
+                    rect.contains(e.abs)
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if note_hit {
+            return false;
+        }
+    }
+    // A scrub pin owns the pointer ABSOLUTELY: no picking, no hover-outline
+    // churn at the virtual abs (the "keeps highlighting things while I
+    // drag" bug), and never a consumed up (the wedge). The pick pass
+    // stands down until the pin releases; stale hover chrome clears once.
+    if cx.fingers.has_pinned_capture() {
+        let had_hover = {
+            let mut s = session().lock().unwrap();
+            s.hover.take().is_some()
+        };
+        if had_hover {
+            cx.redraw_all();
+        }
+        return false;
+    }
     // A splitter drag owns the pointer outright: the pick path must not
     // eat the Move that resizes or the Up that releases — releasing
     // OUTSIDE the band swallowed the Up and wedged the drag forever.
@@ -1097,6 +1194,111 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
 // instance through the ordinary apply machinery, then a full redraw/relayout.
 // ---------------------------------------------------------------------------
 
+
+/// Apply `sel`'s draw-layer SOURCE object + the session-ledger overlay onto
+/// a preview quad — the swatch then renders with the selection's actual
+/// compiled shader (fn-hash cache) at its live-tweaked values. Quad-family
+/// layers only; anything else leaves the preview untouched.
+fn apply_material_preview(
+    cx: &mut Cx,
+    widget: &WidgetRef,
+    preview: &mut DrawQuad,
+    layer: &str,
+    sel_path: &str,
+) {
+    let overlay: Vec<(String, String)> = {
+        let session = session().lock().unwrap();
+        let prefix = format!("{layer}.");
+        let mut latest: Vec<(String, String)> = Vec::new();
+        for entry in session
+            .diff
+            .iter()
+            .filter(|e| e.path == sel_path && e.prop.starts_with(&prefix))
+        {
+            let leaf = entry.prop[prefix.len()..].to_string();
+            if let Some(slot) = latest.iter_mut().find(|(l, _)| *l == leaf) {
+                slot.1 = entry.new.clone();
+            } else {
+                latest.push((leaf, entry.new.clone()));
+            }
+        }
+        latest
+    };
+    let layer_id = LiveId::from_str(layer);
+    cx.with_vm(|vm| {
+        vm.bx.captured_errors = Some(Vec::new());
+        let source = widget.script_source();
+        if source != ScriptObject::ZERO {
+            let value = vm.bx.heap.value(source, layer_id.into(), NoTrap);
+            if let Some(vobj) = value.as_object() {
+                let quadish = !vm
+                    .bx
+                    .heap
+                    .value(vobj, id!(rect_pos).into(), NoTrap)
+                    .is_nil();
+                if quadish {
+                    let mut body = String::from("{");
+                    for (leaf, val) in &overlay {
+                        body.push_str(&format!("{leaf}: {val}\n"));
+                    }
+                    body.push('}');
+                    let merged = vm.eval_with_source(
+                        ScriptMod {
+                            cargo_manifest_path: String::new(),
+                            module_path: "tweak".to_string(),
+                            file: "tweak://swatch".to_string(),
+                            line: 1,
+                            column: 1,
+                            code: format!(
+                                "use mod.prelude.widgets.*\n__script_source__{body};"
+                            ),
+                            values: Vec::new(),
+                        },
+                        vobj,
+                    );
+                    if merged.as_object().is_some() {
+                        use crate::makepad_script::traits::ScriptApply;
+                        preview.script_apply(
+                            vm,
+                            &crate::makepad_script::apply::Apply::Eval,
+                            &mut Scope::default(),
+                            merged,
+                        );
+                    }
+                }
+            }
+        }
+        let errors = vm.take_errors();
+        if !errors.is_empty() {
+            log!("TWEAK swatch apply errors: {}", errors.join("; "));
+        }
+    });
+}
+
+/// Feed the undo stack from one applied ledger entry. Consecutive applies
+/// to the same prop merge while the gesture is open (a scrub = one step);
+/// any new user gesture clears the redo branch. Undo/redo replays pass
+/// origin "undo"/"redo" and are not tracked.
+fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
+    s.redo.clear();
+    if s.undo_open {
+        if let Some(UndoStep::Value { path, prop, new, .. }) = s.undo.last_mut() {
+            if *path == entry.path && *prop == entry.prop {
+                *new = entry.new.clone();
+                return;
+            }
+        }
+    }
+    s.undo.push(UndoStep::Value {
+        path: entry.path.clone(),
+        prop: entry.prop.clone(),
+        old: entry.old.clone(),
+        new: entry.new.clone(),
+        seq_start: entry.seq,
+    });
+    s.undo_open = true;
+}
+
 /// One level of the selection's construction chain, display-ready.
 /// Built from `vm.construction_chain` over the widget's `#[source]` object:
 /// the proto chain of `made_at` ips, each resolved to a source location and
@@ -1338,6 +1540,9 @@ pub fn apply_splash_chunk(
                     );
                 }
                 s.diff.push(entry.clone());
+                if origin != "undo" && origin != "redo" {
+                    track_undo(&mut s, &entry);
+                }
                 changed.push(entry);
             }
         }
@@ -1395,6 +1600,9 @@ pub fn apply_splash_chunk(
                 );
             }
             s.diff.push(entry.clone());
+            if origin != "undo" && origin != "redo" {
+                track_undo(&mut s, &entry);
+            }
             changed.push(entry);
         }
     }
@@ -1662,6 +1870,41 @@ pub fn tweak_callback(
                 out.push_str(",\"hover\":");
                 out.push_str(&pick_json(pick));
             }
+            {
+                let notes = session().lock().unwrap().notes.clone();
+                if !notes.is_empty() {
+                    out.push_str(",\"notes\":[");
+                    for (i, note) in notes.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"path\":{},\"text\":{}}}",
+                            json_str(&note.path),
+                            json_str(&note.text)
+                        ));
+                    }
+                    out.push(']');
+                }
+            }
+            {
+                let vibes = session().lock().unwrap().vibes.clone();
+                if !vibes.is_empty() {
+                    out.push_str(",\"vibe\":[");
+                    for (i, (vpath, vlayer, vprompt)) in vibes.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"path\":{},\"layer\":{},\"prompt\":{}}}",
+                            json_str(vpath),
+                            json_str(vlayer),
+                            json_str(vprompt)
+                        ));
+                    }
+                    out.push(']');
+                }
+            }
             out.push_str(",\"diff\":");
             out.push_str(&diff_json(&diff));
             out.push_str(",\"ann\":");
@@ -1791,6 +2034,12 @@ script_mod! {
         }
     }
 
+    mod.widgets.TweakMaterialSwatchBase = #(TweakMaterialSwatch::register_widget(vm))
+    mod.widgets.TweakMaterialSwatch = set_type_default() do mod.widgets.TweakMaterialSwatchBase{
+        width: Fill
+        height: 34
+    }
+
     mod.widgets.TweakerBase = #(Tweaker::register_widget(vm))
     mod.widgets.Tweaker = set_type_default() do mod.widgets.TweakerBase{
         width: 0
@@ -1811,6 +2060,47 @@ script_mod! {
             color: #x303030
         }
     }
+}
+
+/// A live material preview: a quad drawn with the SELECTION'S OWN draw
+/// shader. The tweaker applies the selected widget's current draw-layer
+/// value onto `preview` (same source, same instance values), so the
+/// fn-hash shader cache compiles to the identical shader — the swatch IS
+/// the material, not a color approximation. Quad-family layers only
+/// (guarded by a rect_pos probe); other layers draw the default flat quad.
+#[derive(Script, ScriptHook, Widget)]
+pub struct TweakMaterialSwatch {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    preview: DrawQuad,
+    #[rust]
+    area: Area,
+    /// Which draw layer this swatch currently previews.
+    #[rust]
+    pub layer: String,
+    /// Rebuild generation the preview was last applied at (MAX = never).
+    #[rust(u64::MAX)]
+    pub applied_gen: u64,
+}
+
+impl Widget for TweakMaterialSwatch {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.preview.draw_abs(cx, rect);
+        cx.end_turtle_with_area(&mut self.area);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
 #[derive(Script, ScriptHook)]
@@ -2108,6 +2398,9 @@ enum VisKind {
     AlignGrid,
     /// "show all (N)": the section's long tail, folded by default.
     More(SectionKind, usize),
+    /// A material card header: layer name + live shader preview swatch
+    /// (index into Tweaker::materials).
+    Material(usize),
 }
 
 #[derive(Clone)]
@@ -2201,6 +2494,9 @@ pub struct Tweaker {
     /// Segment buttons drawn this frame: (uid, splash chunk they apply).
     #[rust]
     composite_clicks: Vec<(u64, String)>,
+    /// The selection's draw layers, in row order (material card headers).
+    #[rust]
+    materials: Vec<String>,
     /// Doc-channel text per row prop (tooltips + scrubber hints).
     #[rust]
     row_docs: HashMap<String, String>,
@@ -2216,6 +2512,42 @@ pub struct Tweaker {
     /// Focus the filter input on the next sidebar draw ('/' or tweak-on).
     #[rust]
     focus_search_pending: bool,
+    /// The exploded-view toggle button beside the filter.
+    #[rust]
+    sploded_uid: u64,
+    /// Armed state for the 2.5D exploded z-layer view (M3 wires the
+    /// renderer; until then this is the mode flag + visual state).
+    #[rust]
+    sploded_armed: bool,
+    /// The vibecode material popup: which draw layer it shows (None =
+    /// closed). Opened by clicking a material thumbnail row.
+    #[rust]
+    vibe_layer: Option<String>,
+    /// The popup's widget tree (big preview + prompt), built lazily.
+    #[rust]
+    vibe_ui: Option<WidgetRef>,
+    /// The popup swatch's last applied generation (vs rows_gen).
+    #[rust]
+    vibe_applied_gen: u64,
+    /// The prompt TextInput's uid, captured at draw.
+    #[rust]
+    vibe_prompt_uid: u64,
+    /// The Ctrl+Space note card: visible for the current selection.
+    #[rust]
+    note_open: bool,
+    #[rust]
+    note_ui: Option<WidgetRef>,
+    /// The card's on-screen rect (intercept exemption + grip dragging).
+    #[rust]
+    note_rect: Option<Rect>,
+    /// A grip drag in flight: pointer offset from the card origin.
+    #[rust]
+    note_drag: Option<Vec2d>,
+    #[rust]
+    note_text_uid: u64,
+    /// Seed the card's TextInput once per open (never clobber typing).
+    #[rust]
+    note_seed_pending: bool,
     /// Previous tweak-mode state, to detect the on edge.
     #[rust]
     was_on: bool,
@@ -2231,6 +2563,9 @@ pub struct Tweaker {
     /// The two link-toggle uids (margin, padding).
     #[rust]
     box_link_uids: [u64; 2],
+    /// The vibecode popup's own overlay list (above the panel).
+    #[rust]
+    vibe_list: Option<DrawList2d>,
     /// The panel's own overlay draw list: begun AFTER the outline overlay,
     /// so the stacking is app < outlines < panel < panel-popups — the app
     /// (dock tab bars included) can never read through the panel.
@@ -2253,6 +2588,7 @@ impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
+        self.vibe_list = Some(DrawList2d::script_new(vm));
     }
 }
 
@@ -2334,7 +2670,26 @@ impl Tweaker {
                         margin: Inset{left: 4 top: 0 right: 0 bottom: 2}
                         text: "click a widget to inspect it"
                     }
-                    search := FabSearch {}
+                    filter_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 4
+                        align: Align{x: 0.0 y: 0.5}
+                        search := FabSearch {}
+                        sploded := Button {
+                            width: 28
+                            height: 24
+                            padding: Inset{left: 5 right: 5 top: 3 bottom: 3}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: ""
+                            icon_walk: Walk{width: 15 height: Fit}
+                            draw_icon +: {
+                                color: #xd8d8d8
+                                svg: crate_resource("self:resources/icons/sploded.svg")
+                            }
+                        }
+                    }
                     props := PortalList {
                         width: Fill
                         height: Fill
@@ -2346,14 +2701,63 @@ impl Tweaker {
                         // and the scrollbar thumb still scroll.
                         drag_scrolling: false
                         SectionRow := FabSection {}
-                        NumRow := FabPropRow {
-                            value := FabValueInput {
+                        MaterialRow := View {
+                            width: Fill
+                            height: 40
+                            flow: Right
+                            spacing: 6
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 3 bottom: 3}
+                            name := mod.widgets.FabLabelDim {
+                                width: 70
+                                text: ""
+                            }
+                            swatch_bg := View {
                                 width: Fill
+                                height: 30
+                                show_bg: true
+                                padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
+                                draw_bg +: {
+                                    color: #x606060
+                                }
+                                swatch := TweakMaterialSwatch {
+                                    width: Fill
+                                    height: Fill
+                                }
+                            }
+                        }
+                        NumRow := View {
+                            width: Fill
+                            height: 24
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                            spacing: 6
+                            name := FabLabelDim {
+                                width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
+                            value := FabValueInput {
+                                width: 150
                                 height: 18
                             }
                             origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
                         }
-                        BoolRow := FabPropRow {
+                        BoolRow := View {
+                            width: Fill
+                            height: 24
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                            spacing: 6
+                            name := FabLabelDim {
+                                width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
                             value := CheckBox {
                                 width: Fit
                                 height: Fit
@@ -2361,9 +2765,21 @@ impl Tweaker {
                             }
                             origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
                         }
-                        TextRow := FabPropRow {
-                            value := TextInput {
+                        TextRow := View {
+                            width: Fill
+                            height: 24
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                            spacing: 6
+                            name := FabLabelDim {
                                 width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
+                            value := TextInput {
+                                width: 150
                                 height: 18
                                 empty_text: ""
                                 draw_bg +: {
@@ -2549,9 +2965,21 @@ impl Tweaker {
                             }
                         }
                         MoreRow := FabSection {}
-                        ColorRow := FabPropRow {
-                            value := TextInput {
+                        ColorRow := View {
+                            width: Fill
+                            height: 24
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                            spacing: 6
+                            name := FabLabelDim {
                                 width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
+                            value := TextInput {
+                                width: 110
                                 height: 18
                                 empty_text: "#rrggbbaa"
                                 draw_bg +: {
@@ -2582,6 +3010,114 @@ impl Tweaker {
         // session can drive the sidebar's fields too.
         cx.widget_tree_insert_child(self.uid, live_id!(sidebar), sidebar.clone());
         self.sidebar = Some(sidebar);
+    }
+
+    fn ensure_vibe_ui(&mut self, cx: &mut Cx) {
+        if self.vibe_ui.is_some() {
+            return;
+        }
+        let ui = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View {
+                    width: Fill
+                    height: 300
+                    flow: Down
+                    show_bg: true
+                    draw_bg +: {
+                        color: #x262626
+                    }
+                    padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
+                    spacing: 6
+                    vibe_title := FabHeaderLabel {
+                        width: Fill
+                        text: ""
+                    }
+                    vibe_doc := FabLabelSmall {
+                        width: Fill
+                        text: ""
+                    }
+                    big_bg := View {
+                        width: Fill
+                        height: 130
+                        show_bg: true
+                        padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                        draw_bg +: {
+                            color: #x585858
+                        }
+                        big := TweakMaterialSwatch {
+                            width: Fill
+                            height: Fill
+                        }
+                    }
+                    prompt := TextInput {
+                        width: Fill
+                        height: 58
+                        empty_text: "describe the change\u{2026} Enter sends to the AI"
+                        draw_bg +: {
+                            color: #x1b1b1b
+                            border_radius: 3.0
+                        }
+                        draw_text +: {
+                            color: #xe6e6e6
+                            text_style +: { font_size: 8.5 }
+                        }
+                    }
+                    vibe_hint := FabLabelSmall {
+                        width: Fill
+                        text: "Enter sends \u{00b7} the agent rewrites just this shader \u{00b7} Esc closes"
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        cx.widget_tree_insert_child(self.uid, live_id!(vibe), ui.clone());
+        self.vibe_ui = Some(ui);
+    }
+
+    fn ensure_note_ui(&mut self, cx: &mut Cx) {
+        if self.note_ui.is_some() {
+            return;
+        }
+        let ui = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View {
+                    width: Fill
+                    height: 72
+                    flow: Down
+                    show_bg: true
+                    draw_bg +: {
+                        color: #x2d2d36
+                    }
+                    grip := View {
+                        width: Fill
+                        height: 11
+                        show_bg: true
+                        draw_bg +: {
+                            color: #x444452
+                        }
+                    }
+                    note_text := TextInput {
+                        width: Fill
+                        height: 54
+                        empty_text: "note for the AI\u{2026}"
+                        draw_bg +: {
+                            color: #x22222a
+                        }
+                        draw_text +: {
+                            color: #xe8e8d0
+                            text_style +: { font_size: 8.5 }
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        cx.widget_tree_insert_child(self.uid, live_id!(note), ui.clone());
+        self.note_ui = Some(ui);
     }
 
     /// Rebuild the row bindings from the selection's reflected properties:
@@ -2668,6 +3204,16 @@ impl Tweaker {
                 })
             })
             .and_then(|row| row.value.parse::<f64>().ok().map(|v| (row.prop.clone(), v)));
+        // The selection's draw layers, in row order — the material cards.
+        self.materials.clear();
+        for row in &self.rows {
+            if row.section == SectionKind::Style {
+                let first = row.prop.split('.').next().unwrap_or("");
+                if first.starts_with("draw_") && !self.materials.iter().any(|m| m == first) {
+                    self.materials.push(first.to_string());
+                }
+            }
+        }
         // The CASCADE section: read-only rows, one block per construction
         // level, pushed after the sort so they keep exactly this order.
         {
@@ -2852,6 +3398,7 @@ impl Tweaker {
             out.extend(composites.iter().copied());
             let expanded = filtering || self.expanded[section.index()];
             let mut hidden = 0usize;
+            let mut last_material: Option<String> = None;
             for index in members {
                 let row = &self.rows[index];
                 let in_tail = match section {
@@ -2871,6 +3418,16 @@ impl Tweaker {
                         hidden += 1;
                     }
                     continue;
+                }
+                // Material card header before each draw layer's first row.
+                if section == SectionKind::Style && !filtering {
+                    let first = row.prop.split('.').next().unwrap_or("");
+                    if first.starts_with("draw_") && last_material.as_deref() != Some(first) {
+                        if let Some(mi) = self.materials.iter().position(|m| m == first) {
+                            out.push(VisKind::Material(mi));
+                        }
+                        last_material = Some(first.to_string());
+                    }
                 }
                 out.push(VisKind::Prop(index));
             }
@@ -2923,12 +3480,21 @@ impl Tweaker {
             }
         }
         self.search_uid = sidebar
+            .child(live_id!(filter_row))
             .child(live_id!(search))
             .child(live_id!(input))
             .widget_uid()
             .0;
+        self.sploded_uid = sidebar
+            .child(live_id!(filter_row))
+            .child(live_id!(sploded))
+            .widget_uid()
+            .0;
         if self.focus_search_pending {
-            let input = sidebar.child(live_id!(search)).child(live_id!(input));
+            let input = sidebar
+                .child(live_id!(filter_row))
+                .child(live_id!(search))
+                .child(live_id!(input));
             if input.area() != Area::Empty {
                 cx.set_key_focus(input.area());
                 self.focus_search_pending = false;
@@ -2959,6 +3525,7 @@ impl Tweaker {
                 let template = match entry {
                     VisKind::Section(..) => live_id!(SectionRow),
                     VisKind::More(..) => live_id!(MoreRow),
+                    VisKind::Material(_) => live_id!(MaterialRow),
                     VisKind::Size => live_id!(SizeRow),
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
@@ -2989,6 +3556,36 @@ impl Tweaker {
                     VisKind::More(_, count) => {
                         item.child(live_id!(title))
                             .set_text(cx, &format!("\u{2026} show all ({count})"));
+                    }
+                    VisKind::Material(mi) => {
+                        let layer = self.materials.get(mi).cloned().unwrap_or_default();
+                        item.child(live_id!(name)).set_text(cx, &layer);
+                        let sw_ref = item.child(live_id!(swatch_bg)).child(live_id!(swatch));
+                        let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
+                        if let Some(mut sw) = sw_opt {
+                            if sw.applied_gen != self.rows_gen || sw.layer != layer {
+                                let widget =
+                                    cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                                if !widget.is_empty() {
+                                    let sel_path = session()
+                                        .lock()
+                                        .unwrap()
+                                        .pinned
+                                        .as_ref()
+                                        .map(|p| p.path.clone())
+                                        .unwrap_or_default();
+                                    apply_material_preview(
+                                        cx,
+                                        &widget,
+                                        &mut sw.preview,
+                                        &layer,
+                                        &sel_path,
+                                    );
+                                    sw.applied_gen = self.rows_gen;
+                                    sw.layer = layer;
+                                }
+                            }
+                        }
                     }
                     VisKind::Size => {
                         item.child(live_id!(name)).set_text(cx, "size");
@@ -3331,10 +3928,27 @@ impl Tweaker {
         let Some(row) = self.rows.get(row_index) else {
             return;
         };
-        let Some(original) = row.original.clone() else {
-            return; // nothing to reset
-        };
         let prop = row.prop.clone();
+        self.reset_prop(cx, sel, &prop);
+    }
+
+    /// Reset one prop to its session baseline (the FIRST diff entry's old
+    /// value) and drop every ledger entry for it — a reset value is as if
+    /// it was never touched: /tweak/state, /tweak/final and the changed
+    /// indicators all forget it.
+    fn reset_prop(&mut self, cx: &mut Cx, sel: &TweakPick, prop: &str) {
+        let original = {
+            let session = session().lock().unwrap();
+            session
+                .diff
+                .iter()
+                .find(|entry| entry.path == sel.path && entry.prop == prop)
+                .map(|entry| entry.old.clone())
+        };
+        let Some(original) = original else {
+            return; // untouched this session: nothing to reset
+        };
+        let prop = prop.to_string();
         let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
         if widget.is_empty() {
             return;
@@ -3343,6 +3957,21 @@ impl Tweaker {
         match eval_chunk(cx, &widget, &chunk) {
             Ok(()) => {
                 let mut session = session().lock().unwrap();
+                let removed: Vec<TweakDiffEntry> = session
+                    .diff
+                    .iter()
+                    .filter(|entry| entry.path == sel.path && entry.prop == prop)
+                    .cloned()
+                    .collect();
+                if !removed.is_empty() {
+                    session.redo.clear();
+                    session.undo.push(UndoStep::Reset {
+                        path: sel.path.clone(),
+                        prop: prop.clone(),
+                        removed,
+                    });
+                    session.undo_open = false;
+                }
                 session
                     .diff
                     .retain(|entry| !(entry.path == sel.path && entry.prop == prop));
@@ -3360,6 +3989,138 @@ impl Tweaker {
         }
     }
 
+    /// Cmd+Z: pop the top edit gesture — restore the pre-gesture value and
+    /// remove the gesture's ledger entries, as if it never happened.
+    fn undo(&mut self, cx: &mut Cx) {
+        let Some(step) = session().lock().unwrap().undo.pop() else {
+            return;
+        };
+        match &step {
+            UndoStep::Value {
+                path,
+                prop,
+                old,
+                seq_start,
+                ..
+            } => {
+                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                    session().lock().unwrap().undo.push(step);
+                    return;
+                };
+                let chunk = format!("{prop}: {old}");
+                if let Err(error) = eval_chunk(cx, &widget, &chunk) {
+                    log!("TWEAK undo failed: {error}");
+                    return;
+                }
+                let mut s = session().lock().unwrap();
+                s.diff.retain(|e| {
+                    !(e.path == *path && e.prop == *prop && e.seq >= *seq_start)
+                });
+                s.apply_gen += 1;
+                s.undo_open = false;
+                drop(s);
+                log!("TWEAK undo {} {} -> {}", path, prop, old);
+            }
+            UndoStep::Reset {
+                path,
+                prop,
+                removed,
+            } => {
+                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                    session().lock().unwrap().undo.push(step);
+                    return;
+                };
+                let last = removed.last().map(|e| e.new.clone()).unwrap_or_default();
+                let chunk = format!("{prop}: {last}");
+                if let Err(error) = eval_chunk(cx, &widget, &chunk) {
+                    log!("TWEAK undo(reset) failed: {error}");
+                    return;
+                }
+                let mut s = session().lock().unwrap();
+                for entry in removed {
+                    s.diff.push(entry.clone());
+                }
+                s.apply_gen += 1;
+                s.undo_open = false;
+                drop(s);
+                log!("TWEAK undo reset {} {} -> {}", path, prop, last);
+            }
+        }
+        session().lock().unwrap().redo.push(step);
+        self.rows_uid = 0;
+        cx.redraw_all();
+    }
+
+    /// Cmd+Shift+Z: replay the most recently undone gesture.
+    fn redo(&mut self, cx: &mut Cx) {
+        let Some(step) = session().lock().unwrap().redo.pop() else {
+            return;
+        };
+        match &step {
+            UndoStep::Value {
+                path, prop, new, ..
+            } => {
+                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                    session().lock().unwrap().redo.push(step);
+                    return;
+                };
+                let chunk = format!("{prop}: {new}");
+                if let Err(error) = apply_splash_chunk(cx, &widget, path, &chunk, "redo")
+                    .map(|_| ())
+                {
+                    log!("TWEAK redo failed: {error}");
+                    return;
+                }
+                let mut s = session().lock().unwrap();
+                let seq_start = s
+                    .diff
+                    .last()
+                    .map(|e| e.seq)
+                    .unwrap_or(0);
+                s.undo.push(UndoStep::Value {
+                    path: path.clone(),
+                    prop: prop.clone(),
+                    old: match &step {
+                        UndoStep::Value { old, .. } => old.clone(),
+                        _ => unreachable!(),
+                    },
+                    new: new.clone(),
+                    seq_start,
+                });
+                s.undo_open = false;
+                drop(s);
+                log!("TWEAK redo {} {} -> {}", path, prop, new);
+            }
+            UndoStep::Reset {
+                path,
+                prop,
+                removed,
+            } => {
+                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                    session().lock().unwrap().redo.push(step);
+                    return;
+                };
+                let baseline = removed.first().map(|e| e.old.clone()).unwrap_or_default();
+                let chunk = format!("{prop}: {baseline}");
+                if let Err(error) = eval_chunk(cx, &widget, &chunk) {
+                    log!("TWEAK redo(reset) failed: {error}");
+                    return;
+                }
+                let mut s = session().lock().unwrap();
+                let (path_c, prop_c) = (path.clone(), prop.clone());
+                s.diff
+                    .retain(|e| !(e.path == path_c && e.prop == prop_c));
+                s.undo.push(step.clone());
+                s.apply_gen += 1;
+                s.undo_open = false;
+                drop(s);
+                log!("TWEAK redo reset {} {}", path_c, prop_c);
+            }
+        }
+        self.rows_uid = 0;
+        cx.redraw_all();
+    }
+
     /// Sidebar edits: every field action becomes one splash chunk applied
     /// to the selected instance — textbox, swatch, picker and the AI's
     /// /tweak/apply all land in the same diff entry per property.
@@ -3370,6 +4131,51 @@ impl Tweaker {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
             };
+            if self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid {
+                if let TextInputAction::Changed(text) = widget_action.cast::<TextInputAction>() {
+                    let sel = session().lock().unwrap().pinned.clone();
+                    if let Some(sel) = sel {
+                        let mut s = session().lock().unwrap();
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                            note.text = text.clone();
+                        }
+                    }
+                }
+            }
+            if self.vibe_prompt_uid != 0
+                && widget_action.widget_uid.0 == self.vibe_prompt_uid
+            {
+                if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
+                {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        let (path, layer) = {
+                            let s = session().lock().unwrap();
+                            (
+                                s.pinned
+                                    .as_ref()
+                                    .map(|p| p.path.clone())
+                                    .unwrap_or_default(),
+                                self.vibe_layer.clone().unwrap_or_default(),
+                            )
+                        };
+                        // The execute bundle, on the AI's ear (the TWEAK
+                        // log + /tweak/state carry it to the driving
+                        // agent): scope = exactly this draw layer.
+                        log!("TWEAK vibe sel={path} layer={layer} prompt={text}");
+                        session().lock().unwrap().vibes.push((path, layer, text));
+                    }
+                }
+            }
+            if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    // The 2.5D exploded z-layer view. Inspection-only while
+                    // up (input belongs to the mode): exit with Esc or F10.
+                    cx.sploded_toggle();
+                    self.sploded_armed = cx.sploded_active();
+                    log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
+                }
+            }
             if self.search_uid != 0 && widget_action.widget_uid.0 == self.search_uid {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
@@ -3380,6 +4186,7 @@ impl Tweaker {
                         self.filter.clear();
                         if let Some(sidebar) = self.sidebar.as_ref() {
                             sidebar
+                                .child(live_id!(filter_row))
                                 .child(live_id!(search))
                                 .child(live_id!(input))
                                 .set_text(cx, "");
@@ -3402,6 +4209,7 @@ impl Tweaker {
             HoldOff,
         }
         let mut edits: Vec<Edit> = Vec::new();
+        let mut resets: Vec<String> = Vec::new();
         for action in actions {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
@@ -3416,6 +4224,10 @@ impl Tweaker {
                 .cloned()
             {
                 match widget_action.cast::<FabValueInputAction>() {
+                    FabValueInputAction::Reset => {
+                        resets.push(prop.clone());
+                        continue;
+                    }
                     FabValueInputAction::Changed(v) => {
                         // Linked box editor: one leg drives all four.
                         let link_index = if prop.starts_with("margin.") {
@@ -3506,6 +4318,9 @@ impl Tweaker {
                     FabValueInputAction::Ended(_) => {
                         edits.push(Edit::HoldOff);
                     }
+                    FabValueInputAction::Reset => {
+                        resets.push(binding.prop.clone());
+                    }
                     _ => {}
                 },
                 RowKind::Bool => match widget_action.cast::<CheckBoxAction>() {
@@ -3592,6 +4407,9 @@ impl Tweaker {
                 },
             }
         }
+        for prop in resets {
+            self.reset_prop(cx, &sel, &prop);
+        }
         for edit in edits {
             match edit {
                 Edit::Apply(chunk) => self.sidebar_apply(cx, &sel, &chunk),
@@ -3617,7 +4435,12 @@ impl Tweaker {
                     self.redraw_overlay(cx);
                 }
                 Edit::HoldOff => {
-                    session().lock().unwrap().edit_hold = false;
+                    let mut s = session().lock().unwrap();
+                    s.edit_hold = false;
+                    // Gesture boundary: the next apply starts a NEW undo
+                    // step (two scrubs on one prop never merge).
+                    s.undo_open = false;
+                    drop(s);
                     self.text_edit_origin = None;
                     self.redraw_overlay(cx);
                 }
@@ -3652,6 +4475,9 @@ impl Tweaker {
         }
         if let Some(sidebar_list) = &self.sidebar_list {
             sidebar_list.redraw(cx);
+        }
+        if let Some(vibe_list) = &self.vibe_list {
+            vibe_list.redraw(cx);
         }
         cx.redraw_all();
     }
@@ -3928,6 +4754,15 @@ impl Widget for Tweaker {
                                 self.expanded[index] = !self.expanded[index];
                                 self.redraw_sidebar(cx);
                             }
+                            VisKind::Material(mi) => {
+                                // Thumbnail click: open the vibecode popup
+                                // for this draw layer.
+                                if let Some(layer) = self.materials.get(mi) {
+                                    self.vibe_layer = Some(layer.clone());
+                                    self.vibe_applied_gen = u64::MAX;
+                                    self.redraw_sidebar(cx);
+                                }
+                            }
                             VisKind::Size
                             | VisKind::BoxInset(_)
                             | VisKind::FlowSpacing
@@ -3992,6 +4827,49 @@ impl Widget for Tweaker {
                 }
             }
             Event::KeyDown(ke)
+                if ke.key_code == KeyCode::Space
+                    && ke.modifiers.control
+                    && tweak_is_on() =>
+            {
+                // Ctrl+Space: the note card for the SELECTED widget.
+                let sel_path = session()
+                    .lock()
+                    .unwrap()
+                    .pinned
+                    .as_ref()
+                    .map(|p| p.path.clone());
+                if let Some(path) = sel_path {
+                    self.note_open = !self.note_open;
+                    if self.note_open {
+                        let mut s = session().lock().unwrap();
+                        if !s.notes.iter().any(|n| n.path == path) {
+                            s.notes.push(TweakNote {
+                                path,
+                                text: String::new(),
+                                dx: 8.0,
+                                dy: -78.0,
+                            });
+                        }
+                        self.note_seed_pending = true;
+                    } else {
+                        self.note_rect = None;
+                    }
+                    self.redraw_overlay(cx);
+                }
+            }
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::KeyZ
+                    && ke.modifiers.logo
+                    && tweak_is_on()
+                    && cx.key_focus() == Area::Empty =>
+            {
+                if ke.modifiers.shift {
+                    self.redo(cx);
+                } else {
+                    self.undo(cx);
+                }
+            }
+            Event::KeyDown(ke)
                 if ke.key_code == KeyCode::Slash
                     && tweak_is_on()
                     && cx.key_focus() == Area::Empty =>
@@ -3999,6 +4877,11 @@ impl Widget for Tweaker {
                 // '/': jump to the filter (only when nothing is editing).
                 self.focus_search_pending = true;
                 self.redraw_sidebar(cx);
+            }
+            Event::Scroll(_) if tweak_is_on() => {
+                // Content may have moved under the outlines: repaint the
+                // overlay with the freshly-read rects.
+                self.redraw_overlay(cx);
             }
             Event::MouseMove(e)
                 if Some(e.window_id.id()) == self.my_window
@@ -4067,12 +4950,70 @@ impl Widget for Tweaker {
                 sidebar.handle_event(cx, event, scope);
             }
         }
+        if self.note_open {
+            if let Some(ui) = self.note_ui.clone() {
+                ui.handle_event(cx, event, scope);
+            }
+            match event {
+                Event::MouseDown(e) if e.button.is_primary() => {
+                    if let Some(rect) = self.note_rect {
+                        let grip = Rect {
+                            pos: rect.pos,
+                            size: dvec2(rect.size.x, 12.0),
+                        };
+                        if grip.contains(e.abs) {
+                            self.note_drag = Some(dvec2(
+                                e.abs.x - rect.pos.x,
+                                e.abs.y - rect.pos.y,
+                            ));
+                        }
+                    }
+                }
+                Event::MouseMove(e) => {
+                    if let Some(grab) = self.note_drag {
+                        let sel = session().lock().unwrap().pinned.clone();
+                        if let Some(sel) = sel {
+                            let mut s = session().lock().unwrap();
+                            if let Some(note) =
+                                s.notes.iter_mut().find(|n| n.path == sel.path)
+                            {
+                                note.dx = e.abs.x - grab.x - sel.rect.pos.x;
+                                note.dy = e.abs.y - grab.y - sel.rect.pos.y;
+                            }
+                            drop(s);
+                            self.redraw_overlay(cx);
+                        }
+                    }
+                }
+                Event::MouseUp(_) => {
+                    self.note_drag = None;
+                }
+                _ => {}
+            }
+        }
+        if self.vibe_layer.is_some() {
+            if let Some(ui) = self.vibe_ui.clone() {
+                ui.handle_event(cx, event, scope);
+            }
+            if let Event::KeyDown(ke) = event {
+                if ke.key_code == KeyCode::Escape {
+                    self.vibe_layer = None;
+                    self.open_popup = None;
+                    self.redraw_sidebar(cx);
+                }
+            }
+        }
         if let Event::Actions(actions) = event {
             self.handle_sidebar_actions(cx, actions);
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        // While the exploded z-layer view is up the panel and overlay make
+        // no sense (and could not receive input anyway): draw nothing.
+        if cx.sploded_active() {
+            return DrawStep::done();
+        }
         let on = tweak_is_on();
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.
@@ -4132,6 +5073,32 @@ impl Widget for Tweaker {
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
 
+        // Selection/hover rects go STALE when containers scroll: re-read
+        // the live widget areas every overlay frame (and write back, so
+        // /tweak/state reports where things actually are).
+        let pinned = pinned.map(|mut pick| {
+            let live = cx.widget_tree().widget(WidgetUid(pick.uid));
+            if !live.is_empty() {
+                let rect = live.area().clipped_rect(cx);
+                if rect.size.x > 0.0 && rect != pick.rect {
+                    pick.rect = rect;
+                    if let Some(pinned) = session().lock().unwrap().pinned.as_mut() {
+                        pinned.rect = rect;
+                    }
+                }
+            }
+            pick
+        });
+        let hover = hover.map(|mut pick| {
+            let live = cx.widget_tree().widget(WidgetUid(pick.uid));
+            if !live.is_empty() {
+                let rect = live.area().clipped_rect(cx);
+                if rect.size.x > 0.0 {
+                    pick.rect = rect;
+                }
+            }
+            pick
+        });
         if let Some(pick) = &pinned {
             if Some(pick.window_id) == window_id {
                 let style = if quiet {
@@ -4165,6 +5132,38 @@ impl Widget for Tweaker {
                 self.draw_stroke_points(cx, &stroke.points);
             }
         }
+        // The Ctrl+Space note card rides the SELECTION's live rect.
+        self.note_rect = None;
+        if self.note_open {
+            if let Some(pick) = &pinned {
+                let note = {
+                    let s = session().lock().unwrap();
+                    s.notes.iter().find(|n| n.path == pick.path).cloned()
+                };
+                if let Some(note) = note {
+                    self.ensure_note_ui(cx);
+                    let ui = self.note_ui.as_ref().unwrap().clone();
+                    let field = ui.child(live_id!(note_text));
+                    self.note_text_uid = field.widget_uid().0;
+                    if self.note_seed_pending {
+                        field.set_text(cx, &note.text);
+                        self.note_seed_pending = false;
+                    }
+                    let pos = dvec2(
+                        (pick.rect.pos.x + note.dx).max(0.0),
+                        (pick.rect.pos.y + note.dy).max(0.0),
+                    );
+                    let mut walk = Walk::fit();
+                    walk.abs_pos = Some(pos);
+                    walk.width = Size::Fixed(210.0);
+                    let _ = ui.draw_walk(cx, scope, walk);
+                    let rect = ui.area().rect(cx);
+                    if rect.size.x > 0.0 {
+                        self.note_rect = Some(rect);
+                    }
+                }
+            }
+        }
 
         cx.end_pass_sized_turtle();
         self.overlay_list.as_mut().unwrap().end(cx);
@@ -4180,6 +5179,63 @@ impl Widget for Tweaker {
         self.draw_sidebar(cx, scope, sel.as_ref());
         cx.end_pass_sized_turtle();
         self.sidebar_list.as_mut().unwrap().end(cx);
+
+        if self.vibe_layer.is_some() {
+            let band = self.band;
+            let vibe_list = self.vibe_list.as_mut().unwrap();
+            vibe_list.begin_overlay_reuse(cx);
+            let size = cx.current_pass_size();
+            cx.begin_root_turtle(size, Layout::flow_down());
+            // The vibecode material popup: big live preview + prompt, anchored
+            // over the panel. While open it owns its rect (open_popup gating).
+            if let Some(layer) = self.vibe_layer.clone() {
+                self.ensure_vibe_ui(cx);
+                let ui = self.vibe_ui.as_ref().unwrap().clone();
+                ui.child(live_id!(vibe_title)).set_text(cx, &layer);
+                let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
+                ui.child(live_id!(vibe_doc))
+                    .set_text(cx, doc.lines().next().unwrap_or(""));
+                self.vibe_prompt_uid = ui.child(live_id!(prompt)).widget_uid().0;
+                {
+                    let sw_ref = ui.child(live_id!(big_bg)).child(live_id!(big));
+                    let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
+                    if let Some(mut sw) = sw_opt {
+                        if sw.applied_gen != self.rows_gen || sw.layer != layer {
+                            let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                            if !widget.is_empty() {
+                                let sel_path = session()
+                                    .lock()
+                                    .unwrap()
+                                    .pinned
+                                    .as_ref()
+                                    .map(|p| p.path.clone())
+                                    .unwrap_or_default();
+                                apply_material_preview(
+                                    cx,
+                                    &widget,
+                                    &mut sw.preview,
+                                    &layer,
+                                    &sel_path,
+                                );
+                                sw.applied_gen = self.rows_gen;
+                                sw.layer = layer.clone();
+                            }
+                        }
+                    }
+                }
+                let width = (band.size.x - 16.0).max(200.0);
+                let mut popup_walk = Walk::fit();
+                popup_walk.abs_pos = Some(dvec2(band.pos.x + 8.0, 96.0));
+                popup_walk.width = Size::Fixed(width);
+                let _ = ui.draw_walk(cx, scope, popup_walk);
+                let rect = ui.area().rect(cx);
+                if rect.size.x > 0.0 {
+                    self.open_popup = Some(rect);
+                }
+            }
+            cx.end_pass_sized_turtle();
+            self.vibe_list.as_mut().unwrap().end(cx);
+        }
 
         DrawStep::done()
     }

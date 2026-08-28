@@ -175,6 +175,9 @@ mod imp {
             dx: f64,
             dy: f64,
             mods: RemoteKeyModifiers,
+            /// Hardware-faithful: route through the same pointer-lock/pin
+            /// transform physical mouse events take (`/m?hw=1`).
+            hw: bool,
         },
         Key {
             down: bool,
@@ -205,6 +208,13 @@ mod imp {
     /// drawn a frame that includes whatever the request did. `payload` is the
     /// JSON to answer with (a tweak op's result); `None` answers with the
     /// generic `{"ok":1,"f":N}` frame ack.
+    /// Last hw-injected pointer position: hw moves carry deltas computed
+    /// against it, like hardware events carry NSEvent deltas.
+    fn hw_last() -> &'static Mutex<Option<crate::makepad_math::DVec2>> {
+        static W: OnceLock<Mutex<Option<crate::makepad_math::DVec2>>> = OnceLock::new();
+        W.get_or_init(|| Mutex::new(None))
+    }
+
     fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>, Option<String>)>> {
         static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>, Option<String>)>>> = OnceLock::new();
         W.get_or_init(|| Mutex::new(Vec::new()))
@@ -639,6 +649,84 @@ mod imp {
                 };
                 let time = cx.seconds_since_app_start();
                 for input in inputs {
+                    // Hardware-faithful injection: the same platform path
+                    // (and pointer-pin transform) physical events take.
+                    if let Input::Mouse {
+                        kind,
+                        x,
+                        y,
+                        button,
+                        dx,
+                        dy,
+                        mods,
+                        hw: true,
+                    } = input
+                    {
+                        let raw = dvec2(x, y);
+                        match kind {
+                            MouseKind::Move => {
+                                let (seed, delta) = {
+                                    let mut last = hw_last().lock().unwrap();
+                                    let seed = last.unwrap_or(raw);
+                                    let delta = dvec2(raw.x - seed.x, raw.y - seed.y);
+                                    *last = Some(raw);
+                                    (seed, delta)
+                                };
+                                cx.dispatch_hw_mouse_move(
+                                    window_id,
+                                    raw,
+                                    delta,
+                                    seed,
+                                    mods.into_key_modifiers(),
+                                    time,
+                                );
+                            }
+                            MouseKind::Down => {
+                                *hw_last().lock().unwrap() = Some(raw);
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::MouseDown(RemoteMouseDown {
+                                        time,
+                                        x,
+                                        y,
+                                        button_raw_bits: 1 << button,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                            MouseKind::Up => {
+                                cx.dispatch_hw_pin_release();
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::MouseUp(RemoteMouseUp {
+                                        time,
+                                        x,
+                                        y,
+                                        button_raw_bits: 1 << button,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                            MouseKind::Scroll => {
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::Scroll(RemoteScroll {
+                                        time,
+                                        x,
+                                        y,
+                                        sx: dx,
+                                        sy: dy,
+                                        is_mouse: true,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let msg = match input {
                         Input::Mouse {
                             kind,
@@ -648,6 +736,7 @@ mod imp {
                             dx,
                             dy,
                             mods,
+                            hw: _,
                         } => match kind {
                             MouseKind::Move => StudioToApp::MouseMove(RemoteMouseMove {
                                 time,
@@ -1053,6 +1142,7 @@ mod imp {
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
              /g?w=&scale=&raw= grab window w (default: first). writes a png, returns {{\"png\":path,\"w\":id,\"sz\":[w,h]}}; raw=1 sends image/png bytes\n\
              /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
+                               add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
@@ -1197,6 +1287,7 @@ mod imp {
         let dx = p.f64(&["dx", "sx"], 0.0);
         let dy = p.f64(&["dy", "sy"], 0.0);
         let mods = p.mods();
+        let hw = p.flag(&["hw"]);
         let mouse = |kind| Input::Mouse {
             kind,
             x,
@@ -1205,6 +1296,7 @@ mod imp {
             dx,
             dy,
             mods,
+            hw,
         };
         let inputs = match kind.as_str() {
             "move" => vec![mouse(MouseKind::Move)],
