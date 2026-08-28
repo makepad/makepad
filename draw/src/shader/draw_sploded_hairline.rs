@@ -26,13 +26,13 @@ script_mod! {
         // would clash with it, the way rect_pos/rect_size are left undeclared.
         pixel: fn(){
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 0.5)
+            sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 0.5)
             // Deepest levels read warmest, so the eye can rank planes without
             // counting them. 12 is a nesting depth no real UI exceeds by much.
             let t = clamp(self.level / 12.0, 0.0, 1.0)
             let tint = vec3(0.45, 0.72, 1.0).mix(vec3(1.0, 0.62, 0.18), t)
-            let a = 0.55
-            sdf.stroke(vec4(tint * a, a), 1.0)
+            let a = 0.85
+            sdf.stroke(vec4(tint * a, a), 2.0)
             return sdf.result
         }
     }

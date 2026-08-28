@@ -517,7 +517,14 @@ impl CxDrawCall {
     /// is a larger z, and the ortho maps larger z nearer the viewer, so
     /// children lift toward you and parents stay at the bottom of the stack.
     pub fn resolve_zbias(&mut self, paint_order: f32, sploded: bool) -> bool {
-        let z = if sploded { self.turtle_depth } else { paint_order };
+        let z = if sploded {
+            // One level is worth far more than any widget's own `draw_depth`,
+            // so those stay an in-plane tie-break instead of whole planes of
+            // separation. See `sploded::SPLODED_DEPTH_UNIT`.
+            self.turtle_depth * crate::sploded::SPLODED_DEPTH_UNIT
+        } else {
+            paint_order
+        };
         self.draw_call_uniforms.set_zbias(z)
     }
 }

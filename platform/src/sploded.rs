@@ -28,12 +28,57 @@
 //! while the mode is up — `find_appendable_drawcall` takes a depth target that
 //! is `Some` only then, which is what keeps mode-off rendering byte-identical.
 //!
+//! # The depth convention, derived once (do not flip signs by eye)
+//!
+//! This axis was flipped three times by trial before it was written down. The
+//! chain below is the whole derivation; `sign_convention_is_stable` in the
+//! tests at the bottom of this file asserts it, so it cannot regress silently.
+//!
+//! 1. **Nesting increases into the tree.** `Cx::nesting_depth` counts
+//!    `WidgetRef` draw scopes, so a child's `turtle_depth` is strictly greater
+//!    than its parent's.
+//! 2. **Nesting depth becomes `world.z`.** While the mode is up the backend
+//!    walk hands out `turtle_depth * SPLODED_DEPTH_UNIT` as `zbias`, and every
+//!    2D shader computes `world.z = <per-instance depth> + zbias`. Deeper
+//!    nesting is therefore a LARGER `world.z`.
+//! 3. **Larger `world.z` is nearer the eye.** The 2D ortho is built with
+//!    `near = 100, far = -100` (`set_ortho_matrix`), giving
+//!    `z_clip = 0.5 - z_view/200`; the depth test is `LessEqual` against a
+//!    1.0 clear. Larger z_view means smaller z_clip means it wins the depth
+//!    test. So the eye sits at large +z looking down the -z direction, and
+//!    "more nested" already means "in front" without any sign choice.
+//! 4. **Screen y is down.** The ortho passes `top = offset.y` and
+//!    `bottom = offset.y + size.y`, so the y row carries `-2/size.y`: a larger
+//!    `world.y` is lower on the screen.
+//! 5. **Ortho has no perspective, so step 3 is invisible on its own.** Moving
+//!    along the view axis changes nothing in an orthographic projection. The
+//!    stack is made legible by SHEARING the z axis onto a screen direction,
+//!    and which direction that is, is the one real choice here.
+//! 6. **The camera looks DOWN at the stack.** Picture sheets stacked on a
+//!    desk with the most-nested sheet on top, viewed from above and slightly
+//!    in front: the desk recedes toward the top of the image, so the sheet
+//!    nearest the eye sits LOWER in the image and the base of the stack
+//!    recedes upward and away.
+//!
+//! Conclusion, and the one sign this file sets: **a deeper layer projects
+//! DOWNWARD on screen (larger `y`) and NEARER in depth (larger view z).**
+//! Concretely `camera_view` applies `Rx(-pitch)`, not `Rx(+pitch)`: the raw
+//! right-handed rotation in a (right, down, toward-viewer) frame puts the eye
+//! BELOW the stack, which is the inside-out reading the user first rejected.
+//!
+//! Two independent things can make a correct matrix look wrong, and both have
+//! done so here — check them before touching a sign:
+//!
+//! * the body pass composites through a texture, so a wrong `source_y_flip` in
+//!   `SplodedStack::draw_resolve` mirrors the whole scene vertically, which
+//!   inverts the APPARENT z direction while the matrix is fine. Readable text
+//!   in a grab is the tell: if the text is mirrored, fix the flip, not the z.
+//! * a stale build. Confirm the binary under test contains the fix.
+//!
 //! The matrix keeps its third row a pure `z -> z * scale` pass-through on
-//! purpose. Deeper nesting is a larger z, and the ortho maps larger z nearer
-//! the viewer (`z_clip = 0.5 - z/200`, depth test LessEqual), so the direction
-//! is structurally correct rather than a tuned sign. Instances inside one
-//! plane share a z, so paint order decides among them exactly as in flat 2D.
-//! Parallel planes cannot intersect, so that is also geometrically right.
+//! purpose. Instances inside one plane share a z, so paint order decides among
+//! them exactly as in flat 2D. Parallel planes cannot intersect, so that is
+//! also geometrically right.
 
 use crate::{
     cx::Cx,
@@ -148,6 +193,16 @@ pub struct SplodedView {
     hairlines: bool,
 }
 
+/// World-z units per nesting level while the mode is up.
+///
+/// One level has to be far larger than the per-instance `draw_depth` offsets
+/// widgets set for their own layering (Dock uses 10, tab bars 10, the map -50).
+/// Those ride on the same `world.z = draw_depth + zbias` sum, so at one unit
+/// per level a label with `draw_depth: 10` floated TEN planes in front of its
+/// own background — the "why is that text so far in front" report. At 1000
+/// units per level the same offset is a hundredth of a level: still a correct
+/// tie-break inside the plane, invisible as separation.
+pub const SPLODED_DEPTH_UNIT: f32 = 1000.0;
 /// Headroom above the layer count for `draw_depth` (widgets use -50..20).
 const DRAW_DEPTH_HEADROOM: f32 = 128.0;
 /// Keep the clip z inside the ortho's +-100 range with room to spare.
@@ -199,9 +254,10 @@ impl SplodedView {
         let layers = self.layers.max(1.0);
 
         // The stack's pre-rotation depth, in pixels, and the gain that gets
-        // there one draw call at a time.
+        // there one nesting level at a time.
         let depth_px = self.spread * w.min(h);
-        let gain = depth_px / layers;
+        let z_span = layers * SPLODED_DEPTH_UNIT;
+        let gain = depth_px / z_span;
 
         let (sa, ca) = (self.yaw.sin().abs(), self.yaw.cos().abs());
         let (sb, cb) = (self.pitch.sin().abs(), self.pitch.cos().abs());
@@ -215,8 +271,8 @@ impl SplodedView {
             pitch: self.pitch,
             gain,
             fit,
-            z_center: layers * 0.5,
-            z_scale: Z_CLIP_BUDGET / (layers + DRAW_DEPTH_HEADROOM),
+            z_center: z_span * 0.5,
+            z_scale: Z_CLIP_BUDGET / (z_span + DRAW_DEPTH_HEADROOM),
         }
     }
 }
@@ -458,5 +514,99 @@ impl Cx {
         // Text's slug matrix is CPU-side, and the depth-homogeneous batching
         // split only happens on emission — both need the content re-emitted.
         self.redraw_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Params equivalent to a real window: 1200x800 at the default angles,
+    /// with a 10-level deep tree.
+    fn probe() -> (SplodedParams, Vec2d, Vec2d) {
+        let mut view = SplodedView::default();
+        view.layers = 10.0;
+        let size = dvec2(1200.0, 800.0);
+        (view.params(size), dvec2(0.0, 0.0), size)
+    }
+
+    /// Project a point sitting at the centre of the window on plane `level`.
+    fn project(level: f32) -> Vec4f {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        let x = (offset.x + size.x * 0.5) as f32;
+        let y = (offset.y + size.y * 0.5) as f32;
+        m.transform_vec4(vec4(x, y, level * SPLODED_DEPTH_UNIT, 1.0))
+    }
+
+    /// THE ANTI-FLIP CHECK. This axis was flipped three times by eye before it
+    /// was derived; the derivation lives in this module's docs and this test is
+    /// what holds it. If you are here because the picture looks inverted, read
+    /// those docs first — a mirrored `source_y_flip` on the body-pass composite
+    /// and a stale build both invert the APPARENT direction while this stays
+    /// correct.
+    #[test]
+    fn sign_convention_is_stable() {
+        let shallow = project(0.0);
+        let deep = project(9.0);
+
+        // Deeper nesting is NEARER the eye: the ortho maps a larger view z to
+        // a smaller z_clip and the depth test is LessEqual, so the deeper
+        // plane wins. (Step 3 of the derivation.)
+        assert!(
+            deep.z > shallow.z,
+            "a deeper layer must project nearer the eye: deep z {} !> shallow z {}",
+            deep.z,
+            shallow.z
+        );
+
+        // ...and it projects DOWNWARD on screen, because the camera looks down
+        // at the stack. Screen y is down (step 4), so "down" is a larger y.
+        // (Step 6 of the derivation.)
+        assert!(
+            deep.y > shallow.y,
+            "a deeper layer must project downward on screen: deep y {} !> shallow y {}",
+            deep.y,
+            shallow.y
+        );
+    }
+
+    /// Every level is the same size step — the user must be able to count
+    /// levels by eye rather than guess whether something is deeply nested or
+    /// the stepping is uneven.
+    #[test]
+    fn levels_are_evenly_spaced() {
+        let steps: Vec<f32> = (0..9)
+            .map(|i| project((i + 1) as f32).y - project(i as f32).y)
+            .collect();
+        let first = steps[0];
+        assert!(first > 0.5, "level step too small to see: {first}");
+        for (i, s) in steps.iter().enumerate() {
+            assert!(
+                (s - first).abs() < 1.0e-3,
+                "level {i} steps by {s}, expected the uniform {first}"
+            );
+        }
+    }
+
+    /// A widget's own `draw_depth` (Dock uses 10, the map -50) rides the same
+    /// `world.z` sum as the nesting depth. It must stay a tie-break INSIDE a
+    /// plane and never read as separation — the "why is that text so far in
+    /// front of its background" report.
+    #[test]
+    fn draw_depth_stays_inside_its_plane() {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        let x = (offset.x + size.x * 0.5) as f32;
+        let y = (offset.y + size.y * 0.5) as f32;
+        let plane = |z: f32| m.transform_vec4(vec4(x, y, z, 1.0)).y;
+
+        let one_level = plane(SPLODED_DEPTH_UNIT) - plane(0.0);
+        // The largest draw_depth any widget in the tree uses.
+        let worst_offset = plane(20.0) - plane(0.0);
+        assert!(
+            worst_offset.abs() < one_level.abs() * 0.05,
+            "draw_depth 20 moves {worst_offset}, more than 5% of a {one_level} level step"
+        );
     }
 }
