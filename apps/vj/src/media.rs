@@ -1352,6 +1352,9 @@ fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo
     let duration = info.duration_100ns.max(1);
     let t_in = shared.trim_in_100ns.load(Ordering::Acquire).clamp(0, duration);
     let t_out = shared.trim_out_100ns.load(Ordering::Acquire).clamp(t_in, duration);
+    // No OUT of the operator's own: the window is the whole clip, and the
+    // fill must not stop at a duration the container rounded down.
+    let open_ended = t_out >= duration;
     {
         let mut rc = shared.repeat_cache.lock().unwrap();
         if rc.epoch != epoch {
@@ -1391,7 +1394,7 @@ fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo
     let path = path.to_string();
     let _ = std::thread::Builder::new().name("vj-cache-fill".into()).spawn(move || {
         let t0 = Instant::now();
-        let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out);
+        let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out, open_ended);
         shared.repeat_cache.lock().unwrap().filling = false;
         if tl_on() {
             eprintln!("tl fill done ok={ok} in {}ms", t0.elapsed().as_millis());
@@ -1408,6 +1411,7 @@ fn repeat_fill_worker(
     epoch: u64,
     t_in: i64,
     t_out: i64,
+    open_ended: bool,
 ) -> bool {
     let Ok(mut decoder) = VideoFileDecoder::open(path) else { return false };
     if t_in > 0 {
@@ -1425,7 +1429,16 @@ fn repeat_fill_worker(
         }
         match decoder.next_frame() {
             Ok(Some(f)) if f.pts_100ns + 400_000 < t_in => {}
-            Ok(Some(f)) if f.pts_100ns < t_out => {
+            // An UNTRIMMED window runs to end-of-file, never to the
+            // container's idea of the duration. Those two disagree: the
+            // decoder hands back each frame's presentation time one frame
+            // later than the encoder wrote it, so the LAST frame's pts
+            // lands just past a duration that was rounded down — and a
+            // strict `< t_out` quietly lopped that frame off every
+            // resident cache. A loop then skipped its own last frame,
+            // forever. A real trim still gates on OUT, where the operator
+            // put it.
+            Ok(Some(f)) if open_ended || f.pts_100ns < t_out => {
                 let frame = decoded_frame(f);
                 bytes += frame.px.byte_len();
                 if bytes > MAX_PINGPONG_CACHE_BYTES {
@@ -2060,6 +2073,46 @@ pub fn decode_audio_clip(
 }
 
 /// Min/max waveform columns over the whole clip.
+/// Columns in the pre-listen player's seek strip — one bin per bar.
+pub const PREVIEW_WAVE_COLS: usize = 240;
+
+/// The pre-listen strip's shape: ENERGY (RMS) per bin, divided by the
+/// loudest bin so the busiest moment of the track fills the strip.
+///
+/// Deliberately NOT peak-per-bin. Over a bin this wide almost every one of
+/// a loud master's bins contains a full-scale sample, so a peak strip ties
+/// dozens of bars at exactly the ceiling and draws a hard flat line along
+/// the top and bottom — which reads as a waveform with its head and feet
+/// cut off, however much room is left around it. Energy varies smoothly,
+/// ties nowhere, and is what the ear follows anyway: the intro, the drop
+/// and the outro are all visible in it.
+pub fn preview_wave_bins(pcm: &TrackPcm, cols: usize) -> Vec<f32> {
+    let cols = cols.max(1);
+    if pcm.frames.is_empty() {
+        return vec![0.0; cols];
+    }
+    let per_col = pcm.frames.len() as f64 / cols as f64;
+    let mut bins = Vec::with_capacity(cols);
+    let mut loudest = 0.0f32;
+    for col in 0..cols {
+        let start = ((col as f64 * per_col) as usize).min(pcm.frames.len() - 1);
+        let end =
+            (((col + 1) as f64 * per_col) as usize).clamp(start + 1, pcm.frames.len());
+        let mut sum = 0.0f64;
+        for frame in &pcm.frames[start..end] {
+            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            sum += (mono as f64) * (mono as f64);
+        }
+        let rms = (sum / (end - start).max(1) as f64).sqrt() as f32;
+        loudest = loudest.max(rms);
+        bins.push(rms);
+    }
+    // One divisor, no curve: the loudest bin is full height and every
+    // other bar stands in true proportion to it.
+    let scale = if loudest > 1e-6 { 1.0 / loudest } else { 0.0 };
+    bins.into_iter().map(|rms| (rms * scale).clamp(0.0, 1.0)).collect()
+}
+
 pub fn wave_peaks(pcm: &TrackPcm, cols: usize) -> Vec<(f32, f32)> {
     let cols = cols.max(1);
     let mut out = Vec::with_capacity(cols);
@@ -2179,6 +2232,9 @@ impl UiStep {
 
 pub enum DecodeJob {
     Deck { deck: DeckId, gen: u64, path: PathBuf, media: MediaType },
+    /// The headphone pre-listen: the same full decode as a deck, plus the
+    /// overview strip for the mini player's seek bar.
+    Preview { gen: u64, path: PathBuf, media: MediaType },
     Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, path: PathBuf, media: MediaType },
     /// Read + parse + fully prepare a GLB for the 3D program slot: the UI
     /// thread only uploads the finished result.
@@ -2288,6 +2344,10 @@ pub enum DecodeDone {
         deck: DeckId,
         gen: u64,
         result: Result<(Arc<TrackPcm>, Vec<(f32, f32)>), String>,
+    },
+    Preview {
+        gen: u64,
+        result: Result<(Arc<TrackPcm>, Vec<f32>), String>,
     },
     Pad {
         pad: PadKey,
@@ -3378,6 +3438,13 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
             let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES).map(Arc::new);
             DecodeDone::Pad { pad, gen, revision, result }
         }
+        DecodeJob::Preview { gen, path, media } => {
+            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+                let peaks = preview_wave_bins(&pcm, PREVIEW_WAVE_COLS);
+                (Arc::new(pcm), peaks)
+            });
+            DecodeDone::Preview { gen, result }
+        }
         DecodeJob::MeshPrep { gen, path } => {
             #[cfg(test)]
             if let Some(delay) = test_sleep_marker(&path) {
@@ -4204,7 +4271,8 @@ mod tests {
                     assert_eq!(gen, 9);
                     assert!(result.is_err(), "bad wav must fail");
                 }
-                DecodeDone::MeshPrep { .. }
+                DecodeDone::Preview { .. }
+                | DecodeDone::MeshPrep { .. }
                 | DecodeDone::SlotMesh { .. }
                 | DecodeDone::Still { .. }
                 | DecodeDone::Billboard { .. }
@@ -4853,7 +4921,14 @@ mod mode_flip_tests {
         let _ = presented_for(&mut player, Duration::from_millis(400));
         let after = player.resident_frames().expect("a seek does not drop the cache");
         assert_eq!(after.len(), ID_FRAMES);
-        assert!(after[0].pts_100ns < 10_000_000 / ID_FPS as i64, "cache lost its head");
+        // The head is the WINDOW's head, not the scrub target's: a cache
+        // rebuilt from a seek at 0.6 would start near 0.8s, two orders of
+        // magnitude away from this bound. The slack is one frame because
+        // Media Foundation's own encode/decode round trip does not hand
+        // back a zero-based origin — it puts the first sample one frame
+        // duration in, and makepad reports its timestamps as given.
+        let head_slack = 2 * 10_000_000 / ID_FPS as i64;
+        assert!(after[0].pts_100ns < head_slack, "cache lost its head");
         let leak = presented_for(&mut player, Duration::from_millis(400));
         assert!(leak.is_empty(), "the ring kept flowing after a seek: {leak:?}");
 

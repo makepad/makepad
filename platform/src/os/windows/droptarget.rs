@@ -25,10 +25,14 @@ use {
 
 #[derive(Clone)]
 pub enum DropTargetMessage {
-    Enter(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, DragItem),
-    Leave,
-    Over(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, DragItem),
-    Drop(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, DragItem),
+    Enter(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, Vec<DragItem>),
+    // true when a drag was actually delivered to the app (DragEnter's
+    // conversion succeeded and drag_items was Some) — OLE calls DragLeave
+    // even when DragEnter bailed early, and win32_window.rs needs to tell
+    // those two cases apart before it fires DragEnd.
+    Leave(bool),
+    Over(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, Vec<DragItem>),
+    Drop(MODIFIERKEYS_FLAGS, POINTL, DROPEFFECT, Vec<DragItem>),
 }
 
 // This uses WM_USER to send user messages back to the message queue of the window; careful when using WM_USER elsewhere
@@ -36,8 +40,10 @@ pub const WM_DROPTARGET: u32 = WM_USER + 0;
 
 #[derive(Clone)]
 pub(crate) struct DropTarget {
-    pub drag_item: RefCell<Option<DragItem>>, // Windows only provides the data item for Enter and Drop, but makepad needs it for Over as well
-    pub hwnd: HWND,                           // which window to send the messages to
+    // Windows only provides the data item for Enter and Drop, but makepad
+    // needs it for Over as well
+    pub drag_items: RefCell<Option<Vec<DragItem>>>,
+    pub hwnd: HWND, // which window to send the messages to
 }
 crate::implement_com! {
     for_struct: DropTarget,
@@ -49,7 +55,7 @@ crate::implement_com! {
     }
 }
 
-fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragItem> {
+fn create_dragitems_from_idataobject(data_object: &IDataObject) -> Option<Vec<DragItem>> {
     // obtain enumerator for all DATADIR_GET formats of this object
     let enum_formats = unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32).unwrap() };
 
@@ -79,8 +85,8 @@ fn create_dragitem_from_idataobject(data_object: &IDataObject) -> Option<DragIte
         // get data medium of the object
         let medium = unsafe { data_object.GetData(format).unwrap() };
 
-        // convert to DragItem
-        convert_medium_to_dragitem(medium)
+        // convert to DragItems
+        convert_medium_to_dragitems(medium)
     } else {
         log!("CF_HDROP format not found on data object");
         None
@@ -102,16 +108,16 @@ impl IDropTarget_Impl for DropTarget_Impl {
             return Ok(());
         };
 
-        // convert _p_data_obj to DragItem
-        let drag_item_opt = create_dragitem_from_idataobject(p_data_obj);
+        // convert _p_data_obj to DragItems
+        let drag_items_opt = create_dragitems_from_idataobject(p_data_obj);
 
         // ignore if conversion fails
-        if let None = drag_item_opt {
+        if let None = drag_items_opt {
             return Ok(());
         }
 
         // store locally for Over messages
-        self.drag_item.replace(drag_item_opt.clone());
+        self.drag_items.replace(drag_items_opt.clone());
 
         // allocate message
         let effect = unsafe { *_pdweffect };
@@ -119,7 +125,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
             _grf_key_state,
             *_pt,
             effect,
-            drag_item_opt.unwrap(),
+            drag_items_opt.unwrap(),
         ));
 
         // send to window for further processing
@@ -136,11 +142,16 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 
     fn DragLeave(&self) -> wcore::Result<()> {
+        // read before we clear it below: Some means DragEnter's conversion
+        // succeeded and the app was actually told about this drag, so
+        // win32_window.rs knows whether a DragEnd is owed here.
+        let was_delivered = self.drag_items.borrow().is_some();
+
         // allocate message
-        let param = Box::new(DropTargetMessage::Leave);
+        let param = Box::new(DropTargetMessage::Leave(was_delivered));
 
         // forget the locally stored data item
-        self.drag_item.replace(None);
+        self.drag_items.replace(None);
 
         // send to window for further processing
         unsafe {
@@ -162,7 +173,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         _pdweffect: *mut DROPEFFECT,
     ) -> wcore::Result<()> {
         // if for some reason there is no current drag item, exit
-        if let None = *self.drag_item.borrow() {
+        if let None = *self.drag_items.borrow() {
             return Ok(());
         }
 
@@ -172,7 +183,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
             _grf_key_state,
             *_pt,
             effect,
-            self.drag_item.borrow().clone().unwrap(),
+            self.drag_items.borrow().clone().unwrap(),
         ));
 
         // send to window for further processing
@@ -202,16 +213,16 @@ impl IDropTarget_Impl for DropTarget_Impl {
             return Ok(());
         };
 
-        // convert _p_data_obj to DragItem
-        let drag_item_opt = create_dragitem_from_idataobject(p_data_obj);
+        // convert _p_data_obj to DragItems
+        let drag_items_opt = create_dragitems_from_idataobject(p_data_obj);
 
         // ignore if conversion fails
-        if let None = drag_item_opt {
+        if let None = drag_items_opt {
             return Ok(());
         }
 
         // forget the locally stored one, after Drop we don't need it anymore
-        self.drag_item.replace(None);
+        self.drag_items.replace(None);
 
         // allocate message
         let effect = unsafe { *_pdweffect };
@@ -219,7 +230,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
             _grf_key_state,
             *_pt,
             effect,
-            drag_item_opt.unwrap().clone(),
+            drag_items_opt.unwrap(),
         ));
 
         // send to window for further processing

@@ -170,6 +170,40 @@ impl CacheHeader {
     }
 }
 
+/// Whether `digest` is separated end to end under `root`, WITHOUT touching a
+/// byte of it.
+///
+/// [`StemCache::open`] is the separator's door: it creates the entry, sizes
+/// four sparse stem files to the whole track and REPLACES one whose header
+/// disagrees. That is right for a caller about to write spans and wrong for
+/// one that only wants to know — a deck served its stems from the store never
+/// separates locally, and opening the entry to ask about it would leave an
+/// empty one behind on every load and put it in front of the budget.
+///
+/// Same two checks `open` makes before it trusts an entry, in the same order:
+/// the header must be this exact track under this exact model, and every span
+/// byte must be set. Anything unreadable, short or stale reads as "not
+/// complete" — the question is only ever asked to decide whether work can be
+/// SKIPPED, so uncertainty has to answer no.
+pub fn is_complete_on_disk(root: impl AsRef<Path>, digest: &str, header: &CacheHeader) -> bool {
+    if digest.is_empty() || digest.contains(['/', '\\', '.']) {
+        return false;
+    }
+    let dir = root.as_ref().join(digest);
+    let Ok(text) = std::fs::read_to_string(dir.join("header")) else {
+        return false;
+    };
+    if CacheHeader::decode(&text).ok().as_ref() != Some(header) {
+        return false;
+    }
+    let Ok(spans) = std::fs::read(dir.join("spans")) else {
+        return false;
+    };
+    spans.len() as u64 == header.span_count
+        && header.span_count > 0
+        && spans.iter().all(|present| *present != 0)
+}
+
 /// A per-track cache directory, opened for read+write.
 pub struct StemCache {
     dir: PathBuf,
@@ -599,6 +633,60 @@ mod tests {
             }
         }
         set
+    }
+
+    /// Asking whether a track is already separated must not BUILD the entry
+    /// it is asking about. `open` creates the directory, sizes four sparse
+    /// stem files and replaces an entry whose header disagrees — all correct
+    /// for a separator about to write, all wrong for a caller that only wants
+    /// to know. A fetched track never separates locally, so a probe that
+    /// created an entry would leave an empty one behind on every load.
+    #[test]
+    fn a_completeness_probe_creates_nothing() {
+        let root = temp_root("probe-creates-nothing");
+        let frames = 2 * CHUNK_STEP;
+        let header = CacheHeader::for_track(frames as u64);
+        let digest = "a".repeat(64);
+
+        assert!(!is_complete_on_disk(&root, &digest, &header));
+        assert!(
+            !root.join(&digest).exists(),
+            "the probe must not create the entry it probes"
+        );
+    }
+
+    /// What the probe is FOR: a track separated in an earlier session is
+    /// complete on disk, and that is true whoever is asking — the separator,
+    /// or a deck being served its stems from the store.
+    #[test]
+    fn a_completeness_probe_reads_what_separation_left() {
+        let root = temp_root("probe-truth");
+        let frames = 2 * CHUNK_STEP;
+        let header = CacheHeader::for_track(frames as u64);
+        let digest = "b".repeat(64);
+        {
+            let mut cache = StemCache::open(&root, &digest, header.clone()).unwrap();
+            cache.write_span(0, &ramp_stems(CHUNK_STEP, 0.0)).unwrap();
+            // Half a track is not a track: the bake reads every span.
+            assert!(!cache.is_complete());
+        }
+        assert!(!is_complete_on_disk(&root, &digest, &header));
+        {
+            let mut cache = StemCache::open(&root, &digest, header.clone()).unwrap();
+            cache
+                .write_span(CHUNK_STEP, &ramp_stems(CHUNK_STEP, 0.5))
+                .unwrap();
+            assert!(cache.is_complete());
+        }
+        assert!(is_complete_on_disk(&root, &digest, &header));
+
+        // A DIFFERENT track under the same name is not this one. The header
+        // is the check `open` makes before it trusts an entry, and the probe
+        // owes callers the same one — calling a stale entry complete would
+        // hand the karaoke bake another track's vocals.
+        let other = CacheHeader::for_track((frames + CHUNK_STEP) as u64);
+        assert!(!is_complete_on_disk(&root, &digest, &other));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

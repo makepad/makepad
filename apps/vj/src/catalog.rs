@@ -49,10 +49,6 @@ pub const INTERMEDIATE_TAG: &str = "intermediate";
 /// generated songs in the same bucket. The importer's constant is the
 /// authority so the two can never drift apart.
 pub const MUSIC_TAG: &str = makepad_asset_importer::music_import::MUSIC_TAG;
-/// Catalog tag the classic game imports stamp on every sound effect. Note
-/// it is a TAG, not a category — no importer writes an `sfx` category, so
-/// a category-based sfx filter lists nothing at all.
-pub const SFX_TAG: &str = "sfx";
 
 /// The playable file a tile's manifest selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -340,29 +336,6 @@ impl<C: Clone> BrowseModel<C> {
     /// Character; the surface shows both.
     pub fn dance() -> BrowseModel<C> {
         Self::new_multi(vec![AssetKind::Mesh, AssetKind::Character], "")
-    }
-
-    /// The DJ deck explorer: every MUSIC-tagged audio asset in the store,
-    /// whatever its namespace — a generated song is as loadable as an
-    /// imported one. The classic-import sound effects (tagged [`SFX_TAG`])
-    /// stay on the SFX surface: they outnumber the music and sort ahead of
-    /// it by alias, so an unfiltered deck browser opens on pages of door
-    /// hinges and shotgun noises with the user's library six pages deep.
-    /// The tag narrowing rides BESIDE the default intermediate-artifact
-    /// exclusion (`tag` and `exclude` are separate wire fields).
-    pub fn music() -> BrowseModel<C> {
-        let mut model = Self::new(AssetKind::Audio, "");
-        model.tag = MUSIC_TAG.to_string();
-        model
-    }
-
-    /// The SFX surface: sound-effect-tagged audio. A TAG filter — the old
-    /// `sfx` CATEGORY filter matched nothing (no importer writes one), so
-    /// the surface listed an empty store.
-    pub fn sfx() -> BrowseModel<C> {
-        let mut model = Self::new(AssetKind::Audio, "");
-        model.tag = SFX_TAG.to_string();
-        model
     }
 
     /// Every kind that can land on A/B: video clips, stills, 3D, sprites
@@ -1312,29 +1285,6 @@ mod tests {
         // sheet that replaces it always declares its own cells.
         assert!(!kind_may_be_sheet(Some(AssetKind::VjEffect)));
         assert!(!kind_may_be_sheet(None));
-    }
-
-    /// The DJ explorer asks the SERVER for music only, the SFX surface for
-    /// sound effects only, and BOTH keep the intermediate-artifact
-    /// exclusion — the tag narrowing and the exclude ride different wire
-    /// fields. This is the whole music/sfx separation: get it wrong and
-    /// the deck browser opens on pages of door hinges again.
-    #[test]
-    fn music_and_sfx_surfaces_narrow_by_tag_and_keep_the_exclusion() {
-        for (mut model, tag) in [
-            (BrowseModel::<u8>::music(), MUSIC_TAG),
-            (BrowseModel::<u8>::sfx(), SFX_TAG),
-        ] {
-            let cmds = model.refresh();
-            assert_eq!(cmds.len(), 1, "{tag}: one audio lane");
-            let CatCmd::SearchPage { query, .. } = &cmds[0] else {
-                panic!("{tag}: expected a search page");
-            };
-            assert_eq!(query.kind, Some(AssetKind::Audio));
-            assert_eq!(query.tag.as_deref(), Some(tag));
-            assert_eq!(query.category, None, "{tag}: narrowing is a TAG (no sfx category exists)");
-            assert_eq!(query.exclude_tag.as_deref(), Some(INTERMEDIATE_TAG));
-        }
     }
 
     #[test]
