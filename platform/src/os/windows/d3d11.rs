@@ -690,6 +690,11 @@ impl Cx {
                 self.capture_window_screenshot(d3d11_window, d3d11_cx);
             }
             presented = d3d11_window.present(vsync, latency_wait_timed_out);
+            // Lift the per-window verdict to the process-wide latch: the device is shared by
+            // every window, so one window seeing it die means the recovery driver has work.
+            if d3d11_window.device_lost {
+                d3d11_cx.device_lost.set(true);
+            }
         });
         // A frame went to `Present`, so the credit is spent — whether or not the
         // compositor kept it. Assuming it spent when it was not only costs one
@@ -895,7 +900,13 @@ impl Cx {
 
     pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u64 {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.update_shared_texture(self.os.d3d11_device.as_ref().unwrap());
+        // `None` while a device loss is being recovered. Answering with the null handle is
+        // what the caller already gets for a texture that has not been shared yet, and the
+        // sweep will have cleared this texture's handle anyway.
+        let Some(device) = self.os.d3d11_device.clone() else {
+            return 0;
+        };
+        cxtexture.update_shared_texture(&device);
         cxtexture.os.shared_handle.0 as u64
     }
 
@@ -1370,7 +1381,10 @@ pub struct D3d11Window {
     /// DPI factor the swap-chain buffers were last allocated for.
     pub alloc_dpi: f64,
     pub first_draw: bool,
-    pub swap_chain: IDXGISwapChain1,
+    /// `None` between a device loss and the recovery driver rebuilding it. DXGI allows only
+    /// one flip-model swap chain per HWND at a time, so the dead one has to be released
+    /// before a replacement can be created against the same window.
+    pub swap_chain: Option<IDXGISwapChain1>,
     /// The DXGI frame-latency waitable object for this swap chain, used to pace
     /// the CPU render loop to the display refresh (vblank). It is created by
     /// requesting the `FRAME_LATENCY_WAITABLE_OBJECT` swap-chain flag and
@@ -1430,89 +1444,29 @@ impl D3d11Window {
         win32_window.set_ime_active(false);
         let wg = win32_window.get_window_geom();
 
-        let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            BufferCount: main_window_buffer_count(),
-            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
-            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            // Request a frame-latency waitable object so the render loop can pace
-            // the CPU to the display refresh (vblank) by waiting on it once per
-            // frame, instead of spinning. ResizeBuffers must pass this same flag.
-            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Scaling: DXGI_SCALING_NONE,
-            Stereo: FALSE,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        let mut window = D3d11Window {
+            first_draw: true,
+            is_in_resize: false,
+            window_id,
+            alloc_size: wg.inner_size,
+            alloc_dpi: wg.dpi_factor,
+            window_geom: wg,
+            win32_window,
+            swap_texture: None,
+            render_target_view: None,
+            swap_chain: None,
+            frame_latency_waitable: HANDLE(std::ptr::null_mut()),
+            waitable_swap_chain: true,
+            resize_error_logged: false,
+            present_error_logged: false,
+            refresh_period: DEFAULT_REFRESH_PERIOD,
+            last_frame_stats: None,
+            occluded_since: None,
+            latency_timeout_since: None,
+            device_lost: false,
         };
-
-        unsafe {
-            let swap_chain = d3d11_cx
-                .factory
-                .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
-                .unwrap();
-
-            // Set the maximum frame latency on the *swap chain* (not the device)
-            // and retrieve its frame-latency waitable object — the beat the event
-            // loop waits on, one credit per retired present. Latency 2 (with 3
-            // buffers) gives the CPU a frame of headroom so a single slow tick
-            // does not cost a whole refresh; `MAKEPAD_WIN_LATENCY=1` restores the
-            // old minimum-latency pair.
-            let frame_latency_waitable = match swap_chain.cast::<IDXGISwapChain2>() {
-                Ok(swap_chain2) => {
-                    let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
-                    swap_chain2.GetFrameLatencyWaitableObject()
-                }
-                Err(_) => HANDLE(std::ptr::null_mut()),
-            };
-            // Publish it as this window's paint beat. Registration order decides
-            // the primary window (index 0), whose beat drives the whole app tick.
-            if !frame_latency_waitable.is_invalid() {
-                with_win32_app(|app| {
-                    app.register_beat_handle(window_id, frame_latency_waitable, false)
-                });
-            }
-
-            let swap_texture = swap_chain.GetBuffer(0).unwrap();
-            let mut render_target_view = None;
-            d3d11_cx
-                .device
-                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
-                .unwrap();
-            swap_chain
-                .SetBackgroundColor(&mut DXGI_RGBA {
-                    r: 0.3,
-                    g: 0.3,
-                    b: 0.3,
-                    a: 1.0,
-                })
-                .unwrap();
-            D3d11Window {
-                first_draw: true,
-                is_in_resize: false,
-                window_id: window_id,
-                alloc_size: wg.inner_size,
-                alloc_dpi: wg.dpi_factor,
-                window_geom: wg,
-                win32_window: win32_window,
-                swap_texture: Some(swap_texture),
-                render_target_view: render_target_view,
-                swap_chain: swap_chain,
-                frame_latency_waitable,
-                waitable_swap_chain: true,
-                resize_error_logged: false,
-                present_error_logged: false,
-                refresh_period: DEFAULT_REFRESH_PERIOD,
-                last_frame_stats: None,
-                occluded_since: None,
-                latency_timeout_since: None,
-                device_lost: false,
-            }
-        }
+        window.create_swap_chain(d3d11_cx);
+        window
     }
 
     pub fn new_popup(
@@ -1526,13 +1480,57 @@ impl D3d11Window {
 
         let wg = win32_window.get_window_geom();
 
-        let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
+        let mut window = D3d11Window {
+            first_draw: true,
+            is_in_resize: false,
+            window_id,
+            alloc_size: wg.inner_size,
+            alloc_dpi: wg.dpi_factor,
+            window_geom: wg,
+            win32_window,
+            swap_texture: None,
+            render_target_view: None,
+            swap_chain: None,
+            // Popups are not paced via a waitable object; the handle stays null and the
+            // render loop skips waiting on it.
+            frame_latency_waitable: HANDLE(std::ptr::null_mut()),
+            waitable_swap_chain: false,
+            resize_error_logged: false,
+            present_error_logged: false,
+            refresh_period: DEFAULT_REFRESH_PERIOD,
+            last_frame_stats: None,
+            occluded_since: None,
+            latency_timeout_since: None,
+            device_lost: false,
+        };
+        window.create_swap_chain(d3d11_cx);
+        window
+    }
+
+    /// This window's swap-chain description.
+    ///
+    /// `waitable_swap_chain` is what separates a main window (an extra buffer beyond the frame
+    /// latency, and the FRAME_LATENCY_WAITABLE_OBJECT flag that gives the paint loop its beat)
+    /// from a popup (two buffers, no flags). `ResizeBuffers` must later be handed the same
+    /// flags the chain was created with, which is why that lives on the window rather than
+    /// being passed in.
+    fn swap_chain_desc(&self) -> DXGI_SWAP_CHAIN_DESC1 {
+        let wg = &self.window_geom;
+        DXGI_SWAP_CHAIN_DESC1 {
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            BufferCount: 2,
-            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
-            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
+            BufferCount: if self.waitable_swap_chain {
+                main_window_buffer_count()
+            } else {
+                2
+            },
+            Width: (wg.inner_size.x * wg.dpi_factor).max(1.0) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor).max(1.0) as u32,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            Flags: 0,
+            Flags: if self.waitable_swap_chain {
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32
+            } else {
+                0
+            },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -1541,52 +1539,108 @@ impl D3d11Window {
             Scaling: DXGI_SCALING_NONE,
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-        };
+        }
+    }
 
+    /// Creates this window's swap chain, back-buffer view and — for a waitable chain — its
+    /// frame-latency handle and paint-beat registration, against the HWND the window already
+    /// owns. Any previous chain must already have gone through [`Self::release_gpu_resources`].
+    ///
+    /// Nothing is stored on `self` until every fallible step has succeeded, so a failed attempt
+    /// leaves the window exactly as it was and the recovery driver simply tries again.
+    pub fn create_swap_chain(&mut self, d3d11_cx: &D3d11Cx) -> bool {
+        debug_assert!(self.swap_chain.is_none());
+        let desc = self.swap_chain_desc();
         unsafe {
-            let swap_chain = d3d11_cx
-                .factory
-                .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
-                .unwrap();
+            let swap_chain = match d3d11_cx.factory.CreateSwapChainForHwnd(
+                &d3d11_cx.device,
+                self.win32_window.hwnd,
+                &desc,
+                None,
+                None,
+            ) {
+                Ok(sc) => sc,
+                Err(e) => {
+                    d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForHwnd", &e);
+                    return false;
+                }
+            };
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
+                Ok(t) => t,
+                Err(e) => {
+                    d3d11_cx.note_error("IDXGISwapChain::GetBuffer", &e);
+                    return false;
+                }
+            };
+            let mut render_target_view = None;
+            if let Err(e) = d3d11_cx.device.CreateRenderTargetView(
+                &swap_texture,
+                None,
+                Some(&mut render_target_view),
+            ) {
+                d3d11_cx.note_error("CreateRenderTargetView(backbuffer)", &e);
+                return false;
+            }
+            // Cosmetic, and `sync_background_color` already ignores its result.
+            let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                r: 0.3,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
+            });
 
-            // Keep the low (1-frame) latency that the old device-level
-            // SetMaximumFrameLatency(1) used to give popups, but WITHOUT requesting
-            // the waitable flag (popups are not paced via a waitable object).
-            if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+            // Set the maximum frame latency on the swap chain (not the device) and, for a main
+            // window, take its waitable object: the beat the event loop waits on, one credit
+            // per retired present. Registration order decides the primary window (index 0),
+            // whose beat drives the whole app tick.
+            if self.waitable_swap_chain {
+                let handle = match swap_chain.cast::<IDXGISwapChain2>() {
+                    Ok(swap_chain2) => {
+                        let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
+                        swap_chain2.GetFrameLatencyWaitableObject()
+                    }
+                    Err(_) => HANDLE(std::ptr::null_mut()),
+                };
+                self.frame_latency_waitable = handle;
+                if !handle.is_invalid() {
+                    let window_id = self.window_id;
+                    with_win32_app(|app| app.register_beat_handle(window_id, handle, false));
+                }
+            } else if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+                // Popups keep the low one-frame latency without requesting the waitable flag.
                 let _ = swap_chain2.SetMaximumFrameLatency(1);
             }
 
-            let swap_texture = swap_chain.GetBuffer(0).unwrap();
-            let mut render_target_view = None;
-            d3d11_cx
-                .device
-                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
-                .unwrap();
-
-            D3d11Window {
-                first_draw: true,
-                is_in_resize: false,
-                window_id,
-                alloc_size: wg.inner_size,
-                alloc_dpi: wg.dpi_factor,
-                window_geom: wg,
-                win32_window,
-                swap_texture: Some(swap_texture),
-                render_target_view,
-                swap_chain,
-                // Popups are not paced via a waitable object; store a null handle
-                // and the render loop will skip waiting on it.
-                frame_latency_waitable: HANDLE(std::ptr::null_mut()),
-                waitable_swap_chain: false,
-                resize_error_logged: false,
-                present_error_logged: false,
-                refresh_period: DEFAULT_REFRESH_PERIOD,
-                last_frame_stats: None,
-                occluded_since: None,
-                latency_timeout_since: None,
-                device_lost: false,
-            }
+            self.swap_texture = Some(swap_texture);
+            self.render_target_view = render_target_view;
+            self.swap_chain = Some(swap_chain);
+            self.alloc_size = self.window_geom.inner_size;
+            self.alloc_dpi = self.window_geom.dpi_factor;
+            self.last_frame_stats = None;
+            true
         }
+    }
+
+    /// Drops every GPU object this window owns, in the order DXGI requires.
+    ///
+    /// The back-buffer view and texture must go before the chain, and the beat handle must be
+    /// retired before it is closed or the event loop is left waiting on a closed handle. The
+    /// HWND and the `Win32Window` are untouched: they survive a device loss, and the rebuilt
+    /// chain is created against the same window.
+    pub fn release_gpu_resources(&mut self) {
+        try_with_win32_app(|app| app.unregister_beat_handle(self.window_id));
+        if !self.frame_latency_waitable.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.frame_latency_waitable);
+            }
+            self.frame_latency_waitable = HANDLE(std::ptr::null_mut());
+        }
+        self.render_target_view = None;
+        self.swap_texture = None;
+        self.swap_chain = None;
+        self.last_frame_stats = None;
+        self.occluded_since = None;
+        self.latency_timeout_since = None;
     }
 
     pub fn start_resize(&mut self) {
@@ -1632,7 +1686,13 @@ impl D3d11Window {
         // DXGI_ERROR_FRAME_STATISTICS_DISJOINT (and a fresh chain that has not
         // presented yet) means the sequence broke: fall back to one period out
         // from the wake time and start the estimate over.
-        if unsafe { get_frame_statistics(&self.swap_chain, &mut stats) }.is_err()
+        // No chain (a device loss is being recovered) is the same broken-sequence case: one
+        // period out from the wake time, with the estimate restarted.
+        let Some(swap_chain) = self.swap_chain.as_ref() else {
+            self.last_frame_stats = None;
+            return wake_time + self.refresh_period;
+        };
+        if unsafe { get_frame_statistics(swap_chain, &mut stats) }.is_err()
             || stats.SyncQPCTime == 0
         {
             self.last_frame_stats = None;
@@ -1668,7 +1728,10 @@ impl D3d11Window {
     /// By matching the app's background, the gap becomes invisible.
     pub fn sync_background_color(&self, clear_color: crate::makepad_math::Vec4f) {
         unsafe {
-            let _ = self.swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+            let Some(swap_chain) = self.swap_chain.as_ref() else {
+                return;
+            };
+            let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
                 r: clear_color.x,
                 g: clear_color.y,
                 b: clear_color.z,
@@ -1697,6 +1760,12 @@ impl D3d11Window {
         if (inner.x * dpi) < 1.0 || (inner.y * dpi) < 1.0 {
             return; // ResizeBuffers rejects zero dimensions.
         }
+        // Before the alloc record is updated or the backbuffer references are dropped: with no
+        // chain there is nothing to resize, and recording the new size would make the rebuilt
+        // chain look already-sized and skip its first real resize.
+        let Some(swap_chain) = self.swap_chain.clone() else {
+            return;
+        };
         self.alloc_size = self.window_geom.inner_size;
         self.alloc_dpi = self.window_geom.dpi_factor;
         // ResizeBuffers requires all references to the old backbuffers released first.
@@ -1718,7 +1787,7 @@ impl D3d11Window {
                 DXGI_SWAP_CHAIN_FLAG(0)
             };
             let mut resize_ok = true;
-            if let Err(e) = self.swap_chain.ResizeBuffers(
+            if let Err(e) = swap_chain.ResizeBuffers(
                 // 0 = keep the count the chain was created with. It used to be
                 // hardcoded to 2, which silently shrank a 3-buffer main window
                 // back to 2 on the first resize and undid the beat's headroom.
@@ -1737,7 +1806,7 @@ impl D3d11Window {
                 // Fall through: re-acquire the old-size backbuffer so we keep presenting.
             }
 
-            let swap_texture: ID3D11Texture2D = match self.swap_chain.GetBuffer(0) {
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
                 Ok(texture) => texture,
                 Err(e) => {
                     if !self.resize_error_logged {
@@ -1790,7 +1859,11 @@ impl D3d11Window {
             } else {
                 DXGI_PRESENT(0)
             };
-            let hr = self.swap_chain.Present(sync_interval, flags);
+            let Some(swap_chain) = self.swap_chain.as_ref() else {
+                // Between a device loss and the rebuild there is nothing to present to.
+                return false;
+            };
+            let hr = swap_chain.Present(sync_interval, flags);
             if hr == DXGI_ERROR_WAS_STILL_DRAWING {
                 // DO_NOT_WAIT path only: a benign dropped frame; the caller schedules a retry.
                 return false;
@@ -1839,6 +1912,99 @@ impl D3d11Window {
                 dwm_flush();
             }
             true
+        }
+    }
+}
+
+impl CxOsTexture {
+    /// Forgets every GPU object and every "already uploaded" record for this texture, so the
+    /// ordinary upload path rebuilds it from the CPU-side pixels the next time it is drawn.
+    ///
+    /// The shared handle and keyed mutex are cleared rather than closed: the handle is duped
+    /// out to other processes by `share_texture_for_presentable_image`, so this type has never
+    /// owned its lifetime and closing it here would break an unrelated feature.
+    fn forget_gpu_objects(&mut self) {
+        self.texture = None;
+        self.keyed_mutex = None;
+        self.shared_handle = HANDLE(std::ptr::null_mut());
+        self.shader_resource_view = None;
+        self.render_target_view = None;
+        self.render_target_face_views = Default::default();
+        self.depth_stencil_view = None;
+        self.vec_alloc_width = 0;
+        self.vec_alloc_height = 0;
+        self.vec_alloc_dxgi = 0;
+        self.vec_uploaded_height = 0;
+    }
+}
+
+impl CxOsPass {
+    /// Forgets the pipeline state objects; `setup_pass_render_targets` recreates them on the
+    /// next paint because each is created only when its slot is `None`.
+    fn forget_gpu_objects(&mut self) {
+        self.pass_uniforms = D3d11Buffer::default();
+        self.blend_state = None;
+        self.raster_state_no_cull = None;
+        self.raster_state_backface_cull = None;
+        self.depth_stencil_state_write = None;
+        self.depth_stencil_state_no_write = None;
+    }
+}
+
+impl Cx {
+    /// Drops every GPU object this `Cx` holds and re-arms whatever gates their re-upload.
+    ///
+    /// Called when the D3D11 device has gone: everything created from it is dead, so the
+    /// handles are worthless and the bookkeeping that says "this is already on the GPU" is
+    /// actively harmful — it is what would otherwise hand a dead pointer back forever.
+    ///
+    /// Clearing a handle is only half of it. Geometry and instance uploads are gated on dirty
+    /// flags that are cleared unconditionally once the upload runs, and textures on a dirty
+    /// rect consumed by `take_updated`, so each gate has to be re-armed or the empty slot is
+    /// simply never refilled. The CPU-side sources all survive a device loss: texture pixels
+    /// live in `TextureFormat::Vec*`, geometry in `CxGeometry`, and shaders keep their compiled
+    /// DXBC blobs plus the on-disk cache, so nothing here needs recompiling.
+    pub(crate) fn d3d11_forget_gpu_resources(&mut self) {
+        for item in &mut self.textures.0.pool {
+            item.item.os.forget_gpu_objects();
+            // A render target has no CPU-side contents; clearing its alloc record is what makes
+            // the next pass rebuild it at the right size.
+            item.item.alloc = None;
+            item.item.set_updated(TextureUpdated::Full);
+        }
+        for item in &mut self.geometries.0.pool {
+            item.item.os.geom_vbuf = D3d11Buffer::default();
+            item.item.os.geom_ibuf = D3d11Buffer::default();
+            item.item.dirty_vertices = true;
+            item.item.dirty_indices = true;
+            item.item.dirty = true;
+        }
+        for item in &mut self.draw_lists.0.pool {
+            item.item.os.draw_list_uniforms = D3d11Buffer::default();
+            for index in 0..item.item.draw_items.len() {
+                let draw_item = &mut item.item.draw_items[index];
+                if let Some(dc) = draw_item.kind.draw_call_mut() {
+                    dc.instance_dirty = true;
+                }
+                draw_item.os.draw_call_uniforms = D3d11Buffer::default();
+                draw_item.os.user_uniforms = D3d11Buffer::default();
+                draw_item.os.inst_vbuf = D3d11Buffer::default();
+            }
+        }
+        for item in &mut self.passes.0.pool {
+            item.item.os.forget_gpu_objects();
+        }
+        for item in &mut self.uniform_buffers.0.pool {
+            item.item.os.buffer = D3d11Buffer::default();
+        }
+        // Shader objects die with the device, but their DXBC does not: dropping the os_shaders
+        // and re-queueing every shader makes `hlsl_compile_shaders` recreate the D3D objects
+        // from the retained blobs and the on-disk cache, with no HLSL compilation.
+        self.draw_shaders.os_shaders.clear();
+        for (index, shader) in self.draw_shaders.shaders.iter_mut().enumerate() {
+            if shader.os_shader_id.take().is_some() {
+                self.draw_shaders.compile_set.insert(index);
+            }
         }
     }
 }

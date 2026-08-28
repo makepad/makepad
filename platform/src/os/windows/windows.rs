@@ -82,6 +82,13 @@ impl Cx {
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
+        // Before anything touches the GPU. This is the one place holding both `&mut D3d11Cx`
+        // and `&mut Vec<D3d11Window>` exclusively while nothing is mid-render — the wndproc
+        // queues re-entrant events, `handle_platform_ops` only borrows the Cx immutably, and
+        // `present` runs with the passes and the window list already borrowed.
+        if d3d11_cx.device_lost.get() {
+            self.recover_lost_d3d11_device(d3d11_cx, d3d11_windows);
+        }
         if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
             self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
@@ -412,6 +419,13 @@ impl Cx {
                 // or video is playing, resume the vsync-paced Poll loop so it paints
                 // promptly; otherwise go back to sleep in `GetMessageW`.
                 // Video must keep Poll: Wait skips Paint on signal-poll ticks.
+                // A lost device makes every one of those conditions unsatisfiable: nothing can
+                // paint, so `Poll` would spin at the loop's full rate for the whole outage —
+                // which can be hours with a lid shut. Sleep instead and let the signal-poll
+                // heartbeat deliver the retries.
+                if d3d11_cx.device_lost.get() {
+                    return EventFlow::Wait;
+                }
                 if self.any_passes_dirty()
                     || self.need_redrawing()
                     || self.new_next_frames.len() != 0
@@ -434,6 +448,11 @@ impl Cx {
         // `draw_pass_to_window` -> `Present(1,..)`) is what actually paces frames to
         // the display; this replaces the old hard-forced Poll that repainted
         // unconditionally at the 8 ms signal-timer rate (~125 Hz).
+        // A lost device makes all of those unsatisfiable — nothing can paint until it is
+        // rebuilt — so `Poll` would spin at the loop's full rate for the whole outage.
+        if d3d11_cx.device_lost.get() {
+            return EventFlow::Wait;
+        }
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
@@ -601,6 +620,85 @@ impl Cx {
     }
 
     /// Repaints all dirty passes. Returns whether any window pass actually presented a
+    /// Rebuilds the D3D11 device and everything created from it after the device was removed
+    /// or reset — a GPU driver restart, a TDR, a driver update, or the hybrid-GPU transition a
+    /// laptop makes across suspend/resume.
+    ///
+    /// Retries are driven by whatever event next reaches the loop rather than by a timer, and
+    /// spaced by a backoff, because the GPU can stay absent for a long time: a lid can be shut
+    /// for hours. It never gives up, since a failed `D3D11CreateDevice` on an absent adapter
+    /// returns in milliseconds and costs nothing to repeat.
+    fn recover_lost_d3d11_device(
+        &mut self,
+        d3d11_cx: &mut D3d11Cx,
+        d3d11_windows: &mut Vec<D3d11Window>,
+    ) {
+        let now = Instant::now();
+        if self.os.d3d11_next_recovery_attempt.is_some_and(|at| now < at) {
+            return;
+        }
+        // 250ms doubling to 4s. The first attempt is immediate; this only spaces the retries.
+        let backoff = (250u64 << self.os.d3d11_recovery_attempts.min(4)).min(4000);
+        self.os.d3d11_next_recovery_attempt =
+            Some(now + std::time::Duration::from_millis(backoff));
+        self.os.d3d11_recovery_attempts = self.os.d3d11_recovery_attempts.saturating_add(1);
+
+        // Every window drops its swap chain, back buffer, view and beat registration first:
+        // DXGI allows one flip-model swap chain per HWND at a time, so the dead one has to be
+        // gone before a replacement can be made against the same window.
+        for window in d3d11_windows.iter_mut() {
+            window.release_gpu_resources();
+        }
+        // A pending studio grab can never be answered from a dead device, and leaving it
+        // pending would both block its requester and hold the event loop in `Poll`.
+        // A pending studio or `/g` grab can never be answered from a dead device. Answering
+        // with the empty-PNG convention releases the requester and, just as importantly, empties
+        // `screenshot_requests` — which is one of the conditions that would otherwise hold the
+        // event loop in `Poll` for the whole outage.
+        let pending: Vec<u64> = self
+            .screenshot_requests
+            .drain(..)
+            .map(|r| r.request_id)
+            .collect();
+        Self::send_studio_screenshot_response(pending, 0, 0, Vec::new());
+
+        if !d3d11_cx.device_is_alive() {
+            self.os.d3d11_device = None;
+            self.unpublish_d3d11_device_for_media();
+            if !d3d11_cx.recreate_device() {
+                return;
+            }
+            self.os.d3d11_device = Some(d3d11_cx.device.clone());
+            self.publish_d3d11_device_for_media();
+        }
+
+        // The device is live again, so throw away every handle made from the old one. This
+        // must happen before any window presents, or the first paint binds dead objects.
+        self.d3d11_forget_gpu_resources();
+
+        for window in d3d11_windows.iter_mut() {
+            if !window.create_swap_chain(d3d11_cx) {
+                // Leave `device_lost` set and try the whole sequence again on a later event.
+                return;
+            }
+            window.device_lost = false;
+            window.present_error_logged = false;
+            window.resize_error_logged = false;
+        }
+
+        d3d11_cx.device_lost.set(false);
+        self.os.d3d11_recovery_attempts = 0;
+        self.os.d3d11_next_recovery_attempt = None;
+        crate::log!("D3D11 device recovered; redrawing every window.");
+        // Nothing on the GPU survived, so every pass has to be re-rendered, not just the
+        // window passes a repaint would reach.
+        for pass_id in self.passes.id_iter() {
+            self.passes[pass_id].paint_dirty = true;
+        }
+        self.redraw_all();
+        self.repaint_windows();
+    }
+
     /// frame, so the Paint handler can tell a paced (vsync-blocking) pass from a no-op
     /// or dropped one; a dropped present does not count and re-marks its pass dirty.
     pub(crate) fn handle_repaint(
@@ -1253,4 +1351,9 @@ pub struct CxOs {
     pub(crate) video_players: HashMap<LiveId, WindowsUnifiedVideoPlayer>,
     pub(crate) async_hlsl_compile: crate::os::windows::d3d11::AsyncHlslCompile,
     pub(crate) stdin_timers: crate::os::shared_framebuf::PollTimers,
+    /// Earliest time the device-loss recovery may try again, and how many tries this outage
+    /// has taken. Recovery is driven by whatever event next reaches the loop rather than by a
+    /// timer of its own, so this is what spaces the attempts.
+    pub(crate) d3d11_next_recovery_attempt: Option<Instant>,
+    pub(crate) d3d11_recovery_attempts: u32,
 }
