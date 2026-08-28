@@ -144,78 +144,375 @@ pub const KENNEY_TERMS_TEXT: &[u8] = b"CC-BY-4.0 legal text for pack_import test
 pub const KENNEY_REDISTRIBUTION: &str = "attribution-required";
 pub const KENNEY_DERIVATIVES: &str = "allowed";
 
-/// One Kenney pack the Import UI / compiler already names.
+/// One Kenney pack the Import UI / compiler names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KenneyPack {
     pub name: &'static str,
+    /// Display title as on kenney.nl (the slug is `name`).
+    pub title: &'static str,
     pub version: &'static str,
     pub page: &'static str,
 }
 
-/// Packs this compiler already names (tests + in-tree sandbox usage).
+/// The Kenney catalogue this compiler knows: every free 3D kit listed on
+/// kenney.nl (inventoried 2026-08-28, 4 category pages) plus the 2D/audio
+/// packs in-tree tests and the sandbox use. `version` is the suffix of
+/// Kenney's own zip name (`kenney_<slug>_<version>.zip`) where it has one;
+/// older zips carry none and are recorded as "1.0". Kits are NOT downloaded
+/// by this crate — each one is a local folder under `local/packs/kenney/<name>`
+/// (flat `<stem>.glb` + optional `Textures/`), see the asset-ui Import card.
 pub const KENNEY_PACKS: &[KenneyPack] = &[
+    // ---- 3D kits: every free kit under kenney.nl/assets/category:3D (50 on 2026-08-28) ----
+    // no GLB in the download (glTF text + Unity package only): not importable as shipped
     KenneyPack {
-        name: "space-kit",
+        name: "3d-road-tiles",
+        title: "3D Road Tiles",
         version: "1.0",
-        page: "https://kenney.nl/assets/space-kit",
+        page: "https://kenney.nl/assets/3d-road-tiles",
+    },
+    // no GLB in the download (FBX only): not importable as shipped
+    KenneyPack {
+        name: "animated-characters-protagonists",
+        title: "Animated Characters Protagonists",
+        version: "1.0",
+        page: "https://kenney.nl/assets/animated-characters-protagonists",
+    },
+    // no GLB in the download (FBX only): not importable as shipped
+    KenneyPack {
+        name: "animated-characters-retro",
+        title: "Animated Characters Retro",
+        version: "1.0",
+        page: "https://kenney.nl/assets/animated-characters-retro",
+    },
+    // no GLB in the download (FBX only): not importable as shipped
+    KenneyPack {
+        name: "animated-characters-survivors",
+        title: "Animated Characters Survivors",
+        version: "1.0",
+        page: "https://kenney.nl/assets/animated-characters-survivors",
     },
     KenneyPack {
-        name: "ui-pack",
-        version: "2.0",
-        page: "https://kenney.nl/assets/ui-pack",
+        name: "blaster-kit",
+        title: "Blaster Kit",
+        version: "2.1",
+        page: "https://kenney.nl/assets/blaster-kit",
+    },
+    KenneyPack {
+        name: "blocky-characters",
+        title: "Blocky Characters",
+        version: "20",
+        page: "https://kenney.nl/assets/blocky-characters",
+    },
+    KenneyPack {
+        name: "brick-kit",
+        title: "Brick Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/brick-kit",
+    },
+    KenneyPack {
+        name: "building-kit",
+        title: "Building Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/building-kit",
     },
     KenneyPack {
         name: "car-kit",
+        title: "Car Kit",
         version: "1.0",
         page: "https://kenney.nl/assets/car-kit",
     },
     KenneyPack {
+        name: "castle-kit",
+        title: "Castle Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/castle-kit",
+    },
+    KenneyPack {
+        name: "city-kit-commercial",
+        title: "City Kit (Commercial)",
+        version: "2.1",
+        page: "https://kenney.nl/assets/city-kit-commercial",
+    },
+    KenneyPack {
+        name: "city-kit-industrial",
+        title: "City Kit (Industrial)",
+        version: "1.0",
+        page: "https://kenney.nl/assets/city-kit-industrial",
+    },
+    KenneyPack {
+        name: "city-kit-roads",
+        title: "City Kit (Roads)",
+        version: "1.0",
+        page: "https://kenney.nl/assets/city-kit-roads",
+    },
+    KenneyPack {
         name: "city-kit-suburban",
+        title: "City Kit (Suburban)",
         version: "1.0",
         page: "https://kenney.nl/assets/city-kit-suburban",
     },
     KenneyPack {
+        name: "coaster-kit",
+        title: "Coaster Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/coaster-kit",
+    },
+    KenneyPack {
+        name: "cube-pets",
+        title: "Cube Pets",
+        version: "1.0",
+        page: "https://kenney.nl/assets/cube-pets",
+    },
+    KenneyPack {
+        name: "factory-kit",
+        title: "Factory Kit",
+        version: "3.0",
+        page: "https://kenney.nl/assets/factory-kit",
+    },
+    KenneyPack {
+        name: "fantasy-town-kit",
+        title: "Fantasy Town Kit",
+        version: "2.0",
+        page: "https://kenney.nl/assets/fantasy-town-kit",
+    },
+    KenneyPack {
+        name: "food-kit",
+        title: "Food Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/food-kit",
+    },
+    KenneyPack {
+        name: "furniture-kit",
+        title: "Furniture Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/furniture-kit",
+    },
+    KenneyPack {
+        name: "graveyard-kit",
+        title: "Graveyard Kit",
+        version: "5.0",
+        page: "https://kenney.nl/assets/graveyard-kit",
+    },
+    KenneyPack {
+        name: "hexagon-kit",
+        title: "Hexagon Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/hexagon-kit",
+    },
+    KenneyPack {
+        name: "holiday-kit",
+        title: "Holiday Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/holiday-kit",
+    },
+    KenneyPack {
+        name: "marble-kit",
+        title: "Marble Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/marble-kit",
+    },
+    KenneyPack {
+        name: "mini-arcade",
+        title: "Mini Arcade",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-arcade",
+    },
+    KenneyPack {
+        name: "mini-arena",
+        title: "Mini Arena",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-arena",
+    },
+    KenneyPack {
+        name: "mini-characters",
+        title: "Mini Characters",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-characters",
+    },
+    KenneyPack {
+        name: "mini-dungeon",
+        title: "Mini Dungeon",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-dungeon",
+    },
+    KenneyPack {
+        name: "mini-forest",
+        title: "Mini Forest",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-forest",
+    },
+    KenneyPack {
+        name: "mini-market",
+        title: "Mini Market",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-market",
+    },
+    KenneyPack {
+        name: "mini-skate",
+        title: "Mini Skate",
+        version: "1.0",
+        page: "https://kenney.nl/assets/mini-skate",
+    },
+    KenneyPack {
+        name: "minigolf-kit",
+        title: "Minigolf Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/minigolf-kit",
+    },
+    KenneyPack {
+        name: "modular-buildings",
+        title: "Modular Buildings",
+        version: "1.0",
+        page: "https://kenney.nl/assets/modular-buildings",
+    },
+    KenneyPack {
+        name: "modular-cave-kit",
+        title: "Modular Cave Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/modular-cave-kit",
+    },
+    KenneyPack {
+        name: "modular-dungeon-kit",
+        title: "Modular Dungeon Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/modular-dungeon-kit",
+    },
+    KenneyPack {
+        name: "modular-space-kit",
+        title: "Modular Space Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/modular-space-kit",
+    },
+    KenneyPack {
+        name: "nature-kit",
+        title: "Nature Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/nature-kit",
+    },
+    KenneyPack {
+        name: "pirate-kit",
+        title: "Pirate Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/pirate-kit",
+    },
+    KenneyPack {
         name: "platformer-kit",
+        title: "Platformer Kit",
         version: "1.0",
         page: "https://kenney.nl/assets/platformer-kit",
     },
     KenneyPack {
+        name: "prototype-kit",
+        title: "Prototype Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/prototype-kit",
+    },
+    KenneyPack {
+        name: "racing-kit",
+        title: "Racing Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/racing-kit",
+    },
+    KenneyPack {
+        name: "retro-fantasy-kit",
+        title: "Retro Fantasy Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/retro-fantasy-kit",
+    },
+    KenneyPack {
+        name: "retro-urban-kit",
+        title: "Retro Urban Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/retro-urban-kit",
+    },
+    KenneyPack {
+        name: "space-kit",
+        title: "Space Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/space-kit",
+    },
+    KenneyPack {
+        name: "space-station-kit",
+        title: "Space Station Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/space-station-kit",
+    },
+    KenneyPack {
         name: "survival-kit",
+        title: "Survival Kit",
         version: "1.0",
         page: "https://kenney.nl/assets/survival-kit",
     },
     KenneyPack {
+        name: "tower-defense-kit",
+        title: "Tower Defense Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/tower-defense-kit",
+    },
+    KenneyPack {
+        name: "toy-car-kit",
+        title: "Toy Car Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/toy-car-kit",
+    },
+    KenneyPack {
+        name: "train-kit",
+        title: "Train Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/train-kit",
+    },
+    KenneyPack {
+        name: "watercraft-kit",
+        title: "Watercraft Kit",
+        version: "1.0",
+        page: "https://kenney.nl/assets/watercraft-kit",
+    },
+    // ---- 2D / audio packs the compiler already names ----
+    KenneyPack {
+        name: "ui-pack",
+        title: "UI Pack",
+        version: "2.0",
+        page: "https://kenney.nl/assets/ui-pack",
+    },
+    KenneyPack {
         name: "digital-audio",
+        title: "Digital Audio",
         version: "1.0",
         page: "https://kenney.nl/assets/digital-audio",
     },
     KenneyPack {
         name: "impact-sounds",
+        title: "Impact Sounds",
         version: "1.0",
         page: "https://kenney.nl/assets/impact-sounds",
     },
     KenneyPack {
         name: "interface-sounds",
+        title: "Interface Sounds",
         version: "1.0",
         page: "https://kenney.nl/assets/interface-sounds",
     },
     KenneyPack {
         name: "music-jingles",
+        title: "Music Jingles",
         version: "1.0",
         page: "https://kenney.nl/assets/music-jingles",
     },
     KenneyPack {
         name: "rpg-audio",
+        title: "RPG Audio",
         version: "1.0",
         page: "https://kenney.nl/assets/rpg-audio",
     },
     KenneyPack {
         name: "sci-fi-sounds",
+        title: "Sci-Fi Sounds",
         version: "1.0",
         page: "https://kenney.nl/assets/sci-fi-sounds",
     },
     KenneyPack {
         name: "ui-audio",
+        title: "UI Audio",
         version: "1.0",
         page: "https://kenney.nl/assets/ui-audio",
     },
@@ -227,6 +524,14 @@ pub fn kenney_terms_digest_hex() -> String {
 
 pub fn kenney_pack(name: &str) -> Option<&'static KenneyPack> {
     KENNEY_PACKS.iter().find(|p| p.name == name)
+}
+
+/// Kenney 3D kit slugs (the `category:3D` listing) — the packs that can
+/// hold GLB models, i.e. what the model importer expects on disk.
+pub fn kenney_3d_kits() -> impl Iterator<Item = &'static KenneyPack> {
+    KENNEY_PACKS
+        .iter()
+        .filter(|p| !matches!(p.name, "ui-pack" | "digital-audio" | "impact-sounds" | "interface-sounds" | "music-jingles" | "rpg-audio" | "sci-fi-sounds" | "ui-audio"))
 }
 
 /// Official kenney.nl page of one kit (catalogued page, else the slug URL).

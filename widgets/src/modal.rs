@@ -132,7 +132,11 @@ impl Widget for Modal {
                     _ => false,
                 };
             if should_close {
-                cx.widget_action(content.widget_uid(), ModalAction::Dismissed);
+                // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
+                // action up by `self.widget_uid()`, so the content view's uid
+                // never matched and every caller's dismiss branch was dead.
+                let uid = self.widget_uid();
+                cx.widget_action(uid, ModalAction::Dismissed);
                 self.close(cx);
             }
         }
