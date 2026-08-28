@@ -550,11 +550,12 @@ impl X11Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let window = &cx.windows[window_id];
+                    let (create_position, create_inner_size) = window.create_geom();
                     let opengl_window = OpenglWindow::new(
                         window_id,
                         gl_cx,
-                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
-                        window.create_position,
+                        create_inner_size,
+                        create_position,
                         &window.create_title,
                         &window.create_app_id,
                         window.is_fullscreen,
