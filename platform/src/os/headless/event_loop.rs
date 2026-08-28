@@ -633,10 +633,13 @@ impl Cx {
                     }
 
                     let window = &mut self.windows[window_id];
-                    let inner_size = window
-                        .create_inner_size
-                        .unwrap_or_else(|| dvec2(1920.0, 1080.0));
-                    let position = window.create_position.unwrap_or_else(|| dvec2(0.0, 0.0));
+                    let (position, inner_size) = window.create_geom();
+                    let inner_size = if window.create_inner_size.is_some() {
+                        inner_size
+                    } else {
+                        dvec2(1920.0, 1080.0)
+                    };
+                    let position = position.unwrap_or_else(|| dvec2(0.0, 0.0));
                     let dpi_factor = configured_headless_dpi();
 
                     let state = &mut windows[window_id.id()];
