@@ -1364,6 +1364,29 @@ impl Widget for WmDesk {
                 items.push(item.clone());
             }
         }
+        // Scroll is NOT a captured hit: every area containing the point
+        // receives it, so a wheel over a float would also scroll the tile
+        // underneath. Deliver a scroll only to the TOPMOST window under
+        // the pointer.
+        if let Event::Scroll(e) = event {
+            let top = self
+                .zorder
+                .iter()
+                .rev()
+                .find(|c| {
+                    self.anims
+                        .get(c)
+                        .map(|a| Self::lrect_to_rect(a.cur).contains(e.abs))
+                        .unwrap_or(false)
+                })
+                .copied();
+            if let Some(client) = top {
+                if let Some(item) = self.items.get(&client).cloned() {
+                    item.handle_event(cx, event, scope);
+                }
+            }
+            return;
+        }
         for item in items {
             item.handle_event(cx, event, scope);
         }
