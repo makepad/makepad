@@ -51,6 +51,7 @@ mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
+pub mod sploded;
 pub mod permission;
 mod texture;
 mod uniform_buffer;
@@ -124,6 +125,7 @@ pub use {
             DrawPassId, ScriptDrawPass,
         },
         draw_vars::DrawVars,
+        sploded::{SplodedParams, SplodedView},
         event::{
             CharOffset,
             DigitDevice,

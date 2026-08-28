@@ -919,6 +919,17 @@ impl MacosWindow {
         if self.retired {
             return;
         }
+        // The physical button-up ends a scrub pin UNCONDITIONALLY at the
+        // platform layer: cursor restored at the press point even if event
+        // dispatch drops the up. (Cx's call_event_handler hook clears its
+        // own flag; the owner's later release call no-ops.)
+        if button.is_primary() {
+            with_macos_app(|app| {
+                if app.pointer_pin_mode {
+                    app.set_pointer_pin(false);
+                }
+            });
+        }
         self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
@@ -969,25 +980,10 @@ impl MacosWindow {
         // and the true motion travels as `lock_delta`. An unbounded virtual
         // position routed clicks into whatever UI it drifted over.
         let (pos, lock_delta) = with_macos_app(|app| {
-            if !app.mouse_pointer_lock {
-                return (pos, Vec2d::default());
-            }
             let (dx, dy): (f64, f64) = unsafe {
                 (msg_send![event, deltaX], msg_send![event, deltaY])
             };
-            if app.pointer_pin_mode {
-                // Widget-scoped scrub pin: the drag math needs continuous
-                // positions, so integrate the deltas into an unbounded
-                // virtual abs. Routing cannot wander: the pressed widget
-                // holds the finger capture for the whole drag.
-                let mut v = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
-                v.x += dx;
-                v.y += dy;
-                app.virtual_mouse = Some(v);
-                return (v, Vec2d { x: dx, y: dy });
-            }
-            let pin = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
-            (pin, Vec2d { x: dx, y: dy })
+            app.locked_mouse_transform(pos, Vec2d { x: dx, y: dy }, self.last_mouse_pos)
         });
         self.last_mouse_pos = pos;
 

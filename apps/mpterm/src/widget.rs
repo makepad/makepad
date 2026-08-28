@@ -253,6 +253,10 @@ pub struct MpTerm {
     /// the pager on a file); the session ends when it exits.
     #[rust]
     pub command: Option<String>,
+    /// An unloaded Quick Look panel: no session, and none respawned until
+    /// the next retarget (`restart_with`).
+    #[rust]
+    dormant: bool,
     #[rust]
     area: Area,
     /// Key focus grabbed on the first draw (a terminal owns the keyboard
@@ -300,8 +304,35 @@ pub struct MpTerm {
 impl ScriptHook for MpTerm {}
 
 impl MpTerm {
+    /// Quick Look retarget (`WmEvent::PreviewFile`): tear down the current
+    /// job — dropping the session kills the PTY child — and run a new one
+    /// in place, same process, same window.
+    pub fn restart_with(&mut self, cx: &mut Cx, cwd: Option<PathBuf>, command: Option<String>) {
+        self.session = None;
+        self.cwd = cwd;
+        self.command = command;
+        self.dormant = false;
+        self.view_offset = 0;
+        self.sel_anchor = None;
+        self.sel_cursor = None;
+        self.selecting = false;
+        self.area.redraw(cx);
+    }
+
+    /// Quick Look unload (`WmEvent::PreviewUnload`): drop the job and idle
+    /// blank until the next retarget. Not a close — the process stays warm.
+    pub fn unload(&mut self, cx: &mut Cx) {
+        self.session = None;
+        self.dormant = true;
+        self.view_offset = 0;
+        self.sel_anchor = None;
+        self.sel_cursor = None;
+        self.selecting = false;
+        self.area.redraw(cx);
+    }
+
     fn ensure_session(&mut self, _cx: &mut Cx) {
-        if self.session.is_some() {
+        if self.session.is_some() || self.dormant {
             return;
         }
         let cols = 80;

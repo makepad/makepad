@@ -126,6 +126,48 @@ impl MatchEvent for App {
     }
 }
 
+impl App {
+    /// Quick Look v2, viewer half: mpwm retargets a warm text preview with
+    /// `PreviewFile` (restart the pager in place — no respawn, no new
+    /// window) and parks it with `PreviewUnload`. `PreviewUnload` never
+    /// ends the process.
+    fn handle_wm_event(&mut self, cx: &mut Cx, event: &mp_wm_api::WmEvent) {
+        use mp_wm_api::WmEvent;
+        match event {
+            WmEvent::PreviewFile { path } => {
+                let path = PathBuf::from(path);
+                self.preview = true;
+                if let Some(mut term) = self.ui.widget(cx, ids!(term)).borrow_mut::<MpTerm>() {
+                    log!("mpterm DEBUG retarget borrow OK -> {}", path.display());
+                    term.restart_with(
+                        cx,
+                        path.parent().map(Path::to_path_buf),
+                        Some(preview_command(&path)),
+                    );
+                } else {
+                    log!("mpterm DEBUG retarget borrow FAILED (term widget not found)");
+                }
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let title = format!("{} \u{2014} preview", name);
+                self.ui
+                    .window(cx, ids!(main_window))
+                    .set_title(cx, &title);
+                mp_wm_api::set_title(cx, &title);
+            }
+            WmEvent::PreviewUnload => {
+                if let Some(mut term) = self.ui.widget(cx, ids!(term)).borrow_mut::<MpTerm>() {
+                    term.unload(cx);
+                }
+            }
+            WmEvent::CloseRequested => cx.quit(),
+            _ => {}
+        }
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
@@ -135,6 +177,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Custom(json) = event {
+            log!("mpterm DEBUG custom event: {}", json);
+            if let Some(wm) = mp_wm_api::WmEvent::parse(json) {
+                self.handle_wm_event(cx, &wm);
+            }
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

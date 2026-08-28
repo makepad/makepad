@@ -356,8 +356,13 @@ pub struct MacosApp {
     /// lock): `abs` integrates the deltas into an unbounded virtual
     /// position (the drag needs continuous positions; the pressed widget
     /// holds the finger capture, so routing cannot wander), instead of the
-    /// game model where `abs` stays pinned and motion rides `lock_delta`.
+    /// game model where `abs` stays pinned and motion rides lock_delta.
     pub pointer_pin_mode: bool,
+    /// Live-path measurement: hardware move events seen under the pin and
+    /// their integrated horizontal travel. Logged at release so a physical
+    /// pass is measurable against the owner's own FingerMove count.
+    pub pin_ns_moves: u64,
+    pub pin_sum_dx: f64,
     //current_ns_event: Option<ObjcId>,
 
     /// Set by `send_command_event()` to avoid sending keyboard events
@@ -403,6 +408,8 @@ impl MacosApp {
                 lock_pin: None,
                 pin_restore: None,
                 pointer_pin_mode: false,
+                pin_ns_moves: 0,
+                pin_sum_dx: 0.0,
                 terminating_from_app_delegate: false,
                 //current_ns_event: None,
                 menu_command_fired: false,
@@ -1172,6 +1179,35 @@ impl MacosApp {
         }
     }
 
+    /// The one pointer-lock abs transform every mouse move takes — the
+    /// hardware path (send_mouse_move) and the hardware-faithful injection
+    /// path (remote /m?hw=1) both come through here, so they can never
+    /// disagree. Under a scrub pin the delta integrates into an unbounded
+    /// virtual abs (the drag owner needs continuous positions; the finger
+    /// capture keeps routing to the owner). Under a game lock the abs
+    /// stays pinned and motion rides lock_delta.
+    pub fn locked_mouse_transform(
+        &mut self,
+        raw: Vec2d,
+        delta: Vec2d,
+        seed: Vec2d,
+    ) -> (Vec2d, Vec2d) {
+        if !self.mouse_pointer_lock {
+            return (raw, Vec2d::default());
+        }
+        if self.pointer_pin_mode {
+            self.pin_ns_moves += 1;
+            self.pin_sum_dx += delta.x;
+            let mut v = *self.virtual_mouse.get_or_insert(seed);
+            v.x += delta.x;
+            v.y += delta.y;
+            self.virtual_mouse = Some(v);
+            (v, delta)
+        } else {
+            (*self.virtual_mouse.get_or_insert(seed), delta)
+        }
+    }
+
     /// Widget-scoped pointer pin (value scrubbing): the FPS lock machinery,
     /// but the cursor pins AT ITS CURRENT POSITION and is restored there on
     /// release. Engage only when a drag actually starts (the threshold
@@ -1190,6 +1226,8 @@ impl MacosApp {
             self.mouse_pointer_lock = true;
             self.pointer_lock_applied = true;
             self.pointer_pin_mode = true;
+            self.pin_ns_moves = 0;
+            self.pin_sum_dx = 0.0;
             unsafe {
                 let loc: NSPoint = msg_send![class!(NSEvent), mouseLocation];
                 self.lock_pin = Some(Vec2d { x: loc.x, y: loc.y });
@@ -1202,6 +1240,11 @@ impl MacosApp {
                 self.pin_restore = None;
                 return;
             }
+            crate::log!(
+                "PIN stats: ns_moves={} sum_dx={:.1}",
+                self.pin_ns_moves,
+                self.pin_sum_dx
+            );
             self.mouse_pointer_lock = false;
             self.pointer_lock_applied = false;
             self.pointer_pin_mode = false;
