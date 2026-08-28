@@ -27,10 +27,15 @@ script_mod! {
         margin: theme.mspace_v_1
         label_walk: Walk{width: Fit, height: Fit}
 
+        /** The button label ink, state-mixed with the face. */
         draw_text +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: 0.0
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
             // A button face is a box with one line of text in it: center the
@@ -61,9 +66,13 @@ script_mod! {
          * optional two-stop gradient fill, state-mixed by the animator's
          * hover/down/focus/disabled instances. */
         draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
             /** bevel border thickness in pixels 0..4 step 0.5 */
@@ -73,7 +82,9 @@ script_mod! {
 
             /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
             color: uniform(theme.color_outset)
@@ -82,6 +93,7 @@ script_mod! {
             color_focus: uniform(theme.color_outset_focus)
             color_disabled: uniform(theme.color_outset_disabled)
 
+            /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             color_2_hover: uniform(theme.color_outset_2_hover)
             color_2_down: uniform(theme.color_outset_2_down)
@@ -94,6 +106,7 @@ script_mod! {
             border_color_focus: uniform(theme.color_bevel_focus)
             border_color_disabled: uniform(theme.color_bevel_disabled)
 
+            /** bevel gradient end stop; negative alpha means flat stroke */
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             border_color_2_hover: uniform(theme.color_bevel_outset_2_hover)
             border_color_2_down: uniform(theme.color_bevel_outset_2_down)
@@ -266,6 +279,7 @@ script_mod! {
         }
     }
 
+    /** The borderless button: face and bevel hidden until disabled. */
     mod.widgets.ButtonFlatter = mod.widgets.ButtonFlat{
         draw_bg +: {
             color: theme.color_u_hidden

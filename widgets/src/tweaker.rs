@@ -2024,6 +2024,16 @@ script_mod! {
         }
     }
 
+    set_type_default() do #(DrawTweakChecker::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            // The alpha-visualizing checkerboard: 6px two-tone squares.
+            let p = floor(self.pos * self.rect_size / 6.0)
+            let t = modf(p.x + p.y, 2.0)
+            return mix(vec4(0.42, 0.42, 0.42, 1.0), vec4(0.58, 0.58, 0.58, 1.0), t)
+        }
+    }
+
     set_type_default() do #(DrawTweakStroke::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn() {
@@ -2081,6 +2091,8 @@ pub struct TweakMaterialSwatch {
     #[redraw]
     #[live]
     preview: DrawQuad,
+    #[live]
+    checker: DrawTweakChecker,
     #[rust]
     area: Area,
     /// Which draw layer this swatch currently previews.
@@ -2095,12 +2107,22 @@ impl Widget for TweakMaterialSwatch {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
+        self.checker.draw_abs(cx, rect);
         self.preview.draw_abs(cx, rect);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+/// The checkerboard behind material swatches: translucent shaders read
+/// against it (the standard alpha backdrop).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTweakChecker {
+    #[deref]
+    draw_super: DrawQuad,
 }
 
 #[derive(Script, ScriptHook)]
@@ -2369,6 +2391,15 @@ struct HoverDoc {
     pos: Vec2d,
 }
 
+/// The side panel's tabs.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum PanelTab {
+    #[default]
+    Props,
+    Shader,
+    Tree,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum BoxKind {
     Margin,
@@ -2519,16 +2550,35 @@ pub struct Tweaker {
     /// renderer; until then this is the mode flag + visual state).
     #[rust]
     sploded_armed: bool,
-    /// The vibecode material popup: which draw layer it shows (None =
-    /// closed). Opened by clicking a material thumbnail row.
+    /// Which side-panel tab is active (persists across F12).
+    #[rust]
+    panel_tab: PanelTab,
+    /// The shader tab's draw layer (clicking a material thumbnail switches
+    /// the tab here and sets this).
     #[rust]
     vibe_layer: Option<String>,
-    /// The popup's widget tree (big preview + prompt), built lazily.
-    #[rust]
-    vibe_ui: Option<WidgetRef>,
-    /// The popup swatch's last applied generation (vs rows_gen).
+    /// The shader tab's preview generation (vs rows_gen).
     #[rust]
     vibe_applied_gen: u64,
+    /// Tab-bar button uids, captured at draw.
+    #[rust]
+    tab_uids: [u64; 3],
+    /// The two PortalLists' uids (props, tree), captured at ensure.
+    #[rust]
+    props_list_uid: u64,
+    #[rust]
+    tree_list_uid: u64,
+    /// The flattened widget tree for the tree tab + its generation.
+    #[rust]
+    tree_rows: Vec<crate::widget_tree::FlatTreeRow>,
+    #[rust]
+    tree_rows_gen: u64,
+    /// Tree rows drawn this frame: (item, target widget uid).
+    #[rust]
+    tree_visible: Vec<(WidgetRef, u64)>,
+    /// Set while the hover outline was driven from the tree tab.
+    #[rust]
+    tree_hover_active: bool,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     vibe_prompt_uid: u64,
@@ -2563,9 +2613,6 @@ pub struct Tweaker {
     /// The two link-toggle uids (margin, padding).
     #[rust]
     box_link_uids: [u64; 2],
-    /// The vibecode popup's own overlay list (above the panel).
-    #[rust]
-    vibe_list: Option<DrawList2d>,
     /// The panel's own overlay draw list: begun AFTER the outline overlay,
     /// so the stacking is app < outlines < panel < panel-popups — the app
     /// (dock tab bars included) can never read through the panel.
@@ -2588,7 +2635,6 @@ impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
-        self.vibe_list = Some(DrawList2d::script_new(vm));
     }
 }
 
@@ -2690,7 +2736,78 @@ impl Tweaker {
                             }
                         }
                     }
-                    props := PortalList {
+                    tab_row := View {
+                        width: Fill
+                        height: 22
+                        flow: Right
+                        spacing: 2
+                        padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
+                        tab_props := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
+                    }
+                    shader_col := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 6
+                        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                        shader_title := FabHeaderLabel {
+                            width: Fill
+                            text: ""
+                        }
+                        shader_doc := FabLabelSmall {
+                            width: Fill
+                            text: ""
+                        }
+                        big := TweakMaterialSwatch {
+                            width: Fill
+                            height: 150
+                        }
+                        prompt := TextInput {
+                            width: Fill
+                            height: 64
+                            empty_text: "describe the change\u{2026} Enter sends to the AI"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe6e6e6
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                        vibe_hint := FabLabelSmall {
+                            width: Fill
+                            text: "Enter sends \u{00b7} the agent rewrites just this shader \u{00b7} Esc closes"
+                        }
+                    }
+                    tree_wrap := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        tree_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
+                        drag_scrolling: false
+                        TreeRow := Button {
+                            width: Fill
+                            height: 19
+                            padding: Inset{left: 6 right: 4 top: 1 bottom: 1}
+                            align: Align{x: 0.0 y: 0.5}
+                            text: ""
+                            draw_text +: {
+                                text_style +: { font_size: 8.0 }
+                            }
+                        }
+                        }
+                    }
+                    props_wrap := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        props := PortalList {
                         width: Fill
                         height: Fill
                         margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
@@ -3001,6 +3118,7 @@ impl Tweaker {
                             origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
                         }
                     }
+                    }
                 }
             });
             WidgetRef::script_from_value(vm, value)
@@ -3009,71 +3127,17 @@ impl Tweaker {
         // /snap lists its rows, so the same remote agent that watches the
         // session can drive the sidebar's fields too.
         cx.widget_tree_insert_child(self.uid, live_id!(sidebar), sidebar.clone());
+        self.props_list_uid = sidebar
+            .child(live_id!(props_wrap))
+            .child(live_id!(props))
+            .widget_uid()
+            .0;
+        self.tree_list_uid = sidebar
+            .child(live_id!(tree_wrap))
+            .child(live_id!(tree_list))
+            .widget_uid()
+            .0;
         self.sidebar = Some(sidebar);
-    }
-
-    fn ensure_vibe_ui(&mut self, cx: &mut Cx) {
-        if self.vibe_ui.is_some() {
-            return;
-        }
-        let ui = cx.with_vm(|vm| {
-            let value = script_eval!(vm, {
-                use mod.prelude.widgets.*
-                use mod.widgets.*
-                View {
-                    width: Fill
-                    height: 300
-                    flow: Down
-                    show_bg: true
-                    draw_bg +: {
-                        color: #x262626
-                    }
-                    padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
-                    spacing: 6
-                    vibe_title := FabHeaderLabel {
-                        width: Fill
-                        text: ""
-                    }
-                    vibe_doc := FabLabelSmall {
-                        width: Fill
-                        text: ""
-                    }
-                    big_bg := View {
-                        width: Fill
-                        height: 130
-                        show_bg: true
-                        padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
-                        draw_bg +: {
-                            color: #x585858
-                        }
-                        big := TweakMaterialSwatch {
-                            width: Fill
-                            height: Fill
-                        }
-                    }
-                    prompt := TextInput {
-                        width: Fill
-                        height: 58
-                        empty_text: "describe the change\u{2026} Enter sends to the AI"
-                        draw_bg +: {
-                            color: #x1b1b1b
-                            border_radius: 3.0
-                        }
-                        draw_text +: {
-                            color: #xe6e6e6
-                            text_style +: { font_size: 8.5 }
-                        }
-                    }
-                    vibe_hint := FabLabelSmall {
-                        width: Fill
-                        text: "Enter sends \u{00b7} the agent rewrites just this shader \u{00b7} Esc closes"
-                    }
-                }
-            });
-            WidgetRef::script_from_value(vm, value)
-        });
-        cx.widget_tree_insert_child(self.uid, live_id!(vibe), ui.clone());
-        self.vibe_ui = Some(ui);
     }
 
     fn ensure_note_ui(&mut self, cx: &mut Cx) {
@@ -3500,6 +3564,81 @@ impl Tweaker {
                 self.focus_search_pending = false;
             }
         }
+        // The panel tabs: Props / Shader / Tree, one content visible.
+        {
+            let tab = self.panel_tab;
+            sidebar
+                .child(live_id!(props_wrap))
+                .set_visible(cx, tab == PanelTab::Props);
+            sidebar
+                .child(live_id!(shader_col))
+                .set_visible(cx, tab == PanelTab::Shader);
+            sidebar
+                .child(live_id!(tree_wrap))
+                .set_visible(cx, tab == PanelTab::Tree);
+            let tab_row = sidebar.child(live_id!(tab_row));
+            let tabs = [
+                (live_id!(tab_props), PanelTab::Props, "Props"),
+                (live_id!(tab_shader), PanelTab::Shader, "Shader"),
+                (live_id!(tab_tree), PanelTab::Tree, "Tree"),
+            ];
+            for (i, (id, t, label)) in tabs.into_iter().enumerate() {
+                let btn = tab_row.child(id);
+                btn.set_text(
+                    cx,
+                    &if t == tab {
+                        format!("[{label}]")
+                    } else {
+                        label.to_string()
+                    },
+                );
+                self.tab_uids[i] = btn.widget_uid().0;
+            }
+            // Shader tab content: the layer's live preview + doc + prompt.
+            if tab == PanelTab::Shader {
+                let layer = self
+                    .vibe_layer
+                    .clone()
+                    .unwrap_or_else(|| "draw_bg".to_string());
+                let col = sidebar.child(live_id!(shader_col));
+                col.child(live_id!(shader_title)).set_text(cx, &layer);
+                let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
+                col.child(live_id!(shader_doc))
+                    .set_text(cx, doc.lines().next().unwrap_or(""));
+                self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
+                let sw_ref = col.child(live_id!(big));
+                let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
+                if let Some(mut sw) = sw_opt {
+                    if sw.applied_gen != self.rows_gen || sw.layer != layer {
+                        let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                        if !widget.is_empty() {
+                            let sel_path = session()
+                                .lock()
+                                .unwrap()
+                                .pinned
+                                .as_ref()
+                                .map(|p| p.path.clone())
+                                .unwrap_or_default();
+                            apply_material_preview(
+                                cx,
+                                &widget,
+                                &mut sw.preview,
+                                &layer,
+                                &sel_path,
+                            );
+                            sw.applied_gen = self.rows_gen;
+                            sw.layer = layer;
+                        }
+                    }
+                }
+            }
+            // Tree tab data: refresh on generation change.
+            if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
+            {
+                self.tree_rows = cx.widget_tree().flat_tree(cx);
+                self.tree_rows_gen = self.rows_gen.wrapping_add(1);
+            }
+        }
 
         self.composite_fields.clear();
         self.composite_align.clear();
@@ -3512,7 +3651,36 @@ impl Tweaker {
             pos: dvec2(band.pos.x + SPLITTER_WIDTH, band.pos.y),
             size: dvec2(band.size.x - SPLITTER_WIDTH, band.size.y),
         });
+        self.tree_visible.clear();
         while let Some(step_widget) = sidebar.draw_walk(cx, scope, walk).step() {
+            // The tree tab's list fills from the flattened hierarchy.
+            if step_widget.widget_uid().0 == self.tree_list_uid {
+                let sel_uid = self.rows_uid;
+                let mut sel_index = None;
+                let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
+                    continue;
+                };
+                list.set_item_range(cx, 0, self.tree_rows.len());
+                while let Some(row_id) = list.next_visible_item(cx) {
+                    let Some(row) = self.tree_rows.get(row_id) else {
+                        continue;
+                    };
+                    let item = list.item(cx, row_id, live_id!(TreeRow));
+                    let indent = "\u{00b7} ".repeat(row.depth as usize);
+                    let glyph = if row.has_children { "+ " } else { "  " };
+                    item.set_text(
+                        cx,
+                        &format!("{indent}{glyph}{} \u{00b7} {}", row.name, row.ty),
+                    );
+                    if row.uid == sel_uid {
+                        sel_index = Some(row_id);
+                    }
+                    item.draw_all(cx, &mut Scope::empty());
+                    self.tree_visible.push((item.clone(), row.uid));
+                }
+                let _ = sel_index;
+                continue;
+            }
             let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
                 continue;
             };
@@ -4167,6 +4335,62 @@ impl Tweaker {
                     }
                 }
             }
+            if self.tab_uids.contains(&widget_action.widget_uid.0)
+                && widget_action.widget_uid.0 != 0
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let index = self
+                        .tab_uids
+                        .iter()
+                        .position(|uid| *uid == widget_action.widget_uid.0)
+                        .unwrap_or(0);
+                    self.panel_tab = match index {
+                        1 => PanelTab::Shader,
+                        2 => PanelTab::Tree,
+                        _ => PanelTab::Props,
+                    };
+                    self.redraw_sidebar(cx);
+                }
+            }
+            if let Some((_, target)) = self
+                .tree_visible
+                .iter()
+                .find(|(item, _)| item.widget_uid() == widget_action.widget_uid)
+                .cloned()
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    // Tree row click: pin that widget as the selection,
+                    // exactly like a body pick.
+                    let widget = cx.widget_tree().widget(WidgetUid(target));
+                    if !widget.is_empty() {
+                        let rect = widget.area().clipped_rect(cx);
+                        let ids = cx.widget_tree().path_to(WidgetUid(target));
+                        let path = ids
+                            .iter()
+                            .map(|id| live_id_token(*id))
+                            .collect::<Vec<_>>()
+                            .join(".");
+                        let ty = widget
+                            .widget_type_id()
+                            .and_then(|type_id| {
+                                widget_type_names(cx).get(&type_id).copied()
+                            })
+                            .map(live_id_token)
+                            .unwrap_or_else(|| "-".to_string());
+                        session().lock().unwrap().pinned = Some(TweakPick {
+                            uid: target,
+                            path,
+                            ty,
+                            rect,
+                            window_id: self.my_window.unwrap_or(0),
+                            band: None,
+                        });
+                        self.rows_uid = 0;
+                        self.redraw_overlay(cx);
+                        self.redraw_sidebar(cx);
+                    }
+                }
+            }
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
@@ -4458,7 +4682,7 @@ impl Tweaker {
                     && self.rows[*index].prop.starts_with(&format!("L{level} ")))
         });
         if let (Some(target), Some(sidebar)) = (target, self.sidebar.as_ref()) {
-            let list_ref = sidebar.child(live_id!(props));
+            let list_ref = sidebar.child(live_id!(props_wrap)).child(live_id!(props));
             {
                 if let Some(mut list) = list_ref.borrow_mut::<PortalList>() {
                     list.set_first_id_and_scroll(target, 0.0);
@@ -4475,9 +4699,6 @@ impl Tweaker {
         }
         if let Some(sidebar_list) = &self.sidebar_list {
             sidebar_list.redraw(cx);
-        }
-        if let Some(vibe_list) = &self.vibe_list {
-            vibe_list.redraw(cx);
         }
         cx.redraw_all();
     }
@@ -4755,11 +4976,11 @@ impl Widget for Tweaker {
                                 self.redraw_sidebar(cx);
                             }
                             VisKind::Material(mi) => {
-                                // Thumbnail click: open the vibecode popup
-                                // for this draw layer.
+                                // Thumbnail click: jump to the Shader tab
+                                // with this draw layer loaded.
                                 if let Some(layer) = self.materials.get(mi) {
                                     self.vibe_layer = Some(layer.clone());
-                                    self.vibe_applied_gen = u64::MAX;
+                                    self.panel_tab = PanelTab::Shader;
                                     self.redraw_sidebar(cx);
                                 }
                             }
@@ -4890,6 +5111,47 @@ impl Widget for Tweaker {
             {
                 // The doc tooltip: a row whose prop carries doc-channel
                 // text shows it, anchored to the row (no per-pixel churn).
+                // Tree tab: hovering a row outlines its widget in the body.
+                if self.panel_tab == PanelTab::Tree
+                    && self.band.size.x > 0.0
+                    && e.abs.x > self.band.pos.x
+                {
+                    let mut hover_target = None;
+                    for (item, target) in &self.tree_visible {
+                        let rect = item.area().clipped_rect(cx);
+                        if rect.size.y > 0.0 && rect.contains(e.abs) {
+                            hover_target = Some(*target);
+                            break;
+                        }
+                    }
+                    match hover_target {
+                        Some(target) => {
+                            let widget = cx.widget_tree().widget(WidgetUid(target));
+                            if !widget.is_empty() {
+                                let rect = widget.area().clipped_rect(cx);
+                                if rect.size.x > 0.0 {
+                                    session().lock().unwrap().hover = Some(TweakPick {
+                                        uid: target,
+                                        path: String::new(),
+                                        ty: String::new(),
+                                        rect,
+                                        window_id: self.my_window.unwrap_or(0),
+                                        band: None,
+                                    });
+                                    self.tree_hover_active = true;
+                                    self.redraw_overlay(cx);
+                                }
+                            }
+                        }
+                        None => {
+                            if self.tree_hover_active {
+                                self.tree_hover_active = false;
+                                session().lock().unwrap().hover = None;
+                                self.redraw_overlay(cx);
+                            }
+                        }
+                    }
+                }
                 let mut new = None;
                 if self.band.size.x > 0.0
                     && e.abs.x > self.band.pos.x
@@ -4945,20 +5207,6 @@ impl Widget for Tweaker {
         // the property list underneath it.
         let swallow_scroll = matches!(event, Event::Scroll(e)
             if self.open_popup.is_some_and(|rect| rect.contains(e.abs)));
-        // The popup dispatches FIRST: its inputs claim presses via the
-        // handled flag before the rows underneath can take focus.
-        if self.vibe_layer.is_some() {
-            if let Some(ui) = self.vibe_ui.clone() {
-                ui.handle_event(cx, event, scope);
-            }
-            if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
-                    self.vibe_layer = None;
-                    self.open_popup = None;
-                    self.redraw_sidebar(cx);
-                }
-            }
-        }
         if let Some(sidebar) = self.sidebar.clone() {
             if !swallow_scroll {
                 sidebar.handle_event(cx, event, scope);
@@ -5182,74 +5430,6 @@ impl Widget for Tweaker {
         self.draw_sidebar(cx, scope, sel.as_ref());
         cx.end_pass_sized_turtle();
         self.sidebar_list.as_mut().unwrap().end(cx);
-
-        if self.vibe_layer.is_some() {
-            let band = self.band;
-            let vibe_list = self.vibe_list.as_mut().unwrap();
-            vibe_list.begin_overlay_reuse(cx);
-            let size = cx.current_pass_size();
-            cx.begin_root_turtle(size, Layout::flow_down());
-            // Card chrome drawn with the tweaker's own quads FIRST (View
-            // backgrounds proved unreliable in these script-built trees):
-            // an opaque panel slab, then a big-preview backing well.
-            let card = Rect {
-                pos: dvec2(band.pos.x + 8.0, 96.0),
-                size: dvec2((band.size.x - 16.0).max(200.0), 300.0),
-            };
-            self.draw_panel_bg.draw_abs(cx, card);
-            self.draw_label_bg.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(card.pos.x + 10.0, card.pos.y + 56.0),
-                    size: dvec2(card.size.x - 20.0, 136.0),
-                },
-            );
-            self.open_popup = Some(card);
-            // The vibecode material popup: big live preview + prompt, anchored
-            // over the panel. While open it owns its rect (open_popup gating).
-            if let Some(layer) = self.vibe_layer.clone() {
-                self.ensure_vibe_ui(cx);
-                let ui = self.vibe_ui.as_ref().unwrap().clone();
-                ui.child(live_id!(vibe_title)).set_text(cx, &layer);
-                let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
-                ui.child(live_id!(vibe_doc))
-                    .set_text(cx, doc.lines().next().unwrap_or(""));
-                self.vibe_prompt_uid = ui.child(live_id!(prompt)).widget_uid().0;
-                {
-                    let sw_ref = ui.child(live_id!(big_bg)).child(live_id!(big));
-                    let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
-                    if let Some(mut sw) = sw_opt {
-                        if sw.applied_gen != self.rows_gen || sw.layer != layer {
-                            let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
-                            if !widget.is_empty() {
-                                let sel_path = session()
-                                    .lock()
-                                    .unwrap()
-                                    .pinned
-                                    .as_ref()
-                                    .map(|p| p.path.clone())
-                                    .unwrap_or_default();
-                                apply_material_preview(
-                                    cx,
-                                    &widget,
-                                    &mut sw.preview,
-                                    &layer,
-                                    &sel_path,
-                                );
-                                sw.applied_gen = self.rows_gen;
-                                sw.layer = layer.clone();
-                            }
-                        }
-                    }
-                }
-                let mut popup_walk = Walk::fit();
-                popup_walk.abs_pos = Some(dvec2(band.pos.x + 8.0, 96.0));
-                popup_walk.width = Size::Fixed((band.size.x - 16.0).max(200.0));
-                let _ = ui.draw_walk(cx, scope, popup_walk);
-            }
-            cx.end_pass_sized_turtle();
-            self.vibe_list.as_mut().unwrap().end(cx);
-        }
 
         DrawStep::done()
     }
