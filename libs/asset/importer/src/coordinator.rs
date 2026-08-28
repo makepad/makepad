@@ -4028,6 +4028,79 @@ mod tests {
         );
     }
 
+    fn on_gpu(mut snapshot: BoxSnapshot, gpu: &str) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().gpu = Some(gpu.to_string());
+        snapshot
+    }
+
+    /// Everything else equal, the faster card takes it. Last tiebreak, and
+    /// only a tiebreak: the tier is decided by weights and idleness first.
+    #[test]
+    fn the_faster_gpu_wins_a_tie_inside_a_tier() {
+        let ready = || vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)];
+        let both_idle = vec![
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            on_gpu(
+                snapshot("http://10.0.0.165:8123", 95 * 1024, 96 * 1024, ready()),
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&both_idle, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "6000 beats 4090 when nothing else separates them"
+        );
+
+        // The idle tier still wins: a 4090 that can start now beats the
+        // fastest card in the fleet with a run already on it.
+        let fast_but_busy = vec![
+            busy(
+                on_gpu(
+                    snapshot("http://10.0.0.165:8123", 95 * 1024, 96 * 1024, ready()),
+                    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                ),
+                1,
+            ),
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&fast_but_busy, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "idle beats faster-but-busy"
+        );
+
+        // And the weights still outrank the card: the 6000 would download.
+        let fast_but_cold = vec![
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.165:8123",
+                    95 * 1024,
+                    96 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+                ),
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ),
+        ];
+        assert!(matches!(
+            select_route(&fast_but_cold, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 0, .. }
+        ));
+    }
+
     /// The two stalls read differently, and both say which box.
     #[test]
     fn the_progress_note_says_which_stall_this_is_and_where() {

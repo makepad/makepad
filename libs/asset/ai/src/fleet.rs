@@ -482,8 +482,46 @@ pub fn affinity_reason(score: u32) -> &'static str {
     }
 }
 
+/// Relative speed of the GPUs this fleet runs on, fastest first.
+///
+/// Matched as a lowercase SUBSTRING of the `/health` `gpu` name, first hit
+/// wins — a new card is ONE LINE here and nothing else changes. Unknown
+/// stays 0: a card nobody listed is never preferred, and never excluded
+/// (an unknown GPU still runs everything it is admitted for).
+///
+/// This is a TIEBREAK and nothing more. It never moves work to a box that
+/// would have to download the weights, never past an idle box onto a busy
+/// one, and never past a role: those rules are decided before it is read.
+const GPU_SPEED_RANK: &[(&str, u32)] = &[
+    ("rtx pro 6000", 3),
+    ("rtx 5090", 2),
+    ("rtx 4090", 1),
+];
+
+/// Speed rank of a GPU by its reported name (see [`GPU_SPEED_RANK`]).
+pub fn gpu_speed(name: &str) -> u32 {
+    let name = name.to_ascii_lowercase();
+    GPU_SPEED_RANK
+        .iter()
+        .find(|(needle, _)| name.contains(needle))
+        .map(|(_, rank)| *rank)
+        .unwrap_or(0)
+}
+
+/// Speed rank of the GPU a box reports. A box that names no GPU (an older
+/// service, or a machine where the probe is not cheap) ranks 0.
+pub fn gpu_rank(snapshot: &BoxSnapshot) -> u32 {
+    snapshot
+        .health
+        .as_ref()
+        .and_then(|health| health.gpu.as_deref())
+        .map(gpu_speed)
+        .unwrap_or(0)
+}
+
 /// Picks the best hardware-compatible box for `model_id`: highest affinity,
-/// ties broken by smaller queue depth, then config order. This intentionally
+/// ties broken by the faster GPU, then smaller queue depth, then config
+/// order. This intentionally
 /// includes a sufficiently large node that is temporarily waiting for free
 /// VRAM; dispatchers must use [`pick_box_admitted_scored`], while capability
 /// and queue planners use this function. Returns an index into `snapshots`.
@@ -497,10 +535,11 @@ pub fn pick_box_scored(snapshots: &[BoxSnapshot], model_id: &str) -> Option<(usi
         .iter()
         .enumerate()
         .filter_map(|(i, snap)| affinity(snap, model_id).map(|score| (i, snap, score)))
-        // min_by with an inverted affinity ordering: the "smallest" element
-        // is the highest-affinity, shallowest-queue, earliest-config box.
+        // min_by with an inverted ordering: the "smallest" element is the
+        // highest-affinity, fastest, shallowest-queue, earliest-config box.
         .min_by(|a, b| {
             b.2.cmp(&a.2) // higher affinity first
+                .then(gpu_rank(b.1).cmp(&gpu_rank(a.1))) // faster GPU
                 .then(a.1.jobs_pending().cmp(&b.1.jobs_pending())) // shallower queue
                 .then(a.0.cmp(&b.0)) // config order
         })
@@ -528,6 +567,7 @@ pub fn pick_box_admitted_scored(
         })
         .min_by(|a, b| {
             b.2.cmp(&a.2)
+                .then(gpu_rank(b.1).cmp(&gpu_rank(a.1)))
                 .then(a.1.jobs_pending().cmp(&b.1.jobs_pending()))
                 .then(a.0.cmp(&b.0))
         })
@@ -578,7 +618,7 @@ pub fn pick_for_domain_scored(
     snapshots: &[BoxSnapshot],
     domain: &str,
 ) -> Option<(usize, String, u32)> {
-    let mut best: Option<(bool, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
     for (i, snap) in snapshots.iter().enumerate() {
         if !snap.is_up() || !role_allows(&snap.base_url, domain) {
             continue;
@@ -595,19 +635,20 @@ pub fn pick_for_domain_scored(
             };
             let real = !is_synthetic_fallback(model);
             let pending = snap.jobs_pending();
+            let speed = gpu_rank(snap);
             let better = match &best {
                 None => true,
-                Some((br, bs, bp, bi, _)) => {
-                    (real, score, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bs, bg, bp, bi, _)) => {
+                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, pending, i, model.id.as_str()));
+                best = Some((real, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 /// Aggregate admission state for automatic domain routing on one node.
@@ -666,7 +707,7 @@ pub fn pick_for_domain_admitted_scored(
                     && vram_admission_for_model(snapshot, model).is_hardware_compatible()
             })
     });
-    let mut best: Option<(bool, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
     for (i, snapshot) in snapshots.iter().enumerate() {
         if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
             continue;
@@ -686,19 +727,20 @@ pub fn pick_for_domain_admitted_scored(
                 continue;
             }
             let pending = snapshot.jobs_pending();
+            let speed = gpu_rank(snapshot);
             let better = match &best {
                 None => true,
-                Some((br, bs, bp, bi, _)) => {
-                    (real, score, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bs, bg, bp, bi, _)) => {
+                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, pending, i, model.id.as_str()));
+                best = Some((real, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 pub fn pick_for_domain_admitted(
@@ -927,6 +969,52 @@ mod tests {
         health.vram_total_mb = Some(total_mb);
         health.vram_reserve_mb = None;
         snapshot
+    }
+
+    fn with_gpu(mut snapshot: BoxSnapshot, gpu: &str) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().gpu = Some(gpu.to_string());
+        snapshot
+    }
+
+    /// The GPU rank is a TIEBREAK: same weights, same queue, faster card.
+    /// It is read from the name the box reports, so a new card is one line
+    /// in the table — and a card nobody listed is never PREFERRED, which is
+    /// a different thing from being excluded.
+    #[test]
+    fn a_faster_gpu_breaks_a_tie_and_an_unlisted_card_never_wins_one() {
+        assert_eq!(gpu_speed("NVIDIA RTX PRO 6000 Blackwell Workstation Edition"), 3);
+        assert_eq!(gpu_speed("NVIDIA GeForce RTX 5090"), 2);
+        assert_eq!(gpu_speed("NVIDIA GeForce RTX 4090"), 1);
+        // Case is not a signal, and a name that merely LOOKS like one on
+        // the list (a different, older card) is not on the list.
+        assert_eq!(gpu_speed("nvidia geforce rtx 5090"), 2);
+        assert_eq!(gpu_speed("NVIDIA RTX 6000 Ada Generation"), 0);
+        assert_eq!(gpu_speed(""), 0);
+        // A box that names no GPU ranks with the unknowns.
+        assert_eq!(gpu_rank(&snapshot("http://quiet", 0, Vec::new())), 0);
+
+        let ready = || vec![model("m", "image", MODEL_STATE_READY, true)];
+        let fleet = vec![
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce RTX 4090"),
+            with_gpu(snapshot("http://b", 0, ready()), "NVIDIA RTX PRO 6000"),
+            with_gpu(snapshot("http://c", 0, ready()), "NVIDIA GeForce RTX 5090"),
+        ];
+        assert_eq!(pick_box(&fleet, "m"), Some(1), "6000 > 5090 > 4090");
+        assert_eq!(pick_for_domain(&fleet, "image"), Some((1, "m".to_string())));
+
+        // But it never outranks the weights: the 4090 HOLDS the model and
+        // the 6000 would have to fetch it.
+        let cold_fast = vec![
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce RTX 4090"),
+            with_gpu(
+                snapshot("http://b", 0, vec![model("m", "image", MODEL_STATE_ABSENT, true)]),
+                "NVIDIA RTX PRO 6000",
+            ),
+        ];
+        assert_eq!(pick_box(&cold_fast, "m"), Some(0));
+        // Nor a role: the chat box stays a chat box, whatever card it has.
+        let roles = FleetRoles::parse("b=chat");
+        assert!(!roles.allows("http://b", "image"));
     }
 
     #[test]
