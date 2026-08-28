@@ -95,10 +95,19 @@ script_mod! {
             // Deepest levels read warmest, so the eye can rank planes without
             // counting them. 12 is a nesting depth no real UI exceeds by much.
             let t = clamp(self.level / 12.0, 0.0, 1.0)
-            let tint = vec3(0.45, 0.72, 1.0).mix(vec3(1.0, 0.62, 0.18), t)
+            let depth_tint = vec3(0.45, 0.72, 1.0).mix(vec3(1.0, 0.62, 0.18), t)
+            // The tweaker's marks: the SAME colours its flat hover and pinned
+            // outlines use, so lighting up reads identically in both modes.
+            // emphasis 1 = hover (cyan), 2 = pinned (orange), both full alpha.
+            let hover = clamp(self.emphasis, 0.0, 1.0)
+            let pinned = clamp(self.emphasis - 1.0, 0.0, 1.0)
+            let tint = depth_tint
+                .mix(vec3(0.19, 0.78, 1.0), hover)
+                .mix(vec3(1.0, 0.62, 0.13), pinned)
+            let alpha = mix(0.8, 1.0, hover)
             // Premultiplied, so the blend does not fringe over varied
             // backgrounds.
-            let a = 0.8 * aa
+            let a = alpha * aa
             return vec4(tint * a, a)
         }
     }
@@ -133,6 +142,10 @@ pub struct DrawSplodedHairline {
     /// Stroke width in logical pixels.
     #[live(1.5)]
     pub stroke: f32,
+    /// 0 = a scope frame; 1 = the tweaker's hover outline; 2 = its pinned
+    /// selection. Drives the tint and full alpha.
+    #[live(0.0)]
+    pub emphasis: f32,
 }
 
 impl DrawSplodedHairline {
@@ -152,5 +165,26 @@ impl DrawSplodedHairline {
         // every scope in the frame, so holding on to the last one's area would
         // leave a stale reference behind on the next redraw.
         cx.add_aligned_instance(&self.draw_vars);
+    }
+
+    /// Emit one of the tweaker's marks — a hover (`emphasis` 1) or pinned
+    /// (`emphasis` 2) outline — at an already-clipped screen rect. Unaligned:
+    /// the mark list sits directly under the pass root, so `rect` IS the
+    /// instance's position and no alignment pass moves it. The caller sets
+    /// `cx.nesting_depth` to the mark's level first, which is what lands the
+    /// draw call on the marked widget's own plane.
+    pub fn draw_mark(&mut self, cx: &mut Cx2d, rect: Rect, level: f32, emphasis: f32, stroke: f32) {
+        if self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.level = level;
+        self.emphasis = emphasis;
+        self.stroke = stroke;
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw_clip = vec4(-1.0e6, -1.0e6, 1.0e6, 1.0e6);
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        cx.add_instance(&self.draw_vars);
+        self.emphasis = 0.0;
     }
 }

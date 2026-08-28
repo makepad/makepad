@@ -76,6 +76,9 @@ pub struct TweakPick {
     /// the spacing band rather than on content — the gap between rects is a
     /// first-class target.
     pub band: Option<String>,
+    /// The plane the widget renders on in the exploded view (its component
+    /// nesting depth); 0 when it has not drawn while the mode was up.
+    pub level: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -232,7 +235,9 @@ fn pick_candidate(cx: &Cx, widget: &WidgetRef, abs: Vec2d) -> Option<Rect> {
     if !widget.visible() {
         return None;
     }
-    let rect = widget.area().clipped_rect(cx);
+    // All instances, not the first: a text run's area is its glyph run,
+    // and the first glyph alone is not a paragraph.
+    let rect = widget.area().clipped_rect_union(cx);
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 || !rect.contains(abs) {
         return None;
     }
@@ -250,12 +255,21 @@ fn walk_pick(
     widget: &WidgetRef,
     abs: Vec2d,
     depth: usize,
+    max_level: Option<usize>,
     best: &mut Option<(WidgetRef, Rect, usize)>,
 ) {
     if !widget.visible() {
         return;
     }
-    if !is_design_transparent(widget) {
+    // Exploded view: the cursor is on ONE plane. A widget nested deeper than
+    // that plane sits on another sheet, however its 2D rect overlaps the
+    // un-projected point — that is what makes a covered parent selectable.
+    let on_deeper_plane = max_level.is_some_and(|max| {
+        cx.widget_tree()
+            .nesting_depth(widget.widget_uid())
+            .is_some_and(|level| level > max)
+    });
+    if !on_deeper_plane && !is_design_transparent(widget) {
         if let Some(rect) = pick_candidate(cx, widget, abs) {
             let take = match best {
                 // Deeper wins; equal depth: later in draw order wins.
@@ -268,7 +282,7 @@ fn walk_pick(
         }
     }
     widget.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, depth + 1, best);
+        walk_pick(cx, &child, abs, depth + 1, max_level, best);
     });
 }
 
@@ -282,7 +296,7 @@ fn resolve_band(cx: &mut Cx, widget: &WidgetRef, rect: Rect, abs: Vec2d) -> Opti
         if !child.visible() {
             return;
         }
-        let child_rect = child.area().clipped_rect(cx);
+        let child_rect = child.area().clipped_rect_union(cx);
         if child_rect.size.x <= 0.0 || child_rect.size.y <= 0.0 {
             return;
         }
@@ -321,7 +335,7 @@ fn resolve_band(cx: &mut Cx, widget: &WidgetRef, rect: Rect, abs: Vec2d) -> Opti
         if !child.visible() {
             return;
         }
-        let r = child.area().clipped_rect(cx);
+        let r = child.area().clipped_rect_union(cx);
         if r.size.x <= 0.0 || r.size.y <= 0.0 {
             return;
         }
@@ -380,12 +394,20 @@ fn resolve_pick(
     window_id: usize,
 ) -> Option<TweakPick> {
     let mut best = None;
+    // Exploded: the router already re-addressed `abs` onto the plane the ray
+    // hit; a miss (off the deck) picks nothing.
+    let max_level = if cx.sploded_active() {
+        Some(cx.sploded_hit_level()?)
+    } else {
+        None
+    };
     // Start below the root (the window body itself is chrome, not content).
     root.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, 0, &mut best);
+        walk_pick(cx, &child, abs, 0, max_level, &mut best);
     });
     let (widget, rect, _depth) = best?;
     let uid = widget.widget_uid();
+    let level = cx.widget_tree().nesting_depth(uid).unwrap_or(0);
     let path_ids = cx.widget_tree().path_to(uid);
     let path = if path_ids.is_empty() {
         format!("uid:{}", uid.0)
@@ -409,6 +431,7 @@ fn resolve_pick(
         rect,
         window_id,
         band,
+        level,
     })
 }
 
@@ -1956,7 +1979,7 @@ pub fn tweak_callback(
             let changed = apply_splash_chunk(cx, &widget, &resolved_path, &chunk, "remote")?;
             {
                 let mut s = session().lock().unwrap();
-                let rect = widget.area().clipped_rect(cx);
+                let rect = widget.area().clipped_rect_union(cx);
                 let ty = widget
                     .widget_type_id()
                     .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
@@ -1969,6 +1992,7 @@ pub fn tweak_callback(
                     rect,
                     window_id: 0,
                     band: None,
+                    level: 0,
                 });
             }
             Ok(format!(
@@ -4519,7 +4543,7 @@ impl Tweaker {
                         let target = id.0;
                         let widget = cx.widget_tree().widget(WidgetUid(target));
                         if !widget.is_empty() {
-                            let rect = widget.area().clipped_rect(cx);
+                            let rect = widget.area().clipped_rect_union(cx);
                             let ids = cx.widget_tree().path_to(WidgetUid(target));
                             let path = ids
                                 .iter()
@@ -4540,6 +4564,7 @@ impl Tweaker {
                                 rect,
                                 window_id: self.my_window.unwrap_or(0),
                                 band: None,
+                                level: 0,
                             });
                             self.rows_uid = 0;
                             self.redraw_overlay(cx);
@@ -4550,7 +4575,7 @@ impl Tweaker {
                         // Tree hover: outline that widget in the body/3D.
                         let widget = cx.widget_tree().widget(WidgetUid(id.0));
                         if !widget.is_empty() {
-                            let rect = widget.area().clipped_rect(cx);
+                            let rect = widget.area().clipped_rect_union(cx);
                             if rect.size.x > 0.0 {
                                 session().lock().unwrap().hover = Some(TweakPick {
                                     uid: id.0,
@@ -4559,6 +4584,7 @@ impl Tweaker {
                                     rect,
                                     window_id: self.my_window.unwrap_or(0),
                                     band: None,
+                                    level: 0,
                                 });
                                 self.tree_hover_active = true;
                                 self.redraw_overlay(cx);
@@ -4580,7 +4606,9 @@ impl Tweaker {
                     // The 2.5D exploded z-layer view. Inspection-only while
                     // up (input belongs to the mode): exit with Esc or F10.
                     cx.sploded_toggle();
-                    self.sploded_armed = cx.sploded_active();
+                    // The toggle is deferred to the next event; read the
+                    // state it WILL have, not the one it still has.
+                    self.sploded_armed = cx.sploded_will_be_active();
                     log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
                 }
             }
@@ -4955,18 +4983,23 @@ impl Tweaker {
     }
 
     fn draw_pick(&mut self, cx: &mut Cx2d, pick: &TweakPick, style: PickStyle) {
+        if pick.rect.size.x <= 0.0 || pick.rect.size.y <= 0.0 {
+            return;
+        }
         let dpi = cx.current_dpi_factor().max(1.0) as f32;
         self.draw_outline.dpi = dpi;
         match style {
             PickStyle::Pinned => {
+                // Outline only — a wash over the selection would tint the
+                // very colours being tweaked.
                 self.draw_outline.border_color = vec4(1.0, 0.62, 0.13, 1.0);
-                self.draw_outline.fill_color = vec4(1.0, 0.62, 0.13, 0.08);
+                self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
                 self.draw_outline.border_size = 2.0;
                 self.draw_outline.dash = 0.0;
             }
             PickStyle::Hover => {
                 self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 1.0);
-                self.draw_outline.fill_color = vec4(0.19, 0.78, 1.0, 0.06);
+                self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
                 self.draw_outline.border_size = 1.0;
                 self.draw_outline.dash = 0.0;
             }
@@ -5302,7 +5335,7 @@ impl Widget for Tweaker {
                 {
                     let mut hover_target = None;
                     for (item, target) in &self.tree_visible {
-                        let rect = item.area().clipped_rect(cx);
+                        let rect = item.area().clipped_rect_union(cx);
                         if rect.size.y > 0.0 && rect.contains(e.abs) {
                             hover_target = Some(*target);
                             break;
@@ -5312,7 +5345,7 @@ impl Widget for Tweaker {
                         Some(target) => {
                             let widget = cx.widget_tree().widget(WidgetUid(target));
                             if !widget.is_empty() {
-                                let rect = widget.area().clipped_rect(cx);
+                                let rect = widget.area().clipped_rect_union(cx);
                                 if rect.size.x > 0.0 {
                                     session().lock().unwrap().hover = Some(TweakPick {
                                         uid: target,
@@ -5321,6 +5354,7 @@ impl Widget for Tweaker {
                                         rect,
                                         window_id: self.my_window.unwrap_or(0),
                                         band: None,
+                                        level: 0,
                                     });
                                     self.tree_hover_active = true;
                                     self.redraw_overlay(cx);
@@ -5509,12 +5543,16 @@ impl Widget for Tweaker {
         let pinned = pinned.map(|mut pick| {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
-                let rect = live.area().clipped_rect(cx);
+                let rect = live.area().clipped_rect_union(cx);
                 if rect.size.x > 0.0 && rect != pick.rect {
                     pick.rect = rect;
                     if let Some(pinned) = session().lock().unwrap().pinned.as_mut() {
                         pinned.rect = rect;
                     }
+                } else if rect.size.x <= 0.0 {
+                    // Not drawn this frame (another tab is up): the pin
+                    // stands, but there is nothing on screen to outline.
+                    pick.rect = Rect::default();
                 }
             }
             pick
@@ -5522,13 +5560,35 @@ impl Widget for Tweaker {
         let hover = hover.map(|mut pick| {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
-                let rect = live.area().clipped_rect(cx);
-                if rect.size.x > 0.0 {
-                    pick.rect = rect;
-                }
+                let rect = live.area().clipped_rect_union(cx);
+                pick.rect = if rect.size.x > 0.0 { rect } else { Rect::default() };
             }
             pick
         });
+        // Exploded view: the outlines belong on their widgets' planes inside
+        // the body pass, not flat on the window pass — hand them to the
+        // pass owner as marks and draw nothing here.
+        if cx.sploded_active() {
+            let mark = |pick: &TweakPick| {
+                if Some(pick.window_id) != window_id || pick.rect.size.x <= 0.0 {
+                    return None;
+                }
+                let level = cx
+                    .widget_tree()
+                    .nesting_depth(WidgetUid(pick.uid))
+                    .unwrap_or(pick.level);
+                Some(makepad_platform::sploded::SplodedMark { rect: pick.rect, level: level as f32 })
+            };
+            let hover_mark = if quiet { None } else { hover.as_ref().and_then(mark) };
+            let pinned_mark = pinned.as_ref().and_then(mark);
+            cx.sploded_set_marks(hover_mark, pinned_mark);
+        }
+        // NOT an early return: the overlay list and its root turtle were
+        // begun above and are ended below — leaving them open let the
+        // window's deferred Fill walk resolve against this turtle instead
+        // of its own (an index-out-of-bounds in `resolve_fill`).
+        let flat_outlines = !cx.sploded_active();
+        if flat_outlines {
         if let Some(pick) = &pinned {
             if Some(pick.window_id) == window_id {
                 let style = if quiet {
@@ -5551,6 +5611,7 @@ impl Widget for Tweaker {
                     self.draw_pick(cx, pick, PickStyle::Hover);
                 }
             }
+        }
         }
         for stroke in &strokes {
             if Some(stroke.window_id) == window_id {

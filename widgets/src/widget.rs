@@ -1026,6 +1026,10 @@ impl WidgetRef {
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            if cx.sploded_active() {
+                let uid = inner.widget.widget_uid();
+                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+            }
             let step = inner.widget.draw_walk(cx, scope, walk).step();
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1041,6 +1045,10 @@ impl WidgetRef {
     pub fn draw_walk_all(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            if cx.sploded_active() {
+                let uid = inner.widget.widget_uid();
+                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+            }
             inner.widget.draw_walk_all(cx, scope, walk);
             cx.exit_nesting_depth();
         }

@@ -1,4 +1,15 @@
-//! The "sploded" view: an inspection-only 2.5D exploded z-layer mode.
+//! The "sploded" view: a LIVE 2.5D exploded z-layer mode.
+//!
+//! Live, not frozen: the exploded stack is the running app seen from an
+//! angle. Wheel scrolling still scrolls the list under the cursor, hover
+//! still hovers, and the tweaker still picks — every pointer event is routed
+//! through the inverse of the explode transform (`sploded_route`: screen
+//! point -> the plane the ray lands on -> that plane's own 2D coordinates)
+//! and then dispatched exactly as in flat 2D. The one gesture the mode keeps
+//! for itself is press-and-drag, which orbits the stack; a press that never
+//! moves is a click and flows through like everything else. Grabbing a
+//! scrollbar thumb by dragging is therefore deliberately NOT possible while
+//! exploded — a drag is the orbit — and that is the coexistence rule.
 //!
 //! F10 tilts the window into an isometric stack that renders **the component
 //! nesting structure**: one plane per nesting level, siblings sharing a plane,
@@ -82,8 +93,9 @@
 
 use crate::{
     cx::Cx,
-    draw_pass::CxDrawPassParent,
-    event::{Event, KeyCode},
+    draw_list::{CxDrawKind, DrawListId},
+    draw_pass::{CxDrawPassParent, CxDrawPassRect},
+    event::{Event, KeyCode, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent},
     makepad_math::*,
 };
 
@@ -204,13 +216,29 @@ impl SplodedParams {
     }
 }
 
-/// One drag in progress: where it started and the angles it started from.
+/// One primary press in progress: where it started and the angles it started
+/// from. It becomes an orbit only once the pointer travels past the click
+/// threshold; until then it is a click in the making and flows to the app.
 #[derive(Clone, Copy, Debug)]
 struct SplodedDrag {
     start: Vec2d,
     yaw: f32,
     pitch: f32,
+    orbiting: bool,
 }
+
+/// A rect to emphasise on its plane — the tweaker's hover and pinned
+/// selection, rendered INSIDE the exploded pass at the widget's own nesting
+/// level so the highlight sits on the sheet it belongs to. Outline only,
+/// never a fill: the mode is an overdraw instrument.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplodedMark {
+    pub rect: Rect,
+    pub level: f32,
+}
+
+/// Pixels of travel that turn a press into an orbit drag.
+const ORBIT_THRESHOLD: f64 = 3.0;
 
 /// The mode's whole state. Lives on `Cx`; inert (and free) while `active` is
 /// false, which is the byte-identical-rendering gate.
@@ -238,6 +266,15 @@ pub struct SplodedView {
     /// A region the mode never takes the pointer in — the tweaker's panel
     /// band. See `sploded_set_flat_band`.
     flat_band: Option<Rect>,
+    /// The plane the last routed pointer event landed on (`sploded_route`),
+    /// `None` when the ray missed the stack or the pointer sat in the flat
+    /// band. The tweaker's pick reads this to select ON that plane.
+    hit_level: Option<usize>,
+    /// The tweaker's hover and pinned outlines, drawn by the body pass owner.
+    hover_mark: Option<SplodedMark>,
+    pinned_mark: Option<SplodedMark>,
+    /// The draw list the marks live in, so a mark change redraws only it.
+    mark_list: Option<DrawListId>,
 }
 
 /// World-z units per nesting level while the mode is up.
@@ -289,6 +326,10 @@ impl Default for SplodedView {
             drag: None,
             hairlines: true,
             flat_band: None,
+            hit_level: None,
+            hover_mark: None,
+            pinned_mark: None,
+            mark_list: None,
         }
     }
 }
@@ -398,6 +439,22 @@ impl Cx {
         self.redraw_all();
     }
 
+    /// What `sploded_active` will read once a queued toggle has performed:
+    /// the state a caller that just called `sploded_toggle` should show.
+    pub fn sploded_will_be_active(&self) -> bool {
+        self.sploded.active ^ self.sploded.pending_toggle
+    }
+
+    /// After a panic was contained at a platform callback boundary the mode
+    /// is the first suspect: leave it, so a mode-specific fault cannot
+    /// wound every following frame, and let the flat app draw again.
+    pub(crate) fn sploded_recover_after_panic(&mut self) {
+        if self.sploded.active {
+            crate::log!("sploded view OFF — a panic was contained while it was up");
+            self.sploded_set_active(false);
+        }
+    }
+
     /// Declare a screen region the exploded mode must keep its hands off.
     ///
     /// The mode owns the pointer so a drag can orbit the stack, but the
@@ -433,6 +490,192 @@ impl Cx {
         self.nesting_depth_max
     }
 
+    /// The plane the last routed pointer event landed on. `None` when the
+    /// mode is off, the ray missed every plane, or the pointer is in the flat
+    /// band. A pick made while this is `Some(level)` must not select anything
+    /// nested deeper than `level`: the cursor is on that sheet, and a deeper
+    /// child whose 2D rect happens to contain the un-projected point sits on
+    /// another sheet entirely.
+    pub fn sploded_hit_level(&self) -> Option<usize> {
+        if !self.sploded.active {
+            return None;
+        }
+        self.sploded.hit_level
+    }
+
+    /// Set the hover / pinned outlines the body pass renders on their own
+    /// planes. Cheap to call every overlay redraw: only a change redraws, and
+    /// then only the mark draw list.
+    pub fn sploded_set_marks(&mut self, hover: Option<SplodedMark>, pinned: Option<SplodedMark>) {
+        if self.sploded.hover_mark == hover && self.sploded.pinned_mark == pinned {
+            return;
+        }
+        self.sploded.hover_mark = hover;
+        self.sploded.pinned_mark = pinned;
+        if let Some(list) = self.sploded.mark_list {
+            self.redraw_list(list);
+        }
+    }
+
+    pub fn sploded_marks(&self) -> (Option<SplodedMark>, Option<SplodedMark>) {
+        (self.sploded.hover_mark, self.sploded.pinned_mark)
+    }
+
+    /// The body-pass owner registers the draw list its marks go in.
+    pub fn sploded_set_mark_list(&mut self, list: DrawListId) {
+        self.sploded.mark_list = Some(list);
+    }
+
+    /// The exploded pass and its logical size, while one is armed.
+    fn sploded_pass(&self) -> Option<(Vec2d, DrawListId)> {
+        for pass_id in self.passes.id_iter() {
+            let pass = &self.passes[pass_id];
+            if pass.sploded.is_none() {
+                continue;
+            }
+            if let (Some(CxDrawPassRect::Size(size)), Some(list)) =
+                (&pass.pass_rect, pass.main_draw_list_id)
+            {
+                return Some((*size, list));
+            }
+        }
+        None
+    }
+
+    /// The ray pick: which plane does a screen point land on, and where on
+    /// that plane. Walks the exploded pass's draw lists once, collecting every
+    /// instance's clipped rect per nesting level (the same rect
+    /// `Area::clipped_rect` reports, so it agrees with 2D hit-testing), then
+    /// un-projects the cursor onto each plane from the deepest down. The
+    /// first plane with an instance under the un-projected point wins —
+    /// clicking a covered parent's exposed frame lands on the PARENT, because
+    /// its child's footprint on the deeper plane does not contain the ray.
+    /// Hairline frames are instances too, so drawless containers are hit.
+    fn sploded_ray_hit(&self, screen: Vec2d) -> Option<(usize, Vec2d)> {
+        let (size, root) = self.sploded_pass()?;
+        let params = self.sploded.params(size);
+        let max = self.nesting_depth_max;
+        let mut planes: Vec<Vec<Rect>> = vec![Vec::new(); max + 1];
+        let mut stack = vec![root];
+        while let Some(list_id) = stack.pop() {
+            let draw_list = &self.draw_lists[list_id];
+            let u = &draw_list.draw_list_uniforms;
+            let has_clip = draw_list.draw_list_has_clip;
+            let shift = dvec2(u.view_shift.x as f64, u.view_shift.y as f64);
+            let view_clip = (
+                dvec2(u.view_clip.x as f64, u.view_clip.y as f64),
+                dvec2(u.view_clip.z as f64, u.view_clip.w as f64),
+            );
+            for order_index in 0..draw_list.draw_item_order_len() {
+                let Some(item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                    continue;
+                };
+                let item = &draw_list.draw_items[item_id];
+                match &item.kind {
+                    CxDrawKind::SubList(sub) => stack.push(*sub),
+                    CxDrawKind::DrawCall(dc) => {
+                        let level = dc.turtle_depth.max(0.0) as usize;
+                        if level > max {
+                            continue;
+                        }
+                        let Some(buf) = item.instances.as_ref() else {
+                            continue;
+                        };
+                        let sh = &self.draw_shaders[dc.draw_shader_id.index];
+                        let (Some(rp), Some(rs)) = (sh.mapping.rect_pos, sh.mapping.rect_size)
+                        else {
+                            continue;
+                        };
+                        let stride = sh.mapping.instances.total_slots;
+                        if stride == 0 {
+                            continue;
+                        }
+                        for i in 0..buf.len() / stride {
+                            let o = i * stride;
+                            let mut rect = Rect {
+                                pos: dvec2(buf[o + rp] as f64, buf[o + rp + 1] as f64),
+                                size: dvec2(buf[o + rs] as f64, buf[o + rs + 1] as f64),
+                            };
+                            if let Some(dcl) = sh.mapping.draw_clip {
+                                rect = rect.clip((
+                                    dvec2(buf[o + dcl] as f64, buf[o + dcl + 1] as f64),
+                                    dvec2(buf[o + dcl + 2] as f64, buf[o + dcl + 3] as f64),
+                                ));
+                            }
+                            if has_clip {
+                                rect = rect.translate(shift).clip(view_clip);
+                            }
+                            if rect.size.x > 0.0 && rect.size.y > 0.0 {
+                                planes[level].push(rect);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for level in (0..=max).rev() {
+            if planes[level].is_empty() {
+                continue;
+            }
+            let p = params.unproject(dvec2(0.0, 0.0), size, screen, level as f32);
+            if planes[level].iter().any(|r| r.contains(p)) {
+                return Some((level, p));
+            }
+        }
+        None
+    }
+
+    /// The live-view router. Runs AFTER `sploded_intercept` on every event:
+    /// a pointer event over the exploded body comes back re-addressed to the
+    /// plane its ray lands on, in that plane's own 2D coordinates, for the
+    /// ordinary dispatch that follows. `None` leaves the event untouched —
+    /// mode off, not a pointer event, pointer in the flat band, or an orbit
+    /// drag in progress (the intercept eats those).
+    pub(crate) fn sploded_route(&mut self, event: &Event) -> Option<Event> {
+        if !self.sploded.active {
+            return None;
+        }
+        if self.sploded.drag.is_some_and(|d| d.orbiting) {
+            return None;
+        }
+        let abs = match event {
+            Event::MouseMove(e) => e.abs,
+            Event::MouseDown(e) => e.abs,
+            Event::MouseUp(e) => e.abs,
+            Event::Scroll(e) => e.abs,
+            _ => return None,
+        };
+        if self.sploded_in_flat_band(abs) {
+            self.sploded.hit_level = None;
+            return None;
+        }
+        let (level, p) = match self.sploded_ray_hit(abs) {
+            Some((level, p)) => (Some(level), p),
+            // Off the deck entirely: address the base plane so the app sees
+            // a coherent point (a hover leaving a widget must still arrive).
+            None => {
+                let p = self
+                    .sploded_pass()
+                    .map(|(size, _)| {
+                        self.sploded
+                            .params(size)
+                            .unproject(dvec2(0.0, 0.0), size, abs, 0.0)
+                    })
+                    .unwrap_or(abs);
+                (None, p)
+            }
+        };
+        self.sploded.hit_level = level;
+        Some(match event {
+            Event::MouseMove(e) => Event::MouseMove(MouseMoveEvent { abs: p, ..e.clone() }),
+            Event::MouseDown(e) => Event::MouseDown(MouseDownEvent { abs: p, ..e.clone() }),
+            Event::MouseUp(e) => Event::MouseUp(MouseUpEvent { abs: p, ..e.clone() }),
+            Event::Scroll(e) => Event::Scroll(ScrollEvent { abs: p, ..e.clone() }),
+            _ => unreachable!(),
+        })
+    }
+
     fn sploded_in_flat_band(&self, abs: Vec2d) -> bool {
         self.sploded
             .flat_band
@@ -443,8 +686,9 @@ impl Cx {
     /// First stop for every event. Returns true when the event was consumed
     /// by the mode and must not reach the app.
     ///
-    /// Off, this only ever looks at one key. On, it eats all pointer and
-    /// keyboard input — the mode is inspection-only.
+    /// Off, this only ever looks at one key. On, it claims the mode's own
+    /// keys and the orbit drag — nothing else. Every other pointer event
+    /// flows on through `sploded_route` to the app: the view is live.
     pub(crate) fn sploded_intercept(&mut self, event: &Event) -> bool {
         if self.sploded.pending_toggle {
             self.sploded.pending_toggle = false;
@@ -509,23 +753,37 @@ impl Cx {
             // stay typeable while the stack is exploded.
             Event::KeyUp(_) | Event::TextInput(_) => false,
             Event::MouseDown(e) => {
-                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
+                if !self.sploded.active
+                    || !e.button.is_primary()
+                    || self.sploded_in_flat_band(e.abs)
+                {
                     return false;
                 }
+                // Arm a possible orbit, but let the press itself flow: the
+                // tweaker picks on the down, and a press that never travels
+                // is a click, not a drag.
                 self.sploded.drag = Some(SplodedDrag {
                     start: e.abs,
                     yaw: self.sploded.yaw,
                     pitch: self.sploded.pitch,
+                    orbiting: false,
                 });
-                true
+                false
             }
             Event::MouseMove(e) => {
-                // Only a drag in progress belongs to the mode. Plain motion
-                // flows on, so hover states and tooltips still work.
-                let Some(drag) = self.sploded.drag else {
+                // Only an orbit in progress belongs to the mode. Plain motion
+                // flows on (re-addressed to its plane), so hover works.
+                let Some(mut drag) = self.sploded.drag else {
                     return false;
                 };
                 let d = e.abs - drag.start;
+                if !drag.orbiting {
+                    if d.x.abs() < ORBIT_THRESHOLD && d.y.abs() < ORBIT_THRESHOLD {
+                        return false;
+                    }
+                    drag.orbiting = true;
+                    self.sploded.drag = Some(drag);
+                }
                 self.sploded.yaw =
                     (drag.yaw + d.x as f32 * DRAG_RADIANS_PER_PX).clamp(-YAW_LIMIT, YAW_LIMIT);
                 self.sploded.pitch =
@@ -534,18 +792,15 @@ impl Cx {
                 true
             }
             Event::MouseUp(_) => {
-                if self.sploded.drag.take().is_none() {
-                    return false;
-                }
-                true
+                // The up always pairs with the down the app received, orbit
+                // or not — an eaten up wedges the app's own capture.
+                self.sploded.drag = None;
+                false
             }
-            Event::Scroll(e) => {
-                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
-                    return false;
-                }
-                self.sploded_set_spread(self.sploded.spread - e.scroll.y as f32 * 0.002);
-                true
-            }
+            // The wheel belongs to the list under the ray: `sploded_route`
+            // re-addresses it and ordinary dispatch scrolls. Spread moved to
+            // the +/- keys for exactly this reason.
+            Event::Scroll(_) => false,
             _ => false,
         }
     }
@@ -556,6 +811,9 @@ impl Cx {
         }
         self.sploded.active = active;
         self.sploded.drag = None;
+        self.sploded.hit_level = None;
+        self.sploded.hover_mark = None;
+        self.sploded.pinned_mark = None;
         if active {
             // Drop hover/pressed visuals the app was showing when the mode
             // opened, so the frozen picture is not stuck mid-hover.
@@ -565,7 +823,7 @@ impl Cx {
         self.sploded_sync();
         if active {
             crate::log!(
-                "sploded view ON — {} nesting levels, drag to orbit, +/- to explode, 0 resets, esc/F10 exits",
+                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, 0 resets, esc/F10 exits",
                 self.sploded.layers as u32
             );
         } else {

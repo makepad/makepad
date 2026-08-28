@@ -8,6 +8,7 @@ use crate::{
     },
     label::*,
     makepad_derive_widget::*,
+    makepad_draw::shader::draw_sploded_hairline::DrawSplodedHairline,
     makepad_draw::*,
     nav_control::NavControl,
     view::*,
@@ -720,6 +721,11 @@ struct SplodedStack {
     scene_draw_list: DrawList2d,
     scene_texture: Texture,
     _scene_depth_texture: Texture,
+    /// The tweaker's hover / pinned outlines, drawn INSIDE the exploded pass
+    /// on their widgets' own planes. Its own list so a hover change redraws
+    /// the marks alone, not the app.
+    mark_draw_list: DrawList2d,
+    mark_outline: Option<Box<DrawSplodedHairline>>,
 }
 
 impl SplodedStack {
@@ -751,7 +757,46 @@ impl SplodedStack {
             scene_draw_list,
             scene_texture,
             _scene_depth_texture: scene_depth_texture,
+            mark_draw_list: DrawList2d::new(cx),
+            mark_outline: None,
         }
+    }
+
+    /// The tweaker's marks, last in the body pass so they paint over the
+    /// app on their planes. Each mark's draw call is created with
+    /// `nesting_depth` set to the mark's level — that is the only thing that
+    /// decides which plane a call renders on while the mode is up.
+    fn draw_marks(&mut self, cx: &mut Cx2d) {
+        cx.sploded_set_mark_list(self.mark_draw_list.id());
+        // `begin_always`, like the scene list: a walk here would register a
+        // deferred Fill on the pass root turtle moments before that turtle
+        // ends, and the window's own deferred walks then resolve against the
+        // wrong turtle (an index-out-of-bounds in `resolve_fill`, contained
+        // at the display-link boundary — which reads as the app hanging).
+        self.mark_draw_list.begin_always(cx);
+        let (hover, pinned) = cx.sploded_marks();
+        if hover.is_some() || pinned.is_some() {
+            if self.mark_outline.is_none() {
+                let outline =
+                    cx.with_vm(|vm| DrawSplodedHairline::script_new_with_default(vm));
+                self.mark_outline = Some(Box::new(outline));
+            }
+            let mut outline = self.mark_outline.take().unwrap();
+            let saved_depth = cx.nesting_depth;
+            if let Some(mark) = pinned {
+                cx.nesting_depth = mark.level as usize;
+                outline.draw_mark(cx, mark.rect, mark.level, 2.0, 2.5);
+            }
+            if let Some(mark) = hover {
+                if Some(mark) != pinned {
+                    cx.nesting_depth = mark.level as usize;
+                    outline.draw_mark(cx, mark.rect, mark.level, 1.0, 1.5);
+                }
+            }
+            cx.nesting_depth = saved_depth;
+            self.mark_outline = Some(outline);
+        }
+        self.mark_draw_list.end(cx);
     }
 
     fn begin_scene(&mut self, cx: &mut Cx2d) {
@@ -771,9 +816,14 @@ impl SplodedStack {
         self.scene_draw_list.begin_always(cx);
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+        // Only the body explodes: scope frames are emitted into lists bound
+        // to this pass, nowhere else (the panel stays flat and frameless).
+        cx.sploded_scene = Some(pass_id);
     }
 
     fn end_scene(&mut self, cx: &mut Cx2d) {
+        cx.sploded_scene = None;
+        self.draw_marks(cx);
         cx.end_pass_sized_turtle();
         self.scene_draw_list.end(cx);
         cx.end_pass(&self.scene_pass);

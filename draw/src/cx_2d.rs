@@ -34,6 +34,12 @@ pub struct Cx2d<'a, 'b> {
     /// Every frame emitted this draw, to suppress the concentric near-copies
     /// a widget's internal layout turtles produce.
     pub(crate) sploded_hairline_seen: Vec<Rect>,
+    /// The exploded BODY pass, set by `SplodedStack::begin_scene`. Frames
+    /// are emitted only into draw lists bound to THAT pass — the tweaker's
+    /// panel and every popup are overlay lists bound to the flat window
+    /// pass (even though they draw while the body is open) and must look
+    /// exactly as they do with the mode off.
+    pub sploded_scene: Option<DrawPassId>,
 }
 
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
@@ -68,6 +74,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             draw_call_parent_next: 2,
             sploded_hairline: None,
             sploded_hairline_seen: Vec::new(),
+            sploded_scene: None,
         }
     }
 
@@ -85,13 +92,21 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// Costs nothing when the mode is off: one bool test, and the wireframe is
     /// never even constructed.
     pub(crate) fn draw_sploded_hairline(&mut self, rect: Rect) {
+        let Some(scene_pass) = self.sploded_scene else {
+            return;
+        };
         if !self.cx.sploded_hairlines_active() {
             return;
         }
         if rect.size.x < 1.0 || rect.size.y < 1.0 {
             return;
         }
-        if self.draw_list_stack.is_empty() {
+        let Some(list_id) = self.draw_list_stack.last() else {
+            return;
+        };
+        // Only the body explodes: a turtle closing inside an overlay list
+        // (panel, popup) draws on the window pass and gets no frame.
+        if self.cx.draw_lists[*list_id].draw_pass_id != Some(scene_pass) {
             return;
         }
         // A widget nests several layout turtles that resolve to nearly the

@@ -442,6 +442,18 @@ impl Drop for MacosNativeCameraPreview {
     }
 }
 
+/// Set by the delegate boundaries when a panic was contained; consumed by
+/// the next timer tick, which redraws from a clean slate.
+static CONTAINED_PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn note_contained_panic() {
+    CONTAINED_PANIC.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_contained_panic() -> bool {
+    CONTAINED_PANIC.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 const KEEP_ALIVE_COUNT: usize = 5;
 const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
 
@@ -940,6 +952,13 @@ impl Cx {
                 self.ensure_timer0_started();
             }
             MacosEvent::Timer(te) => {
+                if take_contained_panic() {
+                    // Per-draw state (Cx2d) is rebuilt every frame, so a
+                    // redraw is a clean slate; the exploded view is the
+                    // usual suspect and leaves first.
+                    self.sploded_recover_after_panic();
+                    self.redraw_all();
+                }
                 if te.timer_id == 0 || te.timer_id == POINTER_CAPTURE_TIMER_ID {
                     // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
                     // act — was the gap a LATE FIRE (runloop starved / OS
