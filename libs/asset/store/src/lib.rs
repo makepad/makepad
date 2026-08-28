@@ -64,6 +64,7 @@ pub mod seed;
 pub mod server;
 pub mod variants;
 mod sqlite;
+mod synonyms;
 
 pub use auth::{token_hash, Auth, Capability, PrincipalId, Scope};
 pub use blobrefs::{BlobRef, BlobRefs, RefScan, RefState};
