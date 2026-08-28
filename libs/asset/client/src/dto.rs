@@ -1255,6 +1255,74 @@ impl JobStateDto {
 /// publish convention (`{"asset_id": …, "revision": …}`); anything else is
 /// simply `None` — the catalog event stream, not the job result, is the
 /// authority for publication.
+/// What ONE STAGE of a job was given — the record a person opens a run to
+/// read. The prompt is kept at FULL LENGTH deliberately: a truncated prompt
+/// answers none of the questions anyone asks a finished run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JobStageDto {
+    /// The stage's kind (`music.generate`, `text.expand`, `annotate.asset`).
+    pub name: String,
+    pub recorded_ms: u64,
+    /// The model this stage was handed to.
+    pub model: String,
+    /// Short label of the box that ran it (".165"), empty when unknown.
+    pub at: String,
+    /// THE POINT: the exact final text handed to the model, in full.
+    pub prompt: String,
+    /// The parameters that rode beside it, one `key=value` per line.
+    pub params: String,
+    /// What a text stage answered (an expansion), when it answered.
+    pub output: String,
+}
+
+/// One stage record on its way TO the store (the borrowed counterpart of
+/// [`JobStageDto`]). Every field is sanitized here, not by the caller:
+/// control characters go, line breaks and tabs stay, and each text is
+/// bounded so one stage can never blow the store's record budget.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JobStageInput<'a> {
+    /// `[a-z0-9._-]`, 1..=64 bytes — the kind of work this stage is.
+    pub name: &'a str,
+    pub model: &'a str,
+    /// Short box label (".165"); never a URL.
+    pub at: &'a str,
+    /// The exact final text handed to the model.
+    pub prompt: &'a str,
+    /// `key=value` per line.
+    pub params: &'a str,
+    /// What a text stage answered, once it has.
+    pub output: &'a str,
+}
+
+impl JobStageInput<'_> {
+    /// The wire document, or `InvalidInput` when the name is not a name.
+    pub fn to_value(&self) -> ClientResult<Value> {
+        let ok_name = (1..=64).contains(&self.name.len())
+            && self.name.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+            });
+        if !ok_name {
+            return Err(ClientError::InvalidInput { what: "stage name" });
+        }
+        // The store bounds the whole record; these bounds keep any single
+        // field from being the reason it is refused.
+        let mut pairs = vec![("name", crate::json::s(self.name))];
+        for (key, text, max) in [
+            ("model", self.model, 128usize),
+            ("at", self.at, 64),
+            ("prompt", self.prompt, 8 * 1024),
+            ("params", self.params, 2 * 1024),
+            ("output", self.output, 4 * 1024),
+        ] {
+            let text = sanitize_stage_text(text, max);
+            if !text.is_empty() {
+                pairs.push((key, crate::json::s(text)));
+            }
+        }
+        Ok(crate::json::obj(pairs))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobStatusDto {
     pub job: JobId,
@@ -1269,6 +1337,60 @@ pub struct JobStatusDto {
     pub outcome: Option<String>,
     pub result_asset: Option<AssetId>,
     pub result_revision: Option<AssetRevisionId>,
+    /// What each stage was given, in the order the stages ran. Empty on the
+    /// listing endpoints and on jobs a pre-stage worker ran.
+    pub stages: Vec<JobStageDto>,
+}
+
+/// Longest single text a stage record may carry back (the server bounds the
+/// whole record at 16 KB; this bounds one field of a hostile one).
+const MAX_STAGE_TEXT_BYTES: usize = 16 * 1024;
+
+/// Stage text, kept as written except for the control characters that have
+/// no business in it. Line breaks and tabs SURVIVE — a music prompt with
+/// lyrics is exactly the text this feature exists to show.
+pub fn sanitize_stage_text(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn parse_job_stages(v: &Value) -> Vec<JobStageDto> {
+    let Some(items) = v.get("stages").and_then(Value::as_arr) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter().take(32) {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let record = item.get("record");
+        let field = |key: &str| {
+            record
+                .and_then(|r| r.get(key))
+                .and_then(Value::as_str)
+                .map(|text| sanitize_stage_text(text, MAX_STAGE_TEXT_BYTES))
+                .unwrap_or_default()
+        };
+        out.push(JobStageDto {
+            name: sanitize_text(name, 64),
+            recorded_ms: item.get("recorded_ms").and_then(Value::as_u64).unwrap_or(0),
+            model: field("model"),
+            at: field("at"),
+            prompt: field("prompt"),
+            params: field("params"),
+            output: field("output"),
+        });
+    }
+    out
 }
 
 pub fn parse_job_status(v: &Value) -> ClientResult<JobStatusDto> {
@@ -1327,6 +1449,7 @@ pub fn parse_job_status(v: &Value) -> ClientResult<JobStatusDto> {
         outcome,
         result_asset,
         result_revision,
+        stages: parse_job_stages(v),
     })
 }
 
