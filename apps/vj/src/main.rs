@@ -1381,7 +1381,9 @@ script_mod! {
                                                                 width: 40
                                                                 height: 22
                                                                 labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
-                                                                selected_item: 2
+                                                                // XF: the fresh-deck default. A stored
+                                                                // per-clip choice still wins over it.
+                                                                selected_item: 1
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
                                                                         color: #x16161b
@@ -1869,7 +1871,9 @@ script_mod! {
                                                                 width: 40
                                                                 height: 22
                                                                 labels: ["OFF" "XF" "FL" "AI1" "AI2" "AI3"]
-                                                                selected_item: 2
+                                                                // XF: the fresh-deck default. A stored
+                                                                // per-clip choice still wins over it.
+                                                                selected_item: 1
                                                                 popup_menu: PopupMenu{
                                                                     draw_bg +: {
                                                                         color: #x16161b
@@ -2315,8 +2319,9 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     gen_len := DropDown{labels: ["…"]}
                                     gen_res := DropDown{labels: ["…"]}
-                                    View{width: Fill height: 1}
-                                    gen_go := ChromeButton{text: "Queue"}
+                                    // Which flux draws the still. Only ever
+                                    // models the fleet advertised.
+                                    gen_model := DropDown{labels: ["auto"]}
                                 }
                                 View{
                                     width: Fill
@@ -2324,6 +2329,7 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
+                                    gen_go := ChromeButton{text: "Queue"}
                                     gen_blast := ChromeButton{text: "BLAST"}
                                     // Close the wrap of EVERY looping clip,
                                     // not just the ones this app dreamed.
@@ -3210,7 +3216,9 @@ impl Default for ClipProfile {
             rate: 4.0,
             muted: true,
             sync: true,
-            tween: TWEEN_FLOW,
+            // XF for a clip that has never been given a mode of its own.
+            // A clip whose settings file names a tween still wins here.
+            tween: TWEEN_FADE,
         }
     }
 }
@@ -3640,7 +3648,7 @@ enum CatPurpose {
     /// then rides the ordinary `Thumb` purpose into the shared thumbnail
     /// cache, so the row costs no second decode path.
     DreamThumb { revision: AssetRevisionId },
-    JobProfiles,
+    JobProfiles { domain: &'static str },
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
     JobCancel { job: JobId },
@@ -5642,7 +5650,7 @@ pub struct App {
     rife_state: [u8; 2],
     /// Per-deck frame-tween mode (TWEEN_*): how the deck fills time
     /// between source frames. Stored with the clip like the trim range.
-    #[rust([TWEEN_FLOW, TWEEN_FLOW])]
+    #[rust([TWEEN_FADE, TWEEN_FADE])]
     slot_tween_mode: [u8; 2],
     #[rust]
     rife_service: [Option<flow_tween::RifeService>; 2],
@@ -5764,6 +5772,13 @@ pub struct App {
     /// The completed fade already landed on the mixer.
     #[rust]
     consumed_transition: Option<mixer::VideoTransitionId>,
+    /// The event feed announced itself attached at least once.
+    #[rust]
+    feed_ready: bool,
+    #[rust]
+    feed_batches: u64,
+    #[rust]
+    feed_events: u64,
     /// Last event-driven refresh per surface (see EVENT_REFRESH_COOLDOWN_S).
     #[rust]
     last_event_refresh: [Option<Instant>; 4],
@@ -6207,6 +6222,8 @@ pub struct App {
     gen_profile_labels: Vec<String>,
     #[rust]
     gen_size_labels: Vec<String>,
+    #[rust]
+    gen_model_labels: Vec<String>,
     /// The DREAM runs' prompt expander (broker turns on worker threads).
     /// Bare type name, not a path: the Script derive's field parser refuses
     /// `foo::Bar`.
@@ -10730,11 +10747,11 @@ p2 {}
             let Some(up) = self.up.as_mut() else { return };
             for cmd in cmds {
                 match cmd {
-                    GenCmd::FetchProfiles => {
+                    GenCmd::FetchProfiles { domain } => {
                         if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobProfiles {
-                            domain: Some("video".to_string()),
+                            domain: Some(domain.to_string()),
                         }) {
-                            self.cat_reqs.insert(id, CatPurpose::JobProfiles);
+                            self.cat_reqs.insert(id, CatPurpose::JobProfiles { domain });
                         } else {
                             runtime_down = true;
                         }
@@ -10833,6 +10850,14 @@ p2 {}
     /// Finished expansions become stage-one enqueues.
     fn pump_expander(&mut self) {
         for done in self.expander.drain() {
+            // The row shows a clipped brief; the log keeps it whole, which
+            // is the only place the full text an image was rendered from
+            // can be read back afterwards.
+            match (&done.expanded, &done.note) {
+                (Some(text), _) => log!("dream {}: brief: {text}", done.tag),
+                (None, Some(note)) => log!("dream {}: {note}", done.tag),
+                (None, None) => {}
+            }
             let cmds = self.gen.expand_arrived(done.tag, done.expanded, done.note);
             if !cmds.is_empty() {
                 self.run_gen_cmds(cmds);
@@ -11082,14 +11107,21 @@ p2 {}
                                     self.slot_tween_mode[index] = profile.tween;
                                     player.set_mode(self.slot_play_mode(index));
                                     // A DREAM clip is meant to cycle on a
-                                    // pad, and an i2v clip's last frame is
-                                    // nowhere near its first, so its wrap
-                                    // is closed when the loop window fills
-                                    // (see loop_close.rs). Only clips this
-                                    // session dreamed, unless the operator
-                                    // asked for all of them: silently
-                                    // shortening somebody's own footage is
-                                    // not this feature's business.
+                                    // pad, so its wrap is closed when the
+                                    // loop window fills (loop_close.rs).
+                                    // ALWAYS, even though H3 now honours the
+                                    // last_frame input and lands within
+                                    // ~1.5/255 of its own first frame: that
+                                    // is nearly closed, not closed, and it
+                                    // only holds on boxes already running
+                                    // the new binary. Over an almost-closed
+                                    // clip the blend is invisible, so there
+                                    // is nothing to gain by trusting the
+                                    // model and a visible seam to lose.
+                                    // Only clips this session dreamed,
+                                    // unless the operator asked for all of
+                                    // them: silently shortening somebody
+                                    // else's footage is not our business.
                                     let close = self.close_all_loops
                                         || self.dream_loops.contains(&item.asset);
                                     player.set_seam_close(
@@ -11929,9 +11961,30 @@ p2 {}
         let events = up.subscriber.poll();
         for event in events {
             match event {
-                CatalogSubscriptionEvent::Ready { .. } => self.note_session_ok(),
+                CatalogSubscriptionEvent::Ready { .. } => {
+                    // The one line that says the feed is actually attached.
+                    // Without it, a dead feed and an idle one look identical
+                    // from the log — which is exactly how "new videos never
+                    // show up" went unexplained.
+                    self.feed_ready = true;
+                    log!("event feed: ready (subscribed, awaiting events)");
+                    self.note_session_ok();
+                }
                 CatalogSubscriptionEvent::Events { events, .. } => {
                     self.note_session_ok();
+                    self.feed_batches += 1;
+                    self.feed_events += events.len() as u64;
+                    log!(
+                        "event feed: batch of {} ({} total) kinds={:?}",
+                        events.len(),
+                        self.feed_events,
+                        events.iter().fold(Vec::new(), |mut seen, e| {
+                            if !seen.contains(&e.content_kind) {
+                                seen.push(e.content_kind);
+                            }
+                            seen
+                        }),
+                    );
                     for ev in events {
                         self.video_model.event_touch(ev.content_kind);
                         self.music_model.event_touch(ev.content_kind);
@@ -11977,12 +12030,16 @@ p2 {}
                     }
                 }
                 CatalogSubscriptionEvent::ResyncRequired { .. } => {
+                    log!("event feed: gap — resync, every surface re-lists");
                     self.video_model.event_touch(None);
                     self.music_model.event_touch(None);
                     self.sfx_model.event_touch(None);
                     self.mesh_model.event_touch(None);
                 }
                 CatalogSubscriptionEvent::Retry { error, retry_in_ms } => {
+                    // A feed that is retrying is a feed that is delivering
+                    // nothing, and this is the only place that fact exists.
+                    log!("event feed: RETRY in {retry_in_ms}ms: {error}");
                     self.status_text =
                         format!("event feed retry in {}ms: {error}", retry_in_ms);
                     if is_session_loss(&error) {
@@ -12062,7 +12119,7 @@ p2 {}
                             self.fx_slot_reloading[slot.index()] = false;
                             log!("fx slot {slot:?}: hot reload failed: {error}");
                         }
-                        CatPurpose::JobProfiles => {
+                        CatPurpose::JobProfiles { .. } => {
                             self.gen.profiles_failed(error.to_string());
                         }
                         CatPurpose::JobEnqueue { tag } => {
@@ -12424,9 +12481,11 @@ p2 {}
                     }
                 }
             }
-            (CatPurpose::JobProfiles, ClientOutput::JobProfiles(profiles)) => {
-                self.gen.profiles_arrived(profiles);
+            (CatPurpose::JobProfiles { domain }, ClientOutput::JobProfiles(profiles)) => {
+                self.gen.profiles_arrived(domain, profiles);
                 self.sync_gen_profiles(cx);
+                // The flux list only exists once the image domain lands.
+                self.sync_gen_pickers(cx);
             }
             (CatPurpose::JobEnqueue { tag }, ClientOutput::JobQueued(job)) => {
                 let cmds = self.gen.queued_at(tag, job, Some(now_ms()));
@@ -16094,7 +16153,7 @@ p2 {}
             // Appended last: a file written before the canvas picker
             // existed simply has no line here and reads as the default.
             self.gen.size_index(),
-        );
+        ) + &format!("{}\n", self.gen.image_model_index());
         let path = Self::gen_panel_path();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -16129,6 +16188,12 @@ p2 {}
             self.ui.check_box(cx, ids!(import_flow)).set_active(cx, true, Animate::No);
         }
         let size: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        // Only a REMEMBERED pick counts as the operator having chosen: an
+        // absent line must still take the flux default when the profiles
+        // land, rather than pinning `auto` forever.
+        if let Some(model) = lines.next().and_then(|l| l.parse::<usize>().ok()) {
+            self.gen.set_image_model(model);
+        }
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
         // After the pipe, so the canvas lands in the right table, and after
@@ -16181,6 +16246,21 @@ p2 {}
         self.ui
             .drop_down(cx, ids!(gen_len))
             .set_selected_item(cx, self.gen.video_length());
+        // The flux picker: only on pipes that render a still, and only ever
+        // listing models the fleet said it serves (plus `auto`, which is
+        // always honest because it pins nothing).
+        let picks_model = self.gen.selected_pipe().has_image_model();
+        self.ui.drop_down(cx, ids!(gen_model)).set_visible(cx, picks_model);
+        if picks_model {
+            let models = self.gen.image_model_labels();
+            if models != self.gen_model_labels {
+                self.gen_model_labels = models.clone();
+                self.ui.drop_down(cx, ids!(gen_model)).set_labels(cx, models);
+            }
+            self.ui
+                .drop_down(cx, ids!(gen_model))
+                .set_selected_item(cx, self.gen.image_model_index());
+        }
     }
 
     fn sync_gen_profiles(&mut self, cx: &mut Cx) {
@@ -16714,6 +16794,14 @@ p2 {}
             if model.is_loading() {
                 text.push_str(" …");
             }
+            // New work landed that THIS lane hides. Say so on the count,
+            // where the operator is already looking for it, instead of
+            // letting a finished run vanish until they guess which chip to
+            // click. One click on a lane chip re-queries and clears it.
+            let elsewhere = model.elsewhere();
+            if elsewhere > 0 {
+                text.push_str(&format!(" · {elsewhere} new on other lanes"));
+            }
             if let Some(error) = &model.error {
                 text = format!("error: {error}");
             }
@@ -16770,6 +16858,18 @@ p2 {}
                 }
             },
             ProfilesState::Failed(error) => format!("profiles failed: {error}"),
+        };
+        // A finished run whose clip the CURRENT lane hides would otherwise
+        // vanish: the video grid has no count label of its own (it went
+        // with the sidebar trim), and an operator sitting on the EFFECT
+        // lane — where a VJ spends a set — saw nothing appear anywhere.
+        // The drawer they are already watching the run in says where it
+        // went; one click on a lane chip re-queries and clears it.
+        let hidden = self.video_model.elsewhere();
+        let status = match (hidden, status.is_empty()) {
+            (0, _) => status,
+            (n, true) => format!("{n} new — switch lane to see"),
+            (n, false) => format!("{status} · {n} new on another lane"),
         };
         self.ui.label(cx, ids!(gen_status)).set_text(cx, &status);
     }
@@ -21851,6 +21951,10 @@ impl MatchEvent for App {
             self.sync_gen_pickers(cx);
             self.save_gen_panel();
         }
+        if let Some(index) = self.ui.drop_down(cx, ids!(gen_model)).selected(actions) {
+            self.gen.set_image_model(index);
+            self.save_gen_panel();
+        }
         if let Some(text) = self.ui.text_input(cx, ids!(gen_prompt)).changed(actions) {
             self.gen.set_prompt(text);
             self.save_gen_panel();
@@ -23093,6 +23197,22 @@ impl AppMain for App {
                     .map(|t| t.elapsed().as_secs_f64())
                     .unwrap_or(f64::MAX);
                 let model = self.model(surface);
+                if model.refresh_wanted {
+                    // The line that made "new videos never show up"
+                    // findable: which surface wanted a refresh, what its
+                    // lane was listing, and whether the gate let it through.
+                    log!(
+                        "event refresh {surface:?}: lane={:?} loading={} since={:.1}s -> {}",
+                        model.kinds,
+                        model.is_loading(),
+                        since.min(9_999.0),
+                        if !model.is_loading() && since >= EVENT_REFRESH_COOLDOWN_S {
+                            "GO"
+                        } else {
+                            "held"
+                        },
+                    );
+                }
                 if model.refresh_wanted && !model.is_loading() && since >= EVENT_REFRESH_COOLDOWN_S {
                     // A publish, not a query change: whatever is new lands
                     // in the PENDING head column and nothing on screen

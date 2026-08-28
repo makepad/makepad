@@ -31,6 +31,10 @@ pub const POLL_MS: u64 = 1_500;
 pub const MAX_POLLS_PER_TICK: usize = 8;
 /// Longest prompt accepted.
 pub const MAX_PROMPT_BYTES: usize = 2_000;
+/// Characters of the final prompt shown on a run's subtitle line. The
+/// drawer is narrow and the row lives in a scrolling list, so the full
+/// brief is not shown — the log carries it whole.
+pub const MAX_SUBTITLE_CHARS: usize = 150;
 
 /// Video length choices: (frames, denoise steps).
 ///
@@ -48,6 +52,12 @@ pub const VIDEO_LENGTHS: &[(u32, u32)] = &[(39, 30), (73, 30), (107, 40), (141, 
 
 /// The ~3 s row: what a DREAM run makes unless the operator says otherwise.
 pub const DEFAULT_LENGTH: usize = 1;
+
+/// The "no pin, let the fleet choose" row of the image-model picker.
+pub const AUTO_IMAGE_MODEL: &str = "auto";
+/// Preferred image model when the fleet advertises it: schnell is the
+/// 4-step distilled flux, which is what makes a DREAM run feel immediate.
+pub const DEFAULT_IMAGE_MODEL: &str = "flux1-schnell";
 
 /// Video canvases the fleet is PROVEN to render, smallest first.
 ///
@@ -110,6 +120,46 @@ pub fn canvas_fits(size: (u32, u32), frames: u32) -> bool {
 /// mp4s come back tagged `@24.00fps`, so this app says 24.
 pub fn clip_seconds(frames: u32) -> f32 {
     align_frames(frames) as f32 / 24.0
+}
+
+/// One line, no control characters, no double spaces.
+///
+/// Every prompt this model sends is published as the asset's ANNOTATION,
+/// and the store refuses control characters there: a pasted multi-line
+/// prompt renders a picture that then dies at publish with "annotation
+/// control chars" — the whole run lost at the last step, after the GPU
+/// time was already spent.
+pub fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut spaced = true;
+    for ch in text.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            if !spaced {
+                out.push(' ');
+                spaced = true;
+            }
+        } else {
+            out.push(ch);
+            spaced = false;
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// First `max_chars` CHARACTERS of `text`, with an ellipsis when it was
+/// cut.
+///
+/// `String::truncate` takes a BYTE index and panics when that index is not
+/// a char boundary — which is not a theoretical risk here: an expanded
+/// brief is model prose, full of em dashes and curly quotes, and the raw
+/// prompt is whatever the operator typed. Cutting one of those mid-glyph
+/// would take the whole VJ down mid-set.
+pub fn clip_chars(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if text.chars().nth(max_chars).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Picker label for a canvas.
@@ -270,28 +320,32 @@ pub struct ChainNext {
 
 /// How a run's loop gets closed.
 ///
-/// Our H3 weights ARE the FL2VA first+last-frame checkpoint, but the native
-/// port only exposes the first keyframe today: `VideoJob` carries
-/// `input_rgb` and nothing else. So this is a field, not a constant — the
-/// day the end-frame path lands fleet-wide, a run switches strategy without
-/// this file changing shape.
+/// H3 now honours the `last_frame` named input — the weights were always
+/// the FL2VA first+last checkpoint and the native port exposes it — so a
+/// dreamed clip is generated to END on the still it began from, measured
+/// at ~1.55/255 end-vs-start.
 ///
-/// Even then the wrap blend stays: first+last conditioning is NEAR closure,
-/// not pixel-exact (the conditioning rows are dropped before decode), so
-/// the seam guarantee remains something the player does.
+/// THE PLAYER'S WRAP BLEND STAYS ON EITHER WAY. Two reasons, both real:
+/// ~1.55/255 is nearly closed, not closed, and the fleet is mid-rollout, so
+/// a clip may still come off a box running the old binary. Over an
+/// almost-closed clip the blend is invisible; over an open one it is the
+/// difference between a loop and a jump cut. Nothing is saved by trusting
+/// the model, so the strategy below describes what was ASKED FOR — it does
+/// not gate the wrap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoopStrategy {
-    /// Close the wrap in the player, from the decoded frames.
+    /// No end-frame was requested; the player alone closes the wrap.
     InPlayer,
-    /// The video model was given the still as BOTH first and last frame.
+    /// The still was sent as the last frame too — AND the wrap is still
+    /// blended on playback.
     EndFrame,
 }
 
 impl LoopStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
-            LoopStrategy::InPlayer => "in-player",
-            LoopStrategy::EndFrame => "end-frame",
+            LoopStrategy::InPlayer => "wrap blend",
+            LoopStrategy::EndFrame => "end-frame + wrap",
         }
     }
 }
@@ -324,6 +378,13 @@ pub struct GenChain {
     pub expand_note: Option<String>,
     /// The expanded prompt, once it lands (shown under the row).
     pub expanded: Option<String>,
+    /// The image model this run asked for, when the operator pinned one.
+    pub image_model: Option<String>,
+    /// The prompt the IMAGE STAGE was actually queued with — read back out
+    /// of the job body rather than recomposed, so what the row shows and
+    /// what the fleet renders cannot drift apart. Either the expansion or,
+    /// in the fallback, the operator's own words.
+    pub final_prompt: Option<String>,
     /// The canvas every stage of this run shares.
     pub canvas: (u32, u32),
     pub frames: u32,
@@ -445,9 +506,15 @@ impl GenJob {
         self.chain.as_ref().and_then(|c| c.input_revision)
     }
 
-    /// The expanded prompt, when the expander produced one.
-    pub fn expanded_prompt(&self) -> Option<&str> {
-        self.chain.as_ref().and_then(|c| c.expanded.as_deref())
+    /// The prompt this run's image stage was actually queued with.
+    pub fn final_prompt(&self) -> Option<&str> {
+        self.chain.as_ref().and_then(|c| c.final_prompt.as_deref())
+    }
+
+    /// True when that prompt is the operator's raw words because the
+    /// expander did not deliver.
+    pub fn prompt_is_raw(&self) -> bool {
+        self.chain.as_ref().is_some_and(|c| c.expand_note.is_some())
     }
 
     pub fn elapsed_ms(&self, now_ms: u64) -> u64 {
@@ -538,19 +605,50 @@ impl GenJob {
                 GenJobTone::Waiting,
             ),
         };
-        // What the expander actually did, on the row that is running the
-        // brief it produced.
+        // The subtitle becomes the prompt the fleet is actually working
+        // from, for the WHOLE run — the title stays the operator's own
+        // words, so the row shows both what was asked and what was sent.
+        // A failed or cancelled run keeps its reason instead: at that point
+        // why it stopped outranks what it was going to draw.
         if let Some(chain) = &self.chain {
-            if let Some(note) = &chain.expand_note {
-                if !message.is_empty() {
-                    message.push_str(" · ");
+            let stopped = matches!(
+                self.state,
+                GenJobState::Failed(_) | GenJobState::Cancelled | GenJobState::CancelRequested
+            );
+            match (&chain.final_prompt, stopped) {
+                (Some(prompt), false) => {
+                    // Marked when it is the raw prompt, and marked with the
+                    // REASON: "raw" alone tells the operator the expansion
+                    // is missing but not that the expander timed out.
+                    let label = match &chain.expand_note {
+                        // The note reads "expander timed out — using the
+                        // prompt as typed"; only the cause rides along, and
+                        // the line says what happens NEXT: this text went
+                        // out for the worker to expand, so it is what was
+                        // sent, not what will be rendered.
+                        Some(note) => {
+                            let cause = note.split(" — ").next().unwrap_or(note);
+                            format!("sent raw, worker expanding ({cause})")
+                        }
+                        None => "brief".to_string(),
+                    };
+                    let model = match &chain.image_model {
+                        Some(model) => format!("{model} · "),
+                        None => String::new(),
+                    };
+                    message = format!(
+                        "{model}{label}: {}",
+                        clip_chars(prompt, MAX_SUBTITLE_CHARS)
+                    );
                 }
-                message.push_str(note);
-            } else if let Some(expanded) = &chain.expanded {
-                if chain.stage == 1 {
-                    let mut brief = expanded.clone();
-                    brief.truncate(160);
-                    message = format!("brief: {brief}");
+                // Still expanding, or stopped: say what the expander did.
+                _ => {
+                    if let Some(note) = &chain.expand_note {
+                        if !message.is_empty() {
+                            message.push_str(" · ");
+                        }
+                        message.push_str(note);
+                    }
                 }
             }
         }
@@ -633,7 +731,7 @@ fn node_state_from_note(note: &str) -> GenNodeState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GenCmd {
-    FetchProfiles,
+    FetchProfiles { domain: &'static str },
     /// Run the prompt expander for `tag` and report back through
     /// [`GenModel::expand_arrived`]. Not a job: the store has no expander
     /// kind, so the host does this on the chat broker.
@@ -681,6 +779,12 @@ impl GenPipe {
     /// Whether the length picker applies (video canvases only).
     pub fn has_length(&self) -> bool {
         self.dream || self.kind == "video.generate"
+    }
+
+    /// Whether this pipe renders a STILL — and so has an image model the
+    /// operator can pin. A dream run does: its first stage is the flux.
+    pub fn has_image_model(&self) -> bool {
+        self.kind == "image.generate"
     }
 }
 
@@ -749,7 +853,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
     // this table, so a new row in the middle would silently repoint a
     // saved choice at a different pipe on the next launch.
     GenPipe {
-        label: "DREAM: expand → image → video",
+        label: "DREAM: expand → flux → video",
         kind: "image.generate",
         namespace: "gen",
         expand: true,
@@ -782,6 +886,13 @@ pub struct GenModel {
     published_assets: Vec<AssetId>,
     /// Picked row of [`VIDEO_LENGTHS`] for video pipes.
     video_length: usize,
+    /// Image-domain profiles: the advertised flux models.
+    pub image_profiles: Vec<JobProfileDto>,
+    /// Picked row of [`GenModel::image_model_ids`].
+    image_model: usize,
+    /// The operator has chosen a model themselves, so a late profile fetch
+    /// must not move it back to the default under them.
+    image_model_touched: bool,
     /// Picked row of [`VIDEO_SIZES`] / [`IMAGE_SIZES`] for the selected
     /// pipe. One index per table, so switching pipe back and forth does not
     /// lose the operator's canvas on either side.
@@ -898,15 +1009,81 @@ impl GenModel {
             ProfilesState::Loading | ProfilesState::Ready => Vec::new(),
             ProfilesState::Idle | ProfilesState::Failed(_) => {
                 self.profiles_state = ProfilesState::Loading;
-                vec![GenCmd::FetchProfiles]
+                // Both domains: the video profiles carry the clip defaults,
+                // and the image ones are the ONLY honest source of which
+                // flux models this fleet is actually serving.
+                vec![
+                    GenCmd::FetchProfiles { domain: "video" },
+                    GenCmd::FetchProfiles { domain: "image" },
+                ]
             }
         }
     }
 
-    pub fn profiles_arrived(&mut self, profiles: Vec<JobProfileDto>) {
-        self.selected = self.selected.min(profiles.len().saturating_sub(1));
+    pub fn profiles_arrived(&mut self, domain: &str, profiles: Vec<JobProfileDto>) {
+        if domain == "image" {
+            self.image_profiles = profiles;
+            // Land on the fast default the moment the real list is known,
+            // unless the operator has already chosen for themselves.
+            if !self.image_model_touched {
+                self.image_model = self
+                    .image_model_ids()
+                    .iter()
+                    .position(|id| id == DEFAULT_IMAGE_MODEL)
+                    .unwrap_or(0);
+            }
+            return;
+        }
+        // NOTE: `selected` indexes GEN_PIPES, which are built in — never the
+        // server's profile list. Clamping it to the number of profiles the
+        // server happened to advertise silently moved the operator off any
+        // pipe past the last profile the moment the fetch landed.
+        self.selected = self.selected.min(GEN_PIPES.len() - 1);
         self.profiles = profiles;
         self.profiles_state = ProfilesState::Ready;
+    }
+
+    /// Image models this fleet ADVERTISES, flux family only, in the order
+    /// the server listed them. Nothing invented: a model absent from
+    /// `/v1/job-profiles?domain=image` is a model no box is serving, and
+    /// offering it would be offering a job that cannot run.
+    pub fn image_model_ids(&self) -> Vec<String> {
+        let mut out = vec![AUTO_IMAGE_MODEL.to_string()];
+        for profile in &self.image_profiles {
+            let Some(model) = profile.defaults.get("model").and_then(Value::as_str) else {
+                continue;
+            };
+            if !model.contains("flux") {
+                continue;
+            }
+            if !out.iter().any(|seen| seen == model) {
+                out.push(model.to_string());
+            }
+        }
+        out
+    }
+
+    /// Picker labels. `auto` stays first and is always valid — it is the
+    /// "let the fleet decide" row, and it is what the drawer shows when the
+    /// profiles have not landed yet, rather than a guessed model list.
+    pub fn image_model_labels(&self) -> Vec<String> {
+        self.image_model_ids()
+    }
+
+    pub fn image_model_index(&self) -> usize {
+        self.image_model.min(self.image_model_ids().len().saturating_sub(1))
+    }
+
+    pub fn set_image_model(&mut self, index: usize) {
+        self.image_model = index.min(self.image_model_ids().len().saturating_sub(1));
+        self.image_model_touched = true;
+    }
+
+    /// The model id to pin on the image job, or `None` for auto.
+    pub fn selected_image_model(&self) -> Option<String> {
+        let ids = self.image_model_ids();
+        let id = ids.get(self.image_model_index())?;
+        (id != AUTO_IMAGE_MODEL).then(|| id.clone())
     }
 
     pub fn profiles_failed(&mut self, error: String) {
@@ -1063,7 +1240,7 @@ impl GenModel {
     pub fn generate(&mut self, now_ms: u64) -> Vec<GenCmd> {
         self.last_error = None;
         let pipe = self.selected_pipe();
-        let mut prompt = self.prompt.trim().to_string();
+        let mut prompt = one_line(&self.prompt);
         if pipe.enhance {
             // The source clip is the content; the prompt (if any) only
             // titles the row.
@@ -1094,10 +1271,12 @@ impl GenModel {
                 // duplicate key from the profile would shadow them.
                 let video = pipe.kind == "video.generate";
                 let sized = !pipe.sizes().is_empty();
+                let picks_model = pipe.has_image_model();
                 pairs.extend(defaults.into_iter().filter(|(k, _)| {
                     k != "prompt"
                         && !(video && (k == "frames" || k == "steps"))
                         && !(sized && (k == "width" || k == "height"))
+                        && !(picks_model && k == "model")
                 }));
             }
         }
@@ -1114,6 +1293,15 @@ impl GenModel {
         if let Some((w, h)) = self.selected_size() {
             pairs.push(("width".to_string(), Value::Int(w as i64)));
             pairs.push(("height".to_string(), Value::Int(h as i64)));
+        }
+        // Which flux draws the still. Only ever a model the fleet
+        // advertised, and only when the operator picked one over `auto`;
+        // the scheduler may still hand a cold pin to a warm box in the same
+        // domain, which is its business and does not make this a lie about
+        // what was ASKED for.
+        let image_model = pipe.has_image_model().then(|| self.selected_image_model()).flatten();
+        if let Some(model) = &image_model {
+            pairs.push(("model".to_string(), s(model.clone())));
         }
         if pipe.enhance {
             let (revision, _) = self.enhance_source.clone().expect("guarded above");
@@ -1202,12 +1390,14 @@ impl GenModel {
                 input_revision: None,
                 expand_note: None,
                 expanded: None,
+                image_model: image_model.clone(),
+                final_prompt: None,
                 canvas,
                 frames,
-                // Today: the player closes it. The video body below still
-                // ASKS for end-frame conditioning, so the day the worker
-                // forwards named inputs this run gets it for free.
-                loop_strategy: LoopStrategy::InPlayer,
+                // The video body asks for end-frame conditioning, which
+                // the fleet now honours; the player blends the wrap on top
+                // regardless (see LoopStrategy).
+                loop_strategy: LoopStrategy::EndFrame,
             }
         });
 
@@ -1227,8 +1417,8 @@ impl GenModel {
         }
         self.next_tag += 1;
         let tag = self.next_tag;
-        let mut title = prompt;
-        title.truncate(48);
+        // Char-safe: an accented or emoji prompt must not panic the app.
+        let title = clip_chars(&prompt, 48);
         self.jobs.push(GenJob {
             tag,
             job: None,
@@ -1300,10 +1490,25 @@ impl GenModel {
         if body.is_empty() {
             return Vec::new(); // already handed off (duplicate answer)
         }
+        // The operator's own words, as they stand in the body right now.
+        let typed = body
+            .iter()
+            .find(|(key, _)| key == "prompt")
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or_default()
+            .to_string();
         let expanded = expanded.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         match &expanded {
             Some(text) => {
                 chain.expanded = Some(text.clone());
+                // The worker expands `expand: true` bodies itself now. A
+                // client that already expanded says so by sending the
+                // person's words as `prompt_original`, and the worker then
+                // keeps them for the row instead of rewriting a rewrite —
+                // without this the brief would be expanded TWICE and the
+                // text on the row would not be the text that drew the
+                // picture.
+                body.push(("prompt_original".to_string(), s(typed.clone())));
                 // Both stages render the SAME brief: the still is the
                 // video's first frame, so a different prompt on each would
                 // be two different pictures spliced together.
@@ -1321,10 +1526,21 @@ impl GenModel {
                 }
             }
             None => {
+                // No `prompt_original`, so the worker's own expander takes
+                // the run from here — a second chance on the box about to
+                // do the work, and it cannot lose the run either. The row
+                // must not claim the raw text is final, because it is not.
                 chain.expand_note =
                     Some(note.unwrap_or_else(|| "expander unavailable".to_string()));
             }
         }
+        // The single source of truth for "what did this run actually ask
+        // for": whatever `prompt` says in the body about to be enqueued.
+        chain.final_prompt = body
+            .iter()
+            .find(|(key, _)| key == "prompt")
+            .and_then(|(_, value)| value.as_str())
+            .map(str::to_string);
         chain.stage = 1;
         let namespace = chain.namespace.clone();
         let kind = chain.kind.clone();
@@ -1481,17 +1697,13 @@ impl GenModel {
         // new job kind — `video.generate` already animates a picture when
         // it is handed one.
         body.push(("source_revision".to_string(), s(revision.to_string())));
-        // A LOOP wants the clip to end where it began, and these weights can
-        // do it: they are the first+last-frame checkpoint. Two things are
-        // in the way today, and neither is fixed from here — the native
-        // port only wires the first keyframe, and the worker's
-        // body-to-fleet mapping forwards a fixed list of keys that does not
-        // include `inputs`. So this is written the way the worker will want
-        // to read it and is DROPPED, harmlessly, until it can be honoured:
-        // a revision reference rather than base64, because resolving a
-        // revision to bytes is the worker's job (it already does exactly
-        // that for `source_revision`) and a job body is no place for a
-        // megabyte of PNG.
+        // A LOOP wants the clip to end where it began, and these weights
+        // do it: the FL2VA checkpoint takes a last frame as well as a
+        // first, and the fleet now honours this named input. A revision
+        // reference rather than base64, because resolving a revision to
+        // bytes is the worker's job — it already does exactly that for
+        // `source_revision` — and a job body is no place for a megabyte of
+        // PNG. The playback wrap still runs on top: see LoopStrategy.
         body.push((
             "inputs".to_string(),
             Value::Arr(vec![Value::Obj(vec![
@@ -1657,10 +1869,16 @@ mod tests {
 
     fn ready_model() -> GenModel {
         let mut m = GenModel::new();
-        assert_eq!(m.ensure_profiles(), vec![GenCmd::FetchProfiles]);
+        assert_eq!(
+            m.ensure_profiles(),
+            vec![
+                GenCmd::FetchProfiles { domain: "video" },
+                GenCmd::FetchProfiles { domain: "image" },
+            ]
+        );
         // While loading, ensure is idempotent.
         assert!(m.ensure_profiles().is_empty());
-        m.profiles_arrived(vec![profile("a"), profile("b")]);
+        m.profiles_arrived("video", vec![profile("a"), profile("b")]);
         m
     }
 
@@ -1787,6 +2005,17 @@ mod tests {
         m.selected = GEN_PIPES.iter().position(|p| p.dream).expect("the dream pipe");
         m.set_prompt("a chrome koi".to_string());
         m
+    }
+
+    /// The tag of whichever first command a generate produced (a dream run
+    /// expands first; everything else enqueues).
+    fn enqueue_or_expand_tag(cmds: &[GenCmd]) -> GenTag {
+        cmds.iter()
+            .find_map(|c| match c {
+                GenCmd::Expand { tag, .. } | GenCmd::Enqueue { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .expect("expected an expand or an enqueue")
     }
 
     fn body_of(cmd: &GenCmd) -> Vec<(String, Value)> {
@@ -1959,6 +2188,181 @@ mod tests {
                 );
             }
         }
+    }
+
+
+    /// The row must show the text that ACTUALLY went to the fleet — the
+    /// expansion when there was one, the operator's own words when there
+    /// was not, marked with the reason either way. The title stays what
+    /// they typed, so the row shows both halves of the story.
+    #[test]
+    fn the_subtitle_is_the_prompt_the_image_stage_really_got() {
+        // Expanded.
+        let mut m = dream_model();
+        let tag = enqueue_or_expand_tag(&m.generate(1_000));
+        let cmds = m.expand_arrived(tag, Some("a chrome koi in a flooded cathedral".into()), None);
+        // The worker must not expand a rewrite: the person's words ride
+        // along as `prompt_original`, which is the signal it looks for.
+        let body = body_of(&cmds[0]);
+        assert_eq!(
+            get(&body, "prompt").and_then(Value::as_str),
+            Some("a chrome koi in a flooded cathedral")
+        );
+        assert_eq!(
+            get(&body, "prompt_original").and_then(Value::as_str),
+            Some("a chrome koi")
+        );
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.title, "a chrome koi", "the title stays the typed prompt");
+        assert_eq!(row.final_prompt(), Some("a chrome koi in a flooded cathedral"));
+        assert!(!row.prompt_is_raw());
+        let message = row.display(2_000).message;
+        assert!(message.contains("brief:"), "{message}");
+        assert!(message.contains("flooded cathedral"), "{message}");
+
+        // Raw fallback: marked, and the CAUSE survives.
+        let mut m = dream_model();
+        let tag = enqueue_or_expand_tag(&m.generate(1_000));
+        let cmds =
+            m.expand_arrived(tag, None, Some("expander timed out — using the prompt as typed".into()));
+        let body = body_of(&cmds[0]);
+        assert_eq!(get(&body, "prompt").and_then(Value::as_str), Some("a chrome koi"));
+        // No `prompt_original` and `expand: true` still set: the worker's
+        // own expander picks the run up, so a dead client expander costs
+        // nothing at all now.
+        assert!(get(&body, "prompt_original").is_none(), "{body:?}");
+        assert_eq!(get(&body, "expand").and_then(Value::as_bool), Some(true));
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.final_prompt(), Some("a chrome koi"));
+        assert!(row.prompt_is_raw());
+        let message = row.display(2_000).message;
+        assert!(message.contains("sent raw, worker expanding (expander timed out)"), "{message}");
+        assert!(message.contains("a chrome koi"), "{message}");
+        // And it does not claim the run was expanded.
+        assert!(!message.contains("brief:"), "{message}");
+    }
+
+    /// The prompt still shows once the run has moved ON to the video stage:
+    /// "what is this clip being made from" does not stop being the question
+    /// the moment the still is done.
+    #[test]
+    fn the_prompt_survives_the_hand_off_to_the_video_stage() {
+        let mut m = dream_model();
+        let tag = enqueue_or_expand_tag(&m.generate(1_000));
+        m.expand_arrived(tag, Some("a chrome koi in a flooded cathedral".into()), None);
+        m.queued_at(tag, job_id(1), Some(2_000));
+        let mut done = status(job_id(1), JobStateDto::Succeeded);
+        done.kind = "image.generate".to_string();
+        done.result_asset = Some(AssetId::from_bytes([7; 16]));
+        done.result_revision = Some(makepad_asset_data::AssetRevisionId::from_bytes([9; 32]));
+        m.status_arrived_at(&done, 3_000);
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.kind, "video.generate", "the run has moved on");
+        assert!(row.display(4_000).message.contains("flooded cathedral"));
+    }
+
+    /// A brief is model prose: em dashes, curly quotes, accents. Clipping it
+    /// by BYTE index would panic, and did — this is the guard.
+    #[test]
+    fn a_multibyte_brief_is_clipped_without_panicking() {
+        // Land the byte limit inside a multi-byte character at many
+        // offsets, for both the title and the brief.
+        for pad in 0..8 {
+            let mut m = dream_model();
+            // A title long enough to be cut, in multi-byte characters.
+            m.set_prompt(format!("{}un café — “brûlé” ", "é".repeat(pad)).repeat(6));
+            let tag = enqueue_or_expand_tag(&m.generate(1_000));
+            let brief = format!("{}{}", "x".repeat(pad), "an em—dash and a “quote” ".repeat(40));
+            m.expand_arrived(tag, Some(brief.clone()), None);
+            let row = m.jobs().next().unwrap();
+            assert!(row.title.chars().count() <= 49, "{}", row.title);
+            // The subtitle is clipped by CHARACTERS and is still real text.
+            let message = row.display(2_000).message;
+            assert!(message.contains("brief:"), "{message}");
+            assert!(message.chars().count() < brief.chars().count());
+        }
+    }
+
+    /// A prompt pasted with newlines still reaches the fleet as one line,
+    /// so the picture it makes can actually be published.
+    #[test]
+    fn a_pasted_multiline_prompt_is_flattened_before_it_is_queued() {
+        let mut m = dream_model();
+        m.set_prompt("a chrome koi\n\nin a flooded cathedral\t— lit from above".to_string());
+        let tag = enqueue_or_expand_tag(&m.generate(1_000));
+        let cmds = m.expand_arrived(tag, None, Some("expander off".into()));
+        let body = body_of(&cmds[0]);
+        let prompt = get(&body, "prompt").and_then(Value::as_str).unwrap();
+        assert!(!prompt.chars().any(char::is_control), "{prompt:?}");
+        assert_eq!(prompt, "a chrome koi in a flooded cathedral — lit from above");
+        assert!(!m.jobs().next().unwrap().title.chars().any(char::is_control));
+    }
+
+    /// Mark, never invent: the picker offers `auto` plus exactly the flux
+    /// models the server advertised — and nothing else that happens to be
+    /// in the profile list.
+    #[test]
+    fn the_flux_picker_offers_only_what_the_fleet_advertises() {
+        let mut m = dream_model();
+        // Before the image domain lands there is nothing to claim.
+        assert_eq!(m.image_model_ids(), vec![AUTO_IMAGE_MODEL.to_string()]);
+        assert_eq!(m.selected_image_model(), None, "auto pins nothing");
+
+        let image_profile = |model: &str| JobProfileDto {
+            id: format!("img-{model}"),
+            domain: "image".to_string(),
+            label: model.to_string(),
+            kind: "image.generate".to_string(),
+            namespace: "gen".to_string(),
+            defaults: obj(vec![("model", s(model))]),
+        };
+        m.profiles_arrived(
+            "image",
+            vec![
+                image_profile("flux1-dev"),
+                image_profile("flux1-schnell"),
+                // Not a flux, and not offered by a flux picker.
+                image_profile("sdxl-turbo"),
+                // A duplicate advertisement is one row, not two.
+                image_profile("flux1-dev"),
+            ],
+        );
+        assert_eq!(
+            m.image_model_ids(),
+            vec!["auto", "flux1-dev", "flux1-schnell"],
+            "auto first, flux only, deduped"
+        );
+        // The fast default is chosen for the operator once it is known.
+        assert_eq!(m.selected_image_model().as_deref(), Some(DEFAULT_IMAGE_MODEL));
+
+        // The pick reaches the still's job body, and the row says which.
+        let tag = enqueue_or_expand_tag(&m.generate(1_000));
+        let cmds = m.expand_arrived(tag, Some("a chrome koi in a cathedral".into()), None);
+        let body = body_of(&cmds[0]);
+        assert_eq!(
+            get(&body, "model").and_then(Value::as_str),
+            Some(DEFAULT_IMAGE_MODEL)
+        );
+        assert!(m.jobs().next().unwrap().display(2_000).message.contains(DEFAULT_IMAGE_MODEL));
+
+        // An operator's own choice is not overwritten by a later fetch.
+        m.set_image_model(1);
+        m.profiles_arrived("image", vec![image_profile("flux1-dev"), image_profile("flux1-schnell")]);
+        assert_eq!(m.selected_image_model().as_deref(), Some("flux1-dev"));
+    }
+
+    /// `selected` indexes the built-in pipe table, never the server's
+    /// profile list. Clamping it to the profile count silently moved the
+    /// operator off any pipe past the last advertised profile.
+    #[test]
+    fn a_profile_fetch_does_not_move_the_operator_off_their_pipe() {
+        let mut m = dream_model();
+        let dream = m.selected;
+        assert!(dream > 2, "the dream pipe sits past the video profile count");
+        // Fewer profiles than pipes, which is the normal case.
+        m.profiles_arrived("video", vec![profile("a"), profile("b")]);
+        assert_eq!(m.selected, dream, "the pipe the operator chose is still chosen");
+        assert!(m.selected_pipe().dream);
     }
 
     fn status(job: JobId, state: JobStateDto) -> JobStatusDto {
