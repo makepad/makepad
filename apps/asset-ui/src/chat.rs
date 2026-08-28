@@ -452,6 +452,10 @@ pub struct ChatJob {
     pub video_steps: u32,
     pub seconds: u32,
     pub voice: Option<String>,
+    /// The sung words for a music job, as their own field — an empty one is
+    /// what makes a music model generate an instrumental.
+    pub lyrics: Option<String>,
+    pub seed: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +648,17 @@ impl AppTools {
             }
             ChatJobKind::Music => {
                 pairs.push(("seconds", Value::Int(job.seconds as i64)));
+                // The lyric script is its own field all the way down: the
+                // caption never carries the sung words.
+                if let Some(text) = &job.lyrics {
+                    pairs.push(("lyrics", json::s(text.clone())));
+                }
+                if let Some(steps) = job.steps {
+                    pairs.push(("steps", Value::Int(steps as i64)));
+                }
+                if let Some(seed) = job.seed {
+                    pairs.push(("seed", Value::Int(seed as i64)));
+                }
             }
             ChatJobKind::Speech => {
                 if let Some(v) = &job.voice {
@@ -685,6 +700,8 @@ impl AppTools {
             video_steps: VIDEO_LENGTHS[0].1,
             seconds: MUSIC_DEFAULT_SECONDS,
             voice: None,
+            lyrics: None,
+            seed: None,
         })
     }
 
@@ -742,6 +759,8 @@ impl AppTools {
                     video_steps: steps.unwrap_or(VIDEO_LENGTHS[0].1),
                     seconds: MUSIC_DEFAULT_SECONDS,
                     voice: None,
+                    lyrics: None,
+                    seed: None,
                 }),
             ContentToolCall::AudioGenerate { prompt, model } => self.queue_job(ChatJob {
                 prompt,
@@ -755,6 +774,8 @@ impl AppTools {
                 video_steps: 0,
                 seconds: 0,
                 voice: None,
+                lyrics: None,
+                seed: None,
             }),
             ContentToolCall::SpeechGenerate { prompt, model, voice } => self.queue_job(ChatJob {
                 prompt,
@@ -768,20 +789,26 @@ impl AppTools {
                 video_steps: 0,
                 seconds: 0,
                 voice,
+                lyrics: None,
+                seed: None,
             }),
-            ContentToolCall::MusicGenerate { prompt, model, seconds } => self.queue_job(ChatJob {
-                prompt,
-                kind: ChatJobKind::Music,
-                then: GenerateThen::None,
-                model,
-                width: 0,
-                height: 0,
-                steps: None,
-                frames: 0,
-                video_steps: 0,
-                seconds: seconds.unwrap_or(MUSIC_DEFAULT_SECONDS),
-                voice: None,
-            }),
+            ContentToolCall::MusicGenerate { prompt, model, seconds, lyrics, steps, seed } => {
+                self.queue_job(ChatJob {
+                    prompt,
+                    kind: ChatJobKind::Music,
+                    then: GenerateThen::None,
+                    model,
+                    width: 0,
+                    height: 0,
+                    steps,
+                    frames: 0,
+                    video_steps: 0,
+                    seconds: seconds.unwrap_or(MUSIC_DEFAULT_SECONDS),
+                    voice: None,
+                    lyrics,
+                    seed,
+                })
+            }
             ContentToolCall::MeshGenerate { prompt, model, width, height, steps } => {
                 match self.image_job(
                     ChatJobKind::Mesh,
