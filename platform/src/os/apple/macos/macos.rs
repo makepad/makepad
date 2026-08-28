@@ -1767,6 +1767,10 @@ impl Cx {
                 CxOsOp::RepinMousePointer => {
                     with_macos_app(|app| app.repin_pointer());
                 }
+                CxOsOp::PinMousePointer(on) => {
+                    with_macos_app(|app| app.set_pointer_pin(on));
+                    self.update_macos_pointer_capture_pacing();
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,

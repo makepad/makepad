@@ -622,12 +622,31 @@ pub struct ScriptVecValue {
     pub value: ScriptValue,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ScriptObjectData {
     pub tag: ScriptObjectTag,
     pub proto: ScriptValue,
     pub map: ScriptObjectMap,
     pub vec: Vec<ScriptVecValue>,
+    /// Instruction pointer of the BEGIN_PROTO / BEGIN_BARE opcode that
+    /// constructed this object; `ScriptIp::UNKNOWN` for Rust-built objects.
+    /// The proto chain of `made_at` ips is the object's construction chain:
+    /// the tweaker's cascade view resolves each ip to a source location and
+    /// its `///` doc comments (`vm.construction_chain`). Not stored in the
+    /// tag: the tag's low 40 bits already carry the fn ip for fn objects.
+    pub made_at: ScriptIp,
+}
+
+impl Default for ScriptObjectData {
+    fn default() -> Self {
+        Self {
+            tag: Default::default(),
+            proto: Default::default(),
+            map: Default::default(),
+            vec: Default::default(),
+            made_at: ScriptIp::UNKNOWN,
+        }
+    }
 }
 
 impl ScriptObjectData {
@@ -1080,6 +1099,7 @@ impl ScriptObjectData {
         self.tag.clear();
         self.map.clear();
         self.vec.clear();
+        self.made_at = ScriptIp::UNKNOWN;
         // Debug: verify clear worked
         debug_assert!(self.map.is_empty(), "map.clear() didn't work!");
     }

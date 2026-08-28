@@ -349,6 +349,15 @@ pub struct MacosApp {
     /// The pin, cocoa global coords (bottom-left origin) — where the locked
     /// cursor must stay.
     pub lock_pin: Option<Vec2d>,
+    /// Where a widget-scoped pointer pin must restore the cursor on
+    /// release: the press point, cocoa-global coords (`set_pointer_pin`).
+    pub pin_restore: Option<Vec2d>,
+    /// True while the lock is a widget-scoped SCRUB pin (not a game FPS
+    /// lock): `abs` integrates the deltas into an unbounded virtual
+    /// position (the drag needs continuous positions; the pressed widget
+    /// holds the finger capture, so routing cannot wander), instead of the
+    /// game model where `abs` stays pinned and motion rides `lock_delta`.
+    pub pointer_pin_mode: bool,
     //current_ns_event: Option<ObjcId>,
 
     /// Set by `send_command_event()` to avoid sending keyboard events
@@ -392,6 +401,8 @@ impl MacosApp {
                 virtual_mouse: None,
                 pointer_lock_applied: false,
                 lock_pin: None,
+                pin_restore: None,
+                pointer_pin_mode: false,
                 terminating_from_app_delegate: false,
                 //current_ns_event: None,
                 menu_command_fired: false,
@@ -1153,7 +1164,61 @@ impl MacosApp {
             self.mouse_pointer_lock = false;
             self.pointer_lock_applied = false;
             self.lock_pin = None;
+            // A pin lost to focus loss does not warp anywhere: the pointer
+            // belongs to whoever has focus now. Just forget the restore.
+            self.pin_restore = None;
+            self.pointer_pin_mode = false;
             self.apply_pointer_lock_effects(false);
+        }
+    }
+
+    /// Widget-scoped pointer pin (value scrubbing): the FPS lock machinery,
+    /// but the cursor pins AT ITS CURRENT POSITION and is restored there on
+    /// release. Engage only when a drag actually starts (the threshold
+    /// crossing), never on the initial press; release on mouse-up. Deltas
+    /// keep flowing (virtual mouse), `repin_pointer` holds the pin each
+    /// frame, and focus loss releases it like any lock.
+    pub fn set_pointer_pin(&mut self, on: bool) {
+        if on {
+            if self.mouse_pointer_lock || self.pointer_lock_applied {
+                return; // an FPS-style lock is already holding the pointer
+            }
+            unsafe {
+                let _ = CGSetLocalEventsSuppressionInterval(0.0);
+            }
+            self.virtual_mouse = None;
+            self.mouse_pointer_lock = true;
+            self.pointer_lock_applied = true;
+            self.pointer_pin_mode = true;
+            unsafe {
+                let loc: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+                self.lock_pin = Some(Vec2d { x: loc.x, y: loc.y });
+                self.pin_restore = Some(Vec2d { x: loc.x, y: loc.y });
+                let () = msg_send![class!(NSCursor), hide];
+                CGAssociateMouseAndMouseCursorPosition(0);
+            }
+        } else {
+            if !self.mouse_pointer_lock && !self.pointer_lock_applied {
+                self.pin_restore = None;
+                return;
+            }
+            self.mouse_pointer_lock = false;
+            self.pointer_lock_applied = false;
+            self.pointer_pin_mode = false;
+            self.lock_pin = None;
+            unsafe {
+                CGAssociateMouseAndMouseCursorPosition(1);
+                if let Some(restore) = self.pin_restore.take() {
+                    let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                    let primary: ObjcId = msg_send![screens, firstObject];
+                    let sframe: NSRect = msg_send![primary, frame];
+                    let _ = CGWarpMouseCursorPosition(NSPoint {
+                        x: restore.x,
+                        y: sframe.size.height - restore.y,
+                    });
+                }
+                let () = msg_send![class!(NSCursor), unhide];
+            }
         }
     }
 
