@@ -50,6 +50,7 @@ workspace.members = [
     "examples/datagrid",
     "examples/todo",
     "examples/portallist_hit",
+    "examples/modal_footprint",
     "examples/vector",
     "examples/aichat",
     "examples/pdf",
