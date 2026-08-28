@@ -2353,6 +2353,50 @@ impl WidgetTree {
         widgets
     }
 
+    /// The live widget hierarchy flattened depth-first for the tweaker's
+    /// tree tab: (uid, name, type, depth). Every alive node appears; depth
+    /// is the tree distance from its window root.
+    pub fn flat_tree(&self, cx: &Cx) -> Vec<FlatTreeRow> {
+        self.sync_dirty();
+        let inner = self.inner.borrow();
+        let widget_type_names = widget_type_names(cx);
+        let n = inner.nodes.len();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut roots: Vec<usize> = Vec::new();
+        for (index, node) in inner.nodes.iter().enumerate() {
+            let parent = node.parent as usize;
+            if parent < n && parent != index {
+                children[parent].push(index);
+            } else {
+                roots.push(index);
+            }
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<(usize, u32)> = roots.iter().rev().map(|r| (*r, 0)).collect();
+        while let Some((index, depth)) = stack.pop() {
+            let node = &inner.nodes[index];
+            let Some(widget) = node.widget.upgrade() else {
+                continue;
+            };
+            let name = inner.names[index];
+            let ty = widget
+                .widget_type_id()
+                .and_then(|type_id| widget_type_names.get(&type_id).copied())
+                .unwrap_or(LiveId(0));
+            out.push(FlatTreeRow {
+                uid: widget.widget_uid().0,
+                name: live_id_token(name),
+                ty: live_id_token(ty),
+                depth,
+                has_children: !children[index].is_empty(),
+            });
+            for child in children[index].iter().rev() {
+                stack.push((*child, depth + 1));
+            }
+        }
+        out
+    }
+
     pub fn compact_dump(&self, cx: &Cx) -> String {
         self.sync_dirty();
         let inner = self.inner.borrow();
@@ -2632,6 +2676,16 @@ fn widget_query_callback(cx: &Cx, query: &str) -> Vec<String> {
 
 fn widget_snapshot_callback(cx: &Cx) -> Vec<WidgetSnapshot> {
     cx.widget_tree().snapshot(cx)
+}
+
+/// One row of the flattened widget hierarchy (`WidgetTree::flat_tree`).
+#[derive(Clone, Debug)]
+pub struct FlatTreeRow {
+    pub uid: u64,
+    pub name: String,
+    pub ty: String,
+    pub depth: u32,
+    pub has_children: bool,
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {

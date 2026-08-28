@@ -19,6 +19,7 @@ script_mod! {
     set_type_default() do #(DrawLabelText::script_shader(vm)){
         ..mod.draw.DrawText // splat in draw quad
     }
+    /** The flat dropdown: a button face with a corner arrow, opening a popup menu. */
     mod.widgets.DropDownFlat = set_type_default() do mod.widgets.DropDownBase{
         width: Fit
         height: Fit
@@ -27,8 +28,11 @@ script_mod! {
         padding: theme.mspace_1{left: theme.space_2, right: 22.5}
         margin: theme.mspace_v_1{}
 
+        /** The selected-item label ink, state-mixed with the face. */
         draw_text +: {
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
 
             ink_centered: true
@@ -68,18 +72,29 @@ script_mod! {
             }
         }
 
+        /** The dropdown face: an SDF box with a bevel stroke and a filled corner arrow. */
         draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** popup-open mix 0..1 step 0.01 */
             active: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** corner rounding radius 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
 
             color: uniform(theme.color_outset)
@@ -88,6 +103,7 @@ script_mod! {
             color_down: uniform(theme.color_outset_down)
             color_disabled: uniform(theme.color_outset_disabled)
 
+            /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             color_2_hover: uniform(theme.color_outset_2_hover)
             color_2_focus: uniform(theme.color_outset_2_focus)
@@ -100,12 +116,14 @@ script_mod! {
             border_color_down: uniform(theme.color_bevel_down)
             border_color_disabled: uniform(theme.color_bevel_disabled)
 
+            /** bevel gradient end stop; negative alpha means flat stroke */
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             border_color_2_hover: uniform(theme.color_bevel_outset_2_hover)
             border_color_2_focus: uniform(theme.color_bevel_outset_2_focus)
             border_color_2_down: uniform(theme.color_bevel_outset_2_down)
             border_color_2_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
+            /** the corner disclosure triangle ink */
             arrow_color: uniform(theme.color_label_inner)
             arrow_color_focus: uniform(theme.color_label_inner_focus)
             arrow_color_hover: uniform(theme.color_label_inner_hover)
@@ -303,6 +321,7 @@ script_mod! {
         }
     }
 
+    /** The standard dropdown: the flat face plus the theme's outset bevel. */
     mod.widgets.DropDown = set_type_default() do mod.widgets.DropDownFlat{
         draw_bg +: {
             color: uniform(theme.color_outset)
