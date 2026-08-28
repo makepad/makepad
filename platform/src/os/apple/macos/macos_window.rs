@@ -6,7 +6,7 @@ use {
             MouseUpEvent, ScrollEvent, ScrollPhase, TextInputEvent, WindowCloseRequestedEvent,
             WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom, WindowGeomChangeEvent,
         },
-        makepad_math::{Rect, Vec2d},
+        makepad_math::{dvec2, Rect, Vec2d},
         os::{
             apple::apple_sys::*,
             apple::apple_util::str_to_nsstring,
@@ -18,6 +18,7 @@ use {
                 macos_event::MacosEvent,
             },
         },
+        screen::{clamp_point_to_screens, fit_window_rect_to_screens, ScreenGeom},
         window::{
             MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
             WindowBackdrop, WindowId, WindowVisuals,
@@ -263,9 +264,13 @@ impl MacosWindow {
             let () = msg_send![self.view, setAllowedTouchTypes: 2u64];
 
             let left_top = if let Some(position) = position {
+                // A restored position can name a display that is gone. Pinning it before the
+                // window is built keeps it from being ordered on screen somewhere unreachable;
+                // `fit_to_screens` below corrects the finished frame.
+                let pinned = clamp_point_to_screens(&macos_screens(), position);
                 NSPoint {
-                    x: position.x as f64,
-                    y: position.y as f64,
+                    x: pinned.x,
+                    y: pinned.y,
                 }
             } else {
                 NSPoint { x: 0., y: 0. }
@@ -361,6 +366,11 @@ impl MacosWindow {
 
             if position.is_none() {
                 let () = msg_send![self.window, center];
+            }
+            if !is_fullscreen {
+                // A restored size and position are only as good as the display arrangement
+                // they were saved on; a fullscreen window is AppKit's to place.
+                self.fit_to_screens();
             }
 
             let input_context: ObjcId = msg_send![self.view, inputContext];
@@ -775,10 +785,32 @@ impl MacosWindow {
         let mut window_frame: NSRect = unsafe { msg_send![self.window, frame] };
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
-        //not very nice: CGDisplay::main().pixels_high() as f64
+        // A caller placing the window cannot know the display arrangement it is placing
+        // into, so the request is fitted to the displays that are actually attached.
+        let fitted = fit_window_rect_to_screens(&macos_screens(), rect_of(window_frame));
         unsafe {
-            let () = msg_send![self.window, setFrame: window_frame display: YES];
+            let () = msg_send![self.window, setFrame: ns_rect_of(fitted) display: YES];
         };
+    }
+
+    /// Moves and resizes the window so it sits entirely within one display's visible frame.
+    ///
+    /// See `crate::screen::fit_window_rect_to_screens` for what counts as a fit and why it
+    /// is unconditional. A window that already fits is left untouched.
+    pub fn fit_to_screens(&mut self) {
+        let screens = macos_screens();
+        if screens.is_empty() {
+            return;
+        }
+        let frame: NSRect = unsafe { msg_send![self.window, frame] };
+        let current = rect_of(frame);
+        let fitted = fit_window_rect_to_screens(&screens, current);
+        if fitted == current {
+            return;
+        }
+        unsafe {
+            let () = msg_send![self.window, setFrame: ns_rect_of(fitted) display: YES];
+        }
     }
 
     pub fn get_position(&self) -> Vec2d {
@@ -1200,5 +1232,54 @@ pub fn get_cocoa_window(this: &Object) -> &mut MacosWindow {
     unsafe {
         let ptr: *mut c_void = *this.get_ivar("macos_window_ptr");
         &mut *(ptr as *mut MacosWindow)
+    }
+}
+
+/// Converts an `NSRect` to makepad's rectangle, leaving Cocoa's bottom-left origin as it is.
+fn rect_of(r: NSRect) -> Rect {
+    Rect {
+        pos: dvec2(r.origin.x, r.origin.y),
+        size: dvec2(r.size.width, r.size.height),
+    }
+}
+
+/// Converts makepad's rectangle back to an `NSRect`.
+fn ns_rect_of(r: Rect) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: r.pos.x,
+            y: r.pos.y,
+        },
+        size: NSSize {
+            width: r.size.x,
+            height: r.size.y,
+        },
+    }
+}
+
+/// The displays currently attached, in Cocoa's global point space (bottom-left origin) —
+/// the space an `NSWindow` frame is expressed in.
+pub fn macos_screens() -> Vec<ScreenGeom> {
+    unsafe {
+        let screens: ObjcId = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let mut out = Vec::with_capacity(count);
+        for index in 0..count {
+            let screen: ObjcId = msg_send![screens, objectAtIndex: index];
+            if screen == nil {
+                continue;
+            }
+            let frame: NSRect = msg_send![screen, frame];
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            out.push(ScreenGeom {
+                bounds: rect_of(frame),
+                work_area: rect_of(visible),
+                // Element zero of `NSScreen.screens` is the display holding the menu bar,
+                // which is the one Cocoa places windows against; `mainScreen` follows the
+                // key window instead and would move under the app.
+                is_primary: index == 0,
+            });
+        }
+        out
     }
 }
