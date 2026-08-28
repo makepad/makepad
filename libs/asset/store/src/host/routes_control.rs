@@ -3527,6 +3527,94 @@ fn worker_allowed_kinds(body: &Value) -> RouteResult<Option<Vec<String>>> {
     Ok(Some(out))
 }
 
+// ---------------------------------------------------------------------------
+// stage-input splicing (pipelines without a babysitter)
+// ---------------------------------------------------------------------------
+
+/// A STAGE-INPUT REFERENCE inside a job body:
+///
+/// ```json
+/// {"$from": "job_<32 hex>", "field": "revision"}
+/// ```
+///
+/// At claim time — the first moment every dependency has provably
+/// succeeded, because the claim query refuses a job whose deps have not —
+/// the transport replaces such a value with the named top-level field of
+/// that dependency's recorded result document. This is what lets a whole
+/// pipeline be enqueued UP FRONT: enqueue the image job, enqueue the video
+/// job with `deps:[image]` and `"source_revision": {"$from": <image job>,
+/// "field": "revision"}`, and walk away. No client has to sit between two
+/// stages re-posting bodies, and a pipeline whose enqueuing client is gone
+/// still advances, crash-resumes, and cancels as one tree.
+///
+/// The rules, each refused loudly rather than ever handing a worker an
+/// unresolved placeholder:
+/// - the reference object must be exactly `{"$from": <job id>, "field":
+///   <name>}` — any object carrying a `$from` key in another shape is
+///   malformed;
+/// - the referenced job must be one of this job's declared `deps`. Deps are
+///   the gate that guaranteed its success, and they are namespace-checked
+///   at enqueue, so a reference can never read another tenant's result;
+/// - the field must exist top-level in the dependency's result document and
+///   be a string, number or bool — never a nested structure.
+///
+/// A violation FAILS the claimed job (through the normal fail path, under
+/// the lease the claim just took, burning that attempt) and the worker is
+/// told the queue had nothing; on the failure becoming terminal the reason
+/// lands as the job's result document. A doomed splice therefore exhausts
+/// its attempts without ever occupying a GPU, and every attempt row says
+/// why.
+fn value_has_stage_ref(v: &Value) -> bool {
+    match v {
+        Value::Obj(pairs) => pairs.iter().any(|(k, val)| k == "$from" || value_has_stage_ref(val)),
+        Value::Arr(items) => items.iter().any(value_has_stage_ref),
+        _ => false,
+    }
+}
+
+/// Depth is bounded by the body parser's own `MAX_DEPTH`, so the recursion
+/// here cannot be driven deeper than a body could be posted.
+fn splice_stage_refs(
+    v: &mut Value,
+    resolve: &dyn Fn(&JobId, &str) -> Result<Value, String>,
+) -> Result<(), String> {
+    match v {
+        Value::Obj(pairs) => {
+            if pairs.iter().any(|(k, _)| k == "$from") {
+                if pairs.len() != 2 {
+                    return Err("a $from reference carries exactly $from and field".to_string());
+                }
+                let job = pairs
+                    .iter()
+                    .find(|(k, _)| k == "$from")
+                    .and_then(|(_, val)| val.as_str())
+                    .and_then(parse_job)
+                    .ok_or_else(|| "a $from reference needs a job id".to_string())?;
+                let field = pairs
+                    .iter()
+                    .find(|(k, _)| k == "field")
+                    .and_then(|(_, val)| val.as_str())
+                    .filter(|f| !f.is_empty() && f.len() <= 64)
+                    .ok_or_else(|| "a $from reference needs a field name".to_string())?
+                    .to_string();
+                *v = resolve(&job, &field)?;
+                return Ok(());
+            }
+            for (_, val) in pairs.iter_mut() {
+                splice_stage_refs(val, resolve)?;
+            }
+            Ok(())
+        }
+        Value::Arr(items) => {
+            for item in items.iter_mut() {
+                splice_stage_refs(item, resolve)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn worker_claim(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let body = json_body!(conn, head, rc);
@@ -3567,10 +3655,71 @@ fn worker_claim(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         match claim {
             None => Ok(None),
             Some(cj) => {
-                let (ns, by, job_body) = envelope_parse(&cj.payload).ok_or(ServerError::Io {
+                let (ns, by, mut job_body) = envelope_parse(&cj.payload).ok_or(ServerError::Io {
                     op: "job envelope",
                     kind: std::io::ErrorKind::InvalidData,
                 })?;
+                // Resolve stage-input references against the results of the
+                // dependencies this claim just proved succeeded. See
+                // `splice_stage_refs` for the contract.
+                if value_has_stage_ref(&job_body) {
+                    let deps = ctx.core.jobs().deps_of(&cj.job_id)?;
+                    let mut results: Vec<(JobId, Option<Value>)> = Vec::with_capacity(deps.len());
+                    for dep in &deps {
+                        let parsed = match ctx.result_get(dep)? {
+                            Some(row) => super::json::parse(&row.body).ok(),
+                            None => None,
+                        };
+                        results.push((*dep, parsed));
+                    }
+                    let resolve = |job: &JobId, field: &str| -> Result<Value, String> {
+                        let Some((_, body)) = results.iter().find(|(id, _)| id == job) else {
+                            return Err(format!(
+                                "{} is not a dependency of this job",
+                                super::api::job_str(job)
+                            ));
+                        };
+                        let Some(body) = body else {
+                            return Err(format!(
+                                "{} recorded no readable result",
+                                super::api::job_str(job)
+                            ));
+                        };
+                        match body.get(field) {
+                            Some(v @ (Value::Str(_) | Value::Int(_) | Value::F64(_) | Value::Bool(_))) => {
+                                Ok(v.clone())
+                            }
+                            Some(_) => Err(format!(
+                                "field {field} of {}'s result is not a plain value",
+                                super::api::job_str(job)
+                            )),
+                            None => Err(format!(
+                                "{}'s result has no field {field}",
+                                super::api::job_str(job)
+                            )),
+                        }
+                    };
+                    if let Err(reason) = splice_stage_refs(&mut job_body, &resolve) {
+                        // Never hand a box an unresolved placeholder. The
+                        // claim becomes the job's failure: fail under the
+                        // lease just taken (burning this attempt — honest,
+                        // the claim cannot be undone), record why once the
+                        // failure is terminal, and tell the worker the
+                        // queue had nothing this poll.
+                        let state = ctx.core.jobs().fail(&cj.job_id, &worker, now, 0)?;
+                        if state == JobState::Failed {
+                            let doc = obj(vec![("error", s(format!("stage input: {reason}")))]);
+                            ctx.result_set(
+                                &cj.job_id,
+                                "failed",
+                                cj.attempt as u64,
+                                doc.to_json().as_bytes(),
+                                now,
+                            )?;
+                        }
+                        return Ok(None);
+                    }
+                }
                 Ok(Some((cj.job_id, cj.kind, cj.attempt, cj.lease_expires_ms, ns, by, job_body)))
             }
         }
