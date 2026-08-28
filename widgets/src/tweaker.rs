@@ -2833,7 +2833,7 @@ impl Tweaker {
                         }
                         vibe_hint := FabLabelSmall {
                             width: Fill
-                            text: "Enter sends \u{00b7} the agent rewrites just this shader \u{00b7} Esc closes"
+                            text: "Enter sends \u{00b7} the agent rewrites just this shader"
                         }
                     }
                     tree_wrap := View {
@@ -3639,9 +3639,12 @@ impl Tweaker {
             }
             // Shader tab content: the layer's live preview + doc + prompt.
             if tab == PanelTab::Shader {
+                // Default to the selection's first draw layer (not every
+                // widget has a draw_bg).
                 let layer = self
                     .vibe_layer
                     .clone()
+                    .or_else(|| self.materials.first().cloned())
                     .unwrap_or_else(|| "draw_bg".to_string());
                 let col = sidebar.child(live_id!(shader_col));
                 col.child(live_id!(shader_title)).set_text(cx, &layer);
