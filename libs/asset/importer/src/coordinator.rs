@@ -1976,7 +1976,14 @@ fn select_route(
     want_model: &str,
 ) -> Result<GenRoute, String> {
     use makepad_asset_ai::fleet::{affinity, is_synthetic_backend};
-    let route = warm_route(snapshots, domain, want_model)?;
+    // A DOWNLOAD NEVER STEALS FROM A BOX THAT HAS THE WEIGHTS — not even
+    // from a busy one. Checked first, because it outranks idleness.
+    let route = hold_for_weights(
+        snapshots,
+        domain,
+        want_model,
+        warm_route(snapshots, domain, want_model)?,
+    );
     // Which box is this route standing on, and is that box busy? An idle
     // box holding the job is not a stacking problem: its memory frees on
     // its own, and moving would only cost a load somewhere else.
@@ -2012,6 +2019,73 @@ fn select_route(
         }
     }
     Ok(route)
+}
+
+/// Refuse a route that would DOWNLOAD a model the fleet already holds.
+///
+/// The admitted pickers only see boxes with free memory right now, so a box
+/// mid-clip drops out of them — and the fleet's fresh, empty box wins the
+/// job and starts pulling 17 GB of weights that are already cached two
+/// racks over. That trade is always wrong: a download is tens of minutes
+/// and a queue is one run. So when any hardware-compatible box HOLDS the
+/// weights (`loaded`/`ready`) — busy or not, admitted or not — a cold box
+/// does not get the job; the job waits for the box that has it, and the
+/// migration clock is the safety valve if that box never frees.
+///
+/// A cold route survives only when nothing in the fleet holds anything for
+/// this work: the weights have to be acquired sometime.
+fn hold_for_weights(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+    route: GenRoute,
+) -> GenRoute {
+    use makepad_asset_ai::fleet::affinity;
+    let GenRoute::Admitted { index, ref model, .. } = route else {
+        return route;
+    };
+    if affinity(&snapshots[index], model).is_some_and(|score| score >= WARM_AFFINITY) {
+        return route;
+    }
+    match warm_holder(snapshots, domain, want_model) {
+        Some((holder, held)) if holder != index => GenRoute::Waiting {
+            stage: holding_stage(&held, &short_label(&snapshots[holder].base_url)),
+            on: Some(holder),
+        },
+        _ => route,
+    }
+}
+
+/// The best box that already HAS weights for this work, whether or not its
+/// memory is free this second. Deliberately the `*_scored` pickers, not the
+/// `*_admitted_scored` ones: a box busy with a run is exactly the box this
+/// rule protects.
+fn warm_holder(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+) -> Option<(usize, String)> {
+    use makepad_asset_ai::fleet::{pick_box_scored, pick_for_domain_scored};
+    if !want_model.is_empty() {
+        if let Some((index, score)) = pick_box_scored(snapshots, want_model) {
+            if score >= WARM_AFFINITY {
+                return Some((index, want_model.to_string()));
+            }
+        }
+    }
+    // Nobody holds the pin, but the domain's own warm model somewhere is
+    // still better than fetching gigabytes here — the same trade V4 made
+    // within one box, made across the fleet.
+    let (index, model, score) = pick_for_domain_scored(snapshots, domain)?;
+    (score >= WARM_AFFINITY).then_some((index, model))
+}
+
+/// Why a job is not moving when the fleet has the weights but no room yet.
+/// A third stall, and it reads as its own sentence: this is not a memory
+/// shortage on the box we chose, it is a deliberate wait for the box that
+/// already has the model.
+fn holding_stage(model: &str, on: &str) -> String {
+    format!("waiting-for-fleet: {model} is already on {on} — better than downloading it here")
 }
 
 /// A box with nothing queued or running on it.
@@ -2452,7 +2526,8 @@ mod tests {
     use crate::gen_kinds::kind_of;
     use makepad_asset_ai::fleet::BoxSnapshot;
     use makepad_asset_ai::protocol::{
-        HealthJson, ModelInfoJson, MODEL_STATE_ABSENT, MODEL_STATE_LOADED, MODEL_STATE_READY,
+        HealthJson, ModelInfoJson, MODEL_STATE_ABSENT, MODEL_STATE_DOWNLOADING,
+        MODEL_STATE_LOADED, MODEL_STATE_READY,
     };
     use makepad_asset_client::{ApiEndpoints, ClientConfig};
     use makepad_asset_data::{AssetId, AssetKind};
@@ -3870,6 +3945,89 @@ mod tests {
         }
     }
 
+    /// A DOWNLOAD NEVER STEALS FROM A BOX THAT HAS THE WEIGHTS. The busy
+    /// box holds the model and has no memory free this second, so the
+    /// admitted pickers cannot see it; the fresh empty box can take the job
+    /// today and would spend 20 GB of pull doing it. The job queues on the
+    /// box that has it — one run is shorter than any download — and the
+    /// migration clock is the safety valve if that box never frees.
+    #[test]
+    fn a_box_that_would_download_never_steals_from_one_that_has_the_model() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    2 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+            ),
+        ];
+        // The pin, and the same question with no pin at all.
+        for want in ["minimax-h3-q4-24g", ""] {
+            match select_route(&snapshots, "video", want).unwrap() {
+                GenRoute::Waiting { stage, on } => {
+                    assert_eq!(on, Some(0), "it waits for the box that HAS the weights");
+                    assert!(stage.contains("already on .166"), "{stage}");
+                    assert!(!stage.contains("http"), "no fleet URLs in worker status");
+                }
+                other => panic!("a download must not win: {other:?}"),
+            }
+        }
+        // A box in mid-DOWNLOAD is just as cold: still no stealing.
+        let mut downloading = snapshots.clone();
+        downloading[1].models[0].state = MODEL_STATE_DOWNLOADING.to_string();
+        assert!(matches!(
+            select_route(&downloading, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Waiting { on: Some(0), .. }
+        ));
+        // And when NOTHING in the fleet holds it, the download is the only
+        // way the fleet ever gets the weights: it runs.
+        let mut nobody_has_it = snapshots.clone();
+        nobody_has_it[0].models[0].state = MODEL_STATE_ABSENT.to_string();
+        assert!(matches!(
+            select_route(&nobody_has_it, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+    }
+
+    /// The other half of the same rule, unchanged by it: within the boxes
+    /// that HAVE the weights, idle still beats busy.
+    #[test]
+    fn idle_still_wins_among_the_boxes_that_have_the_model() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)],
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "cached-and-idle beats resident-and-busy"
+        );
+    }
+
     /// The two stalls read differently, and both say which box.
     #[test]
     fn the_progress_note_says_which_stall_this_is_and_where() {
@@ -3889,6 +4047,13 @@ mod tests {
         assert_eq!(queued_note("queued", None, None), "queued-on-fleet");
         // A node that named its own waiting stage is quoted, not overruled.
         assert_eq!(queued_note("download", None, Some(".100")), "@.100 download");
+        // A third stall, its own sentence: the fleet HAS the weights, just
+        // not the room yet — nothing here is downloading or short of memory.
+        assert_eq!(
+            holding_stage("minimax-h3-q4-24g", ".166"),
+            "waiting-for-fleet: minimax-h3-q4-24g is already on .166 — better than \
+             downloading it here"
+        );
         // And a VRAM wait is a VRAM wait — a different sentence entirely.
         let stage = waiting_stage(
             "minimax-h3-q4-24g",
