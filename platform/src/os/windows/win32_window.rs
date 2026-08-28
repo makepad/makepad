@@ -1093,11 +1093,19 @@ impl Win32Window {
             }
             // WM_CANCELMODE (0x001F): the system is telling the window to abandon any internal
             // mode it is in. DefWindowProc normally still leaves the move/size loop through
-            // WM_EXITSIZEMOVE, so this is a failsafe: `in_size_move` is the only thing gating
-            // position publication, and a stuck `true` would silently stop it for the window's
-            // lifetime.
+            // WM_EXITSIZEMOVE, so this is a failsafe for the state that loop arms and only that
+            // loop disarms. A stuck `in_size_move` silently stops publishing the window's
+            // position for its lifetime; a stuck resize is worse still, because the 8 ms resize
+            // timer keeps forcing repaints and `is_in_resize` keeps presenting unpaced, so the
+            // window never returns to vsync. `replace` is what keeps this precise: WM_CANCELMODE
+            // also arrives for menus and capture changes, and unwinding a resize that was not
+            // running would cost a needless `ResizeBuffers` every time one opened.
             0x001F => {
-                window.in_size_move.set(false);
+                if window.in_size_move.replace(false) {
+                    with_win32_app(|app| app.stop_resize());
+                    window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
+                    window.send_move_event();
+                }
             }
             WM_EXITSIZEMOVE => {
                 window.in_size_move.set(false);
