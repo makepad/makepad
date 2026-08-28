@@ -87,8 +87,19 @@ impl WaylandWindow {
         }
         base_surface.commit();
 
-        let wl_egl_surface =
-            WlEglSurface::new(base_surface.id(), inner_size.x as i32, inner_size.y as i32).unwrap();
+        // `wl_egl_window_create` rejects a non-positive extent, and a float-to-int cast turns
+        // both a negative and a NaN into zero, so the requested size is floored before the
+        // call rather than allowed to panic an app at startup over a bad saved size.
+        let egl_w = (inner_size.x as i32).max(1);
+        let egl_h = (inner_size.y as i32).max(1);
+        let wl_egl_surface = match WlEglSurface::new(base_surface.id(), egl_w, egl_h) {
+            Ok(surface) => surface,
+            Err(e) => {
+                crate::error!("wl_egl_window_create failed at {egl_w}x{egl_h}: {e:?}");
+                WlEglSurface::new(base_surface.id(), 800, 600)
+                    .expect("wl_egl_window_create failed at the fallback size too")
+            }
+        };
         let egl_surface = unsafe {
             (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
                 opengl_cx.egl_display,

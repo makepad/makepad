@@ -1,6 +1,12 @@
 use {
     self::super::{x11_sys, xlib_app::*, xlib_event::XlibEvent},
-    crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::{Rect, Vec2d}, window::WindowId},
+    crate::{
+        area::Area, cursor::MouseCursor, event::*,
+        makepad_math::{dvec2, Rect, Vec2d},
+        os::linux::x11::x11_screen::x11_screens,
+        screen::fit_window_rect_to_screens,
+        window::WindowId,
+    },
     std::{
         cell::Cell,
         ffi::{CStr, CString},
@@ -131,22 +137,26 @@ impl XlibWindow {
                 | x11_sys::LeaveWindowMask) as c_long;
 
             let dpi_factor = self.get_dpi_factor();
+            // A restored size and position are only as good as the desktop layout they were
+            // saved on, so the request is fitted before it reaches the server. Doing it here
+            // covers the geometry, the size hints and the pre-map move alike.
+            let (position, size) = fit_create_geom(position, size, dpi_factor);
             // Create a window
+            // X11 encodes a window position as INT16 and an extent as CARD16, and a request
+            // outside those ranges is a BadValue protocol error — which, with no error handler
+            // installed, terminates the process. The fit above already keeps a placement on the
+            // desktop; these clamps are what guarantee the request is expressible at all.
+            let (create_x, create_y) = match position {
+                Some(position) => (clamp_coord(position.x), clamp_coord(position.y)),
+                None => (150, 60),
+            };
             let window = x11_sys::XCreateWindow(
                 display,
                 root_window,
-                if position.is_some() {
-                    position.unwrap().x
-                } else {
-                    150.0
-                } as i32,
-                if position.is_some() {
-                    position.unwrap().y
-                } else {
-                    60.0
-                } as i32,
-                (size.x * dpi_factor) as u32,
-                (size.y * dpi_factor) as u32,
+                create_x,
+                create_y,
+                clamp_extent(size.x * dpi_factor),
+                clamp_extent(size.y * dpi_factor),
                 0,
                 visual_info.depth,
                 x11_sys::InputOutput as u32,
@@ -759,6 +769,8 @@ impl XlibWindow {
         }
     }
 
+    /// The window's top-left corner in physical screen pixels; see [`Self::set_position`]
+    /// for why positions are not scaled the way sizes are.
     pub fn get_position(&self) -> Vec2d {
         unsafe {
             let display = get_xlib_app_global().display;
@@ -814,18 +826,29 @@ impl XlibWindow {
         }
     }
 
+    /// Moves the window's top-left corner to `pos`, in physical screen pixels — the same
+    /// space [`Self::get_position`] reports and `XCreateWindow` takes, so
+    /// `set_position(get_position())` leaves the window where it is. Sizes are logical and
+    /// scale with the DPI; positions are not, because a screen coordinate on a multi-monitor
+    /// desktop has no single scale factor to be logical in.
     pub fn set_position(&mut self, pos: Vec2d) {
         unsafe {
             let display = get_xlib_app_global().display;
-            let dpi_factor = self.get_dpi_factor();
+            // A caller placing the window cannot know the desktop it is placing into, so the
+            // request is fitted to the desktop that is actually there.
+            let want = Rect {
+                pos,
+                size: self.get_outer_size(),
+            };
+            let fitted = fit_window_rect_to_screens(&x11_screens(), want);
             x11_sys::XMoveWindow(
                 display,
                 self.window.unwrap(),
-                (pos.x * dpi_factor) as i32,
-                (pos.y * dpi_factor) as i32,
+                clamp_coord(fitted.pos.x),
+                clamp_coord(fitted.pos.y),
             );
             x11_sys::XFlush(display);
-            self.last_window_geom.position = pos;
+            self.last_window_geom.position = fitted.pos;
         }
     }
 
@@ -1304,4 +1327,49 @@ impl DndAtoms {
             uri_list: x11_sys::XInternAtom(display, "text/uri-list\0".as_ptr() as *const _, 0),
         }
     }
+}
+
+/// Fits a requested window placement onto the desktop.
+///
+/// Takes and returns the pair `XCreateWindow` is called with: a position in physical pixels
+/// and an inner size in logical pixels. `None` leaves placement to the window manager, which
+/// already puts the window somewhere visible, so it passes straight through.
+fn fit_create_geom(
+    position: Option<Vec2d>,
+    size: Vec2d,
+    dpi_factor: f64,
+) -> (Option<Vec2d>, Vec2d) {
+    let Some(pos) = position else {
+        return (None, size);
+    };
+    let screens = x11_screens();
+    if screens.is_empty() {
+        return (position, size);
+    }
+    let want = Rect {
+        pos,
+        size: dvec2(size.x * dpi_factor, size.y * dpi_factor),
+    };
+    let fitted = fit_window_rect_to_screens(&screens, want);
+    (
+        Some(fitted.pos),
+        dvec2(fitted.size.x / dpi_factor, fitted.size.y / dpi_factor),
+    )
+}
+
+/// Clamps a window coordinate into the INT16 range the X11 protocol encodes it in.
+fn clamp_coord(v: f64) -> c_int {
+    if !v.is_finite() {
+        return 0;
+    }
+    (v as i64).clamp(-32768, 32767) as c_int
+}
+
+/// Clamps a window extent into the CARD16 range the X11 protocol encodes it in. Zero is not
+/// a legal extent, so the floor is one pixel.
+fn clamp_extent(v: f64) -> u32 {
+    if !v.is_finite() {
+        return 1;
+    }
+    (v as i64).clamp(1, 65535) as u32
 }
