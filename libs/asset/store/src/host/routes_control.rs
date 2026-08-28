@@ -2384,6 +2384,8 @@ struct SearchParams {
     model: Option<String>,
     owner_me: bool,
     live_only: bool,
+    /// Literal words only: no synonym or plural expansion (`exact=1`).
+    exact: bool,
     page_size: u32,
     cursor: Option<Vec<u8>>,
     /// Facet rows to return with the page; 0 (the default) asks for none.
@@ -2419,6 +2421,14 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
         // terms with any non-alphanumeric byte the charset allows (`-`, `.`,
         // `_`) — the tokenizer splits on all of them. POST /v1/search takes
         // free text.
+        //
+        // Every term is also matched through its synonyms and plural folds
+        // (`puppy` finds the asset whose description says `dog`, `dogs` finds
+        // `dog`), scored strictly below the exact word so literal hits stay on
+        // top. Terms that are synonyms of each other are ONE demand, not two,
+        // so `sniper-rifle` is a name rather than a conjunction. `exact=1`
+        // (POST: `"exact": true`) turns all of that off and searches the typed
+        // words alone.
         text: q("q").unwrap_or_default(),
         namespace: q("ns"),
         kind: head.query_get("kind").map(parse_kind).transpose()?,
@@ -2435,6 +2445,7 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
             Some(_) => return Err(Fail::Http(400, "owner filter must be me")),
         },
         live_only: head.query_get("live").map(parse_flag).transpose()?.unwrap_or(false),
+        exact: head.query_get("exact").map(parse_flag).transpose()?.unwrap_or(false),
         page_size,
         cursor: head.query_get("cursor").map(parse_cursor).transpose()?,
         facets: match head.query_get("facets") {
@@ -2487,6 +2498,10 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
             None => false,
             Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
         },
+        exact: match body.get("exact") {
+            None => false,
+            Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
+        },
         page_size,
         cursor: field("cursor")?.as_deref().map(parse_cursor).transpose()?,
         facets: match body.get("facets") {
@@ -2520,6 +2535,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
         let query = SearchQuery {
             text: &params.text,
             filters,
+            expand: !params.exact,
             page_size: params.page_size,
             facets: params.facets,
         };
