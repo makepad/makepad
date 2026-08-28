@@ -174,6 +174,11 @@ struct TweakSession {
     /// Shader fns applied live from the source view: (uid, layer, fn name)
     /// → the text as applied, shown in place of the file's version.
     fn_overrides: HashMap<(u64, String, String), String>,
+    /// What the panel says under the prompt: "sent … waiting", "applied",
+    /// or an error — the send must be visible, and so must the landing.
+    vibe_status: String,
+    /// A prompt is out and unanswered (path, layer).
+    vibe_pending: Option<(String, String)>,
     /// A sample in flight: (probe id, prop). Answered from the next frame.
     eyedrop_probe: Option<(u64, String)>,
     /// The press went to a navigation widget (tab, fold, dropdown) and was
@@ -1409,6 +1414,23 @@ fn reindent_two(src: &str) -> String {
         .join("\n")
 }
 
+/// Remember `name: fn() {…}` entries of an applied `<layer> +: { … }` chunk
+/// so the source view shows what runs, not what the file says.
+fn record_fn_overrides(uid: u64, chunk: &str) {
+    let chunk = chunk.trim();
+    let Some(open) = chunk.find("+:") else { return };
+    let layer = chunk[..open].trim().to_string();
+    let Some(body) = chunk[open..].find('{').map(|i| &chunk[open + i + 1..]) else { return };
+    let body = body.trim_end().trim_end_matches('}');
+    let mut s = session().lock().unwrap();
+    for name in ["pixel", "vertex"] {
+        if let Some(seg) = body.split(&format!("{name}:")).nth(1) {
+            let seg = format!("{name}:{seg}");
+            s.fn_overrides.insert((uid, layer.clone(), name.to_string()), reindent_two(seg.trim_end()));
+        }
+    }
+}
+
 /// Ctrl+Enter in the source view: apply the fn as edited to the pinned
 /// widget's layer, live — no AI needed for a hand edit.
 fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) {
@@ -2327,7 +2349,24 @@ pub fn tweak_callback(
                         .join(".")
                 }
             };
-            let changed = apply_splash_chunk(cx, &widget, &resolved_path, &chunk, "remote")?;
+            let applied = apply_splash_chunk(cx, &widget, &resolved_path, &chunk, "remote");
+            {
+                // The prompt's answer landed (or failed): say so in the panel.
+                let mut s = session().lock().unwrap();
+                if let Some((ppath, _)) = s.vibe_pending.clone() {
+                    if ppath == resolved_path || ppath == path {
+                        s.vibe_status = match &applied {
+                            Ok(_) => "applied \u{2713}".to_string(),
+                            Err(e) => format!("error: {e}"),
+                        };
+                        s.vibe_pending = None;
+                    }
+                }
+            }
+            cx.redraw_all();
+            let changed = applied?;
+            // A fn rewrite from the AI shows in the source view as applied.
+            record_fn_overrides(widget.widget_uid().0, &chunk);
             {
                 let mut s = session().lock().unwrap();
                 let rect = widget.area().clipped_rect_union(cx);
@@ -3344,6 +3383,11 @@ impl Tweaker {
                                 text_style +: { font_size: 8.5 }
                             }
                         }
+                        vibe_status := FabLabelSmall {
+                            width: Fill
+                            text: ""
+                            draw_text +: { color: #xffa040 }
+                        }
                         vibe_hint := FabLabelSmall {
                             width: Fill
                             text: "Ctrl+Enter sends \u{00b7} the agent rewrites only the fn code \u{00b7} colours and sizes stay in Props"
@@ -4194,6 +4238,13 @@ impl Tweaker {
                     .or_else(|| self.materials.first().cloned())
                     .unwrap_or_else(|| "draw_bg".to_string());
                 let col = sidebar.child(live_id!(shader_col));
+                {
+                    let status = session().lock().unwrap().vibe_status.clone();
+                    col.child(live_id!(vibe_status)).set_text(cx, &status);
+                }
+                // The layer the Shader tab shows is the one a prompt or an
+                // editor apply targets.
+                self.vibe_layer = Some(layer.clone());
                 col.child(live_id!(shader_title)).set_text(cx, &layer);
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
                 col.child(live_id!(shader_doc))
@@ -5049,7 +5100,19 @@ impl Tweaker {
                             .collect::<Vec<_>>()
                             .join("\n\n");
                         log!("TWEAK vibe sel={path} layer={layer} fns={} prompt={text}", self.vibe_fn_sources.iter().map(|(n, l, _)| format!("{n}@{l}")).collect::<Vec<_>>().join(","));
-                        session().lock().unwrap().vibes.push((path, layer, text, fns));
+                        {
+                            let mut s = session().lock().unwrap();
+                            s.vibe_status = format!("sent to the AI \u{00b7} waiting\u{2026} \u{2014} {text}");
+                            s.vibe_pending = Some((path.clone(), layer.clone()));
+                            s.vibes.push((path, layer, text, fns));
+                        }
+                        if let Some(sidebar) = self.sidebar.as_ref() {
+                            let col = sidebar.child(live_id!(shader_col));
+                            col.child(live_id!(prompt)).set_text(cx, "");
+                            let status = session().lock().unwrap().vibe_status.clone();
+                            col.child(live_id!(vibe_status)).set_text(cx, &status);
+                        }
+                        cx.redraw_all();
                     }
                 }
             }
