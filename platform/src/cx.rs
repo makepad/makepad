@@ -21,6 +21,7 @@ use {
         perf_monitor::PerfMonitor,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
+        sploded::SplodedView,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
@@ -169,6 +170,8 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
+    /// The F10 exploded z-layer inspection view. Inert while off.
+    pub sploded: SplodedView,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     #[allow(dead_code)]
@@ -502,6 +505,7 @@ impl Cx {
             self_ref: None,
             performance_stats: Default::default(),
             perf_monitor: Default::default(),
+            sploded: Default::default(),
 
             display_context: Default::default(),
             pending_script_reapply: false,

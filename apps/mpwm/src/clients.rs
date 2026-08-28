@@ -193,6 +193,12 @@ pub fn find_app(id: &str) -> Option<AppDef> {
     if let Some(app) = registry().iter().find(|a| a.id == id) {
         return Some(app.clone());
     }
+    // The file associations (`mp_wm_api::viewer_for`) name binaries, since
+    // standalone apps spawn them as siblings; here those resolve to their
+    // curated entries (mpterm → terminal, mpbrowser → browser, …).
+    if let Some(app) = registry().iter().find(|a| a.bin == id) {
+        return Some(app.clone());
+    }
     use LaunchPolicy::*;
     match id {
         // The file viewers: launchable (previews, Open With) but not menu
@@ -980,6 +986,22 @@ mod tests {
             assert_eq!(app.policy, policy, "{}", id);
             assert!(!app.package.is_empty() && !app.dir.is_empty());
         }
+    }
+
+    #[test]
+    fn the_association_table_resolves_by_binary_name() {
+        // `mp_wm_api::viewer_for` names binaries (standalone apps spawn
+        // them as siblings); the WM must resolve those to curated entries
+        // or every text/html/csv preview dies with "no app".
+        for (bin, id) in [
+            ("mpterm", "terminal"),
+            ("mpbrowser", "browser"),
+            ("mpsheets", "sheets"),
+        ] {
+            assert_eq!(find_app(bin).expect(bin).id, id);
+        }
+        // Registry ids still win over bin names.
+        assert_eq!(find_app("terminal").expect("terminal").id, "terminal");
     }
 
     #[test]

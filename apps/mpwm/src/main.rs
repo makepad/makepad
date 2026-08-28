@@ -1524,6 +1524,12 @@ impl App {
                     self.on_wm_request(cx, client, req);
                 }
             }
+            AppToStudio::LogItem(item) => {
+                // Hosted children log over the studio socket, not stdout —
+                // dropping these makes them undebuggable. Into our own log
+                // (and thus the remote bridge's /log) they go.
+                log!("client {}: {}", client, item.message);
+            }
             _ => {}
         }
     }

@@ -673,6 +673,9 @@ pub enum FabValueInputAction {
     Changed(f64),
     /// The gesture finished (mouse up / Enter) — commit points.
     Ended(f64),
+    /// Double-click: the host should reset this field's prop to its
+    /// baseline and drop it from any change ledger.
+    Reset,
     #[default]
     None,
 }
@@ -907,6 +910,17 @@ pub struct FabValueInput {
     /// Pointer over the field: the ‹ › stepper chevrons reveal.
     #[rust]
     hovered: bool,
+    /// Time of the last primary press inside the field: two presses within
+    /// the double-click window make a RESET gesture.
+    #[rust]
+    last_press_time: f64,
+    /// Live-path measurement: FingerMoves delivered to this owner and
+    /// publishes made during the current drag. Logged at drag end so a
+    /// physical pass measures against the platform's PIN stats line.
+    #[rust]
+    drag_moves: u64,
+    #[rust]
+    drag_publishes: u64,
     #[rust]
     editing: bool,
 }
@@ -1085,7 +1099,9 @@ impl FabValueInput {
     fn cancel_drag(&mut self, cx: &mut Cx, uid: WidgetUid) {
         if let Some(drag) = self.drag.take() {
             if drag.engaged {
-                cx.pin_mouse_pointer(false);
+                // Early cancel (Escape / right-click): the button is still
+                // held, so the pin must be lifted explicitly.
+                cx.unpin_pointer_capture();
                 self.publish(cx, uid, drag.press_value, false);
             }
             self.animator_play(cx, ids!(hover.off));
@@ -1144,6 +1160,30 @@ impl Widget for FabValueInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+
+        // Double-click = RESET, detected on the raw press so it works in
+        // every state (the second press of a double-click lands while the
+        // first click's text editor is already open — the editor claims
+        // hits, so hit-testing can't see it). Coexistence: a single click
+        // still opens the editor instantly (snappy); the second click
+        // within the window converts that into end-edit + reset.
+        if let Event::MouseDown(me) = event {
+            if me.button.is_primary()
+                && self.draw_bg.area().clipped_rect(cx).contains(me.abs)
+            {
+                if me.time - self.last_press_time < 0.4 {
+                    self.last_press_time = 0.0;
+                    if self.editing {
+                        self.end_edit(cx);
+                        cx.revert_key_focus();
+                    }
+                    self.drag = None;
+                    cx.widget_action(uid, FabValueInputAction::Reset);
+                    return;
+                }
+                self.last_press_time = me.time;
+            }
+        }
 
         // Ctrl+Wheel nudges by one step; a plain wheel keeps scrolling the
         // panel underneath.
@@ -1277,9 +1317,14 @@ impl Widget for FabValueInput {
                     // The pointer pins where the press happened: hidden,
                     // infinite drag range, restored in place on release.
                     // Engaged only now, at the threshold — a plain click
-                    // never touches the cursor.
-                    cx.pin_mouse_pointer(true);
+                    // never touches the cursor. The pin rides on this
+                    // widget's finger capture; the hardware button-up
+                    // releases both automatically.
+                    cx.pin_pointer_capture();
+                    self.drag_moves = 0;
+                    self.drag_publishes = 0;
                 }
+                self.drag_moves += 1;
                 let mods = cx.keyboard.modifiers();
                 if mods.shift != drag.shift {
                     // A modifier change re-anchors: the value holds still,
@@ -1304,6 +1349,7 @@ impl Widget for FabValueInput {
                 drag.anchor = anchor;
                 self.drag = Some(drag);
                 let v = self.normalize(publish);
+                self.drag_publishes += 1;
                 self.publish(cx, uid, v, false);
                 // Hold the pin against quiet OS re-association drops.
                 cx.repin_mouse_pointer();
@@ -1313,7 +1359,13 @@ impl Widget for FabValueInput {
                     return;
                 };
                 if drag.engaged {
-                    cx.pin_mouse_pointer(false);
+                    // The pin released with the capture on the way in; the
+                    // action is all that is left to send.
+                    log!(
+                        "SCRUB stats: finger_moves={} publishes={}",
+                        self.drag_moves,
+                        self.drag_publishes
+                    );
                     cx.widget_action(uid, FabValueInputAction::Ended(self.value));
                 } else {
                     // A click. The zone at release decides: arrows step,
