@@ -317,6 +317,8 @@ const DEFAULT_SPREAD: f32 = 0.12;
 /// The scrub range the panel knob should offer.
 pub const SPLODED_SPREAD_MIN: f32 = 0.0;
 pub const SPLODED_SPREAD_MAX: f32 = 2.0;
+/// What the panel knob resets to on double-click.
+pub const SPLODED_SPREAD_DEFAULT: f32 = DEFAULT_SPREAD;
 const SPREAD_KEY_STEP: f32 = 0.05;
 
 impl Default for SplodedView {

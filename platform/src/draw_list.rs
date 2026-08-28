@@ -1028,11 +1028,19 @@ impl Cx {
     /// lists a container has stopped referencing (a Dock's hidden pages, a
     /// closed StackNavigation view) keep their items but are not here.
     pub fn attached_draw_lists(&self, pass_id: DrawPassId) -> std::collections::HashSet<DrawListId> {
+        self.attached_draw_lists_from(self.passes[pass_id].main_draw_list_id)
+    }
+
+    /// Same walk from any set of roots. A list links into its parent only
+    /// when it ENDS, so mid-draw (an overlay drawing while its ancestors
+    /// are still open) the pass root does not yet reach the open chain —
+    /// seed the walk with the open lists too (`Cx2d::open_draw_lists`).
+    pub fn attached_draw_lists_from(
+        &self,
+        roots: impl IntoIterator<Item = DrawListId>,
+    ) -> std::collections::HashSet<DrawListId> {
         let mut out = std::collections::HashSet::new();
-        let Some(root) = self.passes[pass_id].main_draw_list_id else {
-            return out;
-        };
-        let mut stack = vec![root];
+        let mut stack: Vec<DrawListId> = roots.into_iter().collect();
         while let Some(list_id) = stack.pop() {
             if !out.insert(list_id) {
                 continue;

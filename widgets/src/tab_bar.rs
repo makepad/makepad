@@ -602,15 +602,32 @@ impl TabBar {
                 let tab = cx.with_vm(|vm| Tab::script_new(vm));
                 WidgetRef::new_with_inner(Box::new(tab))
             };
-            cx.widget_tree_insert_child(bar_uid, tab_id, tab.clone());
+            cx.widget_tree_insert_child(bar_uid, Self::tab_node_name(tab_id), tab.clone());
             (tab, template)
         });
         tab.clone()
     }
 
+    /// The widget-tree name of a tab: `<tab_id>_tab`. NOT the bare tab id —
+    /// a Dock registers the tab's CONTENT under that id, and the tree
+    /// replaces a same-named sibling, so the bare id evicted every page's
+    /// content from the tree (a pick on the page then found no widget: "0
+    /// props").
+    pub fn tab_node_name(tab_id: LiveId) -> LiveId {
+        let base = tab_id
+            .as_string(|s| s.map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{:x}", tab_id.0));
+        // Interned, so the tree path prints `dock.tButton_tab` and not a
+        // raw hash.
+        let name = format!("{base}_tab");
+        LiveId::from_str_with_lut(&name).unwrap_or_else(|_| LiveId::from_str(&name))
+    }
+
     /// The tabs as widgets, for whoever enumerates children (the Dock).
     pub fn tab_refs(&self) -> impl Iterator<Item = (LiveId, WidgetRef)> + '_ {
-        self.tabs.iter().map(|(id, (tab, _))| (*id, tab.clone()))
+        self.tabs
+            .iter()
+            .map(|(id, (tab, _))| (Self::tab_node_name(*id), tab.clone()))
     }
 
     /// Creates a new Tab from the same template as the given tab, with the same active state.
