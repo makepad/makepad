@@ -1075,12 +1075,17 @@ impl Cx {
                     .push_back(crate::cx_api::CxOsOp::PinMousePointer(false));
             }
         }
-        // The F10 exploded z-layer view is inspection-only: while it is up it
-        // owns the pointer and the keyboard and the app sees neither. (After
-        // the pin hook: a mid-drag F10 must never strand a hidden cursor.)
+        // The F10 exploded z-layer view is LIVE: the intercept claims only
+        // its own keys and the orbit drag (on raw screen coordinates), then
+        // the router re-addresses every other pointer event to the plane
+        // its ray lands on so ordinary dispatch — hover, wheel scrolling,
+        // the tweaker's pick — works on the exploded app. (After the pin
+        // hook: a mid-drag F10 must never strand a hidden cursor.)
         if self.sploded_intercept(event) {
             return;
         }
+        let routed = self.sploded_route(event);
+        let event = routed.as_ref().unwrap_or(event);
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
