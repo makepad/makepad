@@ -20,10 +20,12 @@
 //! log. An installed mpwm with no checkout around it falls back to
 //! exec'ing the sibling binary.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -300,6 +302,232 @@ fn cargo_bin() -> PathBuf {
     PathBuf::from("cargo")
 }
 
+// ======================================================================
+// The warm-instance pool
+// ======================================================================
+
+/// How many DORMANT instances of an app the pool keeps standing by, so a
+/// new window is a swap instead of a launch. The user's sizing: terminals
+/// get two (people burst-open them), the rest one each. An app that is not
+/// in this table is never pre-spawned.
+///
+/// This is the whole registry of warmable apps — `is_warm_app` and the
+/// startup top-up both read it, so adding an app here is the only edit an
+/// app needs to join the pool.
+pub const WARM_CAPACITY: &[(&str, usize)] = &[
+    ("terminal", 2),
+    ("browser", 1),
+    ("files", 1),
+    ("task", 1),
+];
+
+/// The env a warm instance is spawned with. `mp_wm_api::warm_start()` reads
+/// exactly this: the app boots its window and draws once, then IDLES — no
+/// samplers, no refresh timers, no polling — until `WmEvent::Adopted`
+/// arrives. Without it a cached task manager would sit there sampling
+/// every process on the machine for nothing.
+pub const WARM_ENV: (&str, &str) = ("MPWM_WARM_START", "1");
+
+/// Crash budget: this many UNEXPECTED warm deaths per app inside
+/// `WARM_CRASH_WINDOW`, after which the pool gives that app up quietly and
+/// every launch takes the cold path (which always works). Adoption
+/// replacements are NOT crashes and are never capped — capping those would
+/// switch the pool off for anyone who opens four terminals in a minute,
+/// which is exactly who it exists for.
+pub const WARM_CRASH_LIMIT: usize = 3;
+pub const WARM_CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+/// What the WM knows about one pooled instance right now, handed to
+/// `WarmPool::adopt` so the pool itself stays free of WM state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WarmStatus {
+    pub client: ClientId,
+    /// Still in the client table: the process has not been reaped.
+    pub alive: bool,
+    /// Connected to the hub AND past `CreateWindow` — it has a framebuffer
+    /// and a drawn frame, so a tile can show it this instant. A warm
+    /// instance that is still building (or still starting) is not one.
+    pub connected: bool,
+}
+
+/// The pool: per app, the ids of the instances standing by.
+///
+/// Deliberately a plain state machine over ids — no processes, no cx, no
+/// layout — so the rules that matter (adopt clears and tops back up, a
+/// dead instance falls back to a cold spawn, a cwd override skips the pool,
+/// MPWM_NO_WARM turns it off, crash loops give up) are unit-testable
+/// without a running window manager.
+#[derive(Debug)]
+pub struct WarmPool {
+    enabled: bool,
+    /// app id -> the warm clients of that app, oldest first.
+    ready: HashMap<String, Vec<ClientId>>,
+    /// app id -> when its warm instances died unexpectedly, newest last.
+    crashes: HashMap<String, Vec<Instant>>,
+}
+
+impl Default for WarmPool {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+/// MPWM_NO_WARM disables the pool entirely. An empty or `0` value is not a
+/// request — `MPWM_NO_WARM=` in a stale profile should not silently cost
+/// everyone the feature.
+pub fn warm_enabled(no_warm: Option<&str>) -> bool {
+    match no_warm {
+        None => true,
+        Some(v) => matches!(v.trim(), "" | "0"),
+    }
+}
+
+impl WarmPool {
+    pub fn from_env() -> Self {
+        Self::new(warm_enabled(std::env::var("MPWM_NO_WARM").ok().as_deref()))
+    }
+
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ready: HashMap::new(),
+            crashes: HashMap::new(),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// How many instances of this app the pool wants standing by; 0 for an
+    /// app that is not pooled at all.
+    pub fn capacity(app: &str) -> usize {
+        WARM_CAPACITY
+            .iter()
+            .find(|(id, _)| *id == app)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    }
+
+    pub fn is_warm_app(app: &str) -> bool {
+        Self::capacity(app) > 0
+    }
+
+    /// How many instances of this app are currently held.
+    pub fn held(&self, app: &str) -> usize {
+        self.ready.get(app).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Every warm client, whatever the app — the shutdown / close-all
+    /// paths walk this so no pooled process is ever left behind.
+    pub fn clients(&self) -> Vec<ClientId> {
+        let mut all: Vec<ClientId> = self.ready.values().flatten().copied().collect();
+        all.sort_unstable();
+        all
+    }
+
+    pub fn holds(&self, client: ClientId) -> bool {
+        self.ready.values().any(|v| v.contains(&client))
+    }
+
+    /// True while this app is under capacity and inside its crash budget:
+    /// the WM may spawn one more standby instance now.
+    pub fn wants(&self, app: &str, now: Instant) -> bool {
+        self.enabled
+            && self.held(app) < Self::capacity(app)
+            && self.recent_crashes(app, now) < WARM_CRASH_LIMIT
+    }
+
+    /// The next app that is short an instance, in table order — the tick
+    /// tops the pool up ONE spawn at a time so a cold start never forks
+    /// five cargo builds into the same target-dir lock at once.
+    pub fn next_missing(&self, now: Instant) -> Option<String> {
+        WARM_CAPACITY
+            .iter()
+            .map(|(app, _)| *app)
+            .find(|app| self.wants(app, now))
+            .map(str::to_string)
+    }
+
+    /// A standby instance was spawned for `app`.
+    pub fn note_spawned(&mut self, app: &str, client: ClientId) {
+        self.ready.entry(app.to_string()).or_default().push(client);
+    }
+
+    /// A warm instance died on its own. Counted against the crash budget;
+    /// a DELIBERATE close (WM shutdown, close-all) calls `forget` instead.
+    pub fn note_crash(&mut self, app: &str, now: Instant) {
+        self.crashes.entry(app.to_string()).or_default().push(now);
+    }
+
+    fn recent_crashes(&self, app: &str, now: Instant) -> usize {
+        self.crashes
+            .get(app)
+            .map(|v| {
+                v.iter()
+                    .filter(|t| now.saturating_duration_since(**t) < WARM_CRASH_WINDOW)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Drop a client from the pool however it left (died, was closed with
+    /// everything else). Returns the app it was standing by for, which is
+    /// the app the caller then tops back up.
+    pub fn forget(&mut self, client: ClientId) -> Option<String> {
+        let mut which = None;
+        for (app, ids) in self.ready.iter_mut() {
+            if let Some(pos) = ids.iter().position(|c| *c == client) {
+                ids.remove(pos);
+                which = Some(app.clone());
+                break;
+            }
+        }
+        which
+    }
+
+    /// THE decision, for one launch of `app`.
+    ///
+    /// `Some(client)` = adopt that instance into a real tile (it leaves the
+    /// pool; the caller tops the app back up immediately). `None` = spawn
+    /// cold exactly as before. Dead entries are pruned on the way past, so
+    /// a crashed instance both falls back cleanly AND frees its slot for
+    /// the next respawn.
+    ///
+    /// THE CWD CARVE-OUT (omarchy's rule, `omarchy-cmd-terminal-cwd`): a
+    /// new terminal opens in the FOCUSED terminal's directory. A warm
+    /// terminal's shell started long ago, in the default directory — it
+    /// cannot be moved after the fact without lying about where it is — so
+    /// when a cwd is being inherited the pool stands aside and the launch
+    /// goes cold. Correct beats instant; the instant path is what you get
+    /// from the desktop, the bar and any non-terminal focus.
+    pub fn adopt(
+        &mut self,
+        app: &str,
+        cwd_override: bool,
+        status: &[WarmStatus],
+    ) -> Option<ClientId> {
+        if !self.enabled {
+            return None;
+        }
+        let ids = self.ready.get_mut(app)?;
+        ids.retain(|id| {
+            status
+                .iter()
+                .any(|s| s.client == *id && s.alive)
+        });
+        if cwd_override {
+            return None;
+        }
+        let pos = ids.iter().position(|id| {
+            status
+                .iter()
+                .any(|s| s.client == *id && s.connected)
+        })?;
+        Some(ids.remove(pos))
+    }
+}
+
 pub struct ClientSlot {
     #[allow(dead_code)]
     pub id: ClientId,
@@ -319,6 +547,19 @@ pub struct ClientSlot {
     /// Opened as a Quick-Look preview: a centered float that Escape or
     /// Space dismisses.
     pub is_preview: bool,
+    /// A DORMANT warm-pool instance (see `WarmPool`): the process is up,
+    /// connected and drawing into its own off-desk framebuffer, but it has
+    /// NO tile. Everything the desk enumerates works off the LAYOUT, which
+    /// a warm client is never in, so this flag is only needed where the WM
+    /// walks the client table itself — launch-or-focus matching, and the
+    /// tile plumbing that must stay away until adoption.
+    pub warm: bool,
+    /// When this client was opened as a real window (launched cold, or
+    /// adopted out of the pool) and whether that open was the warm path —
+    /// the pair behind the "first frame in Nms" log line that measures the
+    /// pool honestly.
+    pub open_at: Option<Instant>,
+    pub opened_warm: bool,
     /// FOCUS RULE: a Quick-Look preview never takes key focus — keys keep
     /// flowing to the requesting tile (mpfiles). `focus_client` refuses to
     /// focus a client with this false; every normal client defaults true.
@@ -525,6 +766,10 @@ pub fn spawn_client(
     // `extra_args` is appended after the app's own args: the file to open,
     // with `--preview` in front of it for a Quick-Look popup.
     extra_args: &[String],
+    // A DORMANT warm-pool instance: same launch in every other way — same
+    // cargo, same env, same log — plus `WARM_ENV`, which tells the app to
+    // come up and then idle until it is adopted.
+    warm: bool,
     // Every output line the child writes is forwarded here, so the tile
     // can show cargo's progress instead of a bare "starting…".
     lines: Sender<ClientLine>,
@@ -574,6 +819,9 @@ pub fn spawn_client(
     if let Ok(theme) = std::env::var("MPWM_THEME_SPLASH") {
         cmd.env("MPWM_THEME_SPLASH", theme);
     }
+    if warm {
+        cmd.env(WARM_ENV.0, WARM_ENV.1);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {}", app.package, e))?;
@@ -599,7 +847,12 @@ pub fn spawn_client(
         ready: false,
         pwd: None,
         is_preview: false,
-        takes_focus: true,
+        warm,
+        open_at: (!warm).then(Instant::now),
+        opened_warm: false,
+        // A warm instance is not a window yet: nothing may focus it until
+        // adoption hands it a tile.
+        takes_focus: !warm,
         via_cargo,
         status: String::new(),
         linked: false,
@@ -757,6 +1010,215 @@ mod tests {
             );
             assert!(app.is_available(), "{} should be available", app.id);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The warm pool
+    // ------------------------------------------------------------------
+
+    /// A pool holding `ids` for `app`, every one of them live and ready.
+    fn pool_with(app: &str, ids: &[ClientId]) -> (WarmPool, Vec<WarmStatus>) {
+        let mut pool = WarmPool::new(true);
+        for id in ids {
+            pool.note_spawned(app, *id);
+        }
+        let status = ids
+            .iter()
+            .map(|id| WarmStatus {
+                client: *id,
+                alive: true,
+                connected: true,
+            })
+            .collect();
+        (pool, status)
+    }
+
+    #[test]
+    fn the_pool_sizes_are_the_users_two_terminals_and_one_of_the_rest() {
+        assert_eq!(WarmPool::capacity("terminal"), 2);
+        for app in ["browser", "files", "task"] {
+            assert_eq!(WarmPool::capacity(app), 1, "{}", app);
+        }
+        // Everything else launches cold, as it always did.
+        for app in ["vj", "fab", "studio", "mpimage", "nonesuch"] {
+            assert_eq!(WarmPool::capacity(app), 0, "{}", app);
+            assert!(!WarmPool::is_warm_app(app), "{}", app);
+        }
+        // Every pooled app is a real registry entry we can actually spawn.
+        for (app, _) in WARM_CAPACITY {
+            assert!(find_app(app).is_some(), "{} is not in the registry", app);
+        }
+    }
+
+    #[test]
+    fn adopting_clears_the_slot_and_asks_for_a_respawn() {
+        let (mut pool, status) = pool_with("browser", &[7]);
+        // Fill the rest of the shelf, so a full pool asks for nothing and
+        // the top-up below names exactly the app that was adopted.
+        pool.note_spawned("terminal", 1);
+        pool.note_spawned("terminal", 2);
+        pool.note_spawned("files", 3);
+        pool.note_spawned("task", 4);
+        assert!(!pool.wants("browser", Instant::now()), "already full");
+        assert_eq!(pool.next_missing(Instant::now()), None, "nothing missing");
+        assert_eq!(pool.adopt("browser", false, &status), Some(7));
+        // Out of the pool, and the pool now wants its replacement.
+        assert_eq!(pool.held("browser"), 0);
+        assert!(!pool.holds(7));
+        assert!(pool.wants("browser", Instant::now()));
+        assert_eq!(pool.next_missing(Instant::now()).as_deref(), Some("browser"));
+        // The same instance can never be adopted twice.
+        assert_eq!(pool.adopt("browser", false, &status), None);
+    }
+
+    #[test]
+    fn two_terminals_stand_by_and_both_open_instantly() {
+        let (mut pool, status) = pool_with("terminal", &[3, 4]);
+        assert_eq!(pool.held("terminal"), 2);
+        assert!(!pool.wants("terminal", Instant::now()));
+        // Back-to-back opens: both are swaps, oldest first.
+        assert_eq!(pool.adopt("terminal", false, &status), Some(3));
+        assert_eq!(pool.held("terminal"), 1);
+        assert_eq!(pool.adopt("terminal", false, &status), Some(4));
+        assert_eq!(pool.held("terminal"), 0);
+        // A third open in the same breath falls back to cold, and the pool
+        // is two short — one spawn per tick, so it tops up twice.
+        assert_eq!(pool.adopt("terminal", false, &status), None);
+        assert!(pool.wants("terminal", Instant::now()));
+        pool.note_spawned("terminal", 9);
+        assert!(pool.wants("terminal", Instant::now()));
+        pool.note_spawned("terminal", 10);
+        assert!(!pool.wants("terminal", Instant::now()));
+        assert_eq!(pool.next_missing(Instant::now()).as_deref(), Some("browser"));
+    }
+
+    #[test]
+    fn a_dead_or_unconnected_warm_instance_falls_back_to_a_cold_spawn() {
+        // Killed behind our back: not in the client table any more.
+        let (mut pool, _) = pool_with("terminal", &[3, 4]);
+        let gone = [
+            WarmStatus { client: 3, alive: false, connected: false },
+            WarmStatus { client: 4, alive: true, connected: true },
+        ];
+        assert_eq!(pool.adopt("terminal", false, &gone), Some(4));
+        // The dead one was pruned on the way past, so the pool asks for
+        // two replacements rather than counting a corpse.
+        assert_eq!(pool.held("terminal"), 0);
+
+        // Still building / still starting: alive but not connected. No
+        // adoption (there is no frame to show), and it KEEPS its slot —
+        // it will be ready for the next launch.
+        let (mut pool, _) = pool_with("browser", &[5]);
+        let starting = [WarmStatus { client: 5, alive: true, connected: false }];
+        assert_eq!(pool.adopt("browser", false, &starting), None);
+        assert_eq!(pool.held("browser"), 1);
+        assert!(!pool.wants("browser", Instant::now()));
+
+        // An app with nothing standing by: cold, quietly.
+        let mut empty = WarmPool::new(true);
+        assert_eq!(empty.adopt("terminal", false, &[]), None);
+    }
+
+    #[test]
+    fn a_cwd_override_skips_adoption_and_keeps_the_instance() {
+        // THE CARVE-OUT: a new terminal must open in the focused
+        // terminal's cwd, and the warm shell already started elsewhere.
+        let (mut pool, status) = pool_with("terminal", &[3, 4]);
+        assert_eq!(pool.adopt("terminal", true, &status), None);
+        // Nothing was consumed: the next launch WITHOUT an override is
+        // still instant.
+        assert_eq!(pool.held("terminal"), 2);
+        assert_eq!(pool.adopt("terminal", false, &status), Some(3));
+    }
+
+    #[test]
+    fn mpwm_no_warm_turns_the_pool_off_entirely() {
+        assert!(warm_enabled(None));
+        // An empty or 0 value is not a request.
+        assert!(warm_enabled(Some("")));
+        assert!(warm_enabled(Some("0")));
+        assert!(!warm_enabled(Some("1")));
+        assert!(!warm_enabled(Some("yes")));
+
+        let mut off = WarmPool::new(false);
+        assert!(!off.enabled());
+        // Nothing is ever spawned…
+        assert!(!off.wants("terminal", Instant::now()));
+        assert_eq!(off.next_missing(Instant::now()), None);
+        // …and even a hand-fed instance is never adopted.
+        off.note_spawned("terminal", 1);
+        let status = [WarmStatus { client: 1, alive: true, connected: true }];
+        assert_eq!(off.adopt("terminal", false, &status), None);
+    }
+
+    #[test]
+    fn a_crash_loop_gives_up_quietly_after_three_a_minute() {
+        let now = Instant::now();
+        let mut pool = WarmPool::new(true);
+        for i in 0..WARM_CRASH_LIMIT {
+            assert!(pool.wants("browser", now), "attempt {}", i);
+            pool.note_spawned("browser", i as ClientId);
+            // Up, then dead before anyone could adopt it.
+            let app = pool.forget(i as ClientId).expect("pooled");
+            pool.note_crash(&app, now);
+        }
+        assert!(!pool.wants("browser", now), "the budget should be spent");
+        assert_eq!(pool.next_missing(now).as_deref(), Some("terminal"));
+        // The budget is per app…
+        assert!(pool.wants("terminal", now));
+        // …and it is a WINDOW: a minute later the app is tried again.
+        assert!(pool.wants("browser", now + WARM_CRASH_WINDOW + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_deliberate_close_costs_no_budget_and_tops_back_up() {
+        // CTRL+ALT+DELETE closes the warm instances with everything else;
+        // that is not a crash, so the pool refills at once instead of
+        // spending the loop budget on the user's own gesture.
+        let now = Instant::now();
+        let mut pool = WarmPool::new(true);
+        for id in 0..6 {
+            pool.note_spawned("terminal", id);
+            assert_eq!(pool.forget(id).as_deref(), Some("terminal"));
+        }
+        assert!(pool.wants("terminal", now));
+        assert_eq!(pool.forget(99), None, "an unknown client is not ours");
+    }
+
+    #[test]
+    fn every_warm_client_is_reachable_for_shutdown() {
+        let mut pool = WarmPool::new(true);
+        pool.note_spawned("terminal", 3);
+        pool.note_spawned("terminal", 4);
+        pool.note_spawned("browser", 1);
+        assert_eq!(pool.clients(), vec![1, 3, 4]);
+        assert!(pool.holds(4) && !pool.holds(5));
+    }
+
+    #[test]
+    fn a_warm_instance_launches_exactly_like_a_cold_one() {
+        // Same argv — the registry's own args included, which is how the
+        // warm Files inherits `--demo` without the pool knowing about it.
+        let files = find_app("files").unwrap();
+        let root = std::path::PathBuf::from("/checkout");
+        let (program, args) = launch_argv(&files, Some(&root), &[]).unwrap();
+        assert!(program.to_string_lossy().ends_with("cargo"));
+        assert!(args.contains(&"mpfiles".to_string()), "{:?}", args);
+        if std::env::var("MPWM_FILES_REAL").is_err() {
+            assert_eq!(args.last().map(String::as_str), Some("--demo"), "{:?}", args);
+        }
+    }
+
+    #[test]
+    fn the_warm_env_is_the_one_the_apps_read() {
+        // The contract with `mp_wm_api::warm_start()`: a dormant app idles
+        // (no samplers, no refresh) until `WmEvent::Adopted`. If these two
+        // ever drift, a warm task manager silently burns a core.
+        assert!(!mp_wm_api::warm_start(), "MPWM_WARM_START leaked in");
+        std::env::set_var(WARM_ENV.0, WARM_ENV.1);
+        assert!(mp_wm_api::warm_start());
+        std::env::remove_var(WARM_ENV.0);
+        assert!(!mp_wm_api::warm_start());
     }
 
     #[test]

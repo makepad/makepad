@@ -355,6 +355,59 @@ impl Density {
     }
 }
 
+/// The warm-pool dormancy state machine (see `mp_wm_api::warm_start` /
+/// `WmEvent::Adopted`). mpwm pre-spawns hidden warm instances of this app
+/// (`MPWM_WARM_START=1`); a cached task manager must not burn CPU sampling
+/// in the background before anyone is looking at it. A warm instance starts
+/// `Dormant` — no sampler thread, no snapshots, empty graphs — and wakes
+/// exactly once: either mpwm adopts it into a real tile (`WmEvent::Adopted`
+/// on the studio `Custom` channel), or, defensively, a human touches the
+/// window directly (a key or pointer/touch event, in case an `Adopted`
+/// message is ever lost). A non-warm instance is never dormant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dormancy {
+    /// Not a warm-pool instance: sampling starts immediately.
+    #[default]
+    Active,
+    /// A warm-pool instance, still idling.
+    Dormant,
+    /// A warm-pool instance that has woken up.
+    Woken,
+}
+
+impl Dormancy {
+    /// `warm` is `mp_wm_api::warm_start()`, read once at startup.
+    pub fn start(warm: bool) -> Self {
+        if warm { Dormancy::Dormant } else { Dormancy::Active }
+    }
+
+    pub fn is_dormant(&self) -> bool {
+        *self == Dormancy::Dormant
+    }
+
+    /// Transition `Dormant` -> `Woken`. Returns `true` the one time this
+    /// actually wakes it (the caller should start the sampler then); `false`
+    /// when it was already active or already woken, so Adopted arriving
+    /// after an input wake (or twice) never restarts anything.
+    pub fn wake(&mut self) -> bool {
+        if *self == Dormancy::Dormant {
+            *self = Dormancy::Woken;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A raw input event a human — not the WM protocol — could only have sent:
+/// the defensive wake path for a lost `WmEvent::Adopted`.
+fn is_wake_input(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::KeyDown(_) | Event::MouseDown(_) | Event::TouchUpdate(_)
+    )
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -382,11 +435,17 @@ pub struct App {
     down_history: Vec<f64>,
     #[rust]
     up_history: Vec<f64>,
+    /// Warm-pool dormancy — see `Dormancy`.
+    #[rust]
+    dormancy: Dormancy,
 }
 
 impl App {
+    /// Starts the sampler thread, unless a warm-pool instance is still
+    /// dormant — a cached task manager must not sample at its 0.1s default
+    /// while nobody is looking at it.
     fn start_sampler(&mut self) {
-        if self.sampler_started {
+        if self.sampler_started || self.dormancy.is_dormant() {
             return;
         }
         self.sampler_started = true;
@@ -394,6 +453,17 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.snapshot_rx = Some(rx);
         sampler::spawn(tx, self.interval_ms.clone());
+    }
+
+    /// Wakes a dormant warm instance: `WmEvent::Adopted`, or defensively the
+    /// first real key/pointer input in case that message was lost. A no-op
+    /// past the first call (`Dormancy::wake` only fires once), so mashing
+    /// keys after `Adopted` already woke it never restarts the sampler.
+    fn wake(&mut self) {
+        if self.dormancy.wake() {
+            log!("mptask: warm instance woken, starting sampler");
+            self.start_sampler();
+        }
     }
 
     /// Drain to the newest snapshot: if the UI was busy we want the latest
@@ -700,6 +770,9 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Startup = event {
+            // Checked once: a warm-pool instance stays dormant until
+            // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
+            self.dormancy = Dormancy::start(mp_wm_api::warm_start());
             self.theme = Theme::from_environment();
             self.apply_theme(cx);
             // `--size WxH` lets a test drive the breakpoints without a WM.
@@ -707,6 +780,7 @@ impl AppMain for App {
                 self.ui.window(cx, ids!(main_window)).resize(cx, size);
             }
             self.layout_from_window(cx);
+            // No-ops while dormant — see `start_sampler`.
             self.start_sampler();
         }
         // The window is often an mpwm tile, so the layout follows its size
@@ -716,6 +790,18 @@ impl AppMain for App {
         }
         if let Event::Signal = event {
             self.drain_snapshots(cx);
+        }
+        // `StudioToApp::Custom` from mpwm reaches a hosted app as
+        // `Event::Custom(json)`; `Adopted` is what wakes a warm instance.
+        if let Event::Custom(json) = event {
+            if let Some(mp_wm_api::WmEvent::Adopted) = mp_wm_api::WmEvent::parse(json) {
+                self.wake();
+            }
+        }
+        // Defensive fallback: a lost `Adopted` message must not leave a
+        // visibly-adopted, actually-being-used instance sampling nothing.
+        if self.dormancy.is_dormant() && is_wake_input(event) {
+            self.wake();
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
@@ -816,5 +902,61 @@ mod tests {
         // Nothing may panic when MPWM_THEME_SPLASH is unset or bogus.
         let theme = Theme::from_environment();
         assert!(theme.accent.w > 0.0);
+    }
+
+    // ---- warm-pool dormancy ----
+
+    #[test]
+    fn non_warm_starts_active() {
+        let dormancy = Dormancy::start(false);
+        assert_eq!(dormancy, Dormancy::Active);
+        assert!(!dormancy.is_dormant());
+    }
+
+    #[test]
+    fn warm_starts_dormant_and_adopted_wakes_exactly_once() {
+        let mut dormancy = Dormancy::start(true);
+        assert!(dormancy.is_dormant());
+        // Adopted wakes it...
+        assert!(dormancy.wake());
+        assert!(!dormancy.is_dormant());
+        assert_eq!(dormancy, Dormancy::Woken);
+        // ...and a second Adopted (or a stray input) never fires again.
+        assert!(!dormancy.wake());
+        assert_eq!(dormancy, Dormancy::Woken);
+    }
+
+    #[test]
+    fn waking_an_already_active_instance_is_a_no_op() {
+        let mut dormancy = Dormancy::start(false);
+        assert!(!dormancy.wake());
+        assert_eq!(dormancy, Dormancy::Active);
+    }
+
+    #[test]
+    fn key_and_pointer_events_are_wake_input() {
+        assert!(is_wake_input(&Event::KeyDown(KeyEvent::default())));
+        assert!(is_wake_input(&Event::MouseDown(MouseDownEvent {
+            abs: dvec2(0.0, 0.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::default()),
+            time: 0.0,
+        })));
+        // Touch ("finger") input wakes it too — same match arm as the mouse
+        // and keyboard cases above; `TouchUpdateEvent` is not part of the
+        // widgets crate's public re-export surface so it is not
+        // constructible from an app crate's test.
+        // A timer tick or a signal drain is not a human touching the app.
+        assert!(!is_wake_input(&Event::Signal));
+    }
+
+    #[test]
+    fn input_wakes_a_dormant_instance_the_same_as_adopted() {
+        let mut dormancy = Dormancy::start(true);
+        assert!(is_wake_input(&Event::KeyDown(KeyEvent::default())));
+        assert!(dormancy.wake());
+        assert!(!dormancy.is_dormant());
     }
 }

@@ -75,9 +75,9 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    accelerated_paint_requested, bootstrap, do_message_loop_work, initialize, is_initialized,
-    prepare, reexec_into_app_bundle_if_needed, shutdown, startup_phases, AcceleratedStats,
-    Browser, RenderMode,
+    accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
+    is_initialized, prepare, reexec_into_app_bundle_if_needed, set_background_color, shutdown,
+    startup_phases, AcceleratedStats, Browser, RenderMode,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -98,11 +98,22 @@ pub struct AcceleratedStats {
     pub last_blit_micros: u64,
     pub total_blit_micros: u64,
     pub dropped_no_target: u64,
+    pub target_frames: u64,
+    pub last_copy_width: usize,
+    pub last_copy_height: usize,
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn accelerated_paint_requested() -> bool {
     false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_background_color(_argb: u32) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn background_color() -> u32 {
+    0
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use mp_wm_api::{viewer_for, WmRequest};
 
-use crate::clients::{registry, spawn_client, AppDef, ClientLine};
+use crate::clients::{spawn_client, AppDef, ClientLine};
 use crate::hub::ClientId;
 
 /// The Quick Look warm-viewer cache, one live client per viewer TYPE
@@ -89,7 +89,10 @@ pub fn spawn_for_request(
 ) -> Result<crate::clients::ClientSlot, String> {
     let (app, extra) = app_for_request(req)
         .ok_or_else(|| format!("no app '{}' for {}", req.app, req.path.display()))?;
-    spawn_client(&app, id, hub_port, None, None, &extra, lines)
+    // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
+    // (`PreviewCache`), which keeps a viewer alive between panels rather
+    // than standing one by before the first.
+    spawn_client(&app, id, hub_port, None, None, &extra, false, lines)
 }
 
 #[cfg(test)]

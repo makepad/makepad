@@ -21,6 +21,46 @@ pub enum BrowserBackend {
     CEF,
 }
 
+/// The IOSurface handed to CEF is rounded up to this pixel grid, so a drag
+/// resize walks dozens of page sizes inside ONE surface instead of allocating
+/// (and showing) a blank one at every step.
+pub const SURFACE_GRID: usize = 256;
+
+/// Round a page size up to [`SURFACE_GRID`].
+pub fn surface_alloc(width: usize, height: usize) -> (usize, usize) {
+    fn up(v: usize) -> usize {
+        v.max(1).div_ceil(SURFACE_GRID) * SURFACE_GRID
+    }
+    (up(width), up(height))
+}
+
+/// Does the page need a surface other than the one it has (or the one already
+/// on its way)? Growing is immediate — a surface smaller than the page clips
+/// the blit. Shrinking waits for the size to settle, so a drag does not
+/// allocate at every step.
+pub fn needs_new_surface(
+    current: Option<(usize, usize)>,
+    pending: Option<(usize, usize)>,
+    want: (usize, usize),
+    settled: bool,
+) -> bool {
+    match (current, pending) {
+        // Something bigger is already on its way: only a page that outgrows
+        // even that needs another surface.
+        (_, Some((pw, ph))) => want.0 > pw || want.1 > ph,
+        (Some((aw, ah)), None) => want.0 > aw || want.1 > ah || (settled && want != (aw, ah)),
+        (None, None) => true,
+    }
+}
+
+/// How long a page size has to hold still before the surface may shrink back
+/// down to it. Growing never waits.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+/// Floor on the spacing between `was_resized` calls: CEF's paint always lags
+/// the size, and driving resizes faster than the display refresh starves the
+/// paint callback outright (measured: zero accelerated frames at ~2 kHz).
+pub const RESIZE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ActiveBrowserBackend {
@@ -49,8 +89,40 @@ pub struct Browser {
     #[visible]
     #[live(true)]
     visible: bool,
+    /// The last good frame. Never dropped for a resize — only replaced once
+    /// its successor holds a page frame.
     #[rust]
     texture: Option<Texture>,
+    /// Pixel size `texture` is allocated at, and the sub-rect of it that holds
+    /// page pixels (the last blit's copy region). The quad samples exactly
+    /// that sub-rect and stretches it over the current rect.
+    #[rust]
+    texture_alloc: Option<(usize, usize)>,
+    #[rust]
+    texture_valid: Option<(usize, usize)>,
+    /// A surface already handed to CEF that has not been painted yet: it stays
+    /// invisible until it holds a frame, so a resize never shows a blank.
+    #[rust]
+    pending_texture: Option<Texture>,
+    #[rust]
+    pending_alloc: Option<(usize, usize)>,
+    #[rust]
+    painted: bool,
+    #[cfg(feature = "cef")]
+    #[rust]
+    resized_to: Option<(usize, usize)>,
+    #[cfg(feature = "cef")]
+    #[rust]
+    resized_at: Option<std::time::Instant>,
+    #[cfg(feature = "cef")]
+    #[rust]
+    deferred_resize: Option<(usize, usize, f32)>,
+    #[cfg(feature = "cef")]
+    #[rust]
+    wanted_size: Option<(usize, usize)>,
+    #[cfg(feature = "cef")]
+    #[rust]
+    wanted_at: Option<std::time::Instant>,
     #[cfg(feature = "cef")]
     #[rust]
     cef_browser: Option<makepad_cef::Browser>,
@@ -135,9 +207,18 @@ impl Browser {
             }
             ActiveBrowserBackend::CEF => {
                 self.texture = None;
+                self.texture_alloc = None;
+                self.texture_valid = None;
+                self.pending_texture = None;
+                self.pending_alloc = None;
+                self.painted = false;
                 #[cfg(feature = "cef")]
                 {
                     self.cef_browser = None;
+                    self.accel_target_size = None;
+                    self.resized_to = None;
+                    self.resized_at = None;
+                    self.deferred_resize = None;
                 }
             }
             ActiveBrowserBackend::None | ActiveBrowserBackend::Unsupported => {}
@@ -572,16 +653,13 @@ impl Browser {
             }
         }
 
-        if let Some(browser) = &mut self.cef_browser {
-            if let Err(err) = browser.resize(width, height, scale_factor) {
-                let message = err.to_string();
-                log!("Browser widget resize failed: {message}");
-                self.init_error = Some(message);
-                self.cef_browser = None;
-            }
+        let now = std::time::Instant::now();
+        if self.wanted_size != Some((width, height)) {
+            self.wanted_size = Some((width, height));
+            self.wanted_at = Some(now);
         }
-
-        self.sync_accelerated_target(_cx, width, height);
+        self.sync_browser_size(width, height, scale_factor, now);
+        self.sync_accelerated_target(_cx, width, height, now);
 
         if let Some(browser) = &mut self.cef_browser {
             let url = self.url.as_ref();
@@ -599,37 +677,105 @@ impl Browser {
         }
     }
 
-    /// GPU path: the browser paints into pooled IOSurfaces and blits them
-    /// into a Makepad-owned IOSurface texture (`create_iosurface_render_texture`)
-    /// that the quad samples directly — no CPU readback, no upload.
+    /// Tell CEF the page size, at most once per [`RESIZE_INTERVAL`]; anything
+    /// faster is remembered and applied by the next pump, so the final size of
+    /// a drag always lands.
     #[cfg(feature = "cef")]
-    fn sync_accelerated_target(&mut self, cx: &mut Cx, width: usize, height: usize) {
+    fn sync_browser_size(
+        &mut self,
+        width: usize,
+        height: usize,
+        scale_factor: f32,
+        now: std::time::Instant,
+    ) {
+        let same = self.resized_to == Some((width, height));
+        if !same
+            && self
+                .resized_at
+                .is_some_and(|last| now.duration_since(last) < RESIZE_INTERVAL)
+        {
+            self.deferred_resize = Some((width, height, scale_factor));
+            return;
+        }
+        // `Browser::resize` no-ops on an unchanged size, so this still lets a
+        // dpi change through without another `was_resized`.
+        if let Some(browser) = &mut self.cef_browser {
+            if let Err(err) = browser.resize(width, height, scale_factor) {
+                let message = err.to_string();
+                log!("Browser widget resize failed: {message}");
+                self.init_error = Some(message);
+                self.cef_browser = None;
+            }
+        }
+        if !same {
+            self.resized_to = Some((width, height));
+            self.resized_at = Some(now);
+        }
+        self.deferred_resize = None;
+    }
+
+    /// GPU path: the browser paints into pooled IOSurfaces and blits them into
+    /// a Makepad-owned IOSurface texture (`create_iosurface_render_texture`)
+    /// that the quad samples directly — no CPU readback, no upload.
+    ///
+    /// The surface is over-allocated on [`SURFACE_GRID`] and grows only when
+    /// the page outgrows it (it shrinks only once the size settles). A fresh
+    /// surface is BLANK, so it waits in `pending_texture` while the last good
+    /// one keeps covering the page area — that is what keeps a drag-resize
+    /// from flashing empty.
+    #[cfg(feature = "cef")]
+    fn sync_accelerated_target(
+        &mut self,
+        cx: &mut Cx,
+        width: usize,
+        height: usize,
+        now: std::time::Instant,
+    ) {
         #[cfg(target_os = "macos")]
         {
+            if !self
+                .cef_browser
+                .as_ref()
+                .is_some_and(|browser| browser.is_accelerated())
+            {
+                return;
+            }
+            let want = surface_alloc(width, height);
+            let settled = self
+                .wanted_at
+                .is_some_and(|since| now.duration_since(since) >= SETTLE);
+            if !needs_new_surface(self.accel_target_size, self.pending_alloc, want, settled) {
+                return;
+            }
+            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(want.0, want.1);
             let Some(browser) = &mut self.cef_browser else {
                 return;
             };
-            if !browser.is_accelerated() {
-                return;
-            }
-            if self.accel_target_size == Some((width, height)) && self.texture.is_some() {
-                return;
-            }
-            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(width, height);
-            match browser.set_accelerated_target(iosurface, width, height) {
+            match browser.set_accelerated_target(iosurface, want.0, want.1) {
                 Ok(()) => {
-                    self.texture = Some(texture);
-                    self.accel_target_size = Some((width, height));
+                    self.accel_target_size = Some(want);
+                    if self.painted && self.texture.is_some() {
+                        self.pending_texture = Some(texture);
+                        self.pending_alloc = Some(want);
+                    } else {
+                        self.texture = Some(texture);
+                        self.texture_alloc = Some(want);
+                        self.texture_valid = None;
+                        self.pending_texture = None;
+                        self.pending_alloc = None;
+                    }
                 }
                 Err(err) => {
                     log!("Browser accelerated target failed, staying on software frames: {err}");
                     self.accel_target_size = None;
+                    self.pending_texture = None;
+                    self.pending_alloc = None;
                 }
             }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (cx, width, height);
+            let _ = (cx, width, height, now);
         }
     }
 
@@ -646,6 +792,21 @@ impl Browser {
             if counter != self.accel_frame_counter {
                 self.accel_frame_counter = counter;
                 accelerated_dirty = true;
+                let stats = browser.accelerated_stats();
+                let valid = (stats.last_copy_width, stats.last_copy_height);
+                if stats.target_frames > 0 && valid.0 > 0 && valid.1 > 0 {
+                    // The surface CEF paints into now holds a real frame: if it
+                    // was the pending one, this is the moment to swap — never
+                    // before, so the page area never goes blank.
+                    if let (Some(texture), Some(alloc)) =
+                        (self.pending_texture.take(), self.pending_alloc.take())
+                    {
+                        self.texture = Some(texture);
+                        self.texture_alloc = Some(alloc);
+                    }
+                    self.texture_valid = Some(valid);
+                    self.painted = true;
+                }
             }
         }
         if let Some(frame) = latest_frame {
@@ -657,18 +818,24 @@ impl Browser {
         } else if accelerated_dirty {
             self.redraw(cx);
         }
+        // A resize that arrived faster than CEF can take them: apply the last
+        // one now, so the end of a drag always reaches the page.
+        if let Some((w, h, dpi)) = self.deferred_resize {
+            self.sync_browser_size(w, h, dpi, std::time::Instant::now());
+            self.redraw(cx);
+        }
     }
 
     #[cfg(feature = "cef")]
     fn apply_frame(&mut self, cx: &mut Cx, frame: makepad_cef::Frame) {
+        let size = (frame.width, frame.height);
         match &self.texture {
-            Some(texture)
-                if texture.get_format(cx).vec_width_height()
-                    == Some((frame.width, frame.height)) =>
-            {
+            Some(texture) if texture.get_format(cx).vec_width_height() == Some(size) => {
                 texture.set_data_u32(cx, frame.width, frame.height, frame.pixels);
             }
             _ => {
+                self.pending_texture = None;
+                self.pending_alloc = None;
                 self.texture = Some(Texture::new_with_format(
                     cx,
                     TextureFormat::VecBGRAu8_32 {
@@ -680,6 +847,10 @@ impl Browser {
                 ));
             }
         }
+        // An upload texture is exactly the page: all of it is valid.
+        self.texture_alloc = Some(size);
+        self.texture_valid = Some(size);
+        self.painted = true;
     }
 
     fn set_url_internal(&mut self, cx: &mut Cx, url: &str) {
@@ -993,10 +1164,30 @@ impl Widget for Browser {
 
                     self.ensure_browser(cx, width, height, dpi);
 
-                    if let Some(texture) = &self.texture {
-                        self.draw_bg.draw_vars.set_texture(0, texture);
-                    } else {
-                        self.draw_bg.draw_vars.empty_texture(0);
+                    match (self.painted, &self.texture) {
+                        (true, Some(texture)) => {
+                            // Sample only the part of the surface that holds
+                            // page pixels and stretch it over the current
+                            // rect: mid-drag that is the last good frame at a
+                            // slightly older size, never a blank margin.
+                            let scale = match (self.texture_alloc, self.texture_valid) {
+                                (Some((aw, ah)), Some((vw, vh)))
+                                    if aw > 0 && ah > 0 && vw > 0 && vh > 0 =>
+                                {
+                                    vec2(
+                                        (vw as f32 / aw as f32).min(1.0),
+                                        (vh as f32 / ah as f32).min(1.0),
+                                    )
+                                }
+                                _ => vec2(1.0, 1.0),
+                            };
+                            self.draw_bg.image_scale = scale;
+                            self.draw_bg.draw_vars.set_texture(0, texture);
+                        }
+                        _ => {
+                            self.draw_bg.image_scale = vec2(1.0, 1.0);
+                            self.draw_bg.draw_vars.empty_texture(0);
+                        }
                     }
 
                     self.draw_bg.draw_walk(cx, walk);

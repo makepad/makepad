@@ -111,6 +111,11 @@ script_mod! {
     }
 }
 
+/// The arrival crossfade length: the wash fades out while the first
+/// frames fade in, smoothstepped, long enough to read as a resolve
+/// rather than a zap.
+const ARRIVAL_FADE_SECS: f32 = 0.28;
+
 /// Drag-stall hunt: timestamped trace lines appended to the file named by
 /// MPWM_TRACE. Free when unset (one static branch). Timestamps are UNIX ms
 /// (mod 1e7) so host and child (MAKEPAD_STUDIO_TRACE) lines correlate.
@@ -191,6 +196,10 @@ pub struct MpRunView {
     /// The popin fade (1.0 = solid); the desk drives it during open/close.
     #[rust(1.0f32)]
     fade: f32,
+    /// When the FIRST frame landed: the content fades in quickly from the
+    /// "starting…" panel instead of popping on abruptly.
+    #[rust]
+    first_present_at: Option<std::time::Instant>,
     #[rust]
     tick_timer: Timer,
     #[rust]
@@ -267,6 +276,7 @@ impl MpRunView {
         self.last_swapchain_with_completed_draws = None;
         self.pending_draw = None;
         self.present_ok_count = 0;
+        self.first_present_at = None;
         self.app_ready_for_swapchain = false;
         self.ime_pos = None;
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -558,6 +568,11 @@ impl MpRunView {
             ));
             self.pending_draw = None;
             self.present_ok_count += 1;
+            if self.present_ok_count == 1 {
+                // Whatever frames come in first, they fade in quickly
+                // rather than popping over the "starting…" panel.
+                self.first_present_at = Some(std::time::Instant::now());
+            }
             self.bootstrap_pending = false;
             self.bootstrap_tick_count = 0;
         } else {
@@ -586,6 +601,7 @@ impl MpRunView {
         }
         self.app_ready_for_swapchain = true;
         self.present_ok_count = 0;
+        self.first_present_at = None;
         self.bootstrap_pending = true;
         self.bootstrap_tick_count = 0;
         self.redraw_countdown = self.redraw_countdown.max(240);
@@ -629,6 +645,21 @@ impl MpRunView {
     /// The desk's popin fade for this frame (content fades WITH the ring).
     pub fn set_fade(&mut self, fade: f32) {
         self.fade = fade;
+    }
+
+    /// How far the arrival fade-in has come (0 = first frame just landed,
+    /// 1 = fully shown; also 1 before any frame). The desk uses the
+    /// complement on its dark starting wash so the crossfade keeps the
+    /// tile's darkness continuous — no bright flash between the wash
+    /// vanishing and the content appearing.
+    pub fn arrival_fade(&self) -> f32 {
+        match self.first_present_at {
+            Some(t0) => {
+                let t = (t0.elapsed().as_secs_f32() / ARRIVAL_FADE_SECS).min(1.0);
+                t * t * (3.0 - 2.0 * t)
+            }
+            None => 1.0,
+        }
     }
 
     pub fn set_status_line(&mut self, cx: &mut Cx, line: &str) {
@@ -730,9 +761,23 @@ impl Widget for MpRunView {
             id!(crop_span),
             &[crop_span.x as f32, crop_span.y as f32],
         );
+        // The arrival fade: ~130ms from the first presented frame, over
+        // whatever frames come in, multiplied with the desk's popin fade.
+        const FIRST_FADE: f32 = ARRIVAL_FADE_SECS;
+        let first_fade = match self.first_present_at {
+            Some(t0) => {
+                let t = (t0.elapsed().as_secs_f32() / FIRST_FADE).min(1.0);
+                if t < 1.0 {
+                    self.redraw(cx);
+                }
+                // almostLinear-ish ease-out.
+                t * t * (3.0 - 2.0 * t)
+            }
+            None => 1.0,
+        };
         self.draw_app
             .draw_vars
-            .set_dyn_instance(cx, id!(fade), &[self.fade]);
+            .set_dyn_instance(cx, id!(fade), &[self.fade * first_fade]);
         self.draw_app.draw_abs(cx, rect);
 
         if waiting_for_framebuffer {

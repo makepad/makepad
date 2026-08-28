@@ -18,9 +18,42 @@ pub struct Tab {
     pub can_go_back: bool,
     pub can_go_forward: bool,
     /// What the quad samples: an IOSurface-backed texture on the GPU path,
-    /// a BGRA upload texture on the software path.
+    /// a BGRA upload texture on the software path. This is the LAST GOOD
+    /// frame — it is never dropped for a resize, only replaced once its
+    /// successor holds a page frame.
     pub texture: Option<Texture>,
+    /// CEF has put at least one frame in `texture`. The GPU path hands the
+    /// browser an IOSurface up front, so the texture EXISTS long before the
+    /// page is on it; drawing it meanwhile paints an opaque black hole over
+    /// the themed ground — which, inside the WM, reads as the window
+    /// flashing black on the way in. Nothing samples the texture until this
+    /// is true.
+    pub painted: bool,
+    /// Pixel size `texture` is allocated at. The GPU surface is rounded up to
+    /// a coarse grid so a drag walks many sizes inside one surface.
+    pub texture_alloc: Option<(usize, usize)>,
+    /// The sub-rect of `texture` that actually holds page pixels (the last
+    /// blit's copy region). The quad samples exactly this and stretches it
+    /// over the current rect, so a frame from a slightly older size shows
+    /// scaled instead of cropped-with-a-blank-margin.
+    pub texture_valid: Option<(usize, usize)>,
+    /// A larger/smaller surface already handed to CEF that has NOT been
+    /// painted yet. It is not drawn until it holds a frame; `texture` keeps
+    /// covering the page area meanwhile.
+    pub pending_texture: Option<Texture>,
+    pub pending_alloc: Option<(usize, usize)>,
+    /// Allocation size of the surface CEF is painting into right now.
     pub accel_target_size: Option<(usize, usize)>,
+    /// Page size last handed to `browser.resize`, and when — `was_resized` is
+    /// rate-limited, because a resize faster than CEF can paint starves the
+    /// paint callback completely (measured: 0 frames at ~2 kHz).
+    pub resized_to: Option<(usize, usize)>,
+    pub resized_at: Option<std::time::Instant>,
+    pub deferred_resize: Option<(usize, usize, f32)>,
+    /// Page size the layout last asked for, and when it last changed — the
+    /// settle detector behind shrinking a surface back down.
+    pub wanted_size: Option<(usize, usize)>,
+    pub wanted_at: Option<std::time::Instant>,
     pub accel_frame_counter: u64,
     pub nav_generation: u64,
     pub favicon: Option<Texture>,
@@ -40,7 +73,17 @@ impl Tab {
             can_go_back: false,
             can_go_forward: false,
             texture: None,
+            painted: false,
+            texture_alloc: None,
+            texture_valid: None,
+            pending_texture: None,
+            pending_alloc: None,
             accel_target_size: None,
+            resized_to: None,
+            resized_at: None,
+            deferred_resize: None,
+            wanted_size: None,
+            wanted_at: None,
             accel_frame_counter: 0,
             nav_generation: 0,
             favicon: None,
