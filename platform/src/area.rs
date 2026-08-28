@@ -286,7 +286,12 @@ impl Area {
         let Area::Instance(inst) = self else {
             return self.clipped_rect(cx);
         };
-        if inst.instance_count <= 1 {
+        if inst.instance_count == 0 {
+            // A probe, not a draw: an instance-less area is simply "nothing
+            // on screen", not a mark/sweep mistake worth logging.
+            return Rect::default();
+        }
+        if inst.instance_count == 1 {
             return self.clipped_rect(cx);
         }
         let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -348,6 +353,16 @@ impl Area {
             });
         }
         union.unwrap_or_default()
+    }
+
+    /// Is this area on screen right now — its draw list reachable from its
+    /// pass's main list? A page a Dock, StackNavigation or PageFlip has
+    /// hidden keeps its retained draw list and every stale rect in it; a
+    /// design pick that trusts those rects clicks through to widgets that
+    /// are not there.
+    pub fn is_attached(&self, cx: &Cx, attached: &std::collections::HashSet<DrawListId>) -> bool {
+        let _ = cx;
+        self.draw_list_id().is_some_and(|id| attached.contains(&id))
     }
 
     pub fn rect(&self, cx: &Cx) -> Rect {

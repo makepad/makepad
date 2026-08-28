@@ -1021,3 +1021,32 @@ impl CxDrawList {
         self.draw_list_uniforms.view_transform
     }*/
 }
+
+impl Cx {
+    /// Every draw list reachable from `pass_id`'s main list through SubList
+    /// items — the lists that are actually on screen this frame. Retained
+    /// lists a container has stopped referencing (a Dock's hidden pages, a
+    /// closed StackNavigation view) keep their items but are not here.
+    pub fn attached_draw_lists(&self, pass_id: DrawPassId) -> std::collections::HashSet<DrawListId> {
+        let mut out = std::collections::HashSet::new();
+        let Some(root) = self.passes[pass_id].main_draw_list_id else {
+            return out;
+        };
+        let mut stack = vec![root];
+        while let Some(list_id) = stack.pop() {
+            if !out.insert(list_id) {
+                continue;
+            }
+            let draw_list = &self.draw_lists[list_id];
+            for order_index in 0..draw_list.draw_item_order_len() {
+                let Some(item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                    continue;
+                };
+                if let CxDrawKind::SubList(sub) = &draw_list.draw_items[item_id].kind {
+                    stack.push(*sub);
+                }
+            }
+        }
+        out
+    }
+}

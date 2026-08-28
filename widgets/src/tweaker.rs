@@ -45,7 +45,7 @@ use crate::Animate;
 use crate::ButtonAction;
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -159,6 +159,9 @@ struct TweakSession {
     drew: bool,
     /// A mouse-down we swallowed; swallow the matching up too.
     down_consumed: bool,
+    /// The press went to a navigation widget (tab, fold, dropdown) and was
+    /// NOT consumed; its release must flow through too.
+    pass_up: bool,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
     /// The on-canvas selection outline hides until this time: an edit was
@@ -231,8 +234,19 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
 // children resolve, it never does.
 // ---------------------------------------------------------------------------
 
-fn pick_candidate(cx: &Cx, widget: &WidgetRef, abs: Vec2d) -> Option<Rect> {
+fn pick_candidate(
+    cx: &Cx,
+    widget: &WidgetRef,
+    abs: Vec2d,
+    attached: &HashSet<DrawListId>,
+) -> Option<Rect> {
     if !widget.visible() {
+        return None;
+    }
+    // Only what is on screen: a hidden Dock page keeps its retained draw
+    // list and every rect in it, and clicking "through" to those was the
+    // stale-tab bug.
+    if !widget.area().is_attached(cx, attached) {
         return None;
     }
     // All instances, not the first: a text run's area is its glyph run,
@@ -242,6 +256,60 @@ fn pick_candidate(cx: &Cx, widget: &WidgetRef, abs: Vec2d) -> Option<Rect> {
         return None;
     }
     Some(rect)
+}
+
+/// The draw lists on screen in the pass a widget draws into.
+fn attached_lists_of(cx: &Cx, widget: &WidgetRef) -> HashSet<DrawListId> {
+    widget
+        .area()
+        .draw_list_id()
+        .and_then(|id| cx.draw_lists[id].draw_pass_id)
+        .map(|pass| cx.attached_draw_lists(pass))
+        .unwrap_or_default()
+}
+
+/// A widget's on-screen rect this frame: empty when it is not drawn (its
+/// page is hidden), whatever its retained draw list still holds.
+fn live_rect(cx: &Cx, widget: &WidgetRef) -> Rect {
+    let attached = attached_lists_of(cx, widget);
+    if !widget.area().is_attached(cx, &attached) {
+        return Rect::default();
+    }
+    widget.area().clipped_rect_union(cx)
+}
+
+/// Navigation-class widgets keep working under the pick: "since tabs show
+/// whole new chunks of clickable UI", a plain click on a tab, fold button,
+/// dropdown opener or stack-navigation control both PINS it and performs
+/// its normal action, so every corner of the app stays reachable while
+/// tweaking. Fold headers and expandable panels count only for their
+/// `header` subtree — a button in a fold's body is content, not navigation.
+fn is_navigation_pick(cx: &mut Cx, uid: WidgetUid) -> bool {
+    const NAV: &[&str] = &["Tab", "TabBar", "FoldButton", "DropDown", "StackNavigation"];
+    const HEADER_NAV: &[&str] = &["FoldHeader", "ExpandablePanel"];
+    let mut cur = Some(uid);
+    let mut child_name: Option<LiveId> = None;
+    for _ in 0..16 {
+        let Some(u) = cur else { break };
+        let widget = cx.widget_tree().widget(u);
+        if widget.is_empty() {
+            break;
+        }
+        let ty = widget
+            .widget_type_id()
+            .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+            .map(live_id_token)
+            .unwrap_or_default();
+        if NAV.contains(&ty.as_str()) {
+            return true;
+        }
+        if HEADER_NAV.contains(&ty.as_str()) {
+            return child_name == Some(live_id!(header));
+        }
+        child_name = cx.widget_tree().name_of(u);
+        cur = cx.widget_tree().parent_of(u);
+    }
+    false
 }
 
 fn is_design_transparent(widget: &WidgetRef) -> bool {
@@ -256,6 +324,7 @@ fn walk_pick(
     abs: Vec2d,
     depth: usize,
     max_level: Option<usize>,
+    attached: &HashSet<DrawListId>,
     best: &mut Option<(WidgetRef, Rect, usize)>,
 ) {
     if !widget.visible() {
@@ -270,7 +339,7 @@ fn walk_pick(
             .is_some_and(|level| level > max)
     });
     if !on_deeper_plane && !is_design_transparent(widget) {
-        if let Some(rect) = pick_candidate(cx, widget, abs) {
+        if let Some(rect) = pick_candidate(cx, widget, abs, attached) {
             let take = match best {
                 // Deeper wins; equal depth: later in draw order wins.
                 Some((_, _, best_depth)) => depth >= *best_depth,
@@ -282,7 +351,7 @@ fn walk_pick(
         }
     }
     widget.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, depth + 1, max_level, best);
+        walk_pick(cx, &child, abs, depth + 1, max_level, attached, best);
     });
 }
 
@@ -401,9 +470,10 @@ fn resolve_pick(
     } else {
         None
     };
+    let attached = attached_lists_of(cx, root);
     // Start below the root (the window body itself is chrome, not content).
     root.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, 0, max_level, &mut best);
+        walk_pick(cx, &child, abs, 0, max_level, &attached, &mut best);
     });
     let (widget, rect, _depth) = best?;
     let uid = widget.widget_uid();
@@ -753,10 +823,25 @@ pub fn window_intercept(
                 drop(s);
                 sidebar_refresh(cx, &tweaker);
                 redraw_tweaker(cx, &tweaker);
+                // Navigation stays reachable: the press flows on to the
+                // tab / fold / dropdown as well, and so will its release.
+                if let Some(pick) = &pick {
+                    if is_navigation_pick(cx, WidgetUid(pick.uid)) {
+                        let mut s = session().lock().unwrap();
+                        s.down_consumed = false;
+                        s.pass_up = true;
+                        return false;
+                    }
+                }
             }
         }
         PointerKind::Up => {
             let mut s = session().lock().unwrap();
+            if s.pass_up {
+                s.pass_up = false;
+                s.down_consumed = false;
+                return false;
+            }
             s.down_consumed = false;
             if let Some(mut stroke) = s.live_stroke.take() {
                 stroke.points.push((abs.x, abs.y));
@@ -5543,7 +5628,7 @@ impl Widget for Tweaker {
         let pinned = pinned.map(|mut pick| {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
-                let rect = live.area().clipped_rect_union(cx);
+                let rect = live_rect(cx, &live);
                 if rect.size.x > 0.0 && rect != pick.rect {
                     pick.rect = rect;
                     if let Some(pinned) = session().lock().unwrap().pinned.as_mut() {
@@ -5560,7 +5645,7 @@ impl Widget for Tweaker {
         let hover = hover.map(|mut pick| {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
-                let rect = live.area().clipped_rect_union(cx);
+                let rect = live_rect(cx, &live);
                 pick.rect = if rect.size.x > 0.0 { rect } else { Rect::default() };
             }
             pick

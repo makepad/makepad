@@ -1075,6 +1075,10 @@ impl WidgetRef {
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            if cx.sploded_active() {
+                let uid = inner.widget.widget_uid();
+                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+            }
             let step = inner.widget.draw(cx, scope).step();
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1090,6 +1094,10 @@ impl WidgetRef {
     pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            if cx.sploded_active() {
+                let uid = inner.widget.widget_uid();
+                cx.widget_tree().note_nesting_depth(uid, cx.nesting_depth);
+            }
             let step = inner.widget.draw(cx, &mut Scope::empty()).step();
             cx.exit_nesting_depth();
             if let Some(nd) = step {
