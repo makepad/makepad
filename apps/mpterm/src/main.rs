@@ -177,6 +177,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::Draw(_) => log!("mpterm DEBUG Event::Draw"),
+            Event::Signal => log!("mpterm DEBUG Event::Signal"),
+            Event::NextFrame(_) => log!("mpterm DEBUG Event::NextFrame"),
+            _ => {}
+        }
         if let Event::Custom(json) = event {
             log!("mpterm DEBUG custom event: {}", json);
             if let Some(wm) = mp_wm_api::WmEvent::parse(json) {
