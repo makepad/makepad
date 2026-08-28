@@ -36,7 +36,7 @@
 //! implementation ([`AssetAiFleet`]) is a thin adapter over
 //! `makepad-asset-ai`'s blocking client.
 
-use crate::gen_kinds::{kind_of, GenKind, InputNeed};
+use crate::gen_kinds::{kind_of, GenKind, InputNeed, Product};
 use crate::gen_profiles::slug;
 use crate::glb::inspect_glb;
 use crate::import::{placeholder_thumb, usable_image_thumb};
@@ -71,6 +71,31 @@ const CANCEL_CHECK_EVERY: Duration = Duration::from_secs(3);
 const IDLE_SLEEP: Duration = Duration::from_secs(2);
 /// Hard wall-clock ceiling for one generation (queue + render).
 const JOB_DEADLINE: Duration = Duration::from_secs(45 * 60);
+/// The prompt expander's own budget, covering the wait for a text model to
+/// be admitted AND the answer. Short on purpose: it is a courtesy step in
+/// front of a clip that itself takes ~40 s, and the raw prompt is already
+/// good enough to run. Spending minutes waiting for a nicer wording is a
+/// worse outcome than not having one.
+const EXPAND_DEADLINE: Duration = Duration::from_secs(90);
+/// Token budget for one expansion (the same 512 the interactive chains use).
+const EXPAND_MAX_TOKENS: u32 = 512;
+/// Longest expanded prompt forwarded to a model; `GenRequest::from_body`
+/// refuses anything past 4 000, so an over-eager expander cannot make the
+/// generation itself unrunnable.
+const MAX_EXPANDED_PROMPT_BYTES: usize = 3_500;
+
+/// The expander's job kind. Deliberately NOT a row in
+/// [`crate::gen_kinds::GEN_KINDS`]: nobody enqueues `text.expand`, nothing
+/// claims it, and no profile advertises it. It exists so an expansion can
+/// travel the same dispatch/poll/heartbeat path as everything else while
+/// staying invisible to the queue.
+static EXPAND_KIND: GenKind = GenKind {
+    kind: "text.expand",
+    domain: "text",
+    product: Product::Text,
+    input: InputNeed::None,
+    action: "expand a prompt",
+};
 /// Largest catalog input this worker relays to a box, base64 included.
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 /// Reply budget for a vision answer. The annotation pass answers in nine
@@ -154,7 +179,13 @@ pub struct GenInput {
 #[derive(Clone, Debug)]
 pub struct GenRequest {
     pub kind: &'static GenKind,
+    /// The prompt that goes to the model — the EXPANDED one once the
+    /// expander has run.
     pub prompt: String,
+    /// The human's own words, kept when an expansion replaced `prompt`.
+    /// The published row is titled from this and its provenance names it,
+    /// so a person can always find their run by what they typed.
+    pub original_prompt: Option<String>,
     /// Empty = let domain affinity pick.
     pub model: String,
     pub seed: Option<u64>,
@@ -188,6 +219,7 @@ impl GenRequest {
         Ok(GenRequest {
             kind,
             prompt,
+            original_prompt: None,
             model: body
                 .get("model")
                 .and_then(Value::as_str)
@@ -389,8 +421,16 @@ impl<'f> Coordinator<'f> {
             });
         }
 
+        // The prompt expander, when the enqueuer asked for one. It runs
+        // BEFORE the generation and can only ever improve the prompt: a
+        // failed, empty or timed-out expansion leaves the human's words
+        // exactly as they were and the run continues.
+        if let Some(outcome) = self.expand_prompt(claimed, &mut request, stop)? {
+            return Ok(outcome);
+        }
+
         let style = if kind.is_text() { StageStyle::Vision } else { StageStyle::Fleet };
-        let answer = match self.dispatch_and_wait(claimed, &request, style, stop)? {
+        let answer = match self.dispatch_and_wait(claimed, &request, style, JOB_DEADLINE, stop)? {
             FleetRun::Done(answer) => answer,
             FleetRun::Outcome(outcome) => return Ok(outcome),
         };
@@ -446,6 +486,11 @@ impl<'f> Coordinator<'f> {
         );
         publish.alias = AssetAlias::from_str(&alias_text).ok();
         publish.prompt = request.prompt.clone();
+        // Both prompts survive: the expanded one generated the pixels, the
+        // original is the only thing the person can search for.
+        if let Some(original) = &request.original_prompt {
+            publish.provenance = format!("expanded from: {}", bounded(original, 500));
+        }
         publish.generator = "asset-worker".to_string();
         publish.backend = answer.backend;
         publish.model = answer.model.clone();
@@ -574,6 +619,7 @@ impl<'f> Coordinator<'f> {
         let request = GenRequest {
             kind,
             prompt,
+            original_prompt: None,
             model: body
                 .get("model")
                 .and_then(Value::as_str)
@@ -587,7 +633,9 @@ impl<'f> Coordinator<'f> {
                 content_type: "image/jpeg".to_string(),
             }),
         };
-        let answer = match self.dispatch_and_wait(claimed, &request, StageStyle::Vision, stop)? {
+        let answer =
+            match self.dispatch_and_wait(claimed, &request, StageStyle::Vision, JOB_DEADLINE, stop)?
+            {
             FleetRun::Done(answer) => answer,
             FleetRun::Outcome(outcome) => return Ok(outcome),
         };
@@ -659,11 +707,124 @@ impl<'f> Coordinator<'f> {
     /// progress, upstream cancellation is propagated to the box, a box that
     /// is momentarily short of VRAM is waited for rather than failed, and
     /// the whole thing is bounded by [`JOB_DEADLINE`].
+    /// Run the prompt expander for a job whose body asked for it
+    /// (`expand: true`), rewriting `request.prompt` in place.
+    ///
+    /// AN EXPANSION CAN NEVER LOSE A RUN. It is a text model's opinion
+    /// about wording, not a precondition of the work: when the box refuses,
+    /// times out, or answers with nothing, this logs why, notes it on the
+    /// job so the row says so, and returns with the ORIGINAL prompt intact.
+    /// The only thing that stops the job here is the enqueuer cancelling it
+    /// (returned as an outcome, exactly as the generation path would).
+    ///
+    /// This is what a picker's "expand → video" pipe means. The flag rode
+    /// the job body for a long time with nothing reading it, so those runs
+    /// quietly generated from the raw prompt while their label promised an
+    /// expansion.
+    fn expand_prompt(
+        &mut self,
+        claimed: &ClaimedJobDto,
+        request: &mut GenRequest,
+        stop: &AtomicBool,
+    ) -> Result<Option<JobOutcome>, ClientError> {
+        if request.body.get("expand").and_then(Value::as_bool) != Some(true) {
+            return Ok(None);
+        }
+        // ALREADY EXPANDED BY THE CLIENT. A client that ran its own
+        // expansion sends the expanded text as `prompt` and the person's
+        // words as `prompt_original`; expanding that again would rewrite a
+        // rewrite. Keep the original for the row's title and provenance and
+        // dispatch what arrived.
+        if let Some(original) = request
+            .body
+            .get("prompt_original")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            request.original_prompt = Some(bounded(original, MAX_EXPANDED_PROMPT_BYTES));
+            return Ok(None);
+        }
+        // Nothing to expand, or the kind IS the text path already.
+        if request.prompt.is_empty() || request.kind.is_text() {
+            return Ok(None);
+        }
+        let original = request.prompt.clone();
+        // The expander is told what the expansion is FOR: a video brief and
+        // a mesh brief are not the same piece of writing.
+        let body = obj(vec![
+            ("target_domain", s(request.kind.domain.to_string())),
+            ("max_tokens", Value::Int(EXPAND_MAX_TOKENS as i64)),
+        ]);
+        let expand_request = GenRequest {
+            kind: &EXPAND_KIND,
+            prompt: original.clone(),
+            original_prompt: None,
+            // Affinity picks the box's own text model; a video pin means
+            // nothing here.
+            model: String::new(),
+            seed: None,
+            body,
+            input: None,
+        };
+        self.log(&format!(
+            "job {}: expanding \"{}\"",
+            claimed.job,
+            bounded(&original, 120)
+        ));
+        let failed = |reason: String| -> String {
+            format!("expand failed, used raw prompt ({reason})")
+        };
+        let note = match self.dispatch_and_wait(
+            claimed,
+            &expand_request,
+            StageStyle::Vision,
+            EXPAND_DEADLINE,
+            stop,
+        )? {
+            FleetRun::Done(answer) => {
+                match answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                    Some(text) => {
+                        request.prompt = bounded(text, MAX_EXPANDED_PROMPT_BYTES);
+                        request.original_prompt = Some(original);
+                        self.log(&format!(
+                            "job {}: expanded to \"{}\"",
+                            claimed.job,
+                            bounded(&request.prompt, 160)
+                        ));
+                        None
+                    }
+                    None => Some(failed("the box answered with no text".to_string())),
+                }
+            }
+            // The enqueuer stopped the job: that IS the job's outcome.
+            FleetRun::Outcome(JobOutcome::CancelledUpstream) => {
+                return Ok(Some(JobOutcome::CancelledUpstream))
+            }
+            FleetRun::Outcome(JobOutcome::Failed { error }) => Some(failed(bounded(&error, 100))),
+            FleetRun::Outcome(_) => Some(failed("the expander produced no answer".to_string())),
+        };
+        if let Some(note) = note {
+            // Say it on the JOB, not only in a log nobody is reading: the
+            // row an operator is watching is where "used raw prompt" has to
+            // appear.
+            self.log(&format!("job {}: {note}", claimed.job));
+            let _ = self.client.worker_heartbeat(
+                &claimed.job,
+                LEASE_MS,
+                Some(&self.suffix),
+                Some((0, &bounded(&note, 180))),
+            );
+        }
+        Ok(None)
+    }
+
     fn dispatch_and_wait(
         &mut self,
         claimed: &ClaimedJobDto,
         request: &GenRequest,
         style: StageStyle,
+        deadline: Duration,
         stop: &AtomicBool,
     ) -> Result<FleetRun, ClientError> {
         let started = Instant::now();
@@ -682,7 +843,7 @@ impl<'f> Coordinator<'f> {
                         error: "worker shutdown".to_string(),
                     }));
                 }
-                if started.elapsed() > JOB_DEADLINE {
+                if started.elapsed() > deadline {
                     return Ok(FleetRun::Outcome(JobOutcome::Failed {
                         error: "generation deadline".to_string(),
                     }));
@@ -770,7 +931,7 @@ impl<'f> Coordinator<'f> {
                         error: "worker shutdown".to_string(),
                     }));
                 }
-                if started.elapsed() > JOB_DEADLINE {
+                if started.elapsed() > deadline {
                     self.fleet.cancel(&fleet_job);
                     return Ok(FleetRun::Outcome(JobOutcome::Failed {
                         error: "generation deadline".to_string(),
@@ -1050,7 +1211,11 @@ fn build_product(
     request: &GenRequest,
     product: GenArtifact,
 ) -> Result<PublishRequest, String> {
-    let mut title = makepad_asset_client::util::sanitize_text(&request.prompt, 120);
+    // The row is titled by what the PERSON typed. An expanded prompt is a
+    // paragraph of camera language; a person looking for their run scans for
+    // their own words.
+    let titled_from = request.original_prompt.as_deref().unwrap_or(&request.prompt);
+    let mut title = makepad_asset_client::util::sanitize_text(titled_from, 120);
     if title.is_empty() {
         title = format!("Generated {}", kind.action);
     }
@@ -1596,6 +1761,9 @@ fn wire_request(
         // Vision: how much answer to allow. The nine-line record needs
         // ~200; a client asking its own question sets its own budget.
         max_tokens: u32_of("max_tokens"),
+        // Text: what the expansion is FOR (a video brief is not a mesh
+        // brief). Only the expander sets it.
+        target_domain: str_of("target_domain"),
         audio: body.get("audio").and_then(Value::as_bool),
         interpolate: u32_of("interpolate"),
         // Enhance (video post-process)
@@ -1862,6 +2030,15 @@ mod tests {
         fail: Option<String>,
         /// Set to answer with TEXT instead of artifacts (the vision kinds).
         text: Option<String>,
+        /// What the prompt expander answers. `None` = it answers nothing,
+        /// which the coordinator must survive.
+        expand_text: Option<String>,
+        /// Set to make the expander's DISPATCH fail outright.
+        expand_dispatch_fail: Option<String>,
+        /// Set to make the expander's job fail after it started.
+        expand_job_fail: Option<String>,
+        /// Fleet job ids that belong to an expansion.
+        expand_jobs: Vec<String>,
     }
 
     impl GenFleet for ScriptedFleet {
@@ -1870,12 +2047,27 @@ mod tests {
         }
 
         fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String> {
-            if let Some(error) = &self.fail {
+            let expanding = request.kind.domain == "text";
+            if expanding {
+                if let Some(error) = &self.expand_dispatch_fail {
+                    return Err(error.clone());
+                }
+            } else if let Some(error) = &self.fail {
                 return Err(error.clone());
             }
             self.requests.push(request.clone());
+            let job = format!("fleet-job-{}", self.requests.len());
+            if expanding {
+                self.expand_jobs.push(job.clone());
+                return Ok(FleetDispatch::Started {
+                    job,
+                    model: "qwen3.8-27b".to_string(),
+                    backend: "scripted".to_string(),
+                    version: "0.2.0-test".to_string(),
+                });
+            }
             Ok(FleetDispatch::Started {
-                job: format!("fleet-job-{}", self.requests.len()),
+                job,
                 // Deliberately differ from the requested full model: the
                 // published annotation/provenance must name what really ran.
                 model: format!("{}-q4", request.model),
@@ -1884,7 +2076,16 @@ mod tests {
             })
         }
 
-        fn poll(&mut self, _fleet_job: &str) -> Result<FleetPoll, String> {
+        fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String> {
+            if self.expand_jobs.iter().any(|job| job == fleet_job) {
+                if let Some(error) = &self.expand_job_fail {
+                    return Ok(FleetPoll::Failed { error: error.clone() });
+                }
+                return Ok(FleetPoll::Done {
+                    artifacts: Vec::new(),
+                    text: self.expand_text.clone(),
+                });
+            }
             if let Some(text) = &self.text {
                 // A vision box answers with text and no artifacts at all.
                 return Ok(FleetPoll::Done {
@@ -2374,6 +2575,229 @@ mod tests {
             .get("model")
             .and_then(Value::as_str)
             .is_some_and(|m| !m.is_empty()));
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `expand: true` in a job body means an expansion actually happens.
+    ///
+    /// The flag rode the wire for months with nothing reading it: a picker
+    /// offering "expand → video" sent the raw prompt to the video model and
+    /// called it expanded. The expansion now runs first, on the box's own
+    /// text model, and the generation gets its words.
+    #[test]
+    fn an_expand_job_expands_before_it_generates() {
+        let (server, root, token) = test_server("expand_ok");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("scanning electron microscope art")),
+            ("expand", Value::Bool(true)),
+        ]);
+        submitter
+            .enqueue_job("gen", "image.generate", &body)
+            .expect("enqueue");
+
+        let mut fleet = ScriptedFleet {
+            expand_text: Some(
+                "  a scanning electron micrograph of a pollen grain, false-colour, \
+                 extreme macro, studio lighting  "
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the job")
+        };
+        assert!(
+            matches!(outcome, JobOutcome::Published { .. }),
+            "expected a published row, got {outcome:?}"
+        );
+        assert_eq!(fleet.requests.len(), 2, "expansion, then generation");
+        // The expander is asked with the PERSON'S words, and told what the
+        // expansion is for.
+        let expand = &fleet.requests[0];
+        assert_eq!(expand.kind.domain, "text");
+        assert_eq!(expand.prompt, "scanning electron microscope art");
+        assert_eq!(
+            expand.body.get("target_domain").and_then(Value::as_str),
+            Some("image")
+        );
+        // Affinity picks the text model: a video/image pin means nothing here.
+        assert!(expand.model.is_empty());
+        // The generation gets the expansion, and still knows what was typed.
+        let generate = &fleet.requests[1];
+        assert_eq!(generate.kind.kind, "image.generate");
+        assert!(
+            generate.prompt.starts_with("a scanning electron micrograph"),
+            "{}",
+            generate.prompt
+        );
+        assert_eq!(
+            generate.original_prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// AN EXPANSION CAN NEVER LOSE A RUN. Whether the expander refuses to
+    /// start, dies mid-answer, or answers with nothing at all, the run goes
+    /// ahead on the words the person typed.
+    #[test]
+    fn a_failed_expansion_still_generates_from_the_raw_prompt() {
+        for (name, fleet_setup) in [
+            (
+                "dispatch_refused",
+                ScriptedFleet {
+                    expand_dispatch_fail: Some("no text box in this fleet".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "job_failed",
+                ScriptedFleet {
+                    expand_job_fail: Some("chat box evicted the model".to_string()),
+                    ..Default::default()
+                },
+            ),
+            // Answered, but with nothing usable.
+            ("empty_answer", ScriptedFleet::default()),
+        ] {
+            let (server, root, token) = test_server(&format!("expand_{name}"));
+            let submitter = connect(&server, &token, &root.join("submit-cache"));
+            let body = obj(vec![
+                ("prompt", s("scanning electron microscope art")),
+                ("expand", Value::Bool(true)),
+            ]);
+            submitter
+                .enqueue_job("gen", "image.generate", &body)
+                .expect("enqueue");
+
+            let mut fleet = fleet_setup;
+            let outcome = {
+                let mut coordinator = Coordinator {
+                    client: connect(&server, &token, &root.join("worker-cache")),
+                    fleet: &mut fleet,
+                    suffix: "image-box".to_string(),
+                    kinds: vec!["image.generate".to_string()],
+                    rights: PublishRights::generated_cc0(),
+                    log: false,
+                };
+                coordinator
+                    .run_one(&AtomicBool::new(false))
+                    .expect("coordinator call")
+                    .expect("claimed the job")
+            };
+            assert!(
+                matches!(outcome, JobOutcome::Published { .. }),
+                "{name}: a failed expansion must not lose the run, got {outcome:?}"
+            );
+            // The generation ran with the human's own prompt, unchanged.
+            let generate = fleet
+                .requests
+                .iter()
+                .find(|request| request.kind.kind == "image.generate")
+                .unwrap_or_else(|| panic!("{name}: nothing generated"));
+            assert_eq!(generate.prompt, "scanning electron microscope art");
+            assert_eq!(generate.original_prompt, None);
+
+            drop(submitter);
+            drop(server);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// A client that expanded on its own is not expanded a second time —
+    /// and its record of what the person typed still reaches the row.
+    #[test]
+    fn a_client_side_expansion_is_kept_not_repeated() {
+        let (server, root, token) = test_server("expand_client_side");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        submitter
+            .enqueue_job(
+                "gen",
+                "image.generate",
+                &obj(vec![
+                    ("prompt", s("a false-colour scanning electron micrograph")),
+                    ("prompt_original", s("scanning electron microscope art")),
+                    ("expand", Value::Bool(true)),
+                ]),
+            )
+            .expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a THIRD rewrite nobody asked for".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator.run_one(&AtomicBool::new(false)).expect("run").expect("claimed");
+        }
+        assert_eq!(fleet.requests.len(), 1, "no second expansion");
+        assert_eq!(
+            fleet.requests[0].prompt,
+            "a false-colour scanning electron micrograph"
+        );
+        assert_eq!(
+            fleet.requests[0].original_prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A body without the flag is untouched: no expander, no extra dispatch.
+    #[test]
+    fn a_job_that_did_not_ask_for_an_expansion_never_gets_one() {
+        let (server, root, token) = test_server("expand_off");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        submitter
+            .enqueue_job(
+                "gen",
+                "image.generate",
+                &obj(vec![("prompt", s("a red door"))]),
+            )
+            .expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a magnificent crimson portal".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator.run_one(&AtomicBool::new(false)).expect("run").expect("claimed");
+        }
+        assert_eq!(fleet.requests.len(), 1);
+        assert_eq!(fleet.requests[0].prompt, "a red door");
 
         drop(submitter);
         drop(server);
