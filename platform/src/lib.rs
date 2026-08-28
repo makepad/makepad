@@ -52,6 +52,7 @@ mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod permission;
+mod screen;
 mod texture;
 mod uniform_buffer;
 mod window;
@@ -215,6 +216,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
+        screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         texture::{
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,

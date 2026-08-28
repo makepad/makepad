@@ -12,6 +12,7 @@ pub mod video_file_decoder;
 pub mod video_file_encoder;
 pub mod wasapi;
 pub mod win32_event;
+pub mod win32_screen;
 pub mod win32_window;
 pub mod windows_media;
 pub mod windows_media_engine_notify;
