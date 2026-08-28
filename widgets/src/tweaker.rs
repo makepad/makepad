@@ -1497,52 +1497,6 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, base: &DrawVars) -> Opti
     })
 }
 
-/// Drive the swatch with the SAME inputs the real widget has right now:
-/// the layer's current value object (every instance value — colours,
-/// border sizes, the hover/focus/down mix factors at their live values —
-/// and its type, which is what binds the shader). Only the rect differs,
-/// and the swatch sets that when it draws. Re-evaluating the widget's
-/// SOURCE here was wrong twice over: the eval scope did not carry
-/// `__script_source__` for a sub-object (the swatch stayed a bare
-/// checkerboard), and a fresh instantiation shows defaults, not the
-/// widget's live state ("you do kinda have to feed it similar inputs as
-/// the actual widget").
-fn apply_material_preview(
-    cx: &mut Cx,
-    widget: &WidgetRef,
-    preview: &mut DrawQuad,
-    layer: &str,
-    _sel_path: &str,
-) {
-    let layer_id = LiveId::from_str(layer);
-    cx.with_vm(|vm| {
-        vm.bx.captured_errors = Some(Vec::new());
-        let current = widget.current_to_value(vm);
-        if let Some(obj) = current.as_object() {
-            let value = vm.bx.heap.value(obj, layer_id.into(), NoTrap);
-            if let Some(vobj) = value.as_object() {
-                let quadish = !vm
-                    .bx
-                    .heap
-                    .value(vobj, id!(rect_pos).into(), NoTrap)
-                    .is_nil();
-                if quadish {
-                    use crate::makepad_script::traits::ScriptApply;
-                    preview.script_apply(
-                        vm,
-                        &crate::makepad_script::apply::Apply::Eval,
-                        &mut Scope::default(),
-                        value,
-                    );
-                }
-            }
-        }
-        let errors = vm.take_errors();
-        if !errors.is_empty() {
-            log!("TWEAK swatch apply errors: {}", errors.join("; "));
-        }
-    });
-}
 
 /// Feed the undo stack from one applied ledger entry. Consecutive applies
 /// to the same prop merge while the gesture is open (a scrub = one step);
@@ -2260,7 +2214,23 @@ pub fn tweak_callback(
                     format!("{prop}: {value}")
                 }
             };
-            let widget = resolve_widget_by_path(cx, &path)?;
+            let widget = {
+                // Anonymous path segments (`-`, list indices) do not round-trip
+                // the path finder; the pinned selection resolves by uid, and a
+                // caller may pass uid= outright.
+                let by_uid = arg(args, &["uid"]).and_then(|s| s.parse::<u64>().ok());
+                let pinned = session().lock().unwrap().pinned.clone();
+                let w = match (by_uid, pinned) {
+                    (Some(uid), _) => cx.widget_tree().widget(WidgetUid(uid)),
+                    (None, Some(p)) if p.path == path => cx.widget_tree().widget(WidgetUid(p.uid)),
+                    _ => WidgetRef::empty(),
+                };
+                if w.is_empty() {
+                    resolve_widget_by_path(cx, &path)?
+                } else {
+                    w
+                }
+            };
             // Applying to a widget selects it — the AI tweaks the very
             // instance the person would see outlined.
             let resolved_path = {
@@ -4106,23 +4076,7 @@ impl Tweaker {
                     if sw.applied_gen != self.rows_gen || sw.layer != layer {
                         let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
                         if !widget.is_empty() {
-                            let sel_path = session()
-                                .lock()
-                                .unwrap()
-                                .pinned
-                                .as_ref()
-                                .map(|p| p.path.clone())
-                                .unwrap_or_default();
-                            if layer != "draw_bg" {
-                                apply_material_preview(
-                                    cx,
-                                    &widget,
-                                    &mut sw.preview,
-                                    &layer,
-                                    &sel_path,
-                                );
-                            }
-                            sw.mirror_uid = widget.widget_uid().0;
+sw.mirror_uid = widget.widget_uid().0;
                             sw.mirror_layer = layer.clone();
                             sw.applied_gen = self.rows_gen;
                             sw.layer = layer;
@@ -4343,23 +4297,7 @@ impl Tweaker {
                                 let widget =
                                     cx.widget_tree().widget(WidgetUid(self.rows_uid));
                                 if !widget.is_empty() {
-                                    let sel_path = session()
-                                        .lock()
-                                        .unwrap()
-                                        .pinned
-                                        .as_ref()
-                                        .map(|p| p.path.clone())
-                                        .unwrap_or_default();
-                                    if layer != "draw_bg" {
-                                        apply_material_preview(
-                                            cx,
-                                            &widget,
-                                            &mut sw.preview,
-                                            &layer,
-                                            &sel_path,
-                                        );
-                                    }
-                                    sw.mirror_uid = widget.widget_uid().0;
+sw.mirror_uid = widget.widget_uid().0;
                                     sw.mirror_layer = layer.clone();
                                     sw.applied_gen = self.rows_gen;
                                     sw.layer = layer;
