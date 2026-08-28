@@ -353,6 +353,13 @@ mod windows_api {
                 *MEDIA_D3D11_DEVICE.lock().unwrap() = Some(device);
             }
         }
+
+        /// Withdraws the published device, so nothing hands a removed one to a decoder while
+        /// the backend is rebuilding. Republished by `publish_d3d11_device_for_media` once
+        /// there is a live device again.
+        pub fn unpublish_d3d11_device_for_media(&self) {
+            *MEDIA_D3D11_DEVICE.lock().unwrap() = None;
+        }
     }
 
     static MEDIA_D3D11_DEVICE: std::sync::Mutex<Option<ID3D11Device>> =
