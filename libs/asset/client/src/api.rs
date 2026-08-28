@@ -1660,6 +1660,27 @@ impl Api {
         suffix: Option<&str>,
         progress: Option<(u16, &str)>,
     ) -> ClientResult<u64> {
+        self.worker_heartbeat_stage(job, extend_ms, suffix, progress, None)
+    }
+
+    /// [`Api::worker_heartbeat`], also recording WHAT one stage of this job
+    /// was given: the exact final text a model was handed, in full, with the
+    /// parameters beside it.
+    ///
+    /// It rides the heartbeat rather than a route of its own because the
+    /// heartbeat is already the proof that this worker holds the job: a
+    /// stage record lands under exactly the same live lease as the progress
+    /// note, and a worker whose lease is gone cannot rewrite the history of
+    /// the attempt that replaced it. Re-recording a stage name REPLACES it,
+    /// so a job re-dispatched to another box ends with one true record.
+    pub fn worker_heartbeat_stage(
+        &self,
+        job: &JobId,
+        extend_ms: u64,
+        suffix: Option<&str>,
+        progress: Option<(u16, &str)>,
+        stage: Option<&crate::dto::JobStageInput<'_>>,
+    ) -> ClientResult<u64> {
         check_worker_suffix(suffix)?;
         if extend_ms == 0 {
             return Err(ClientError::InvalidInput { what: "heartbeat extend_ms" });
@@ -1682,6 +1703,9 @@ impl Api {
                     ("note", json::s(note)),
                 ]),
             ));
+        }
+        if let Some(stage) = stage {
+            pairs.push(("stage", stage.to_value()?));
         }
         let body = json::obj(pairs).to_json().into_bytes();
         let mut req = Request::post("/v1/worker/heartbeat", &body);

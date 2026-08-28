@@ -51,7 +51,8 @@ use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
 use makepad_asset_annotate::{needs_annotation, parse_record, plan_upload, ANNOTATOR_VERSION};
 use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
-    AnnotationUpload, AssetClient, ClaimedJobDto, ClientError, JobStateDto, PublishFile,
+    AnnotationUpload, AssetClient, ClaimedJobDto, ClientError, JobStageInput, JobStateDto,
+    PublishFile,
     PublishProvenance, PublishRequest, PublishRights, PublishStats, PublishThumbnail,
 };
 use makepad_asset_data::{
@@ -168,6 +169,11 @@ pub enum FleetDispatch {
         model: String,
         backend: String,
         version: String,
+        /// The parameters that went WITH the prompt, `key=value` per line,
+        /// read off the request the adapter actually sent. Recorded on the
+        /// job so a person can open a finished run and see what it was
+        /// given, not what a UI believes it asked for.
+        params: String,
     },
     Waiting { stage: String },
 }
@@ -889,12 +895,31 @@ impl<'f> Coordinator<'f> {
                 match answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                     Some(text) => {
                         request.prompt = annotation_text(text, MAX_EXPANDED_PROMPT_BYTES);
-                        request.original_prompt = Some(original);
+                        request.original_prompt = Some(original.clone());
                         self.log(&format!(
                             "job {}: expanded to \"{}\"",
                             claimed.job,
                             bounded(&request.prompt, 160)
                         ));
+                        // Close the expander's own stage record with what it
+                        // ANSWERED. Two halves of one question — what the
+                        // person typed, and what the next model will be
+                        // handed because of it — in one place, in full.
+                        let stage = JobStageInput {
+                            name: EXPAND_KIND.kind,
+                            model: &answer.model,
+                            at: answer.host.as_deref().unwrap_or_default(),
+                            prompt: &original,
+                            params: &format!("target_domain={}", request.kind.domain),
+                            output: &request.prompt,
+                        };
+                        let _ = self.client.worker_heartbeat_stage(
+                            &claimed.job,
+                            LEASE_MS,
+                            Some(&self.suffix),
+                            None,
+                            Some(&stage),
+                        );
                         None
                     }
                     None => Some(failed("the box answered with no text".to_string())),
@@ -953,7 +978,13 @@ impl<'f> Coordinator<'f> {
             // below its advertised admission target. This is also the retry
             // path when the service's authoritative, later admission check
             // beats our health snapshot.
-            let (fleet_job, dispatched_model, dispatched_backend, dispatched_version) = loop {
+            let (
+                fleet_job,
+                dispatched_model,
+                dispatched_backend,
+                dispatched_version,
+                dispatched_params,
+            ) = loop {
                 if stop.load(Ordering::SeqCst) {
                     return Ok(FleetRun::Outcome(JobOutcome::Failed {
                         error: "worker shutdown".to_string(),
@@ -999,8 +1030,8 @@ impl<'f> Coordinator<'f> {
                 }
                 retry_not_before = None;
                 match self.fleet.dispatch(request) {
-                    Ok(FleetDispatch::Started { job, model, backend, version }) => {
-                        break (job, model, backend, version)
+                    Ok(FleetDispatch::Started { job, model, backend, version, params }) => {
+                        break (job, model, backend, version, params)
                     }
                     Ok(FleetDispatch::Waiting { stage }) => {
                         if wait_stage.as_deref() != Some(stage.as_str()) {
@@ -1055,11 +1086,29 @@ impl<'f> Coordinator<'f> {
             // ever reported which box was on it, and an operator watching a
             // backlog drain would see a queue with nothing visibly running.
             last_heartbeat = Instant::now();
-            let _ = self.client.worker_heartbeat(
+            // The same beat records WHAT this stage was handed: the exact
+            // final prompt text and the parameters beside it. It rides the
+            // heartbeat because that is already the proof of the lease, and
+            // it is written the moment the box has it — a person watching a
+            // run can read the prompt while it renders, not only after.
+            let stage = JobStageInput {
+                name: request.kind.kind,
+                model: &dispatched_model,
+                // The short label when the transport knows one, else the
+                // box's own address: "which box" is the question, and the
+                // vision note has named hosts here for as long as it has
+                // existed.
+                at: node_tag.as_deref().or(node_host.as_deref()).unwrap_or_default(),
+                prompt: &request.prompt,
+                params: &dispatched_params,
+                output: "",
+            };
+            let _ = self.client.worker_heartbeat_stage(
                 &claimed.job,
                 LEASE_MS,
                 Some(&self.suffix),
                 Some((0, &bounded(&heartbeat_stage, 180))),
+                Some(&stage),
             );
             loop {
                 if stop.load(Ordering::SeqCst) {
@@ -2321,6 +2370,88 @@ fn wire_request(
     wire
 }
 
+/// What went to the box BESIDES the prompt, `key=value` per line, read off
+/// the request that was actually sent rather than the body it was built
+/// from — so an inspected run shows what the model got, not what a client
+/// meant. The prompt itself is recorded separately and in full; the input
+/// payload is named by size and type, never by its base64.
+fn stage_params(
+    wire: &makepad_asset_ai::protocol::GenerateRequestJson,
+    request: &GenRequest,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut put = |key: &str, value: String| lines.push(format!("{key}={value}"));
+    put("model", wire.model.clone());
+    if let Some(text) = &wire.negative_prompt {
+        put("negative_prompt", text.clone());
+    }
+    if let Some(text) = &wire.lyrics {
+        put("lyrics", text.clone());
+    }
+    if let Some(text) = &wire.text {
+        put("text", text.clone());
+    }
+    if let Some(voice) = &wire.voice {
+        put("voice", voice.clone());
+    }
+    if let Some(codec) = &wire.codec {
+        put("codec", codec.clone());
+    }
+    if let Some(domain) = &wire.target_domain {
+        put("target_domain", domain.clone());
+    }
+    if let Some(mode) = &wire.motion_mode {
+        put("motion_mode", mode.clone());
+    }
+    for (key, value) in [
+        ("width", wire.width),
+        ("height", wire.height),
+        ("steps", wire.steps),
+        ("frames", wire.frames),
+        ("interpolate", wire.interpolate),
+        ("upscale", wire.upscale),
+        ("max_tokens", wire.max_tokens),
+        ("remesh_resolution", wire.remesh_resolution),
+        ("decimation_target", wire.decimation_target),
+        ("texture_size", wire.texture_size),
+        ("gaussians", wire.gaussians),
+    ] {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(seed) = wire.seed {
+        put("seed", seed.to_string());
+    }
+    for (key, value) in [
+        ("guidance", wire.guidance),
+        ("seconds", wire.seconds),
+        ("speed", wire.speed),
+        ("canny_low", wire.canny_low),
+        ("canny_high", wire.canny_high),
+    ] {
+        if let Some(value) = value {
+            put(key, format!("{value}"));
+        }
+    }
+    if let Some(strength) = wire.strength {
+        put("strength", format!("{strength}"));
+    }
+    for (key, value) in [("audio", wire.audio), ("texture", wire.texture), ("flow_map", wire.flow_map)]
+    {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(input) = &request.input {
+        put(
+            "input",
+            format!("{} bytes {}", input.bytes.len(), input.content_type),
+        );
+    }
+    lines.join("\n")
+}
+
 impl GenFleet for AssetAiFleet {
     fn route_label(&self, fleet_job: &str) -> Option<String> {
         Some(short_label(self.routes.get(fleet_job)?))
@@ -2387,11 +2518,13 @@ impl GenFleet for AssetAiFleet {
             }
         };
         self.routes.insert(fleet_job.clone(), base_url);
+        let params = stage_params(&wire, request);
         Ok(FleetDispatch::Started {
             job: fleet_job,
             model: wire.model,
             backend,
             version,
+            params,
         })
     }
 
@@ -2652,6 +2785,7 @@ mod tests {
                     model: "qwen3.8-27b".to_string(),
                     backend: "scripted".to_string(),
                     version: "0.2.0-test".to_string(),
+                    params: "model=qwen3.8-27b\nmax_tokens=512".to_string(),
                 });
             }
             Ok(FleetDispatch::Started {
@@ -2661,6 +2795,7 @@ mod tests {
                 model: format!("{}-q4", request.model),
                 backend: "scripted".to_string(),
                 version: "0.2.0-test".to_string(),
+                params: format!("model={}-q4\nseed=77", request.model),
             })
         }
 
@@ -4186,6 +4321,7 @@ mod tests {
                 model: "minimax-h3-q4-24g".to_string(),
                 backend: "h3".to_string(),
                 version: "0.2.0-test".to_string(),
+                params: "model=minimax-h3-q4-24g".to_string(),
             })
         }
 
@@ -4329,6 +4465,92 @@ mod tests {
             "asking costs a fleet probe: {} asks in 8 polls",
             fleet.widen_calls
         );
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -------------------------------------------- stages are inspectable
+
+    /// The user's case: open the run, read the exact text that went into the
+    /// model. Recorded while the job runs, not reconstructed afterwards.
+    #[test]
+    fn every_stage_records_the_full_text_it_handed_the_model() {
+        let prompt = "warm analog house, 120 bpm\n\n[verse]\nthe city hums at dusk\n\
+                      [chorus]\nall night, all night";
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, job) =
+            run_one_job("stage_records", prompt, &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let status = submitter
+            .job_status(&makepad_asset_client::dto::JobId::parse(&job).unwrap())
+            .expect("status");
+        assert_eq!(status.stages.len(), 1);
+        let stage = &status.stages[0];
+        assert_eq!(stage.name, "image.generate");
+        assert_eq!(stage.prompt, prompt, "the whole prompt, line breaks and all");
+        assert_eq!(stage.model, "minimax-h3-q4-24g-q4", "what RAN, not what was asked for");
+        assert_eq!(stage.at, "10.0.0.203");
+        assert!(stage.params.contains("seed=77"), "{}", stage.params);
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An expansion is two things worth reading: what the person typed, and
+    /// the paragraph the next model was handed because of it. Both, on the
+    /// same job, as separate stages.
+    #[test]
+    fn an_expansion_records_both_what_it_was_asked_and_what_it_answered() {
+        let root = test_root("stage_expand");
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a warm house track")),
+            ("model", s("minimax-music3")),
+            ("expand", Value::Bool(true)),
+            ("seconds", Value::Int(60)),
+        ]);
+        let job = submitter.enqueue_job("gen", "music.generate", &body).expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("warm analog house, 120 bpm, tape saturation".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "box-165".to_string(),
+                kinds: vec!["music.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            let _ = coordinator.run_one(&AtomicBool::new(false)).expect("coordinator call");
+        }
+        let status = submitter.job_status(&job).expect("status");
+        let names: Vec<&str> = status.stages.iter().map(|st| st.name.as_str()).collect();
+        assert_eq!(names, vec!["text.expand", "music.generate"], "in the order they ran");
+        let expand = &status.stages[0];
+        assert_eq!(expand.prompt, "a warm house track", "what the person typed");
+        assert_eq!(
+            expand.output, "warm analog house, 120 bpm, tape saturation",
+            "what the next model will be handed"
+        );
+        assert!(expand.params.contains("target_domain=music"), "{}", expand.params);
+        // And the music stage was given the EXPANSION, which is the whole
+        // reason a person opens the run to look.
+        assert_eq!(status.stages[1].prompt, "warm analog house, 120 bpm, tape saturation");
+        drop(submitter);
         drop(server);
         let _ = std::fs::remove_dir_all(root);
     }

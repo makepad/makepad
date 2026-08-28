@@ -59,6 +59,11 @@ use makepad_asset_data::{
 /// Largest worker-supplied result/error document the transport records.
 const MAX_RESULT_BYTES: usize = 16 * 1024;
 const MAX_PROGRESS_NOTE_BYTES: usize = 200;
+/// One stage record: the full text a model was handed, plus its parameters.
+/// Generous on purpose — a prompt is capped at 4 000 characters upstream and
+/// the whole point of keeping it is that it is not truncated — and still
+/// bounded, because this is queue state a worker writes.
+const MAX_STAGE_BYTES: usize = 16 * 1024;
 /// Most assets one backlog sweep may queue. The 4023-asset Kenney library
 /// is nine sweeps, and the ceiling is what keeps one request from holding
 /// the state thread while it writes thousands of rows.
@@ -3065,7 +3070,7 @@ fn attempts_value(attempts: &[crate::AttemptRow]) -> Value {
 fn job_get(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
-    let (meta, state, attempts, progress, result) = call_state(&rc.state, move |ctx| {
+    let (meta, state, attempts, progress, result, stages) = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let meta = ctx
             .meta_get(&job)?
@@ -3084,7 +3089,8 @@ fn job_get(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
         let attempts = ctx.core.jobs().attempts(&job)?;
         let progress = ctx.progress_get(&job)?;
         let result = ctx.result_get(&job)?;
-        Ok((meta, state, attempts, progress, result))
+        let stages = ctx.stages_get(&job)?;
+        Ok((meta, state, attempts, progress, result, stages))
     })?;
     let mut pairs = vec![
         ("job", s(super::api::job_str(&job))),
@@ -3101,6 +3107,26 @@ fn job_get(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
             ("note", s(pr.note)),
             ("updated_ms", Value::Int(pr.updated_ms as i64)),
         ])));
+    }
+    // What each stage was GIVEN — the full prompt text and parameters, in
+    // the order the stages ran. Only the single-job read carries them: a
+    // listing page of these would be megabytes.
+    if !stages.is_empty() {
+        let mut out = Vec::with_capacity(stages.len());
+        for stage in stages {
+            let body = super::json::parse(&stage.body).map_err(|_| {
+                Fail::Srv(ServerError::Io {
+                    op: "job stage body",
+                    kind: std::io::ErrorKind::InvalidData,
+                })
+            })?;
+            out.push(obj(vec![
+                ("name", s(stage.name)),
+                ("recorded_ms", Value::Int(stage.recorded_ms as i64)),
+                ("record", body),
+            ]));
+        }
+        pairs.push(("stages", Value::Arr(out)));
     }
     if let Some(r) = result {
         let body = super::json::parse(&r.body).map_err(|_| {
@@ -3421,6 +3447,55 @@ fn result_bytes(body: &Value, key: &'static str) -> RouteResult<Option<Vec<u8>>>
     }
 }
 
+/// A worker's stage record: an opaque bounded JSON object naming the stage.
+///
+/// Opaque because WHAT a stage was given differs per kind (a music prompt
+/// and a framed vision sheet are not the same document) and the queue has
+/// no business knowing; bounded and control-char-checked because a worker
+/// writes it and anyone may read it back. LINE BREAKS AND TABS SURVIVE:
+/// lyrics and multi-line briefs are exactly the text this exists to keep.
+fn stage_bytes(body: &Value) -> RouteResult<Option<(String, Vec<u8>)>> {
+    let Some(stage @ Value::Obj(_)) = body.get("stage") else {
+        return match body.get("stage") {
+            None | Some(Value::Null) => Ok(None),
+            Some(_) => Err(Fail::Http(400, "stage must be an object")),
+        };
+    };
+    let name = stage
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or(Fail::Http(400, "stage needs a name"))?;
+    let ok_name = (1..=64).contains(&name.len())
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+        });
+    if !ok_name {
+        return Err(Fail::Http(400, "malformed stage name"));
+    }
+    if !stage_text_is_clean(stage) {
+        return Err(Fail::Http(400, "malformed stage text"));
+    }
+    let bytes = stage.to_json().into_bytes();
+    if bytes.len() > MAX_STAGE_BYTES {
+        return Err(Fail::Http(413, "stage record too large"));
+    }
+    Ok(Some((name.to_string(), bytes)))
+}
+
+/// Every string in a stage record, checked for the control characters that
+/// have no business in text — newline and tab excepted, because a prompt
+/// with lyrics in it is the case this feature exists for.
+fn stage_text_is_clean(value: &Value) -> bool {
+    match value {
+        Value::Str(text) => !text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t'),
+        Value::Arr(items) => items.iter().all(stage_text_is_clean),
+        Value::Obj(pairs) => pairs.iter().all(|(_, v)| stage_text_is_clean(v)),
+        _ => true,
+    }
+}
+
 fn job_of_body(body: &Value) -> RouteResult<JobId> {
     parse_job(body_str(body, "job")?).ok_or(Fail::Http(400, "malformed job id"))
 }
@@ -3544,6 +3619,7 @@ fn worker_heartbeat(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteRes
             Some((permille, note))
         }
     };
+    let stage = stage_bytes(&body)?;
     let now = now_ms();
     let expires = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
@@ -3556,6 +3632,11 @@ fn worker_heartbeat(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteRes
         // Progress only records under a live lease the line above proved.
         if let Some((permille, note)) = &progress {
             ctx.progress_set(&job, *permille, note, now)?;
+        }
+        // Same gate for what the stage was given: it rides the heartbeat
+        // precisely so it needs no second route and no second lease proof.
+        if let Some((name, bytes)) = &stage {
+            ctx.stage_set(&job, name, bytes, now)?;
         }
         Ok(expires)
     })?;

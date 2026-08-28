@@ -1045,6 +1045,19 @@ impl AssetClient {
         self.api.worker_heartbeat(job, extend_ms, suffix, progress)
     }
 
+    /// [`AssetClient::worker_heartbeat`], also recording what one stage of
+    /// this job was handed — see [`Api::worker_heartbeat_stage`].
+    pub fn worker_heartbeat_stage(
+        &self,
+        job: &crate::dto::JobId,
+        extend_ms: u64,
+        suffix: Option<&str>,
+        progress: Option<(u16, &str)>,
+        stage: Option<&crate::dto::JobStageInput<'_>>,
+    ) -> ClientResult<u64> {
+        self.api.worker_heartbeat_stage(job, extend_ms, suffix, progress, stage)
+    }
+
     pub fn worker_succeed(
         &self,
         job: &crate::dto::JobId,

@@ -29,7 +29,7 @@ use crate::{
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-pub const TRANSPORT_SCHEMA_VERSION: u64 = 4;
+pub const TRANSPORT_SCHEMA_VERSION: u64 = 5;
 
 /// Most distinct namespaces the transport will ever route jobs for. The
 /// worker claim gate authorizes against every namespace jobs have been
@@ -104,6 +104,31 @@ CREATE INDEX IF NOT EXISTS asset_index_live_all
 
 const TRANSPORT_SCHEMA_V4: &str = "DROP TABLE IF EXISTS asset_rev_index;";
 
+/// v5: what each STAGE of a job was actually given.
+///
+/// A job's progress note says where it is; this says what went in — the
+/// exact final prompt text a model was handed, and the parameters beside
+/// it. Full length on purpose: the point is inspection, and a truncated
+/// prompt answers none of the questions people ask a job about. One row per
+/// named stage (a re-dispatch to another box REPLACES that stage's record
+/// rather than piling up), ordered by first appearance.
+const TRANSPORT_SCHEMA_V5: &str = "
+CREATE TABLE IF NOT EXISTS job_stages(
+    job_id BLOB NOT NULL,
+    name TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    body BLOB NOT NULL,
+    recorded_ms INTEGER NOT NULL,
+    PRIMARY KEY(job_id, name)
+);
+CREATE INDEX IF NOT EXISTS job_stages_by_job ON job_stages(job_id, seq);
+";
+
+/// Most stages one job may record. A pipeline stage is a dispatch, and no
+/// kind here has more than a handful; a job trying to write more is a bug
+/// or a hostile worker, and either way the queue must stay bounded.
+pub const MAX_JOB_STAGES: u64 = 16;
+
 const ROOT_ADMIN_KEY: &str = "root_admin_principal";
 
 pub struct StateCtx {
@@ -136,7 +161,8 @@ pub fn build_ctx(root: &Path, budgets: Budgets) -> ServerResult<(StateCtx, Recov
                 db.exec("create transport schema v2", TRANSPORT_SCHEMA_V2)?;
                 db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
                 db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
-                db.exec("set transport version", "PRAGMA user_version=4")
+                db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
+                db.exec("set transport version", "PRAGMA user_version=5")
             })?;
         }
         1 | 2 | 3 => {
@@ -150,7 +176,16 @@ pub fn build_ctx(root: &Path, budgets: Budgets) -> ServerResult<(StateCtx, Recov
                 }
                 db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
                 db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
-                db.exec("set transport version", "PRAGMA user_version=4")
+                db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
+                db.exec("set transport version", "PRAGMA user_version=5")
+            })?;
+        }
+        // A v4 root keeps every row it has; stage records simply start
+        // being kept from here on.
+        4 => {
+            tdb.tx(|db| {
+                db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
+                db.exec("set transport version", "PRAGMA user_version=5")
             })?;
         }
         TRANSPORT_SCHEMA_VERSION => {}
@@ -281,6 +316,14 @@ pub struct ProgressRow {
     pub permille: u64,
     pub note: String,
     pub updated_ms: u64,
+}
+
+/// One stage of a job, as the worker recorded it: the stage name and the
+/// opaque JSON document describing what it was given.
+pub struct StageRow {
+    pub name: String,
+    pub body: Vec<u8>,
+    pub recorded_ms: u64,
 }
 
 pub struct ResultRow {
@@ -465,6 +508,73 @@ impl StateCtx {
         } else {
             Ok(None)
         }
+    }
+
+    /// Record what one named stage of a job was given. Re-recording the
+    /// same name REPLACES it (a stage that was re-dispatched to another box
+    /// has one true record — the box it finally ran on) and keeps its
+    /// original position in the order.
+    pub fn stage_set(
+        &self,
+        job: &JobId,
+        name: &str,
+        body: &[u8],
+        now: u64,
+    ) -> ServerResult<()> {
+        let mut count = self.tdb.prepare(
+            "stage count",
+            "SELECT COUNT(*) FROM job_stages WHERE job_id=?1",
+        )?;
+        count.bind_blob(1, &job.0)?;
+        let seq = if count.step()? { count.column_u64(0) } else { 0 };
+        drop(count);
+        if seq >= MAX_JOB_STAGES {
+            // Only a NEW stage is refused; an existing one may always be
+            // rewritten, so a job at the cap can still correct itself.
+            let mut known = self.tdb.prepare(
+                "stage known",
+                "SELECT 1 FROM job_stages WHERE job_id=?1 AND name=?2",
+            )?;
+            known.bind_blob(1, &job.0)?;
+            known.bind_text(2, name)?;
+            if !known.step()? {
+                return Err(ServerError::OverBudget {
+                    what: "job stages",
+                    limit: MAX_JOB_STAGES,
+                    found: seq + 1,
+                });
+            }
+        }
+        let mut st = self.tdb.prepare(
+            "stage set",
+            "INSERT INTO job_stages(job_id, name, seq, body, recorded_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(job_id, name) DO UPDATE SET body=?4, recorded_ms=?5",
+        )?;
+        st.bind_blob(1, &job.0)?;
+        st.bind_text(2, name)?;
+        st.bind_u64(3, seq)?;
+        st.bind_blob(4, body)?;
+        st.bind_u64(5, now)?;
+        st.run()
+    }
+
+    /// Every stage record of a job, in the order the stages first ran.
+    pub fn stages_get(&self, job: &JobId) -> ServerResult<Vec<StageRow>> {
+        let mut st = self.tdb.prepare(
+            "stages get",
+            "SELECT name, body, recorded_ms FROM job_stages WHERE job_id=?1 ORDER BY seq",
+        )?;
+        st.bind_blob(1, &job.0)?;
+        let mut out = Vec::new();
+        while st.step()? {
+            out.push(StageRow {
+                name: st.column_text(0),
+                body: st.column_blob(1),
+                recorded_ms: st.column_u64(2),
+            });
+        }
+        Ok(out)
     }
 
     pub fn result_set(
