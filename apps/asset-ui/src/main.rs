@@ -1222,32 +1222,43 @@ script_mod! {
                 }
             }
             StageR := Card{
-                flow: Right spacing: 8
+                flow: Down spacing: 4
                 padding: Inset{left: 10 right: 6 top: 6 bottom: 6}
-                align: Align{y: 0.5}
-                stage_title := Label{
-                    width: 190
-                    max_lines: 1
-                    text_overflow: TextOverflow.Ellipsis
-                    draw_text +: {
-                        color: #xdfe6ec
-                        text_style: theme.font_regular{font_size: 8.5}
+                View{
+                    width: Fill height: Fit flow: Right spacing: 8
+                    align: Align{y: 0.5}
+                    // The title is the open/close affordance: pressing the
+                    // row is how you read what the stage was handed.
+                    stage_title := ButtonFlatter{
+                        width: 190
+                        draw_text +: {
+                            color: #xdfe6ec
+                            text_style: theme.font_regular{font_size: 8.5}
+                        }
                     }
+                    // ONE line, always: a long status wrapping to two lines
+                    // grew the row and made the whole Loading strip bounce
+                    // while an import streamed status updates.
+                    stage_meta := Label{
+                        width: Fill
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                        draw_text +: {
+                            color: #x8a939d
+                            text_style: theme.font_regular{font_size: 8}
+                        }
+                    }
+                    stage_bar := ProgressBar{ width: 140 height: 4 }
+                    stage_copy := GhostButton{ text: "Copy" visible: false }
+                    stage_cancel := DangerButton{ text: "Stop" visible: false }
                 }
-                // ONE line, always: a long status wrapping to two lines
-                // grew the row and made the whole Loading strip bounce
-                // while an import streamed status updates.
-                stage_meta := Label{
+                // What the stage was GIVEN, in full, once the row is open:
+                // the exact prompt text that went to the model, wrapped and
+                // selectable, never truncated — the whole point.
+                stage_detail := MonoLabel{
                     width: Fill
-                    max_lines: 1
-                    text_overflow: TextOverflow.Ellipsis
-                    draw_text +: {
-                        color: #x8a939d
-                        text_style: theme.font_regular{font_size: 8}
-                    }
+                    visible: false
                 }
-                stage_bar := ProgressBar{ width: 140 height: 4 }
-                stage_cancel := DangerButton{ text: "Stop" visible: false }
             }
             QueuedR := Card{
                 flow: Right spacing: 4
@@ -3790,6 +3801,12 @@ pub struct App {
     /// The last run spec, for Retry after a failure.
     #[rust]
     last_run: Option<PendingRun>,
+    /// `(run id, stage index)` of every stage row the person has OPENED to
+    /// read what it was handed. Lives here, not in the list: the rows are
+    /// rebuilt from scratch several times a second, so an open row has to
+    /// be remembered by something that outlives them.
+    #[rust]
+    open_stages: Vec<(u64, usize)>,
     #[rust]
     fleet_timer: Timer,
     /// LAN beacon listener; polled on the fleet timer.
@@ -11258,8 +11275,9 @@ impl App {
                 &fleet.snapshots,
                 &fleet.latency_ms,
                 &self.store,
+                &self.open_stages,
             ),
-            None => runs_rows(&run_views, &queued, &[], &[], &self.store),
+            None => runs_rows(&run_views, &queued, &[], &[], &self.store, &self.open_stages),
         };
         if let Some(mut list) = self
             .ui
@@ -11627,6 +11645,9 @@ impl App {
                 progress,
                 failed,
                 cancel: Some(RowAction::StopImport),
+                detail: String::new(),
+                expand: None,
+                copy: None,
             });
         }
         for item in &self.import_queue.pending {
@@ -11646,6 +11667,9 @@ impl App {
                 progress: self.annotate_queue.progress_fraction(),
                 failed: self.annotate_queue.error.is_some(),
                 cancel: None,
+                detail: String::new(),
+                expand: None,
+                copy: None,
             });
         }
         // The analysis bake is its own lane beside the imports: it outlives
@@ -11660,6 +11684,9 @@ impl App {
                     progress: queue.progress_fraction(),
                     failed: false,
                     cancel: None,
+                    detail: String::new(),
+                    expand: None,
+                    copy: None,
                 });
             }
         }
@@ -13479,13 +13506,27 @@ impl MatchEvent for App {
         let runs_widget = self.ui.widget(cx, ids!(runs_list));
         let runs_portal = runs_widget.portal_list(cx, ids!(list));
         let mut runs_action = None;
+        let mut runs_open: Option<StoreRow> = None;
+        let mut runs_copy: Option<StoreRow> = None;
         for (row_id, item) in runs_portal.items_with_actions(actions) {
+            let row = || {
+                runs_widget
+                    .borrow::<StoreListPanel>()
+                    .and_then(|panel| panel.row_at(row_id))
+            };
             if item.button(cx, ids!(stage_cancel)).clicked(actions)
                 || item.button(cx, ids!(queued_cancel)).clicked(actions)
             {
-                runs_action = runs_widget
-                    .borrow::<StoreListPanel>()
-                    .and_then(|panel| panel.row_at(row_id));
+                runs_action = row();
+                break;
+            }
+            // Pressing the stage's name opens it: what went into the model.
+            if item.button(cx, ids!(stage_title)).clicked(actions) {
+                runs_open = row();
+                break;
+            }
+            if item.button(cx, ids!(stage_copy)).clicked(actions) {
+                runs_copy = row();
                 break;
             }
         }
@@ -13499,6 +13540,25 @@ impl MatchEvent for App {
                 ..
             }) => self.cancel_row(cx, index),
             _ => {}
+        }
+        if let Some(StoreRow::Stage {
+            expand: Some(RowAction::ToggleStage(run_id, index)),
+            ..
+        }) = runs_open
+        {
+            let key = (run_id, index);
+            match self.open_stages.iter().position(|open| *open == key) {
+                Some(at) => {
+                    self.open_stages.remove(at);
+                }
+                None => self.open_stages.push(key),
+            }
+            self.refresh_runs_panel(cx);
+        }
+        if let Some(StoreRow::Stage { detail, copy: Some(_), .. }) = runs_copy {
+            // The text is long by design; the clipboard is how it leaves.
+            cx.copy_to_clipboard(&detail);
+            log!("runs: stage input copied to the clipboard");
         }
         // Server catalog rows (only ever populated by a real transport).
         let server_widget = self.ui.widget(cx, ids!(lib_server_list));

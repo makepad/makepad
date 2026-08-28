@@ -651,6 +651,67 @@ pub fn seed_replaces_prefix(domains: &[&str], seed_content_type: &str) -> Option
 /// Human-facing stage name.  In particular, call the text stage what it is:
 /// a local model inference step, rather than making it look like string
 /// templating in the UI.
+/// The parameters a submitted request carries besides its prompt, one
+/// `key=value` per line — read off the request that is actually being sent,
+/// so an opened run shows what the box got rather than what the UI meant.
+/// The prompt is kept separately and in full; an input payload is named by
+/// size and type, never by its base64.
+pub fn sent_params(request: &GenerateRequestJson) -> String {
+    let mut lines: Vec<String> = vec![format!("model={}", request.model)];
+    let mut put = |key: &str, value: String| lines.push(format!("{key}={value}"));
+    if let Some(text) = &request.negative_prompt {
+        put("negative_prompt", text.clone());
+    }
+    if let Some(text) = &request.lyrics {
+        put("lyrics", text.clone());
+    }
+    if let Some(text) = &request.text {
+        put("text", text.clone());
+    }
+    if let Some(voice) = &request.voice {
+        put("voice", voice.clone());
+    }
+    for (key, value) in [
+        ("width", request.width),
+        ("height", request.height),
+        ("steps", request.steps),
+        ("frames", request.frames),
+        ("interpolate", request.interpolate),
+        ("upscale", request.upscale),
+        ("max_tokens", request.max_tokens),
+    ] {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(seed) = request.seed {
+        put("seed", seed.to_string());
+    }
+    for (key, value) in [
+        ("guidance", request.guidance),
+        ("seconds", request.seconds),
+        ("speed", request.speed),
+    ] {
+        if let Some(value) = value {
+            put(key, format!("{value}"));
+        }
+    }
+    if let Some(strength) = request.strength {
+        put("strength", format!("{strength}"));
+    }
+    if let Some(bytes) = &request.input_b64 {
+        put(
+            "input",
+            format!(
+                "{} b64 chars {}",
+                bytes.len(),
+                request.input_content_type.as_deref().unwrap_or("?")
+            ),
+        );
+    }
+    lines.join("\n")
+}
+
 pub fn stage_display_name(domain: &str) -> &str {
     match domain {
         "text" => "LLM prompt expansion",
@@ -803,6 +864,16 @@ pub struct StageRun {
     /// always have one; other pipelines retain the backend's existing seed
     /// behavior.
     pub seed: Option<u64>,
+    /// THE TEXT THIS STAGE ACTUALLY SENT, captured at submit, in full.
+    ///
+    /// Not `Pipeline::prompt`: an expansion stage rewrites what the next
+    /// model sees, a music stage carries its lyrics, and a character chain
+    /// composes its own brief — so the only honest answer to "what did the
+    /// model get?" is the string that went on the wire. Kept so the run can
+    /// be opened and read.
+    pub sent_prompt: String,
+    /// The parameters that went with it, `key=value` per line.
+    pub sent_params: String,
     pub started: Option<std::time::Instant>,
     pub finished: Option<std::time::Instant>,
     /// Fetched artifacts: (content_type, bytes).
@@ -955,6 +1026,8 @@ impl Pipeline {
                     reason: String::new(),
                     service_state: String::new(),
                     seed: None,
+                    sent_prompt: String::new(),
+                    sent_params: String::new(),
                     started: None,
                     finished: None,
                     outputs: Vec::new(),
@@ -2170,6 +2243,11 @@ impl Pipeline {
             Ok(request) => request,
             Err(error) => return self.fail_stage(stage, error, events),
         };
+        // Remember what is about to go on the wire, before it goes: this is
+        // what an opened run shows, and it is the only place the composed
+        // text still exists as one string.
+        self.stages[stage].sent_prompt = request_json.prompt.clone().unwrap_or_default();
+        self.stages[stage].sent_params = sent_params(&request_json);
         let url = format!("{}/generate", self.stages[stage].box_url);
         let mut request = crate::http::request(url, HttpMethod::POST);
         request.set_header("Content-Type".to_string(), "application/json".to_string());
@@ -3707,6 +3785,22 @@ impl Pipeline {
                 state,
                 elapsed
             ));
+            // WHAT THIS STAGE WAS HANDED, in full, indented under it. The
+            // music stage's prompt carries its lyrics and a video brief is a
+            // paragraph, so this is the one place the composed text can
+            // actually be read — the panel it lives in scrolls.
+            if !stage.sent_prompt.is_empty() {
+                out.push_str("    prompt sent:\n");
+                for line in stage.sent_prompt.lines() {
+                    out.push_str(&format!("      {line}\n"));
+                }
+            }
+            if !stage.sent_params.is_empty() {
+                out.push_str("    params:\n");
+                for line in stage.sent_params.lines() {
+                    out.push_str(&format!("      {line}\n"));
+                }
+            }
         }
         out
     }

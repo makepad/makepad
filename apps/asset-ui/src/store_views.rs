@@ -1541,6 +1541,10 @@ pub enum RowAction {
     StopImport,
     /// Drop a waiting import by queue id.
     RemoveQueuedImport(u64),
+    /// Open (or close) stage `index` of run `id` to read what it was given.
+    ToggleStage(u64, usize),
+    /// Put that stage's full input on the clipboard.
+    CopyStage(u64, usize),
 }
 
 /// One concurrent pipeline run as the Runs surface renders it.
@@ -1563,6 +1567,14 @@ pub enum StoreRow {
         progress: f32,
         failed: bool,
         cancel: Option<RowAction>,
+        /// What this stage was HANDED — the full prompt text and the
+        /// parameters beside it — shown while the row is open. Empty when
+        /// the row is closed, so a closed list stays a list.
+        detail: String,
+        /// Opening/closing this row, when there is something to open.
+        expand: Option<RowAction>,
+        /// Copying `detail` to the clipboard, when the row is open.
+        copy: Option<RowAction>,
     },
     /// App-side queued run (waiting for the active pipeline to finish).
     Queued { title: String, cancel: RowAction },
@@ -1657,10 +1669,21 @@ impl Widget for StoreListPanel {
                         progress,
                         failed,
                         cancel,
+                        detail,
+                        copy,
+                        ..
                     } => {
                         let item = list.item(cx, item_id, id!(StageR));
-                        item.label(cx, ids!(stage_title)).set_text(cx, &title);
+                        item.button(cx, ids!(stage_title)).set_text(cx, &title);
                         item.label(cx, ids!(stage_meta)).set_text(cx, &meta);
+                        // The detail block only exists while the row is
+                        // open; a closed row is exactly the row it was.
+                        let detail_label = item.label(cx, ids!(stage_detail));
+                        detail_label.set_visible(cx, !detail.is_empty());
+                        if !detail.is_empty() {
+                            detail_label.set_text(cx, &detail);
+                        }
+                        item.button(cx, ids!(stage_copy)).set_visible(cx, copy.is_some());
                         let bar = item.view(cx, ids!(stage_bar));
                         bar.set_uniform(cx, live_id!(progress), &[progress]);
                         let fill: [f32; 4] = if failed {
@@ -1769,7 +1792,32 @@ pub fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-fn stage_row(run_id: u64, pipeline: &Pipeline, index: usize) -> StoreRow {
+/// What one stage was given, as a person reads it. The prompt first and in
+/// FULL — it is the reason the row opens — then the parameters that rode
+/// with it.
+fn stage_detail(stage: &crate::pipeline::StageRun) -> String {
+    if stage.sent_prompt.is_empty() && stage.sent_params.is_empty() {
+        return "not sent yet — this stage has not started".to_string();
+    }
+    let mut out = String::new();
+    if !stage.sent_prompt.is_empty() {
+        out.push_str("PROMPT SENT\n");
+        out.push_str(&stage.sent_prompt);
+    }
+    if !stage.sent_params.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("PARAMS\n");
+        out.push_str(&stage.sent_params);
+    }
+    if !stage.job_id.is_empty() {
+        out.push_str(&format!("\n\nJOB\n{}", stage.job_id));
+    }
+    out
+}
+
+fn stage_row(run_id: u64, pipeline: &Pipeline, index: usize, open: bool) -> StoreRow {
     let stage = &pipeline.stages[index];
     let where_ = if stage.box_url.is_empty() {
         String::new()
@@ -1828,12 +1876,22 @@ fn stage_row(run_id: u64, pipeline: &Pipeline, index: usize) -> StoreRow {
         .collect::<Vec<_>>()
         .join(" · ");
     StoreRow::Stage {
-        title: format!("{} · {}", index + 1, stage_display_name(&stage.domain)),
+        // The marker says the row has more to say — the same [+]/[−] the
+        // chat tool chips use, so it reads as the same gesture.
+        title: format!(
+            "{} {} · {}",
+            if open { "[-]" } else { "[+]" },
+            index + 1,
+            stage_display_name(&stage.domain)
+        ),
         meta,
         progress: progress as f32,
         failed,
         cancel: (index == pipeline.current && pipeline.can_cancel_current())
             .then_some(RowAction::CancelRun(run_id)),
+        detail: if open { stage_detail(stage) } else { String::new() },
+        expand: Some(RowAction::ToggleStage(run_id, index)),
+        copy: open.then_some(RowAction::CopyStage(run_id, index)),
     }
 }
 
@@ -1846,6 +1904,11 @@ pub fn runs_rows(
     fleet: &[BoxSnapshot],
     latency_ms: &[Option<u64>],
     store: &AssetStore,
+    // `open_stages` is `(run id, stage index)` of every stage the person has
+    // opened. It is held by the APP, not the widget: these rows are rebuilt
+    // from scratch several times a second, so an open row has to be
+    // remembered by something that outlives them.
+    open_stages: &[(u64, usize)],
 ) -> Vec<StoreRow> {
     let mut rows = vec![StoreRow::Section("THIS APP · LOCAL RUNS".into())];
     if runs.is_empty() {
@@ -1865,7 +1928,8 @@ pub fn runs_rows(
             truncate(&run.pipeline.prompt, 72)
         )));
         for index in 0..run.pipeline.stages.len() {
-            rows.push(stage_row(run.id, run.pipeline, index));
+            let open = open_stages.contains(&(run.id, index));
+            rows.push(stage_row(run.id, run.pipeline, index, open));
         }
     }
     if !queued.is_empty() {
@@ -2211,6 +2275,61 @@ mod tests {
         )
     }
 
+    /// The user's question — "what text went into the music model?" — has
+    /// an answer in the RUNS list: press the stage, read the whole thing.
+    #[test]
+    fn an_opened_stage_shows_the_whole_text_it_sent() {
+        let mut pipeline = local_pipeline();
+        let prompt = "warm analog house, 120 bpm\n\n[verse]\nthe city hums at dusk";
+        pipeline.stages[0].sent_prompt = prompt.to_string();
+        pipeline.stages[0].sent_params = "model=minimax-music3\nseconds=60".to_string();
+        let runs = [RunView { id: 7, label: "music", pipeline: &pipeline }];
+        let store = AssetStore::default();
+
+        // Closed, the list is still a list: no row carries the detail.
+        let closed = runs_rows(&runs, &[], &[], &[], &store, &[]);
+        assert!(closed.iter().all(|row| !matches!(
+            row,
+            StoreRow::Stage { detail, .. } if !detail.is_empty()
+        )));
+        assert!(closed.iter().any(|row| matches!(
+            row,
+            StoreRow::Stage { title, copy: None, .. } if title.starts_with("[+]")
+        )));
+
+        // Opened, the row carries the text EXACTLY as it was sent — line
+        // breaks and all, never truncated — plus what rode with it.
+        let open = runs_rows(&runs, &[], &[], &[], &store, &[(7, 0)]);
+        let detail = open
+            .iter()
+            .find_map(|row| match row {
+                StoreRow::Stage { detail, .. } if !detail.is_empty() => Some(detail.clone()),
+                _ => None,
+            })
+            .expect("the opened stage");
+        assert!(detail.contains(prompt), "{detail}");
+        assert!(detail.contains("seconds=60"), "{detail}");
+        assert!(open.iter().any(|row| matches!(
+            row,
+            StoreRow::Stage { title, copy: Some(RowAction::CopyStage(7, 0)), .. }
+                if title.starts_with("[-]")
+        )));
+        // Only the stage that was opened: opening one row is not opening
+        // the run.
+        let opened = open
+            .iter()
+            .filter(|row| matches!(row, StoreRow::Stage { detail, .. } if !detail.is_empty()))
+            .count();
+        assert_eq!(opened, 1);
+
+        // A stage that has not run yet says so instead of showing nothing.
+        let other = runs_rows(&runs, &[], &[], &[], &store, &[(7, 1)]);
+        assert!(other.iter().any(|row| matches!(
+            row,
+            StoreRow::Stage { detail, .. } if detail.contains("not sent yet")
+        )));
+    }
+
     #[test]
     fn runs_rows_show_each_concurrent_run_and_honest_server_state() {
         let first = local_pipeline();
@@ -2234,6 +2353,7 @@ mod tests {
             &fleet,
             &[None],
             &AssetStore::default(),
+            &[],
         );
         // One Stage row per stage PER RUN — concurrent runs itemize
         // independently instead of collapsing into one "active" pipeline.
