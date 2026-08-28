@@ -975,6 +975,17 @@ impl MacosWindow {
             let (dx, dy): (f64, f64) = unsafe {
                 (msg_send![event, deltaX], msg_send![event, deltaY])
             };
+            if app.pointer_pin_mode {
+                // Widget-scoped scrub pin: the drag math needs continuous
+                // positions, so integrate the deltas into an unbounded
+                // virtual abs. Routing cannot wander: the pressed widget
+                // holds the finger capture for the whole drag.
+                let mut v = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
+                v.x += dx;
+                v.y += dy;
+                app.virtual_mouse = Some(v);
+                return (v, Vec2d { x: dx, y: dy });
+            }
             let pin = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
             (pin, Vec2d { x: dx, y: dy })
         });

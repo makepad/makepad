@@ -7,6 +7,141 @@ use crate::makepad_draw::vector::{LineCap, LineJoin};
 use crate::makepad_draw::*;
 use crate::DrawVector;
 
+/// The "space warp" mode (close-3D): a unified fold + perspective camera.
+///
+/// The base renderer is ORTHOGRAPHIC (screen y = rel_y*cos(tilt) −
+/// lift_px*sin(tilt): an axonometric camera pitched 90°−tilt below the
+/// horizon, at infinite distance). This struct is that same camera pulled in
+/// to a finite dolly distance D = 1/kappa (scale 1 at the pivot, ortho as
+/// kappa→0), looking at a ground surface that FOLDS: beyond `start_px` the
+/// ground curls up along a circle of radius `radius_px` until its tangent is
+/// PERPENDICULAR to the view axis (cap angle = tilt), then continues straight.
+/// Past the cap, z along the view axis is constant, so the risen far field
+/// renders as an undistorted, uniform-scale, face-on flat map — near field
+/// stays true perspective street view; the fold is the hinge between them.
+///
+/// One math, two implementations — this struct is the CPU twin of the
+/// `space_warp`/`space_warp2` uniform branch in DrawMapVector's vertex fn;
+/// keep them in LOCKSTEP or CPU-projected overlays/labels detach from the
+/// GPU-warped tiles.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct SpaceWarp {
+    /// Tween 0..1 (eased); 0 compiles to the exact identity path.
+    pub amount: f64,
+    /// Fold start r0: pre-tilt ground px up-screen from the pivot.
+    pub start_px: f64,
+    /// Curl radius R in pre-tilt ground px.
+    pub radius_px: f64,
+    /// cos(tilt) — doubles as cos of the bend cap.
+    pub cos_t: f64,
+    /// sin(tilt) — doubles as sin of the bend cap.
+    pub sin_t: f64,
+    /// Bend cap angle = tilt in radians: the wall stops curling exactly
+    /// face-on to the camera (view axis pitch below horizon is 90°−tilt).
+    pub cap: f64,
+    /// Perspective strength 1/D in px⁻¹, ALREADY amount-scaled; 0 = ortho.
+    pub kappa: f64,
+}
+
+impl SpaceWarp {
+    pub fn is_on(&self) -> bool {
+        self.amount > 1e-4
+    }
+
+    /// Fold the ground surface: ground distance g (pre-tilt px ahead of the
+    /// pivot) with height lift_px above it → (forward, up, applied via the
+    /// LOCAL surface normal so wall buildings point out of the wall), already
+    /// blended toward flat by `amount`.
+    fn fold(&self, g: f64, lift_px: f64) -> (f64, f64) {
+        let a = g - self.start_px;
+        let (f, u, nx, ny) = if a > 0.0 {
+            let r = self.radius_px.max(1.0);
+            let th = (a / r).min(self.cap);
+            let (sth, cth) = (th.sin(), th.cos());
+            let mut f = self.start_px + r * sth;
+            let mut u = r * (1.0 - cth);
+            let e = a - r * self.cap;
+            if e > 0.0 {
+                // straight, face-on continuation: 1 ground px = 1 wall px
+                f += e * self.cos_t;
+                u += e * self.sin_t;
+            }
+            (f, u, -sth, cth)
+        } else {
+            (g, 0.0, 0.0, 1.0)
+        };
+        let (pf, pu) = (f + lift_px * nx, u + lift_px * ny);
+        (
+            g + (pf - g) * self.amount,
+            lift_px + (pu - lift_px) * self.amount,
+        )
+    }
+
+    /// The ON-path camera: pre-tilt rotated rel offset from the pivot
+    /// (x lateral, y: up-screen = negative = forward) plus vertical lift in
+    /// ground px → screen offset from the pivot. Callers keep the legacy
+    /// ortho expression when `!is_on()` (byte-identical flat mode).
+    pub fn project(&self, rel_x: f64, rel_y: f64, lift_px: f64) -> Vec2d {
+        let (bf, bu) = self.fold(-rel_y, lift_px);
+        // z along the view axis rel to the pivot plane; w = D/z, scale 1 at
+        // the pivot. Floor keeps geometry behind the eye finite (off-screen
+        // anyway — must not blow up or flip).
+        let zrel = bf * self.sin_t - bu * self.cos_t;
+        let w = 1.0 / (1.0 + self.kappa * zrel).max(0.12);
+        dvec2(rel_x * w, -(bf * self.cos_t + bu * self.sin_t) * w)
+    }
+
+    /// Re-project a point the label funnel already carried to ortho GROUND
+    /// screen space (rot + tilt applied, lift NOT yet applied): recover the
+    /// pre-tilt rel, then run the full camera with the point's lift.
+    pub fn warp_screen_point(&self, p: Vec2d, pivot: Vec2d, lift_px: f64) -> Vec2d {
+        if !self.is_on() {
+            return dvec2(p.x, p.y - lift_px * self.sin_t);
+        }
+        let rel_x = p.x - pivot.x;
+        let rel_y = (p.y - pivot.y) / self.cos_t.max(1e-6);
+        pivot + self.project(rel_x, rel_y, lift_px)
+    }
+
+    /// Perspective factor w (screen scale) at an ortho GROUND screen point;
+    /// 1 when off. Label lifts/badges scale by this so far-wall pins don't
+    /// tower over their perspective-shrunken buildings.
+    pub fn screen_w(&self, p: Vec2d, pivot: Vec2d) -> f64 {
+        if !self.is_on() {
+            return 1.0;
+        }
+        let rel_y = (p.y - pivot.y) / self.cos_t.max(1e-6);
+        let (bf, bu) = self.fold(-rel_y, 0.0);
+        let zrel = bf * self.sin_t - bu * self.cos_t;
+        1.0 / (1.0 + self.kappa * zrel).max(0.12)
+    }
+
+    /// Tile-culling extents under the warp. `half_h_flat` is the flat-mode
+    /// pre-tilt ground reach (screen_half/tilt_cos); returns (ground reach,
+    /// lateral widen factor ≥1). The wall advances up-screen slower than the
+    /// flat ortho compression at low tilt, so the fold can SEE FURTHER than
+    /// the flat frustum — cull honestly or the wall runs out of city
+    /// (perf-never-breaks-the-picture).
+    pub fn cull_extents(&self, screen_half: f64, half_h_flat: f64) -> (f64, f64) {
+        if !self.is_on() {
+            return (half_h_flat, 1.0);
+        }
+        // End of the bend (lift 0, amount folded in):
+        let r = self.radius_px.max(1.0);
+        let g_cap = self.start_px + r * self.cap;
+        let (f_cap, u_cap) = self.fold(g_cap, 0.0);
+        let z_cap = f_cap * self.sin_t - u_cap * self.cos_t;
+        let w_wall = 1.0 / (1.0 + self.kappa * z_cap).max(0.12);
+        let y_cap = f_cap * self.cos_t + u_cap * self.sin_t;
+        // On the wall screen-y advances 1:1·amount·w_wall per ground px
+        // (blended toward the flat cos_t rate when amount < 1).
+        let rate = (self.amount + (1.0 - self.amount) * self.cos_t) * w_wall;
+        let need = screen_half - y_cap * w_wall;
+        let reach = g_cap + (need / rate.max(1e-3)).max(0.0);
+        (reach.max(half_h_flat), (1.0 / w_wall).max(1.0))
+    }
+}
+
 /// Screen-space camera for one overlay frame; built by `MapView::draw_walk`
 /// from the same numbers the tile pass uses.
 pub struct OverlayCamera {
@@ -24,20 +159,55 @@ pub struct OverlayCamera {
     pub rotation_deg: f64,
     /// cos(tilt) of the 2.5D camera; 1.0 = top-down.
     pub tilt_cos: f64,
+    /// The Inception fold, identity when off — every CPU ground projection
+    /// funnels through it so overlays/markers/terrain track the GPU tiles.
+    pub warp: SpaceWarp,
 }
 
 impl OverlayCamera {
     pub fn norm_to_screen(&self, p: Vec2d) -> Vec2d {
+        self.norm_to_screen_with_rel(p).0
+    }
+
+    /// Screen position AND the pre-tilt, UN-warped ground rel-y — depth
+    /// must stay a function of the original ground plane (the tile shader
+    /// computes depth from unwarped `ground_rel_y`), so callers that build
+    /// depth ladders take the second value instead of un-compressing the
+    /// warped screen y.
+    pub fn norm_to_screen_with_rel(&self, p: Vec2d) -> (Vec2d, f64) {
         let s = p * self.world_size + self.offset;
-        if self.rot == (1.0, 0.0) && self.tilt_cos == 1.0 {
-            return s;
+        if self.rot == (1.0, 0.0) && self.tilt_cos == 1.0 && !self.warp.is_on() {
+            return (s, s.y - self.rot_pivot.y);
         }
         let rel = s - self.rot_pivot;
         let rotated = dvec2(
             rel.x * self.rot.0 - rel.y * self.rot.1,
             rel.x * self.rot.1 + rel.y * self.rot.0,
         );
-        self.rot_pivot + dvec2(rotated.x, rotated.y * self.tilt_cos)
+        let screen = if self.warp.is_on() {
+            self.rot_pivot + self.warp.project(rotated.x, rotated.y, 0.0)
+        } else {
+            self.rot_pivot + dvec2(rotated.x, rotated.y * self.tilt_cos)
+        };
+        (screen, rotated.y)
+    }
+
+    /// Ground point with a vertical lift (in GROUND px) through the warp
+    /// camera — terrain/overlay callers use this when the warp is on so the
+    /// lift rides the fold normal and the perspective divide; when it is
+    /// off they keep their legacy straight-up `lift_m * ppm * sin(tilt)`
+    /// screen offset (byte-identical flat path).
+    pub fn norm_to_screen_lifted(&self, p: Vec2d, lift_px: f64) -> (Vec2d, f64) {
+        let s = p * self.world_size + self.offset;
+        let rel = s - self.rot_pivot;
+        let rotated = dvec2(
+            rel.x * self.rot.0 - rel.y * self.rot.1,
+            rel.x * self.rot.1 + rel.y * self.rot.0,
+        );
+        (
+            self.rot_pivot + self.warp.project(rotated.x, rotated.y, lift_px),
+            rotated.y,
+        )
     }
 }
 

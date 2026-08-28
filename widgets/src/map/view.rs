@@ -58,6 +58,17 @@ script_mod! {
         // between their sparse vertices — leave fills flat and let the
         // (more opaque) surface be the ground; strokes/icons keep riding.
         terrain_fill_lift: uniform(1.0)
+        // The Inception mode (close-3D): fold + perspective camera.
+        // space_warp:  x = tween amount 0..1, y = fold start r0 (pre-tilt
+        //              ground px from the pivot), z = curl radius R, w = sin(tilt).
+        // space_warp2: x = kappa (perspective 1/D px^-1, amount-scaled;
+        //              0 = ortho), y = px-per-meter (lift px), z = bend cap
+        //              angle = tilt rad (wall ends face-on), w unused.
+        // Shader twin of overlay.rs SpaceWarp::project — keep in LOCKSTEP.
+        // amount 0 short-circuits to the identity path (coherent uniform
+        // branch, flat mode untouched).
+        space_warp: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        space_warp2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // shiny.md: the one SceneSun + per-feature gates. All gates default
         // 0 -> the material dispatch short-circuits and the frame is
         // identical to the legacy path (uniform branches are coherent).
@@ -469,9 +480,57 @@ script_mod! {
                         + ground_m;
                 }
             }
-            transformed.y = self.rot_pivot.y
-                + ground_rel_y * self.tilt_params.x
-                - lift_m * self.tilt_params.y;
+            // The Inception mode: fold + perspective camera (CPU twin:
+            // overlay.rs SpaceWarp::project — keep in LOCKSTEP). Ground
+            // beyond r0 curls up along a circle until its tangent is
+            // face-on to the camera (cap = tilt), then runs straight, so
+            // the far field reads as an undistorted flat map; kappa pulls
+            // the ortho camera in to a finite dolly distance (scale 1 at
+            // the pivot). Building lift extrudes along the LOCAL surface
+            // normal. DEPTH below keeps the UNWARPED ground_rel_y —
+            // ground distance stays a monotone proxy for camera z in this
+            // camera family, so the ortho depth ladder remains valid.
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
             // shape 20: zoom-constant symbol. POI symbols stay upright and
             // add their offset here; surface decals were already projected
             // through the map plane above.
@@ -850,7 +909,11 @@ script_mod! {
         center_lat: 52.3757
         zoom: 17.0
         min_zoom: 11.0
-        max_zoom: 19.0
+        // Street-level over-zoom: past the archive's deepest level the
+        // renderer scales those tiles (request_zoom_level clamps; geometry
+        // is vector so it stays crisp) — z21 is the near-first-person
+        // envelope the space-warp mode keys on.
+        max_zoom: 21.0
         dark_theme: false
         use_network: false
         use_local_mbtiles: true
@@ -1080,7 +1143,14 @@ const MISSING_RECHECK_FRAMES: u64 = 1800;
 
 /// Camera tilt ceiling (degrees from top-down). Flat enough to read
 /// terrain relief against the horizon without the far plane exploding.
+/// This is the BASE cap — the near-ground regime (street-level zoom)
+/// unlocks up to TILT_HARD_MAX_DEG via `tilt_max_deg_now()`.
 const TILT_MAX_DEG: f64 = 78.0;
+/// Absolute tilt ceiling, reachable only at street-level zoom where the
+/// visible ground fan is a handful of over-zoomed tiles (the honest
+/// 1/cos(tilt) culling reach stays cheap there). Every math-side clamp
+/// uses THIS so a legally-steep camera is never silently truncated.
+const TILT_HARD_MAX_DEG: f64 = 85.0;
 /// Accumulated pan (screen px) before labels are re-placed; must stay under
 /// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
 // Pure pan shifts the cached placement affinely, so mid-gesture full
@@ -1668,6 +1738,11 @@ pub struct MapView {
     label_cache_rotation: f64,
     #[rust]
     label_cache_tilt: f64,
+    /// Warp amount the cached placement was computed at: the fold is a
+    /// non-affine screen transform, so any change forces a full re-place
+    /// (the rigid-delta reuse would leave labels floating off the fold).
+    #[rust]
+    label_cache_warp: f64,
     #[rust]
     label_cache_tiles: Vec<TileKey>,
     #[rust]
@@ -1676,6 +1751,19 @@ pub struct MapView {
     label_draw_transform: (f32, Vec2f, f32, Vec2f, f32),
     #[rust(1.0)]
     label_cache_tilt_cos_for_delta: f32,
+    /// Inception fold setting: the USER'S INTENT (survives leaving close-3D
+    /// — un-tilting tweens the fold out, tilting back in tweens it back).
+    #[rust]
+    space_warp_want: bool,
+    /// Tween position 0..1 (raw; the eased value goes to the shader).
+    #[rust]
+    space_warp_t: f64,
+    #[rust]
+    space_warp_last_step: Option<std::time::Instant>,
+    /// The effective warp this frame — stamped in draw_walk, read by every
+    /// OverlayCamera construction so CPU projections match the GPU tiles.
+    #[rust]
+    space_warp_eff: SpaceWarp,
     #[rust]
     tiles_generation: u64,
     #[rust]
@@ -1929,7 +2017,8 @@ impl Widget for MapView {
                     // Snap-to-2D dead zone: dragging the camera back to
                     // straight above lands on EXACTLY 0 so the renderer
                     // re-enters the flat building/tree style.
-                    let raw_tilt = (start_tilt + delta.y * 0.25).clamp(0.0, TILT_MAX_DEG);
+                    let raw_tilt =
+                        (start_tilt + delta.y * 0.25).clamp(0.0, self.tilt_max_deg_now());
                     self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
                     cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: self.tilt });
                     self.redraw(cx);
@@ -2053,20 +2142,111 @@ impl Widget for MapView {
         let rot_pivot = rect.pos + rect.size * 0.5;
         let view_rot_uniform = [rot_cos as f32, rot_sin as f32];
         let rot_pivot_uniform = [rot_pivot.x as f32, rot_pivot.y as f32];
-        let tilt_rad = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians();
+        // Zoom-coupled tilt ceiling: zooming away from street level eases
+        // any extra-steep camera back to the base cap (cap is continuous
+        // in zoom, so this follows the zoom tween — no snap).
+        let tilt_cap_now = self.tilt_max_deg_now();
+        if self.tilt > tilt_cap_now {
+            self.tilt = tilt_cap_now;
+        }
+        let tilt_rad = self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians();
         let px_per_meter = {
             let (_, lat) = normalized_to_lon_lat(self.center_norm);
             world_size / (40_075_016.686 * lat.to_radians().cos())
         };
+        // ---- the Inception mode (fold + perspective camera) ----
+        // Only meaningful in the near-ground regime (strong tilt + close
+        // zoom): the effect auto-tweens out when the camera un-tilts /
+        // zooms away and back in when it returns — the SETTING
+        // (space_warp_want) remembers intent throughout.
+        let warp_conditions = self.space_warp_available();
+        let warp_target = if self.space_warp_want && warp_conditions {
+            1.0
+        } else {
+            0.0
+        };
+        if (self.space_warp_t - warp_target).abs() > 1e-4 {
+            let now = std::time::Instant::now();
+            let dt = self
+                .space_warp_last_step
+                .map(|t| (now - t).as_secs_f64().clamp(0.0, 0.1))
+                .unwrap_or(1.0 / 60.0);
+            let step = dt / 0.6; // ~600ms full travel
+            self.space_warp_t = if warp_target > self.space_warp_t {
+                (self.space_warp_t + step).min(warp_target)
+            } else {
+                (self.space_warp_t - step).max(warp_target)
+            };
+            self.space_warp_last_step = Some(now);
+            self.redraw(cx);
+        } else {
+            self.space_warp_last_step = None;
+        }
+        // Smoothstep ease on the tween. Geometry law (tuned by eye against
+        // the reference): r0 pins the fold start ~0.18·H above the pivot in
+        // flat-screen terms — in ground METERS that scales with camera
+        // height (1/ppm) and tilt, so a near-first-person view folds a few
+        // hundred meters out and a higher camera proportionally further.
+        // R = 0.30·H curl radius; kappa_full = 1/H is a ~53° vertical FOV
+        // at full effect (the perspective tweens in WITH the fold; ortho is
+        // its kappa→0 limit, so amount 0 is today's camera exactly).
+        let wt = self.space_warp_t;
+        let warp_eased = wt * wt * (3.0 - 2.0 * wt);
+        self.space_warp_eff = if warp_eased > 1e-4 {
+            let h = rect.size.y.max(1.0);
+            SpaceWarp {
+                amount: warp_eased,
+                start_px: 0.18 * h / tilt_rad.cos().max(0.087),
+                radius_px: (0.30 * h).max(1.0),
+                cos_t: tilt_rad.cos(),
+                sin_t: tilt_rad.sin(),
+                cap: tilt_rad,
+                kappa: warp_eased / h,
+            }
+        } else {
+            SpaceWarp::default()
+        };
+        let warp_uniform = [
+            self.space_warp_eff.amount as f32,
+            self.space_warp_eff.start_px as f32,
+            self.space_warp_eff.radius_px as f32,
+            self.space_warp_eff.sin_t as f32,
+        ];
+        let warp2_uniform = [
+            self.space_warp_eff.kappa as f32,
+            px_per_meter as f32,
+            self.space_warp_eff.cap as f32,
+            0.0,
+        ];
+        // One uniform set for the whole frame: every draw_geometry call
+        // below shares draw_map's draw_vars.
+        self.draw_map
+            .draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(space_warp), &warp_uniform);
+        self.draw_map
+            .draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(space_warp2), &warp2_uniform);
         // Tilted map depth lives in a negative domain well below every UI
         // element, so panels/labels/overlay drawn later always win by call
         // order. Within the map, view-ground y dominates for occlusion and
         // the baked sort-rank micro-depth (param5) resolves overlapping
         // layers at the same ground pixel without depth-precision flicker.
+        // Depth is a function of the UNWARPED ground rel-y in every mode —
+        // with the fold on, the visible (unwarped) ground fan extends past
+        // the flat frustum, so the ladder budget must cover the warp's
+        // cull reach or far-wall depth overflows the domain.
         let tilt_uniform = if tilt_rad > 1e-4 {
-            let max_rel = (rect.size.y * 0.5
+            let mut max_rel = (rect.size.y * 0.5
                 + self.terrain_elev_max as f64 * self.terrain_lift_px_per_m())
                 / tilt_rad.cos().max(0.05);
+            if self.space_warp_eff.is_on() {
+                let (reach, _) = self
+                    .space_warp_eff
+                    .cull_extents(rect.size.y * 0.5, max_rel);
+                max_rel = reach.max(max_rel);
+            }
             self.tilt_depth_slope = (18.0 / (max_rel.max(1.0) * 2.0)).min(0.01);
             [
                 tilt_rad.cos() as f32,
@@ -2303,7 +2483,17 @@ impl Widget for MapView {
                     // full tilt stretch — visible geometry never drops
                     // below full detail (perf-never-breaks-the-picture).
                     let half_w = rect.size.x * 0.5;
-                    let half_h = rect.size.y * 0.5 / self.tilt_cos().max(0.2);
+                    // .max(0.087): honest at the 85° street-level cap (the
+                    // clamp was tuned to the old 78° base cap's cos).
+                    let mut half_h = rect.size.y * 0.5 / self.tilt_cos().max(0.087);
+                    if self.space_warp_eff.is_on() {
+                        // The fold sees further than the flat frustum: keep
+                        // the bend region inside the full-detail ring.
+                        let (reach, _) = self
+                            .space_warp_eff
+                            .cull_extents(rect.size.y * 0.5, half_h);
+                        half_h = reach;
+                    }
                     let frustum = (half_w * half_w + half_h * half_h).sqrt();
                     let near = frustum * 1.35 + TILE_SIZE * scale;
                     let far = near * 1.7;
@@ -2591,6 +2781,7 @@ impl Widget for MapView {
                 rot_pivot,
                 rotation_deg: self.rotation,
                 tilt_cos: tilt_rad.cos(),
+                warp: self.space_warp_eff,
             };
             let mut overlay = std::mem::take(&mut self.overlay);
             overlay.route_glow = self.active_style().shiny.route_glow;
@@ -2827,6 +3018,37 @@ impl MapView {
         }
     }
 
+    /// The Inception fold ON/OFF (the SETTING — remembers intent; the fold
+    /// itself tweens in only while the camera is in a close 3D view and
+    /// tweens back out when it leaves one).
+    pub fn set_space_warp(&mut self, cx: &mut Cx, on: bool) {
+        if self.space_warp_want == on {
+            return;
+        }
+        self.space_warp_want = on;
+        // Restyle resident tiles both ways: turning ON re-uploads the
+        // ground meshes chord-refined against the fold (insert_ready_tile),
+        // turning OFF restores the pristine buffers so flat mode stays
+        // byte-identical to a session that never warped. Old geometry
+        // stays on screen while replacements stream in (bucket sentinel),
+        // so the 600ms tween starts immediately on the coarse meshes.
+        self.restyle_tiles_keep_stale(cx);
+        self.redraw(cx);
+    }
+
+    pub fn space_warp(&self) -> bool {
+        self.space_warp_want
+    }
+
+    /// Whether the near-ground regime for the space-warp mode is active
+    /// (strong tilt + close zoom). The UI grays the toggle outside it; the
+    /// draw loop uses the same predicate to auto-tween the effect out and
+    /// back — ONE source of truth for the regime.
+    pub fn space_warp_available(&self) -> bool {
+        let tilt_rad = self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians();
+        tilt_rad > 0.55 && self.view_zoom() >= 15.0
+    }
+
     /// Switch the active theme (0 light, 1 dark, 2 circuit city) with the
     /// keep-stale restyle: resident tiles keep drawing in the old palette
     /// and cross-fade per tile as their rebake lands.
@@ -2981,6 +3203,39 @@ impl MapView {
         } else {
             buffers.byte_size()
         };
+        // Space-warp mode: refine long chords in the ground meshes before
+        // upload. A flat triangle with far-apart vertices (full-tile land
+        // sheets, long straight road quads) warps only at its corners, so
+        // its chord slices straight through the curled fold — both in
+        // screen position and in the interpolated ground-rel depth. The
+        // triangulator's output is midpoint-split (crack-free, shared
+        // midpoints) until edges are short against the curl radius; the
+        // toggle restyles resident tiles both ways, so flat mode keeps its
+        // pristine (byte-identical) buffers.
+        if self.space_warp_want {
+            let scale = (self.view_zoom() - tile_key.z as f64).exp2().max(1.0);
+            let max_edge = (64.0 / scale).clamp(4.0, 64.0) as f32;
+            crate::makepad_draw::vector::subdivide_packed_mesh(
+                &mut buffers.fill_indices,
+                &mut buffers.fill_vertices,
+                max_edge,
+            );
+            crate::makepad_draw::vector::subdivide_packed_mesh(
+                &mut buffers.casing_indices,
+                &mut buffers.casing_vertices,
+                max_edge,
+            );
+            crate::makepad_draw::vector::subdivide_packed_mesh(
+                &mut buffers.stroke_indices,
+                &mut buffers.stroke_vertices,
+                max_edge,
+            );
+            crate::makepad_draw::vector::subdivide_packed_mesh(
+                &mut buffers.fringe_indices,
+                &mut buffers.fringe_vertices,
+                max_edge,
+            );
+        }
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
@@ -3895,9 +4150,20 @@ impl MapView {
         // Under heading-up rotation the viewport covers the rotated AABB in
         // world space.
         let (rot_cos, rot_sin) = self.screen_rotation();
-        let half_w = rect.size.x * 0.5;
+        let mut half_w = rect.size.x * 0.5;
         // Tilt compression means the screen shows more world vertically.
         let mut half_h = rect.size.y * 0.5 / self.tilt_cos().max(1e-3);
+        // The space-warp wall advances up-screen slower than the flat
+        // ortho compression at moderate tilt, and its perspective shrinks
+        // the far field laterally — the fold can SEE FURTHER than the flat
+        // frustum. Cull honestly or the wall runs out of city.
+        if self.space_warp_eff.is_on() {
+            let (reach, widen) = self
+                .space_warp_eff
+                .cull_extents(rect.size.y * 0.5, half_h);
+            half_h = reach;
+            half_w *= widen;
+        }
         // Terrain displacement pulls geometry up-screen by up to the max
         // elevation: ground past both screen edges still lands in view.
         let lift_pad = self.terrain_elev_max as f64 * self.terrain_lift_px_per_m()
@@ -4156,7 +4422,11 @@ impl MapView {
         let pan_delta = map_offset - self.label_cache_offset;
         let pan_dist = pan_delta.x.abs().max(pan_delta.y.abs());
         let rot_delta = self.rotation - self.label_cache_rotation;
-        let tilt_delta = self.tilt != self.label_cache_tilt;
+        // The fold is a non-affine screen transform: any warp change makes
+        // the cached rigid-delta reuse wrong (labels would float off the
+        // fold) — treat it like a tilt change and force a full re-place.
+        let tilt_delta = self.tilt != self.label_cache_tilt
+            || self.space_warp_eff.amount != self.label_cache_warp;
         let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
             && rot_delta == 0.0
@@ -4203,7 +4473,7 @@ impl MapView {
                 let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
                 let t0 = self
                     .label_cache_tilt
-                    .clamp(0.0, TILT_MAX_DEG)
+                    .clamp(0.0, TILT_HARD_MAX_DEG)
                     .to_radians()
                     .cos()
                     .max(1e-6);
@@ -4220,7 +4490,7 @@ impl MapView {
             // build the exact non-commuting delta matrix.
             let rot_rad = (-rot_delta).to_radians() as f32;
             let cached_tilt_cos =
-                (self.label_cache_tilt.clamp(0.0, TILT_MAX_DEG).to_radians().cos() as f32).max(1e-4);
+                (self.label_cache_tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().cos() as f32).max(1e-4);
             let pivot = rect.pos + rect.size * 0.5;
             self.draw_label_plans_scaled(
                 cx,
@@ -4558,6 +4828,7 @@ impl MapView {
         self.label_cache_zoom = view_zoom;
         self.label_cache_rotation = self.rotation;
         self.label_cache_tilt = self.tilt;
+        self.label_cache_warp = self.space_warp_eff.amount;
         self.label_cache_tiles.clear();
         self.label_cache_tiles.extend_from_slice(draw_tiles);
         self.label_cache_generation = self.tiles_generation;
@@ -4741,18 +5012,35 @@ impl MapView {
                 // would tilt-compress and orbit the pin under rotation).
                 // Flying-marker labels ride their marker's BAKED stalk
                 // height (dynamic: each pin clears its own building).
-                let lift_px = self.lift_screen_px(label.lift_m, view_zoom);
+                let mut lift_px = self.lift_screen_px(label.lift_m, view_zoom);
                 // Total upward screen shift baked into this path — the glyph
                 // shader camera-deltas the GROUND anchor and re-applies it.
                 let mut baked_lift_px = 0.0f64;
                 // Terrain: labels ride the displaced ground like the tiles.
+                // Ground lift is looked up from the UNWARPED point (the
+                // inverse projection knows nothing of the fold), THEN the
+                // path goes through the warp camera (fold + perspective on
+                // BOTH axes), THEN lifts subtract as screen shifts scaled
+                // by the local perspective factor so pins don't tower over
+                // their perspective-shrunken far buildings.
                 if !self.scratch_screen_path.is_empty() {
                     let ground_px =
                         self.terrain_ground_lift_px_at_screen(self.scratch_screen_path[0]);
-                    if ground_px > 0.0 {
-                        baked_lift_px += ground_px;
+                    let mut persp_w = 1.0f64;
+                    if self.space_warp_eff.is_on() {
+                        persp_w = self
+                            .space_warp_eff
+                            .screen_w(self.scratch_screen_path[0], rot_pivot);
                         for p in self.scratch_screen_path.iter_mut() {
-                            p.y -= ground_px;
+                            *p = self.space_warp_eff.warp_screen_point(*p, rot_pivot, 0.0);
+                        }
+                        lift_px *= persp_w;
+                    }
+                    if ground_px > 0.0 {
+                        let shift = ground_px * persp_w;
+                        baked_lift_px += shift;
+                        for p in self.scratch_screen_path.iter_mut() {
+                            p.y -= shift;
                         }
                     }
                 }
@@ -5172,7 +5460,19 @@ impl MapView {
     }
 
     fn tilt_cos(&self) -> f64 {
-        self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians().cos()
+        self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().cos()
+    }
+
+    /// Zoom-coupled tilt ceiling: the base 78° everywhere, ramping to the
+    /// 85° hard cap across view zoom 18.5→20 — the extra steepness (a
+    /// near-first-person camera) only unlocks together with street-level
+    /// zoom, where the honest 1/cos(tilt) culling fan is a handful of
+    /// over-zoomed tiles. Continuous in zoom, so the per-frame enforcement
+    /// in draw_walk eases the camera down as it zooms away, never snaps.
+    fn tilt_max_deg_now(&self) -> f64 {
+        let t = ((self.view_zoom() - 18.5) / 1.5).clamp(0.0, 1.0);
+        let s = t * t * (3.0 - 2.0 * t);
+        TILT_MAX_DEG + (TILT_HARD_MAX_DEG - TILT_MAX_DEG) * s
     }
 
     /// Screen-space vector (relative to the view pivot) back into
@@ -5289,7 +5589,7 @@ impl MapView {
         let world_size = TILE_SIZE * 2f64.powf(view_zoom);
         let (_, lat) = normalized_to_lon_lat(self.center_norm);
         let px_per_meter = world_size / (40_075_016.686 * lat.to_radians().cos());
-        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians().sin()
+        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().sin()
     }
 
     fn pin_at(&self, abs: Vec2d) -> Option<(f64, f64, Vec<(String, String)>)> {
@@ -5435,6 +5735,7 @@ impl MapView {
             rot_pivot: rect.pos + rect.size * 0.5,
             rotation_deg: self.rotation,
             tilt_cos: self.tilt_cos(),
+            warp: self.space_warp_eff,
         }
     }
 
@@ -5499,11 +5800,14 @@ impl MapView {
         self.rotation
     }
 
-    /// Axonometric camera tilt (degrees, 0 = top-down, clamped to TILT_MAX_DEG).
+    /// Axonometric camera tilt (degrees, 0 = top-down). Clamped to the
+    /// HARD ceiling here; the zoom-coupled cap (`tilt_max_deg_now`) is
+    /// enforced per-frame in draw_walk so a steep persisted tilt settles
+    /// smoothly once the actual zoom is known.
     /// The following draw detects a flat/tilted mode transition and re-bakes
     /// once; keeping that invalidation in one place avoids duplicate work.
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
-        let tilt = tilt_deg.clamp(0.0, TILT_MAX_DEG);
+        let tilt = tilt_deg.clamp(0.0, TILT_HARD_MAX_DEG);
         if (tilt - self.tilt).abs() < 1e-9 {
             return;
         }
@@ -5791,7 +6095,7 @@ impl MapView {
         let camera = self.overlay_camera();
         let (west, north, east, south) = self.terrain_bbox;
         self.draw_terrain.draw_super.draw_vars.set_texture(0, &texture);
-        let tilted = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians() > 1e-4;
+        let tilted = self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians() > 1e-4;
         self.draw_terrain
             .draw_super
             .draw_vars
@@ -5803,10 +6107,12 @@ impl MapView {
             live_id!(opacity_boost),
             &[if ground_mode { 1.7f32 } else { 1.0 }],
         );
-        let inv_tilt_cos = 1.0 / camera.tilt_cos.max(1e-6);
         let slope = self.tilt_depth_slope;
-        let depth_of = move |screen_y: f64| -> f32 {
-            let ground_rel = (screen_y - camera.rot_pivot.y) * inv_tilt_cos;
+        // Depth stays a function of the UNWARPED ground plane (the tile
+        // shader computes depth from the unwarped ground_rel_y — with the
+        // Inception fold on, un-compressing the warped screen y would
+        // diverge from the tiles and the surface would win above the fold).
+        let depth_of_rel = move |ground_rel: f64| -> f32 {
             (-24.0 + 0.02 + ground_rel * slope) as f32
         };
         let lift_px_per_m = self.terrain_lift_px_per_m();
@@ -5814,15 +6120,15 @@ impl MapView {
         if !displace {
             self.draw_terrain.uv0 = Vec2f { x: 0.0, y: 0.0 };
             self.draw_terrain.uv1 = Vec2f { x: 1.0, y: 1.0 };
-            let c0 = camera.norm_to_screen(dvec2(west, north));
-            let c1 = camera.norm_to_screen(dvec2(east, north));
-            let c2 = camera.norm_to_screen(dvec2(east, south));
-            let c3 = camera.norm_to_screen(dvec2(west, south));
+            let (c0, r0) = camera.norm_to_screen_with_rel(dvec2(west, north));
+            let (c1, r1) = camera.norm_to_screen_with_rel(dvec2(east, north));
+            let (c2, r2) = camera.norm_to_screen_with_rel(dvec2(east, south));
+            let (c3, r3) = camera.norm_to_screen_with_rel(dvec2(west, south));
             self.draw_terrain.gdepth = Vec4f {
-                x: depth_of(c0.y),
-                y: depth_of(c1.y),
-                z: depth_of(c2.y),
-                w: depth_of(c3.y),
+                x: depth_of_rel(r0),
+                y: depth_of_rel(r1),
+                z: depth_of_rel(r2),
+                w: depth_of_rel(r3),
             };
             self.terrain_cell(cx, c0, c1, c2, c3);
             return;
@@ -5838,9 +6144,19 @@ impl MapView {
             for gx in 0..=GX {
                 let u = gx as f64 / GX as f64;
                 let nx = west + (east - west) * u;
-                let mut p = camera.norm_to_screen(dvec2(nx, ny));
-                ground_depth.push(depth_of(p.y));
-                p.y -= self.terrain_elevation_at(dvec2(nx, ny)) * lift_px_per_m;
+                let npt = dvec2(nx, ny);
+                let elev_m = self.terrain_elevation_at(npt);
+                let (p, ground_rel) = if camera.warp.is_on() {
+                    // Lift through the SAME camera: ground px along the
+                    // fold's local normal, perspective divide included.
+                    let h_px = elev_m * lift_px_per_m / camera.warp.sin_t.max(1e-6);
+                    camera.norm_to_screen_lifted(npt, h_px)
+                } else {
+                    let (mut p, r) = camera.norm_to_screen_with_rel(npt);
+                    p.y -= elev_m * lift_px_per_m;
+                    (p, r)
+                };
+                ground_depth.push(depth_of_rel(ground_rel));
                 pts.push(p);
             }
         }
@@ -5899,7 +6215,7 @@ impl MapView {
 
     /// Screen px of lift per meter of elevation (0 when flat / no 3D).
     fn terrain_lift_px_per_m(&self) -> f64 {
-        let tilt_rad = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians();
+        let tilt_rad = self.tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians();
         if tilt_rad <= 1e-4 {
             return 0.0;
         }
@@ -6170,6 +6486,23 @@ impl MapViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_theme(cx, theme);
         }
+    }
+
+    /// The Inception fold on/off (tweens; close-3D only — see MapView).
+    pub fn set_space_warp(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_space_warp(cx, on);
+        }
+    }
+
+    pub fn space_warp(&self) -> bool {
+        self.borrow().map(|inner| inner.space_warp()).unwrap_or(false)
+    }
+
+    pub fn space_warp_available(&self) -> bool {
+        self.borrow()
+            .map(|inner| inner.space_warp_available())
+            .unwrap_or(false)
     }
 
     pub fn set_center(&self, cx: &mut Cx, lon: f64, lat: f64) {

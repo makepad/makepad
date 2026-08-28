@@ -280,6 +280,10 @@ pub enum CxOsOp {
     /// positions, so existing MouseMove consumers work unchanged); `false`
     /// releases. Backends without support ignore it.
     LockMousePointer(bool),
+    /// Widget-scoped pointer pin for value scrubbing: cursor stays at its
+    /// press point (hidden) while deltas keep flowing; restored in place
+    /// on release. Engage at the drag threshold, never on the press.
+    PinMousePointer(bool),
     /// Per-frame lock maintenance, pushed by the captured app every frame:
     /// re-pins the hardware cursor. Exists because OS-level disassociation
     /// proves unreliable on some systems (it silently drops on app
@@ -466,6 +470,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
+            Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
 
@@ -951,6 +956,16 @@ impl Cx {
     /// cursor pinned even when the OS quietly drops the disassociation.
     pub fn repin_mouse_pointer(&mut self) {
         self.platform_ops.push_back(CxOsOp::RepinMousePointer);
+    }
+
+    /// Widget-scoped pointer pin (value scrubbing): hides the cursor AT its
+    /// current position and detaches it so deltas keep flowing with
+    /// infinite range; `pin_mouse_pointer(false)` restores the cursor at
+    /// the press point. Engage only when the drag actually starts (the
+    /// 3px threshold crossing), never on the initial press. Focus loss
+    /// releases the pin automatically.
+    pub fn pin_mouse_pointer(&mut self, on: bool) {
+        self.platform_ops.push_back(CxOsOp::PinMousePointer(on));
     }
 
     pub fn show_in_dock(&mut self, show: bool) {
