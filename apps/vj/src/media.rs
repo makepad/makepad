@@ -24,7 +24,7 @@ use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLim
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -378,6 +378,14 @@ struct SlotShared {
     stop: AtomicBool,
     paused: AtomicBool,
     mode: AtomicU8,
+    /// Frames of tail to cross-fade onto the head when the repeat window is
+    /// built, closing a generated clip into a seamless loop (see
+    /// `loop_close`). 0 = off, which is every clip the operator did not ask
+    /// this of: a clip that already loops must not be shortened and
+    /// dissolved behind their back.
+    seam_wrap: AtomicUsize,
+    /// What the closer actually did, for the run row's words.
+    seam_applied: AtomicUsize,
     muted: AtomicBool,
     /// The operator is holding the scrub bar: seeks land silently (no
     /// per-tick audio blips); the release seek re-primes audio if unmuted.
@@ -479,6 +487,8 @@ impl SlotPlayer {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(start_paused),
             mode: AtomicU8::new(if loop_on { PlayMode::Loop } else { PlayMode::Once } as u8),
+            seam_wrap: AtomicUsize::new(0),
+            seam_applied: AtomicUsize::new(0),
             muted: AtomicBool::new(false),
             scrub: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
@@ -564,6 +574,20 @@ impl SlotPlayer {
         !self.shared.paused.load(Ordering::Acquire)
             && (!self.shared.end_of_stream.load(Ordering::Acquire)
                 || !self.shared.frames.lock().unwrap().is_empty())
+    }
+
+    /// Ask for this clip's loop to be CLOSED: when the repeat window is
+    /// built, cross-fade `wrap` frames of tail onto the head so the pad's
+    /// wrap is not a jump cut. Set before the window fills (i.e. at cue
+    /// time); 0 turns it off.
+    pub fn set_seam_close(&mut self, wrap: usize) {
+        self.shared.seam_wrap.store(wrap, Ordering::Release);
+    }
+
+    /// Frames the closer actually spent, once the window exists; 0 = the
+    /// clip plays as it came.
+    pub fn seam_closed(&self) -> usize {
+        self.shared.seam_applied.load(Ordering::Acquire)
     }
 
     pub fn set_loop(&mut self, loop_on: bool) {
@@ -1460,6 +1484,17 @@ fn repeat_fill_worker(
     if frames.len() < 2 {
         return false;
     }
+    // The one moment a generated clip can be closed into a loop: the whole
+    // window is decoded and in hand, and nothing has presented it yet.
+    let wrap = shared.seam_wrap.load(Ordering::Acquire);
+    let applied = match wrap {
+        0 => 0,
+        wrap => match crate::loop_close::close_loop(&mut frames, wrap) {
+            crate::loop_close::LoopClosure::Crossfade { wrap } => wrap,
+            crate::loop_close::LoopClosure::None => 0,
+        },
+    };
+    shared.seam_applied.store(applied, Ordering::Release);
     let mut rc = shared.repeat_cache.lock().unwrap();
     if rc.epoch != epoch {
         return false;
@@ -3716,6 +3751,8 @@ mod tests {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             mode: AtomicU8::new(PlayMode::PingPong as u8),
+            seam_wrap: AtomicUsize::new(0),
+            seam_applied: AtomicUsize::new(0),
             muted: AtomicBool::new(true),
             scrub: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
@@ -3825,6 +3862,8 @@ mod tests {
                 stop: AtomicBool::new(false),
                 paused: AtomicBool::new(paused),
                 mode: AtomicU8::new(PlayMode::Once as u8),
+                seam_wrap: AtomicUsize::new(0),
+                seam_applied: AtomicUsize::new(0),
                 muted: AtomicBool::new(false),
                 scrub: AtomicBool::new(false),
                 seek_100ns: AtomicI64::new(-1),
