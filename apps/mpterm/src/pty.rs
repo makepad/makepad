@@ -408,10 +408,24 @@ impl Pty {
     /// switches the master fd to blocking mode (reads park in the kernel;
     /// writes on the same fd stay fine). On Windows it hands over the
     /// ConPTY output channel. May only be called once.
+    ///
+    /// The reader gets its OWN `dup` of the master, and closes it when its
+    /// loop ends. That ownership is what keeps a teardown from deadlocking:
+    /// `close()` on the last descriptor of a pty master BLOCKS IN THE KERNEL
+    /// while a thread is parked in `read()` on it, and the reader can only
+    /// leave `read()` once the slave side is gone — so the UI thread would
+    /// wait on the reader while the reader waits on the shell. With a dup
+    /// outstanding, `Pty::drop`'s close is a refcount decrement that returns
+    /// at once, and the tty is torn down by the reader's own close after its
+    /// `read()` has returned. (Sharing one raw fd number across threads and
+    /// closing it under a live reader was unsound anyway: the number can be
+    /// handed straight back out by the next `open`.)
     pub fn take_reader(&mut self) -> PtyReader {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             unsafe {
+                // O_NONBLOCK lives on the open file description, which the
+                // dup shares — clear it once, for both.
                 let flags = libc_ffi::fcntl_int(self.master_fd, libc_ffi::F_GETFL, 0);
                 if flags >= 0 {
                     libc_ffi::fcntl_int(
@@ -420,9 +434,21 @@ impl Pty {
                         flags & !libc_ffi::O_NONBLOCK,
                     );
                 }
-            }
-            PtyReader {
-                master_fd: self.master_fd,
+                // A dup does not inherit FD_CLOEXEC: set it, or the next
+                // shell we spawn inherits this master and holds the tty open.
+                let read_fd = libc_ffi::dup(self.master_fd);
+                let read_fd = if read_fd >= 0 {
+                    set_cloexec(read_fd);
+                    read_fd
+                } else {
+                    // Out of descriptors: fall back to sharing (the old
+                    // behavior) rather than losing the terminal entirely.
+                    self.master_fd
+                };
+                PtyReader {
+                    master_fd: read_fd,
+                    owns_fd: read_fd != self.master_fd,
+                }
             }
         }
         #[cfg(windows)]
@@ -552,6 +578,10 @@ impl Pty {
 pub struct PtyReader {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     master_fd: i32,
+    /// The fd is this reader's own dup and is closed with it. False only in
+    /// the out-of-descriptors fallback, where it is the `Pty`'s to close.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    owns_fd: bool,
     #[cfg(windows)]
     read_rx: mpsc::Receiver<Vec<u8>>,
 }
@@ -589,16 +619,46 @@ impl PtyReader {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Drop for PtyReader {
+    fn drop(&mut self) {
+        if self.owns_fd {
+            unsafe {
+                libc_ffi::close(self.master_fd);
+            }
+        }
+    }
+}
+
 impl Drop for Pty {
     fn drop(&mut self) {
+        // The job goes FIRST. `pre_exec` gave the shell its own session, so
+        // its pid is also its process-group id: signalling the group takes
+        // whatever it started with it (a pager the shell forked instead of
+        // exec'ing would otherwise outlive us holding the slave). With the
+        // slave gone the reader thread's `read()` returns and it closes its
+        // dup — the last reference — which is what actually tears the tty
+        // down. Reap rather than `try_wait`: a killed child left unwaited is
+        // a zombie for the life of the process, and a Quick-Look panel
+        // restarts its pager on every arrow key.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(mut child) = self.child.take() {
+            // Only signal the GROUP while the child is demonstrably still
+            // running: once it has been reaped (`child_exited` polls with
+            // `try_wait`) its pid is the kernel's to hand out again, and a
+            // group kill on a recycled id would hit a stranger. `kill`/`wait`
+            // below are safe either way — std remembers the exit status.
+            if matches!(child.try_wait(), Ok(None)) {
+                unsafe {
+                    libc_ffi::killpg(child.id() as i32, libc_ffi::SIGKILL);
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         unsafe {
             libc_ffi::close(self.master_fd);
-        }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.try_wait();
         }
         #[cfg(windows)]
         unsafe {
@@ -904,12 +964,16 @@ mod libc_ffi {
 
     extern "C" {
         pub fn close(fd: i32) -> i32;
+        pub fn dup(fd: i32) -> i32;
         pub fn read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
         pub fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
         pub fn ioctl(fd: i32, request: u64, ...) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn setsid() -> i32;
+        pub fn killpg(pgrp: i32, sig: i32) -> i32;
     }
+
+    pub const SIGKILL: i32 = 9;
 
     pub unsafe fn fcntl_int(fd: i32, cmd: i32, arg: i32) -> i32 {
         fcntl(fd, cmd, arg)

@@ -150,3 +150,40 @@ impl Session {
         let _ = self.pty.resize(cols as u16, rows as u16);
     }
 }
+
+#[cfg(test)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// Dropping a session whose job is sitting idle must RETURN.
+    ///
+    /// The reader thread parks in `read()` on the pty master, and `close()`
+    /// on the last descriptor of a master with a reader parked on it blocks
+    /// in the kernel until that reader leaves — which it only does once the
+    /// slave side is gone. Closing before killing the job was therefore a
+    /// deadlock between the UI thread and its own reader: a Quick-Look
+    /// panel that retargeted at the next file (`MpTerm::restart_with` drops
+    /// the session) froze the whole child, and the panel kept showing the
+    /// previous file's last frame forever.
+    #[test]
+    fn dropping_an_idle_session_does_not_block() {
+        let mut session =
+            Session::spawn(80, 24, None, None, Some("sleep 30")).expect("a pty session");
+        // Give the job time to start and the reader thread time to park.
+        std::thread::sleep(Duration::from_millis(300));
+        session.drain();
+
+        // Drop on another thread so a regression FAILS instead of hanging
+        // the test binary.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(session);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "Session::drop blocked with the reader thread parked in read()"
+        );
+    }
+}

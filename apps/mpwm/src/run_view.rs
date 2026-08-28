@@ -243,8 +243,6 @@ pub struct MpRunView {
     /// local/agent_state/mpwm/resize-sync-design.md).
     #[rust]
     target_size: Option<Vec2d>,
-    #[rust]
-    debug_tick_count: u64,
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
@@ -833,14 +831,6 @@ impl Widget for MpRunView {
                         }
                     }
                     msgs.push(StudioToApp::Tick);
-                    self.debug_tick_count = self.debug_tick_count.wrapping_add(1);
-                    if self.debug_tick_count % 125 == 0 {
-                        log!(
-                            "mpwm DEBUG run_view tick c{} n={}",
-                            target.client,
-                            self.debug_tick_count
-                        );
-                    }
                     self.emit_to_app(cx, target.client, msgs);
                 }
             }

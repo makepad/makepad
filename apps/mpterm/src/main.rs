@@ -138,14 +138,11 @@ impl App {
                 let path = PathBuf::from(path);
                 self.preview = true;
                 if let Some(mut term) = self.ui.widget(cx, ids!(term)).borrow_mut::<MpTerm>() {
-                    log!("mpterm DEBUG retarget borrow OK -> {}", path.display());
                     term.restart_with(
                         cx,
                         path.parent().map(Path::to_path_buf),
                         Some(preview_command(&path)),
                     );
-                } else {
-                    log!("mpterm DEBUG retarget borrow FAILED (term widget not found)");
                 }
                 let name = path
                     .file_name()
@@ -177,14 +174,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        match event {
-            Event::Draw(_) => log!("mpterm DEBUG Event::Draw"),
-            Event::Signal => log!("mpterm DEBUG Event::Signal"),
-            Event::NextFrame(_) => log!("mpterm DEBUG Event::NextFrame"),
-            _ => {}
-        }
         if let Event::Custom(json) = event {
-            log!("mpterm DEBUG custom event: {}", json);
             if let Some(wm) = mp_wm_api::WmEvent::parse(json) {
                 self.handle_wm_event(cx, &wm);
             }
