@@ -76,7 +76,7 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowRect, MoveWindow, PostMessageW,
-                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
                         ShowWindow,
                         CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM,
                         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
@@ -154,6 +154,14 @@ unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -
     unsafe { ImmSetCandidateWindow(himc, lpcandidate) }
 }
 
+// `SetWindowTextW` is not present in the vendored (pruned) `windows` crate's
+// `WindowsAndMessaging` module; bind it the same way as the shims above.
+#[inline]
+unsafe fn SetWindowTextW(hwnd: HWND, lpstring: PCWSTR) -> windows_core::BOOL {
+    windows_core::link!("user32.dll" "system" fn SetWindowTextW(hwnd : HWND, lpstring : PCWSTR) -> windows_core::BOOL);
+    unsafe { SetWindowTextW(hwnd, lpstring) }
+}
+
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -221,7 +229,7 @@ impl Win32Window {
     pub fn set_title(&self, title: &str) {
         let title = encode_wide(title);
         unsafe {
-            let _ = SetWindowTextW(self.window, PCWSTR(title.as_ptr()));
+            let _ = SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr()));
         }
     }
 
