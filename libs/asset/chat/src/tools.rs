@@ -220,12 +220,30 @@ pub fn definitions() -> Vec<ToolDef> {
             api_name: "music_generate",
             description: "Generate a full song from a text prompt. \
                           Use for music, score, or a track — not short SFX.",
-            args_doc: r#"{"prompt": "lofi rain loop, warm keys", "model": "minimax-music3", "seconds": 180}"#,
+            args_doc: r#"{"prompt": "warm neo-soul, Rhodes, intimate male vocal", "lyrics": "[Verse]\nMorning settles on the floor\n\n[Chorus]\nWe can rise into the day", "model": "minimax-music3", "seconds": 180}"#,
             parameters: schema_object(
                 vec![
                     (
                         "prompt",
-                        schema_string_len("musical description", 1, 2048),
+                        schema_string_len(
+                            "musical description: genre, mood, tempo, instruments, \
+                             vocal type, production. Never put lyric words here",
+                            1,
+                            2048,
+                        ),
+                    ),
+                    (
+                        // The field that makes a song a song. Empty means
+                        // instrumental to both music backends, so a vocal
+                        // request that leaves it out comes back as a hum.
+                        "lyrics",
+                        schema_string_len(
+                            "the sung words, as a temporal script: section tags such as \
+                             [Verse]/[Chorus] alone on their own lines. \
+                             \"[Instrumental]\" for instrumental music",
+                            1,
+                            4096,
+                        ),
                     ),
                     (
                         "model",
@@ -234,6 +252,14 @@ pub fn definitions() -> Vec<ToolDef> {
                     (
                         "seconds",
                         schema_integer_range("song length 5..=300; omit for 180", 5, 300),
+                    ),
+                    (
+                        "steps",
+                        schema_integer_range("diffusion steps 1..=64; omit for the model's own", 1, 64),
+                    ),
+                    (
+                        "seed",
+                        schema_integer_range("reproducibility seed; omit for a fresh one", 0, i64::MAX),
                     ),
                 ],
                 &["prompt"],
@@ -1396,6 +1422,12 @@ pub enum ContentToolCall {
         prompt: String,
         model: Option<String>,
         seconds: Option<u32>,
+        /// The sung words. Separate from `prompt` because both music
+        /// backends take them separately — and because an empty lyric field
+        /// is exactly what makes MiniMax generate an instrumental.
+        lyrics: Option<String>,
+        steps: Option<u32>,
+        seed: Option<u64>,
     },
     MeshGenerate {
         prompt: String,
@@ -1740,11 +1772,21 @@ impl ContentToolCall {
                 })
             }
             "music.generate" => {
-                check_known(args, &["prompt", "model", "seconds"], "music.generate argument")?;
+                check_known(
+                    args,
+                    &["prompt", "model", "seconds", "lyrics", "steps", "seed"],
+                    "music.generate argument",
+                )?;
                 Ok(ContentToolCall::MusicGenerate {
                     prompt: need_prompt(args)?,
                     model: optional_str(args, "model")?.map(str::to_string),
                     seconds: optional_u32(args, "seconds", 5, 300)?,
+                    lyrics: optional_str(args, "lyrics")?
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string),
+                    steps: optional_u32(args, "steps", 1, 64)?,
+                    seed: optional_u64(args, "seed")?,
                 })
             }
             "mesh.generate" => {
@@ -2617,13 +2659,22 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             Value::Obj(pairs)
         }
-        ContentToolCall::MusicGenerate { prompt, model, seconds } => {
+        ContentToolCall::MusicGenerate { prompt, model, seconds, lyrics, steps, seed } => {
             let mut pairs = match encode_prompt_model(prompt, model) {
                 Value::Obj(p) => p,
                 other => return other,
             };
+            if let Some(text) = lyrics {
+                pairs.push(("lyrics".into(), json::s(text.clone())));
+            }
             if let Some(s) = seconds {
                 pairs.push(("seconds".into(), Value::Int(*s as i64)));
+            }
+            if let Some(s) = steps {
+                pairs.push(("steps".into(), Value::Int(*s as i64)));
+            }
+            if let Some(s) = seed {
+                pairs.push(("seed".into(), Value::Int(*s as i64)));
             }
             Value::Obj(pairs)
         }

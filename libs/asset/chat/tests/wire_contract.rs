@@ -392,6 +392,49 @@ fn origin_audit_fields_are_not_on_tool_or_chat_wire() {
 
 // ------------------------------------------------------------- tool calls
 
+/// A song needs its words, and both music backends take them SEPARATELY:
+/// an empty lyric field is what makes MiniMax generate an instrumental. The
+/// chat path could not send them at all, so every song it asked for was a
+/// hum.
+#[test]
+fn a_music_call_carries_its_lyrics_seed_and_steps() {
+    let lyrics = "[Verse]\nMorning settles on the floor\n\n[Chorus]\nWe can rise into the day";
+    let call = ContentToolCall::parse(
+        "music.generate",
+        &json::obj(vec![
+            ("prompt", json::s("warm neo-soul, Rhodes, intimate male vocal")),
+            ("lyrics", json::s(lyrics)),
+            ("seconds", Value::Int(60)),
+            ("steps", Value::Int(8)),
+            ("seed", Value::Int(5)),
+        ]),
+    )
+    .unwrap();
+    match &call {
+        ContentToolCall::MusicGenerate { prompt, lyrics: got, seconds, steps, seed, .. } => {
+            assert!(prompt.contains("neo-soul"));
+            assert_eq!(got.as_deref(), Some(lyrics), "tags and line breaks intact");
+            assert_eq!((*seconds, *steps, *seed), (Some(60), Some(8), Some(5)));
+        }
+        other => panic!("expected a music call, got {other:?}"),
+    }
+    // …and they survive the round trip back onto the wire.
+    let args = makepad_asset_chat::tools::encode_args(&call);
+    assert_eq!(args.get("lyrics").and_then(Value::as_str), Some(lyrics));
+    assert_eq!(args.get("steps").and_then(Value::as_i64), Some(8));
+    assert_eq!(args.get("seed").and_then(Value::as_i64), Some(5));
+    // An instrumental request simply says so; the field is never invented.
+    let instrumental = ContentToolCall::parse(
+        "music.generate",
+        &json::obj(vec![("prompt", json::s("taiko boss battle, instrumental"))]),
+    )
+    .unwrap();
+    assert!(matches!(
+        instrumental,
+        ContentToolCall::MusicGenerate { lyrics: None, .. }
+    ));
+}
+
 #[test]
 fn typed_tool_parse_accepts_the_allowlist() {
     let asset = makepad_asset_data::AssetId::from_bytes([5; 16]);
