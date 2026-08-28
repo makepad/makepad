@@ -160,6 +160,50 @@ impl SplodedParams {
     }
 }
 
+impl SplodedParams {
+    /// Invert the projection for the plane at `level`: given a screen point,
+    /// which layout point on that plane lands under it.
+    ///
+    /// This is what makes picking a PARENT possible. The transform is affine
+    /// with a pure-z pass-through, so for a fixed plane the screen mapping is
+    /// a 2x2 affine solve in closed form — no ray marching, no depth buffer
+    /// readback. A caller walks planes from the deepest down, un-projects the
+    /// cursor onto each, and hit-tests the widgets that drew at that depth
+    /// with their ordinary layout rects: the first hit is what the eye sees
+    /// under the cursor. A child only covers its own footprint, so everywhere
+    /// else the ray reaches the parent's exposed plane or its hairline —
+    /// which flat 2D picking can never offer.
+    pub fn unproject(&self, offset: Vec2d, size: Vec2d, screen: Vec2d, level: f32) -> Vec2d {
+        let cx = (offset.x + size.x * 0.5) as f32;
+        let cy = (offset.y + size.y * 0.5) as f32;
+        let (sa, ca) = (self.yaw.sin(), self.yaw.cos());
+        let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
+        let f = self.fit;
+        let g = self.gain;
+        let zc = self.z_center;
+        let z = level * SPLODED_DEPTH_UNIT;
+
+        // Same rows as `camera_view`, with z fixed so only x and y are unknown:
+        //   sx = m00*x + m01*y + (m02*z + m03)
+        //   sy =         m11*y + (m12*z + m13)
+        let m00 = f * ca;
+        let m01 = f * sa * sb;
+        let m02 = f * g * sa * cb;
+        let m03 = cx - m00 * cx - m01 * cy - m02 * zc;
+        let m11 = f * cb;
+        let m12 = -f * g * sb;
+        let m13 = cy - m11 * cy - m12 * zc;
+
+        // Row 1 has no x term, so y falls out directly and x follows.
+        if m11.abs() < 1.0e-6 || m00.abs() < 1.0e-6 {
+            return screen;
+        }
+        let y = (screen.y as f32 - (m12 * z + m13)) / m11;
+        let x = (screen.x as f32 - m01 * y - (m02 * z + m03)) / m00;
+        dvec2(x as f64, y as f64)
+    }
+}
+
 /// One drag in progress: where it started and the angles it started from.
 #[derive(Clone, Copy, Debug)]
 struct SplodedDrag {
@@ -191,6 +235,9 @@ pub struct SplodedView {
     /// without a frame there is nothing to see or click — which is the whole
     /// point of the mode.
     hairlines: bool,
+    /// A region the mode never takes the pointer in — the tweaker's panel
+    /// band. See `sploded_set_flat_band`.
+    flat_band: Option<Rect>,
 }
 
 /// World-z units per nesting level while the mode is up.
@@ -238,6 +285,7 @@ impl Default for SplodedView {
             layers: 1.0,
             drag: None,
             hairlines: true,
+            flat_band: None,
         }
     }
 }
@@ -339,12 +387,54 @@ impl Cx {
 
     /// Programmatic toggle (the tweaker's panel button). DEFERRED: safe to
     /// call from anywhere including action handling — the intercept
-    /// performs it at the next event, pre-dispatch. Entering hands input
-    /// to the mode; leave via Esc / F10 (the panel is hidden and cannot be
-    /// clicked while the mode is up).
+    /// performs it at the next event, pre-dispatch. Leave via Esc / F10, or
+    /// the same button (a press inside a declared flat band always reaches
+    /// the app, so the panel stays clickable while the mode is up).
     pub fn sploded_toggle(&mut self) {
         self.sploded.pending_toggle = true;
         self.redraw_all();
+    }
+
+    /// Declare a screen region the exploded mode must keep its hands off.
+    ///
+    /// The mode owns the pointer so a drag can orbit the stack, but the
+    /// tweaker's panel occupies a fixed band and has to stay clickable. A
+    /// press that lands inside this rect is never consumed — it flows to the
+    /// app exactly as it would with the mode off. Call it with the panel's
+    /// band each time the panel draws, and `None` when it closes.
+    pub fn sploded_set_flat_band(&mut self, band: Option<Rect>) {
+        self.sploded.flat_band = band;
+    }
+
+    /// Map a screen point back onto the plane at nesting level `level`, for a
+    /// window of `size`. `None` while the mode is off, in which case the
+    /// caller's ordinary 2D point is already correct.
+    ///
+    /// The ray pick: walk levels from `sploded_max_level()` down to 0, call
+    /// this for each, and hit-test the widgets whose nesting depth equals that
+    /// level against their normal `Area::rect()`s. First hit wins — clicking a
+    /// covered parent's exposed frame selects the PARENT.
+    pub fn sploded_unproject(&self, size: Vec2d, screen: Vec2d, level: f32) -> Option<Vec2d> {
+        if !self.sploded.active {
+            return None;
+        }
+        Some(
+            self.sploded
+                .params(size)
+                .unproject(dvec2(0.0, 0.0), size, screen, level),
+        )
+    }
+
+    /// Deepest nesting level in the last draw — where a ray pick starts.
+    pub fn sploded_max_level(&self) -> usize {
+        self.nesting_depth_max
+    }
+
+    fn sploded_in_flat_band(&self, abs: Vec2d) -> bool {
+        self.sploded
+            .flat_band
+            .map(|b| b.contains(abs))
+            .unwrap_or(false)
     }
 
     /// First stop for every event. Returns true when the event was consumed
@@ -371,6 +461,8 @@ impl Cx {
                 if !self.sploded.active {
                     return false;
                 }
+                // Only the mode's own keys are claimed; the rest reach the app
+                // so the panel stays usable while the stack is exploded.
                 match e.key_code {
                     KeyCode::Escape => self.sploded_set_active(false),
                     KeyCode::Equals | KeyCode::NumpadAdd => {
@@ -406,13 +498,15 @@ impl Cx {
                         self.sploded.hairlines = !self.sploded.hairlines;
                         self.sploded_sync();
                     }
-                    _ => {}
+                    _ => return false,
                 }
                 true
             }
-            Event::KeyUp(_) | Event::TextInput(_) => self.sploded.active,
+            // Keys the mode does not claim reach the app: the panel's fields
+            // stay typeable while the stack is exploded.
+            Event::KeyUp(_) | Event::TextInput(_) => false,
             Event::MouseDown(e) => {
-                if !self.sploded.active {
+                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
                     return false;
                 }
                 self.sploded.drag = Some(SplodedDrag {
@@ -423,28 +517,27 @@ impl Cx {
                 true
             }
             Event::MouseMove(e) => {
-                if !self.sploded.active {
+                // Only a drag in progress belongs to the mode. Plain motion
+                // flows on, so hover states and tooltips still work.
+                let Some(drag) = self.sploded.drag else {
                     return false;
-                }
-                if let Some(drag) = self.sploded.drag {
-                    let d = e.abs - drag.start;
-                    self.sploded.yaw = (drag.yaw + d.x as f32 * DRAG_RADIANS_PER_PX)
-                        .clamp(-YAW_LIMIT, YAW_LIMIT);
-                    self.sploded.pitch = (drag.pitch + d.y as f32 * DRAG_RADIANS_PER_PX)
-                        .clamp(-PITCH_LIMIT, PITCH_LIMIT);
-                    self.sploded_sync();
-                }
+                };
+                let d = e.abs - drag.start;
+                self.sploded.yaw =
+                    (drag.yaw + d.x as f32 * DRAG_RADIANS_PER_PX).clamp(-YAW_LIMIT, YAW_LIMIT);
+                self.sploded.pitch =
+                    (drag.pitch + d.y as f32 * DRAG_RADIANS_PER_PX).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+                self.sploded_sync();
                 true
             }
             Event::MouseUp(_) => {
-                if !self.sploded.active {
+                if self.sploded.drag.take().is_none() {
                     return false;
                 }
-                self.sploded.drag = None;
                 true
             }
             Event::Scroll(e) => {
-                if !self.sploded.active {
+                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
                     return false;
                 }
                 self.sploded_set_spread(self.sploded.spread - e.scroll.y as f32 * 0.002);
@@ -586,6 +679,34 @@ mod tests {
                 (s - first).abs() < 1.0e-3,
                 "level {i} steps by {s}, expected the uniform {first}"
             );
+        }
+    }
+
+    /// The pick's inverse must land back exactly where the projection took a
+    /// point from, on every plane — that round trip IS the ray pick.
+    #[test]
+    fn unproject_inverts_the_projection() {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        for level in [0.0f32, 1.0, 4.0, 9.0] {
+            for p in [dvec2(10.0, 20.0), dvec2(600.0, 400.0), dvec2(1190.0, 790.0)] {
+                let projected = m.transform_vec4(vec4(
+                    p.x as f32,
+                    p.y as f32,
+                    level * SPLODED_DEPTH_UNIT,
+                    1.0,
+                ));
+                let back = params.unproject(
+                    offset,
+                    size,
+                    dvec2(projected.x as f64, projected.y as f64),
+                    level,
+                );
+                assert!(
+                    (back.x - p.x).abs() < 0.01 && (back.y - p.y).abs() < 0.01,
+                    "level {level}: {p:?} projected then un-projected to {back:?}"
+                );
+            }
         }
     }
 
