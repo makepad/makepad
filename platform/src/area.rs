@@ -283,6 +283,22 @@ impl Area {
     /// design pick on a paragraph used to fall through to its container.
     /// Rect areas and single instances answer exactly as `clipped_rect`.
     pub fn clipped_rect_union(&self, cx: &Cx) -> Rect {
+        self.clipped_rect_union_inner(cx, false)
+    }
+
+    /// The union rect ignoring the redraw-id freshness guard. Retained draw
+    /// lists (a Dock's tab strip, a cached content view) legitimately keep
+    /// last frame's instances while the global redraw id advances, so their
+    /// widgets' areas read one frame stale — `clipped_rect` then returns
+    /// zero even though the pixels are on screen. A caller that has already
+    /// confirmed the list is ATTACHED (visible this frame) wants the
+    /// geometry regardless; a hidden list is not attached, so this never
+    /// resurrects a stale rect for something off screen.
+    pub fn clipped_rect_union_attached(&self, cx: &Cx) -> Rect {
+        self.clipped_rect_union_inner(cx, true)
+    }
+
+    fn clipped_rect_union_inner(&self, cx: &Cx, ignore_redraw: bool) -> Rect {
         let Area::Instance(inst) = self else {
             return self.clipped_rect(cx);
         };
@@ -291,11 +307,8 @@ impl Area {
             // on screen", not a mark/sweep mistake worth logging.
             return Rect::default();
         }
-        if inst.instance_count == 1 {
-            return self.clipped_rect(cx);
-        }
         let draw_list = &cx.draw_lists[inst.draw_list_id];
-        if draw_list.redraw_id != inst.redraw_id {
+        if !ignore_redraw && draw_list.redraw_id != inst.redraw_id {
             return Rect::default();
         }
         let draw_item = &draw_list.draw_items[inst.draw_item_id];
