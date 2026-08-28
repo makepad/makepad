@@ -1444,8 +1444,13 @@ public class MakepadActivity
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        super.onBackPressed();
+        // Let Rust decide: in-app back (player / folder / overlay) or finish.
+        // Calling super here would finish the Activity before the app can handle it.
         MakepadNative.onBackPressed();
+    }
+
+    public void finishIfBackUnhandled() {
+        runOnUiThread(this::finish);
     }
 
     @Override
@@ -1536,6 +1541,42 @@ public class MakepadActivity
                 @Override
                 public void run() {
                     applyFullScreen(fullscreen);
+                }
+            });
+    }
+
+    public void setScreenOrientation(final int orientation) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    setRequestedOrientation(orientation);
+                }
+            });
+    }
+
+    /// Keep the display on while video is playing. Must run on the UI thread:
+    /// `Window.addFlags` / `View.setKeepScreenOn` from the Makepad native
+    /// thread are ignored or throw. Also sets the SurfaceView — that is the
+    /// view Android uses for the timeout when FLAG_KEEP_SCREEN_ON is not enough.
+    public void setKeepScreenOnEnabled(final boolean on) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Window window = getWindow();
+                    if (window != null) {
+                        if (on) {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                        } else {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                        }
+                        View decor = window.getDecorView();
+                        if (decor != null) {
+                            decor.setKeepScreenOn(on);
+                        }
+                    }
+                    if (view != null) {
+                        view.setKeepScreenOn(on);
+                    }
                 }
             });
     }

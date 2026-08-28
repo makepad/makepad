@@ -1393,6 +1393,16 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     );
 }
 
+pub unsafe fn to_java_set_screen_orientation(env: *mut jni_sys::JNIEnv, orientation: i32) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setScreenOrientation",
+        "(I)V",
+        orientation
+    );
+}
+
 pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_icons: bool) {
     ndk_utils::call_void_method!(
         env,
@@ -1421,6 +1431,11 @@ pub unsafe fn to_java_request_surface_snapshot_refresh() {
 
 pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
     ndk_utils::call_void_method!(env, get_activity(), "switchActivity", "()V");
+}
+
+pub unsafe fn to_java_finish_if_back_unhandled() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "finishIfBackUnhandled", "()V");
 }
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {

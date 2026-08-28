@@ -5,7 +5,7 @@ use {
         area::Area,
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType, XrCapabilities},
-        display_context::SystemBarAppearance,
+        display_context::{ScreenOrientation, SystemBarAppearance},
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
@@ -289,6 +289,8 @@ pub enum CxOsOp {
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
+    /// Lock or unlock screen orientation on mobile. Ignored on desktop.
+    SetScreenOrientation(ScreenOrientation),
 
     // The `Rect` is the caret/composition line's bounding box (top-left + size,
     // line height included), so each backend can ask the OS to place the IME
@@ -466,6 +468,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
+            Self::SetScreenOrientation(..) => write!(f, "SetScreenOrientation"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
@@ -968,6 +971,24 @@ impl Cx {
     /// event cycle.
     pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
         self.display_context.system_bar_appearance = appearance;
+    }
+
+    /// Lock (or unlock) screen orientation on Android and iOS. Desktop no-ops.
+    ///
+    /// The queue is LIFO, so multiple orientation ops in one frame would apply
+    /// in reverse. This replaces any pending `SetScreenOrientation` so only the
+    /// latest request is sent.
+    pub fn set_screen_orientation(&mut self, orientation: ScreenOrientation) {
+        self.display_context.screen_orientation = orientation;
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::SetScreenOrientation(_)));
+        self.platform_ops
+            .push(CxOsOp::SetScreenOrientation(orientation));
+    }
+
+    /// Last requested orientation lock (see [`Self::set_screen_orientation`]).
+    pub fn screen_orientation(&self) -> ScreenOrientation {
+        self.display_context.screen_orientation
     }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {

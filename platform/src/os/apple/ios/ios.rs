@@ -1542,6 +1542,9 @@ impl Cx {
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     IosApp::set_status_bar_dark_icons(dark_icons);
                 }
+                CxOsOp::SetScreenOrientation(orientation) => {
+                    IosApp::set_screen_orientation(orientation);
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
