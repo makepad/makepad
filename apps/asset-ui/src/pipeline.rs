@@ -1171,6 +1171,17 @@ impl Pipeline {
     /// Service job ids this run has in flight on `base_url` (linear stage
     /// + fan-out candidates) — lets the fleet panel tell "ours" from other
     /// clients' jobs.
+    /// The text a job of this pipeline was handed, by the box's own job id.
+    /// Lets a fleet-box view show WHAT a job it is running was asked for —
+    /// the box itself never reports the prompt back.
+    pub fn sent_prompt_for_job(&self, job_id: &str) -> Option<&str> {
+        self.stages
+            .iter()
+            .find(|stage| stage.job_id == job_id)
+            .map(|stage| stage.sent_prompt.as_str())
+            .filter(|text| !text.is_empty())
+    }
+
     pub fn job_ids_on(&self, base_url: &str) -> Vec<String> {
         let mut ids: Vec<String> = self
             .candidate_sets
