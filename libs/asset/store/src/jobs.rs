@@ -120,6 +120,16 @@ pub struct ClaimedJob {
     pub lease_expires_ms: u64,
 }
 
+/// Jobs of one kind, counted by state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobCounts {
+    pub pending: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttemptRow {
     pub attempt: u32,
@@ -531,6 +541,99 @@ impl<'a> Jobs<'a> {
     }
 
     // ---- queries -----------------------------------------------------------
+
+    /// Put a TERMINAL job back in the queue, with a fresh payload and a
+    /// fresh allowance of attempts. `Ok(false)` = the job is still pending
+    /// or running, so it is already queued and nothing was touched.
+    ///
+    /// This exists because a job id may be DERIVED from what it is about
+    /// rather than minted at random (see the annotation queue): derived ids
+    /// make "enqueue twice" a free no-op, but without a way back a
+    /// succeeded job becomes a tombstone that blocks the same work for
+    /// ever — and the work does come back, when whatever the job produced
+    /// is overwritten.
+    ///
+    /// Attempt history is KEPT: `attempts_used` is not reset, the ceiling
+    /// is raised past it, so `job_attempts` stays a truthful record and the
+    /// next claim numbers its attempt after the last one.
+    pub fn requeue(
+        &self,
+        job_id: &JobId,
+        payload: &[u8],
+        extra_attempts: u32,
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        if payload.len() as u64 > self.budgets.max_job_payload_bytes {
+            return Err(ServerError::OverBudget {
+                what: "job payload",
+                limit: self.budgets.max_job_payload_bytes,
+                found: payload.len() as u64,
+            });
+        }
+        self.db.tx(|db| {
+            let mut s = db.prepare(
+                "requeue read",
+                "SELECT state, attempts_used FROM jobs WHERE job_id=?1",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            if !s.step()? {
+                return Err(ServerError::NotFound { what: "job" });
+            }
+            let state = JobState::parse(&s.column_text(0)).ok_or(ServerError::InvalidState {
+                what: "job row",
+                state: "unknown state",
+            })?;
+            let used = s.column_u64(1);
+            drop(s);
+            if !state.is_terminal() {
+                return Ok(false);
+            }
+            let mut s = db.prepare(
+                "requeue job",
+                "UPDATE jobs SET state='pending', payload=?2, not_before_ms=0,
+                        max_attempts=?3, updated_ms=?4
+                 WHERE job_id=?1",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, payload)?;
+            s.bind_u64(3, used.saturating_add(extra_attempts.max(1) as u64))?;
+            s.bind_u64(4, now_ms)?;
+            s.run()?;
+            drop(s);
+            // A terminal job holds no live lease, but a stale row would let
+            // the next heartbeat land on the wrong attempt.
+            let mut s = db.prepare("requeue drop lease", "DELETE FROM job_leases WHERE job_id=?1")?;
+            s.bind_blob(1, &job_id.0)?;
+            s.run()?;
+            Ok(true)
+        })
+    }
+
+    /// How many jobs of one kind sit in each state.
+    ///
+    /// One grouped read, so an operator bar ("312 done, 18 running, 3693
+    /// queued") costs a single query instead of listing thousands of jobs
+    /// a page at a time.
+    pub fn count_by_state(&self, kind: &str) -> ServerResult<JobCounts> {
+        let mut s = self.db.prepare(
+            "job counts",
+            "SELECT state, COUNT(*) FROM jobs WHERE kind = ?1 GROUP BY state",
+        )?;
+        s.bind_text(1, kind)?;
+        let mut c = JobCounts::default();
+        while s.step()? {
+            let n = s.column_u64(1);
+            match JobState::parse(&s.column_text(0)) {
+                Some(JobState::Pending) => c.pending = n,
+                Some(JobState::Running) => c.running = n,
+                Some(JobState::Succeeded) => c.succeeded = n,
+                Some(JobState::Failed) => c.failed = n,
+                Some(JobState::Cancelled) => c.cancelled = n,
+                None => {}
+            }
+        }
+        Ok(c)
+    }
 
     pub fn state(&self, job_id: &JobId) -> ServerResult<Option<JobState>> {
         let mut s = self

@@ -68,7 +68,8 @@ pub use discovery::{
 };
 pub use dto::{
     ChatProviderLocality,
-    AliasDto, AliasStatusDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
+    AliasDto, AliasStatusDto, AnnotateBacklogDto, AnnotateSummaryDto, AnnotationDto,
+    AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
     CatalogEventDto,
     CatalogEventKind, CatalogFacet, CatalogHit, ClaimedJobDto, EventsPageDto, FacetKind,
     ModelPreviewDto, ModelPreviewPartDto, ModelPreviewRenameDto,

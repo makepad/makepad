@@ -41,6 +41,7 @@
 pub use makepad_widgets;
 
 mod analysis;
+mod annotate_queue;
 mod artifact_io;
 mod asset_store_state;
 mod audio;
@@ -70,6 +71,7 @@ use crate::artifact_io::{
     ViewerOpenGate,
 };
 use crate::fleet_poll::FleetPoll;
+use crate::annotate_queue::AnnotateQueue;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
 use crate::music_page::MusicImportPage;
@@ -2299,6 +2301,17 @@ script_mod! {
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
+                            // How much of the catalog an AI can actually
+                            // find by asking for it. Visible from every
+                            // surface, because it is a property of the
+                            // store, not of whichever page is open.
+                            annotation_chip := Label{
+                                text: ""
+                                draw_text +: {
+                                    color: #x6a7178
+                                    text_style: theme.font_bold{font_size: 7}
+                                }
+                            }
                         }
 
                         // Everything below the nav flips between the surfaces.
@@ -3006,8 +3019,11 @@ script_mod! {
                                             HintLabel{ text: "CC BY 4.0 · attribution required" }
                                             LinkLabel{ text: "Terms" url: "https://creativecommons.org/licenses/by/4.0/" }
                                             kenney_pack_drop := FieldDrop2{ width: 180 }
+                                            kenney_annotate_btn := GhostButton{ text: "Annotate" }
+                                            kenney_annotate_all_btn := GhostButton{ text: "Annotate all" }
                                         }
                                         HintLabel{ text: "© Kenney (kenney.nl). Attribution required on every copy and derivative. Not CC0. Local kits only — this card does not download Kenney." }
+                                        HintLabel{ text: "Annotate queues this kit's turntable sheets for the vision model, which writes the descriptions catalog search hits. A publish queues its own — these buttons are for what is already in." }
                                     }
 
                                     freedoom_card := ImportRow{
@@ -3203,6 +3219,45 @@ script_mod! {
                         }
                     }
 
+                    }
+                    kenney_donate_modal := Modal{
+                        can_dismiss: true
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                BrightLabel{
+                                    text: "Consider donating to Kenney"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: "These kits are free (CC BY 4.0) and made by one person. If they end up in your game, a donation keeps them coming."
+                                }
+                                LinkLabel{ text: "kenney.nl/donate" url: "https://kenney.nl/donate" }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    kenney_donate_cancel := ChipButton{ text: "Cancel" }
+                                    kenney_donate_ok := PrimaryButton{ text: "Import" }
+                                }
+                            }
+                        }
                     }
                     license_modal := Modal{
                         can_dismiss: false
@@ -3880,6 +3935,9 @@ pub struct App {
     /// Box base_url shown in the fleet box popup + its row → model map.
     #[rust]
     fleet_modal_box: Option<String>,
+    /// Kenney Load / Load all waiting on the "consider donating" popup's OK.
+    #[rust]
+    kenney_donate_pending: Option<ImportJob>,
     #[rust]
     fleet_modal_models: Vec<String>,
     /// Job ids per jobs row in the node column (for Cancel).
@@ -3947,6 +4005,11 @@ pub struct App {
     /// One running import plus a user-editable wait list.
     #[rust]
     import_queue: ImportQueue,
+    /// The store's vision-annotation queue: this app hosts its worker and
+    /// draws its progress. An asset published without a description is
+    /// invisible to every text search the AI level builder makes.
+    #[rust]
+    annotate_queue: AnnotateQueue,
     /// Landings waiting to be written a few at a time so the UI stays live.
     #[rust]
     import_landings: Vec<crate::import::LibraryLanding>,
@@ -4565,6 +4628,15 @@ impl App {
             }
         }
         ids
+    }
+
+    /// Kenney kits are free: every Load / Load all first asks for a donation
+    /// (kenney.nl/donate). OK queues the held job, Cancel/dismiss drops it.
+    fn open_kenney_donate_modal(&mut self, cx: &mut Cx, job: ImportJob) {
+        let label = if matches!(job, ImportJob::KenneyAll) { "Import all" } else { "Import" };
+        self.ui.button(cx, ids!(kenney_donate_ok)).set_text(cx, label);
+        self.kenney_donate_pending = Some(job);
+        self.ui.modal(cx, ids!(kenney_donate_modal)).open(cx);
     }
 
     fn open_license_modal(&mut self, cx: &mut Cx, prompt: LicensePrompt) {
@@ -11540,6 +11612,19 @@ impl App {
                 cancel: RowAction::RemoveQueuedImport(item.id),
             });
         }
+        // The annotation queue is the store's, not this window's: it gets
+        // its own row for the same reason the analysis bake below does —
+        // the work outlives the import that queued it, and an operator
+        // watching a load wants to see the descriptions arriving too.
+        if self.annotate_queue.has_work() {
+            rows.push(StoreRow::Stage {
+                title: "Annotation".into(),
+                meta: self.annotate_queue.status_line(),
+                progress: self.annotate_queue.progress_fraction(),
+                failed: self.annotate_queue.error.is_some(),
+                cancel: None,
+            });
+        }
         // The analysis bake is its own lane beside the imports: it outlives
         // the run that queued it (a 200-track import publishes long before
         // the first track is separated), so it gets its own row with its own
@@ -11822,6 +11907,35 @@ impl App {
                 self.refresh_import_ui(cx);
             }
         }
+    }
+
+    /// Host the annotation worker as soon as there is a server to talk to.
+    ///
+    /// The same shape as the generation job loop: this process runs the
+    /// store, so this process drains the store's queues. A deployment that
+    /// wants the vision work elsewhere runs
+    /// `makepad-asset-annotate --worker` on that box instead — same loop,
+    /// same claim, and this one simply finds an empty queue.
+    fn maybe_start_annotate_queue(&mut self) {
+        if self.annotate_queue.running() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        // Scratch and client cache beside THIS instance's store root, never
+        // at a fixed repo path: a second instance on an isolated root must
+        // not write its sheets into the operator's.
+        let home = crate::asset_store_state::default_asset_server_root()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(crate::asset_store_state::asset_ui_home);
+        self.annotate_queue.start(
+            session.endpoints,
+            Some(session.server_id),
+            session.token,
+            home,
+        );
     }
 
     fn import_server_session(&self) -> Option<crate::import::ServerSession> {
@@ -12781,8 +12895,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(kenney_import_btn)).clicked(actions) {
             let (pack, _) = self.import_page.selected_pack_id();
-            log!("import: queue Kenney {pack}");
-            self.enqueue_import(
+            self.open_kenney_donate_modal(
                 cx,
                 ImportJob::Kenney {
                     pack,
@@ -12792,8 +12905,44 @@ impl MatchEvent for App {
             );
         }
         if self.ui.button(cx, ids!(kenney_import_all_btn)).clicked(actions) {
-            log!("import: queue Kenney all");
-            self.enqueue_import(cx, ImportJob::KenneyAll);
+            self.open_kenney_donate_modal(cx, ImportJob::KenneyAll);
+        }
+        // No donate prompt on these two: they load nothing from Kenney,
+        // they ask the SERVER to queue descriptions for what is already in
+        // the catalog. One request each — the queue outlives this window.
+        if self.ui.button(cx, ids!(kenney_annotate_btn)).clicked(actions) {
+            let (kit, _) = self.import_page.selected_pack_id();
+            log!("annotate: sweeping {kit} into the queue");
+            self.annotate_queue.sweep(Some(kit));
+            self.refresh_import_ui(cx);
+        }
+        if self.ui.button(cx, ids!(kenney_annotate_all_btn)).clicked(actions) {
+            log!("annotate: sweeping the whole catalog into the queue");
+            self.annotate_queue.sweep(None);
+            self.refresh_import_ui(cx);
+        }
+        let donate_modal = self.ui.modal(cx, ids!(kenney_donate_modal));
+        if self.ui.button(cx, ids!(kenney_donate_ok)).clicked(actions) {
+            donate_modal.close(cx);
+            match self.kenney_donate_pending.take() {
+                Some(ImportJob::Kenney { pack, pack_index, path }) => {
+                    log!("import: queue Kenney {pack}");
+                    self.enqueue_import(cx, ImportJob::Kenney { pack, pack_index, path });
+                }
+                Some(job) => {
+                    log!("import: queue Kenney all");
+                    self.enqueue_import(cx, job);
+                }
+                None => {}
+            }
+        }
+        if self.ui.button(cx, ids!(kenney_donate_cancel)).clicked(actions)
+            || donate_modal.dismissed(actions)
+        {
+            if self.kenney_donate_pending.take().is_some() {
+                log!("import: Kenney load cancelled at the donate prompt");
+            }
+            donate_modal.close(cx);
         }
         if self.ui.button(cx, ids!(queue_clear_btn)).clicked(actions) {
             self.import_queue.clear_pending();
@@ -14085,6 +14234,16 @@ impl AppMain for App {
                 }
             }
             self.maybe_open_gc_confirm(cx);
+            self.maybe_start_annotate_queue();
+            let annotate_poll = self.annotate_queue.poll();
+            if annotate_poll {
+                self.ui
+                    .label(cx, ids!(annotation_chip))
+                    .set_text(cx, &self.annotate_queue.chip());
+                if self.surface == Surface::Import {
+                    self.refresh_import_ui(cx);
+                }
+            }
             let kenney_poll = self.import_page.poll();
             let classic_poll = self.classic_import_page.poll();
             let music_poll = self.music_import_page.poll();

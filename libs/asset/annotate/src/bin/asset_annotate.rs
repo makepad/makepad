@@ -14,19 +14,18 @@
 //! the model moves from Metal-local to the CUDA fleet: point `--executor` at a
 //! different program and bump `--version`.
 
+use makepad_asset_annotate::pass::{self, SheetPrep};
 use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
 use makepad_asset_annotate::{
-    needs_annotation, parse_record, plan_upload, sheet, ANNOTATOR_VERSION, PROMPT, PROMPT_PERSON,
+    executor, needs_annotation, parse_record, plan_upload, worker, ANNOTATOR_VERSION,
 };
 use makepad_asset_client::api::{AnnotationUpload, Api, ApiEndpoints};
 use makepad_asset_client::http::HttpLimits;
 use makepad_asset_data::{AssetId, AssetKind};
 use makepad_sqlite::{Database, Value};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const DEFAULT_STORE: &str = "local/asset-ui/asset-server";
 
@@ -51,6 +50,19 @@ struct Config {
     set_kind: Option<String>,
     verify: bool,
     wipe: bool,
+    /// Print `<kit>\t<live>\t<needing>` for every kit of `source` and exit.
+    /// The asset-ui import queue's "Annotate all" reads this instead of
+    /// linking a SQL engine of its own.
+    list_kits: bool,
+    /// The collection label whose kits are listed (`kenney`).
+    source: String,
+    /// Drain the store's `annotate.asset` job queue instead of running one
+    /// filtered pass. This is the mode that matters: the queue is central,
+    /// the server fills it on every publish, and nobody has to remember to
+    /// run anything.
+    worker: bool,
+    /// Sheets per executor invocation in worker mode.
+    batch: usize,
 }
 
 fn usage() -> ! {
@@ -73,6 +85,10 @@ fn usage() -> ! {
   --dry-run           do everything except the publish
   --verify-nondestructive  snapshot the import, wipe+redo, prove it untouched
   --wipe              remove this pass's tags and clear its descriptions
+  --worker            drain the store's annotate.asset job queue and stay
+  --batch N           sheets per executor invocation in --worker (default 16)
+  --list-kits         print `<kit>\\t<live>\\t<needing>` per kit and exit
+  --source LABEL      collection label --list-kits groups under (default kenney)
 "
     );
     std::process::exit(2)
@@ -97,6 +113,10 @@ fn parse_config() -> Config {
         set_kind: None,
         verify: false,
         wipe: false,
+        list_kits: false,
+        source: "kenney".to_string(),
+        worker: false,
+        batch: 16,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -125,6 +145,10 @@ fn parse_config() -> Config {
             "--set-kind" => c.set_kind = Some(next(&mut i)),
             "--verify-nondestructive" => c.verify = true,
             "--wipe" => c.wipe = true,
+            "--worker" => c.worker = true,
+            "--batch" => c.batch = next(&mut i).parse().unwrap_or_else(|_| usage()),
+            "--list-kits" => c.list_kits = true,
+            "--source" => c.source = next(&mut i),
             "--executor" => {
                 c.executor = args[i + 1..].to_vec();
                 if c.executor.is_empty() {
@@ -180,27 +204,47 @@ fn open_catalog(store: &Path) -> Result<Database, String> {
     Ok(db)
 }
 
-/// Load candidates plus their current annotation and tag set.
-fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, String> {
-    let filter = if !cfg.aliases.is_empty() {
-        let list = cfg
-            .aliases
+/// The WHERE clause selecting the pass's working set.
+///
+/// The filters AND together. They used to be an if/else ladder, which made
+/// "the characters of the mini-dungeon kit" inexpressible — and that is
+/// exactly the second pass every kit needs (`--kit X --kind character
+/// --person`), so the on-import job could not have been written without it.
+/// `--alias` stays absolute: naming assets by alias means those assets and
+/// nothing else.
+fn candidate_filter(
+    aliases: &[String],
+    kit: Option<&str>,
+    kind: Option<&str>,
+) -> Result<String, String> {
+    if !aliases.is_empty() {
+        let list = aliases
             .iter()
             .map(|a| format!("'{}'", a.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(",");
-        format!("a.canon_alias IN ({list})")
-    } else if let Some(kit) = &cfg.kit {
-        format!(
+        return Ok(format!("a.canon_alias IN ({list})"));
+    }
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(kit) = kit {
+        clauses.push(format!(
             "EXISTS (SELECT 1 FROM search_labels l WHERE l.asset_id = a.asset_id \
              AND l.kind = 'category' AND l.label = '{}')",
             kit.replace('\'', "''")
-        )
-    } else if let Some(kind) = &cfg.kind {
-        format!("a.kind = '{}'", kind.replace('\'', "''"))
-    } else {
+        ));
+    }
+    if let Some(kind) = kind {
+        clauses.push(format!("a.kind = '{}'", kind.replace('\'', "''")));
+    }
+    if clauses.is_empty() {
         return Err("need --kit, --kind or --alias".to_string());
-    };
+    }
+    Ok(clauses.join(" AND "))
+}
+
+/// Load candidates plus their current annotation and tag set.
+fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, String> {
+    let filter = candidate_filter(&cfg.aliases, cfg.kit.as_deref(), cfg.kind.as_deref())?;
     let sql = format!(
         "SELECT hex(a.asset_id), a.canon_alias, a.title, a.description, a.kind, \
                 a.creator, a.generator, a.backend, a.model, a.prompt, a.provenance, a.visibility \
@@ -249,6 +293,57 @@ fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, St
     Ok(out)
 }
 
+/// Every kit of `source` with its live-asset count and how many of those
+/// still need this annotator version.
+///
+/// Three flat queries and the intersection in Rust rather than one grouped
+/// join: the catalog engine here is our own, and the pass has no business
+/// being the first caller to need GROUP BY.
+fn list_kits(db: &mut Database, cfg: &Config) -> Result<(), String> {
+    let live: std::collections::BTreeSet<String> = rows(
+        db,
+        "SELECT hex(asset_id) FROM search_annotations WHERE live = 1 AND canon_alias <> ''",
+    )?
+    .iter()
+    .map(|r| text(&r[0]))
+    .collect();
+    let done: std::collections::BTreeSet<String> = rows(
+        db,
+        &format!(
+            "SELECT hex(asset_id) FROM search_labels WHERE kind = 'tag' AND label = 'vlm-v{}'",
+            cfg.version
+        ),
+    )?
+    .iter()
+    .map(|r| text(&r[0]))
+    .collect();
+    let mut by_asset: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in rows(db, "SELECT hex(asset_id), label FROM search_labels WHERE kind = 'category'")? {
+        let id = text(&r[0]);
+        if !live.contains(&id) {
+            continue;
+        }
+        by_asset.entry(id).or_default().push(text(&r[1]));
+    }
+    let mut kits: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for (id, labels) in &by_asset {
+        if !labels.iter().any(|l| l == &cfg.source) {
+            continue;
+        }
+        for label in labels.iter().filter(|l| *l != &cfg.source) {
+            let e = kits.entry(label.clone()).or_insert((0, 0));
+            e.0 += 1;
+            if !done.contains(id) {
+                e.1 += 1;
+            }
+        }
+    }
+    for (kit, (total, need)) in kits {
+        println!("{kit}\t{total}\t{need}");
+    }
+    Ok(())
+}
+
 fn read_listen(store: &Path) -> Result<(SocketAddr, SocketAddr), String> {
     let raw = std::fs::read_to_string(store.join("listen"))
         .map_err(|e| format!("read listen: {e}"))?;
@@ -265,37 +360,6 @@ fn read_listen(store: &Path) -> Result<(SocketAddr, SocketAddr), String> {
     Ok((control, data))
 }
 
-/// Minimal GET for the data plane's thumbnail route, which the asset client
-/// does not wrap. Localhost, one request per connection, bounded read.
-fn http_get(addr: SocketAddr, path: &str, token: &str) -> Result<Vec<u8>, String> {
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|e| format!("connect {addr}: {e}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    s.set_write_timeout(Some(Duration::from_secs(30))).ok();
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\n\
-         Accept: */*\r\nConnection: close\r\n\r\n"
-    );
-    s.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
-    let mut buf = Vec::new();
-    s.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
-    let split = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("no header terminator")?;
-    let head = String::from_utf8_lossy(&buf[..split]).to_string();
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse::<u16>().ok())
-        .ok_or("no status line")?;
-    if status != 200 {
-        return Err(format!("HTTP {status} for {path}"));
-    }
-    Ok(buf[split + 4..].to_vec())
-}
-
 // ---- the pass --------------------------------------------------------------
 
 fn main() {
@@ -307,6 +371,11 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cfg = parse_config();
+    if cfg.list_kits {
+        // No server, no token: listing is a read of the catalog file.
+        let mut db = open_catalog(&cfg.store)?;
+        return list_kits(&mut db, &cfg);
+    }
     let token = std::fs::read_to_string(cfg.store.join("admin-token"))
         .map_err(|e| format!("read admin-token: {e}"))?
         .trim()
@@ -318,6 +387,9 @@ fn run() -> Result<(), String> {
         Some(token.clone()),
     )
     .map_err(|e| format!("api: {e:?}"))?;
+    if cfg.worker {
+        return run_worker(&cfg, token, control, data);
+    }
     let annotator = Annotator { version: cfg.version, model: cfg.model_tag.clone() };
     let mut db = open_catalog(&cfg.store)?;
 
@@ -374,6 +446,59 @@ fn run() -> Result<(), String> {
         published += 1;
     }
     println!("published {published}, skipped {skipped}");
+    Ok(())
+}
+
+/// `--worker`: claim, annotate, publish, repeat, until killed.
+///
+/// The executor is `--executor` when the operator pinned one, else the
+/// standard ladder (env override, then the fleet box, then this machine's
+/// Metal tower) — so a worker started with no flags at all still picks the
+/// best model actually present.
+fn run_worker(
+    cfg: &Config,
+    token: String,
+    control: SocketAddr,
+    data: SocketAddr,
+) -> Result<(), String> {
+    let (executor, model_tag) = if cfg.executor.is_empty() {
+        let repo = std::env::var("MAKEPAD_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| repo.join("target/release"));
+        let choice = executor::choose_real(&executor::ExecutorEnv::from_env(repo, exe_dir))?;
+        let tag = choice.model_tag.clone();
+        (choice, tag)
+    } else {
+        (
+            executor::ExecutorChoice {
+                argv: cfg.executor.clone(),
+                model_tag: cfg.model_tag.clone(),
+                source: "flag".to_string(),
+            },
+            cfg.model_tag.clone(),
+        )
+    };
+    let _ = model_tag;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let wcfg = worker::WorkerConfig {
+        endpoints: ApiEndpoints { control, data },
+        server_id: None,
+        token,
+        cache_root: cfg.work.join("worker"),
+        work: cfg.work.join("worker-batch"),
+        data,
+        executor,
+        batch: cfg.batch.max(1),
+        suffix: "annotate".to_string(),
+        version: cfg.version,
+        prep: SheetPrep { sheet_size: cfg.sheet_size, exposure: cfg.exposure },
+        log: true,
+    };
+    worker::run(&wcfg, &stop);
     Ok(())
 }
 
@@ -436,6 +561,11 @@ fn put(
 }
 
 /// Fetch sheets, write the batch files, run the executor, collect replies.
+///
+/// Every step here is [`makepad_asset_annotate::pass`] and
+/// [`makepad_asset_annotate::executor`] — the same code the queue worker
+/// runs — so an operator run and a queued run cannot describe the same
+/// asset differently.
 fn run_executor(
     cfg: &Config,
     _api: &Api,
@@ -448,131 +578,46 @@ fn run_executor(
     }
     let sheets = cfg.work.join("sheets");
     std::fs::create_dir_all(&sheets).map_err(|e| format!("mkdir {}: {e}", sheets.display()))?;
+    let prep = SheetPrep { sheet_size: cfg.sheet_size, exposure: cfg.exposure };
 
     let mut jobs = String::new();
     for c in todo {
-        let png = http_get(data, &format!("/v1/thumbnails/alias/{}", c.alias), token)?;
-        let mut img = sheet::decode_png(&png)?;
-        // People are small in their cells; zoom each view onto the subject
-        // so the tower's patch budget lands on the person, not the empty
-        // background. Kit pieces keep their true in-cell size (it feeds the
-        // size line).
-        if cfg.person {
-            img = sheet::zoom_to_subject(&img, 4, 0.15);
-        }
-        // Lift before downscaling: the box filter then averages corrected
-        // values rather than correcting an already-averaged shadow.
-        sheet::lift_exposure(&mut img, cfg.exposure);
-        let small = sheet::downscale(&img, cfg.sheet_size);
+        let png = pass::thumbnail_sheet(data, token, &c.alias)?;
+        let ppm = pass::sheet_to_ppm(&png, cfg.person, &prep)?;
         let path = sheets.join(format!("{}.ppm", c.asset_hex));
-        std::fs::write(&path, sheet::to_ppm(&small))
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
-        // The asset's own name and kit are metadata we already hold, and
-        // withholding them only makes the model guess: an upright grey slab
-        // reads as a book until you know the kit calls it "wall". The image
-        // still decides everything the name cannot say — colour, orientation,
-        // how it connects — which is the whole point of the pass.
-        let (kit, name) = c.alias.rsplit_once('/').unwrap_or(("", c.alias.as_str()));
-        let kit = kit.rsplit('/').next().unwrap_or("");
-        if cfg.person {
-            // Person framing: the SET name is context, but the questions are
-            // about the person. No construction-kit talk — a character does
-            // not snap onto a grid, and the grid frame biases the answers
-            // toward objects.
-            let set_frame = if kit.is_empty() {
-                String::new()
-            } else {
-                format!(" It comes from the Kenney \"{kit}\" set.")
-            };
-            jobs.push_str(&format!(
-                "{}\t{}\tThe set calls this character \"{}\".{} Describe the PERSON you see; trust the images over the name where they disagree.\n",
-                c.asset_hex,
-                path.display(),
-                name,
-                set_frame,
-            ));
-            continue;
-        }
-        // Kit-level context beside the piece name: without the frame a wall
-        // panel reads as "a book"; with it the model knows pieces snap on a
-        // grid and names them in kit terms. The images still decide
-        // everything the name cannot say.
-        let kit_frame = if kit.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " It is a game asset from the Kenney \"{kit}\" set, a low-poly \
-                 modular construction kit whose pieces snap together on a grid."
-            )
-        };
-        jobs.push_str(&format!(
-            "{}\t{}\tThe kit calls this piece \"{}\".{} Trust the images over the name where they disagree.\n",
-            c.asset_hex,
-            path.display(),
-            name,
-            kit_frame,
+        std::fs::write(&path, ppm).map_err(|e| format!("write {}: {e}", path.display()))?;
+        jobs.push_str(&pass::job_line(
+            &c.asset_hex,
+            &path,
+            &pass::context_line(&c.alias, cfg.person),
         ));
     }
     let jobs_path = cfg.work.join("jobs.tsv");
     let prompt_path = cfg.work.join("prompt.txt");
     let out_path = cfg.work.join("replies.tsv");
     std::fs::write(&jobs_path, &jobs).map_err(|e| format!("write jobs: {e}"))?;
-    let prompt = if cfg.person { PROMPT_PERSON } else { PROMPT };
-    std::fs::write(&prompt_path, prompt).map_err(|e| format!("write prompt: {e}"))?;
-    let _ = std::fs::remove_file(&out_path);
+    std::fs::write(&prompt_path, pass::prompt_for(cfg.person))
+        .map_err(|e| format!("write prompt: {e}"))?;
 
     println!("running executor over {} sheets...", todo.len());
-    let status = std::process::Command::new(&cfg.executor[0])
-        .args(&cfg.executor[1..])
-        .arg("--jobs")
-        .arg(&jobs_path)
-        .arg("--prompt-file")
-        .arg(&prompt_path)
-        .arg("--out")
-        .arg(&out_path)
-        .status()
-        .map_err(|e| format!("spawn executor: {e}"))?;
-    if !status.success() {
-        eprintln!("executor exited with {status}; using whatever it wrote");
-    }
-
-    let text = std::fs::read_to_string(&out_path).map_err(|e| format!("read replies: {e}"))?;
-    let mut out = BTreeMap::new();
-    for line in text.lines() {
-        let mut it = line.splitn(3, '\t');
-        let (Some(id), Some(status), Some(payload)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        if status != "ok" {
-            eprintln!("  executor error for {id}: {payload}");
-            continue;
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let mut on_line = |line: &str, _parsed: executor::ExecutorLine| {
+        if !line.trim().is_empty() {
+            eprintln!("{}", line.trim());
         }
-        out.insert(id.to_string(), unescape(payload));
+    };
+    let replies = executor::run_batch(
+        &cfg.executor,
+        &jobs_path,
+        &prompt_path,
+        &out_path,
+        &never,
+        &mut on_line,
+    )?;
+    for (id, why) in &replies.err {
+        eprintln!("  executor error for {id}: {why}");
     }
-    Ok(out)
-}
-
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
+    Ok(replies.ok)
 }
 
 /// Clear the pass's own footprint: drop every `vlm-` tag and blank the

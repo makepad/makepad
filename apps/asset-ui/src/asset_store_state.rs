@@ -1453,7 +1453,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn checkout_root() -> PathBuf {
+pub(crate) fn checkout_root() -> PathBuf {
     if let Ok(root) = std::env::var("MAKEPAD_ROOT") {
         return PathBuf::from(root);
     }
