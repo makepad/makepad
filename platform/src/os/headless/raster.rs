@@ -1215,6 +1215,8 @@ impl Cx {
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        // Exploded z-layer view: z is the call's nesting depth, not paint order.
+        let sploded = self.passes[draw_pass_id].sploded.is_some();
 
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
@@ -1255,7 +1257,7 @@ impl Cx {
                 if let CxDrawKind::DrawCall(dc) =
                     &mut self.draw_lists[draw_list_id].draw_items[draw_item_id].kind
                 {
-                    dc.draw_call_uniforms.set_zbias(current_zbias);
+                    dc.resolve_zbias(current_zbias, sploded);
                 }
             }
             *zbias += zbias_step;
