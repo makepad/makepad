@@ -212,6 +212,150 @@ fn hierarchical_cancel_and_doomed_dependents() {
     assert_eq!(r.status, 409, "report after cancel must lose the lease");
 }
 
+/// The pipeline primitive: a job enqueued UP FRONT with `deps` and
+/// stage-input references gets its dependency's recorded result spliced
+/// into its body at claim time — top level and nested — so a whole
+/// expand → image → video chain can be enqueued at once and advance with
+/// nobody watching.
+#[test]
+fn a_stage_reference_is_spliced_from_the_deps_result_at_claim() {
+    let (_ts, _admin, mut enqueuer, mut worker) = setup();
+
+    let image = enqueue(&mut enqueuer, "image.generate", vec![]);
+    let stage_ref = |job: &str, field: &str| {
+        jobj(vec![("$from", jstr(job)), ("field", jstr(field))])
+    };
+    // The video stage, enqueued BEFORE the image has run, referencing the
+    // revision the image job will publish — at top level and inside the
+    // named-inputs array (the `last_frame` shape the video kinds use).
+    let r = enqueuer.post_json(
+        "/v1/jobs",
+        &jobj(vec![
+            ("namespace", jstr("demo")),
+            ("kind", jstr("video.generate")),
+            ("deps", Value::Arr(vec![jstr(image.clone())])),
+            ("body", jobj(vec![
+                ("prompt", jstr("animate it")),
+                ("source_revision", stage_ref(&image, "revision")),
+                ("inputs", Value::Arr(vec![jobj(vec![
+                    ("name", jstr("last_frame")),
+                    ("source_revision", stage_ref(&image, "revision")),
+                ])])),
+            ])),
+        ]),
+    );
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    let video = r.str_field("job");
+
+    // The image runs and records what it published.
+    let claimed = claim(&mut worker);
+    assert_eq!(claimed.get("job").unwrap().as_str(), Some(image.as_str()));
+    let r = worker.post_json(
+        "/v1/worker/succeed",
+        &jobj(vec![
+            ("job", jstr(image.clone())),
+            ("result", jobj(vec![("revision", jstr("arev_still7")), ("asset_id", jstr("ast_x"))])),
+        ]),
+    );
+    assert_eq!(r.status, 200);
+
+    // The video's claim carries the spliced body: the references are GONE,
+    // replaced by the dependency's recorded revision; untouched fields
+    // stay exactly as enqueued.
+    let claimed = claim(&mut worker);
+    assert_eq!(claimed.get("job").unwrap().as_str(), Some(video.as_str()));
+    let body = claimed.get("body").unwrap();
+    assert_eq!(body.get("prompt").unwrap().as_str(), Some("animate it"));
+    assert_eq!(body.get("source_revision").unwrap().as_str(), Some("arev_still7"));
+    let input = &body.get("inputs").unwrap().as_arr().unwrap()[0];
+    assert_eq!(input.get("name").unwrap().as_str(), Some("last_frame"));
+    assert_eq!(input.get("source_revision").unwrap().as_str(), Some("arev_still7"));
+}
+
+/// An unresolvable reference must never reach a box as a placeholder: the
+/// job fails at claim — visibly, with the reason as its result — and the
+/// worker is told the queue had nothing.
+#[test]
+fn an_unresolvable_stage_reference_fails_the_job_at_claim() {
+    let (_ts, _admin, mut enqueuer, mut worker) = setup();
+
+    let a = enqueue(&mut enqueuer, "stage.a", vec![]);
+    let claimed = claim(&mut worker);
+    assert_eq!(claimed.get("job").unwrap().as_str(), Some(a.as_str()));
+    let r = worker.post_json(
+        "/v1/worker/succeed",
+        &jobj(vec![
+            ("job", jstr(a.clone())),
+            ("result", jobj(vec![("text", jstr("an answer, no revision"))])),
+        ]),
+    );
+    assert_eq!(r.status, 200);
+
+    // References a field the result does not carry.
+    let r = enqueuer.post_json(
+        "/v1/jobs",
+        &jobj(vec![
+            ("namespace", jstr("demo")),
+            ("kind", jstr("video.generate")),
+            ("deps", Value::Arr(vec![jstr(a.clone())])),
+            ("body", jobj(vec![("source_revision", jobj(vec![
+                ("$from", jstr(a.clone())),
+                ("field", jstr("revision")),
+            ]))])),
+        ]),
+    );
+    assert_eq!(r.status, 201);
+    let missing_field = r.str_field("job");
+    assert!(claim(&mut worker).get("job").unwrap().as_str().is_none());
+    let r = enqueuer.get(&format!("/v1/jobs/{missing_field}"));
+    assert_eq!(r.str_field("state"), "failed");
+    let result = r.json().get("result").unwrap().clone();
+    assert_eq!(result.get("outcome").unwrap().as_str(), Some("failed"));
+    let error = result.get("body").unwrap().get("error").unwrap().as_str().unwrap().to_string();
+    assert!(error.contains("no field revision"), "{error}");
+
+    // References a job that is not among its deps: refused for the same
+    // reason deps are namespace-checked — a reference reads only what this
+    // job provably waited for.
+    let r = enqueuer.post_json(
+        "/v1/jobs",
+        &jobj(vec![
+            ("namespace", jstr("demo")),
+            ("kind", jstr("video.generate")),
+            ("body", jobj(vec![("source_revision", jobj(vec![
+                ("$from", jstr(a.clone())),
+                ("field", jstr("text")),
+            ]))])),
+        ]),
+    );
+    assert_eq!(r.status, 201);
+    let not_a_dep = r.str_field("job");
+    assert!(claim(&mut worker).get("job").unwrap().as_str().is_none());
+    let r = enqueuer.get(&format!("/v1/jobs/{not_a_dep}"));
+    assert_eq!(r.str_field("state"), "failed");
+    let error = r.json().get("result").unwrap().get("body").unwrap()
+        .get("error").unwrap().as_str().unwrap().to_string();
+    assert!(error.contains("not a dependency"), "{error}");
+
+    // A malformed reference shape fails too — it is never forwarded as a
+    // literal object for a box to misread.
+    let r = enqueuer.post_json(
+        "/v1/jobs",
+        &jobj(vec![
+            ("namespace", jstr("demo")),
+            ("kind", jstr("video.generate")),
+            ("deps", Value::Arr(vec![jstr(a.clone())])),
+            ("body", jobj(vec![("source_revision", jobj(vec![
+                ("$from", jstr(a.clone())),
+            ]))])),
+        ]),
+    );
+    assert_eq!(r.status, 201);
+    let malformed = r.str_field("job");
+    assert!(claim(&mut worker).get("job").unwrap().as_str().is_none());
+    assert_eq!(enqueuer.get(&format!("/v1/jobs/{malformed}")).str_field("state"), "failed");
+}
+
 #[test]
 fn lease_expiry_requeues_via_janitor() {
     let (_ts, _admin, mut enqueuer, mut worker) = setup();

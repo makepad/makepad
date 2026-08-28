@@ -758,6 +758,23 @@ impl<'a> Jobs<'a> {
         Ok(Some(JobId(crate::catalog::fixed16(&s.column_blob(0), "job row")?)))
     }
 
+    /// Every dependency edge of a job, in stable (blob) order. Public
+    /// because the transport resolves stage-input references at claim time
+    /// and must check that a reference names an actual dependency — deps
+    /// are the only jobs whose success this one provably waited for.
+    pub fn deps_of(&self, job_id: &JobId) -> ServerResult<Vec<JobId>> {
+        let mut s = self.db.prepare(
+            "job deps",
+            "SELECT depends_on FROM job_deps WHERE job_id = ?1 ORDER BY depends_on",
+        )?;
+        s.bind_blob(1, &job_id.0)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(JobId(crate::catalog::fixed16(&s.column_blob(0), "job dep row")?));
+        }
+        Ok(out)
+    }
+
     fn lease_of(&self, job_id: &JobId) -> ServerResult<Option<(String, u32)>> {
         let mut s = self.db.prepare(
             "job lease",
