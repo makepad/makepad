@@ -552,6 +552,42 @@
    ]
   },
   {
+   "id": "qwen3.8-27b-vision",
+   "domain": "vision",
+   "backend": "vision",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.8-27B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 21.0,
+   "min_vram_gb": 22.0,
+   "note": "The vision serving entry the text 'qwen3.8-27b' note anticipated: the SAME language GGUF (identical repo/revision/size/digest, so a box that already holds the text model downloads only the tower) paired with the mmproj vision tower. Image + prompt -> text answer. Sheet tier is chosen at load from free VRAM: a 512 px sheet (1024 patches / 256 image tokens, max_context 4096) where >= 30 GB is free, else a 256 px sheet with max_context 2048 - measured 24.6 GB peak and 21.0 GB peak respectively, which is why vram_gb records the small tier (a 24 GB card must stay admissible) and min_vram_gb the hard floor. Apache-2.0. NOTE: min_vram_gb fails closed on a box whose total VRAM is unknown, which includes every Metal machine - a Mac serves this through a cache-dir registry override that drops the field.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.8-27B-GGUF",
+     "path": "Qwen3.8-27B-Q4_K_M.gguf",
+     "revision": "fe1e2a23d973adb629709749dc4f6756df66ef10",
+     "cache_as": "llm/Qwen3.8-27B-Q4_K_M.gguf",
+     "size": 17106775008,
+     "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.8-27B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "fe1e2a23d973adb629709749dc4f6756df66ef10",
+     "cache_as": "llm/Qwen3.8-27B-mmproj-F16.gguf",
+     "size": 927607488,
+     "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
+    }
+   ]
+  },
+  {
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",

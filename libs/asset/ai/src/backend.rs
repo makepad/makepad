@@ -1259,6 +1259,9 @@ pub fn backend_compiled(name: &str) -> bool {
         "testpattern" => true,
         "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
+        // The vision domain rides the same llama session + the mmproj tower,
+        // so it is compiled in exactly when the LLM is.
+        "vision" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
         "h3" => cfg!(feature = "video"),
@@ -1323,6 +1326,9 @@ pub fn backend_provisioned(name: &str) -> bool {
         #[cfg(feature = "python-backends")]
         "flashworld" => crate::world_backend::flashworld_provisioned(),
         "music3" => crate::music3_backend::music3_provisioned(),
+        // The vision tower and its language session have no CPU path: Metal
+        // on macOS, CUDA on Windows/Linux, probed once and memoised.
+        "vision" => crate::vision_backend::vision_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
@@ -1486,6 +1492,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "llm" => Ok(Box::new(crate::llm_backend::LlmBackend::new_llama(&spec.id))),
         #[cfg(not(feature = "llm"))]
         "llm" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'llm' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "llm")]
+        "vision" => Ok(Box::new(crate::vision_backend::VisionBackend::new(&spec.id))),
+        #[cfg(not(feature = "llm"))]
+        "vision" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'llm' cargo feature",
             spec.id
         ))),

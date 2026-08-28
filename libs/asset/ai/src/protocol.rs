@@ -651,6 +651,16 @@ pub struct JobStatusJson {
     /// here: a client that does not know it ignores it, and a service that
     /// does not fill it is simply an older service. Absent on non-chat jobs.
     pub serving: Option<ServingStatusJson>,
+    /// The FINAL text answer of a text-producing job (the vision domain's
+    /// answer, an llm expansion or chat reply), present from the moment the
+    /// job reaches `done`.
+    ///
+    /// Distinct from `partial_text` on purpose: `partial_text` is a snapshot
+    /// that exists to be watched and may be a prefix of anything, while this
+    /// is the completed answer a caller can act on without also having to
+    /// check `state`, fetch `/artifact/<id>` and decode the bytes. Absent on
+    /// jobs that produce no text, and while one is still running.
+    pub text: Option<String>,
 }
 
 /// What a chat turn is actually doing, for a client that would otherwise have
