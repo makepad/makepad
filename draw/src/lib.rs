@@ -26,8 +26,10 @@ pub use crate::{
     cx_draw::CxDraw,
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
     image_cache::{
-        decode_image_from_data, handle_image_cache_network_responses, image_size_by_data,
-        looks_like_svg, load_image_file_by_path_async, load_image_from_cache, load_image_from_data_async,
+        decode_image_from_data, evict_image_from_cache, handle_image_cache_network_responses,
+        image_size_by_data,
+        looks_like_svg, load_image_file_by_path_async, load_image_from_cache,
+        load_image_from_data_async,
         load_image_http_by_url_async, process_async_image_load, AsyncImageLoad, AsyncLoadResult,
         ImageBuffer, ImageCache, ImageCacheImpl, ImageError, JpgDecodeErrors, PngDecodeErrors,
     },

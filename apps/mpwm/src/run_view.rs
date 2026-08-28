@@ -185,6 +185,12 @@ pub struct MpRunView {
     no_fb_view: WidgetRef,
     #[rust]
     area: Area,
+    /// FOCUS RULE: false on a Quick-Look panel. Clicks still hit-test and
+    /// still reach the child (hover, scroll, buttons all work), but the
+    /// press does not pull the compositor's key focus off the requester —
+    /// mpfiles keeps the keyboard so its arrows go on dialing.
+    #[rust(true)]
+    takes_key_focus: bool,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -626,11 +632,23 @@ impl MpRunView {
     /// be a no-op); the WM keeps such a focus PENDING and retries when the
     /// child's first frame arrives.
     pub fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
+        // A Quick-Look panel declines the keyboard outright. True, not
+        // false: there is nothing to retry later, the tile simply never
+        // wants it (the FOCUS RULE).
+        if !self.takes_key_focus {
+            return true;
+        }
         if self.area == Area::Empty {
             return false;
         }
         cx.set_key_focus(self.area);
         true
+    }
+
+    /// FOCUS RULE: mark this tile a Quick-Look panel — mouse yes, keyboard
+    /// never. Set once when the WM floats a preview viewer.
+    pub fn set_takes_key_focus(&mut self, on: bool) {
+        self.takes_key_focus = on;
     }
 
     /// The newest line the child (or the cargo wrapper building it) wrote.
@@ -832,8 +850,13 @@ impl Widget for MpRunView {
             }
             Hit::FingerDown(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    cx.set_key_focus(self.area);
-                    self.ime_pos = Some(local);
+                    // FOCUS RULE: a Quick-Look panel is hit-tested and gets
+                    // the press, but must not take the keyboard from the
+                    // requester that is dialing through files.
+                    if self.takes_key_focus {
+                        cx.set_key_focus(self.area);
+                        self.ime_pos = Some(local);
+                    }
                     cx.widget_action(
                         self.uid,
                         MpRunViewAction::Clicked {
