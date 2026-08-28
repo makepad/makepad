@@ -5679,7 +5679,12 @@ impl App {
     fn current_run_spec(&mut self, cx: &mut Cx) -> Result<PendingRun, String> {
         let mut prompt = self.ui.text_input(cx, ids!(prompt_input)).text();
         if prompt.trim().is_empty() {
+            // A demo prompt stands in for an empty box, but SILENTLY
+            // substituting one reads as "my prompt did not go in" — which is
+            // exactly what it is.
             prompt = "a weathered fishing trawler at dawn, misty harbor".to_string();
+            log!("input: prompt box was empty — using the demo prompt");
+            self.set_caption(cx, "INPUT", "prompt box was empty — used the demo prompt");
         }
         let preset = self.current_preset_index(cx);
         let model_overrides =
@@ -6240,6 +6245,15 @@ impl App {
             .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
             .collect();
         let snapshots = self.routing_snapshots_keeping(&keep);
+        // Every run says WHAT it was asked for, in the person's own words,
+        // the moment it starts. A run whose prompt appears nowhere is a run
+        // that cannot be found again when something goes wrong with it.
+        log!(
+            "run: {} starting {:?} — prompt \"{}\"",
+            run.group_id,
+            PRESETS[run.preset].name,
+            truncate(run.prompt.trim(), 160)
+        );
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
