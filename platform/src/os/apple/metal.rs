@@ -1271,19 +1271,24 @@ impl Cx {
                         for px in bgra.chunks_exact_mut(4) {
                             px.swap(0, 2);
                         }
-                        let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
-                            Ok(png) => png,
-                            Err(err) => {
-                                crate::error!("{}", err);
-                                Vec::new()
-                            }
-                        };
-                        Cx::send_studio_screenshot_response(
-                            sf.request_ids,
-                            sf.width as _,
-                            sf.height as _,
-                            png,
-                        );
+                        // Pixel probes (the eyedropper) want one sample, not a PNG.
+                        let mut request_ids = sf.request_ids;
+                        crate::pixel_probe::answer_pixel_probes(&mut request_ids, sf.width, sf.height, &bgra);
+                        if !request_ids.is_empty() {
+                            let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
+                                Ok(png) => png,
+                                Err(err) => {
+                                    crate::error!("{}", err);
+                                    Vec::new()
+                                }
+                            };
+                            Cx::send_studio_screenshot_response(
+                                request_ids,
+                                sf.width as _,
+                                sf.height as _,
+                                png,
+                            );
+                        }
                     }
 
                     let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };

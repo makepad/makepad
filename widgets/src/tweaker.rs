@@ -168,9 +168,18 @@ struct TweakSession {
     drew: bool,
     /// A mouse-down we swallowed; swallow the matching up too.
     down_consumed: bool,
+    /// Eyedropper armed for this prop: the next press in the body samples
+    /// the pixel under it instead of picking.
+    eyedrop: Option<String>,
+    /// A sample in flight: (probe id, prop). Answered from the next frame.
+    eyedrop_probe: Option<(u64, String)>,
     /// The press went to a navigation widget (tab, fold, dropdown) and was
     /// NOT consumed; its release must flow through too.
     pass_up: bool,
+    /// The press went to the tweaker's own popover (colour picker) while it
+    /// held the edit; the release must reach it too or its buttons never
+    /// complete a click.
+    hold_up: bool,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
     /// The on-canvas selection outline hides until this time: an edit was
@@ -692,6 +701,18 @@ pub fn window_intercept(
         }
     }
 
+    // Eyedropper armed: the press samples the pixel under it from the next
+    // presented frame (device pixels), the tweaker's event loop applies it.
+    if kind == PointerKind::Down {
+        let armed = session().lock().unwrap().eyedrop.take();
+        if let Some(prop) = armed {
+            let dpi = cx.windows[window_id].window_geom.dpi_factor;
+            let id = cx.probe_pixel((abs.x * dpi) as u32, (abs.y * dpi) as u32);
+            session().lock().unwrap().eyedrop_probe = Some((id, prop));
+            session().lock().unwrap().down_consumed = true;
+            return true;
+        }
+    }
     // Annotate mode draws; holding Alt draws too, so a person can sketch a
     // note mid-pick without flipping the mode.
     let alt_held = match event {
@@ -788,7 +809,8 @@ pub fn window_intercept(
 
     match kind {
         PointerKind::Move => {
-            cx.set_cursor(if annotate {
+            let eyedrop = session().lock().unwrap().eyedrop.is_some();
+            cx.set_cursor(if annotate || eyedrop {
                 MouseCursor::Crosshair
             } else {
                 MouseCursor::Hand
@@ -823,7 +845,13 @@ pub fn window_intercept(
                 // The press ends the interaction whatever the widgets made
                 // of it (a popover that closed already said so; a focused
                 // field may not report focus loss for an off-widget press).
-                session().lock().unwrap().edit_hold = false;
+                // The matching release goes the same way, so a button
+                // inside the popover (the eyedropper's `pick`) can finish
+                // its click.
+                let mut s = session().lock().unwrap();
+                s.edit_hold = false;
+                s.hold_up = true;
+                drop(s);
                 redraw_tweaker(cx, &tweaker);
                 return true;
             }
@@ -880,6 +908,14 @@ pub fn window_intercept(
                 s.pass_up = false;
                 s.down_consumed = false;
                 return false;
+            }
+            if s.hold_up {
+                s.hold_up = false;
+                s.down_consumed = false;
+                drop(s);
+                tweaker.handle_event(cx, event, &mut Scope::empty());
+                redraw_tweaker(cx, &tweaker);
+                return true;
             }
             s.down_consumed = false;
             if let Some(mut stroke) = s.live_stroke.take() {
@@ -5053,6 +5089,7 @@ impl Tweaker {
             Revert(usize, String),
             HoldOn(usize),
             HoldOff,
+            Eyedrop(String),
         }
         let mut edits: Vec<Edit> = Vec::new();
         let mut resets: Vec<String> = Vec::new();
@@ -5278,6 +5315,10 @@ impl Tweaker {
                     FabColorPickAction::Closed => {
                         edits.push(Edit::HoldOff);
                     }
+                    FabColorPickAction::Eyedropper => {
+                        edits.push(Edit::HoldOff);
+                        edits.push(Edit::Eyedrop(binding.prop.clone()));
+                    }
                     _ => {}
                 },
             }
@@ -5288,6 +5329,11 @@ impl Tweaker {
         for edit in edits {
             match edit {
                 Edit::Apply(chunk) => self.sidebar_apply(cx, &sel, &chunk),
+                Edit::Eyedrop(prop) => {
+                    log!("TWEAK eyedropper armed for {prop} — click a pixel in the app");
+                    session().lock().unwrap().eyedrop = Some(prop);
+                    cx.set_cursor(MouseCursor::Crosshair);
+                }
                 Edit::Revert(index, value) => {
                     // Push the origin value back through the same path, then
                     // refresh the field itself.
@@ -5577,6 +5623,38 @@ impl Widget for Tweaker {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !tweak_is_on() {
             return;
+        }
+        // An eyedropper sample in flight: apply it the moment the frame
+        // has been read back, else look again next frame.
+        let probe = session().lock().unwrap().eyedrop_probe.clone();
+        if let Some((id, prop)) = probe {
+            match makepad_platform::pixel_probe::take_pixel_probe(id) {
+                Some(Some(rgba)) => {
+                    session().lock().unwrap().eyedrop_probe = None;
+                    let hex = format_hex(
+                        [
+                            rgba[0] as f32 / 255.0,
+                            rgba[1] as f32 / 255.0,
+                            rgba[2] as f32 / 255.0,
+                            rgba[3] as f32 / 255.0,
+                        ],
+                        true,
+                    );
+                    log!("TWEAK eyedropper {prop} <- {hex}");
+                    let sel = session().lock().unwrap().pinned.clone();
+                    if let Some(sel) = sel {
+                        self.sidebar_apply(cx, &sel, &format!("{prop}: {hex}"));
+                        self.rows_uid = 0;
+                    }
+                    self.redraw_sidebar(cx);
+                }
+                Some(None) => {
+                    self.next_frame = cx.new_next_frame();
+                }
+                None => {
+                    session().lock().unwrap().eyedrop_probe = None;
+                }
+            }
         }
         // The suppression window expired: bring the solid outline back.
         if self.next_frame.is_event(event).is_some() {

@@ -23,6 +23,8 @@
 //!   `mod.widgets.FabSection` (clickable section header) — the DSL shapes
 //!   panels are assembled from (the tweaker's sidebar is the first tenant).
 
+use crate::button::ButtonAction;
+use crate::widget_tree::CxWidgetExt;
 use crate::{
     animator::*, makepad_derive_widget::*, makepad_draw::*, text_input::*, view::View, widget::*,
 };
@@ -478,6 +480,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     align: Align{x: 0.0 y: 0.5}
                     spacing: 6
                     mod.widgets.FabLabelDim{ width: 30 text: "Hex" }
+                    pick := mod.widgets.Button{
+                        width: Fit
+                        height: Fill
+                        padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
+                        text: "pick"
+                    }
                     hex := TextInput{
                         width: Fill
                         height: Fill
@@ -1608,17 +1616,22 @@ pub enum FabColorPickAction {
     Ended(Vec4f),
     Opened,
     Closed,
+    /// The popover's `pick` button: sample a colour from the app — the
+    /// host owns the eyedropper (it knows the window), the popover closes.
+    Eyedropper,
     #[default]
     None,
 }
 
-#[derive(Script, Widget)]
+// Hand-written `WidgetNode` (the `Widget` derive owns that impl): the open
+// popover's controls surface as children so the remote bridge and the
+// design tweaker's walks can reach the `pick` button and the fields.
+#[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct FabColorPick {
     #[uid]
     uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[redraw]
     #[live]
     draw_swatch: DrawFabSwatch,
     #[walk]
@@ -1728,6 +1741,15 @@ impl FabColorPick {
             list.redraw(cx);
         }
         self.draw_swatch.redraw(cx);
+        // The popover's controls join the widget tree under this swatch
+        // while it is open, so the remote bridge (/snap) and the tweaker's
+        // tree walks can reach the `pick` button and the fields.
+        let uid = self.uid;
+        let mut kids = Vec::new();
+        self.popover.children(&mut |id, w| kids.push((id, w)));
+        for (id, w) in kids {
+            cx.widget_tree_insert_child_deep(uid, id, w);
+        }
     }
 
     pub fn close_popover(&mut self, cx: &mut Cx, revert: bool) {
@@ -1760,6 +1782,36 @@ impl FabColorPick {
             self.panel_rect
         } else {
             Rect::default()
+        }
+    }
+}
+
+impl WidgetNode for FabColorPick {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn set_action_data(&mut self, _action_data: std::sync::Arc<dyn ActionTrait>) {}
+
+    fn action_data(&self) -> Option<std::sync::Arc<dyn ActionTrait>> {
+        None
+    }
+
+    fn area(&self) -> Area {
+        self.draw_swatch.area()
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_swatch.redraw(cx);
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if self.open {
+            self.popover.children(visit);
         }
     }
 }
@@ -1840,6 +1892,19 @@ impl Widget for FabColorPick {
                     .child(live_id!(hex_row))
                     .child(live_id!(hex))
                     .widget_uid();
+                let pick_uid = self
+                    .popover
+                    .child(live_id!(hex_row))
+                    .child(live_id!(pick))
+                    .widget_uid();
+                if widget_action.widget_uid == pick_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        let uid = self.widget_uid();
+                        self.close_popover(cx, false);
+                        cx.widget_action(uid, FabColorPickAction::Eyedropper);
+                    }
+                    continue;
+                }
                 if widget_action.widget_uid == wheel_uid {
                     match widget_action.cast::<ColorWheelAction>() {
                         ColorWheelAction::Changed(hsv) => {
