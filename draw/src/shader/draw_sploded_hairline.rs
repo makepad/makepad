@@ -26,13 +26,32 @@ script_mod! {
         // would clash with it, the way rect_pos/rect_size are left undeclared.
         pixel: fn(){
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 0.5)
+            // These stay HOLLOW. `stroke` covers |distance| < width, so on a
+            // small container a wide stroke reaches the middle from both sides
+            // and the frame reads as a solid slab — hence the clamp to a
+            // fraction of the shorter side.
+            // 2.0 = twice the original one-pixel hairline. A script-level
+            // `let` is NOT in scope inside shader code, so this stays a
+            // literal — bind one and the shader silently fails to compile and
+            // nothing draws at all.
+            let w = min(2.0, min(self.rect_size.x, self.rect_size.y) * 0.2)
+            // The radius is load-bearing, not decoration. Sdf2d.box clamps its
+            // interior to a FLAT plateau at -k, where k = min(2 * r, half the
+            // shorter side) — it is not a true signed distance inside. `stroke`
+            // paints wherever |shape| < width, so with 2 * r <= width the
+            // plateau is inside the stroke band and the whole box fills solid.
+            // r = w gives k = 2w > w, which keeps the interior outside the band.
+            sdf.box(w, w, self.rect_size.x - 2.0 * w, self.rect_size.y - 2.0 * w, w)
             // Deepest levels read warmest, so the eye can rank planes without
             // counting them. 12 is a nesting depth no real UI exceeds by much.
             let t = clamp(self.level / 12.0, 0.0, 1.0)
             let tint = vec3(0.45, 0.72, 1.0).mix(vec3(1.0, 0.62, 0.18), t)
-            let a = 0.85
-            sdf.stroke(vec4(tint * a, a), 2.0)
+            // Stroke only — never fill. The exploded view doubles as an
+            // overdraw instrument: a solid plane must always mean the APP
+            // painted those pixels. A frame the mode adds marks existence
+            // only, so it stays a hollow outline over a transparent plane.
+            let a = 0.8
+            sdf.stroke(vec4(tint * a, a), w)
             return sdf.result
         }
     }

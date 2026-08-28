@@ -31,6 +31,9 @@ pub struct Cx2d<'a, 'b> {
     /// scope a visible frame. Built on first use so an app that never opens
     /// the mode never constructs it.
     pub(crate) sploded_hairline: Option<Box<crate::shader::draw_sploded_hairline::DrawSplodedHairline>>,
+    /// Every frame emitted this draw, to suppress the concentric near-copies
+    /// a widget's internal layout turtles produce.
+    pub(crate) sploded_hairline_seen: Vec<Rect>,
 }
 
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
@@ -64,6 +67,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             draw_call_parent_stack,
             draw_call_parent_next: 2,
             sploded_hairline: None,
+            sploded_hairline_seen: Vec::new(),
         }
     }
 
@@ -90,6 +94,24 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         if self.draw_list_stack.is_empty() {
             return;
         }
+        // A widget nests several layout turtles that resolve to nearly the
+        // same rect, so drawing one frame per turtle stacks concentric copies
+        // a couple of pixels apart. At any readable stroke weight those
+        // compound into a solid slab — which breaks the mode's whole point,
+        // because a solid plane has to mean the APP painted there. One frame
+        // per distinct rect keeps every container visible and every plane
+        // honest.
+        let level = self.cx.nesting_depth as f32;
+        const NEAR: f64 = 3.0;
+        if self.sploded_hairline_seen.iter().any(|s| {
+            (s.pos.x - rect.pos.x).abs() < NEAR
+                && (s.pos.y - rect.pos.y).abs() < NEAR
+                && (s.size.x - rect.size.x).abs() < NEAR
+                && (s.size.y - rect.size.y).abs() < NEAR
+        }) {
+            return;
+        }
+        self.sploded_hairline_seen.push(rect);
         if self.sploded_hairline.is_none() {
             // `script_new_with_default` — not `script_new` — because the
             // registered type default is where the shader binding lives.
@@ -105,7 +127,6 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             }
             self.sploded_hairline = Some(Box::new(hairline));
         }
-        let level = self.cx.nesting_depth as f32;
         let mut hairline = self.sploded_hairline.take().unwrap();
         hairline.draw_scope(self, rect, level);
         self.sploded_hairline = Some(hairline);
