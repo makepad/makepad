@@ -55,6 +55,14 @@ pub struct MpImageView {
     dir_paths: Vec<PathBuf>,
     #[rust]
     index: usize,
+    /// Every path this viewer has actually had decoded. The image cache is
+    /// process-wide and sheds entries only past 512 of them, counted
+    /// without regard to their size — dialing through a folder of
+    /// 24-megapixel photographs is 96 MB a picture and the cap never
+    /// bites. So the viewer remembers what it asked for and hands it back
+    /// (`evict_cached`) the moment it stops showing it.
+    #[rust]
+    cached: Vec<PathBuf>,
     #[rust]
     natural_size: Option<(f64, f64)>,
 
@@ -177,7 +185,13 @@ impl Widget for MpImageView {
 
 impl MpImageView {
     /// Opens `path`: scans its folder for sibling images (sorted), and loads it.
+    ///
+    /// A Quick-Look retarget lands here, once per arrow key: everything the
+    /// last file cost goes back to the allocator before the new one is
+    /// decoded, so dialing a folder holds one picture at a time instead of
+    /// every picture the panel has ever shown.
     pub fn open(&mut self, cx: &mut Cx, path: &Path) {
+        self.evict_cached(cx, Some(path));
         self.scan_dir(path);
         self.load_current(cx);
     }
@@ -193,6 +207,11 @@ impl MpImageView {
             // the old file cannot land on a viewer showing nothing.
             ImageCacheImpl::set_texture(&mut *image, None, 0);
         }
+        // Nothing is on screen now, so nothing is worth keeping decoded:
+        // the widget just dropped its own handle, and this drops the
+        // process-wide cache's. "Idle at near-zero cost" is not true of a
+        // viewer still holding a folder of decoded photographs.
+        self.evict_cached(cx, None);
         self.dir_paths.clear();
         self.index = 0;
         self.natural_size = None;
@@ -207,6 +226,19 @@ impl MpImageView {
     /// True while a picture (or a decode of one) is on screen.
     pub fn is_loaded(&self) -> bool {
         !self.dir_paths.is_empty()
+    }
+
+    /// Take every image this viewer had decoded back out of the process-
+    /// wide cache, except `keep` (the file it is about to show, which would
+    /// only have to be decoded again). Paths nobody cached are ignored.
+    fn evict_cached(&mut self, cx: &mut Cx, keep: Option<&Path>) {
+        for path in evictable(&self.cached, keep) {
+            evict_image_from_cache(cx, &path);
+        }
+        self.cached.clear();
+        if let Some(keep) = keep {
+            self.cached.push(keep.to_path_buf());
+        }
     }
 
     /// Tell the view it belongs to a warm Quick Look panel, where Escape/Q
@@ -270,6 +302,9 @@ impl MpImageView {
         self.pan = dvec2(0.0, 0.0);
         if let Some(mut image) = self.img.borrow_mut::<Image>() {
             let _ = image.load_image_file_by_path_async(cx, &path);
+        }
+        if !self.cached.contains(&path) {
+            self.cached.push(path);
         }
         self.emit_status(cx);
         cx.redraw_all();
@@ -384,6 +419,16 @@ impl MpImageView {
     }
 }
 
+/// Which of the paths a viewer has had decoded are worth handing back:
+/// all of them, except the one it is about to show (or is still showing).
+fn evictable(cached: &[PathBuf], keep: Option<&Path>) -> Vec<PathBuf> {
+    cached
+        .iter()
+        .filter(|p| Some(p.as_path()) != keep)
+        .cloned()
+        .collect()
+}
+
 fn is_image_path(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
@@ -392,4 +437,36 @@ fn is_image_path(path: &Path) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "qoi" | "ico"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retarget_hands_back_everything_but_the_new_file() {
+        let cached: Vec<PathBuf> = ["a.png", "b.png", "c.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        // Dialing on to a file never seen before: all three go back.
+        assert_eq!(
+            evictable(&cached, Some(Path::new("d.png"))),
+            vec![
+                PathBuf::from("a.png"),
+                PathBuf::from("b.png"),
+                PathBuf::from("c.png")
+            ]
+        );
+        // Dialing back onto one still cached keeps exactly that one, so it
+        // is not thrown away only to be decoded again a moment later.
+        assert_eq!(
+            evictable(&cached, Some(Path::new("b.png"))),
+            vec![PathBuf::from("a.png"), PathBuf::from("c.png")]
+        );
+        // An unload keeps nothing: the panel shows nothing.
+        assert_eq!(evictable(&cached, None), cached);
+        // A viewer that has loaded nothing has nothing to hand back.
+        assert!(evictable(&[], None).is_empty());
+    }
 }

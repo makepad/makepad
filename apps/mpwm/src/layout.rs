@@ -204,6 +204,11 @@ pub struct FloatEntry {
     pub pinned: bool,
     /// Home workspace; ignored while pinned.
     pub ws: usize,
+    /// FOCUS RULE: a Quick-Look preview float is drawn and clicked like
+    /// any other, but never takes KEY focus — the requester (mpfiles)
+    /// keeps the keyboard so its arrows keep dialing. Every focus mover
+    /// (`focused_client`, `cycle_focus`, `neighbor`) skips these.
+    pub no_key_focus: bool,
 }
 
 /// A tabbed group: one tile slot holding N clients with one visible.
@@ -357,9 +362,13 @@ impl WmLayout {
 
     pub fn focused_client(&self) -> Option<ClientId> {
         let ws = self.focus_ws();
-        self.workspaces[ws]
-            .focus
-            .or_else(|| self.clients_on(ws).first().copied())
+        // The fallback skips a Quick-Look panel: it is never what the
+        // keyboard should land on, even when it is the only thing here.
+        self.workspaces[ws].focus.or_else(|| {
+            self.clients_on(ws)
+                .into_iter()
+                .find(|c| self.takes_key_focus(*c))
+        })
     }
 
     pub fn set_focus(&mut self, client: ClientId) {
@@ -862,6 +871,8 @@ impl WmLayout {
         rects
             .iter()
             .filter(|(c, _)| *c != focus)
+            // Directional focus walks past a Quick-Look panel too.
+            .filter(|(c, _)| self.takes_key_focus(*c))
             .filter(|(_, r)| {
                 let (cx, cy) = r.center();
                 match dir {
@@ -1221,8 +1232,40 @@ impl WmLayout {
             rect,
             pinned: false,
             ws,
+            no_key_focus: false,
         });
         self.workspaces[ws].focus = Some(client);
+    }
+
+    /// The Quick-Look panel: a float that is drawn, raised and clicked like
+    /// any other, but is invisible to every focus mover and never becomes
+    /// the workspace's focus. The requester keeps the keyboard (the FOCUS
+    /// RULE), so its arrows go on dialing while the panel is up.
+    pub fn add_preview_float(&mut self, client: ClientId, rect: LRect, ws: usize) {
+        self.floats.retain(|f| f.client != client);
+        self.floats.push(FloatEntry {
+            client,
+            rect,
+            pinned: false,
+            ws,
+            no_key_focus: true,
+        });
+    }
+
+    /// False only for a Quick-Look panel (`add_preview_float`).
+    pub fn takes_key_focus(&self, client: ClientId) -> bool {
+        !self
+            .floats
+            .iter()
+            .any(|f| f.client == client && f.no_key_focus)
+    }
+
+    /// `visible_clients_on` minus the panels no focus mover may land on.
+    fn focusable_on(&self, ws: usize) -> Vec<ClientId> {
+        self.visible_clients_on(ws)
+            .into_iter()
+            .filter(|c| self.takes_key_focus(*c))
+            .collect()
     }
 
     /// A centered popup rect for a preview, clamped into the desk.
@@ -1261,6 +1304,7 @@ impl WmLayout {
             rect,
             pinned: false,
             ws,
+            no_key_focus: false,
         });
         self.workspaces[ws].focus = Some(client);
     }
@@ -1834,7 +1878,8 @@ impl WmLayout {
     /// Cycle focus to the next/previous visible client (ALT+TAB).
     pub fn cycle_focus(&mut self, forward: bool) {
         let ws = self.focus_ws();
-        let clients = self.visible_clients_on(ws);
+        // ALT+TAB never stops on a Quick-Look panel (the FOCUS RULE).
+        let clients = self.focusable_on(ws);
         if clients.is_empty() {
             return;
         }
@@ -2213,6 +2258,42 @@ mod tests {
         assert_eq!(l.focused_client(), Some(9));
         l.remove(9);
         assert_eq!(l.rects(AREA, 0.0).len(), 3);
+    }
+
+    #[test]
+    fn a_quick_look_panel_is_drawn_but_never_focused() {
+        let mut l = abc();
+        l.workspaces[0].focus = Some(2);
+        // The panel goes on top of the stack like any float...
+        l.add_preview_float(9, LRect::new(100.0, 100.0, 400.0, 300.0), 0);
+        let r = l.rects(AREA, 0.0);
+        assert_eq!(r.len(), 4, "still drawn — the mouse must hit it");
+        assert_eq!(r[3].0, 9, "and on top of the tiles");
+        // ...but the FOCUS RULE keeps the keyboard on the requester.
+        assert!(!l.takes_key_focus(9));
+        assert!(l.takes_key_focus(2));
+        assert_eq!(l.focused_client(), Some(2), "add did not steal focus");
+
+        // No focus mover lands on it: ALT+TAB walks the three tiles only,
+        // and directional focus steps past it.
+        for _ in 0..4 {
+            l.cycle_focus(true);
+            assert_ne!(l.focused_client(), Some(9));
+        }
+        l.workspaces[0].focus = Some(1);
+        while l.focus_dir(Dir::Right, AREA, 0.0) {
+            assert_ne!(l.focused_client(), Some(9));
+        }
+
+        // Even as the only thing left, it is not what the keyboard gets.
+        let mut empty = WmLayout::new();
+        empty.add_preview_float(9, LRect::new(0.0, 0.0, 10.0, 10.0), 0);
+        assert_eq!(empty.focused_client(), None);
+
+        // Hiding the panel drops the flag with the float, so the same
+        // client id could later be a normal window.
+        l.remove(9);
+        assert!(l.takes_key_focus(9));
     }
 
     #[test]
