@@ -152,6 +152,9 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        // Exploded z-layer view: z comes from the call's nesting depth instead
+        // of the paint-order counter. See `crate::sploded`.
+        let sploded = self.passes[draw_pass_id].sploded.is_some();
         let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
         let debug_dump = debug_dump_count > 0;
         if self.draw_lists[draw_list_id].debug_dump {
@@ -250,7 +253,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.draw_call_uniforms.set_zbias(*zbias);
+                draw_call.resolve_zbias(*zbias, sploded);
                 *zbias += zbias_step;
 
                 if draw_call.uniforms_dirty {

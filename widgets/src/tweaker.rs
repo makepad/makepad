@@ -3557,6 +3557,9 @@ impl Tweaker {
             size: dvec2(width, pass_size.y),
         };
         self.band = band;
+        // The panel is flat chrome over the exploded view: pointer events
+        // inside the band flow through in plain window coordinates.
+        cx.sploded_set_flat_band(Some(band));
 
         // One solid surface first: the band must never show the app's bare
         // clear color between rows.

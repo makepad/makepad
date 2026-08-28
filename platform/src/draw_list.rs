@@ -486,10 +486,16 @@ pub struct CxDrawCall {
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
+    /// Component nesting depth (`Cx::nesting_depth`) at the moment this call
+    /// was created. The exploded z-layer view hands this to the shader in
+    /// place of the paint-order zbias, so one plane = one nesting level.
+    /// Stamped always (one f32 write per call creation); read only while the
+    /// mode is up.
+    pub turtle_depth: f32,
 }
 
 impl CxDrawCall {
-    pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
+    pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars, turtle_depth: f32) -> Self {
         CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
@@ -502,7 +508,24 @@ impl CxDrawCall {
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
+            turtle_depth,
         }
+    }
+
+    /// The z the shader sees in `world.z`. Paint order normally; the emitting
+    /// component's nesting depth while the pass is exploded — deeper nesting
+    /// is a larger z, and the ortho maps larger z nearer the viewer, so
+    /// children lift toward you and parents stay at the bottom of the stack.
+    pub fn resolve_zbias(&mut self, paint_order: f32, sploded: bool) -> bool {
+        let z = if sploded {
+            // One level is worth far more than any widget's own `draw_depth`,
+            // so those stay an in-plane tie-break instead of whole planes of
+            // separation. See `sploded::SPLODED_DEPTH_UNIT`.
+            self.turtle_depth * crate::sploded::SPLODED_DEPTH_UNIT
+        } else {
+            paint_order
+        };
+        self.draw_call_uniforms.set_zbias(z)
     }
 }
 
@@ -682,10 +705,14 @@ impl CxDrawList {
             && target_draw_call_group != barrier_draw_call_group
     }
 
+    /// `depth_target` is `Some` only while the exploded z-layer view is up:
+    /// batches must then stay depth-homogeneous, because the whole call shares
+    /// one z. `None` — the ordinary case — leaves batching exactly as it was.
     pub fn find_appendable_drawcall(
         &mut self,
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
+        depth_target: Option<f32>,
     ) -> Option<usize> {
         // find our drawcall to append to the current layer
         if draw_vars.draw_shader_id.is_none() {
@@ -712,6 +739,18 @@ impl CxDrawList {
                 draw_call.append_group_id,
                 draw_call.options.draw_call_group.0,
             );
+
+            // Exploded view: a call carries ONE z, so it may only hold
+            // instances from one nesting level. A depth mismatch is treated
+            // like any other uniform difference.
+            if let Some(depth) = depth_target {
+                if draw_call.turtle_depth != depth {
+                    if can_cross {
+                        continue;
+                    }
+                    break;
+                }
+            }
 
             if self.find_appendable_draw_shader_check[i] == draw_shader_check {
                 // TODO! figure out why this can happen
@@ -848,6 +887,7 @@ impl CxDrawList {
         redraw_id: u64,
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
+        turtle_depth: f32,
     ) -> &mut CxDrawItem {
         Self::append_trace_log(format!(
             "append_new shader={} group={} draw_call_group={} items_before={}",
@@ -867,7 +907,7 @@ impl CxDrawList {
         }
         self.draw_items.push_item(
             redraw_id,
-            CxDrawKind::DrawCall(CxDrawCall::new(&sh.mapping, draw_vars)),
+            CxDrawKind::DrawCall(CxDrawCall::new(&sh.mapping, draw_vars, turtle_depth)),
         )
     }
 
