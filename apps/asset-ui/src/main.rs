@@ -4910,8 +4910,17 @@ impl App {
             view.set_visible(cx, true);
             let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
             let who = if ours.iter().any(|id| id == &job.job_id) { "ours" } else { "other client" };
+            // For a job of OUR OWN, say what it was asked for: the box
+            // reports a model and a stage but never the prompt, so this is
+            // the only side that knows.
+            let asked = self
+                .runs
+                .iter()
+                .find_map(|run| run.pipeline.sent_prompt_for_job(&job.job_id))
+                .map(|prompt| format!(" · \u{201c}{}\u{201d}", truncate(prompt, 64)))
+                .unwrap_or_default();
             let text = format!(
-                "{} · {} · {}{} · {} · {}",
+                "{} · {} · {}{} · {} · {}{asked}",
                 job.model.clone().unwrap_or_else(|| "?".to_string()),
                 job.state,
                 job.stage.clone().unwrap_or_default(),
