@@ -954,13 +954,30 @@ impl App {
     }
 
     /// Send a hosted client a `WmEvent` over its own studio socket — the
-    /// WM->app half of the `mp_wm_api` protocol. A no-op if the client is
-    /// gone or has not connected yet (a warm viewer always has by now).
-    fn send_wm_event(&mut self, client: ClientId, ev: WmEvent) {
+    /// WM->app half of the `mp_wm_api` protocol. False when the client is
+    /// gone or has not connected yet, so a caller whose message MUST land
+    /// (a Quick-Look retarget) can park it for `HubEvent::Connected`.
+    fn send_wm_event(&mut self, client: ClientId, ev: WmEvent) -> bool {
         if let Some(slot) = self.state_mut().clients.get(&client) {
             if let Some(sender) = &slot.sender {
                 crate::hub::send_to_app(sender, vec![StudioToApp::Custom(ev.to_json())]);
+                return true;
             }
+        }
+        false
+    }
+
+    /// Retarget a warm viewer at `path`. A viewer spawned moments ago has
+    /// no socket yet — park the newest file and let `drain_hub` flush it
+    /// the instant the child connects, or a fast arrow-dial silently keeps
+    /// the file the viewer was launched with.
+    fn send_preview_file(&mut self, client: ClientId, path: &str) {
+        log!("mpwm: preview retarget client {} -> {}", client, path);
+        let ev = WmEvent::PreviewFile {
+            path: path.to_string(),
+        };
+        if !self.send_wm_event(client, ev) {
+            self.preview_cache.queue_pending(client, path.to_string());
         }
     }
 
@@ -986,29 +1003,38 @@ impl App {
         let path_str = open.path.to_string_lossy().to_string();
 
         // A different TYPE is currently the visible panel: hide it (it
-        // stays warm) before showing this one.
-        let switching_type = self
-            .preview_cache
-            .active
-            .as_ref()
-            .map(|a| a.viewer_app != viewer_app)
-            .unwrap_or(false);
-        if switching_type {
-            self.hide_active_preview(cx);
+        // stays warm) before showing this one. The requester is NOT told
+        // `PreviewHidden` here — from its side the panel never goes away,
+        // it just changes what it shows, and a Hidden/Shown pair inside one
+        // keystroke would make its event-driven state stutter.
+        //
+        // That silence has to be paid back if the new viewer never comes
+        // up: the requester would go on believing a panel is there, its
+        // Space would close a panel that is not, and Quick Look would wedge
+        // until something else resynced it. `suppressed_hide` says the debt
+        // is outstanding; every failure path below settles it.
+        let mut suppressed_hide = false;
+        if self.preview_cache.switching_type(&viewer_app) {
+            self.hide_active_preview_ex(cx, false);
+            suppressed_hide = true;
         }
 
-        // Reuse this type's warm viewer if it is still actually alive.
-        let warm = self.preview_cache.warm.get(&viewer_app).copied();
-        let warm_alive = warm.filter(|id| self.state_mut().clients.contains_key(id));
-        if let Some(id) = warm_alive {
-            self.send_wm_event(id, WmEvent::PreviewFile { path: path_str.clone() });
-            let already_shown = self
-                .preview_cache
-                .active
-                .as_ref()
-                .map(|a| a.client == id)
-                .unwrap_or(false);
-            if !already_shown {
+        // Reuse this type's warm viewer if the process behind it is still
+        // usable; a dead or CLOSING one clears its own slot in there, so a
+        // viewer already on its way out never gets the next file.
+        let alive: Vec<ClientId> = self
+            .state_mut()
+            .clients
+            .iter()
+            .filter(|(_, s)| s.closing.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        let warm = self
+            .preview_cache
+            .warm_client(&viewer_app, |id| alive.contains(&id));
+        if let Some(id) = warm {
+            self.send_preview_file(id, &path_str);
+            if !self.preview_cache.is_showing(id) {
                 // Was hidden (or this is its first request this session
                 // after a hide) — bring the float back, same reused rect.
                 self.show_preview_float(cx, id);
@@ -1022,10 +1048,6 @@ impl App {
             self.send_wm_event(requester, WmEvent::PreviewShown { path: path_str });
             self.redraw_all(cx);
             return;
-        }
-        // A stale entry (the process died since): drop it before respawning.
-        if warm.is_some() {
-            self.preview_cache.warm.remove(&viewer_app);
         }
 
         // Spawn fresh, exactly as an ordinary preview always has, except it
@@ -1042,6 +1064,9 @@ impl App {
             }
             Err(err) => {
                 log!("mpwm: preview request failed: {}", err);
+                if suppressed_hide {
+                    self.send_wm_event(requester, WmEvent::PreviewHidden);
+                }
                 return;
             }
         };
@@ -1052,7 +1077,7 @@ impl App {
             viewer_app
         );
         self.state_mut().clients.insert(id, slot);
-        self.preview_cache.warm.insert(viewer_app.clone(), id);
+        self.preview_cache.remember(&viewer_app, id);
         self.sync_geometry(cx);
         let hub_port = self.state_mut().hub_port;
         self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
@@ -1070,18 +1095,21 @@ impl App {
     }
 
     /// Float a (warm or fresh) preview client into the single reused
-    /// popup rect. `add_float` sets the layout's own notion of focus to
-    /// whatever it is handed — the FOCUS RULE says a preview never takes
-    /// it, so this restores whatever was already focused right after.
+    /// popup rect — `popup_rect` is a pure function of the desk, so every
+    /// show of every viewer type lands on exactly the same rect and a
+    /// retarget never moves the panel. `add_preview_float` keeps the
+    /// layout's focus where it was (the FOCUS RULE), and the tile itself
+    /// is marked so its own clicks cannot take the keyboard either.
     fn show_preview_float(&mut self, cx: &mut Cx, client: ClientId) {
         let area = self.desk_area(cx);
         let state = self.state_mut();
         let gap = state.gap;
         let ws = state.layout.active;
         let rect = state.layout.popup_rect(area, gap, 900.0, 700.0);
-        let prev_focus = state.layout.workspaces[ws].focus;
-        state.layout.add_float(client, rect, ws);
-        state.layout.workspaces[ws].focus = prev_focus;
+        state.layout.add_preview_float(client, rect, ws);
+        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+            d.with_run_view(cx, client, |_cx, v| v.set_takes_key_focus(false))
+        });
         self.redraw_all(cx);
     }
 
@@ -1089,12 +1117,34 @@ impl App {
     /// viewer is told to `PreviewUnload` (drop decoders/textures, idle)
     /// but is NEVER killed here, and the requester is told `PreviewHidden`.
     fn hide_active_preview(&mut self, cx: &mut Cx) {
+        self.hide_active_preview_ex(cx, true);
+    }
+
+    /// `notify_requester` is false only for the hide inside a TYPE SWITCH,
+    /// where the panel is about to come straight back with another viewer:
+    /// the requester is told `PreviewShown` for the new file instead, and
+    /// never sees a phantom close.
+    fn hide_active_preview_ex(&mut self, cx: &mut Cx, notify_requester: bool) {
         let Some(active) = self.preview_cache.active.take() else {
             return;
         };
+        // Out of the layout, but NOT out of the desk: `WmDesk::remove_client`
+        // would drop the tile widget (and with it the child's swapchain and
+        // this viewer's warmth) once its close animation finished.
         self.state_mut().layout.remove(active.client);
+        log!(
+            "mpwm: preview hide client {} ({}), viewer stays warm",
+            active.client,
+            active.viewer_app
+        );
         self.send_wm_event(active.client, WmEvent::PreviewUnload);
-        self.send_wm_event(active.requester, WmEvent::PreviewHidden);
+        // A retarget parked for a viewer that never connected dies with the
+        // panel: showing it later would resurrect a file nobody asked for.
+        self.preview_cache.take_pending(active.client);
+        if notify_requester {
+            self.send_wm_event(active.requester, WmEvent::PreviewHidden);
+        }
+        self.focus_after_layout(cx);
         self.redraw_all(cx);
     }
 
@@ -1106,6 +1156,14 @@ impl App {
     fn close_focused_preview(&mut self, cx: &mut Cx) -> bool {
         if self.preview_cache.active.is_none() {
             return false;
+        }
+        // Only the app that is dialing loses its Space/Escape to the panel.
+        // Focus somewhere else (a terminal the user tabbed to while the
+        // panel stayed up) means Space is a space again.
+        let focus = self.state_mut().layout.focused_client();
+        match focus {
+            Some(client) if !self.preview_cache.is_requester(client) => return false,
+            _ => {}
         }
         self.hide_active_preview(cx);
         true
@@ -1198,16 +1256,7 @@ impl App {
         // A dying warm viewer (or its requester) clears the cache's
         // reference to it — "if a viewer process dies clear its slot, so
         // the next Space respawns" instead of talking to a dead socket.
-        self.preview_cache.warm.retain(|_, id| *id != client);
-        let was_active_preview = self
-            .preview_cache
-            .active
-            .as_ref()
-            .map(|a| a.client == client || a.requester == client)
-            .unwrap_or(false);
-        if was_active_preview {
-            self.preview_cache.active = None;
-        }
+        self.preview_cache.forget_client(client);
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
             desk.remove_client(client);
         }
@@ -1361,6 +1410,11 @@ impl App {
                                 )],
                             );
                         }
+                    }
+                    // A Quick-Look retarget that arrived while this viewer
+                    // was still starting: it has a socket now, so land it.
+                    if let Some(path) = self.preview_cache.take_pending(client) {
+                        self.send_wm_event(client, WmEvent::PreviewFile { path });
                     }
                 }
                 HubEvent::Disconnected { socket } => {
@@ -1891,13 +1945,35 @@ impl App {
     /// notices they were asked to go (not that they crashed) and refills
     /// itself on the ticks that follow, so the desktop is empty AND the
     /// next window still opens instantly.
+    ///
+    /// `clients` holds the hidden warm viewers too, so a close-all takes
+    /// the whole Quick-Look cache with it — hide keeps a viewer, this does
+    /// not.
     fn close_all_windows(&mut self, cx: &mut Cx) {
+        self.preview_cache.active = None;
         let all: Vec<ClientId> = self.state_mut().clients.keys().copied().collect();
         for client in all {
             self.request_close(cx, client);
         }
+        self.preview_cache.clear();
         self.state_mut().layout.switch_workspace(0);
         self.redraw_all(cx);
+    }
+
+    /// The WM itself is going down: a hidden warm viewer has no tile and
+    /// no window, so nothing else would ever reap it. Kill the cache's
+    /// processes outright — `--stdin-loop` children do notice an orphaned
+    /// parent eventually, but "eventually" is not a shutdown story.
+    fn kill_warm_previews(&mut self) {
+        for client in self.preview_cache.warm_clients() {
+            if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                if let Some(child) = slot.child.as_mut() {
+                    log!("mpwm: shutdown kills warm preview client {}", client);
+                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+                }
+            }
+        }
+        self.preview_cache.clear();
     }
 
     /// SUPER+F hides the bar with the window; anything that leaves
@@ -2993,6 +3069,11 @@ impl AppMain for App {
                 {
                     return;
                 }
+            }
+        }
+        if let Event::Shutdown = event {
+            if self.state.is_some() {
+                self.kill_warm_previews();
             }
         }
         if let Event::Timer(te) = event {
