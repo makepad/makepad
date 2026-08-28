@@ -1479,8 +1479,8 @@ impl MaterialMirror {
 
 /// Read a widget's live draw call through its area: the first instance's
 /// values plus the call's shader, geometry, uniforms and textures.
-fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, base: &DrawVars) -> Option<MaterialMirror> {
-    let Area::Instance(inst) = widget.area() else {
+fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawVars) -> Option<MaterialMirror> {
+    let Area::Instance(inst) = area else {
         return None;
     };
     if inst.instance_count == 0 {
@@ -2462,9 +2462,18 @@ impl Widget for TweakMaterialSwatch {
         // right now) and draw one instance of it here with only the
         // geometry substituted. "you do kinda have to feed it similar
         // inputs as the actual widget probably like colors and things".
-        let mirrored = if self.mirror_uid != 0 && self.mirror_primary {
+        let mirrored = if self.mirror_uid != 0 {
             let widget = cx.widget_tree().widget(WidgetUid(self.mirror_uid));
-            capture_material_mirror(cx, &widget, &self.preview.draw_vars)
+            // The layer's own area when the widget exposes it (every
+            // `#[live] Draw…` field does), else the widget's area for its
+            // primary material.
+            let layer_area = widget
+                .layer_areas()
+                .into_iter()
+                .find(|(name, _)| *name == self.mirror_layer)
+                .map(|(_, a)| a)
+                .or_else(|| if self.mirror_primary { Some(widget.area()) } else { None });
+            layer_area.and_then(|area| capture_material_mirror(cx, &widget, area, &self.preview.draw_vars))
         } else {
             None
         };
