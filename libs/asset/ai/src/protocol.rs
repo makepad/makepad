@@ -373,6 +373,13 @@ pub struct GenerateRequestJson {
     /// "reference_image" PNG). Single-input models keep using `input_b64`;
     /// a model that requires named inputs visibly refuses requests missing
     /// them — it never infers or falls back to `input_b64`.
+    ///
+    /// H3 video reads one optional name here, `last_frame` (`image/png`):
+    /// the LAST-frame keyframe, beside the first frame on `input_b64`. The
+    /// weights are FL2VA, so first only, last only, both or neither are all
+    /// valid — see `h3_backend::H3_LAST_FRAME_INPUT`. Names H3 does not know
+    /// stay ignored rather than failing the job, so a caller can send
+    /// `last_frame` to a node that may predate it.
     pub inputs: Option<Vec<NamedInputJson>>,
     /// Image-to-image denoise strength 0..=1 for image/edit models that
     /// start from `input_b64` instead of pure noise (1.0 = ignore the
