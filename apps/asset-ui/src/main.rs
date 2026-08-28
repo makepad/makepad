@@ -3021,9 +3021,10 @@ script_mod! {
                                             kenney_pack_drop := FieldDrop2{ width: 180 }
                                             kenney_annotate_btn := GhostButton{ text: "Annotate" }
                                             kenney_annotate_all_btn := GhostButton{ text: "Annotate all" }
+                                            kenney_annotate_pause_btn := GhostButton{ text: "Pause" }
                                         }
                                         HintLabel{ text: "© Kenney (kenney.nl). Attribution required on every copy and derivative. Not CC0. Local kits only — this card does not download Kenney." }
-                                        HintLabel{ text: "Annotate queues this kit's turntable sheets for the vision model, which writes the descriptions catalog search hits. A publish queues its own — these buttons are for what is already in." }
+                                        HintLabel{ text: "Annotate queues this kit's turntable sheets for the vision model, which writes the descriptions catalog search hits. A publish queues its own — these buttons are for what is already in. Pause cancels what is still queued and lets the boxes finish what they are on; Resume queues exactly those assets again." }
                                     }
 
                                     freedoom_card := ImportRow{
@@ -11284,6 +11285,14 @@ impl App {
         self.ui
             .button(cx, ids!(queue_clear_btn))
             .set_visible(cx, !self.import_queue.pending.is_empty() || self.import_busy());
+        // The Pause/Resume button says which of the two it will do, and is
+        // only worth showing while the catalog still owes descriptions.
+        let pause_btn = self.ui.button(cx, ids!(kenney_annotate_pause_btn));
+        pause_btn.set_visible(cx, self.annotate_queue.has_work());
+        pause_btn.set_text(
+            cx,
+            if self.annotate_queue.paused { "Resume" } else { "Pause" },
+        );
         let kenney_job = ImportJob::Kenney {
             pack: self.import_page.selected_pack_id().0,
             pack_index: self.import_page.kenney_pack_index,
@@ -12919,6 +12928,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(kenney_annotate_all_btn)).clicked(actions) {
             log!("annotate: sweeping the whole catalog into the queue");
             self.annotate_queue.sweep(None);
+            self.refresh_import_ui(cx);
+        }
+        // One button, two states: an operator either wants the backlog to
+        // stop or to carry on, and both are the same place on screen.
+        if self.ui.button(cx, ids!(kenney_annotate_pause_btn)).clicked(actions) {
+            if self.annotate_queue.paused {
+                log!("annotate: resuming the backlog");
+                self.annotate_queue.resume();
+            } else {
+                log!("annotate: pausing the backlog");
+                self.annotate_queue.pause();
+            }
             self.refresh_import_ui(cx);
         }
         let donate_modal = self.ui.modal(cx, ids!(kenney_donate_modal));

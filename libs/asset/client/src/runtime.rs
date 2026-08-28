@@ -975,7 +975,7 @@ fn run_one(
             Ok(ClientOutput::JobDetail(client.job_detail(&job)?))
         }
         ClientRequest::FetchJobs { namespace, limit } => Ok(ClientOutput::Jobs(
-            client.list_jobs(namespace.as_deref(), limit)?,
+            client.list_jobs(namespace.as_deref(), None, None, limit)?,
         )),
         ClientRequest::CancelJob { job } => {
             Ok(ClientOutput::JobCancelled(client.api().cancel_job(&job)?))

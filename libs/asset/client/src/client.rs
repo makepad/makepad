@@ -573,9 +573,19 @@ impl AssetClient {
     pub fn list_jobs(
         &self,
         namespace: Option<&str>,
+        kind: Option<&str>,
+        state: Option<crate::dto::JobStateDto>,
         limit: u64,
     ) -> ClientResult<Vec<crate::dto::JobRowDto>> {
-        self.api.list_jobs(namespace, limit)
+        self.api.list_jobs(namespace, kind, state, limit)
+    }
+
+    /// The published thumbnail sheet of an alias, as served.
+    pub fn thumbnail_alias_bytes(
+        &self,
+        alias: &makepad_asset_data::AssetAlias,
+    ) -> ClientResult<Vec<u8>> {
+        self.api.thumbnail_alias_bytes(alias)
     }
 
     pub fn cancel_job(&self, job: &crate::dto::JobId) -> ClientResult<u64> {
