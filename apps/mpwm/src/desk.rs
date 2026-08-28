@@ -633,7 +633,11 @@ impl TileAnim {
     /// Scale + alpha of the popin, opening or closing.
     fn popin(&self) -> (f64, f64) {
         if let Some(close_t) = self.close_t {
-            // windowsOut: linear popin back to 87%, fadeOut almostLinear.
+            // Hyprland's popin close, verbatim (WindowAnimationController
+            // applyPopin + renderSnapshot): the FROZEN snapshot stretched
+            // into a box shrinking to 87% centered, 149ms LINEAR, while
+            // fadeOut runs 146ms almostLinear — the fade dominates, the
+            // pop stays subtle. The freeze is what makes it read clean.
             let scale = lerp(1.0, POPIN_SCALE, close_t);
             let fade = 1.0 - almost_linear((close_t * DUR_WINDOWS_OUT / DUR_FADE_OUT).min(1.0));
             (scale, fade)
@@ -882,14 +886,17 @@ impl WmDesk {
         client: ClientId,
         borders: &BorderTheme,
     ) {
-        let Some((cur, target, focus, (scale, fade))) = self
+        let Some((cur, target, focus, (scale, fade), closing)) = self
             .anims
             .get(&client)
-            .map(|a| (a.cur, a.target, a.focus, a.popin()))
+            .map(|a| (a.cur, a.target, a.focus, a.popin(), a.close_t.is_some()))
         else {
             return;
         };
         let mut draw_rect = Self::lrect_to_rect(cur);
+        // The rect BEFORE the popin scale: while closing, the frozen frame
+        // stays pinned to this and the shrinking quad only CROPS it.
+        let unscaled_rect = draw_rect;
         if scale < 1.0 {
             let center = draw_rect.pos + draw_rect.size * 0.5;
             draw_rect.size *= scale;
@@ -975,9 +982,14 @@ impl WmDesk {
         } else {
             settled_child
         };
+        // Hyprland stretches the frozen snapshot into the shrinking box —
+        // no crop (that experiment read odd; git has it).
+        let _ = (closing, unscaled_rect);
         if let Some(item) = self.item(cx, client) {
             if let Some(mut view) = item.borrow_mut::<MpRunView>() {
                 view.set_target_size(Some(settled_child.size));
+                view.set_close_crop(None);
+                view.set_fade(fade as f32);
             }
             item.draw_walk_all(cx, scope, Walk::abs_rect(child_rect));
         }
@@ -1580,12 +1592,12 @@ mod tests {
         }
         assert_eq!(opening.popin(), (1.0, 1.0));
 
-        // Closing: 149ms and the tile is reapable.
+        // Closing: the 220ms frozen-frame zoom-out, then reapable.
         let mut closing = TileAnim::new(a, true);
         closing.open_t = 1.0;
         closing.close_t = Some(0.0);
         assert!(!closing.done_closing());
-        for _ in 0..10 {
+        for _ in 0..((DUR_WINDOWS_OUT * 60.0) as usize + 2) {
             closing.step(1.0 / 60.0);
         }
         assert!(closing.done_closing());

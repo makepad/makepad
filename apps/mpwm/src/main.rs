@@ -1003,6 +1003,18 @@ impl App {
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
                 crate::run_view::trace_host(&format!("rx-flip c{}", client));
+                // A CLOSING client's tile is frozen on its last good frame:
+                // the zoom-out plays over that, never over the app's own
+                // shutdown relayout/clipping.
+                let closing = self
+                    .state_mut()
+                    .clients
+                    .get(&client)
+                    .map(|s| s.closing.is_some())
+                    .unwrap_or(false);
+                if closing {
+                    return;
+                }
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
