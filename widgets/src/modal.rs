@@ -12,9 +12,13 @@ script_mod! {
 
     mod.widgets.ModalBase = #(Modal::register_widget(vm))
 
+    // No `width`/`height`: a modal is an overlay and claims NO slot in its
+    // parent's layout — `Modal::on_after_apply` pins the walk it reports
+    // upward to `Walk::empty()`, and the overlay itself is sized by the pass
+    // (see `Modal::draw_walk`). Declaring `Fill` here made the modal a
+    // *deferred fill* of its parent, which took a share of the parent's
+    // spare length whether or not the modal ever drew.
     mod.widgets.Modal = mod.widgets.ModalBase{
-        width: Fill
-        height: Fill
         flow: Overlay
         align: Center
 
@@ -86,6 +90,24 @@ impl ScriptHook for Modal {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        // A modal occupies NO space in the layout that holds it. `draw_walk`
+        // opens its own overlay draw list on a root turtle for the pass and
+        // never walks the parent's turtle, so the walk this widget reports
+        // upward must claim nothing.
+        //
+        // It used to report `Fill`/`Fill` — the size of the overlay it paints
+        // inside its own pass, which is not a request the parent can honour.
+        // A `Fill` child of a `flow: Down` parent is a *deferred fill*: the
+        // parent hands it an equal share of the column's spare height at
+        // resolve time, whether or not the child then draws a single pixel.
+        // Three closed modals parked beside a `height: Fill` sibling split
+        // that column four ways — on the VJ DJ page 856pt of spare height
+        // became 214pt each, and the content under the fill was laid out
+        // with a negative height and never drawn at all.
+        //
+        // Forced here rather than only left out of the DSL, so that an
+        // instance writing `Modal{height: Fill}` cannot bring the bug back.
+        self.view.walk = Walk::empty();
         vm.with_cx_mut(|cx| {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
@@ -142,15 +164,23 @@ impl Widget for Modal {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    /// The incoming `walk` is deliberately ignored: a modal is not laid out by
+    /// its parent at all. It paints over the whole pass, on a root turtle
+    /// sized by the pass, so its geometry comes from `Walk::fill()` against
+    /// that root — never from the slot a parent thought it was handing over.
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let draw_list = self.draw_list.as_mut().unwrap();
         draw_list.begin_overlay_reuse(cx);
         cx.begin_root_turtle_for_pass(self.view.layout);
-        self.draw_bg.begin(cx, self.view.walk, self.view.layout);
+        self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
 
         if self.is_open {
             let bg_view = self.view.widget(cx, ids!(bg_view));
-            let _ = bg_view.draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
+            let _ = bg_view.draw_walk(
+                cx,
+                scope,
+                Walk::fill().with_abs_pos(Vec2d { x: 0., y: 0. }),
+            );
 
             let content = self.view.widget(cx, ids!(content));
             let _ = content.draw_all(cx, scope);

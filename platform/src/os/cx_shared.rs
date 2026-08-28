@@ -625,11 +625,14 @@ impl Cx {
         modifiers: crate::event::KeyModifiers,
         time: f64,
     ) {
-        #[cfg(target_os = "macos")]
+        // `os::apple` does not exist in a headless build (see os/mod.rs), so
+        // the pointer-lock transform has to be gated on the module's own cfg,
+        // not on the target alone.
+        #[cfg(all(target_os = "macos", not(headless)))]
         let (abs, lock_delta) = crate::os::apple::macos::macos_app::with_macos_app(|app| {
             app.locked_mouse_transform(raw, delta, seed)
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(target_os = "macos", not(headless))))]
         let (abs, lock_delta) = {
             let _ = (delta, seed);
             (raw, crate::makepad_math::DVec2::default())
@@ -650,7 +653,7 @@ impl Cx {
     /// scrub pin at the platform layer first — exactly what
     /// macos_window::send_mouse_up does for a physical up.
     pub fn dispatch_hw_pin_release(&mut self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(headless)))]
         crate::os::apple::macos::macos_app::with_macos_app(|app| {
             if app.pointer_pin_mode {
                 app.set_pointer_pin(false);
