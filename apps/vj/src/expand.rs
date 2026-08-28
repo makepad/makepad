@@ -25,7 +25,7 @@
 
 use makepad_asset_client::{
     Api, ApiEndpoints, ChatCreateRequest, ChatEventBodyDto, ChatProviderKind, ChatSendRequest,
-    HttpLimits,
+    ChatTranscriptRole, HttpLimits,
 };
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -158,6 +158,11 @@ fn run_one(
     }
     let started = std::time::Instant::now();
     let mut cursor = 0u64;
+    // Deltas are the FALLBACK. They carry a thinking model's reasoning as
+    // well as its answer — a live run came back with "The user wants me to
+    // expand a brief… Let me craft this carefully." and rendered THAT — so
+    // the transcript, which the broker returns with thinking stripped, is
+    // what the answer is actually read from below.
     let mut text = String::new();
     let outcome = loop {
         if started.elapsed().as_millis() as u64 > DEADLINE_MS {
@@ -186,8 +191,22 @@ fn run_one(
             break reason;
         }
     };
+    // The broker's own transcript: thinking already stripped, one row per
+    // turn. Only used when it actually has an assistant row — a provider
+    // that returns nothing here still gets the delta stream's version.
+    let answer = api
+        .chat_transcript(&id)
+        .ok()
+        .and_then(|rows| {
+            rows.iter()
+                .rev()
+                .find(|row| row.role == ChatTranscriptRole::Assistant)
+                .map(|row| row.text.clone())
+        })
+        .filter(|answer| !answer.trim().is_empty())
+        .unwrap_or(text);
     let _ = api.chat_retire(&id);
-    let cleaned = clean(&text);
+    let cleaned = clean(&answer);
     match (cleaned, outcome) {
         (Some(text), _) => (Some(text), None),
         (None, Some(reason)) => fail(&reason),
@@ -200,7 +219,18 @@ fn run_one(
 /// usable prompt, so an empty or think-only answer falls back to the raw
 /// prompt instead of generating from an empty string.
 fn clean(raw: &str) -> Option<String> {
-    let mut text = raw.to_string();
+    // ONE LINE, no control characters. This is not cosmetic: the prompt is
+    // published as the asset's annotation, and the store refuses control
+    // characters there — a brief with a newline in it rendered a picture
+    // that then died at publish with "annotation control chars", losing the
+    // whole run at the last step.
+    let mut text: String = raw
+        .chars()
+        .map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c })
+        .collect();
+    while text.contains("  ") {
+        text = text.replace("  ", " ");
+    }
     // Thinking models emit <think>…</think>; a broker that already strips
     // it changes nothing here.
     while let Some(start) = text.find("<think>") {
@@ -221,9 +251,19 @@ fn clean(raw: &str) -> Option<String> {
         }
     }
     if text.len() > MAX_EXPANDED {
+        // The largest char boundary that fits. Slicing straight at
+        // MAX_EXPANDED would panic the moment a multi-byte character
+        // straddled it — and model prose is full of em dashes and curly
+        // quotes, so that is a matter of when, not if.
+        let boundary = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|i| *i <= MAX_EXPANDED)
+            .last()
+            .unwrap_or(0);
         // Cut at the last sentence that fits, so the brief never ends
         // mid-clause (a truncated clause reads as a different instruction).
-        let cut = text[..MAX_EXPANDED].rfind(". ").map(|i| i + 1).unwrap_or(MAX_EXPANDED);
+        let cut = text[..boundary].rfind(". ").map(|i| i + 1).unwrap_or(boundary);
         text.truncate(cut);
         text = text.trim().to_string();
     }
@@ -252,6 +292,34 @@ mod tests {
         assert_eq!(clean("a fish"), None);
         // An unclosed think block does not leak into the prompt.
         assert_eq!(clean("<think>still going and going and going"), None);
+    }
+
+    /// The cut must survive multi-byte prose. `String::truncate` and a
+    /// bare slice both take BYTE indices, and an expansion that lands a
+    /// curly quote across the limit would otherwise panic the app.
+    #[test]
+    fn a_long_expansion_full_of_punctuation_does_not_panic() {
+        // "…" is three bytes, so the byte limit lands mid-character for
+        // most repeat counts.
+        for pad in 0..8 {
+            let long = format!("{}{}", "x".repeat(pad), "an em—dash and a “quote” ".repeat(200));
+            let cut = clean(&long).expect("still usable");
+            assert!(cut.len() <= MAX_EXPANDED, "{}", cut.len());
+            // Whatever came back is still valid UTF-8 prose, not a shard.
+            assert!(cut.chars().count() > 0);
+        }
+    }
+
+    /// The bug that killed a real run at the LAST step: a brief with a
+    /// newline in it renders fine and then fails to publish, because the
+    /// store refuses control characters in an annotation.
+    #[test]
+    fn a_brief_is_flattened_to_one_line_with_no_control_characters() {
+        let messy = "A chrome koi drifts\n\nthrough a flooded cathedral,\tlit from above.";
+        let cleaned = clean(messy).expect("a usable prompt");
+        assert!(!cleaned.chars().any(char::is_control), "{cleaned:?}");
+        assert!(!cleaned.contains("  "), "{cleaned:?}");
+        assert!(cleaned.starts_with("A chrome koi drifts through"), "{cleaned:?}");
     }
 
     #[test]
