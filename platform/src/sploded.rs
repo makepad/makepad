@@ -1,36 +1,87 @@
 //! The "sploded" view: an inspection-only 2.5D exploded z-layer mode.
 //!
-//! F10 tilts the whole window into an isometric stack: every GPU draw call
-//! becomes one layer, separated along z by its paint order, so overdraw and
-//! layering are visible at a glance. While it is on the app receives no
-//! input — this is a looking glass, not a picking surface.
+//! F10 tilts the window into an isometric stack that renders **the component
+//! nesting structure**: one plane per nesting level, siblings sharing a plane,
+//! children lifting toward the viewer and their parents staying at the bottom
+//! of the stack. The point is to see — and click — the fully-covered parent
+//! containers that flat 2D picking can never reach.
 //!
 //! # The seam
 //!
 //! The 2D pass already carries everything needed:
 //!
-//! * `world.z` in every vertex shader is `draw_depth + draw_call.zbias`, and
-//!   `zbias` is handed out by the backend's draw walk in *global paint order*
-//!   (`render_view` in the OS backends). It IS the layer index.
+//! * `world.z` in every vertex shader is `<per-instance depth> +
+//!   draw_call.zbias`, and `zbias` is a per-draw-call value the backend's
+//!   draw walk hands out. While the mode is up, the walk hands out
+//!   `CxDrawCall::turtle_depth` — the component nesting depth stamped when
+//!   the call was created — instead of the paint-order counter.
 //! * every 2D vertex function ends in
 //!   `draw_pass.camera_projection * (draw_pass.camera_view * world)`, and
 //!   `camera_view` is the identity for ordinary 2D passes.
 //!
-//! So the entire mode is one matrix. `CxDrawPass::set_ortho_matrix` writes an
-//! explode matrix into `camera_view` instead of the identity, and the pass's
-//! `zbias_step` is opened up from `0.001` to `1.0` so one draw call is one
-//! z unit. Nothing else in the render path changes, no shader is edited, and
-//! with the mode off `camera_view` is the identity it always was.
+//! So the mode is one matrix plus one substituted z. `CxDrawPass::set_ortho_matrix`
+//! writes an explode matrix into `camera_view` instead of the identity. No
+//! shader is edited, no instance layout changes, and with the mode off
+//! `camera_view` is the identity it always was and batching is untouched.
+//!
+//! Because a draw call carries ONE z, batches must stay depth-homogeneous
+//! while the mode is up — `find_appendable_drawcall` takes a depth target that
+//! is `Some` only then, which is what keeps mode-off rendering byte-identical.
+//!
+//! # The depth convention, derived once (do not flip signs by eye)
+//!
+//! This axis was flipped three times by trial before it was written down. The
+//! chain below is the whole derivation; `sign_convention_is_stable` in the
+//! tests at the bottom of this file asserts it, so it cannot regress silently.
+//!
+//! 1. **Nesting increases into the tree.** `Cx::nesting_depth` counts
+//!    `WidgetRef` draw scopes, so a child's `turtle_depth` is strictly greater
+//!    than its parent's.
+//! 2. **Nesting depth becomes `world.z`.** While the mode is up the backend
+//!    walk hands out `turtle_depth * SPLODED_DEPTH_UNIT` as `zbias`, and every
+//!    2D shader computes `world.z = <per-instance depth> + zbias`. Deeper
+//!    nesting is therefore a LARGER `world.z`.
+//! 3. **Larger `world.z` is nearer the eye.** The 2D ortho is built with
+//!    `near = 100, far = -100` (`set_ortho_matrix`), giving
+//!    `z_clip = 0.5 - z_view/200`; the depth test is `LessEqual` against a
+//!    1.0 clear. Larger z_view means smaller z_clip means it wins the depth
+//!    test. So the eye sits at large +z looking down the -z direction, and
+//!    "more nested" already means "in front" without any sign choice.
+//! 4. **Screen y is down.** The ortho passes `top = offset.y` and
+//!    `bottom = offset.y + size.y`, so the y row carries `-2/size.y`: a larger
+//!    `world.y` is lower on the screen.
+//! 5. **Ortho has no perspective, so step 3 is invisible on its own.** Moving
+//!    along the view axis changes nothing in an orthographic projection. The
+//!    stack is made legible by SHEARING the z axis onto a screen direction,
+//!    and which direction that is, is the one real choice here.
+//! 6. **The camera looks DOWN at the stack.** Picture sheets stacked on a
+//!    desk with the most-nested sheet on top, viewed from above and slightly
+//!    in front: the desk recedes toward the top of the image, so the sheet
+//!    nearest the eye sits LOWER in the image and the base of the stack
+//!    recedes upward and away.
+//!
+//! Conclusion, and the one sign this file sets: **a deeper layer projects
+//! DOWNWARD on screen (larger `y`) and NEARER in depth (larger view z).**
+//! Concretely `camera_view` applies `Rx(-pitch)`, not `Rx(+pitch)`: the raw
+//! right-handed rotation in a (right, down, toward-viewer) frame puts the eye
+//! BELOW the stack, which is the inside-out reading the user first rejected.
+//!
+//! Two independent things can make a correct matrix look wrong, and both have
+//! done so here — check them before touching a sign:
+//!
+//! * the body pass composites through a texture, so a wrong `source_y_flip` in
+//!   `SplodedStack::draw_resolve` mirrors the whole scene vertically, which
+//!   inverts the APPARENT z direction while the matrix is fine. Readable text
+//!   in a grab is the tell: if the text is mirrored, fix the flip, not the z.
+//! * a stale build. Confirm the binary under test contains the fix.
 //!
 //! The matrix keeps its third row a pure `z -> z * scale` pass-through on
-//! purpose. Depth ordering therefore stays exactly what it is in normal 2D
-//! (later draw call = nearer, instances inside one draw call all share a z so
-//! paint order decides), while only x/y pick up the tilt. Parallel planes
-//! cannot intersect, so that is also the geometrically correct answer.
+//! purpose. Instances inside one plane share a z, so paint order decides among
+//! them exactly as in flat 2D. Parallel planes cannot intersect, so that is
+//! also geometrically right.
 
 use crate::{
     cx::Cx,
-    draw_list::DrawListId,
     draw_pass::CxDrawPassParent,
     event::{Event, KeyCode},
     makepad_math::*,
@@ -40,13 +91,6 @@ use crate::{
 /// so `set_ortho_matrix` — which has no `Cx` — can consume it.
 #[derive(Clone, Copy, Debug)]
 pub struct SplodedParams {
-    /// +1: this pass displays directly. -1: this pass renders to a texture
-    /// that the compositor samples Y-FLIPPED (the gauss scene pass on
-    /// backends where `gauss_render_texture_y_flip_for_os` says so). The
-    /// value comes from the pass REGISTRATION — one source of truth — and
-    /// `camera_view` compensates numerically, so a pass restructure can
-    /// never silently flip the explode direction again.
-    pub v_flip: f32,
     /// Rotation about the vertical screen axis, radians.
     pub yaw: f32,
     /// Tilt about the horizontal screen axis, radians.
@@ -70,14 +114,22 @@ impl SplodedParams {
     /// Frame: `u` right, `v` down, `w` toward the viewer (larger `world.z` is
     /// nearer, because the ortho maps `z_clip = 0.5 - z/200` and the depth
     /// test is LessEqual). Yaw rotates about `v`, pitch about `u`, applied as
-    /// `Ry(yaw) * Rx(pitch)` — pitch first, so a horizontal row of text stays
+    /// `Ry(yaw) * Rx(-pitch)` — pitch first, so a horizontal row of text stays
     /// a horizontal row and the picture reads as a stack of layers rather
     /// than a sheared page. Then a uniform fit scale about the pass centre.
+    ///
+    /// The pitch is NEGATED against the raw right-handed convention on
+    /// purpose: `Rx(+b)` in a (right, down, toward-viewer) frame puts the eye
+    /// BELOW the stack, so the layers nearest you ride upward and the picture
+    /// reads inside out. `Rx(-b)` is the same rotation seen from above —
+    /// nested children, being nearer, come down and forward over their
+    /// parents, which is what a stack of sheets on a desk looks like.
     pub fn camera_view(&self, offset: Vec2d, size: Vec2d) -> Mat4f {
         let cx = (offset.x + size.x * 0.5) as f32;
         let cy = (offset.y + size.y * 0.5) as f32;
         let (sa, ca) = (self.yaw.sin(), self.yaw.cos());
-        let (sb, cb) = (self.pitch.sin(), self.pitch.cos());
+        // Rx(-pitch): looking down on the stack, not up at it.
+        let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
         let f = self.fit;
         let g = self.gain;
         // The stack fans out of the z = z_center plane, so `w = (z - zc) * g`.
@@ -97,104 +149,58 @@ impl SplodedParams {
         let m22 = self.z_scale;
 
         // Mat4f is column major: v[4 * col + row].
-        let m = Mat4f {
+        Mat4f {
             v: [
                 m00, m10, 0.0, 0.0, //
                 m01, m11, 0.0, 0.0, //
                 m02, m12, m22, 0.0, //
                 m03, m13, 0.0, 1.0,
             ],
-        };
-        if self.v_flip >= 0.0 {
-            return m;
         }
-        // The compositor will flip this pass vertically; pre-compose the
-        // inverse flip (about the pass centre) so the DISPLAYED result is
-        // identical to the direct-display case: F * M, F: v -> 2*cy - v.
-        let mut v = m.v;
-        v[1] = -v[1];
-        v[5] = -v[5];
-        v[9] = -v[9];
-        v[13] = 2.0 * cy - v[13];
-        Mat4f { v }
     }
 }
 
-#[cfg(test)]
-mod sploded_convention_tests {
-    use super::*;
-    use crate::makepad_math::dvec2;
+impl SplodedParams {
+    /// Invert the projection for the plane at `level`: given a screen point,
+    /// which layout point on that plane lands under it.
+    ///
+    /// This is what makes picking a PARENT possible. The transform is affine
+    /// with a pure-z pass-through, so for a fixed plane the screen mapping is
+    /// a 2x2 affine solve in closed form — no ray marching, no depth buffer
+    /// readback. A caller walks planes from the deepest down, un-projects the
+    /// cursor onto each, and hit-tests the widgets that drew at that depth
+    /// with their ordinary layout rects: the first hit is what the eye sees
+    /// under the cursor. A child only covers its own footprint, so everywhere
+    /// else the ray reaches the parent's exposed plane or its hairline —
+    /// which flat 2D picking can never offer.
+    pub fn unproject(&self, offset: Vec2d, size: Vec2d, screen: Vec2d, level: f32) -> Vec2d {
+        let cx = (offset.x + size.x * 0.5) as f32;
+        let cy = (offset.y + size.y * 0.5) as f32;
+        let (sa, ca) = (self.yaw.sin(), self.yaw.cos());
+        let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
+        let f = self.fit;
+        let g = self.gain;
+        let zc = self.z_center;
+        let z = level * SPLODED_DEPTH_UNIT;
 
-    /// THE ANTI-FLIP GATE: for any point and depth, the y-flipped-texture
-    /// path composed with the compositor's flip must land on EXACTLY the
-    /// same screen position as the direct path — the explode direction is
-    /// invariant under pass restructures by construction. Runs as
-    /// `cargo test -p makepad-platform sploded` and must pass before any
-    /// user-instance refresh of this mode.
-    #[test]
-    fn explode_direction_invariant_under_texture_y_flip() {
-        let offset = dvec2(0.0, 0.0);
-        let size = dvec2(1200.0, 800.0);
-        let base = SplodedParams {
-            v_flip: 1.0,
-            yaw: 0.35,
-            pitch: 0.38,
-            gain: 12.0,
-            fit: 0.8,
-            z_center: 5.0,
-            z_scale: 0.01,
-        };
-        let flipped = SplodedParams {
-            v_flip: -1.0,
-            ..base
-        };
-        let md = base.camera_view(offset, size);
-        let mf = flipped.camera_view(offset, size);
-        let cy = (size.y * 0.5) as f32;
-        let apply = |m: &Mat4f, p: [f32; 3]| -> [f32; 2] {
-            let x = m.v[0] * p[0] + m.v[4] * p[1] + m.v[8] * p[2] + m.v[12];
-            let y = m.v[1] * p[0] + m.v[5] * p[1] + m.v[9] * p[2] + m.v[13];
-            [x, y]
-        };
-        for point in [
-            [100.0f32, 100.0, 0.0],
-            [600.0, 400.0, 5.0],
-            [1100.0, 700.0, 12.0],
-            [600.0, 100.0, 20.0],
-        ] {
-            let direct = apply(&md, point);
-            let via_texture = {
-                let p = apply(&mf, point);
-                // the compositor's vertical flip about the pass centre
-                [p[0], 2.0 * cy - p[1]]
-            };
-            assert!(
-                (direct[0] - via_texture[0]).abs() < 0.01
-                    && (direct[1] - via_texture[1]).abs() < 0.01,
-                "convention flip leaked: {direct:?} vs {via_texture:?} at {point:?}"
-            );
+        // Same rows as `camera_view`, with z fixed so only x and y are unknown:
+        //   sx = m00*x + m01*y + (m02*z + m03)
+        //   sy =         m11*y + (m12*z + m13)
+        let m00 = f * ca;
+        let m01 = f * sa * sb;
+        let m02 = f * g * sa * cb;
+        let m03 = cx - m00 * cx - m01 * cy - m02 * zc;
+        let m11 = f * cb;
+        let m12 = -f * g * sb;
+        let m13 = cy - m11 * cy - m12 * zc;
+
+        // Row 1 has no x term, so y falls out directly and x follows.
+        if m11.abs() < 1.0e-6 || m00.abs() < 1.0e-6 {
+            return screen;
         }
-        // And the direction law itself: with positive yaw, a DEEPER point
-        // at the same screen position must displace toward positive u
-        // (toward the camera side), never away.
-        let shallow = apply(&md, [600.0, 400.0, 0.0]);
-        let deep = apply(&md, [600.0, 400.0, 20.0]);
-        assert!(
-            deep[0] > shallow[0],
-            "deeper must parallax toward the camera side: {shallow:?} vs {deep:?}"
-        );
-        // Rotation direction law: mirroring the yaw mirrors the parallax.
-        let neg = SplodedParams {
-            yaw: -base.yaw,
-            ..base
-        };
-        let mn = neg.camera_view(offset, size);
-        let deep_neg = apply(&mn, [600.0, 400.0, 20.0]);
-        let shallow_neg = apply(&mn, [600.0, 400.0, 0.0]);
-        assert!(
-            deep_neg[0] < shallow_neg[0],
-            "negative yaw must parallax the deep layer the other way"
-        );
+        let y = (screen.y as f32 - (m12 * z + m13)) / m11;
+        let x = (screen.x as f32 - m01 * y - (m02 * z + m03)) / m00;
+        dvec2(x as f64, y as f64)
     }
 }
 
@@ -210,13 +216,6 @@ struct SplodedDrag {
 /// false, which is the byte-identical-rendering gate.
 pub struct SplodedView {
     active: bool,
-    /// The pass the exploded camera applies to, WITH its display
-    /// y-convention (+1 direct, -1 sampled-flipped): registered each frame
-    /// by the window widget from the one authority for that convention.
-    /// Never the window pass itself, so panels/overlays stay flat.
-    pub target_pass: Option<crate::draw_pass::DrawPassId>,
-    /// The registered pass's display y-flip (see target_pass).
-    pub target_v_flip: f32,
     /// A toggle requested from WITHIN event dispatch (the tweaker's panel
     /// button): performed by the intercept at the next event, pre-dispatch —
     /// set_active clears hovers via nested dispatch and must never run
@@ -226,17 +225,31 @@ pub struct SplodedView {
     pitch: f32,
     /// Fraction of the window's smaller dimension the whole stack spans.
     spread: f32,
-    /// Draw calls counted on the last sync — the stack's depth in layers.
+    /// Deepest component nesting level in the last draw — the stack's height.
+    /// Roughly 10-20, which is why the fan is calm by construction where v1's
+    /// draw-call count (100s) made a staircase out of a row of buttons.
     layers: f32,
     drag: Option<SplodedDrag>,
-    /// The pass `zbias_step` that was in force before the mode opened it up.
-    saved_zbias_step: f32,
+    /// Draw a wireframe frame around every turtle scope. On by default: a
+    /// container its children completely cover has no pixels of its own, and
+    /// without a frame there is nothing to see or click — which is the whole
+    /// point of the mode.
+    hairlines: bool,
+    /// A region the mode never takes the pointer in — the tweaker's panel
+    /// band. See `sploded_set_flat_band`.
+    flat_band: Option<Rect>,
 }
 
-/// Normal 2D `zbias_step`; while sploded one draw call is one whole z unit,
-/// which is also `draw_depth`'s unit — so an element that asked to be drawn
-/// `n` in front honestly floats `n` layers forward.
-const SPLODED_ZBIAS_STEP: f32 = 1.0;
+/// World-z units per nesting level while the mode is up.
+///
+/// One level has to be far larger than the per-instance `draw_depth` offsets
+/// widgets set for their own layering (Dock uses 10, tab bars 10, the map -50).
+/// Those ride on the same `world.z = draw_depth + zbias` sum, so at one unit
+/// per level a label with `draw_depth: 10` floated TEN planes in front of its
+/// own background — the "why is that text so far in front" report. At 1000
+/// units per level the same offset is a hundredth of a level: still a correct
+/// tie-break inside the plane, invisible as separation.
+pub const SPLODED_DEPTH_UNIT: f32 = 1000.0;
 /// Headroom above the layer count for `draw_depth` (widgets use -50..20).
 const DRAW_DEPTH_HEADROOM: f32 = 128.0;
 /// Keep the clip z inside the ortho's +-100 range with room to spare.
@@ -252,21 +265,30 @@ const DRAG_RADIANS_PER_PX: f32 = 0.0035;
 
 const DEFAULT_YAW: f32 = 0.50;
 const DEFAULT_PITCH: f32 = 0.38;
-const DEFAULT_SPREAD: f32 = 0.85;
+/// Fraction of the window's smaller dimension the WHOLE stack spans.
+///
+/// Deliberately tight: the levels should read as one fanned deck you can count
+/// at a glance, not as sheets scattered across an empty screen. At 0.12 a
+/// 15-level tree in an 800pt-tall window steps about 6pt per level before the
+/// fit scale. The panel binds a scrub field to `sploded_set_spread`.
+const DEFAULT_SPREAD: f32 = 0.12;
+/// The scrub range the panel knob should offer.
+pub const SPLODED_SPREAD_MIN: f32 = 0.0;
+pub const SPLODED_SPREAD_MAX: f32 = 2.0;
+const SPREAD_KEY_STEP: f32 = 0.05;
 
 impl Default for SplodedView {
     fn default() -> Self {
         Self {
             active: false,
             pending_toggle: false,
-            target_pass: None,
-            target_v_flip: 1.0,
             yaw: DEFAULT_YAW,
             pitch: DEFAULT_PITCH,
             spread: DEFAULT_SPREAD,
             layers: 1.0,
             drag: None,
-            saved_zbias_step: 0.001,
+            hairlines: true,
+            flat_band: None,
         }
     }
 }
@@ -283,9 +305,10 @@ impl SplodedView {
         let layers = self.layers.max(1.0);
 
         // The stack's pre-rotation depth, in pixels, and the gain that gets
-        // there one draw call at a time.
+        // there one nesting level at a time.
         let depth_px = self.spread * w.min(h);
-        let gain = depth_px / layers;
+        let z_span = layers * SPLODED_DEPTH_UNIT;
+        let gain = depth_px / z_span;
 
         let (sa, ca) = (self.yaw.sin().abs(), self.yaw.cos().abs());
         let (sb, cb) = (self.pitch.sin().abs(), self.pitch.cos().abs());
@@ -295,13 +318,12 @@ impl SplodedView {
         let fit = (w / ext_u.max(1.0)).min(h / ext_v.max(1.0)) * FIT_MARGIN;
 
         SplodedParams {
-            v_flip: 1.0,
             yaw: self.yaw,
             pitch: self.pitch,
             gain,
             fit,
-            z_center: layers * 0.5,
-            z_scale: Z_CLIP_BUDGET / (layers + DRAW_DEPTH_HEADROOM),
+            z_center: z_span * 0.5,
+            z_scale: Z_CLIP_BUDGET / (z_span + DRAW_DEPTH_HEADROOM),
         }
     }
 }
@@ -313,14 +335,109 @@ impl Cx {
         self.sploded.active
     }
 
+    /// Enter one component draw scope. Called by every `WidgetRef` draw
+    /// entry point, so the counter is the nesting depth as components see
+    /// it — one plane per selectable node, with a widget's internal layout
+    /// turtles collapsed onto its own plane.
+    pub fn enter_nesting_depth(&mut self) {
+        self.nesting_depth += 1;
+        if self.nesting_depth > self.nesting_depth_max {
+            self.nesting_depth_max = self.nesting_depth;
+        }
+    }
+
+    pub fn exit_nesting_depth(&mut self) {
+        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+    }
+
+    /// The depth a draw call created right now belongs to, and the value the
+    /// exploded view separates planes by. `None` while the mode is off — that
+    /// is what keeps draw-call batching byte-identical.
+    pub fn sploded_depth_target(&self) -> Option<f32> {
+        if self.sploded.active {
+            Some(self.nesting_depth as f32)
+        } else {
+            None
+        }
+    }
+
+    /// Should turtle scopes get their wireframe frame this frame? Off unless
+    /// the mode is up; `H` toggles it.
+    pub fn sploded_hairlines_active(&self) -> bool {
+        self.sploded.active && self.sploded.hairlines
+    }
+
+    /// How far apart the nesting levels sit, as a fraction of the window's
+    /// smaller dimension spanned by the whole stack. Bind a panel scrub field
+    /// to this pair; `SPLODED_SPREAD_MIN`/`MAX` are the sane range.
+    pub fn sploded_spread(&self) -> f32 {
+        self.sploded.spread
+    }
+
+    /// Set the level separation. Safe to call at any time — takes effect on
+    /// the next frame whether or not the mode is currently up. The `+`/`-`
+    /// keys drive this same value.
+    pub fn sploded_set_spread(&mut self, spread: f32) {
+        let spread = spread.clamp(SPLODED_SPREAD_MIN, SPLODED_SPREAD_MAX);
+        if self.sploded.spread == spread {
+            return;
+        }
+        self.sploded.spread = spread;
+        if self.sploded.active {
+            self.sploded_sync();
+        }
+    }
+
     /// Programmatic toggle (the tweaker's panel button). DEFERRED: safe to
     /// call from anywhere including action handling — the intercept
-    /// performs it at the next event, pre-dispatch. Entering hands input
-    /// to the mode; leave via Esc / F10 (the panel is hidden and cannot be
-    /// clicked while the mode is up).
+    /// performs it at the next event, pre-dispatch. Leave via Esc / F10, or
+    /// the same button (a press inside a declared flat band always reaches
+    /// the app, so the panel stays clickable while the mode is up).
     pub fn sploded_toggle(&mut self) {
         self.sploded.pending_toggle = true;
         self.redraw_all();
+    }
+
+    /// Declare a screen region the exploded mode must keep its hands off.
+    ///
+    /// The mode owns the pointer so a drag can orbit the stack, but the
+    /// tweaker's panel occupies a fixed band and has to stay clickable. A
+    /// press that lands inside this rect is never consumed — it flows to the
+    /// app exactly as it would with the mode off. Call it with the panel's
+    /// band each time the panel draws, and `None` when it closes.
+    pub fn sploded_set_flat_band(&mut self, band: Option<Rect>) {
+        self.sploded.flat_band = band;
+    }
+
+    /// Map a screen point back onto the plane at nesting level `level`, for a
+    /// window of `size`. `None` while the mode is off, in which case the
+    /// caller's ordinary 2D point is already correct.
+    ///
+    /// The ray pick: walk levels from `sploded_max_level()` down to 0, call
+    /// this for each, and hit-test the widgets whose nesting depth equals that
+    /// level against their normal `Area::rect()`s. First hit wins — clicking a
+    /// covered parent's exposed frame selects the PARENT.
+    pub fn sploded_unproject(&self, size: Vec2d, screen: Vec2d, level: f32) -> Option<Vec2d> {
+        if !self.sploded.active {
+            return None;
+        }
+        Some(
+            self.sploded
+                .params(size)
+                .unproject(dvec2(0.0, 0.0), size, screen, level),
+        )
+    }
+
+    /// Deepest nesting level in the last draw — where a ray pick starts.
+    pub fn sploded_max_level(&self) -> usize {
+        self.nesting_depth_max
+    }
+
+    fn sploded_in_flat_band(&self, abs: Vec2d) -> bool {
+        self.sploded
+            .flat_band
+            .map(|b| b.contains(abs))
+            .unwrap_or(false)
     }
 
     /// First stop for every event. Returns true when the event was consumed
@@ -347,15 +464,15 @@ impl Cx {
                 if !self.sploded.active {
                     return false;
                 }
+                // Only the mode's own keys are claimed; the rest reach the app
+                // so the panel stays usable while the stack is exploded.
                 match e.key_code {
                     KeyCode::Escape => self.sploded_set_active(false),
                     KeyCode::Equals | KeyCode::NumpadAdd => {
-                        self.sploded.spread = (self.sploded.spread + 0.1).min(4.0);
-                        self.sploded_sync();
+                        self.sploded_set_spread(self.sploded.spread + SPREAD_KEY_STEP);
                     }
                     KeyCode::Minus | KeyCode::NumpadSubtract => {
-                        self.sploded.spread = (self.sploded.spread - 0.1).max(0.0);
-                        self.sploded_sync();
+                        self.sploded_set_spread(self.sploded.spread - SPREAD_KEY_STEP);
                     }
                     KeyCode::ArrowLeft => {
                         self.sploded.yaw = (self.sploded.yaw - 0.06).max(-YAW_LIMIT);
@@ -379,13 +496,20 @@ impl Cx {
                         self.sploded.spread = DEFAULT_SPREAD;
                         self.sploded_sync();
                     }
-                    _ => {}
+                    // Cycle the hairline frames: all scopes / none.
+                    KeyCode::KeyH => {
+                        self.sploded.hairlines = !self.sploded.hairlines;
+                        self.sploded_sync();
+                    }
+                    _ => return false,
                 }
                 true
             }
-            Event::KeyUp(_) | Event::TextInput(_) => self.sploded.active,
+            // Keys the mode does not claim reach the app: the panel's fields
+            // stay typeable while the stack is exploded.
+            Event::KeyUp(_) | Event::TextInput(_) => false,
             Event::MouseDown(e) => {
-                if !self.sploded.active {
+                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
                     return false;
                 }
                 self.sploded.drag = Some(SplodedDrag {
@@ -396,33 +520,30 @@ impl Cx {
                 true
             }
             Event::MouseMove(e) => {
-                if !self.sploded.active {
+                // Only a drag in progress belongs to the mode. Plain motion
+                // flows on, so hover states and tooltips still work.
+                let Some(drag) = self.sploded.drag else {
                     return false;
-                }
-                if let Some(drag) = self.sploded.drag {
-                    let d = e.abs - drag.start;
-                    self.sploded.yaw = (drag.yaw + d.x as f32 * DRAG_RADIANS_PER_PX)
-                        .clamp(-YAW_LIMIT, YAW_LIMIT);
-                    self.sploded.pitch = (drag.pitch + d.y as f32 * DRAG_RADIANS_PER_PX)
-                        .clamp(-PITCH_LIMIT, PITCH_LIMIT);
-                    self.sploded_sync();
-                }
+                };
+                let d = e.abs - drag.start;
+                self.sploded.yaw =
+                    (drag.yaw + d.x as f32 * DRAG_RADIANS_PER_PX).clamp(-YAW_LIMIT, YAW_LIMIT);
+                self.sploded.pitch =
+                    (drag.pitch + d.y as f32 * DRAG_RADIANS_PER_PX).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+                self.sploded_sync();
                 true
             }
             Event::MouseUp(_) => {
-                if !self.sploded.active {
+                if self.sploded.drag.take().is_none() {
                     return false;
                 }
-                self.sploded.drag = None;
                 true
             }
             Event::Scroll(e) => {
-                if !self.sploded.active {
+                if !self.sploded.active || self.sploded_in_flat_band(e.abs) {
                     return false;
                 }
-                self.sploded.spread =
-                    (self.sploded.spread - e.scroll.y as f32 * 0.004).clamp(0.0, 4.0);
-                self.sploded_sync();
+                self.sploded_set_spread(self.sploded.spread - e.scroll.y as f32 * 0.002);
                 true
             }
             _ => false,
@@ -444,7 +565,7 @@ impl Cx {
         self.sploded_sync();
         if active {
             crate::log!(
-                "sploded view ON — {} draw-call layers, drag to orbit, +/- to explode, 0 resets, esc/F10 exits",
+                "sploded view ON — {} nesting levels, drag to orbit, +/- to explode, 0 resets, esc/F10 exits",
                 self.sploded.layers as u32
             );
         } else {
@@ -452,138 +573,164 @@ impl Cx {
         }
     }
 
-    /// Push the current state onto every window pass and get a frame out of
-    /// it. Cheap enough to run on each drag step.
-    /// The window widget registers its body-content (scene) pass here each
-    /// frame while the mode is on; the exploded camera then applies to
-    /// THAT pass only, and everything at window level (the tweak panel,
-    /// tooltips, modals) composites flat.
-    pub fn sploded_set_target_pass(
-        &mut self,
-        pass: Option<crate::draw_pass::DrawPassId>,
-        v_flip: f32,
-    ) {
-        if self.sploded.target_pass != pass || self.sploded.target_v_flip != v_flip {
-            self.sploded.target_pass = pass;
-            self.sploded.target_v_flip = v_flip;
-            self.sploded_sync();
+    /// The explode camera inputs for a pass of this size, or `None` while the
+    /// mode is off. `Window::begin` calls this to arm its BODY pass — the
+    /// explode is a per-pass camera, and putting it on the window pass would
+    /// tilt the tweaker's panel along with the app.
+    pub fn sploded_params(&self, size: Vec2d) -> Option<SplodedParams> {
+        if !self.sploded.active {
+            return None;
         }
+        Some(self.sploded.params(size))
     }
 
+    /// Recompute and get a frame out. Cheap enough to run on each drag step.
+    ///
+    /// The params themselves are armed by whoever owns the body pass; all this
+    /// does is refresh the measured layer count, disarm every pass when the
+    /// mode goes off, and force the redraw.
+    ///
+    /// `zbias_step` is deliberately left alone: while the mode is up the
+    /// backend walk ignores its running counter entirely (`resolve_zbias`), so
+    /// there is nothing to open up and nothing to restore.
     fn sploded_sync(&mut self) {
-        let active = self.sploded.active;
-        if active {
-            self.sploded.layers = self.sploded_count_layers();
+        if self.sploded.active {
+            // Measured by `enter_nesting_depth` during the last draw.
+            self.sploded.layers = (self.nesting_depth_max as f32).max(1.0);
+        } else {
+            for draw_pass_id in self.passes.id_iter() {
+                self.passes[draw_pass_id].sploded = None;
+            }
         }
-        let target = self.sploded.target_pass;
         for draw_pass_id in self.passes.id_iter() {
-            let is_target = target == Some(draw_pass_id);
-            let is_window_parent = matches!(
-                self.passes[draw_pass_id].parent,
-                CxDrawPassParent::Window(_)
-            );
-            // With a registered target, ONLY that pass explodes; without
-            // one (no window began its scene pass yet this toggle), fall
-            // back to window passes so the mode is never a silent no-op.
-            if target.is_some() {
-                if !is_target {
-                    // ensure anything previously marked (e.g. the window
-                    // pass from the fallback frame) is cleared
-                    if self.passes[draw_pass_id].sploded.is_some() {
-                        let saved = self.sploded.saved_zbias_step;
-                        let pass = &mut self.passes[draw_pass_id];
-                        pass.sploded = None;
-                        pass.zbias_step = saved;
-                    }
-                    continue;
-                }
-            } else if !is_window_parent {
-                continue;
+            if matches!(self.passes[draw_pass_id].parent, CxDrawPassParent::Window(_)) {
+                self.passes[draw_pass_id].paint_dirty = true;
             }
-            if active {
-                let size = self
-                    .get_pass_rect(draw_pass_id, 1.0)
-                    .map(|r| r.size)
-                    .unwrap_or(dvec2(1.0, 1.0));
-                let mut params = self.sploded.params(size);
-                if Some(draw_pass_id) == self.sploded.target_pass {
-                    params.v_flip = self.sploded.target_v_flip;
-                }
-                let pass = &mut self.passes[draw_pass_id];
-                if pass.sploded.is_none() {
-                    self.sploded.saved_zbias_step = pass.zbias_step;
-                }
-                pass.sploded = Some(params);
-                pass.zbias_step = SPLODED_ZBIAS_STEP;
-                // The slug-text path bakes camera_view into a CPU matrix at
-                // DRAW time, so the matrix has to already be current when the
-                // redraw below runs — not only when the backend renders.
-                let offset = self
-                    .get_pass_rect(draw_pass_id, 1.0)
-                    .map(|r| r.pos)
-                    .unwrap_or_default();
-                self.passes[draw_pass_id].set_ortho_matrix(offset, size);
-            } else {
-                let saved = self.sploded.saved_zbias_step;
-                let pass = &mut self.passes[draw_pass_id];
-                if pass.sploded.take().is_some() {
-                    pass.zbias_step = saved;
-                }
-            }
-            self.passes[draw_pass_id].paint_dirty = true;
         }
-        // Text's slug matrix is CPU-side, so the content has to be re-emitted
-        // for it to follow the tilt.
+        // Text's slug matrix is CPU-side, and the depth-homogeneous batching
+        // split only happens on emission — both need the content re-emitted.
         self.redraw_all();
     }
+}
 
-    /// Count the draw calls a window pass will emit, the same walk the
-    /// backends do when they hand out zbias — that count is the stack depth.
-    fn sploded_count_layers(&self) -> f32 {
-        let mut max = 0usize;
-        for draw_pass_id in self.passes.id_iter() {
-            if !matches!(self.passes[draw_pass_id].parent, CxDrawPassParent::Window(_)) {
-                continue;
-            }
-            if let Some(list_id) = self.passes[draw_pass_id].main_draw_list_id {
-                let mut running = 0usize;
-                let mut seen = 0usize;
-                self.sploded_scan(list_id, &mut running, &mut seen, 0);
-                max = max.max(seen);
-            }
-        }
-        (max as f32).max(1.0)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Params equivalent to a real window: 1200x800 at the default angles,
+    /// with a 10-level deep tree.
+    fn probe() -> (SplodedParams, Vec2d, Vec2d) {
+        let mut view = SplodedView::default();
+        view.layers = 10.0;
+        let size = dvec2(1200.0, 800.0);
+        (view.params(size), dvec2(0.0, 0.0), size)
     }
 
-    fn sploded_scan(
-        &self,
-        draw_list_id: DrawListId,
-        running: &mut usize,
-        seen: &mut usize,
-        depth: usize,
-    ) {
-        if depth > 64 {
-            return;
+    /// Project a point sitting at the centre of the window on plane `level`.
+    fn project(level: f32) -> Vec4f {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        let x = (offset.x + size.x * 0.5) as f32;
+        let y = (offset.y + size.y * 0.5) as f32;
+        m.transform_vec4(vec4(x, y, level * SPLODED_DEPTH_UNIT, 1.0))
+    }
+
+    /// THE ANTI-FLIP CHECK. This axis was flipped three times by eye before it
+    /// was derived; the derivation lives in this module's docs and this test is
+    /// what holds it. If you are here because the picture looks inverted, read
+    /// those docs first — a mirrored `source_y_flip` on the body-pass composite
+    /// and a stale build both invert the APPARENT direction while this stays
+    /// correct.
+    #[test]
+    fn sign_convention_is_stable() {
+        let shallow = project(0.0);
+        let deep = project(9.0);
+
+        // Deeper nesting is NEARER the eye: the ortho maps a larger view z to
+        // a smaller z_clip and the depth test is LessEqual, so the deeper
+        // plane wins. (Step 3 of the derivation.)
+        assert!(
+            deep.z > shallow.z,
+            "a deeper layer must project nearer the eye: deep z {} !> shallow z {}",
+            deep.z,
+            shallow.z
+        );
+
+        // ...and it projects DOWNWARD on screen, because the camera looks down
+        // at the stack. Screen y is down (step 4), so "down" is a larger y.
+        // (Step 6 of the derivation.)
+        assert!(
+            deep.y > shallow.y,
+            "a deeper layer must project downward on screen: deep y {} !> shallow y {}",
+            deep.y,
+            shallow.y
+        );
+    }
+
+    /// Every level is the same size step — the user must be able to count
+    /// levels by eye rather than guess whether something is deeply nested or
+    /// the stepping is uneven.
+    #[test]
+    fn levels_are_evenly_spaced() {
+        let steps: Vec<f32> = (0..9)
+            .map(|i| project((i + 1) as f32).y - project(i as f32).y)
+            .collect();
+        let first = steps[0];
+        assert!(first > 0.5, "level step too small to see: {first}");
+        for (i, s) in steps.iter().enumerate() {
+            assert!(
+                (s - first).abs() < 1.0e-3,
+                "level {i} steps by {s}, expected the uniform {first}"
+            );
         }
-        let len = self.draw_lists[draw_list_id].draw_item_order_len();
-        for order_index in 0..len {
-            let Some(draw_item_id) =
-                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
-            else {
-                continue;
-            };
-            let kind = &self.draw_lists[draw_list_id].draw_items[draw_item_id].kind;
-            if let Some(sub_list_id) = kind.sub_list() {
-                if self.draw_lists[sub_list_id].reset_zbias {
-                    let mut child = 0usize;
-                    self.sploded_scan(sub_list_id, &mut child, seen, depth + 1);
-                } else {
-                    self.sploded_scan(sub_list_id, running, seen, depth + 1);
-                }
-            } else if kind.draw_call().is_some() {
-                *running += 1;
-                *seen = (*seen).max(*running);
+    }
+
+    /// The pick's inverse must land back exactly where the projection took a
+    /// point from, on every plane — that round trip IS the ray pick.
+    #[test]
+    fn unproject_inverts_the_projection() {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        for level in [0.0f32, 1.0, 4.0, 9.0] {
+            for p in [dvec2(10.0, 20.0), dvec2(600.0, 400.0), dvec2(1190.0, 790.0)] {
+                let projected = m.transform_vec4(vec4(
+                    p.x as f32,
+                    p.y as f32,
+                    level * SPLODED_DEPTH_UNIT,
+                    1.0,
+                ));
+                let back = params.unproject(
+                    offset,
+                    size,
+                    dvec2(projected.x as f64, projected.y as f64),
+                    level,
+                );
+                assert!(
+                    (back.x - p.x).abs() < 0.01 && (back.y - p.y).abs() < 0.01,
+                    "level {level}: {p:?} projected then un-projected to {back:?}"
+                );
             }
         }
+    }
+
+    /// A widget's own `draw_depth` (Dock uses 10, the map -50) rides the same
+    /// `world.z` sum as the nesting depth. It must stay a tie-break INSIDE a
+    /// plane and never read as separation — the "why is that text so far in
+    /// front of its background" report.
+    #[test]
+    fn draw_depth_stays_inside_its_plane() {
+        let (params, offset, size) = probe();
+        let m = params.camera_view(offset, size);
+        let x = (offset.x + size.x * 0.5) as f32;
+        let y = (offset.y + size.y * 0.5) as f32;
+        let plane = |z: f32| m.transform_vec4(vec4(x, y, z, 1.0)).y;
+
+        let one_level = plane(SPLODED_DEPTH_UNIT) - plane(0.0);
+        // The largest draw_depth any widget in the tree uses.
+        let worst_offset = plane(20.0) - plane(0.0);
+        assert!(
+            worst_offset.abs() < one_level.abs() * 0.05,
+            "draw_depth 20 moves {worst_offset}, more than 5% of a {one_level} level step"
+        );
     }
 }

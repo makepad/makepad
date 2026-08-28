@@ -1025,7 +1025,10 @@ impl WidgetRef {
 
     pub fn draw_walk(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(nd) = inner.widget.draw_walk(cx, scope, walk).step() {
+            cx.enter_nesting_depth();
+            let step = inner.widget.draw_walk(cx, scope, walk).step();
+            cx.exit_nesting_depth();
+            if let Some(nd) = step {
                 if nd.is_empty() {
                     return DrawStep::make_step_here(self.clone());
                 }
@@ -1037,7 +1040,9 @@ impl WidgetRef {
 
     pub fn draw_walk_all(&self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.draw_walk_all(cx, scope, walk)
+            cx.enter_nesting_depth();
+            inner.widget.draw_walk_all(cx, scope, walk);
+            cx.exit_nesting_depth();
         }
     }
 
@@ -1061,7 +1066,10 @@ impl WidgetRef {
 
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(nd) = inner.widget.draw(cx, scope).step() {
+            cx.enter_nesting_depth();
+            let step = inner.widget.draw(cx, scope).step();
+            cx.exit_nesting_depth();
+            if let Some(nd) = step {
                 if nd.is_empty() {
                     return DrawStep::make_step_here(self.clone());
                 }
@@ -1073,7 +1081,10 @@ impl WidgetRef {
 
     pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(nd) = inner.widget.draw(cx, &mut Scope::empty()).step() {
+            cx.enter_nesting_depth();
+            let step = inner.widget.draw(cx, &mut Scope::empty()).step();
+            cx.exit_nesting_depth();
+            if let Some(nd) = step {
                 if nd.is_empty() {
                     return DrawStep::make_step_here(self.clone());
                 }

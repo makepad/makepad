@@ -119,6 +119,8 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        // Exploded z-layer view: z is the call's nesting depth, not paint order.
+        let sploded = self.passes[pass_id].sploded.is_some();
 
         {
             let draw_list = &mut self.draw_lists[draw_list_id];
@@ -163,7 +165,7 @@ impl Cx {
                 // order. It must advance for every draw call in the tree, ahead of the early-outs
                 // below, or the sequence would depend on which draw calls happen to be dirty this
                 // frame rather than on the draw tree alone.
-                let zbias_changed = draw_call.draw_call_uniforms.set_zbias(*zbias);
+                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded);
                 *zbias += zbias_step;
 
                 // A cached draw call (one whose draw list was not redrawn this frame) has
