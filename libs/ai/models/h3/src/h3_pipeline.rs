@@ -13,11 +13,14 @@ use crate::h3::{
     h3_align_num_frames, h3_audio_latent_num_frames, h3_build_packed_layout,
     h3_build_row_timesteps_cond, h3_euler_step, h3_patchify_video_latents, h3_rope_tables,
     h3_scale_noise, h3_schedule, h3_unpatchify_video_latents, h3_video_latent_num_frames,
-    H3ShardedWeights, H3_AUDIO_IN_CHANNELS, H3_AUDIO_SHIFT, H3_KEYFRAME_NOISE_AUG, H3_TEXT_TAG,
-    H3_VIDEO_PATCH_DIM, H3_VIDEO_SHIFT, H3_VIDEO_TAG,
+    H3KeyframeAnchor, H3ShardedWeights, H3_AUDIO_IN_CHANNELS, H3_AUDIO_SHIFT,
+    H3_KEYFRAME_NOISE_AUG, H3_TEXT_TAG, H3_VIDEO_PATCH_DIM, H3_VIDEO_SHIFT, H3_VIDEO_TAG,
 };
 use crate::h3_audio_vae::H3AudioVae;
-use crate::h3_text::{h3_text_encode_progress, h3_text_encoder_evict, H3TextEncoderPrepared};
+use crate::h3_text::{
+    h3_text_encode_progress, h3_text_encoder_evict, H3TextEncoderPrepared, H3VisionImage,
+    H3VisionSpan,
+};
 use crate::h3_transformer::{h3_dit_forward, H3DitPrepared};
 use crate::h3_vae::{
     h3_vae_decode_ctrl, h3_vae_denormalize_latents, h3_vae_frames_to_u8, H3VaeCtrl,
@@ -116,8 +119,15 @@ impl H3RunControl<'_> {
 #[derive(Default)]
 pub struct H3CondCache {
     embeds: Option<(H3CondKey, Vec<f32>)>,
-    keyframe_latents: Option<(H3KeyframeKey, Vec<f32>)>,
+    /// Most-recent-first, one entry per distinct keyframe canvas. A
+    /// first+last request encodes two anchors, and swapping only the prompt
+    /// must still hit both.
+    keyframe_latents: Vec<(H3KeyframeKey, Vec<f32>)>,
 }
+
+/// How many keyframe latent blocks the cache keeps (2 keyframes x a
+/// previous request's pair).
+const H3_KEYFRAME_CACHE_SLOTS: usize = 4;
 
 /// Identity of one text-conditioning result. Exact comparison, no hashing:
 /// the token ids are short and the canvas comparison is a cheap memcmp.
@@ -127,8 +137,9 @@ struct H3CondKey {
     token_ids: Vec<u32>,
     width: usize,
     height: usize,
-    /// fl2va: the resized keyframe canvas the vision tower saw (None = t2v).
-    canvas: Option<Vec<u8>>,
+    /// fl2va: the prepared keyframe canvases the vision tower saw, in packed
+    /// order (empty = t2v).
+    canvases: Vec<Vec<u8>>,
 }
 
 /// Identity of one keyframe VAE-encode result (prompt-independent).
@@ -154,25 +165,31 @@ impl H3CondCache {
 
     fn latents_for(&self, key: &H3KeyframeKey) -> Option<&[f32]> {
         self.keyframe_latents
-            .as_ref()
-            .filter(|(cached, _)| cached == key)
+            .iter()
+            .find(|(cached, _)| cached == key)
             .map(|(_, latents)| latents.as_slice())
     }
 
     fn store_latents(&mut self, key: H3KeyframeKey, latents: Vec<f32>) {
-        self.keyframe_latents = Some((key, latents));
+        self.keyframe_latents.retain(|(cached, _)| *cached != key);
+        self.keyframe_latents.insert(0, (key, latents));
+        self.keyframe_latents.truncate(H3_KEYFRAME_CACHE_SLOTS);
     }
 }
 
-/// The fl2va keyframe: a decoded RGB image (any size — it is LANCZOS-stretched
-/// onto the canvas) plus the tokenized `"<Picture 1>: "` label that precedes
-/// its vision block in the TE presentation.
+/// One fl2va keyframe: a decoded RGB image (any size — the first one is
+/// LANCZOS-stretched onto the canvas, the followers are cover-cropped onto
+/// it) plus the tokenized `"<Picture i>: "` label that precedes its vision
+/// block in the TE presentation, and which end of the clip it anchors.
 pub struct H3KeyframeInput {
     /// Tightly packed RGB, `height * width * 3`.
     pub rgb: Vec<u8>,
     pub width: usize,
     pub height: usize,
-    /// Tokenizer ids of `"<Picture 1>: "` (no special tokens).
+    /// Which end of the generated clip this image conditions.
+    pub anchor: H3KeyframeAnchor,
+    /// Tokenizer ids of `"<Picture i>: "` (no special tokens), `i` being the
+    /// 1-based position in the packed keyframe order.
     pub picture_label_ids: Vec<u32>,
 }
 
@@ -214,9 +231,13 @@ pub struct H3GenerateParams {
     /// the pipeline prepends the keyframe's label + vision block itself.
     pub token_ids: Vec<u32>,
     pub seed: u64,
-    /// First-frame keyframe: switches the run to the fl2va (i2v) workflow —
-    /// vision-conditioned TE + VAE-encoded never-denoised leading video rows.
-    pub keyframe: Option<H3KeyframeInput>,
+    /// Keyframes in PACKED ORDER: any non-empty list switches the run to the
+    /// fl2va workflow — vision-conditioned TE + VAE-encoded never-denoised
+    /// leading video rows, one condition block per keyframe. Upstream packs
+    /// `image` (anchor `First`) before `last_image` (anchor `Last`); the
+    /// first entry is also the geometry anchor the canvas is derived from
+    /// and the only one that is stretched rather than cover-cropped.
+    pub keyframes: Vec<H3KeyframeInput>,
     /// Optional reference initial noise in packed row layout
     /// (num_video_rows x 96). Overrides the seeded generator.
     pub video_noise_rows: Option<Vec<f32>>,
@@ -337,39 +358,114 @@ fn fl2va_resize_canvas(
     ))
 }
 
+/// fl2va follower keyframe -> canvas: COVER-CROP, not a stretch.
+///
+/// Reference: `before_encoder.py::MiniMaxH3FL2VASetupStep.__call__`
+/// (diffusers `modular_pipelines/minimax_h3`, lines 135-148). Only
+/// `keyframes[0]` — the geometry anchor the canvas was derived from — is
+/// stretched; every later keyframe is scaled to cover, LANCZOS-resized and
+/// centre-cropped, with the released model's own arithmetic:
+/// `scale = max(W/src_w, H/src_h)`, `size = (max(W, round(src_w*scale)),
+/// max(H, round(src_h*scale)))`, `left = (size_w - W) // 2`. `round` is
+/// Python's half-to-even, hence `round_ties_even` here; the reference file
+/// flags that diffusers' own `resize_mode="crop"` (floor division, a
+/// different centring) disagrees by a pixel on about half of the aspect
+/// ratios, which would move the conditioning latents.
+fn fl2va_cover_crop_canvas(
+    rgb: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Result<Vec<u8>> {
+    let scale = (dst_w as f64 / src_w as f64).max(dst_h as f64 / src_h as f64);
+    let resized_w = dst_w.max((src_w as f64 * scale).round_ties_even() as usize);
+    let resized_h = dst_h.max((src_h as f64 * scale).round_ties_even() as usize);
+    let left = resized_w.saturating_sub(dst_w) / 2;
+    let top = resized_h.saturating_sub(dst_h) / 2;
+    let resized = if resized_w == src_w && resized_h == src_h {
+        rgb.to_vec()
+    } else {
+        crate::h3_image::resize_rgb_lanczos3(rgb, src_w, src_h, resized_w, resized_h)
+    };
+    let mut out = vec![0u8; dst_w * dst_h * 3];
+    for y in 0..dst_h {
+        let src = ((top + y) * resized_w + left) * 3;
+        out[y * dst_w * 3..(y + 1) * dst_w * 3]
+            .copy_from_slice(&resized[src..src + dst_w * 3]);
+    }
+    Ok(out)
+}
+
+/// Put one keyframe onto the canvas: `index == 0` is the geometry anchor and
+/// is stretched, the followers are cover-cropped
+/// (`before_encoder.py` lines 135-148).
+fn fl2va_prepare_canvas(
+    keyframe: &H3KeyframeInput,
+    index: usize,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>> {
+    if keyframe.rgb.len() != keyframe.width * keyframe.height * 3 {
+        return Err(DiffusionError::workflow(format!(
+            "h3 keyframe rgb: expected {} bytes, got {}",
+            keyframe.width * keyframe.height * 3,
+            keyframe.rgb.len()
+        )));
+    }
+    if keyframe.width == 0 || keyframe.height == 0 {
+        return Err(DiffusionError::workflow("h3 keyframe: empty image"));
+    }
+    if keyframe.width == width && keyframe.height == height {
+        return Ok(keyframe.rgb.clone());
+    }
+    if index == 0 {
+        fl2va_resize_canvas(&keyframe.rgb, keyframe.width, keyframe.height, width, height)
+    } else {
+        fl2va_cover_crop_canvas(&keyframe.rgb, keyframe.width, keyframe.height, width, height)
+    }
+}
+
 /// fl2va TE: vision-conditioned encode (Qwen3-VL vision tower + interleaved
-/// mrope + deepstack).
+/// mrope + deepstack) over every keyframe's vision block, in packed order.
 #[allow(clippy::too_many_arguments)]
 fn fl2va_text_encode(
     weights: &H3ShardedWeights,
     prepared: &crate::h3_text::H3TextEncoderPrepared,
     token_ids: &[u32],
-    vision_pad_start: usize,
+    vision_pad_starts: &[usize],
     num_vision_tokens: usize,
-    canvas_rgb: &[u8],
+    canvases: &[Vec<u8>],
     width: usize,
     height: usize,
     on_layer: Option<&mut dyn FnMut(usize, usize)>,
 ) -> Result<Vec<f32>> {
-    let (pixel_values, gh, gw) =
-        crate::h3_text::h3_vision_preprocess(canvas_rgb, width, height)?;
-    if gh * gw / 4 != num_vision_tokens {
-        return Err(DiffusionError::workflow(format!(
-            "h3 fl2va: vision grid {gh}x{gw} yields {} tokens, presentation reserved {num_vision_tokens}",
-            gh * gw / 4
-        )));
+    let mut pixels = Vec::with_capacity(canvases.len());
+    for canvas in canvases {
+        let (pixel_values, gh, gw) =
+            crate::h3_text::h3_vision_preprocess(canvas, width, height)?;
+        if gh * gw / 4 != num_vision_tokens {
+            return Err(DiffusionError::workflow(format!(
+                "h3 fl2va: vision grid {gh}x{gw} yields {} tokens, presentation reserved {num_vision_tokens}",
+                gh * gw / 4
+            )));
+        }
+        pixels.push((pixel_values, gh, gw));
     }
-    crate::h3_text::h3_text_encode_fl2va(
-        weights,
-        prepared,
-        token_ids,
-        vision_pad_start,
-        num_vision_tokens,
-        &pixel_values,
-        gh,
-        gw,
-        on_layer,
-    )
+    let images: Vec<H3VisionImage> = vision_pad_starts
+        .iter()
+        .zip(pixels.iter())
+        .map(|(start, (pixel_values, gh, gw))| H3VisionImage {
+            span: H3VisionSpan {
+                start_row: *start,
+                len: num_vision_tokens,
+                gh: *gh,
+                gw: *gw,
+            },
+            pixel_values: pixel_values.as_slice(),
+        })
+        .collect();
+    crate::h3_text::h3_text_encode_fl2va(weights, prepared, token_ids, &images, on_layer)
 }
 
 /// fl2va keyframe VAE encode: canvas pixels -> tiled spatial encoder ->
@@ -419,21 +515,33 @@ fn audio_vae_source(models_dir: &Path, model_set: &Option<H3ModelSet>) -> PathBu
         .unwrap_or_else(|| models_dir.join("audio_vae"))
 }
 
-fn fl2va_condition_latents(
+/// Encode a batch of keyframe canvases under ONE VAE weight load. Each
+/// canvas gets its own posterior generator freshly seeded with
+/// [`H3_KEYFRAME_ENCODE_SEED`], exactly as upstream calls
+/// `encode_vae_condition(..., components.keyframe_encode_seed)` once per
+/// keyframe (`encoders.py::MiniMaxH3KeyframeVaeEncoderStep`), so a canvas
+/// always encodes to the same anchor whatever position it holds.
+fn fl2va_condition_latents_batch(
     vae_path: &Path,
-    canvas_rgb: &[u8],
+    canvases: &[&[u8]],
     width: usize,
     height: usize,
     latent_h: usize,
     latent_w: usize,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>> {
     let vae_weights = H3ShardedWeights::load(vae_path)?;
     let prepared = crate::h3_vae::H3VaeEncoderPrepared::prepare(&vae_weights)?;
-    let moments =
-        crate::h3_vae::h3_vae_encode_keyframe_moments(&prepared, canvas_rgb, width, height)?;
-    let mut eps_rng = H3NoiseRng::new(H3_KEYFRAME_ENCODE_SEED);
-    let eps = eps_rng.fill_normal(24 * latent_h * latent_w);
-    crate::h3_vae::h3_vae_condition_latents(&moments, latent_h, latent_w, &eps)
+    let mut out = Vec::with_capacity(canvases.len());
+    for canvas in canvases {
+        let moments =
+            crate::h3_vae::h3_vae_encode_keyframe_moments(&prepared, canvas, width, height)?;
+        let mut eps_rng = H3NoiseRng::new(H3_KEYFRAME_ENCODE_SEED);
+        let eps = eps_rng.fill_normal(24 * latent_h * latent_w);
+        out.push(crate::h3_vae::h3_vae_condition_latents(
+            &moments, latent_h, latent_w, &eps,
+        )?);
+    }
+    Ok(out)
 }
 
 pub fn h3_generate(
@@ -463,7 +571,7 @@ pub fn h3_generate_with_control(
             params.width, params.height
         )));
     }
-    if params.keyframe.is_some() && (params.width % 32 != 0 || params.height % 32 != 0) {
+    if !params.keyframes.is_empty() && (params.width % 32 != 0 || params.height % 32 != 0) {
         return Err(DiffusionError::workflow(format!(
             "h3 fl2va canvas must be multiples of 32 (vision patch 16 x merge 2), got {}x{}",
             params.width, params.height
@@ -475,63 +583,57 @@ pub fn h3_generate_with_control(
     let num_latent_frames = h3_video_latent_num_frames(num_frames)?;
     let num_audio_latents = h3_audio_latent_num_frames(num_frames);
 
-    // --- fl2va keyframe: canvas resize + TE presentation assembly ----------
-    // Presentation: `"<Picture 1>: "` label (text) + vision block
-    // <|vision_start|> + <|image_pad|>*N + <|vision_end|> (all tagged VIDEO)
-    // + the prompt (text). N = (h/16)*(w/16)/4 merged vision tokens.
-    let keyframe_canvas: Option<Vec<u8>> = match &params.keyframe {
-        None => None,
-        Some(keyframe) => {
-            if keyframe.rgb.len() != keyframe.width * keyframe.height * 3 {
-                return Err(DiffusionError::workflow(format!(
-                    "h3 keyframe rgb: expected {} bytes, got {}",
-                    keyframe.width * keyframe.height * 3,
-                    keyframe.rgb.len()
-                )));
-            }
-            Some(if keyframe.width == params.width && keyframe.height == params.height {
-                keyframe.rgb.clone()
-            } else {
-                fl2va_resize_canvas(
-                    &keyframe.rgb,
-                    keyframe.width,
-                    keyframe.height,
-                    params.width,
-                    params.height,
-                )?
-            })
-        }
-    };
+    // --- fl2va keyframes: canvas prep + TE presentation assembly ----------
+    // Presentation, per keyframe in packed order: a `"<Picture i>: "` label
+    // (text) + a vision block <|vision_start|> + <|image_pad|>*N +
+    // <|vision_end|> (all tagged VIDEO), then the prompt (text).
+    // N = (h/16)*(w/16)/4 merged vision tokens. Mirrors
+    // `encoders.py::MiniMaxH3FL2VATextEncoderStep.__call__` lines 278-295.
+    let mut keyframe_canvases: Vec<Vec<u8>> = Vec::with_capacity(params.keyframes.len());
+    for (index, keyframe) in params.keyframes.iter().enumerate() {
+        keyframe_canvases.push(fl2va_prepare_canvas(
+            keyframe,
+            index,
+            params.width,
+            params.height,
+        )?);
+    }
     let vision_grid_h = params.height / 16;
     let vision_grid_w = params.width / 16;
     let num_vision_tokens = vision_grid_h * vision_grid_w / 4;
-    let (full_token_ids, text_tags, vision_pad_start) = match &params.keyframe {
-        None => (
+    let (full_token_ids, text_tags, vision_pad_starts) = if params.keyframes.is_empty() {
+        (
             params.token_ids.clone(),
             vec![H3_TEXT_TAG; params.token_ids.len()],
-            0usize,
-        ),
-        Some(keyframe) => {
-            let mut ids = keyframe.picture_label_ids.clone();
-            let mut tags = vec![H3_TEXT_TAG; ids.len()];
+            Vec::new(),
+        )
+    } else {
+        let mut ids: Vec<u32> = Vec::new();
+        let mut tags: Vec<u8> = Vec::new();
+        let mut pad_starts = Vec::with_capacity(params.keyframes.len());
+        for keyframe in &params.keyframes {
+            ids.extend_from_slice(&keyframe.picture_label_ids);
+            tags.extend(std::iter::repeat(H3_TEXT_TAG).take(keyframe.picture_label_ids.len()));
             ids.push(H3_TOKEN_VISION_START);
-            let pad_start = ids.len();
+            pad_starts.push(ids.len());
             ids.extend(std::iter::repeat(H3_TOKEN_IMAGE_PAD).take(num_vision_tokens));
             ids.push(H3_TOKEN_VISION_END);
             tags.extend(std::iter::repeat(H3_VIDEO_TAG).take(num_vision_tokens + 2));
-            ids.extend_from_slice(&params.token_ids);
-            tags.extend(std::iter::repeat(H3_TEXT_TAG).take(params.token_ids.len()));
-            (ids, tags, pad_start)
         }
+        ids.extend_from_slice(&params.token_ids);
+        tags.extend(std::iter::repeat(H3_TEXT_TAG).take(params.token_ids.len()));
+        (ids, tags, pad_starts)
     };
 
+    let keyframe_anchors: Vec<H3KeyframeAnchor> =
+        params.keyframes.iter().map(|kf| kf.anchor).collect();
     let layout = h3_build_packed_layout(
         &text_tags,
         num_latent_frames,
         latent_h,
         latent_w,
         num_audio_latents,
-        params.keyframe.is_some() as usize,
+        &keyframe_anchors,
     )?;
     let rope = h3_rope_tables(&layout.position_ids);
     progress(&format!(
@@ -567,13 +669,19 @@ pub fn h3_generate_with_control(
     // Draw order mirrors the reference's single-generator discipline: the
     // conditioning noise FIRST (one draw per keyframe, latent-tensor shape),
     // then the video noise, then the audio noise.
+    // One draw per keyframe, in packed order, mirroring
+    // `before_denoise.py::MiniMaxH3PackConditionRowsStep.__call__`
+    // ("One draw per condition, in packed order", lines 946-953). With one
+    // keyframe this is byte-for-byte the single draw it always was.
     let mut rng = H3NoiseRng::new(params.seed);
-    let cond_noise: Option<Vec<f32>> = if params.keyframe.is_some()
-        && params.condition_rows_override.is_none()
-    {
-        Some(rng.fill_normal(24 * latent_h * latent_w))
+    let cond_noise: Vec<Vec<f32>> = if params.condition_rows_override.is_none() {
+        params
+            .keyframes
+            .iter()
+            .map(|_| rng.fill_normal(24 * latent_h * latent_w))
+            .collect()
     } else {
-        None
+        Vec::new()
     };
     let mut video_rows = match &params.video_noise_rows {
         Some(rows) => {
@@ -613,7 +721,7 @@ pub fn h3_generate_with_control(
         token_ids: full_token_ids.clone(),
         width: params.width,
         height: params.height,
-        canvas: keyframe_canvas.clone(),
+        canvases: keyframe_canvases.clone(),
     };
     let cached_embeds = ctrl
         .cond_cache
@@ -660,24 +768,25 @@ pub fn h3_generate_with_control(
                 // sitting still.
                 let mut on_layer =
                     |done: usize, total: usize| ctrl.phase("text-encode", done, total);
-                match &keyframe_canvas {
-                    None => h3_text_encode_progress(
+                if keyframe_canvases.is_empty() {
+                    h3_text_encode_progress(
                         &te_weights,
                         &te_prepared,
                         &full_token_ids,
                         Some(&mut on_layer),
-                    )?,
-                    Some(canvas) => fl2va_text_encode(
+                    )?
+                } else {
+                    fl2va_text_encode(
                         &te_weights,
                         &te_prepared,
                         &full_token_ids,
-                        vision_pad_start,
+                        &vision_pad_starts,
                         num_vision_tokens,
-                        canvas,
+                        &keyframe_canvases,
                         params.width,
                         params.height,
                         Some(&mut on_layer),
-                    )?,
+                    )?
                 }
             };
             timings.te_encode_s = start.elapsed().as_secs_f64();
@@ -688,10 +797,13 @@ pub fn h3_generate_with_control(
                 "te: encode {:.2}s ({} tokens{}), {freed} buffers evicted",
                 timings.te_encode_s,
                 full_token_ids.len(),
-                if keyframe_canvas.is_some() {
-                    format!(", {num_vision_tokens} vision")
-                } else {
+                if keyframe_canvases.is_empty() {
                     String::new()
+                } else {
+                    format!(
+                        ", {} x {num_vision_tokens} vision",
+                        keyframe_canvases.len()
+                    )
                 }
             ));
             // Cache state only mutates after a fully successful encode.
@@ -703,8 +815,11 @@ pub fn h3_generate_with_control(
     };
 
     // --- fl2va keyframe conditioning rows (never denoised) -------------------
-    let condition_rows: Vec<f32> = match (&params.condition_rows_override, &keyframe_canvas) {
-        (Some(rows), _) => {
+    // One condition block per keyframe, concatenated in packed order: VAE
+    // encode -> noise to t=0.999 -> patchify
+    // (`before_denoise.py::MiniMaxH3PackConditionRowsStep`, lines 946-957).
+    let condition_rows: Vec<f32> = match &params.condition_rows_override {
+        Some(rows) => {
             if rows.len() != layout.num_condition_rows * H3_VIDEO_PATCH_DIM {
                 return Err(DiffusionError::workflow(format!(
                     "h3 condition rows override: expected {} values, got {}",
@@ -714,48 +829,81 @@ pub fn h3_generate_with_control(
             }
             rows.clone()
         }
-        (None, Some(canvas)) => {
+        None if keyframe_canvases.is_empty() => Vec::new(),
+        None => {
             ctrl.check()?;
             // The pre-noise latents are keyframe-deterministic (fixed
             // posterior seed) and prompt/seed-independent — cache them; the
             // per-job cond noise (request seed) is applied after lookup.
-            let keyframe_key = H3KeyframeKey {
-                models_dir: models_dir.to_path_buf(),
-                width: params.width,
-                height: params.height,
-                canvas: canvas.clone(),
-            };
-            let cached_latents = ctrl
-                .cond_cache
-                .as_deref()
-                .and_then(|cache| cache.latents_for(&keyframe_key))
-                .map(<[f32]>::to_vec);
+            let keyframe_keys: Vec<H3KeyframeKey> = keyframe_canvases
+                .iter()
+                .map(|canvas| H3KeyframeKey {
+                    models_dir: models_dir.to_path_buf(),
+                    width: params.width,
+                    height: params.height,
+                    canvas: canvas.clone(),
+                })
+                .collect();
+            let cached: Vec<Option<Vec<f32>>> = keyframe_keys
+                .iter()
+                .map(|key| {
+                    ctrl.cond_cache
+                        .as_deref()
+                        .and_then(|cache| cache.latents_for(key))
+                        .map(<[f32]>::to_vec)
+                })
+                .collect();
             let start = std::time::Instant::now();
-            let latents = match cached_latents {
-                Some(latents) => {
-                    ctrl.phase("keyframe-cached", 0, 0);
-                    progress("keyframe: condition latents cached");
-                    latents
-                }
-                None => {
-                    ctrl.phase("keyframe-encode", 0, 0);
-                    let latents = fl2va_condition_latents(
-                        &video_vae_source(models_dir, &params.model_set),
-                        canvas,
-                        params.width,
-                        params.height,
-                        latent_h,
-                        latent_w,
-                    )?;
-                    if let Some(cache) = ctrl.cond_cache.as_deref_mut() {
-                        cache.store_latents(keyframe_key, latents.clone());
-                    }
-                    latents
-                }
+            let missing: Vec<&[u8]> = keyframe_canvases
+                .iter()
+                .zip(cached.iter())
+                .filter(|(_, hit)| hit.is_none())
+                .map(|(canvas, _)| canvas.as_slice())
+                .collect();
+            let mut encoded = if missing.is_empty() {
+                ctrl.phase("keyframe-cached", 0, 0);
+                progress("keyframe: condition latents cached");
+                Vec::new().into_iter()
+            } else {
+                ctrl.phase("keyframe-encode", 0, 0);
+                fl2va_condition_latents_batch(
+                    &video_vae_source(models_dir, &params.model_set),
+                    &missing,
+                    params.width,
+                    params.height,
+                    latent_h,
+                    latent_w,
+                )?
+                .into_iter()
             };
-            let noise = cond_noise.as_ref().expect("cond noise drawn with keyframe");
-            let noised = h3_scale_noise(&latents, H3_KEYFRAME_NOISE_AUG, noise)?;
-            let rows = h3_patchify_video_latents(&noised, 1, latent_h, latent_w)?;
+            let mut latents_per_keyframe = Vec::with_capacity(keyframe_canvases.len());
+            for (index, hit) in cached.into_iter().enumerate() {
+                let latents = match hit {
+                    Some(latents) => latents,
+                    None => encoded
+                        .next()
+                        .expect("one encode per cache miss, in packed order"),
+                };
+                if let Some(cache) = ctrl.cond_cache.as_deref_mut() {
+                    cache.store_latents(
+                        H3KeyframeKey {
+                            models_dir: models_dir.to_path_buf(),
+                            width: params.width,
+                            height: params.height,
+                            canvas: keyframe_canvases[index].clone(),
+                        },
+                        latents.clone(),
+                    );
+                }
+                latents_per_keyframe.push(latents);
+            }
+            let mut rows: Vec<f32> = Vec::with_capacity(
+                layout.num_condition_rows * H3_VIDEO_PATCH_DIM,
+            );
+            for (latents, noise) in latents_per_keyframe.iter().zip(cond_noise.iter()) {
+                let noised = h3_scale_noise(latents, H3_KEYFRAME_NOISE_AUG, noise)?;
+                rows.extend(h3_patchify_video_latents(&noised, 1, latent_h, latent_w)?);
+            }
             timings.keyframe_encode_s = start.elapsed().as_secs_f64();
             if params.staged_residency {
                 // The VAE encoder must not co-reside with the DiT on the
@@ -767,14 +915,14 @@ pub fn h3_generate_with_control(
                 }
             }
             progress(&format!(
-                "keyframe: vae encode + condition rows {:.2}s ({} rows @ t={})",
+                "keyframe: vae encode + condition rows {:.2}s ({} anchors, {} rows @ t={})",
                 timings.keyframe_encode_s,
+                keyframe_canvases.len(),
                 layout.num_condition_rows,
                 H3_KEYFRAME_NOISE_AUG,
             ));
             rows
         }
-        (None, None) => Vec::new(),
     };
     if condition_rows.len() != layout.num_condition_rows * H3_VIDEO_PATCH_DIM {
         return Err(DiffusionError::workflow(
@@ -948,8 +1096,23 @@ mod tests {
             token_ids: prompt_ids.to_vec(),
             width: w,
             height: h,
-            canvas,
+            canvases: canvas.into_iter().collect(),
         }
+    }
+
+    fn keyframe(rgb: Vec<u8>, w: usize, h: usize, anchor: H3KeyframeAnchor) -> H3KeyframeInput {
+        H3KeyframeInput {
+            rgb,
+            width: w,
+            height: h,
+            anchor,
+            picture_label_ids: Vec::new(),
+        }
+    }
+
+    /// A flat WxH RGB image, distinguishable per call by `tint`.
+    fn flat(w: usize, h: usize, tint: u8) -> Vec<u8> {
+        (0..w * h * 3).map(|i| tint.wrapping_add(i as u8)).collect()
     }
 
     /// The cache keys on the exact conditioning identity: same presentation
@@ -1010,5 +1173,187 @@ mod tests {
         // Different pixels or size: miss.
         assert!(cache.latents_for(&kf(vec![1, 2, 3], 640)).is_none());
         assert!(cache.latents_for(&kf(canvas, 672)).is_none());
+    }
+
+    /// A first+last request encodes two anchors, so the latent cache must
+    /// hold both — a single slot would thrash every job.
+    #[test]
+    fn keyframe_latents_cache_holds_both_anchors() {
+        let mut cache = H3CondCache::default();
+        let kf = |canvas: Vec<u8>| H3KeyframeKey {
+            models_dir: PathBuf::from("/models/h3"),
+            width: 640,
+            height: 352,
+            canvas,
+        };
+        cache.store_latents(kf(vec![1, 2, 3]), vec![1.0f32]);
+        cache.store_latents(kf(vec![4, 5, 6]), vec![2.0f32]);
+        assert_eq!(cache.latents_for(&kf(vec![1, 2, 3])), Some(&[1.0f32][..]));
+        assert_eq!(cache.latents_for(&kf(vec![4, 5, 6])), Some(&[2.0f32][..]));
+        // Re-storing an entry keeps one copy, most recent first.
+        cache.store_latents(kf(vec![1, 2, 3]), vec![3.0f32]);
+        assert_eq!(cache.keyframe_latents.len(), 2);
+        assert_eq!(cache.latents_for(&kf(vec![1, 2, 3])), Some(&[3.0f32][..]));
+        // Past the slot count the oldest is dropped.
+        for tint in 0..H3_KEYFRAME_CACHE_SLOTS as u8 {
+            cache.store_latents(kf(vec![100 + tint]), vec![tint as f32]);
+        }
+        assert_eq!(cache.keyframe_latents.len(), H3_KEYFRAME_CACHE_SLOTS);
+        assert!(cache.latents_for(&kf(vec![4, 5, 6])).is_none());
+    }
+
+    /// PARITY GATE. With one keyframe the presentation is byte-for-byte what
+    /// the single-image pipeline built: label, `<|vision_start|>`, N pads,
+    /// `<|vision_end|>`, prompt — with the vision block tagged VIDEO and the
+    /// pad span starting right after `<|vision_start|>`.
+    #[test]
+    fn single_keyframe_presentation_is_unchanged() {
+        let prompt = [7u32, 8, 9];
+        let label = [40u32, 41];
+        let num_vision_tokens = 6usize;
+        let (ids, tags, starts) =
+            presentation(&label_only(&label, 1), &prompt, num_vision_tokens);
+        let mut expected_ids = label.to_vec();
+        expected_ids.push(H3_TOKEN_VISION_START);
+        expected_ids.extend(std::iter::repeat(H3_TOKEN_IMAGE_PAD).take(num_vision_tokens));
+        expected_ids.push(H3_TOKEN_VISION_END);
+        expected_ids.extend_from_slice(&prompt);
+        assert_eq!(ids, expected_ids);
+        assert_eq!(starts, vec![label.len() + 1]);
+        let mut expected_tags = vec![H3_TEXT_TAG; label.len()];
+        expected_tags.extend(std::iter::repeat(H3_VIDEO_TAG).take(num_vision_tokens + 2));
+        expected_tags.extend(std::iter::repeat(H3_TEXT_TAG).take(prompt.len()));
+        assert_eq!(tags, expected_tags);
+    }
+
+    /// Two keyframes = two labelled vision blocks in packed order, then the
+    /// prompt once. Mirrors `encoders.py::MiniMaxH3FL2VATextEncoderStep`.
+    #[test]
+    fn two_keyframes_build_two_labelled_vision_blocks() {
+        let prompt = [7u32, 8];
+        let labels = [vec![40u32, 41], vec![50u32, 51, 52]];
+        let num_vision_tokens = 4usize;
+        let keyframes: Vec<H3KeyframeInput> = labels
+            .iter()
+            .zip([H3KeyframeAnchor::First, H3KeyframeAnchor::Last])
+            .map(|(label, anchor)| H3KeyframeInput {
+                rgb: Vec::new(),
+                width: 0,
+                height: 0,
+                anchor,
+                picture_label_ids: label.clone(),
+            })
+            .collect();
+        let (ids, tags, starts) = presentation(&keyframes, &prompt, num_vision_tokens);
+        assert_eq!(starts, vec![3, 3 + 4 + 1 + 3 + 1]);
+        assert_eq!(ids.len(), tags.len());
+        assert_eq!(ids[starts[0]], H3_TOKEN_IMAGE_PAD);
+        assert_eq!(ids[starts[1]], H3_TOKEN_IMAGE_PAD);
+        assert_eq!(ids[starts[0] - 1], H3_TOKEN_VISION_START);
+        assert_eq!(ids[starts[1] - 1], H3_TOKEN_VISION_START);
+        assert_eq!(&ids[ids.len() - prompt.len()..], &prompt);
+        // The labels are text, the whole vision block (delimiters included)
+        // is video.
+        for start in &starts {
+            for row in start - 1..start + num_vision_tokens + 1 {
+                assert_eq!(tags[row], H3_VIDEO_TAG, "row {row}");
+            }
+            assert_eq!(tags[start - 2], H3_TEXT_TAG);
+        }
+    }
+
+    /// The geometry anchor is stretched; the follower is cover-cropped. A
+    /// 2:1 source onto a square canvas keeps the middle half, not the whole
+    /// frame squeezed.
+    #[test]
+    fn follower_keyframe_is_cover_cropped_not_stretched() {
+        let (src_w, src_h) = (64usize, 32usize);
+        let rgb = flat(src_w, src_h, 3);
+        let first = keyframe(rgb.clone(), src_w, src_h, H3KeyframeAnchor::First);
+        let last = keyframe(rgb, src_w, src_h, H3KeyframeAnchor::Last);
+        let stretched = fl2va_prepare_canvas(&first, 0, 32, 32).unwrap();
+        let cropped = fl2va_prepare_canvas(&last, 1, 32, 32).unwrap();
+        assert_eq!(stretched.len(), 32 * 32 * 3);
+        assert_eq!(cropped.len(), 32 * 32 * 3);
+        assert_ne!(stretched, cropped);
+        // Cover: scale = max(32/64, 32/32) = 1.0 -> resize to 64x32, crop 32
+        // wide from x=16. So the crop is the source's middle columns, byte
+        // for byte (no resample at scale 1).
+        let source = flat(src_w, src_h, 3);
+        for y in 0..32usize {
+            let src = (y * src_w + 16) * 3;
+            assert_eq!(
+                &cropped[y * 32 * 3..(y + 1) * 32 * 3],
+                &source[src..src + 32 * 3],
+                "row {y}"
+            );
+        }
+    }
+
+    /// A canvas-sized keyframe is passed through untouched whatever its
+    /// position — no resample, no crop.
+    #[test]
+    fn exact_canvas_keyframe_is_passed_through() {
+        let rgb = flat(32, 32, 9);
+        let kf = keyframe(rgb.clone(), 32, 32, H3KeyframeAnchor::Last);
+        assert_eq!(fl2va_prepare_canvas(&kf, 0, 32, 32).unwrap(), rgb);
+        assert_eq!(fl2va_prepare_canvas(&kf, 1, 32, 32).unwrap(), rgb);
+    }
+
+    /// The same image at both ends prepares to the same canvas bytes, so the
+    /// two condition blocks carry identical latents and differ only in their
+    /// rotary anchor.
+    #[test]
+    fn identical_start_and_end_prepare_to_the_same_canvas() {
+        let rgb = flat(48, 48, 21);
+        let first = keyframe(rgb.clone(), 48, 48, H3KeyframeAnchor::First);
+        let last = keyframe(rgb, 48, 48, H3KeyframeAnchor::Last);
+        let a = fl2va_prepare_canvas(&first, 0, 32, 32).unwrap();
+        let b = fl2va_prepare_canvas(&last, 1, 32, 32).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// A keyframe whose byte length disagrees with its declared size is a
+    /// loud error, not a silent crop.
+    #[test]
+    fn malformed_keyframe_rgb_is_refused() {
+        let kf = keyframe(vec![0u8; 10], 8, 8, H3KeyframeAnchor::First);
+        assert!(fl2va_prepare_canvas(&kf, 0, 32, 32).is_err());
+    }
+
+    // -- helpers mirroring the pipeline's presentation assembly ------------
+
+    fn label_only(label: &[u32], _count: usize) -> Vec<H3KeyframeInput> {
+        vec![H3KeyframeInput {
+            rgb: Vec::new(),
+            width: 0,
+            height: 0,
+            anchor: H3KeyframeAnchor::First,
+            picture_label_ids: label.to_vec(),
+        }]
+    }
+
+    /// The exact presentation loop of `h3_generate_with_control`, lifted so
+    /// the token layout can be asserted without a checkpoint on disk.
+    fn presentation(
+        keyframes: &[H3KeyframeInput],
+        prompt: &[u32],
+        num_vision_tokens: usize,
+    ) -> (Vec<u32>, Vec<u8>, Vec<usize>) {
+        let mut ids: Vec<u32> = Vec::new();
+        let mut tags: Vec<u8> = Vec::new();
+        let mut pad_starts = Vec::with_capacity(keyframes.len());
+        for keyframe in keyframes {
+            ids.extend_from_slice(&keyframe.picture_label_ids);
+            tags.extend(std::iter::repeat(H3_TEXT_TAG).take(keyframe.picture_label_ids.len()));
+            ids.push(H3_TOKEN_VISION_START);
+            pad_starts.push(ids.len());
+            ids.extend(std::iter::repeat(H3_TOKEN_IMAGE_PAD).take(num_vision_tokens));
+            ids.push(H3_TOKEN_VISION_END);
+            tags.extend(std::iter::repeat(H3_VIDEO_TAG).take(num_vision_tokens + 2));
+        }
+        ids.extend_from_slice(prompt);
+        tags.extend(std::iter::repeat(H3_TEXT_TAG).take(prompt.len()));
+        (ids, tags, pad_starts)
     }
 }
