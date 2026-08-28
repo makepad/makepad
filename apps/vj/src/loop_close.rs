@@ -1,11 +1,13 @@
 //! Closing a generated clip into a seamless loop.
 //!
-//! The video model cannot do this for us. H3 conditions on a FIRST frame
-//! and nothing else: `VideoJob` carries `input_rgb` and there is no
-//! end-frame, last-frame or loop field anywhere in the backend, the wire
-//! protocol or the model crate. So an i2v clip begins exactly on the flux
-//! still and ends wherever the motion got to — play it on a pad and the
-//! wrap from the last frame back to the still is a visible jump cut.
+//! The video model now gets us most of the way: H3 honours a `last_frame`
+//! input, so a dreamed clip is generated to END on the flux still it began
+//! from — measured at ~1.55/255 end-vs-start. That is NEARLY closed, not
+//! closed, and only on boxes running the new binary; a clip off an older
+//! box still ends wherever the motion got to, and its wrap back to the
+//! still is a visible jump cut. So this runs either way: over an
+//! almost-closed clip it is invisible, and over an open one it is the
+//! difference between a loop and a cut.
 //!
 //! What closes it is the oldest trick there is, applied to the decoded
 //! frames the repeat cache already holds: cross-fade the clip's TAIL onto
@@ -26,7 +28,9 @@
 //! claiming a synthesised wrap. The better version interpolates the wrap
 //! with the in-tree RIFE tweener so the motion CONTINUES through the seam
 //! instead of dissolving across it; that upgrade slots in behind the same
-//! function signature.
+//! function signature. With end-frame conditioning in play the two ends
+//! already nearly agree, so the blend has very little to hide and a short
+//! wrap is enough.
 
 use crate::media::{Frame, Pixels};
 
