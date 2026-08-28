@@ -2,8 +2,9 @@ use {
     crate::{
         cx_draw::CxDraw,
         draw_list_2d::DrawList2d,
-        makepad_math::{Vec2Index, Vec2d},
+        makepad_math::{Rect, Vec2Index, Vec2d},
         makepad_platform::{DrawListId, DrawPassId, LiveId},
+        makepad_script::ScriptNew,
         turtle::{AlignEntry, FinishedWalk, Turtle, Walk},
     },
     std::{ops::Deref, ops::DerefMut},
@@ -26,6 +27,10 @@ pub struct Cx2d<'a, 'b> {
     pub(crate) align_list: Vec<AlignEntry>,
     pub(crate) draw_call_parent_stack: Vec<u64>,
     pub(crate) draw_call_parent_next: u64,
+    /// The wireframe used by the exploded z-layer view to give every turtle
+    /// scope a visible frame. Built on first use so an app that never opens
+    /// the mode never constructs it.
+    pub(crate) sploded_hairline: Option<Box<crate::shader::draw_sploded_hairline::DrawSplodedHairline>>,
 }
 
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
@@ -58,11 +63,52 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             align_list: Vec::with_capacity(4096),
             draw_call_parent_stack,
             draw_call_parent_next: 2,
+            sploded_hairline: None,
         }
     }
 
     pub fn is_drawing_overlay(&self) -> bool {
         self.overlay_draw_depth > 0
+    }
+
+    /// Draw one turtle scope's wireframe frame, while — and only while — the
+    /// exploded z-layer view is up.
+    ///
+    /// A parent whose children fill it completely has no pixels of its own in
+    /// flat 2D; in the exploded view its plane would be an invisible gap. This
+    /// gives every nesting level a frame to see, and to click.
+    ///
+    /// Costs nothing when the mode is off: one bool test, and the wireframe is
+    /// never even constructed.
+    pub(crate) fn draw_sploded_hairline(&mut self, rect: Rect) {
+        if !self.cx.sploded_hairlines_active() {
+            return;
+        }
+        if rect.size.x < 1.0 || rect.size.y < 1.0 {
+            return;
+        }
+        if self.draw_list_stack.is_empty() {
+            return;
+        }
+        if self.sploded_hairline.is_none() {
+            // `script_new_with_default` — not `script_new` — because the
+            // registered type default is where the shader binding lives.
+            let hairline = self.cx.with_vm(|vm| {
+                crate::shader::draw_sploded_hairline::DrawSplodedHairline::script_new_with_default(
+                    vm,
+                )
+            });
+            if hairline.draw_vars.draw_shader_id.is_none() {
+                crate::makepad_platform::error!(
+                    "sploded hairline: shader did not bind; scope frames disabled"
+                );
+            }
+            self.sploded_hairline = Some(Box::new(hairline));
+        }
+        let level = self.cx.nesting_depth as f32;
+        let mut hairline = self.sploded_hairline.take().unwrap();
+        hairline.draw_scope(self, rect, level);
+        self.sploded_hairline = Some(hairline);
     }
 
     #[inline]

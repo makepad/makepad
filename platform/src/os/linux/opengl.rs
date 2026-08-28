@@ -362,6 +362,8 @@ impl Cx {
         //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        // Exploded z-layer view: z is the call's nesting depth, not paint order.
+        let sploded = self.passes[draw_pass_id].sploded.is_some();
 
         let draw_list = &mut self.draw_lists[draw_list_id];
         draw_list
@@ -463,7 +465,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.draw_call_uniforms.set_zbias(*zbias);
+                draw_call.resolve_zbias(*zbias, sploded);
                 *zbias += zbias_step;
 
                 draw_item
