@@ -37741,6 +37741,7 @@ pub unsafe fn MFStartup(version: u32, dwflags: u32) -> windows_core::Result<()> 
     unsafe { MFStartup(version, dwflags).ok() }
 }
 pub const CLSID_MFMediaEngineClassFactory: windows_core::GUID = windows_core::GUID::from_u128(0xb44392da_499b_446b_a4cb_005fead0e6d5);
+pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 #[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DEVICE_INFO {
@@ -46147,7 +46148,6 @@ pub struct MF_STREAM_STATE(pub i32);
 pub struct MF_TOPOLOGY_TYPE(pub i32);
 pub const MF_TRANSCODE_CONTAINERTYPE: windows_core::GUID = windows_core::GUID::from_u128(0x150ff23f_4abc_478b_ac4f_e1916fba1cca);
 pub const MF_VERSION: u32 = 131184u32;
-pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct eAVEncH264VProfile(pub i32);
@@ -50572,9 +50572,6 @@ impl IRecordInfo_Vtbl {
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl windows_core::RuntimeName for IRecordInfo {}
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50588,11 +50585,9 @@ pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
 }
-impl PARAMFLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PARAMFLAGS(pub u16);
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESC {
     fn default() -> Self {
@@ -50605,16 +50600,21 @@ impl Clone for PARAMDESCEX {
         unsafe { core::mem::transmute_copy(self) }
     }
 }
-impl core::ops::BitOr for PARAMFLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+impl PARAMFLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESCEX {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
+    }
+}
+impl core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {
@@ -51846,6 +51846,11 @@ pub unsafe fn GetWindowLongW(hwnd: super::super::Foundation::HWND, nindex: WINDO
     unsafe { GetWindowLongW(hwnd, nindex) }
 }
 #[inline]
+pub unsafe fn GetWindowPlacement(hwnd: super::super::Foundation::HWND, lpwndpl: *mut WINDOWPLACEMENT) -> windows_core::Result<()> {
+    windows_core::link!("user32.dll" "system" fn GetWindowPlacement(hwnd : super::super::Foundation:: HWND, lpwndpl : *mut WINDOWPLACEMENT) -> windows_core::BOOL);
+    unsafe { GetWindowPlacement(hwnd, lpwndpl as _).ok() }
+}
+#[inline]
 pub unsafe fn GetWindowRect(hwnd: super::super::Foundation::HWND, lprect: *mut super::super::Foundation::RECT) -> windows_core::Result<()> {
     windows_core::link!("user32.dll" "system" fn GetWindowRect(hwnd : super::super::Foundation:: HWND, lprect : *mut super::super::Foundation:: RECT) -> windows_core::BOOL);
     unsafe { GetWindowRect(hwnd, lprect as _).ok() }
@@ -52268,6 +52273,52 @@ pub const SW_SHOW: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(5i32);
 pub struct SYSTEM_METRICS_INDEX(pub i32);
 pub type TIMERPROC = Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: usize, param3: u32)>;
 pub const WA_ACTIVE: u32 = 1u32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WINDOWPLACEMENT {
+    pub length: u32,
+    pub flags: WINDOWPLACEMENT_FLAGS,
+    pub showCmd: u32,
+    pub ptMinPosition: super::super::Foundation::POINT,
+    pub ptMaxPosition: super::super::Foundation::POINT,
+    pub rcNormalPosition: super::super::Foundation::RECT,
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WINDOWPLACEMENT_FLAGS(pub u32);
+impl WINDOWPLACEMENT_FLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl core::ops::BitOr for WINDOWPLACEMENT_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl core::ops::BitAnd for WINDOWPLACEMENT_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl core::ops::BitOrAssign for WINDOWPLACEMENT_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl core::ops::BitAndAssign for WINDOWPLACEMENT_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl core::ops::Not for WINDOWPLACEMENT_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WINDOWPOS {

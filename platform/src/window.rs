@@ -8,6 +8,7 @@ use crate::{
     makepad_math::*,
     //makepad_live_id::*,
     makepad_script::*,
+    screen::{sanitize_window_geom, DEFAULT_WINDOW_SIZE},
     script::vm::*,
 };
 
@@ -752,6 +753,8 @@ impl WindowHandle {
         cx.windows[self.window_id()].get_inner_size()
     }
 
+    /// The window's top-left corner, in the space [`Self::reposition`] accepts: physical
+    /// screen pixels on Windows and X11, points on macOS. Never scaled by the DPI factor.
     pub fn get_position(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_position()
     }
@@ -856,6 +859,12 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
 
+    /// Moves the window's top-left corner to `position`, in the same space
+    /// [`Self::get_position`] reports: physical screen pixels on Windows and X11, points on
+    /// macOS. Unlike [`Self::resize`], which takes a logical size that scales with the DPI, a
+    /// position is never scaled — a screen coordinate spanning displays of different scales
+    /// has no single factor to be logical in. Backends fit the request to the displays that
+    /// are actually attached, so a window cannot be placed where it could not be reached.
     pub fn reposition(&self, cx: &mut Cx, position: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::RepositionWindow(self.window_id(), position));
     }
@@ -1139,6 +1148,22 @@ impl Default for CxWindow {
 }
 
 impl CxWindow {
+    /// The geometry to create this window with, reduced to values a windowing system can act
+    /// on: a size no smaller than [`crate::screen::MIN_WINDOW_SIZE`], and a position that is
+    /// either real coordinates or `None` for "the system places it".
+    ///
+    /// Every backend reads its creation geometry through here, so no request — a restored
+    /// state file, a DSL literal, a computed popup rect — can reach a platform call carrying a
+    /// size it will reject or a coordinate that is not a number. Placing the window on a
+    /// display that exists is a separate, per-backend step; see
+    /// [`crate::screen::fit_window_rect_to_screens`].
+    pub fn create_geom(&self) -> (Option<Vec2d>, Vec2d) {
+        sanitize_window_geom(
+            self.create_position,
+            self.create_inner_size.unwrap_or(DEFAULT_WINDOW_SIZE),
+        )
+    }
+
     pub(crate) fn valid_dpi_factor(dpi_factor: f64) -> Option<f64> {
         if dpi_factor.is_finite() && dpi_factor > 0.0 {
             Some(dpi_factor)

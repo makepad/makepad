@@ -10,7 +10,9 @@ use {
             droptarget::*,
             win32_app::{encode_wide, with_win32_app, Win32App},
             win32_event::*,
+            win32_screen::{win32_screens, workspace_rect_to_screen},
         },
+        screen::{clamp_point_to_screens, fit_window_rect_to_screens},
         window::{WindowBackdrop, WindowId, WindowVisuals},
         windows::{
             core::PCWSTR,
@@ -88,6 +90,7 @@ use {
                         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
                         WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
                         WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                        GetWindowPlacement, WINDOWPLACEMENT,
                         WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES,
                         WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
                         WS_EX_WINDOWEDGE, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
@@ -107,6 +110,13 @@ use {
         sync::Mutex,
     },
 };
+
+/// Whether a screen coordinate survives the conversion `CreateWindowExW` and `MoveWindow`
+/// take: a real number inside `i32`, and not the `CW_USEDEFAULT` sentinel that `i32::MIN`
+/// would be read as.
+fn is_placeable(v: f64) -> bool {
+    v.is_finite() && v > i32::MIN as f64 && v < i32::MAX as f64
+}
 
 #[repr(C)]
 struct AccentPolicy {
@@ -203,6 +213,11 @@ pub struct Win32Window {
     /// Set by `close_window()`; suppresses the WM_ACTIVATE-derived
     /// `PopupDismissed(FocusLost)`, which would duplicate the closer's dismissal.
     pub is_closing: Cell<bool>,
+    /// Whether the window is inside the system's modal move/size loop, i.e. the user is
+    /// dragging it. `WM_MOVE` arrives per mouse step there, so the position is published once
+    /// on the way out rather than on every step; a programmatic move, which sets no such
+    /// state, publishes immediately.
+    pub in_size_move: Cell<bool>,
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
@@ -528,10 +543,22 @@ impl Win32Window {
             style_ex |= WS_EX_NOREDIRECTIONBITMAP;
         }
 
-        let (x, y) = if let Some(position) = position {
-            (position.x as i32, position.y as i32)
-        } else {
-            (CW_USEDEFAULT, CW_USEDEFAULT)
+        let (x, y) = match position {
+            // A restored position can name a display that is gone, or hold values no display
+            // ever had. Pinning it now keeps `CreateWindowExW` and the sizing that follows
+            // working on real coordinates; `init` fits the finished rectangle once the size is
+            // known. A coordinate still out of range after pinning means no display could be
+            // enumerated, so the system's own placement is used instead of a value that would
+            // saturate on the way to the API.
+            Some(position) => {
+                let pinned = clamp_point_to_screens(&win32_screens(), position);
+                if is_placeable(pinned.x) && is_placeable(pinned.y) {
+                    (pinned.x as i32, pinned.y as i32)
+                } else {
+                    (CW_USEDEFAULT, CW_USEDEFAULT)
+                }
+            }
+            None => (CW_USEDEFAULT, CW_USEDEFAULT),
         };
 
         let hwnd = unsafe {
@@ -577,6 +604,7 @@ impl Win32Window {
             nc_dq_gen: Cell::new(0),
             geom_event_gen: Cell::new(0),
             is_closing: Cell::new(false),
+            in_size_move: Cell::new(false),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -632,6 +660,7 @@ impl Win32Window {
             nc_dq_gen: Cell::new(0),
             geom_event_gen: Cell::new(0),
             is_closing: Cell::new(false),
+            in_size_move: Cell::new(false),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -661,6 +690,50 @@ impl Win32Window {
         self.set_inner_size(size);
         if self.is_fullscreen {
             self.maximize();
+        } else if !self.is_popup {
+            // A restored size and position are only as good as the display layout they were
+            // saved on. Popups are placed against their parent and left alone; a maximized
+            // window is the system's to place.
+            self.fit_to_screens();
+        }
+    }
+
+    /// Moves and resizes the window so it sits entirely within one display's work area.
+    ///
+    /// See `crate::screen::fit_window_rect_to_screens` for what counts as a fit and why it
+    /// is unconditional. A window rectangle that already fits is left untouched, so this
+    /// costs one `GetWindowRect` and a display enumeration in the common case.
+    pub fn fit_to_screens(&mut self) {
+        let screens = win32_screens();
+        if screens.is_empty() {
+            return;
+        }
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd, &mut rect) }.is_err() {
+            return;
+        }
+        let current = Rect {
+            pos: dvec2(rect.left as f64, rect.top as f64),
+            size: dvec2(
+                (rect.right - rect.left) as f64,
+                (rect.bottom - rect.top) as f64,
+            ),
+        };
+        let fitted = fit_window_rect_to_screens(&screens, current);
+        if fitted == current {
+            return;
+        }
+        if let Err(e) = unsafe {
+            MoveWindow(
+                self.hwnd,
+                fitted.pos.x as i32,
+                fitted.pos.y as i32,
+                fitted.size.x as i32,
+                fitted.size.y as i32,
+                true,
+            )
+        } {
+            crate::error!("Fitting the window into the visible screen area failed: {}", e);
         }
     }
 
@@ -1026,12 +1099,25 @@ impl Win32Window {
                 }));
             }
             WM_ENTERSIZEMOVE => {
+                window.in_size_move.set(true);
                 with_win32_app(|app| app.start_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStart(window.window_id));
             }
+            // WM_CANCELMODE (0x001F): the system is telling the window to abandon any internal
+            // mode it is in. DefWindowProc normally still leaves the move/size loop through
+            // WM_EXITSIZEMOVE, so this is a failsafe: `in_size_move` is the only thing gating
+            // position publication, and a stuck `true` would silently stop it for the window's
+            // lifetime.
+            0x001F => {
+                window.in_size_move.set(false);
+            }
             WM_EXITSIZEMOVE => {
+                window.in_size_move.set(false);
                 with_win32_app(|app| app.stop_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
+                // A drag that only moved the window produced no WM_SIZE, so this is the one
+                // chance to publish where it ended up.
+                window.send_move_event();
             }
             // WM_SIZING (0x0214) fires BEFORE the window is resized with
             // the proposed new rect. By pre-rendering at this size, the
@@ -1045,6 +1131,14 @@ impl Win32Window {
                 // The window may have moved to a monitor with a different scale; drop the cached
                 // DPI so send_change_event() (and subsequent hit-tests) re-read the new value.
                 window.invalidate_cached_dpi();
+                // Minimizing does not change the window's geometry, it parks it. Publishing the
+                // iconic rect would relayout the whole UI at zero size and poison whatever the
+                // app persists; `outer_rect` already answers from the restored placement, so
+                // there is nothing here worth reporting either.
+                const SIZE_MINIMIZED: usize = 1;
+                if wparam.0 == SIZE_MINIMIZED {
+                    return LRESULT(0);
+                }
                 window.send_change_event();
             }
             WM_DPICHANGED => {
@@ -1083,6 +1177,13 @@ impl Win32Window {
             0x0003 => {
                 window.nc_dq_cache.set(None);
                 window.nc_dq_gen.set(window.nc_dq_gen.get().wrapping_add(1));
+                // Publish the new position, or the window keeps reporting — and the app keeps
+                // persisting — where it used to be. A user drag is left to WM_EXITSIZEMOVE:
+                // this message arrives per mouse step, and each published geometry costs a
+                // full redraw on the Cx side.
+                if !window.in_size_move.get() {
+                    window.send_move_event();
+                }
             }
             WM_CLOSE => {
                 // close requested
@@ -1382,31 +1483,51 @@ impl Win32Window {
         self.ime_rect = rect;
     }
 
-    pub fn get_position(&self) -> Vec2d {
+    /// The window's outer rectangle in screen pixels, answered from the restored placement
+    /// while the window is minimized.
+    ///
+    /// A minimized window has no on-screen rectangle: `GetWindowRect` reports the off-screen
+    /// parking position `(-32000, -32000)` and `GetClientRect` a zero size. An app that
+    /// persists its geometry on shutdown would save those and restore, next launch, a window
+    /// it can neither see nor grab — so the restored placement the system keeps for exactly
+    /// this purpose is reported instead.
+    fn outer_rect(&self) -> RECT {
         unsafe {
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                bottom: 0,
-                right: 0,
-            };
-            GetWindowRect(self.hwnd, &mut rect).unwrap();
-            Vec2d {
-                x: rect.left as f64,
-                y: rect.top as f64,
+            if self.is_iconic() {
+                let mut placement = WINDOWPLACEMENT {
+                    length: mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                if GetWindowPlacement(self.hwnd, &mut placement).is_ok() {
+                    return workspace_rect_to_screen(placement.rcNormalPosition);
+                }
             }
+            let mut rect = RECT::default();
+            GetWindowRect(self.hwnd, &mut rect).unwrap();
+            rect
+        }
+    }
+
+    /// The window's top-left corner in physical screen pixels; see [`Self::set_position`]
+    /// for why positions are not scaled the way sizes are.
+    pub fn get_position(&self) -> Vec2d {
+        let rect = self.outer_rect();
+        Vec2d {
+            x: rect.left as f64,
+            y: rect.top as f64,
         }
     }
 
     pub fn get_inner_size(&self) -> Vec2d {
         unsafe {
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                bottom: 0,
-                right: 0,
-            };
-            GetClientRect(self.hwnd, &mut rect).unwrap();
+            let mut rect = RECT::default();
+            if self.is_iconic() {
+                // A restored window of this backend is fully client-sized (see the
+                // `WM_NCCALCSIZE` handler), so its outer rectangle is also its client size.
+                rect = self.outer_rect();
+            } else {
+                GetClientRect(self.hwnd, &mut rect).unwrap();
+            }
             let dpi = self.get_dpi_factor();
             Vec2d {
                 x: (rect.right - rect.left) as f64 / dpi,
@@ -1416,22 +1537,19 @@ impl Win32Window {
     }
 
     pub fn get_outer_size(&self) -> Vec2d {
-        unsafe {
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                bottom: 0,
-                right: 0,
-            };
-            GetWindowRect(self.hwnd, &mut rect).unwrap();
-            let dpi = self.get_dpi_factor();
-            Vec2d {
-                x: (rect.right - rect.left) as f64 / dpi,
-                y: (rect.bottom - rect.top) as f64 / dpi,
-            }
+        let rect = self.outer_rect();
+        let dpi = self.get_dpi_factor();
+        Vec2d {
+            x: (rect.right - rect.left) as f64 / dpi,
+            y: (rect.bottom - rect.top) as f64 / dpi,
         }
     }
 
+    /// Moves the window's top-left corner to `pos`, in physical screen pixels — the same
+    /// space [`Self::get_position`] reports and `CreateWindowExW` takes, so
+    /// `set_position(get_position())` leaves the window where it is. Sizes are logical and
+    /// scale with the DPI; positions are not, because a screen coordinate on a multi-monitor
+    /// desktop has no single scale factor to be logical in.
     pub fn set_position(&mut self, pos: Vec2d) {
         unsafe {
             let mut window_rect = RECT {
@@ -1441,13 +1559,23 @@ impl Win32Window {
                 right: 0,
             };
             GetWindowRect(self.hwnd, &mut window_rect).unwrap();
-            let dpi = self.get_dpi_factor();
+            // A caller placing the window — restoring a saved position, cascading a new
+            // window — cannot know the display layout it is placing into, so the request is
+            // fitted to the displays that are actually attached.
+            let want = Rect {
+                pos,
+                size: dvec2(
+                    (window_rect.right - window_rect.left) as f64,
+                    (window_rect.bottom - window_rect.top) as f64,
+                ),
+            };
+            let fitted = fit_window_rect_to_screens(&win32_screens(), want);
             MoveWindow(
                 self.hwnd,
-                (pos.x * dpi) as i32,
-                (pos.y * dpi) as i32,
-                window_rect.right - window_rect.left,
-                window_rect.bottom - window_rect.top,
+                fitted.pos.x as i32,
+                fitted.pos.y as i32,
+                fitted.size.x as i32,
+                fitted.size.y as i32,
                 false,
             )
             .unwrap();
@@ -1627,6 +1755,27 @@ impl Win32Window {
 
     pub fn do_callback(&mut self, event: Win32Event) {
         Win32App::do_callback(event);
+    }
+
+    /// Publishes a position-only geometry change.
+    ///
+    /// Moving a window does not change what it draws, so unlike [`Self::send_change_event`]
+    /// this asks for no repaint; it only keeps the published geometry — which is what an app
+    /// persists — in step with where the window actually is. Nothing is dispatched when the
+    /// geometry is unchanged, which is also what makes this safe to call for a minimize,
+    /// where `outer_rect` keeps answering from the restored placement.
+    pub fn send_move_event(&mut self) {
+        let new_geom = self.get_window_geom();
+        if new_geom == self.last_window_geom {
+            return;
+        }
+        let old_geom = std::mem::replace(&mut self.last_window_geom, new_geom.clone());
+        self.geom_event_gen.set(self.geom_event_gen.get().wrapping_add(1));
+        self.do_callback(Win32Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id: self.window_id,
+            old_geom,
+            new_geom,
+        }));
     }
 
     pub fn send_change_event(&mut self) {

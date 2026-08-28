@@ -68,7 +68,7 @@ use crate::{
                 },
                 Dxgi::{
                     Common::{
-                        DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED,
+                        DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED,
                         DXGI_FORMAT,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
                         //DXGI_FORMAT_D32_FLOAT_S8X 24_UINT,
@@ -96,7 +96,7 @@ use crate::{
                     DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
                     DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
-                    DXGI_SCALING, DXGI_SCALING_NONE, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+                    DXGI_SCALING_NONE, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                     DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -110,6 +110,7 @@ use crate::{
         },
     },
 };
+use std::cell::Cell;
 
 impl Cx {
     fn render_view(
@@ -288,7 +289,21 @@ impl Cx {
                         d3d11_cx.context.RSSetState(raster_state);
                     }
 
-                    let geom_ibuf = geometry.os.geom_ibuf.buffer.as_ref().unwrap();
+                    // A geometry whose buffers could not be built — the device died between
+                    // frames, so `create_buffer_or_update` bailed — skips its draw call
+                    // instead of panicking a few lines before `DrawIndexedInstanced`. Binding
+                    // a null vertex buffer would be worse than either: it draws nothing and
+                    // reports nothing. The recovery sweep is what puts these back.
+                    let (Some(geom_ibuf), Some(geom_vbuf)) = (
+                        geometry.os.geom_ibuf.buffer.as_ref(),
+                        geometry.os.geom_vbuf.buffer.as_ref(),
+                    ) else {
+                        debug_assert!(
+                            d3d11_cx.device_lost.get(),
+                            "geometry buffers missing while the device is healthy"
+                        );
+                        continue;
+                    };
                     d3d11_cx
                         .context
                         .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
@@ -297,10 +312,7 @@ impl Cx {
                     let inst_slots = sh.mapping.instances.total_slots;
                     let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
                     let offsets = [0u32, 0u32];
-                    let buffers = [
-                        geometry.os.geom_vbuf.buffer.clone(),
-                        draw_item.os.inst_vbuf.buffer.clone(),
-                    ];
+                    let buffers = [Some(geom_vbuf.clone()), draw_item.os.inst_vbuf.buffer.clone()];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
                         2,
@@ -681,6 +693,11 @@ impl Cx {
                 self.capture_window_screenshot(d3d11_window, d3d11_cx);
             }
             presented = d3d11_window.present(vsync, latency_wait_timed_out);
+            // Lift the per-window verdict to the process-wide latch: the device is shared by
+            // every window, so one window seeing it die means the recovery driver has work.
+            if d3d11_window.device_lost {
+                d3d11_cx.device_lost.set(true);
+            }
         });
         // A frame went to `Present`, so the credit is spent — whether or not the
         // compositor kept it. Assuming it spent when it was not only costs one
@@ -867,6 +884,13 @@ impl Cx {
                 let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
                 cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                 self.draw_shaders.os_shaders.push(shp);
+            } else {
+                // `compile_set` was drained into `sync_ids`, so a shader dropped here is never
+                // asked for again and everything drawn with it silently stops rendering for
+                // the life of the process. Creation fails for a whole frame's worth of shaders
+                // when the device dies mid-compile, so put it back and let the next frame,
+                // against a rebuilt device, create it.
+                self.draw_shaders.compile_set.insert(draw_shader_id);
             }
         }
 
@@ -879,7 +903,13 @@ impl Cx {
 
     pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u64 {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.update_shared_texture(self.os.d3d11_device.as_ref().unwrap());
+        // `None` while a device loss is being recovered. Answering with the null handle is
+        // what the caller already gets for a texture that has not been shared yet, and the
+        // sweep will have cleared this texture's handle anyway.
+        let Some(device) = self.os.d3d11_device.clone() else {
+            return 0;
+        };
+        cxtexture.update_shared_texture(&device);
         cxtexture.os.shared_handle.0 as u64
     }
 
@@ -1310,6 +1340,31 @@ unsafe fn get_frame_statistics(
     }
 }
 
+/// `ID3D11Device::GetDeviceRemovedReason` has a vtable slot in the vendored bindings but no
+/// generated wrapper, so it is called through the vtable the way `get_frame_statistics` is.
+///
+/// It is the authoritative answer to "is this device still usable": it latches the real cause
+/// and keeps reporting it, and unlike a `Present` HRESULT it is available when the call that
+/// failed was a `CreateBuffer` on a window that never got as far as presenting.
+unsafe fn device_removed_reason(device: &ID3D11Device) -> windows_core::HRESULT {
+    unsafe { (Interface::vtable(device).GetDeviceRemovedReason)(Interface::as_raw(device)) }
+}
+
+/// Unbinds everything from the immediate context and flushes it.
+///
+/// DXGI allows only one flip-model swap chain per HWND at a time, and D3D11 destroys resources
+/// lazily: the context keeps its own references to whatever is bound — the back-buffer render
+/// target view above all — so dropping the application's handles is not enough to dissolve the
+/// old chain's association with its window. Without this, recreating a swap chain on the same
+/// HWND fails with `E_ACCESSDENIED`. `ClearState` has a vtable slot but no generated wrapper in
+/// the vendored bindings; `Flush` does.
+unsafe fn clear_and_flush(context: &ID3D11DeviceContext) {
+    unsafe {
+        (Interface::vtable(context).ClearState)(Interface::as_raw(context));
+        context.Flush();
+    }
+}
+
 /// Swap-chain headroom for a vsync-paced main window: 3 buffers with a maximum
 /// frame latency of 2 lets the CPU build frame N+1 while the compositor still
 /// holds N, which is what keeps a beat-paced loop from stalling on every hitch.
@@ -1344,7 +1399,10 @@ pub struct D3d11Window {
     /// DPI factor the swap-chain buffers were last allocated for.
     pub alloc_dpi: f64,
     pub first_draw: bool,
-    pub swap_chain: IDXGISwapChain1,
+    /// `None` between a device loss and the recovery driver rebuilding it. DXGI allows only
+    /// one flip-model swap chain per HWND at a time, so the dead one has to be released
+    /// before a replacement can be created against the same window.
+    pub swap_chain: Option<IDXGISwapChain1>,
     /// The DXGI frame-latency waitable object for this swap chain, used to pace
     /// the CPU render loop to the display refresh (vblank). It is created by
     /// requesting the `FRAME_LATENCY_WAITABLE_OBJECT` swap-chain flag and
@@ -1422,148 +1480,41 @@ impl D3d11Window {
         win32_window.set_ime_active(false);
         let wg = win32_window.get_window_geom();
 
-        let swap_chain_desc = |scaling: DXGI_SCALING, alpha_mode: DXGI_ALPHA_MODE| {
-            DXGI_SWAP_CHAIN_DESC1 {
-                AlphaMode: alpha_mode,
-                BufferCount: main_window_buffer_count(),
-                Width: ((wg.inner_size.x * wg.dpi_factor) as u32).max(1),
-                Height: ((wg.inner_size.y * wg.dpi_factor) as u32).max(1),
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                // Request a frame-latency waitable object so the render loop can pace
-                // the CPU to the display refresh (vblank) by waiting on it once per
-                // frame, instead of spinning. ResizeBuffers must pass this same flag.
-                Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Scaling: scaling,
-                Stereo: FALSE,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            }
+        let mut window = D3d11Window {
+            first_draw: true,
+            is_in_resize: false,
+            window_id,
+            alloc_size: wg.inner_size,
+            alloc_dpi: wg.dpi_factor,
+            window_geom: wg,
+            win32_window,
+            swap_texture: None,
+            render_target_view: None,
+            swap_chain: None,
+            frame_latency_waitable: HANDLE(std::ptr::null_mut()),
+            waitable_swap_chain: true,
+            resize_error_logged: false,
+            present_error_logged: false,
+            dcomp: None,
+            refresh_period: DEFAULT_REFRESH_PERIOD,
+            last_frame_stats: None,
+            occluded_since: None,
+            latency_timeout_since: None,
+            device_lost: false,
         };
-        // A flip-model HWND swap chain has to be opaque; transparency on that path
-        // is the layered-window route in `apply_window_visuals` instead.
-        let hwnd_swap_chain = || unsafe {
-            d3d11_cx.factory.CreateSwapChainForHwnd(
-                &d3d11_cx.device,
-                win32_window.hwnd,
-                &swap_chain_desc(DXGI_SCALING_NONE, DXGI_ALPHA_MODE_IGNORE),
-                None,
-                None,
-            )
-        };
-
-        // Composition is where per-pixel alpha actually works: DWM blends the UI
-        // visual onto whatever is behind it (BehindUi child, or the desktop).
-        // PREMULTIPLIED matches the pass blend (ONE / INV_SRC_ALPHA). IGNORE would
-        // flatten the whole UI to opaque and hide BehindUi content.
-        //
-        // This is not a glass HWND. Opaque widgets still look opaque; only pixels
-        // that are actually written with alpha 0 show through. `window.transparent`
-        // is ignored here — it is the layered-window flag on the HWND swap-chain path.
-        let composition_alpha = DXGI_ALPHA_MODE_PREMULTIPLIED;
-
-        let (swap_chain, dcomp) = match dcomp_device {
-            // Composition swap chains reject DXGI_SCALING_NONE; STRETCH also means
-            // a stale buffer is scaled to the window instead of leaving a
-            // uncovered gap, so the background-color trick below is not needed.
-            Some(device) => match unsafe {
-                d3d11_cx.factory.CreateSwapChainForComposition(
-                    &d3d11_cx.device,
-                    &swap_chain_desc(DXGI_SCALING_STRETCH, composition_alpha),
-                    None,
-                )
-            } {
-                Ok(swap_chain) => {
-                    let dcomp = dcomp::bind_swapchain(device, win32_window.hwnd, &swap_chain);
-                    (swap_chain, Some(dcomp))
-                }
-                Err(error) => {
-                    crate::error!("CreateSwapChainForComposition failed: {error}");
-                    crate::error!(
-                        "HWND already has WS_EX_NOREDIRECTIONBITMAP; destroying it instead of \
-                         pretending CreateSwapChainForHwnd can make this window visible"
-                    );
-                    win32_window.close_window();
-                    return None;
-                }
-            },
-            None => match hwnd_swap_chain() {
-                Ok(swap_chain) => (swap_chain, None),
-                Err(error) => {
-                    crate::error!("CreateSwapChainForHwnd failed: {error}");
-                    win32_window.close_window();
-                    return None;
-                }
-            },
-        };
-
-        unsafe {
-
-            // Set the maximum frame latency on the *swap chain* (not the device)
-            // and retrieve its frame-latency waitable object — the beat the event
-            // loop waits on, one credit per retired present. Latency 2 (with 3
-            // buffers) gives the CPU a frame of headroom so a single slow tick
-            // does not cost a whole refresh; `MAKEPAD_WIN_LATENCY=1` restores the
-            // old minimum-latency pair.
-            let frame_latency_waitable = match swap_chain.cast::<IDXGISwapChain2>() {
-                Ok(swap_chain2) => {
-                    let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
-                    swap_chain2.GetFrameLatencyWaitableObject()
-                }
-                Err(_) => HANDLE(std::ptr::null_mut()),
-            };
-            // Publish it as this window's paint beat. Registration order decides
-            // the primary window (index 0), whose beat drives the whole app tick.
-            if !frame_latency_waitable.is_invalid() {
-                with_win32_app(|app| {
-                    app.register_beat_handle(window_id, frame_latency_waitable, false)
-                });
+        if !window.create_swap_chain(d3d11_cx) {
+            // A WS_EX_NOREDIRECTIONBITMAP HWND without a composition tree never
+            // paints. Destroy it so the caller can retry with a redirection bitmap.
+            if window.win32_window.is_direct_composition {
+                crate::error!(
+                    "HWND already has WS_EX_NOREDIRECTIONBITMAP; destroying it instead of \
+                     pretending CreateSwapChainForHwnd can make this window visible"
+                );
+                window.win32_window.close_window();
+                return None;
             }
-
-            let swap_texture = swap_chain.GetBuffer(0).unwrap();
-            let mut render_target_view = None;
-            d3d11_cx
-                .device
-                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
-                .unwrap();
-            // Only meaningful with DXGI_SCALING_NONE. A composition-style HWND
-            // (including a failed bind that still has NOREDIRECTIONBITMAP) rejects it.
-            if dcomp.is_none() && !win32_window.is_direct_composition {
-                swap_chain
-                    .SetBackgroundColor(&mut DXGI_RGBA {
-                        r: 0.3,
-                        g: 0.3,
-                        b: 0.3,
-                        a: 1.0,
-                    })
-                    .unwrap();
-            }
-            Some(D3d11Window {
-                first_draw: true,
-                is_in_resize: false,
-                window_id: window_id,
-                alloc_size: wg.inner_size,
-                alloc_dpi: wg.dpi_factor,
-                window_geom: wg,
-                win32_window: win32_window,
-                swap_texture: Some(swap_texture),
-                render_target_view: render_target_view,
-                swap_chain: swap_chain,
-                frame_latency_waitable,
-                waitable_swap_chain: true,
-                resize_error_logged: false,
-                present_error_logged: false,
-                dcomp,
-                refresh_period: DEFAULT_REFRESH_PERIOD,
-                last_frame_stats: None,
-                occluded_since: None,
-                latency_timeout_since: None,
-                device_lost: false,
-            })
         }
+        Some(window)
     }
 
     pub fn new_popup(
@@ -1577,68 +1528,220 @@ impl D3d11Window {
 
         let wg = win32_window.get_window_geom();
 
-        let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            BufferCount: 2,
-            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
-            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
+        let mut window = D3d11Window {
+            first_draw: true,
+            is_in_resize: false,
+            window_id,
+            alloc_size: wg.inner_size,
+            alloc_dpi: wg.dpi_factor,
+            window_geom: wg,
+            win32_window,
+            swap_texture: None,
+            render_target_view: None,
+            swap_chain: None,
+            // Popups are not paced via a waitable object; the handle stays null and the
+            // render loop skips waiting on it.
+            frame_latency_waitable: HANDLE(std::ptr::null_mut()),
+            waitable_swap_chain: false,
+            resize_error_logged: false,
+            present_error_logged: false,
+            dcomp: None,
+            refresh_period: DEFAULT_REFRESH_PERIOD,
+            last_frame_stats: None,
+            occluded_since: None,
+            latency_timeout_since: None,
+            device_lost: false,
+        };
+        window.create_swap_chain(d3d11_cx);
+        window
+    }
+
+    /// This window's swap-chain description.
+    ///
+    /// `waitable_swap_chain` is what separates a main window (an extra buffer beyond the frame
+    /// latency, and the FRAME_LATENCY_WAITABLE_OBJECT flag that gives the paint loop its beat)
+    /// from a popup (two buffers, no flags). `ResizeBuffers` must later be handed the same
+    /// flags the chain was created with, which is why that lives on the window rather than
+    /// being passed in.
+    fn swap_chain_desc(&self) -> DXGI_SWAP_CHAIN_DESC1 {
+        let wg = &self.window_geom;
+        let composition = self.win32_window.is_direct_composition;
+        DXGI_SWAP_CHAIN_DESC1 {
+            // Composition is where per-pixel alpha actually works: DWM blends the UI
+            // visual onto whatever is behind it. PREMULTIPLIED matches the pass blend
+            // (ONE / INV_SRC_ALPHA). A flip-model HWND swap chain has to be opaque;
+            // transparency on that path is the layered-window route in
+            // `apply_window_visuals` instead.
+            AlphaMode: if composition {
+                DXGI_ALPHA_MODE_PREMULTIPLIED
+            } else {
+                DXGI_ALPHA_MODE_IGNORE
+            },
+            BufferCount: if self.waitable_swap_chain {
+                main_window_buffer_count()
+            } else {
+                2
+            },
+            Width: (wg.inner_size.x * wg.dpi_factor).max(1.0) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor).max(1.0) as u32,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            Flags: 0,
+            Flags: if self.waitable_swap_chain {
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32
+            } else {
+                0
+            },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
             },
-            Scaling: DXGI_SCALING_NONE,
+            // Composition swap chains reject DXGI_SCALING_NONE; STRETCH also means
+            // a stale buffer is scaled to the window instead of leaving an uncovered gap.
+            Scaling: if composition {
+                DXGI_SCALING_STRETCH
+            } else {
+                DXGI_SCALING_NONE
+            },
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-        };
+        }
+    }
 
+    /// Creates this window's swap chain, back-buffer view and — for a waitable chain — its
+    /// frame-latency handle and paint-beat registration, against the HWND the window already
+    /// owns. Any previous chain must already have gone through [`Self::release_gpu_resources`].
+    ///
+    /// Nothing is stored on `self` until every fallible step has succeeded, so a failed attempt
+    /// leaves the window exactly as it was and the recovery driver simply tries again.
+    pub fn create_swap_chain(&mut self, d3d11_cx: &D3d11Cx) -> bool {
+        debug_assert!(self.swap_chain.is_none());
+        let desc = self.swap_chain_desc();
+        let composition = self.win32_window.is_direct_composition;
         unsafe {
-            let swap_chain = d3d11_cx
-                .factory
-                .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
-                .unwrap();
+            let swap_chain = if composition {
+                match d3d11_cx.factory.CreateSwapChainForComposition(
+                    &d3d11_cx.device,
+                    &desc,
+                    None,
+                ) {
+                    Ok(sc) => sc,
+                    Err(e) => {
+                        d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForComposition", &e);
+                        return false;
+                    }
+                }
+            } else {
+                match d3d11_cx.factory.CreateSwapChainForHwnd(
+                    &d3d11_cx.device,
+                    self.win32_window.hwnd,
+                    &desc,
+                    None,
+                    None,
+                ) {
+                    Ok(sc) => sc,
+                    Err(e) => {
+                        d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForHwnd", &e);
+                        return false;
+                    }
+                }
+            };
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
+                Ok(t) => t,
+                Err(e) => {
+                    d3d11_cx.note_error("IDXGISwapChain::GetBuffer", &e);
+                    return false;
+                }
+            };
+            let mut render_target_view = None;
+            if let Err(e) = d3d11_cx.device.CreateRenderTargetView(
+                &swap_texture,
+                None,
+                Some(&mut render_target_view),
+            ) {
+                d3d11_cx.note_error("CreateRenderTargetView(backbuffer)", &e);
+                return false;
+            }
+            // Only meaningful with DXGI_SCALING_NONE. A composition swap chain
+            // (and a NOREDIRECTIONBITMAP HWND) rejects it.
+            if !composition {
+                let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                    r: 0.3,
+                    g: 0.3,
+                    b: 0.3,
+                    a: 1.0,
+                });
+            }
 
-            // Keep the low (1-frame) latency that the old device-level
-            // SetMaximumFrameLatency(1) used to give popups, but WITHOUT requesting
-            // the waitable flag (popups are not paced via a waitable object).
-            if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+            // Set the maximum frame latency on the swap chain (not the device) and, for a main
+            // window, take its waitable object: the beat the event loop waits on, one credit
+            // per retired present. Registration order decides the primary window (index 0),
+            // whose beat drives the whole app tick.
+            if self.waitable_swap_chain {
+                let handle = match swap_chain.cast::<IDXGISwapChain2>() {
+                    Ok(swap_chain2) => {
+                        let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
+                        swap_chain2.GetFrameLatencyWaitableObject()
+                    }
+                    Err(_) => HANDLE(std::ptr::null_mut()),
+                };
+                self.frame_latency_waitable = handle;
+                if !handle.is_invalid() {
+                    let window_id = self.window_id;
+                    with_win32_app(|app| app.register_beat_handle(window_id, handle, false));
+                }
+            } else if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+                // Popups keep the low one-frame latency without requesting the waitable flag.
                 let _ = swap_chain2.SetMaximumFrameLatency(1);
             }
 
-            let swap_texture = swap_chain.GetBuffer(0).unwrap();
-            let mut render_target_view = None;
-            d3d11_cx
-                .device
-                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
-                .unwrap();
-
-            D3d11Window {
-                first_draw: true,
-                is_in_resize: false,
-                window_id,
-                alloc_size: wg.inner_size,
-                alloc_dpi: wg.dpi_factor,
-                window_geom: wg,
-                win32_window,
-                swap_texture: Some(swap_texture),
-                render_target_view,
-                swap_chain,
-                // Popups are not paced via a waitable object; store a null handle
-                // and the render loop will skip waiting on it.
-                frame_latency_waitable: HANDLE(std::ptr::null_mut()),
-                waitable_swap_chain: false,
-                resize_error_logged: false,
-                present_error_logged: false,
-                dcomp: None,
-                refresh_period: DEFAULT_REFRESH_PERIOD,
-                last_frame_stats: None,
-                occluded_since: None,
-                latency_timeout_since: None,
-                device_lost: false,
+            if composition {
+                let Some(device) = d3d11_cx.dcomp_device.clone() else {
+                    crate::error!(
+                        "CreateSwapChainForComposition succeeded but no composition device is cached"
+                    );
+                    return false;
+                };
+                if let Some(dcomp) = self.dcomp.as_mut() {
+                    dcomp.sync_ui_swap_chain(&swap_chain);
+                } else {
+                    self.dcomp = Some(dcomp::bind_swapchain(
+                        device,
+                        self.win32_window.hwnd,
+                        &swap_chain,
+                    ));
+                }
             }
+
+            self.swap_texture = Some(swap_texture);
+            self.render_target_view = render_target_view;
+            self.swap_chain = Some(swap_chain);
+            self.alloc_size = self.window_geom.inner_size;
+            self.alloc_dpi = self.window_geom.dpi_factor;
+            self.last_frame_stats = None;
+            true
         }
+    }
+
+    /// Drops every GPU object this window owns, in the order DXGI requires.
+    ///
+    /// The back-buffer view and texture must go before the chain, and the beat handle must be
+    /// retired before it is closed or the event loop is left waiting on a closed handle. The
+    /// HWND and the `Win32Window` are untouched: they survive a device loss, and the rebuilt
+    /// chain is created against the same window.
+    pub fn release_gpu_resources(&mut self) {
+        try_with_win32_app(|app| app.unregister_beat_handle(self.window_id));
+        if !self.frame_latency_waitable.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.frame_latency_waitable);
+            }
+            self.frame_latency_waitable = HANDLE(std::ptr::null_mut());
+        }
+        self.render_target_view = None;
+        self.swap_texture = None;
+        self.swap_chain = None;
+        self.last_frame_stats = None;
+        self.occluded_since = None;
+        self.latency_timeout_since = None;
     }
 
     pub fn start_resize(&mut self) {
@@ -1684,7 +1787,13 @@ impl D3d11Window {
         // DXGI_ERROR_FRAME_STATISTICS_DISJOINT (and a fresh chain that has not
         // presented yet) means the sequence broke: fall back to one period out
         // from the wake time and start the estimate over.
-        if unsafe { get_frame_statistics(&self.swap_chain, &mut stats) }.is_err()
+        // No chain (a device loss is being recovered) is the same broken-sequence case: one
+        // period out from the wake time, with the estimate restarted.
+        let Some(swap_chain) = self.swap_chain.as_ref() else {
+            self.last_frame_stats = None;
+            return wake_time + self.refresh_period;
+        };
+        if unsafe { get_frame_statistics(swap_chain, &mut stats) }.is_err()
             || stats.SyncQPCTime == 0
         {
             self.last_frame_stats = None;
@@ -1724,7 +1833,10 @@ impl D3d11Window {
             return;
         }
         unsafe {
-            let _ = self.swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+            let Some(swap_chain) = self.swap_chain.as_ref() else {
+                return;
+            };
+            let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
                 r: clear_color.x,
                 g: clear_color.y,
                 b: clear_color.z,
@@ -1894,7 +2006,9 @@ impl D3d11Window {
         } = self;
         match dcomp.as_mut() {
             Some(dcomp) => {
-                dcomp.sync_ui_swap_chain(swap_chain);
+                if let Some(swap_chain) = swap_chain.as_ref() {
+                    dcomp.sync_ui_swap_chain(swap_chain);
+                }
                 dcomp.prepare_commit()
             }
             None => false,
@@ -1927,6 +2041,12 @@ impl D3d11Window {
         if (inner.x * dpi) < 1.0 || (inner.y * dpi) < 1.0 {
             return; // ResizeBuffers rejects zero dimensions.
         }
+        // Before the alloc record is updated or the backbuffer references are dropped: with no
+        // chain there is nothing to resize, and recording the new size would make the rebuilt
+        // chain look already-sized and skip its first real resize.
+        let Some(swap_chain) = self.swap_chain.clone() else {
+            return;
+        };
         self.alloc_size = self.window_geom.inner_size;
         self.alloc_dpi = self.window_geom.dpi_factor;
         // ResizeBuffers requires all references to the old backbuffers released first.
@@ -1948,7 +2068,7 @@ impl D3d11Window {
                 DXGI_SWAP_CHAIN_FLAG(0)
             };
             let mut resize_ok = true;
-            if let Err(e) = self.swap_chain.ResizeBuffers(
+            if let Err(e) = swap_chain.ResizeBuffers(
                 // 0 = keep the count the chain was created with. It used to be
                 // hardcoded to 2, which silently shrank a 3-buffer main window
                 // back to 2 on the first resize and undid the beat's headroom.
@@ -1967,7 +2087,7 @@ impl D3d11Window {
                 // Fall through: re-acquire the old-size backbuffer so we keep presenting.
             }
 
-            let swap_texture: ID3D11Texture2D = match self.swap_chain.GetBuffer(0) {
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
                 Ok(texture) => texture,
                 Err(e) => {
                     if !self.resize_error_logged {
@@ -2020,7 +2140,11 @@ impl D3d11Window {
             } else {
                 DXGI_PRESENT(0)
             };
-            let hr = self.swap_chain.Present(sync_interval, flags);
+            let Some(swap_chain) = self.swap_chain.as_ref() else {
+                // Between a device loss and the rebuild there is nothing to present to.
+                return false;
+            };
+            let hr = swap_chain.Present(sync_interval, flags);
             if hr == DXGI_ERROR_WAS_STILL_DRAWING {
                 // DO_NOT_WAIT path only: a benign dropped frame; the caller schedules a retry.
                 return false;
@@ -2079,6 +2203,107 @@ impl D3d11Window {
     }
 }
 
+impl CxOsTexture {
+    /// Forgets every GPU object and every "already uploaded" record for this texture, so the
+    /// ordinary upload path rebuilds it from the CPU-side pixels the next time it is drawn.
+    ///
+    /// The shared handle and keyed mutex are cleared rather than closed: the handle is duped
+    /// out to other processes by `share_texture_for_presentable_image`, so this type has never
+    /// owned its lifetime and closing it here would break an unrelated feature.
+    fn forget_gpu_objects(&mut self) {
+        self.texture = None;
+        self.keyed_mutex = None;
+        self.shared_handle = HANDLE(std::ptr::null_mut());
+        self.shader_resource_view = None;
+        self.render_target_view = None;
+        self.render_target_face_views = Default::default();
+        self.depth_stencil_view = None;
+        self.vec_alloc_width = 0;
+        self.vec_alloc_height = 0;
+        self.vec_alloc_dxgi = 0;
+        self.vec_uploaded_height = 0;
+    }
+}
+
+impl CxOsPass {
+    /// Forgets the pipeline state objects; `setup_pass_render_targets` recreates them on the
+    /// next paint because each is created only when its slot is `None`.
+    fn forget_gpu_objects(&mut self) {
+        self.pass_uniforms = D3d11Buffer::default();
+        self.blend_state = None;
+        self.raster_state_no_cull = None;
+        self.raster_state_backface_cull = None;
+        self.depth_stencil_state_write = None;
+        self.depth_stencil_state_no_write = None;
+    }
+}
+
+impl Cx {
+    /// Drops every GPU object this `Cx` holds and re-arms whatever gates their re-upload.
+    ///
+    /// Called when the D3D11 device has gone: everything created from it is dead, so the
+    /// handles are worthless and the bookkeeping that says "this is already on the GPU" is
+    /// actively harmful — it is what would otherwise hand a dead pointer back forever.
+    ///
+    /// Clearing a handle is only half of it. Geometry and instance uploads are gated on dirty
+    /// flags that are cleared unconditionally once the upload runs, and textures on a dirty
+    /// rect consumed by `take_updated`, so each gate has to be re-armed or the empty slot is
+    /// simply never refilled. The CPU-side sources all survive a device loss: texture pixels
+    /// live in `TextureFormat::Vec*`, geometry in `CxGeometry`, and shaders keep their compiled
+    /// DXBC blobs plus the on-disk cache, so nothing here needs recompiling.
+    pub(crate) fn d3d11_forget_gpu_resources(&mut self) {
+        for item in &mut self.textures.0.pool {
+            let texture = &mut item.item;
+            texture.os.forget_gpu_objects();
+            if texture.format.is_vec() {
+                // The pixels are still in the format's own `data`, so re-arming the dirty rect
+                // is all it takes for the ordinary upload path to put the whole texture back.
+                // `set_updated` is only defined for these formats and panics for the rest.
+                texture.set_updated(TextureUpdated::Full);
+            } else {
+                // A render target, depth buffer or shared texture has no CPU-side contents to
+                // restore; clearing the alloc record is what makes the next pass rebuild it at
+                // the right size.
+                texture.alloc = None;
+            }
+        }
+        for item in &mut self.geometries.0.pool {
+            item.item.os.geom_vbuf = D3d11Buffer::default();
+            item.item.os.geom_ibuf = D3d11Buffer::default();
+            item.item.dirty_vertices = true;
+            item.item.dirty_indices = true;
+            item.item.dirty = true;
+        }
+        for item in &mut self.draw_lists.0.pool {
+            item.item.os.draw_list_uniforms = D3d11Buffer::default();
+            for index in 0..item.item.draw_items.len() {
+                let draw_item = &mut item.item.draw_items[index];
+                if let Some(dc) = draw_item.kind.draw_call_mut() {
+                    dc.instance_dirty = true;
+                }
+                draw_item.os.draw_call_uniforms = D3d11Buffer::default();
+                draw_item.os.user_uniforms = D3d11Buffer::default();
+                draw_item.os.inst_vbuf = D3d11Buffer::default();
+            }
+        }
+        for item in &mut self.passes.0.pool {
+            item.item.os.forget_gpu_objects();
+        }
+        for item in &mut self.uniform_buffers.0.pool {
+            item.item.os.buffer = D3d11Buffer::default();
+        }
+        // Shader objects die with the device, but their DXBC does not: dropping the os_shaders
+        // and re-queueing every shader makes `hlsl_compile_shaders` recreate the D3D objects
+        // from the retained blobs and the on-disk cache, with no HLSL compilation.
+        self.draw_shaders.os_shaders.clear();
+        for (index, shader) in self.draw_shaders.shaders.iter_mut().enumerate() {
+            if shader.os_shader_id.take().is_some() {
+                self.draw_shaders.compile_set.insert(index);
+            }
+        }
+    }
+}
+
 impl Drop for D3d11Window {
     fn drop(&mut self) {
         // Retire this window's paint beat BEFORE closing the handle, or the event
@@ -2111,13 +2336,29 @@ pub struct D3d11Cx {
     /// `dcomp_probed` is set.
     dcomp_device: Option<IDCompositionDevice>,
     dcomp_probed: bool,
+    /// The device has been removed or reset, so every object created from it is dead and the
+    /// recovery driver owns the window until it has rebuilt them. A `Cell` because every
+    /// resource-creation site in this file holds only a `&D3d11Cx`.
+    pub device_lost: Cell<bool>,
+    /// Once-per-outage latch for failures the device itself says it survived, so a call site
+    /// that runs every frame cannot fill the log.
+    other_error_logged: Cell<bool>,
 }
 
 impl D3d11Cx {
-    pub fn new() -> D3d11Cx {
+    /// Builds the device tier: factory, adapter, device, immediate context and event query.
+    ///
+    /// Fallible because recovery calls it while the display driver may still be restarting,
+    /// when `EnumAdapters` and `D3D11CreateDevice` fail transiently for a few hundred
+    /// milliseconds. Every argument is a literal, so nothing here depends on retained state.
+    fn create_device_tier(
+    ) -> windows_core::Result<(IDXGIFactory2, ID3D11Device, ID3D11DeviceContext, ID3D11Query)> {
         unsafe {
-            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
-            let adapter = factory.EnumAdapters(0).unwrap();
+            // A DXGI factory snapshots its adapter enumeration when it is created, so one made
+            // before a hybrid-GPU transition or a driver reinstall keeps handing back the
+            // adapter that went away. Recovery always starts from a fresh factory.
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let adapter = factory.EnumAdapters(0)?;
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut query: Option<ID3D11Query> = None;
@@ -2131,8 +2372,7 @@ impl D3d11Cx {
                 Some(&mut device),
                 None,
                 Some(&mut context),
-            )
-            .unwrap();
+            )?;
 
             let device = device.unwrap();
             let context = context.unwrap();
@@ -2143,26 +2383,84 @@ impl D3d11Cx {
             // render loop. The old device-level IDXGIDevice1::SetMaximumFrameLatency
             // call has been removed so the two mechanisms don't conflict.
 
-            device
-                .CreateQuery(
-                    &D3D11_QUERY_DESC {
-                        Query: D3D11_QUERY_EVENT,
-                        MiscFlags: 0,
-                    },
-                    Some(&mut query),
-                )
-                .unwrap();
+            device.CreateQuery(
+                &D3D11_QUERY_DESC {
+                    Query: D3D11_QUERY_EVENT,
+                    MiscFlags: 0,
+                },
+                Some(&mut query),
+            )?;
 
-            let query = query.unwrap();
+            Ok((factory, device, context, query.unwrap()))
+        }
+    }
 
-            D3d11Cx {
-                device,
-                context,
-                factory,
-                query,
-                dcomp_device: None,
-                dcomp_probed: false,
+    pub fn new() -> D3d11Cx {
+        let (factory, device, context, query) =
+            Self::create_device_tier().expect("D3D11: could not create the initial device");
+        D3d11Cx {
+            device,
+            context,
+            factory,
+            query,
+            dcomp_device: None,
+            dcomp_probed: false,
+            device_lost: Cell::new(false),
+            other_error_logged: Cell::new(false),
+        }
+    }
+
+    /// Replaces the four COM handles with a freshly created device tier, leaving the rest of
+    /// the struct alone. `false` means the driver is not ready yet and the caller should retry
+    /// on a later tick.
+    pub fn recreate_device(&mut self) -> bool {
+        match Self::create_device_tier() {
+            Ok((factory, device, context, query)) => {
+                self.factory = factory;
+                self.device = device;
+                self.context = context;
+                self.query = query;
+                // The composition device is created from this DXGI device; the old one is dead.
+                self.dcomp_device = None;
+                self.dcomp_probed = false;
+                self.other_error_logged.set(false);
+                true
             }
+            Err(e) => {
+                crate::error!("D3D11 device recreation failed, will retry: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Releases the immediate context's references to everything currently bound, so the
+    /// resources the application has already dropped are actually destroyed. See
+    /// [`clear_and_flush`].
+    pub fn clear_and_flush_context(&self) {
+        unsafe { clear_and_flush(&self.context) };
+    }
+
+    /// Whether the current device is still usable, asked of the device itself.
+    pub fn device_is_alive(&self) -> bool {
+        unsafe { device_removed_reason(&self.device).is_ok() }
+    }
+
+    /// Where every fallible D3D11 call in this file reports its failure.
+    ///
+    /// The HRESULT a creation call returns is not always one of the two DXGI device-lost
+    /// codes, so the device is asked directly instead of the error being pattern-matched.
+    /// Nothing on the healthy path reaches this.
+    pub fn note_error(&self, what: &str, err: &windows_core::Error) {
+        if unsafe { device_removed_reason(&self.device) }.is_err() {
+            if !self.device_lost.replace(true) {
+                crate::error!(
+                    "D3D11 DEVICE LOST: {} failed ({}). Rebuilding the device and every GPU                      resource; the window will keep its last frame until that succeeds.",
+                    what,
+                    err
+                );
+            }
+        } else if !self.other_error_logged.replace(true) {
+            crate::error!("D3D11 {} failed, device still alive: {}", what, err);
         }
     }
 
@@ -2215,6 +2513,13 @@ impl D3d11Cx {
                 0,
             )
         };
+        if hresult.is_err() {
+            // A removed device fails `GetData` rather than answering it, and `!= S_FALSE` would
+            // read that as "the GPU finished this frame" forever — the only device-loss signal
+            // the studio-hosted path has, since it renders to a texture and never presents.
+            self.note_error("ID3D11DeviceContext::GetData", &windows_core::Error::from(hresult));
+            return true;
+        }
         hresult != S_FALSE
     }
 }
@@ -2256,31 +2561,41 @@ impl D3d11Buffer {
             let mut exact_desc = *buffer_desc;
             exact_desc.ByteWidth = (len_slots * 4) as u32;
             let mut new_buffer = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateBuffer(&exact_desc, None, Some(&mut new_buffer))
-                    .unwrap()
-            };
+            } {
+                // Draw-list and pass uniforms come through here every frame with no dirty
+                // gate, so a device that died between frames is seen here first — many times
+                // over, before any window reaches `present`. Leave the slot empty and zero the
+                // size memo, which would otherwise hand the dead buffer straight back, so the
+                // ordinary path rebuilds it once there is a live device again.
+                d3d11_cx.note_error("ID3D11Device::CreateBuffer", &e);
+                self.buffer = None;
+                self.last_size = 0;
+                return;
+            }
             self.last_size = len_slots;
             self.buffer = new_buffer;
         }
 
+        let Some(buffer) = self.buffer.as_ref() else {
+            return;
+        };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let p_mapped: *mut _ = &mut mapped;
         unsafe {
-            d3d11_cx
+            if let Err(e) = d3d11_cx
                 .context
-                .Map(
-                    self.buffer.as_ref().unwrap(),
-                    0,
-                    D3D11_MAP_WRITE_DISCARD,
-                    0,
-                    Some(p_mapped),
-                )
-                .unwrap();
+                .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+            {
+                // Nothing was mapped, so there is no `Unmap` to pair on this path.
+                d3d11_cx.note_error("ID3D11DeviceContext::Map", &e);
+                return;
+            }
             std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-            d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
+            d3d11_cx.context.Unmap(buffer, 0);
         }
     }
 
@@ -2511,6 +2826,13 @@ impl CxTexture {
                 };
 
             if width == 0 || height == 0 || data_ptr.is_null() {
+                // The pixel buffer is out on loan: `Texture::take_vec_*` leaves `data` as
+                // `None` until the matching `put_back_*`, which is the glyph atlas's normal
+                // state for a whole frame whenever `Fonts::prepare_textures` takes an early
+                // return. `take_updated` above already consumed the dirty flag, so re-arm it —
+                // dropping it here would mean this texture is never uploaded again and all
+                // text disappears permanently. The Metal backend guards the same case.
+                self.set_updated(updated);
                 return;
             }
             let row_pitch = (width * bpp) as u32;
@@ -2595,13 +2917,25 @@ impl CxTexture {
                 MiscFlags: 0,
             };
             let mut texture = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                    .unwrap()
+            } {
+                // Re-arm the update rather than dropping it: this texture is an atlas or an
+                // image whose pixels are still in memory, so the next frame against a live
+                // device uploads it in full.
+                d3d11_cx.note_error("CreateTexture2D(vec)", &e);
+                self.set_updated(TextureUpdated::Full);
+                return;
+            }
+            let Some(resource) = texture
+                .as_ref()
+                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+            else {
+                self.set_updated(TextureUpdated::Full);
+                return;
             };
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             // Upload the logical rows (0..height) into the freshly-allocated (possibly taller)
             // texture. Rows height..cap_height stay unused — the glyph shader addresses by absolute
             // texel index, so the extra capacity is never sampled.
@@ -2619,12 +2953,17 @@ impl CxTexture {
                 );
             }
             let mut shader_resource_view = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-                    .unwrap()
-            };
+            } {
+                // Publishing the texture without its view would leave the alloc bookkeeping
+                // claiming a usable texture that nothing can sample.
+                d3d11_cx.note_error("CreateShaderResourceView(vec)", &e);
+                self.set_updated(TextureUpdated::Full);
+                return;
+            }
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
             self.os.vec_alloc_width = width;
@@ -2663,13 +3002,24 @@ impl CxTexture {
             };
 
             let mut texture = None;
-            unsafe {
+            if let Err(e) = unsafe {
                 d3d11_cx
                     .device
                     .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                    .unwrap()
+            } {
+                // A render target has no CPU-side contents to preserve, so there is nothing to
+                // re-arm: clearing the alloc record is what makes the next pass rebuild it.
+                d3d11_cx.note_error("CreateTexture2D(render target)", &e);
+                self.alloc = None;
+                return;
+            }
+            let Some(resource) = texture
+                .as_ref()
+                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+            else {
+                self.alloc = None;
+                return;
             };
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
                 if is_cube {
@@ -2722,13 +3072,14 @@ impl CxTexture {
                     }
                     .unwrap();
                 }
-            } else {
-                unsafe {
-                    d3d11_cx
-                        .device
-                        .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
-                        .unwrap()
-                };
+            } else if let Err(e) = unsafe {
+                d3d11_cx
+                    .device
+                    .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+            } {
+                d3d11_cx.note_error("CreateRenderTargetView(render target)", &e);
+                self.alloc = None;
+                return;
             }
 
             self.os.texture = texture;
@@ -3606,12 +3957,12 @@ impl CxOsDrawShader {
             hlsl,
         ) {
             Err(msg) => {
-                println!(
+                crate::error!(
                     "Cannot compile vertexshader\n{}\n{}",
                     msg,
                     split_source(hlsl)
                 );
-                std::process::exit(1);
+                return None;
             }
             Ok(bytes) => bytes,
         };
@@ -3625,31 +3976,38 @@ impl CxOsDrawShader {
             hlsl,
         ) {
             Err(msg) => {
-                println!(
+                crate::error!(
                     "Cannot compile pixelshader\n{}\n{}",
                     msg,
                     split_source(hlsl)
                 );
-                std::process::exit(1);
+                return None;
             }
             Ok(bytes) => bytes,
         };
 
         let mut vs = None;
-        unsafe {
+        if let Err(e) = unsafe {
             d3d11_cx
                 .device
                 .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
-                .unwrap()
-        };
+        } {
+            // The DXBC is valid — it just came from the compiler or the on-disk cache — so a
+            // failure here is the device, not the shader. Returning `None` puts this shader
+            // back in the compile queue for a later frame.
+            d3d11_cx.note_error("ID3D11Device::CreateVertexShader", &e);
+            return None;
+        }
 
         let mut ps = None;
-        unsafe {
+        if let Err(e) = unsafe {
             d3d11_cx
                 .device
                 .CreatePixelShader(&ps_bytes, None, Some(&mut ps))
-                .unwrap()
-        };
+        } {
+            d3d11_cx.note_error("ID3D11Device::CreatePixelShader", &e);
+            return None;
+        }
 
         let mut layout_desc = Vec::new();
         let mut layout_debug = Vec::new();
@@ -3758,17 +4116,21 @@ impl CxOsDrawShader {
                 .CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout))
         };
         if let Err(err) = input_layout_res {
-            println!("Cannot create input layout: {:?}", err);
-            println!("Input layout descriptors:");
+            // A mismatched layout is a build-time bug worth shouting about, but a device that
+            // died mid-compile fails here too, and killing the process is the one outcome no
+            // recovery can undo. Report it and give the shader back to the compile queue.
+            crate::error!("Cannot create input layout: {:?}", err);
+            crate::error!("Input layout descriptors:");
             for item in &layout_debug {
-                println!("  {}", item);
+                crate::error!("  {}", item);
             }
             if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                println!("HLSL source\n{}", split_source(hlsl));
+                crate::error!("HLSL source\n{}", split_source(hlsl));
             } else {
-                println!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
+                crate::error!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
             }
-            std::process::exit(1);
+            d3d11_cx.note_error("ID3D11Device::CreateInputLayout", &err);
+            return None;
         }
 
         let live_uniforms = D3d11Buffer::default();
