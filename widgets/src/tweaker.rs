@@ -29,6 +29,7 @@
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
     fab_controls::{format_hex, parse_hex, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    file_tree::{FileTree, FileTreeAction},
     label::Label,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -1793,7 +1794,19 @@ pub fn tweak_callback(
             if let Some(pick) = &pinned {
                 out.push_str(",\"sel\":");
                 out.push_str(&pick_json(pick));
-                if let Ok(widget) = resolve_widget_by_path(cx, &pick.path) {
+                // Resolve by UID first: paths with anonymous numeric
+                // segments (a list item's `demos.1` Slider) do not
+                // round-trip through the path finder, but the uid is
+                // always exact for the pinned selection.
+                let widget = {
+                    let by_uid = cx.widget_tree().widget(WidgetUid(pick.uid));
+                    if by_uid.is_empty() {
+                        resolve_widget_by_path(cx, &pick.path).ok()
+                    } else {
+                        Some(by_uid)
+                    }
+                };
+                if let Some(widget) = widget {
                     out.push_str(",\"props\":[");
                     for (index, (name, value, is_set)) in
                         reflect_flat(cx, &widget).into_iter().enumerate()
@@ -2579,6 +2592,19 @@ pub struct Tweaker {
     /// Set while the hover outline was driven from the tree tab.
     #[rust]
     tree_hover_active: bool,
+    /// The selection uid the tree last auto-scrolled to (scroll once per
+    /// selection change; never fight the user's own scrolling).
+    #[rust]
+    tree_scrolled_uid: u64,
+    /// Parent index per tree row (same order as tree_rows).
+    #[rust]
+    tree_parents: Vec<Option<usize>>,
+    /// Child indices per tree row.
+    #[rust]
+    tree_children: Vec<Vec<usize>>,
+    /// Open the readable default levels once per tree refresh.
+    #[rust]
+    tree_open_defaults_pending: bool,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     vibe_prompt_uid: u64,
@@ -2627,6 +2653,9 @@ pub struct Tweaker {
     /// The margin-right currently applied to the window body.
     #[rust]
     applied_margin: f64,
+    /// The body's own margin.right before the panel compressed it.
+    #[rust]
+    saved_body_right: Option<f64>,
     #[rust]
     splitter_drag: bool,
 }
@@ -2672,7 +2701,32 @@ impl Tweaker {
         let Some(body) = self.find_body(cx) else {
             return;
         };
-        let chunk = format!("margin.right: {desired:.0}");
+        // A dotted `margin.right:` apply fails when the body's margin is a
+        // scalar (an f64 has no .right). Read the current legs (scalar
+        // margins fan out to all four) and apply one full Inset; remember
+        // the body's own right so release restores it, not zero.
+        let before = reflect_flat(cx, &body);
+        let leg = |name: &str| {
+            before
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .and_then(|(_, v, _)| v.parse::<f64>().ok())
+        };
+        let scalar = leg("margin");
+        let left = leg("margin.left").or(scalar).unwrap_or(0.0);
+        let top = leg("margin.top").or(scalar).unwrap_or(0.0);
+        let bottom = leg("margin.bottom").or(scalar).unwrap_or(0.0);
+        if self.saved_body_right.is_none() {
+            self.saved_body_right = Some(leg("margin.right").or(scalar).unwrap_or(0.0));
+        }
+        let right = if desired > 0.5 {
+            desired
+        } else {
+            self.saved_body_right.take().unwrap_or(0.0)
+        };
+        let chunk = format!(
+            "margin: Inset{{left: {left} top: {top} right: {right:.0} bottom: {bottom}}}"
+        );
         match eval_chunk(cx, &body, &chunk) {
             Ok(()) => {
                 self.applied_margin = desired;
@@ -2786,22 +2840,7 @@ impl Tweaker {
                         width: Fill
                         height: Fill
                         flow: Down
-                        tree_list := PortalList {
-                        width: Fill
-                        height: Fill
-                        margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
-                        drag_scrolling: false
-                        TreeRow := Button {
-                            width: Fill
-                            height: 19
-                            padding: Inset{left: 6 right: 4 top: 1 bottom: 1}
-                            align: Align{x: 0.0 y: 0.5}
-                            text: ""
-                            draw_text +: {
-                                text_style +: { font_size: 8.0 }
-                            }
-                        }
-                        }
+                        tree := FileTree {}
                     }
                     props_wrap := View {
                         width: Fill
@@ -3134,7 +3173,7 @@ impl Tweaker {
             .0;
         self.tree_list_uid = sidebar
             .child(live_id!(tree_wrap))
-            .child(live_id!(tree_list))
+            .child(live_id!(tree))
             .widget_uid()
             .0;
         self.sidebar = Some(sidebar);
@@ -3403,13 +3442,17 @@ impl Tweaker {
             .map(|row| row.value.as_str())
     }
 
-    /// A row matches the filter on its name OR its value/doc text (the
-    /// cascade rows carry annotation text in their values, so docs and
-    /// friendly names are searchable too).
+    /// A row matches the filter on its name, its value text, or its
+    /// `/** */` annotation (docs are searchable: "banding" finds
+    /// color_dither through its doc line).
     fn row_matches_filter(&self, row: &RowBinding) -> bool {
         self.filter.is_empty()
             || row.prop.to_lowercase().contains(&self.filter)
             || row.value.to_lowercase().contains(&self.filter)
+            || self
+                .row_docs
+                .get(&row.prop)
+                .is_some_and(|doc| doc.to_lowercase().contains(&self.filter))
     }
 
     /// The visible entry list: sections in order, folded sections
@@ -3637,6 +3680,33 @@ impl Tweaker {
             {
                 self.tree_rows = cx.widget_tree().flat_tree(cx);
                 self.tree_rows_gen = self.rows_gen.wrapping_add(1);
+                // Parent links from the depth-first order: the nearest
+                // earlier row one level up.
+                let mut stack: Vec<usize> = Vec::new();
+                self.tree_parents = self
+                    .tree_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        while let Some(&top) = stack.last() {
+                            if self.tree_rows[top].depth >= row.depth {
+                                stack.pop();
+                            } else {
+                                break;
+                            }
+                        }
+                        let parent = stack.last().copied();
+                        stack.push(i);
+                        parent
+                    })
+                    .collect();
+                self.tree_children = vec![Vec::new(); self.tree_rows.len()];
+                for (i, parent) in self.tree_parents.iter().enumerate() {
+                    if let Some(parent) = parent {
+                        self.tree_children[*parent].push(i);
+                    }
+                }
+                self.tree_open_defaults_pending = true;
             }
         }
 
@@ -3656,29 +3726,112 @@ impl Tweaker {
             // The tree tab's list fills from the flattened hierarchy.
             if step_widget.widget_uid().0 == self.tree_list_uid {
                 let sel_uid = self.rows_uid;
-                let mut sel_index = None;
-                let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
+                // Filter: matching nodes plus their ancestor chain stay
+                // visible; their folders force open while filtering.
+                let filtering = !self.filter.is_empty();
+                let keep: Option<Vec<bool>> = if filtering {
+                    let mut keep = vec![false; self.tree_rows.len()];
+                    for (i, row) in self.tree_rows.iter().enumerate() {
+                        if row.name.to_lowercase().contains(&self.filter)
+                            || row.ty.to_lowercase().contains(&self.filter)
+                        {
+                            let mut cursor = Some(i);
+                            while let Some(index) = cursor {
+                                if keep[index] {
+                                    break;
+                                }
+                                keep[index] = true;
+                                cursor = self.tree_parents.get(index).copied().flatten();
+                            }
+                        }
+                    }
+                    Some(keep)
+                } else {
+                    None
+                };
+                let Some(mut tree) = step_widget.borrow_mut::<FileTree>() else {
                     continue;
                 };
-                list.set_item_range(cx, 0, self.tree_rows.len());
-                while let Some(row_id) = list.next_visible_item(cx) {
-                    let Some(row) = self.tree_rows.get(row_id) else {
-                        continue;
-                    };
-                    let item = list.item(cx, row_id, live_id!(TreeRow));
-                    let indent = "\u{00b7} ".repeat(row.depth as usize);
-                    let glyph = if row.has_children { "+ " } else { "  " };
-                    item.set_text(
-                        cx,
-                        &format!("{indent}{glyph}{} \u{00b7} {}", row.name, row.ty),
-                    );
-                    if row.uid == sel_uid {
-                        sel_index = Some(row_id);
+                // First fill (or selection change): open the levels that
+                // make the tree readable / reveal the selection.
+                if self.tree_scrolled_uid != sel_uid && sel_uid != 0 {
+                    if let Some(index) =
+                        self.tree_rows.iter().position(|row| row.uid == sel_uid)
+                    {
+                        let mut cursor = self.tree_parents.get(index).copied().flatten();
+                        while let Some(parent) = cursor {
+                            tree.set_folder_is_open(
+                                cx,
+                                LiveId(self.tree_rows[parent].uid),
+                                true,
+                                Animate::No,
+                            );
+                            cursor = self.tree_parents.get(parent).copied().flatten();
+                        }
                     }
-                    item.draw_all(cx, &mut Scope::empty());
-                    self.tree_visible.push((item.clone(), row.uid));
+                    self.tree_scrolled_uid = sel_uid;
                 }
-                let _ = sel_index;
+                if self.tree_open_defaults_pending {
+                    self.tree_open_defaults_pending = false;
+                    for row in &self.tree_rows {
+                        if row.has_children && row.depth < 4 {
+                            tree.set_folder_is_open(cx, LiveId(row.uid), true, Animate::No);
+                        }
+                    }
+                }
+                if filtering {
+                    if let Some(keep) = &keep {
+                        for (i, row) in self.tree_rows.iter().enumerate() {
+                            if keep[i] && row.has_children {
+                                tree.set_folder_is_open(
+                                    cx,
+                                    LiveId(row.uid),
+                                    true,
+                                    Animate::No,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Recursive emission over the flattened rows.
+                fn emit(
+                    tree: &mut FileTree,
+                    cx: &mut Cx2d,
+                    rows: &[crate::widget_tree::FlatTreeRow],
+                    children: &[Vec<usize>],
+                    keep: Option<&Vec<bool>>,
+                    index: usize,
+                ) {
+                    if let Some(keep) = keep {
+                        if !keep[index] {
+                            return;
+                        }
+                    }
+                    let row = &rows[index];
+                    let label = format!("{} \u{00b7} {}", row.name, row.ty);
+                    if row.has_children {
+                        if tree.begin_folder(cx, LiveId(row.uid), &label).is_ok() {
+                            for &child in &children[index] {
+                                emit(tree, cx, rows, children, keep, child);
+                            }
+                            tree.end_folder();
+                        }
+                    } else {
+                        tree.file(cx, LiveId(row.uid), &label);
+                    }
+                }
+                for index in 0..self.tree_rows.len() {
+                    if self.tree_parents[index].is_none() {
+                        emit(
+                            &mut tree,
+                            cx,
+                            &self.tree_rows,
+                            &self.tree_children,
+                            keep.as_ref(),
+                            index,
+                        );
+                    }
+                }
                 continue;
             }
             let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
@@ -4352,43 +4505,68 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
-            if let Some((_, target)) = self
-                .tree_visible
-                .iter()
-                .find(|(item, _)| item.widget_uid() == widget_action.widget_uid)
-                .cloned()
-            {
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    // Tree row click: pin that widget as the selection,
-                    // exactly like a body pick.
-                    let widget = cx.widget_tree().widget(WidgetUid(target));
-                    if !widget.is_empty() {
-                        let rect = widget.area().clipped_rect(cx);
-                        let ids = cx.widget_tree().path_to(WidgetUid(target));
-                        let path = ids
-                            .iter()
-                            .map(|id| live_id_token(*id))
-                            .collect::<Vec<_>>()
-                            .join(".");
-                        let ty = widget
-                            .widget_type_id()
-                            .and_then(|type_id| {
-                                widget_type_names(cx).get(&type_id).copied()
-                            })
-                            .map(live_id_token)
-                            .unwrap_or_else(|| "-".to_string());
-                        session().lock().unwrap().pinned = Some(TweakPick {
-                            uid: target,
-                            path,
-                            ty,
-                            rect,
-                            window_id: self.my_window.unwrap_or(0),
-                            band: None,
-                        });
-                        self.rows_uid = 0;
-                        self.redraw_overlay(cx);
-                        self.redraw_sidebar(cx);
+            if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
+                match widget_action.cast::<FileTreeAction>() {
+                    FileTreeAction::FileClicked(id) | FileTreeAction::FolderClicked(id) => {
+                        // Tree node click: pin that widget, exactly like a
+                        // body pick (drives 2D outline AND the 3D view).
+                        let target = id.0;
+                        let widget = cx.widget_tree().widget(WidgetUid(target));
+                        if !widget.is_empty() {
+                            let rect = widget.area().clipped_rect(cx);
+                            let ids = cx.widget_tree().path_to(WidgetUid(target));
+                            let path = ids
+                                .iter()
+                                .map(|id| live_id_token(*id))
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            let ty = widget
+                                .widget_type_id()
+                                .and_then(|type_id| {
+                                    widget_type_names(cx).get(&type_id).copied()
+                                })
+                                .map(live_id_token)
+                                .unwrap_or_else(|| "-".to_string());
+                            session().lock().unwrap().pinned = Some(TweakPick {
+                                uid: target,
+                                path,
+                                ty,
+                                rect,
+                                window_id: self.my_window.unwrap_or(0),
+                                band: None,
+                            });
+                            self.rows_uid = 0;
+                            self.redraw_overlay(cx);
+                            self.redraw_sidebar(cx);
+                        }
                     }
+                    FileTreeAction::NodeHovered(id) => {
+                        // Tree hover: outline that widget in the body/3D.
+                        let widget = cx.widget_tree().widget(WidgetUid(id.0));
+                        if !widget.is_empty() {
+                            let rect = widget.area().clipped_rect(cx);
+                            if rect.size.x > 0.0 {
+                                session().lock().unwrap().hover = Some(TweakPick {
+                                    uid: id.0,
+                                    path: String::new(),
+                                    ty: String::new(),
+                                    rect,
+                                    window_id: self.my_window.unwrap_or(0),
+                                    band: None,
+                                });
+                                self.tree_hover_active = true;
+                                self.redraw_overlay(cx);
+                            }
+                        }
+                    }
+                    FileTreeAction::NodeHoverEnded(_) => {
+                        if self.tree_hover_active {
+                            self.tree_hover_active = false;
+                            session().lock().unwrap().hover = None;
+                            self.redraw_overlay(cx);
+                        }
+                    }
+                    _ => {}
                 }
             }
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
@@ -5260,11 +5438,6 @@ impl Widget for Tweaker {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        // While the exploded z-layer view is up the panel and overlay make
-        // no sense (and could not receive input anyway): draw nothing.
-        if cx.sploded_active() {
-            return DrawStep::done();
-        }
         let on = tweak_is_on();
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.

@@ -982,7 +982,13 @@ impl Window {
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_overlay());
         let window_id = self.window.handle.window_id();
-        self.use_gauss_capture = window_wants_gauss_capture(cx, window_id);
+        // The exploded z-layer mode reuses the gauss scene capture as THE
+        // body-content pass: all window content renders into the child
+        // scene pass (which carries the exploded camera), while the
+        // overlay system — the tweak panel, tooltips, modals — stays on
+        // the window pass and composites flat.
+        let sploded = cx.sploded_active();
+        self.use_gauss_capture = window_wants_gauss_capture(cx, window_id) || sploded;
         let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
         let gauss_snapshot = if self.use_gauss_capture {
             Some(
@@ -1000,14 +1006,27 @@ impl Window {
         self.use_ssaa = !self.use_gauss_capture && supersample_factor() > 1.0;
 
         if self.use_gauss_capture {
+            if sploded {
+                // The scene texture's display convention comes from the one
+                // existing authority; the exploded transform compensates.
+                let v_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+                cx.sploded_set_target_pass(
+                    Some(self.gauss_stack.scene_pass.draw_pass_id()),
+                    v_flip,
+                );
+            } else {
+                cx.sploded_set_target_pass(None, 1.0);
+            }
             self.gauss_stack.begin_scene(cx);
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
         } else if self.use_ssaa {
+            cx.sploded_set_target_pass(None, 1.0);
             self.ssaa_stack.begin_scene(cx, supersample_factor());
             self.overlay
                 .begin_for_pass(cx, self.ssaa_stack.scene_pass.draw_pass_id());
         } else {
+            cx.sploded_set_target_pass(None, 1.0);
             self.overlay.begin(cx);
         }
 
@@ -1035,10 +1054,14 @@ impl Window {
             self.gauss_stack.end_scene(cx);
             let root_size = cx.current_pass_size();
             if root_size.x >= 0.5 && root_size.y >= 0.5 {
-                self.gauss_stack
-                    .draw_mip_chain(cx, &mut self.draw_gauss_downsample, root_size);
-                self.gauss_stack
-                    .draw_high_blur_chain(cx, &mut self.draw_gauss_upsample, root_size);
+                // The blur chains only matter to glass widgets; a capture
+                // that exists for the exploded mode composites directly.
+                if window_wants_gauss_capture(cx, self.window.handle.window_id()) {
+                    self.gauss_stack
+                        .draw_mip_chain(cx, &mut self.draw_gauss_downsample, root_size);
+                    self.gauss_stack
+                        .draw_high_blur_chain(cx, &mut self.draw_gauss_upsample, root_size);
+                }
                 self.gauss_stack
                     .draw_scene(cx, &mut self.draw_gauss_scene, root_size);
             }

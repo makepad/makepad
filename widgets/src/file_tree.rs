@@ -496,11 +496,19 @@ pub enum FileTreeAction {
     None,
     FileClicked(LiveId),
     FolderClicked(LiveId),
+    /// A node's row is under the pointer (files and folders alike).
+    NodeHovered(LiveId),
+    /// The pointer left a node's row.
+    NodeHoverEnded(LiveId),
     ShouldFileStartDrag(LiveId),
 }
 
 pub enum FileTreeNodeAction {
     WasClicked,
+    /// Pointer entered the node's row (inspector-style hover linkage).
+    WasHovered,
+    /// Pointer left the node's row.
+    HoverEnded,
     Opening,
     Closing,
     ShouldStartDrag,
@@ -635,9 +643,11 @@ impl FileTreeNode {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
+                actions.push((node_id, FileTreeNodeAction::WasHovered));
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
+                actions.push((node_id, FileTreeNodeAction::HoverEnded));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -880,6 +890,12 @@ impl Widget for FileTree {
                 }
                 FileTreeNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
+                }
+                FileTreeNodeAction::WasHovered => {
+                    cx.widget_action(uid, FileTreeAction::NodeHovered(node_id));
+                }
+                FileTreeNodeAction::HoverEnded => {
+                    cx.widget_action(uid, FileTreeAction::NodeHoverEnded(node_id));
                 }
                 FileTreeNodeAction::WasClicked => {
                     cx.set_key_focus(self.scroll_bars.area());
