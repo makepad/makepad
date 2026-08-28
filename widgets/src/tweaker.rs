@@ -4945,6 +4945,20 @@ impl Widget for Tweaker {
         // the property list underneath it.
         let swallow_scroll = matches!(event, Event::Scroll(e)
             if self.open_popup.is_some_and(|rect| rect.contains(e.abs)));
+        // The popup dispatches FIRST: its inputs claim presses via the
+        // handled flag before the rows underneath can take focus.
+        if self.vibe_layer.is_some() {
+            if let Some(ui) = self.vibe_ui.clone() {
+                ui.handle_event(cx, event, scope);
+            }
+            if let Event::KeyDown(ke) = event {
+                if ke.key_code == KeyCode::Escape {
+                    self.vibe_layer = None;
+                    self.open_popup = None;
+                    self.redraw_sidebar(cx);
+                }
+            }
+        }
         if let Some(sidebar) = self.sidebar.clone() {
             if !swallow_scroll {
                 sidebar.handle_event(cx, event, scope);
@@ -4991,18 +5005,7 @@ impl Widget for Tweaker {
                 _ => {}
             }
         }
-        if self.vibe_layer.is_some() {
-            if let Some(ui) = self.vibe_ui.clone() {
-                ui.handle_event(cx, event, scope);
-            }
-            if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
-                    self.vibe_layer = None;
-                    self.open_popup = None;
-                    self.redraw_sidebar(cx);
-                }
-            }
-        }
+
         if let Event::Actions(actions) = event {
             self.handle_sidebar_actions(cx, actions);
         }
@@ -5186,6 +5189,22 @@ impl Widget for Tweaker {
             vibe_list.begin_overlay_reuse(cx);
             let size = cx.current_pass_size();
             cx.begin_root_turtle(size, Layout::flow_down());
+            // Card chrome drawn with the tweaker's own quads FIRST (View
+            // backgrounds proved unreliable in these script-built trees):
+            // an opaque panel slab, then a big-preview backing well.
+            let card = Rect {
+                pos: dvec2(band.pos.x + 8.0, 96.0),
+                size: dvec2((band.size.x - 16.0).max(200.0), 300.0),
+            };
+            self.draw_panel_bg.draw_abs(cx, card);
+            self.draw_label_bg.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(card.pos.x + 10.0, card.pos.y + 56.0),
+                    size: dvec2(card.size.x - 20.0, 136.0),
+                },
+            );
+            self.open_popup = Some(card);
             // The vibecode material popup: big live preview + prompt, anchored
             // over the panel. While open it owns its rect (open_popup gating).
             if let Some(layer) = self.vibe_layer.clone() {
@@ -5223,15 +5242,10 @@ impl Widget for Tweaker {
                         }
                     }
                 }
-                let width = (band.size.x - 16.0).max(200.0);
                 let mut popup_walk = Walk::fit();
                 popup_walk.abs_pos = Some(dvec2(band.pos.x + 8.0, 96.0));
-                popup_walk.width = Size::Fixed(width);
+                popup_walk.width = Size::Fixed((band.size.x - 16.0).max(200.0));
                 let _ = ui.draw_walk(cx, scope, popup_walk);
-                let rect = ui.area().rect(cx);
-                if rect.size.x > 0.0 {
-                    self.open_popup = Some(rect);
-                }
             }
             cx.end_pass_sized_turtle();
             self.vibe_list.as_mut().unwrap().end(cx);
