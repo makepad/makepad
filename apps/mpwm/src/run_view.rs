@@ -47,10 +47,22 @@ script_mod! {
             host_dpi_factor: instance(1.0)
             y_flip: instance(0.0)
             packed_header: instance(1.0)
+            // The close-crop: while a tile closes, its quad shrinks but the
+            // frozen app image must STAY PUT — the quad becomes a moving
+            // window over the unmoving texture. crop_origin/crop_span map
+            // this quad into the ORIGINAL tile rect (identity when open).
+            crop_origin: instance(vec2(0.0, 0.0))
+            crop_span: instance(vec2(1.0, 1.0))
+            // The popin fade: Hyprland fades the WHOLE snapshot while it
+            // pops (146ms almostLinear); without this the opaque content
+            // shrinking reads as a diagonal slide instead of a soft pop.
+            // Premultiplied output, so one multiply fades everything.
+            fade: instance(1.0)
             pixel: fn() {
-                let uv = vec2(self.pos.x, self.pos.y + self.y_flip - 2.0 * self.y_flip * self.pos.y)
+                let cpos = self.crop_origin + self.pos * self.crop_span
+                let uv = vec2(cpos.x, cpos.y + self.y_flip - 2.0 * self.y_flip * cpos.y)
                 if self.packed_header < 0.5 {
-                    return self.tex.sample(uv * self.tex_scale)
+                    return self.tex.sample(uv * self.tex_scale) * self.fade
                 }
                 let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
                 let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
@@ -58,13 +70,15 @@ script_mod! {
                 if tp.x <= 0.0 || tp.y <= 0.0 {
                     return #0000
                 }
-                let counter = (self.rect_size * self.host_dpi_factor) / tp
+                // The mapping uses the ORIGINAL rect size (quad / span),
+                // so texels remain screen-fixed while the quad shrinks.
+                let counter = ((self.rect_size / self.crop_span) * self.host_dpi_factor) / tp
                 let tex_scale = tp / self.tex_size
                 let fb = self.tex.sample(uv * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                    return #2
+                    return #2 * self.fade
                 }
-                return fb
+                return fb * self.fade
             }
         }
         no_fb_view: RectView {
@@ -169,6 +183,14 @@ pub struct MpRunView {
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
+    /// While closing: this quad's place inside the ORIGINAL tile rect
+    /// (normalized origin + span), so the frozen frame stays screen-fixed
+    /// and the shrinking quad merely crops it.
+    #[rust]
+    close_crop: Option<(Vec2d, Vec2d)>,
+    /// The popin fade (1.0 = solid); the desk drives it during open/close.
+    #[rust(1.0f32)]
+    fade: f32,
     #[rust]
     tick_timer: Timer,
     #[rust]
@@ -597,6 +619,18 @@ impl MpRunView {
 
     /// The newest line the child (or the cargo wrapper building it) wrote.
     /// Shown under "starting…" until the first frame arrives.
+    /// The desk sets this every frame while the tile closes: `origin` and
+    /// `span` place the shrinking quad inside the tile's original rect
+    /// (both normalized), pinning the frozen frame in screen space.
+    pub fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>) {
+        self.close_crop = crop;
+    }
+
+    /// The desk's popin fade for this frame (content fades WITH the ring).
+    pub fn set_fade(&mut self, fade: f32) {
+        self.fade = fade;
+    }
+
     pub fn set_status_line(&mut self, cx: &mut Cx, line: &str) {
         if self.status_line == line {
             return;
@@ -683,6 +717,22 @@ impl Widget for MpRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
+        let (crop_origin, crop_span) = self
+            .close_crop
+            .unwrap_or((dvec2(0.0, 0.0), dvec2(1.0, 1.0)));
+        self.draw_app.draw_vars.set_dyn_instance(
+            cx,
+            id!(crop_origin),
+            &[crop_origin.x as f32, crop_origin.y as f32],
+        );
+        self.draw_app.draw_vars.set_dyn_instance(
+            cx,
+            id!(crop_span),
+            &[crop_span.x as f32, crop_span.y as f32],
+        );
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(fade), &[self.fade]);
         self.draw_app.draw_abs(cx, rect);
 
         if waiting_for_framebuffer {
