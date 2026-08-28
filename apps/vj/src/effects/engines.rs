@@ -247,7 +247,15 @@ impl ParticlesEngine {
     }
 
     pub fn uniforms(&self) -> EngineUniforms {
-        let grid_w = (self.cfg.count as f32).sqrt().ceil().max(1.0);
+        // Image mode homes particles on a 16:9 picture plane with square
+        // cells: W/H = 16/9, so W = sqrt(count * 16/9). Every other mode
+        // keeps the square grid. The shader mirrors the 9/16 ratio as a
+        // constant (0.5625) when it derives rows from shape.w.
+        let grid_w = if self.cfg.mode == ParticleMode::Image {
+            (self.cfg.count as f32 * 16.0 / 9.0).sqrt().ceil().max(1.0)
+        } else {
+            (self.cfg.count as f32).sqrt().ceil().max(1.0)
+        };
         EngineUniforms {
             shape: vec4(
                 self.cfg.mode as i32 as f32,
