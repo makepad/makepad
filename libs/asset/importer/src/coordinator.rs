@@ -1651,7 +1651,18 @@ impl MusicBody {
     fn apply(self, request: &mut GenRequest) {
         request.prompt = annotation_text(&self.prompt, MAX_EXPANDED_PROMPT_BYTES);
         let mut body = request.body.clone();
-        set_key(&mut body, "lyrics", s(self.lyrics.clone()));
+        // Words the PERSON wrote are never replaced by words a model wrote:
+        // the writer never even saw them (it is given the request, not the
+        // body), so anything it invents here would be a substitution, not an
+        // improvement.
+        let has_lyrics = request
+            .body
+            .get("lyrics")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        if !has_lyrics {
+            set_key(&mut body, "lyrics", s(self.lyrics.clone()));
+        }
         if let Some(seconds) = self.seconds {
             if request.body.get("seconds").is_none() {
                 set_key(&mut body, "seconds", Value::F64(seconds));
@@ -4686,6 +4697,20 @@ mod tests {
         compose_music_body(answer).expect("composed").apply(&mut request);
         assert_eq!(request.model, "minimax-music3", "the pin still decides");
         assert_eq!(request.seed, Some(77));
+        // Words the person wrote are never overwritten either.
+        let mut with_lyrics = GenRequest::from_body(
+            kind,
+            &obj(vec![
+                ("prompt", s("neo soul")),
+                ("lyrics", s("[Verse]\nmy own words")),
+            ]),
+        )
+        .unwrap();
+        compose_music_body(answer).expect("composed").apply(&mut with_lyrics);
+        assert_eq!(
+            wire_request(&with_lyrics, "minimax-music3".to_string()).lyrics.as_deref(),
+            Some("[Verse]\nmy own words")
+        );
         let wire = wire_request(&request, request.model.clone());
         assert_eq!(wire.seconds, Some(120.0), "the person asked for two minutes");
         assert_eq!(wire.seed, Some(77));
