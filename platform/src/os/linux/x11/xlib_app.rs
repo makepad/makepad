@@ -498,9 +498,40 @@ pub struct XlibApp {
     pub active_popup_grabbed_keyboard: bool,
 }
 
+/// Reports an X11 protocol error instead of letting Xlib terminate the process.
+///
+/// Xlib's default error handler prints to stderr and calls `exit(1)`, so a single rejected
+/// request — a bad geometry, a race against a window the window manager has already destroyed,
+/// an extension that is not there — kills the app outright. Protocol errors are asynchronous
+/// and often not even caused by the code that happens to be running, so failing the whole
+/// process is never the proportionate response.
+///
+/// The return value is ignored by Xlib; returning 0 is the convention.
+unsafe extern "C" fn x11_error_handler(
+    _display: *mut x11_sys::Display,
+    event: *mut x11_sys::XErrorEvent,
+) -> c_int {
+    if let Some(event) = unsafe { event.as_ref() } {
+        crate::error!(
+            "X11 protocol error: error_code={} request_code={} minor_code={} resource=0x{:x}",
+            event.error_code,
+            event.request_code,
+            event.minor_code,
+            event.resourceid,
+        );
+    } else {
+        crate::error!("X11 protocol error with no event record");
+    }
+    0
+}
+
 impl XlibApp {
     pub fn new(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) -> XlibApp {
         unsafe {
+            // Before the first request: Xlib's default handler prints and calls `exit(1)`, so
+            // any protocol error at all takes the whole app down with no chance to log, save or
+            // report. See `x11_error_handler`.
+            x11_sys::XSetErrorHandler(Some(x11_error_handler));
             let display = x11_sys::XOpenDisplay(ptr::null());
             let display_fd = x11_sys::XConnectionNumber(display);
             x11_sys::setlocale(x11_sys::LC_CTYPE, b"\0".as_ptr() as *const c_char);

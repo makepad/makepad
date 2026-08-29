@@ -136,6 +136,8 @@ pub const XNPreeditCaretCallback: &[u8] = b"preeditCaretCallback\0";
 // field layout (including the padding inserted after `length`/`chg_length`).
 pub type XIMFeedback = c_ulong;
 pub type XIMProc = Option<unsafe extern "C" fn(arg1: XIC, arg2: XPointer, arg3: XPointer)>;
+pub type XErrorHandler =
+    Option<unsafe extern "C" fn(display: *mut Display, event: *mut XErrorEvent) -> c_int>;
 
 #[repr(C)]
 pub struct XIMCallback {
@@ -448,6 +450,12 @@ extern "C" {
     pub fn XMapRaised(arg1: *mut Display, arg2: Window) -> c_int;
 
     pub fn XMoveWindow(display: *mut Display, window: Window, x: c_int, y: c_int);
+
+    pub fn XResizeWindow(display: *mut Display, window: Window, width: c_uint, height: c_uint);
+
+    /// Installs the process-wide handler Xlib calls for a protocol error, returning the
+    /// previous one. Without one Xlib uses its default, which prints and calls `exit(1)`.
+    pub fn XSetErrorHandler(handler: XErrorHandler) -> XErrorHandler;
 
     pub fn XFlush(arg1: *mut Display) -> c_int;
 
