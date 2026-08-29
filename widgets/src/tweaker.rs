@@ -3381,6 +3381,13 @@ pub struct Tweaker {
     /// the last good text running and shows the message under the editor.
     #[rust]
     shader_src_uid: u64,
+    /// The source editor stays folded until asked for: the Shader tab
+    /// opens on the swatch + doc + prompt, and this button uid toggles the
+    /// source view open.
+    #[rust]
+    shader_fold_uid: u64,
+    #[rust]
+    shader_src_open: bool,
     #[rust]
     live_timer: Timer,
     #[rust]
@@ -3593,35 +3600,12 @@ impl Tweaker {
         if self.sidebar.is_some() {
             return;
         }
-        // The shader source view is the real code editor (syntax highlight,
-        // selection, editing) when the app registered `makepad_code_editor`
-        // — the tweaker lives below it and can only ask for it by name.
-        let has_code_view = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
-            let v = script_eval!(vm, { mod.widgets.CodeView });
-            let _ = vm.take_errors();
-            v.as_object().is_some()
-        });
-        // `mod.widgets.X` by full path: the prelude is a snapshot and does
-        // not carry widgets registered after it (the code editor is).
-        let shader_src_code = if has_code_view {
-            "use mod.prelude.widgets.*\nmod.widgets.CodeView { tab_column_count: 2 editor +: { width: Fill height: Fill read_only: false } }"
-        } else {
-            "use mod.prelude.widgets.*\nmod.widgets.Label { width: Fill height: Fit text: \"\" draw_text +: { color: #xd0d0d0 text_style: theme.font_code text_style +: { font_size: 7.5 } } }"
-        };
+        // The shader source view is a plain multiline TextInput, on purpose:
+        // the real code editor as a sidebar child would put a CodeView in
+        // the main window's widget tree for every app the tweaker rides in.
+        // Live-coding needs only text-in/text-out — Ctrl+Enter and the
+        // settle timer read `.text()` by path, whatever widget holds it.
         let sidebar = cx.with_vm(|vm| {
-            let shader_src_value = vm.eval_with_source(
-                ScriptMod {
-                    cargo_manifest_path: String::new(),
-                    module_path: "tweak".to_string(),
-                    file: "tweak://shader_src".to_string(),
-                    line: 1,
-                    column: 1,
-                    code: shader_src_code.to_string(),
-                    values: Vec::new(),
-                },
-                ScriptObject::ZERO,
-            );
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
@@ -3723,13 +3707,30 @@ impl Tweaker {
                             width: Fill
                             height: 150
                         }
-                        src_scroll := View {
+                        src_fold := Button {
+                            width: Fit
+                            height: 20
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "+ source"
+                            draw_text +: { text_style +: { font_size: 8.0 } }
+                        }
+                        src_scroll := ScrollYView {
                             width: Fill
                             height: Fill
                             show_bg: true
                             draw_bg +: { color: #x1b1b1b }
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                            shader_src := #(shader_src_value)
+                            shader_src := TextInput {
+                                width: Fill
+                                height: Fit
+                                is_multiline: true
+                                draw_bg +: { color: #x1b1b1b }
+                                draw_text +: {
+                                    color: #xd0d0d0
+                                    text_style: theme.font_code
+                                    text_style +: { font_size: 7.5 }
+                                }
+                            }
                         }
                         prompt := TextInput {
                             width: Fill
@@ -4667,6 +4668,15 @@ impl Tweaker {
                     .widget_uid()
                     .0;
                 self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
+                // The source editor unfolds on demand only; folded, the tab
+                // is the swatch + doc + prompt.
+                let fold = col.child(live_id!(src_fold));
+                self.shader_fold_uid = fold.widget_uid().0;
+                fold.set_text(
+                    cx,
+                    if self.shader_src_open { "- source" } else { "+ source" },
+                );
+                col.child(live_id!(src_scroll)).set_visible(cx, self.shader_src_open);
                 // The shader as written: pixel (and vertex when the layer
                 // sets its own) with their docs — what the prompt rewrites.
                 {
@@ -4704,8 +4714,9 @@ impl Tweaker {
                         && (cx.has_key_focus(editor.area()) || editor.text() == self.live_last_applied);
                     if editor.text() != text && !typing {
                         editor.set_text(cx, &text);
-                        // Column 0 visible: new text, viewport home.
-                        editor.set_scroll_pos(cx, dvec2(0.0, 0.0));
+                        // Line 1 visible: new text, viewport home (the
+                        // scroll lives on the wrapping ScrollYView now).
+                        col.child(live_id!(src_scroll)).set_scroll_pos(cx, dvec2(0.0, 0.0));
                         self.live_last_applied = text.clone();
                         self.live_last_good = text.clone();
                     }
@@ -5789,6 +5800,13 @@ impl Tweaker {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.note_request = true;
                     cx.redraw_all();
+                }
+                continue;
+            }
+            if self.shader_fold_uid != 0 && action_uid == self.shader_fold_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.shader_src_open = !self.shader_src_open;
+                    self.redraw_sidebar(cx);
                 }
                 continue;
             }
