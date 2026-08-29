@@ -907,6 +907,29 @@ script_mod! {
                 color: #x9fabb7
             }
         }
+        // The set list's own remove: a row in the QUEUE is a decision, and
+        // taking it back should not mean dragging the row out or clearing
+        // the lot. Sits beside the phones mark, where the explorer keeps
+        // its `+` — the same place means the same kind of job.
+        row_unqueue := Button{
+            width: 22
+            height: 18
+            text: "\u{2212}"
+            padding: 0
+            align: Align{x: 0.5, y: 0.5}
+            draw_bg +: {
+                color: #x272e38
+                color_hover: #x3a2b2f
+                color_down: #x1e232b
+                border_color: #xffffff26
+                border_radius: 4.0
+                border_size: 1.0
+            }
+            draw_text +: {
+                color: #xd6dee6
+                text_style: theme.font_bold{font_size: 9}
+            }
+        }
         row_queue := Button{
             width: 26
             height: 18
@@ -2258,6 +2281,7 @@ script_mod! {
                                 min: 0.05
                                 max: 20.0
                                 default: 4.0
+                                scroll_step: 0.025
                             }
                             // FADE walks the console to the other side over that
                             // duration; CUT jumps there. Both land on the
@@ -2970,7 +2994,11 @@ script_mod! {
                         // Compact: the 320-wide panel cannot seat the explorer's
                         // fixed columns — they squeezed the Fill title to nothing,
                         // which is why the queue used to read as bare numbers.
-                        music_queue := mod.widgets.VjTrackList{show_queue_button: false compact: true}
+                        music_queue := mod.widgets.VjTrackList{
+                            show_queue_button: false
+                            show_unqueue_button: true
+                            compact: true
+                        }
                         // The DOCKED home of the pre-listen player: under the
                         // queue, exactly where the mockup parks it.
                         phones_dock := View{
@@ -5448,6 +5476,8 @@ pub enum TrackListHit {
     Load(usize, KeyModifiers),
     /// The row's `+` button: queue it.
     Queue(usize),
+    /// The queue row's minus button: take it back off the set list.
+    Unqueue(usize),
     /// The row's headphones button: pre-listen it on the phones bus.
     Preview(usize),
     /// The inline player's play/pause.
@@ -5472,6 +5502,11 @@ pub struct VjTrackList {
     /// Queue lists have no `+` button — the rows are already queued.
     #[live]
     show_queue_button: bool,
+    /// The queue's remove chip. Explicit rather than inferred from the
+    /// absence of `+`: the two lists differ in more than one way, and a
+    /// flag that says what it means survives the next one.
+    #[live]
+    show_unqueue_button: bool,
     /// A narrow list keeps badge + title and drops every fixed column;
     /// without this the fixed widths squeeze the Fill title to nothing.
     #[live]
@@ -5736,6 +5771,8 @@ impl Widget for VjTrackList {
                     }
                     item.button(cx, ids!(row_queue))
                         .set_visible(cx, self.show_queue_button);
+                    item.button(cx, ids!(row_unqueue))
+                        .set_visible(cx, self.show_unqueue_button);
                     // The phones mark: green while this row's track is the
                     // one being pre-listened. Templated rows are painted
                     // from data here, never through the host's latch cache.
@@ -5828,6 +5865,8 @@ pub fn track_list_hits(
             TrackListHit::Preview(row_id)
         } else if item.button(cx, ids!(row_queue)).clicked(actions) {
             TrackListHit::Queue(row_id)
+        } else if item.button(cx, ids!(row_unqueue)).clicked(actions) {
+            TrackListHit::Unqueue(row_id)
         } else if item.button(cx, ids!(hp_play)).clicked(actions)
             || item.button(cx, ids!(hp_pause)).clicked(actions)
         {

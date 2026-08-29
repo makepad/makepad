@@ -16689,13 +16689,7 @@ p2 {}
         if !cx.windows.is_valid(main_id) {
             return;
         }
-        let native = cx.windows[main_id].native_dpi_factor();
         let dpi = cx.windows[main_id].effective_dpi_factor();
-        // The lists' own width decides whether they tab, but the console's
-        // scale is judged on the whole window — so the height that goes with
-        // it is the window's, exactly as `sync_lists_tabs` feeds it.
-        let geom = &cx.windows[main_id].window_geom;
-        let physical_height = geom.inner_size.y * geom.dpi_factor;
         let (decks, lists) = self.layout_spans(cx);
 
         let stage = console_scale::console_tabs_for(decks);
@@ -16710,7 +16704,11 @@ p2 {}
             self.paint_deck_tabs(cx);
         }
 
-        let tabbed = console_scale::console_lists_tabbed(lists * dpi, physical_height, native);
+        // `dpi` is the console's OWN scale (already correct for the WHOLE
+        // window) — never re-derived from `lists`, which is only the
+        // lists' own small share and would collapse `console_lists_tabbed`
+        // back to a fixed point (see its doc comment).
+        let tabbed = console_scale::console_lists_tabbed(lists * dpi, dpi);
         if tabbed != self.lists_tabbed {
             self.lists_tabbed = tabbed;
             self.paint_lists_tabs(cx);
@@ -16720,36 +16718,27 @@ p2 {}
     /// What the lists get along the body's flow, in layout points: what the
     /// operator dragged them to, or the automatic allotment.
     ///
-    /// Clamped either way. A drag may take room from the decks but never
-    /// past the point where they could not hold one panel and a full-width
-    /// middle — the same floor the automatic allotment respects, because a
-    /// grip that could starve the mixer would just be the old bug with a
-    /// handle on it.
+    /// Clamped either way — beside the decks, down to where the tab stages
+    /// take over (`console_scale::lists_width_beside`); stacked under them,
+    /// down to where the accordion can no longer hold its folded blocks.
     fn lists_extent(&self, cx: &mut Cx) -> f64 {
-        let (total, set, floor) = if self.lists_beside {
+        if self.lists_beside {
             let points = self.ui.view(cx, ids!(page_body)).area().rect(cx).size.x;
-            let decks_floor = console_scale::FLANKS_POINTS / 2.0
-                + console_scale::CENTRE_MIN_POINTS;
-            (points, self.lists_width_set, decks_floor)
-        } else {
-            let points = self.ui.view(cx, ids!(page_body)).area().rect(cx).size.y;
-            let fold = match self.deck_sections.fold() {
-                Fold::None => console_scale::ConsoleFold::None,
-                Fold::Pairs => console_scale::ConsoleFold::Pairs,
-                Fold::Singles => console_scale::ConsoleFold::Singles,
-            };
-            (points, self.lists_height_set, console_scale::region_min_points(fold))
-        };
+            return console_scale::lists_width_beside(points, self.lists_width_set);
+        }
+        let total = self.ui.view(cx, ids!(page_body)).area().rect(cx).size.y;
         if total <= 1.0 {
             return console_scale::LISTS_MIN_POINTS;
         }
-        let want = set.unwrap_or_else(|| {
-            if self.lists_beside {
-                console_scale::lists_width_points(total - 6.0)
-            } else {
-                (total - floor).max(console_scale::LISTS_MIN_POINTS)
-            }
-        });
+        let fold = match self.deck_sections.fold() {
+            Fold::None => console_scale::ConsoleFold::None,
+            Fold::Pairs => console_scale::ConsoleFold::Pairs,
+            Fold::Singles => console_scale::ConsoleFold::Singles,
+        };
+        let floor = console_scale::region_min_points(fold);
+        let want = self
+            .lists_height_set
+            .unwrap_or_else(|| (total - floor).max(console_scale::LISTS_MIN_POINTS));
         let ceiling = (total - floor - 7.0).max(console_scale::LISTS_MIN_POINTS);
         want.clamp(console_scale::LISTS_MIN_POINTS.min(ceiling), ceiling)
     }
@@ -17152,15 +17141,25 @@ p2 {}
         }
         let native = cx.windows[main_id].native_dpi_factor();
         let physical = ev.new_geom.inner_size * ev.new_geom.dpi_factor;
-        // What the DECKS get, which is half the window once the lists have
-        // moved alongside them.
-        let physical_width = console_scale::deck_span(physical.x, physical.y, native);
-        // In POINTS, and from the DECKS' own width: the panels take turns as
-        // soon as they would squeeze the middle under its minimum, whether it
-        // was a narrow window that took the room or the lists moving
-        // alongside them.
         let dpi = console_scale::console_dpi(physical.x, physical.y, native);
-        let stage = console_scale::console_tabs_for(physical_width / dpi);
+        // What the DECKS get, in points: the automatic share, or the width
+        // the operator's own drag left them. Computed fresh from this
+        // event's own geometry rather than `self.lists_beside` /
+        // `lists_extent`, which read `page_body`'s cached rect and
+        // `sync_page_body_flow`'s not-yet-updated flag — both still
+        // describing the window as it was before this resize. A resize
+        // that ignored the drag was reverting the tabs to what the window
+        // alone would have chosen, with the lists still sitting at the
+        // width the hand actually left them.
+        let decks_points = if console_scale::console_lists_beside(physical.x, physical.y, native)
+        {
+            let total = physical.x / dpi;
+            let lists = console_scale::lists_width_beside(total, self.lists_width_set);
+            (total - lists - 7.0).max(1.0)
+        } else {
+            physical.x / dpi
+        };
+        let stage = console_scale::console_tabs_for(decks_points);
         if stage == self.tab_stage {
             return;
         }
@@ -17169,8 +17168,8 @@ p2 {}
         // modes go with the icons: "the deck the library is aimed at" names
         // nothing when the thing on screen might be the mixer, so at this
         // width every tab is the operator's own.
-        let decks = if stage == TabStage::All { 3 } else { 2 };
-        self.deck_tabs.set_decks(decks);
+        let count = if stage == TabStage::All { 3 } else { 2 };
+        self.deck_tabs.set_decks(count);
         if stage == TabStage::All {
             let (target, audible) = (self.tab_target(), self.tab_audible());
             self.deck_tabs.set_follow(TabFollow::Manual, target, audible);
@@ -21248,6 +21247,11 @@ p2 {}
         if let Some(mut list) = list.borrow_mut::<VjTrackList>() {
             list.set_narrow(narrow);
         }
+        // STEM/KRK carry the same S/K abbreviation as the sort arrows do,
+        // and both cells just changed width above — without this the words
+        // stayed full-length in a cell sized for the letter, crowding into
+        // TAGS.
+        self.sync_sort_heads(cx);
         self.ui.redraw(cx);
     }
 
@@ -23973,6 +23977,9 @@ p2 {}
                     }
                     continue;
                 }
+                // The explorer carries no remove chip — the set list is the
+                // only place a row can be taken off it.
+                TrackListHit::Unqueue(_) => continue,
                 TrackListHit::Preview(index) => {
                     self.toggle_preview(cx, PhonesList::Explorer, index);
                     continue;
@@ -24018,6 +24025,13 @@ p2 {}
                     let cmds = self.decks.load_queued(index, self.deck_target);
                     self.run_deck_cmds(cx, cmds);
                     self.queue_rows.clear();
+                }
+                TrackListHit::Unqueue(index) => {
+                    self.decks.dequeue(index);
+                    self.queue_rows.clear();
+                    // A track pulled out of the set list while it is in the
+                    // phones gets its `+` back on the player.
+                    self.sync_phones_player_ui(cx);
                 }
                 TrackListHit::Drag(index) => self.start_queue_drag(cx, index),
                 TrackListHit::Preview(index) => {

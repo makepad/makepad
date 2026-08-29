@@ -114,6 +114,35 @@ pub fn console_scale(physical_width: f64, physical_height: f64, native_dpi: f64)
     console_dpi(physical_width, physical_height, native_dpi) / native_dpi
 }
 
+/// The window width, in layout points, below which the explorer and the
+/// queue stop standing side by side and take turns behind tabs.
+///
+/// The queue is a fixed 320 points at every width, so the explorer gets
+/// whatever is left; 560 is where its columns are already down to the narrow
+/// set and the titles start losing their tails. 880 is the two together.
+///
+/// On a 1.5x display with the console at its 0.75 floor that is about 990
+/// device pixels.
+pub const LISTS_TAB_POINTS: f64 = 880.0;
+
+/// Whether the explorer and the queue have to take turns.
+///
+/// `physical_width` is the width the LISTS get, not the window's — see
+/// [`lists_span`]. `dpi` is the console's OWN scale, from [`console_dpi`]
+/// applied to the WINDOW's width — never re-derived from `physical_width`
+/// itself. The lists' own share is a small fraction of the window, and
+/// running it back through `console_dpi` treats it as if it WERE the
+/// window: for a wide middle range of real list widths that collapses to a
+/// fixed point near `TARGET_POINTS`, which is always past the tab
+/// threshold — so the explorer sat beside the queue, squeezed to a
+/// fraction of what its row needs, and never took the hint to tab.
+pub fn console_lists_tabbed(physical_width: f64, dpi: f64) -> bool {
+    if !physical_width.is_finite() || !dpi.is_finite() || dpi <= 0.0 {
+        return false;
+    }
+    physical_width / dpi < LISTS_TAB_POINTS
+}
+
 /// The physical width the LISTS get: the window, or their share of it once
 /// they stand beside the decks.
 pub fn lists_span(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
@@ -191,6 +220,41 @@ pub fn split_body(total_points: f64) -> (f64, f64) {
 /// How many layout points the lists take beside the decks.
 pub fn lists_width_points(total_points: f64) -> f64 {
     split_body(total_points).1
+}
+
+/// The lists' width beside the decks, in layout points: what the operator
+/// dragged them to (`override_points`), or the automatic allotment —
+/// clamped either way.
+///
+/// The one formula both the drag path (`App::lists_extent`) and a window
+/// resize (`sync_deck_tabs`, `sync_lists_tabs`) have to agree on: a resize
+/// that ran its own, override-blind version of this arithmetic is what let
+/// a live drag get discarded the moment the window so much as twitched —
+/// the tabs reverting to what the WINDOW alone would have chosen, with the
+/// lists still sitting at the width the hand actually left them.
+///
+/// The clamp itself protects only down to where `console_tabs_for` takes
+/// over, not up at the automatic allotment's own "one panel and a
+/// comfortable middle" floor. Below that floor the tab stages already
+/// fold the panels away and hand the mixer a full turn — a SECOND, higher
+/// clamp here would just strand the drag above the point the tabs exist to
+/// handle, holding the mixer at an "uncomfortable but not tabbed either"
+/// width the operator asked past.
+pub fn lists_width_beside(total_points: f64, override_points: Option<f64>) -> f64 {
+    if total_points <= 1.0 {
+        return LISTS_MIN_POINTS;
+    }
+    // A point under `console_tabs_for`'s own `All` threshold, not exactly
+    // on it: that comparison is a strict less-than, so a ceiling calibrated
+    // to the boundary itself lets a drag approach `All` forever without
+    // ever actually crossing into it.
+    let decks_floor = FLANKS_POINTS / 2.0
+        + crate::music_view::STRIP_SWEEP_MIN
+        + crate::music_view::STRIP_ROW_SLACK
+        - 1.0;
+    let want = override_points.unwrap_or_else(|| lists_width_points(total_points - 6.0));
+    let ceiling = (total_points - decks_floor - 7.0).max(LISTS_MIN_POINTS);
+    want.clamp(LISTS_MIN_POINTS.min(ceiling), ceiling)
 }
 
 /// The width, in layout points, a console needs before standing its lists
@@ -702,6 +766,35 @@ mod tests {
     }
 
     #[test]
+    fn the_lists_take_turns_only_once_they_cannot_stand_side_by_side() {
+        // `dpi` here is the console's OWN scale — the second argument
+        // `console_lists_tabbed` actually divides by — not a `native_dpi`
+        // to re-derive one from.
+        for dpi in [1.0, 1.5, 2.0] {
+            let at = LISTS_TAB_POINTS * dpi;
+            assert!(!console_lists_tabbed(at + 1.0, dpi), "room for both");
+            assert!(!console_lists_tabbed(at, dpi), "exactly enough is enough");
+            assert!(console_lists_tabbed(at - 1.0, dpi), "not any more");
+            assert!(console_lists_tabbed(300.0, dpi));
+        }
+        // The lists give up side-by-side BEFORE the mixer joins the deck
+        // tabs: a console narrow enough to tab its mixer has long since had
+        // to choose between its two lists.
+        let px = |points: f64, native: f64| points * native * MIN_SCALE;
+        let native = 1.5;
+        let lists = px(LISTS_TAB_POINTS, native);
+        let mixer = px(
+            FLANKS_POINTS / 2.0
+                + crate::music_view::STRIP_SWEEP_MIN
+                + crate::music_view::STRIP_ROW_SLACK,
+            native,
+        );
+        assert!(mixer < lists, "{mixer} should come after {lists}");
+        // And on the display this was specified against, about 990 pixels.
+        assert!((lists - 990.0).abs() < 1.0, "{lists} should be about 990 device pixels");
+    }
+
+    #[test]
     fn the_status_bar_takes_a_second_line_only_when_its_controls_will_not_fit() {
         let px = |points: f64, native: f64| points * native * MIN_SCALE;
         for dpi in [1.0, 1.5, 2.0] {
@@ -789,6 +882,25 @@ mod tests {
     }
 
     #[test]
+    fn the_lists_take_turns_once_they_are_down_to_their_share() {
+        // The window that prompted this: standing beside the decks, the
+        // lists get about a third — far too little for a 320-point queue and
+        // a readable explorer side by side, so they tab.
+        let native = 1.5;
+        let (w, h) = (1077.0 * native, 490.0 * native);
+        assert!(console_lists_beside(w, h, native));
+        let span = lists_span(w, h, native);
+        // The console's OWN scale, off the WINDOW — the same value
+        // `sync_lists_tabs` computes before calling `console_lists_tabbed`.
+        let dpi = console_dpi(w, h, native);
+        assert!(console_lists_tabbed(span, dpi), "their share is {span}px");
+        // Stacked, they have the window and the same call says otherwise.
+        let tall = 900.0 * native;
+        assert_eq!(lists_span(w, tall, native), w);
+        assert!(!console_lists_tabbed(w, dpi), "the whole window is plenty");
+    }
+
+    #[test]
     fn the_mixer_is_never_hidden_while_both_panels_still_stand() {
         // The invariant, stated once and checked everywhere: two deck panels
         // side by side may only be chosen when there is room for the middle
@@ -855,6 +967,63 @@ mod tests {
         assert!((decks + lists - (wide / dpi - 6.0)).abs() < 1.0, "{decks} + {lists}");
         // Two panels and a full middle fit again at that width.
         assert_eq!(console_tabs_for(decks), TabStage::None);
+    }
+
+    #[test]
+    fn a_resize_after_a_drag_reads_the_drag_not_the_window() {
+        // The bug this exists for: a live drag sets the lists to some width
+        // the automatic split would never have chosen, and then the window
+        // so much as twitches — a resize event with nothing meaningful
+        // changed. `sync_deck_tabs` and `sync_lists_tabs` used to answer
+        // that resize with the WINDOW's own automatic split, discarding the
+        // drag outright: the tabs would revert to what an untouched console
+        // would show while the lists column, painted straight from the
+        // drag, stayed at the width the hand actually left it — the queue
+        // still parked beside an explorer with nowhere to put its columns,
+        // or both deck panels still standing over a mixer with no room.
+        let total = 1500.0;
+
+        // No override: the shared helper matches the automatic split
+        // exactly, so an untouched console is unaffected.
+        assert_eq!(lists_width_beside(total, None), lists_width_points(total - 6.0));
+
+        // A drag that leaves the lists far wider than the automatic split
+        // ever would (but still short of starving the decks) is honoured.
+        let dragged = lists_width_points(total - 6.0) + 300.0;
+        let got = lists_width_beside(total, Some(dragged));
+        assert!((got - dragged).abs() < 1e-9, "the drag should be read back exactly: {got}");
+
+        // And it still respects the floor a drag can never cross: not the
+        // automatic allotment's own "comfortable middle", but a hair under
+        // the point `console_tabs_for` itself takes over at — the boundary
+        // itself is still `Decks` (a strict less-than), so the floor sits
+        // one point past it, letting a drag actually reach `All` rather
+        // than approach it forever.
+        let decks_floor = FLANKS_POINTS / 2.0
+            + crate::music_view::STRIP_SWEEP_MIN
+            + crate::music_view::STRIP_ROW_SLACK
+            - 1.0;
+        let starving = total; // "give the lists everything"
+        let got = lists_width_beside(total, Some(starving));
+        assert!(
+            total - got - 7.0 >= decks_floor - 1e-6,
+            "the decks kept their floor: {} left of {total}",
+            total - got
+        );
+        // And a drag that pushes the lists all the way to that ceiling
+        // leaves the decks sitting exactly on the floor — a hair below it
+        // lands the operator in `TabStage::All`, the whole point of having
+        // lowered it.
+        let decks_at_ceiling = total - got - 7.0;
+        assert!(
+            (decks_at_ceiling - decks_floor).abs() < 1e-6,
+            "the ceiling should leave the decks exactly on the floor: {decks_at_ceiling}"
+        );
+        assert_eq!(
+            console_tabs_for(decks_at_ceiling - 1.0),
+            TabStage::All,
+            "a drag this deep should hand the mixer a full turn"
+        );
     }
 
     #[test]
