@@ -18,7 +18,9 @@ pub fn draw_hud_overlay(
     bars: &[HudBar],
     crosshair: bool,
 ) {
-    let default_color = vec4(1.0, 1.0, 1.0, 0.93);
+    // Legacy/level-authored hint slots should sit behind the world instead
+    // of reading as near-white chrome. Explicit slot colors remain exact.
+    let default_color = vec4(1.0, 1.0, 1.0, 0.65);
     // Per-anchor stacking cursors (y offset from the anchor's origin).
     let mut cursors: [f64; 7] = [0.0; 7];
     let anchor_index = |a: HudAnchor| match a {
@@ -728,6 +730,7 @@ fn draw_glyph(
         if let Some((texture, w, h)) = (binder.image)(&e.image) {
             draws.image.tint = tint;
             draws.image.tex_size = vec2f(w, h);
+            draws.image.pixelated = 1.0;
             draws.image.draw_vars.set_texture(0, &texture);
             // Keep the picture's own proportions inside the box it was given;
             // a stretched key sprite reads as a rendering bug.
@@ -993,5 +996,7 @@ fn restore(draws: &mut HudDraws, style: &HudStyle) {
     draws.shape.frac = 1.0;
     draws.image.tint = vec4(1.0, 1.0, 1.0, 1.0);
     draws.image.tex_size = vec2f(0.0, 0.0);
+    // DrawHudImage is the pixel-art lane. Keeping its default here also
+    // covers the FPS weapon/flash draw that reuses it after the HUD pass.
+    draws.image.pixelated = 1.0;
 }
-

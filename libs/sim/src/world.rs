@@ -40,6 +40,16 @@ pub struct GameWorld {
     /// terrain + statics + water, dirty-flagged. Never replicated — only the
     /// simulating host runs brains/units. See [`crate::nav`].
     pub nav: crate::nav::NavMap,
+    /// Line-of-sight authority beyond the sim's own bodies (a streamed
+    /// level's walls). Installed by the host; `None` means creature sight
+    /// is a distance test, exactly as it was before providers existed. An
+    /// `Arc` so a world snapshot (rollback ring, replay) shares the same
+    /// read-only geometry instead of copying it.
+    pub los: Option<std::sync::Arc<dyn crate::providers::LosProvider>>,
+    /// Route authority beyond the entity grid (a streamed level's own
+    /// graph). ActorKit asks it for the next waypoint; `None` keeps the
+    /// entity-derived walkability grid as the only routing answer.
+    pub nav_provider: Option<std::sync::Arc<dyn crate::providers::NavProvider>>,
     pub next_id: u64,
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
@@ -121,6 +131,9 @@ pub struct GameWorld {
     /// Decoration: visual-only child boxes and billboard nametags.
     pub parts: Vec<Part>,
     pub labels: Vec<LabelDef>,
+    /// Engine-default bullet marks. This fixed ring is presentation-only:
+    /// shots never become entities and never invalidate the static slabs.
+    pub bullet_decals: crate::decal::BulletDecals,
     /// Smooth heightfield ground (game.terrain smooth mode).
     pub terrain: Option<Terrain>,
     /// Per-cell surface materials for `terrain` (F10). None = uniform default
@@ -139,6 +152,13 @@ pub struct GameWorld {
     /// (The legacy `terrain water:` sheet is NOT in here — it stays the flat
     /// sensor slab it always was.)
     pub water: Option<Box<crate::water::WaterState>>,
+    /// A streamed level's solid geometry (`game.map`), for the queries that
+    /// must see a map's walls and floors DURING the tick — the wheel
+    /// raycasts of a vehicle, the camera boom sweep. None until the host
+    /// installs a map; worlds without one run every pre-map path
+    /// byte-identically. Shared by pointer across snapshots (a level is
+    /// immutable while installed). See [`crate::level_solid`].
+    pub level: Option<crate::level_solid::LevelSolidRef>,
     /// Sky/fog, enabled by game.sky().
     pub sky: Option<SkyConfig>,
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).
@@ -177,6 +197,24 @@ pub struct GameWorld {
 }
 
 impl GameWorld {
+    /// The ground under `(x, z)` for a body that wants to rest near `near_y`:
+    /// the terrain heightfield when the world has one, else the installed
+    /// level's floor there ([`crate::level_solid::LevelSolid::ground_under`]),
+    /// else `None` — the flat y = 0 of a world with no ground at all is the
+    /// caller's default, not this function's.
+    ///
+    /// This is the one place a spawn asks "where is the floor" so a verb
+    /// grounded on the terrain today grounds on a map's floor tomorrow
+    /// without learning what a map is.
+    pub fn ground_height_at(&self, x: f32, z: f32, near_y: f32) -> Option<f32> {
+        if let Some(t) = self.terrain.as_ref() {
+            if let Some(h) = t.height_at(x, z) {
+                return Some(h);
+            }
+        }
+        self.level.as_ref().and_then(|level| level.ground_under(x, z, near_y))
+    }
+
     /// A world with the canonical starting camera (the values the gamemaker
     /// widget historically seeded: yaw 0.6, pitch -0.35).
     pub fn new() -> Self {
@@ -318,6 +356,7 @@ impl GameWorld {
         self.entities.clear();
         self.parts.clear();
         self.labels.clear();
+        self.bullet_decals.clear();
         self.terrain = None;
         self.terrain_materials = None;
         // Voxel EDITS survive a re-eval — they are player state, like

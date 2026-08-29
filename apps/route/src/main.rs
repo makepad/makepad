@@ -317,10 +317,26 @@ script_mod! {
                                     tint_color: #xf8fbff
                                     tint_alpha: 0.30
                                 }
+                                // View-effects group first: these two act
+                                // on the CAMERA/rendering, not on map data
+                                // — the divider separates them from the
+                                // content layers below (same unlabeled
+                                // hairline idiom as the theme group).
+                                tilt_check := LayerCheck{text: "Tilt-shift"}
+                                // Grayed (not hidden) outside the
+                                // near-first-person regime — the stock
+                                // disabled label washes out on the glass
+                                // popover, so keep it readable.
+                                warp_check := LayerCheck{
+                                    text: "Space warp"
+                                    draw_text +: { color_disabled: #x8a8f98 }
+                                }
+                                Hr{
+                                    height: 16
+                                }
                                 layer_rain := LayerCheck{text: "Rain radar"}
                                 layer_wind := LayerCheck{text: "Wind"}
                                 layer_terrain := LayerCheck{text: "Terrain"}
-                                tilt_check := LayerCheck{text: "Tilt-shift"}
                                 layer_chargers := LayerCheck{text: "EV chargers"}
                                 layer_transit := LayerCheck{text: "Transit"}
                                 layer_nature := LayerCheck{text: "Nature"}
@@ -340,16 +356,18 @@ script_mod! {
                             }
                         }
 
-                        // --- Assistant panel (right) ---
+                        // --- Assistant panel (bottom-right popover, closed by default) ---
                         View{
                             width: Fill
                             height: Fill
-                            align: Align{x: 1.0 y: 0.0}
+                            flow: Down
+                            align: Align{x: 1.0 y: 1.0}
                             assistant_panel := mod.widgets.glass.Panel{
+                                visible: false
                                 flow: Down
                                 width: 380
-                                height: Fill
-                                margin: 12
+                                height: 620
+                                margin: Inset{right: 14, bottom: 6}
                                 padding: 10
                                 spacing: 0
                                 draw_bg +: {
@@ -497,6 +515,17 @@ script_mod! {
                                 status_label := PanelText{
                                     margin: Inset{top: 6, left: 2}
                                     text: "starting…"
+                                }
+                            }
+                            assistant_button := AppButton{
+                                margin: Inset{right: 14, bottom: 16}
+                                padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
+                                spacing: 0
+                                text: ""
+                                icon_walk: Walk{width: 18, height: 18}
+                                draw_icon +: {
+                                    svg: crate_resource("self://resources/icons/assistant.svg")
+                                    color: #x223038
                                 }
                             }
                         }
@@ -719,6 +748,11 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    /// Last pushed disabled-state of the Space-warp row (None = never
+    /// pushed): the row grays out whenever the camera leaves the
+    /// near-first-person regime and re-enables when it returns.
+    #[rust]
+    warp_check_disabled: Option<bool>,
     #[rust]
     chat: ChatState,
     #[rust]
@@ -761,6 +795,10 @@ pub struct App {
     layers: LayerState,
     #[rust]
     layers_panel_open: bool,
+    /// Route assistant popover (bottom-right button). Closed on every
+    /// launch — nothing persisted.
+    #[rust]
+    assistant_panel_open: bool,
     /// Routed legs with maneuvers (for turn-by-turn).
     #[rust]
     leg_routes: Vec<makepad_map_nav::graph::Route>,
@@ -805,6 +843,65 @@ pub struct App {
     last_tool_call: Option<(String, String)>,
 }
 
+/// The machine's UTC offset in seconds, read once. The platform has no
+/// timezone database, so we ask the system's own `date` — which knows about
+/// DST — instead of guessing. Same house pattern as
+/// `apps/mpfiles/src/model.rs::local_utc_offset_secs`.
+fn local_utc_offset_secs() -> i64 {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let Ok(out) = std::process::Command::new("date").arg("+%z").output() else {
+                return 0;
+            };
+            return parse_utc_offset(String::from_utf8_lossy(&out.stdout).trim());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        0
+    })
+}
+
+/// `+0200` / `-0730` -> seconds east of UTC.
+fn parse_utc_offset(text: &str) -> i64 {
+    let bytes = text.as_bytes();
+    if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
+        return 0;
+    }
+    let Ok(hours) = text[1..3].parse::<i64>() else {
+        return 0;
+    };
+    let Ok(minutes) = text[3..5].parse::<i64>() else {
+        return 0;
+    };
+    let magnitude = hours * 3600 + minutes * 60;
+    if bytes[0] == b'-' {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// The current local hour-of-day (0..24), wall clock + system UTC offset.
+fn local_hour_now() -> u32 {
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let local_secs = epoch_secs + local_utc_offset_secs();
+    (local_secs.rem_euclid(86_400) / 3600) as u32
+}
+
+/// Civil-twilight approximation for the startup theme, no location lookup:
+/// night from 19:00 through 06:59, light from 07:00 through 18:59.
+fn theme_name_for_hour(hour: u32) -> &'static str {
+    if hour >= 19 || hour < 7 {
+        "night"
+    } else {
+        "light"
+    }
+}
+
 /// Pull "ctx USED/MAX" out of the local timing status line.
 fn parse_ctx_usage(timing: &str) -> Option<(usize, usize)> {
     let at = timing.rfind("ctx ")?;
@@ -845,9 +942,17 @@ impl App {
         }
         self.started = true;
         start_memory_watchdog(None);
-        // Reflect the LayerState defaults (e.g. tilt-shift on) in the layers popover;
-        // nothing else syncs the checkboxes until the first apply_layers.
-        self.sync_layer_checkboxes(cx);
+        // Civil-twilight default (route.md follow-up): night 19:00-06:59,
+        // light 07:00-18:59, local wall clock, no location lookup. Same
+        // set_theme_name + apply_layers path the "Night theme" checkbox
+        // uses, so the checkbox, the chrome and the map all agree; the
+        // user can still flip it manually afterwards.
+        let _ = self.layers.set_theme_name(theme_name_for_hour(local_hour_now()));
+        self.layers.dirty = false;
+        // Applies the theme above (chrome + map + checkboxes) and reflects
+        // the rest of the LayerState defaults (e.g. tilt-shift on) in the
+        // layers popover.
+        self.apply_layers(cx);
         nav_data::start_nav_load(self.nav_rx.sender());
         nav_data::start_radar_worker(self.radar_rx.sender());
         cx.start_location_updates();
@@ -1676,6 +1781,10 @@ impl App {
         self.ui
             .check_box(cx, ids!(tilt_check))
             .set_active(cx, self.layers.tilt_shift, Animate::No);
+        let warp_on = self.ui.map_view(cx, ids!(map)).space_warp();
+        self.ui
+            .check_box(cx, ids!(warp_check))
+            .set_active(cx, warp_on, Animate::No);
         self.ui
             .check_box(cx, ids!(theme_night))
             .set_active(cx, self.layers.theme == 1, Animate::No);
@@ -1897,6 +2006,12 @@ impl MatchEvent for App {
                 .widget(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_panel_open);
         }
+        if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
+            self.assistant_panel_open = !self.assistant_panel_open;
+            self.ui
+                .widget(cx, ids!(assistant_panel))
+                .set_visible(cx, self.assistant_panel_open);
+        }
         let layer_checks: [(&[LiveId], &str); 10] = [
             (ids!(layer_rain), "rain"),
             (ids!(layer_wind), "wind"),
@@ -1914,6 +2029,21 @@ impl MatchEvent for App {
                 let _ = self.layers.set_layer(name, on);
                 self.layers.dirty = false;
                 self.apply_layers(cx);
+            }
+        }
+        // The Inception fold: a live rendering mode on the map itself, not
+        // a data layer — MapView owns the tween and the close-3D gating
+        // (the setting remembers intent while the camera is elsewhere).
+        // Grayed = inert: CheckBox still fires Change while disabled, so
+        // outside the regime the mark snaps back and nothing arms.
+        if let Some(on) = self.ui.check_box(cx, ids!(warp_check)).changed(actions) {
+            let map = self.ui.map_view(cx, ids!(map));
+            if map.space_warp_available() {
+                map.set_space_warp(cx, on);
+            } else {
+                self.ui
+                    .check_box(cx, ids!(warp_check))
+                    .set_active(cx, map.space_warp(), Animate::No);
             }
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
@@ -1979,11 +2109,23 @@ impl AppMain for App {
         // voice Metal library has no quantized matmul kernels, so q5_0/q8_0
         // models fail every GPU op. Port the kernels before re-quantizing.
         crate::makepad_widgets::script_mod(vm);
+        mp_theme::apply(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        // The Space-warp row tracks the camera live: grayed (but visible,
+        // so it stays discoverable) outside the near-first-person regime,
+        // re-enabled the moment tilt + zoom qualify. Cached so the
+        // animator only toggles on transitions.
+        let warp_avail = self.ui.map_view(cx, ids!(map)).space_warp_available();
+        if self.warp_check_disabled != Some(!warp_avail) {
+            self.warp_check_disabled = Some(!warp_avail);
+            self.ui
+                .check_box(cx, ids!(warp_check))
+                .set_disabled(cx, !warp_avail);
+        }
         match event {
             Event::Shutdown => {
                 self.drive_log.close();
@@ -2050,6 +2192,16 @@ impl AppMain for App {
                 self.push_line(cx, &text);
             }
             _ => (),
+        }
+        // Esc closes the assistant popover from anywhere, regardless of
+        // which widget currently owns key focus.
+        if let Event::KeyDown(key) = event {
+            if key.key_code == KeyCode::Escape && self.assistant_panel_open {
+                self.assistant_panel_open = false;
+                self.ui
+                    .widget(cx, ids!(assistant_panel))
+                    .set_visible(cx, false);
+            }
         }
         if self.nav_frame.is_event(event).is_some() {
             self.tick_nav_sim(cx);
@@ -2126,5 +2278,32 @@ impl AppMain for App {
         self.chat.tilt_strength = ((tilt - 5.0) / 50.0).clamp(0.0, 1.0);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 19:00 through 06:59 is night; 07:00 through 18:59 is light — the
+    /// boundary hours (6/7/18/19) are the ones a fencepost bug would miss.
+    #[test]
+    fn theme_for_hour_matches_civil_twilight_rule() {
+        assert_eq!(theme_name_for_hour(19), "night");
+        assert_eq!(theme_name_for_hour(7), "light");
+        assert_eq!(theme_name_for_hour(6), "night");
+        assert_eq!(theme_name_for_hour(18), "light");
+        assert_eq!(theme_name_for_hour(0), "night");
+        assert_eq!(theme_name_for_hour(23), "night");
+        assert_eq!(theme_name_for_hour(12), "light");
+        assert_eq!(theme_name_for_hour(20), "night");
+    }
+
+    #[test]
+    fn utc_offset_parses_sign_and_magnitude() {
+        assert_eq!(parse_utc_offset("+0200"), 7200);
+        assert_eq!(parse_utc_offset("-0730"), -27000);
+        assert_eq!(parse_utc_offset("+0000"), 0);
+        assert_eq!(parse_utc_offset("garbage"), 0);
     }
 }

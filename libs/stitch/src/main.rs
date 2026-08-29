@@ -41,6 +41,7 @@ fn parse_val(type_: ValType, string: &str) -> Val {
         ValType::I64 => string.parse::<i64>().unwrap().into(),
         ValType::F32 => string.parse::<f32>().unwrap().into(),
         ValType::F64 => string.parse::<f64>().unwrap().into(),
+        ValType::V128 => unimplemented!(),
         ValType::FuncRef => unimplemented!(),
         ValType::ExternRef => unimplemented!(),
     }
@@ -52,6 +53,7 @@ fn print_val(val: Val) {
         Val::I64(val) => println!("{}", val),
         Val::F32(val) => println!("{}", val),
         Val::F64(val) => println!("{}", val),
+        Val::V128(val) => println!("{:032x}", val.to_bits()),
         Val::FuncRef(_) => unimplemented!(),
         Val::ExternRef(_) => unimplemented!(),
     }

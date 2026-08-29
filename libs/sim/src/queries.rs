@@ -119,8 +119,10 @@ pub fn pick_ground_point(world: &mut GameWorld, u: f32, v: f32, aspect: f32) -> 
 /// How far a camera offset may extend before hitting geometry. This is the
 /// shared point sweep used by both the backwards boom and a lateral shoulder
 /// offset, so the two paths cannot disagree about terrain or collision layers.
-/// Entities tagged "scenery" are ignored (Godot keeps trees on a layer the
-/// camera ray never sees, so foliage doesn't yank the view in).
+/// Entities tagged "scenery" and interior shell surfaces are ignored. Godot
+/// keeps trees on a layer the camera ray never sees, and a shell deliberately
+/// lets a third-person eye sit outside the room looking through its undrawn
+/// outward side.
 pub fn camera_path_limit(
     world: &GameWorld,
     origin: Vec3f,
@@ -130,18 +132,32 @@ pub fn camera_path_limit(
     minimum: f32,
 ) -> f32 {
     const STEPS: i32 = 32;
-    for i in 1..=STEPS {
-        let t = distance * i as f32 / STEPS as f32;
-        let p = origin + dir * t;
-        if let Some(terrain) = &world.terrain {
-            if let Some(h) = terrain.height_at(p.x, p.z) {
-                if p.y < h + 0.2 {
-                    return (t - clearance).max(minimum);
-                }
-            }
+    // A streamed level's walls and ceilings first, as an exact swept ray
+    // rather than a march: the march below samples every `distance/32`
+    // (0.4 m on a 13 m driving boom) and a Doom wall is thinner than that.
+    // The historical one-metre minimum does NOT apply to the level — inside
+    // a 2 m corridor a boom held at 1 m sits in the far wall — so the level
+    // may collapse the boom all the way to the pivot; the rig's
+    // `RENDER_MIN_BOOM` handling carries the eye from there.
+    let mut limit = distance;
+    if let Some(level) = &world.level {
+        if let Some(t) = level.swept_hit(origin, dir, distance, LEVEL_LENS_RADIUS) {
+            limit = (t - clearance).max(0.0);
         }
-        for e in &world.entities {
-            if e.sensor || e.tag == "scenery" {
+    }
+    let distance = limit;
+    // Entities once, not per step: the old march tested EVERY entity at all
+    // 32 sample points — O(32·N) per camera per frame, the top app cost in a
+    // village world (measured: `camera_path_limit` led the profile). The
+    // slab test below finds each body's exact (entry, exit) parameter
+    // interval along the boom and converts it to the FIRST sampled march
+    // step inside it, so the answer stays on the same step grid the march
+    // used — same stop, ~1/32nd the work.
+    let step_t = distance / STEPS as f32;
+    let mut entity_step: i32 = i32::MAX;
+    if step_t > 0.0 {
+        'entities: for e in &world.entities {
+            if e.sensor || e.shell || e.tag == "scenery" {
                 continue;
             }
             if !matches!(
@@ -150,16 +166,62 @@ pub fn camera_path_limit(
             ) {
                 continue;
             }
-            if (p.x - e.pos.x).abs() < e.half.x
-                && (p.y - e.pos.y).abs() < e.half.y
-                && (p.z - e.pos.z).abs() < e.half.z
-            {
-                return (t - clearance).max(minimum);
+            // Open-interval slab test matching the march's strict `<`.
+            let mut entry = 0.0f32;
+            let mut exit = distance;
+            let o = [origin.x, origin.y, origin.z];
+            let d = [dir.x, dir.y, dir.z];
+            let c = [e.pos.x, e.pos.y, e.pos.z];
+            let h = [e.half.x, e.half.y, e.half.z];
+            for a in 0..3 {
+                if d[a].abs() < 1.0e-9 {
+                    if (o[a] - c[a]).abs() >= h[a] {
+                        continue 'entities;
+                    }
+                } else {
+                    let inv = 1.0 / d[a];
+                    let mut t0 = (c[a] - h[a] - o[a]) * inv;
+                    let mut t1 = (c[a] + h[a] - o[a]) * inv;
+                    if t0 > t1 {
+                        core::mem::swap(&mut t0, &mut t1);
+                    }
+                    entry = entry.max(t0);
+                    exit = exit.min(t1);
+                    if entry >= exit {
+                        continue 'entities;
+                    }
+                }
             }
+            // First march sample strictly inside (entry, exit), 1..=STEPS.
+            let first = ((entry / step_t).floor() as i32 + 1).max(1);
+            if first <= STEPS && (first as f32) * step_t < exit && first < entity_step {
+                entity_step = first;
+            }
+        }
+    }
+    let last_step = entity_step.min(STEPS);
+    for i in 1..=last_step {
+        let t = distance * i as f32 / STEPS as f32;
+        let p = origin + dir * t;
+        if let Some(terrain) = &world.terrain {
+            if let Some(h) = terrain.height_at(p.x, p.z) {
+                if p.y < h + 0.2 {
+                    return (t - clearance).max(minimum).min(distance);
+                }
+            }
+        }
+        if i == entity_step {
+            return (t - clearance).max(minimum).min(distance);
         }
     }
     distance
 }
+
+/// Half-width of the camera "lens" the level sweep carries: the thick ray
+/// of [`crate::level_solid::LevelSolid::swept_hit`], so a boom squeezing
+/// past a door jamb or a ceiling beam pulls in before the near plane's
+/// corners reach it.
+const LEVEL_LENS_RADIUS: f32 = 0.25;
 
 /// How far the third-person boom may extend before hitting geometry: march
 /// from the pivot toward the camera and stop half a metre before a solid,
@@ -631,4 +693,86 @@ pub fn sweep_axis(
         }
     }
     (new_axis, hit, hit_id)
+}
+
+#[cfg(test)]
+mod level_boom_tests {
+    use super::*;
+    use crate::level_solid::test_level::Planes;
+    use std::sync::Arc;
+
+    /// A 2 m-high corridor: floor at 0, ceiling at 2, walls at x = ±1.
+    fn corridor() -> GameWorld {
+        let mut world = GameWorld::new();
+        world.level = Some(Arc::new(Planes {
+            floors: vec![0.0, 2.0],
+            walls_x: vec![-1.0, 1.0],
+            walls_z: Vec::new(),
+        }));
+        world
+    }
+
+    #[test]
+    fn the_boom_stops_short_of_a_level_ceiling() {
+        let world = corridor();
+        // Driving boom: 13 m back and up at ~17° from a pivot 1.1 m up.
+        let pivot = vec3f(0.0, 1.1, 0.0);
+        let dir = crate::vec3_normalize(vec3f(0.0, 0.3, 1.0));
+        let boom = camera_boom_limit(&world, pivot, dir, 13.0);
+        // The ceiling is 0.9 m above the pivot: hit at t = 0.9 / 0.287 ≈ 3.1
+        // for the centre ray, sooner for the lens's upper ray; minus the
+        // half-metre clearance. Well inside the corridor either way.
+        let eye = pivot + dir * boom;
+        assert!(boom < 3.0, "boom {boom} was not pulled in by the ceiling");
+        assert!(boom > 1.0, "boom {boom} collapsed further than the ceiling asks");
+        assert!(eye.y < 2.0 - 0.3, "the eye {eye:?} is in the ceiling");
+    }
+
+    #[test]
+    fn the_boom_may_shrink_below_the_historical_minimum_against_a_level_wall() {
+        let world = corridor();
+        // Pivot 0.6 m from the +x wall, boom straight into it.
+        let pivot = vec3f(0.4, 1.0, 0.0);
+        let boom = camera_boom_limit(&world, pivot, vec3f(1.0, 0.0, 0.0), 8.0);
+        assert!(
+            boom < 1.0,
+            "a level wall 0.6 m away must beat the 1 m minimum (got {boom})"
+        );
+        assert!(boom <= 0.6 - 0.5 + 1.0e-4, "eye at {boom} is not clear of the wall");
+    }
+
+    #[test]
+    fn open_ground_leaves_the_boom_alone() {
+        let mut world = corridor();
+        world.level = None;
+        let boom = camera_boom_limit(&world, vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.3, 1.0), 13.0);
+        assert_eq!(boom, 13.0);
+    }
+
+    #[test]
+    fn the_lens_is_thick_the_side_ray_reaches_an_oblique_wall_first() {
+        // A boom grazing toward the +x wall: the lens's near-side ray meets
+        // the wall a lens-width sooner than the centre ray, and the limit
+        // must honour the sooner of the two.
+        let world = corridor();
+        let pivot = vec3f(0.0, 1.0, 0.0);
+        let dir = crate::vec3_normalize(vec3f(0.15, 0.0, 1.0));
+        let boom = camera_boom_limit(&world, pivot, dir, 8.0);
+        let centre_hit = (1.0 - pivot.x) / dir.x;
+        assert!(
+            boom < centre_hit - 0.5 - 0.5,
+            "the lens's side ray must pull the boom in ahead of the centre ray \
+             (boom {boom}, centre-only {})",
+            centre_hit - 0.5
+        );
+    }
+
+    #[test]
+    fn ground_height_prefers_terrain_then_the_level() {
+        let world = corridor();
+        assert_eq!(world.ground_height_at(0.0, 0.0, 0.5), Some(0.0));
+        assert_eq!(world.ground_height_at(0.0, 0.0, 2.5), Some(2.0));
+        let bare = GameWorld::new();
+        assert_eq!(bare.ground_height_at(0.0, 0.0, 0.5), None);
+    }
 }
