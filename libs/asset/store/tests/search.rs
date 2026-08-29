@@ -37,7 +37,13 @@ fn reg(core: &AssetServerCore, n: u8, ns: &str) -> AssetId {
 }
 
 fn q<'a>(text: &'a str) -> SearchQuery<'a> {
-    SearchQuery { text, filters: SearchFilters::default(), page_size: 10, facets: 0 }
+    SearchQuery {
+        text,
+        filters: SearchFilters::default(),
+        expand: false,
+        page_size: 10,
+        facets: 0,
+    }
 }
 
 #[test]

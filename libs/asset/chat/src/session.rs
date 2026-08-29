@@ -211,6 +211,9 @@ pub struct Session {
     /// ride out on. Presentation only — dropping it changes nothing but a
     /// readout.
     pending_serving: Option<crate::wire::ServingFacts>,
+    /// The parked client tool is one whose answer ends the turn (see
+    /// [`ends_turn_on_outcome`]).
+    end_turn_on_client_outcome: bool,
 }
 
 impl Session {
@@ -219,32 +222,79 @@ impl Session {
     /// contain silently mixed provenance. `principal` is kept on
     /// [`Origin`] for the caller; it is not stamped onto Asset Server ops.
     pub fn new(principal: impl Into<String>, provider: Box<dyn ChatProvider>) -> Session {
-        let id = SessionId::generate();
+        Self::resume(SessionId::generate(), principal, provider, Vec::new(), 0, None)
+    }
+
+    /// Rebuild a session from a persisted transcript: the SAME id (so a
+    /// client that stored it keeps finding it), the conversation so far as
+    /// the provider will see it, the turn counter it had, and its `sealed`
+    /// state — a session that fail-closed after an ambiguous tool
+    /// continuation MUST come back refusing sends, not reset by a restart.
+    /// The provider is fresh either way — a resumed session replays its
+    /// history on the next send; nothing provider-native (a CLI
+    /// conversation id) is assumed.
+    ///
+    /// The `known` revision set deliberately starts EMPTY: which exact
+    /// revisions this session may name as transform inputs is security
+    /// state, and resetting it fails closed — a resumed session must
+    /// re-see a revision (attach it, or get it back from a tool result)
+    /// before naming it, and the dispatcher refuses anything else. It is
+    /// never reconstructed from the transcript text, which the model can
+    /// influence.
+    ///
+    /// Invalid messages (empty / over the wire bound) are dropped rather
+    /// than refusing the whole resume; the tail beyond what a live session
+    /// may hold is kept, the oldest rows go.
+    pub fn resume(
+        id: SessionId,
+        principal: impl Into<String>,
+        provider: Box<dyn ChatProvider>,
+        history: Vec<ChatMessage>,
+        turn: u64,
+        sealed: Option<String>,
+    ) -> Session {
+        let mut history: Vec<ChatMessage> =
+            history.into_iter().filter(|m| m.validate().is_ok()).collect();
+        // Leave room for the next turn: a resumed conversation that already
+        // filled the history bound would refuse every send.
+        let keep = MAX_MESSAGES / 2;
+        if history.len() > keep {
+            history.drain(..history.len() - keep);
+        }
         Session {
             origin: Origin { principal: principal.into(), session: id.clone() },
             id,
             provider,
-            history: Vec::new(),
+            history,
             known: HashSet::new(),
             phase: Phase::Idle,
             system: String::new(),
             events: VecDeque::new(),
             seq: 0,
-            turn: 0,
+            turn,
             tool_rounds: 0,
             cancel: CancelFlag::default(),
-            sealed: None,
+            sealed,
             tool_executed_this_turn: false,
             executed_mutation: false,
             pending_clean: String::new(),
             budget_final: false,
             last_call_trained: None,
             pending_serving: None,
+            end_turn_on_client_outcome: false,
         }
     }
 
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    /// The conversation exactly as the provider sees it (user / assistant /
+    /// tool rows, the tool reminder and trained call text included). This
+    /// is what an owner persists; render it for people with
+    /// [`crate::transcript::render`].
+    pub fn history(&self) -> &[ChatMessage] {
+        &self.history
     }
 
     pub fn origin(&self) -> &Origin {
@@ -278,6 +328,12 @@ impl Session {
         self.sealed.is_some()
     }
 
+    /// Why this session refuses sends, when it does — what an owner
+    /// persists so a restart cannot un-seal it.
+    pub fn sealed_reason(&self) -> Option<&str> {
+        self.sealed.as_deref()
+    }
+
     pub fn turn(&self) -> u64 {
         self.turn
     }
@@ -298,6 +354,20 @@ impl Session {
         &mut self,
         text: &str,
         attachments: &[AttachmentBinding],
+        tools_exec: &mut dyn ToolExecutor,
+    ) -> Result<u64, SendRefusal> {
+        self.send_with_context(text, attachments, "", tools_exec)
+    }
+
+    /// Start a turn with a bounded ephemeral context layer supplied by the
+    /// connected client (for example, the current game world manifest).
+    /// It participates in this turn's system prompt but is never appended to
+    /// the durable user transcript.
+    pub fn send_with_context(
+        &mut self,
+        text: &str,
+        attachments: &[AttachmentBinding],
+        dynamic_context: &str,
         tools_exec: &mut dyn ToolExecutor,
     ) -> Result<u64, SendRefusal> {
         if let Some(reason) = &self.sealed {
@@ -350,7 +420,11 @@ impl Session {
             .map_err(|_| SendRefusal::TooLarge { what: "message" })?;
 
         let defs = tools_exec.tool_definitions();
-        let cap = tools_exec.capability_doc();
+        let mut cap = tools_exec.capability_doc();
+        if !dynamic_context.is_empty() {
+            cap.push('\n');
+            cap.push_str(dynamic_context);
+        }
         self.system = if self.provider.kind().uses_native_tools() {
             tools::render_native_system(&defs, &cap)
         } else {
@@ -516,9 +590,10 @@ impl Session {
     }
 
     fn finish_provider_turn(&mut self, full: String, tools_exec: &mut dyn ToolExecutor) {
-        // Textual <<tool>> markers are FleetQwen-only. Native providers
-        // resume through FunctionCall / continue_function.
-        if self.provider.kind() != ProviderKind::FleetQwen {
+        // Textual <<tool>> markers belong to the marker-contract providers
+        // (fleet Qwen, the CLIs). Native providers resume through
+        // FunctionCall / continue_function.
+        if self.provider.kind().uses_native_tools() {
             if let Err(body) = self.finish_assistant_text(full) {
                 self.phase = Phase::Idle;
                 self.emit(body);
@@ -547,6 +622,18 @@ impl Session {
         match toolcall::extract(&full) {
             Extract::None => {
                 let visible = toolcall::split_thinking(&full).visible;
+                // A model that hits the token cap while printing level source
+                // in the open (observed 2026-08-27: a whole interior written
+                // as prose, cut mid-`game.box`) arrives here looking like a
+                // final answer. The fleet protocol carries no stop reason, so
+                // detect the leak by its shape and spend a corrective round
+                // rather than ending the turn with nothing executed.
+                if looks_like_leaked_source(&visible) {
+                    let what = "you printed level source as plain text (and it was cut off at the token limit) instead of calling a tool. Never print source in the open. Call world.set_source with the core of the level now, then add the rest with world.add_addon calls — build in parts so no single reply is huge."
+                        .to_string();
+                    self.tool_round(visible, None, ToolOutcome::Refused { what }, tools_exec);
+                    return;
+                }
                 if let Err(body) = self.finish_assistant_text(visible) {
                     self.phase = Phase::Idle;
                     self.emit(body);
@@ -597,6 +684,7 @@ impl Session {
         if is_mutating(call) {
             self.executed_mutation = true;
         }
+        self.end_turn_on_client_outcome = ends_turn_on_outcome(call);
         self.pending_clean = clean;
         self.phase = Phase::AwaitingClientTool { call_id };
     }
@@ -766,7 +854,7 @@ impl Session {
         // like "Now the car-kit models." mid-build. In-context examples
         // beat instructions; make the history look exactly like what we
         // want more of.
-        let assistant = if self.provider.kind() == ProviderKind::FleetQwen {
+        let assistant = if !self.provider.kind().uses_native_tools() {
             match &self.last_call_trained {
                 Some(call) if clean_text.len() + call.len() + 1 < MAX_MESSAGE_BYTES => {
                     let mut text = clean_text;
@@ -801,6 +889,21 @@ impl Session {
             }
             self.phase = Phase::Idle;
             self.emit(ChatEventBody::Cancelled);
+            return;
+        }
+        if std::mem::take(&mut self.end_turn_on_client_outcome) {
+            // The client's answer IS the end of this turn (the player is
+            // in another game now): the round is in the history, the turn
+            // ends cleanly, and no model round follows. The provider's
+            // conversation state is deliberately RESET — a native lane
+            // would otherwise keep its pending function call and refuse
+            // every later send with "unresolved function call" (`cancel`
+            // preserves it on purpose; this is the one place abandoning
+            // it is the correct, explicit act). A later send replays the
+            // recorded history as a fresh provider conversation.
+            self.provider.reset_conversation();
+            self.phase = Phase::Idle;
+            self.emit(ChatEventBody::Done);
             return;
         }
         self.tool_rounds += 1;
@@ -941,7 +1044,7 @@ impl Session {
 /// JSON — the symmetric inverse of `toolcall`'s native extractor.
 /// Appended to every user message after the first (see `Session::send`).
 /// Short on purpose: it rides in the history for the rest of the session.
-const TOOL_REMINDER: &str = "\n\n(Your tools are live this turn. If this asks for \
+pub const TOOL_REMINDER: &str = "\n\n(Your tools are live this turn. If this asks for \
 something to happen — in the world, in the store, on the fleet — do it with a tool \
 call. Prose is for reporting what you did.)";
 
@@ -953,6 +1056,14 @@ call. Prose is for reporting what you did.)";
 /// `world.get_source` — and a refusal that only says no leaves them to
 /// conclude they have no tools at all and tell the user so. Naming the
 /// real surface in the result walks them straight back into it.
+/// A "final" assistant answer that is actually raw splash level source —
+/// several `game.*(...)` builder lines in the open. Legit prose answers
+/// mention a call or two inline; a leaked build dump is line after line
+/// of them.
+fn looks_like_leaked_source(text: &str) -> bool {
+    text.lines().filter(|l| l.trim_start().starts_with("game.")).count() >= 4
+}
+
 fn corrected(reason: String, tools_exec: &mut dyn ToolExecutor) -> String {
     if !reason.starts_with("unknown tool") {
         return reason;
@@ -1017,6 +1128,7 @@ fn is_mutating(call: &ContentToolCall) -> bool {
             | ContentToolCall::MeshGenerate { .. }
             | ContentToolCall::WorldGenerate { .. }
             | ContentToolCall::CharacterGenerate { .. }
+            | ContentToolCall::ContentGenerate { .. }
             | ContentToolCall::DefaultsSet { .. }
             | ContentToolCall::OperationCreate { .. }
             | ContentToolCall::OperationCancel { .. }
@@ -1025,10 +1137,19 @@ fn is_mutating(call: &ContentToolCall) -> bool {
             | ContentToolCall::WorldRemove { .. }
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldSetSource { .. }
+            | ContentToolCall::WorldNewLevel { .. }
             | ContentToolCall::WorldSetPlayerModel { .. }
             | ContentToolCall::WorldSpawn { .. }
             | ContentToolCall::WorldTune { .. }
     )
+}
+
+/// A client-executed call whose answer ENDS the turn instead of feeding a
+/// follow-up model round: `world.new_level` switches the player to another
+/// game, and that game has its own conversation — nothing this session
+/// could say afterwards would be seen.
+fn ends_turn_on_outcome(call: &ContentToolCall) -> bool {
+    matches!(call, ContentToolCall::WorldNewLevel { .. })
 }
 
 fn bounded_outcome(outcome: ToolOutcome) -> ToolOutcome {

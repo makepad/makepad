@@ -265,6 +265,51 @@ fn asset_publication_manifest_alias_thumbnail() {
 }
 
 #[test]
+fn data_source_publishes_without_thumbnail_or_mesh() {
+    let ts = start_server("publish_data");
+    let token = ts.admin_token();
+    let mut control = ts.control(Some(&token));
+    let mut data = ts.data(Some(&token));
+    let source = b"dataset: city-boundaries-v1\nformat: geojson\n";
+
+    assert_eq!(data.post_bytes("/v1/blobs?ns=demo", source).status, 201);
+    let r = control.post_json("/v1/assets", &jobj(vec![("namespace", jstr("demo"))]));
+    assert_eq!(r.status, 201);
+    let asset_id = r.str_field("asset_id");
+    let asset: AssetId = asset_id.parse().unwrap();
+    let manifest = data_manifest(asset, source);
+    assert!(!manifest.kind.has_mesh());
+    assert!(manifest.thumbnail.is_none());
+    let bytes = manifest.to_canonical_bytes().expect("Source/Text-only Data manifest validates");
+
+    let r = control.post_bytes(&format!("/v1/assets/{asset_id}/revisions"), &bytes);
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    let revision = r.str_field("revision");
+    let r = control.post_json(
+        &format!("/v1/assets/{asset_id}/revisions/{revision}/publish"),
+        &jobj(vec![]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+
+    let r = control.get(&format!("/v1/revisions/{revision}/json"));
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json().get("kind").and_then(Value::as_str), Some("data"));
+    assert_eq!(data.get(&format!("/v1/thumbnails/revision/{revision}")).status, 404);
+
+    let annotation = jobj(vec![("title", jstr("City boundaries")), ("kind", jstr("data"))]);
+    assert_eq!(
+        control.put_json(&format!("/v1/assets/{asset_id}/annotation"), &annotation).status,
+        204
+    );
+    let r = control.get("/v1/search?ns=demo&kind=data");
+    assert_eq!(r.status, 200);
+    let page = r.json();
+    assert_eq!(page.get("total").and_then(Value::as_i64), Some(1));
+    let hit = &page.get("hits").and_then(Value::as_arr).unwrap()[0];
+    assert_eq!(hit.get("kind").and_then(Value::as_str), Some("data"));
+}
+
+#[test]
 fn quarantine_pulls_content_transactionally() {
     let ts = start_server("quarantine");
     let token = ts.admin_token();
@@ -630,6 +675,83 @@ fn search_annotations_visibility_and_cursors() {
     let probe = cursor_probe(&mut owner);
     let stale = owner.get(&format!("/v1/search?limit=1&cursor={probe}"));
     assert_eq!(stale.status, 400);
+}
+
+/// Over the wire, `q=` widens and `exact=1` does not — with annotations
+/// shaped like the ones the live catalog holds.
+#[test]
+fn search_expands_synonyms_unless_the_request_asks_for_exact_words() {
+    let ts = start_server("search_synonyms");
+    let token = ts.admin_token();
+    let mut admin = ts.control(Some(&token));
+    let owner_token = principal_with(
+        &mut admin,
+        &[
+            ("blob_write", "demo"),
+            ("asset_register", "demo"),
+            ("asset_publish", "demo"),
+            ("alias_write", "demo"),
+        ],
+    );
+    let mut owner = ts.control(Some(&owner_token));
+    let mut data = ts.data(Some(&owner_token));
+
+    for (i, (title, description)) in [
+        ("Dog", "dog pet; standalone; 1x1; brown/grey; cube-shaped dog with floppy ears"),
+        ("Race Car", "race car vehicle; standalone; 2x1; red; sports styling"),
+        ("Blaster Rifle", "blaster rifle weapon; standalone; handheld; grey"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (asset_id, _rev) = publish_prop_http(
+            &mut owner,
+            &mut data,
+            "demo",
+            &format!("demo/props/syn-{i}"),
+            format!("glb-syn{i}").as_bytes(),
+            format!("th-syn{i}").as_bytes(),
+        );
+        let ann = jobj(vec![
+            ("title", jstr(*title)),
+            ("description", jstr(*description)),
+            ("kind", jstr("prop")),
+            ("visibility", jstr("public")),
+        ]);
+        assert_eq!(owner.put_json(&format!("/v1/assets/{asset_id}/annotation"), &ann).status, 204);
+    }
+    let total = |c: &mut Client, target: &str| -> i64 {
+        let r = c.get(target);
+        assert_eq!(r.status, 200, "{target}");
+        r.json().get("total").unwrap().as_i64().unwrap()
+    };
+
+    // The words nothing in the catalog says.
+    assert_eq!(total(&mut owner, "/v1/search?q=puppy"), 1);
+    assert_eq!(total(&mut owner, "/v1/search?q=automobile"), 1);
+    assert_eq!(total(&mut owner, "/v1/search?q=gun"), 1);
+    // The `-` join is still a conjunction, each term through its own group.
+    assert_eq!(total(&mut owner, "/v1/search?q=red-sports-automobile"), 1);
+    assert_eq!(total(&mut owner, "/v1/search?q=puppy-automobile"), 0);
+
+    // `exact=1` is the escape hatch, on GET and on POST.
+    assert_eq!(total(&mut owner, "/v1/search?q=puppy&exact=1"), 0);
+    assert_eq!(total(&mut owner, "/v1/search?q=dog&exact=1"), 1);
+    let r = owner.post_json(
+        "/v1/catalog",
+        &jobj(vec![("q", jstr("puppy")), ("exact", Value::Bool(true))]),
+    );
+    assert_eq!(r.json().get("total").unwrap().as_i64(), Some(0));
+    let r = owner.post_json("/v1/catalog", &jobj(vec![("q", jstr("puppy"))]));
+    assert_eq!(r.json().get("total").unwrap().as_i64(), Some(1));
+    // A malformed flag refuses like every other flag.
+    assert_eq!(owner.get("/v1/search?q=dog&exact=maybe").status, 400);
+    assert_eq!(
+        owner
+            .post_json("/v1/catalog", &jobj(vec![("q", jstr("dog")), ("exact", Value::Int(1))]))
+            .status,
+        400
+    );
 }
 
 /// Fetch a fresh cursor for one query shape (used to prove shape binding).

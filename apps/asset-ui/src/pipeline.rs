@@ -27,6 +27,12 @@ use std::collections::{HashMap, HashSet};
 // ---------------------------------------------------------------------------
 
 /// Image canvas presets; entry 0 is the chain default. Flux wants /16 dims.
+/// What a run says when its expander could not deliver. The run itself
+/// carries on with the prompt the person typed — an expansion is a
+/// courtesy, never a precondition.
+pub const EXPAND_FALLBACK_NOTE: &str = "expand failed, used raw prompt";
+
+/// Poll cadence per active job.
 pub const IMAGE_SIZES: &[(u32, u32)] = &[
     (512, 512),
     (768, 768),
@@ -645,6 +651,67 @@ pub fn seed_replaces_prefix(domains: &[&str], seed_content_type: &str) -> Option
 /// Human-facing stage name.  In particular, call the text stage what it is:
 /// a local model inference step, rather than making it look like string
 /// templating in the UI.
+/// The parameters a submitted request carries besides its prompt, one
+/// `key=value` per line — read off the request that is actually being sent,
+/// so an opened run shows what the box got rather than what the UI meant.
+/// The prompt is kept separately and in full; an input payload is named by
+/// size and type, never by its base64.
+pub fn sent_params(request: &GenerateRequestJson) -> String {
+    let mut lines: Vec<String> = vec![format!("model={}", request.model)];
+    let mut put = |key: &str, value: String| lines.push(format!("{key}={value}"));
+    if let Some(text) = &request.negative_prompt {
+        put("negative_prompt", text.clone());
+    }
+    if let Some(text) = &request.lyrics {
+        put("lyrics", text.clone());
+    }
+    if let Some(text) = &request.text {
+        put("text", text.clone());
+    }
+    if let Some(voice) = &request.voice {
+        put("voice", voice.clone());
+    }
+    for (key, value) in [
+        ("width", request.width),
+        ("height", request.height),
+        ("steps", request.steps),
+        ("frames", request.frames),
+        ("interpolate", request.interpolate),
+        ("upscale", request.upscale),
+        ("max_tokens", request.max_tokens),
+    ] {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(seed) = request.seed {
+        put("seed", seed.to_string());
+    }
+    for (key, value) in [
+        ("guidance", request.guidance),
+        ("seconds", request.seconds),
+        ("speed", request.speed),
+    ] {
+        if let Some(value) = value {
+            put(key, format!("{value}"));
+        }
+    }
+    if let Some(strength) = request.strength {
+        put("strength", format!("{strength}"));
+    }
+    if let Some(bytes) = &request.input_b64 {
+        put(
+            "input",
+            format!(
+                "{} b64 chars {}",
+                bytes.len(),
+                request.input_content_type.as_deref().unwrap_or("?")
+            ),
+        );
+    }
+    lines.join("\n")
+}
+
 pub fn stage_display_name(domain: &str) -> &str {
     match domain {
         "text" => "LLM prompt expansion",
@@ -797,6 +864,16 @@ pub struct StageRun {
     /// always have one; other pipelines retain the backend's existing seed
     /// behavior.
     pub seed: Option<u64>,
+    /// THE TEXT THIS STAGE ACTUALLY SENT, captured at submit, in full.
+    ///
+    /// Not `Pipeline::prompt`: an expansion stage rewrites what the next
+    /// model sees, a music stage carries its lyrics, and a character chain
+    /// composes its own brief — so the only honest answer to "what did the
+    /// model get?" is the string that went on the wire. Kept so the run can
+    /// be opened and read.
+    pub sent_prompt: String,
+    /// The parameters that went with it, `key=value` per line.
+    pub sent_params: String,
     pub started: Option<std::time::Instant>,
     pub finished: Option<std::time::Instant>,
     /// Fetched artifacts: (content_type, bytes).
@@ -949,6 +1026,8 @@ impl Pipeline {
                     reason: String::new(),
                     service_state: String::new(),
                     seed: None,
+                    sent_prompt: String::new(),
+                    sent_params: String::new(),
                     started: None,
                     finished: None,
                     outputs: Vec::new(),
@@ -1092,6 +1171,17 @@ impl Pipeline {
     /// Service job ids this run has in flight on `base_url` (linear stage
     /// + fan-out candidates) — lets the fleet panel tell "ours" from other
     /// clients' jobs.
+    /// The text a job of this pipeline was handed, by the box's own job id.
+    /// Lets a fleet-box view show WHAT a job it is running was asked for —
+    /// the box itself never reports the prompt back.
+    pub fn sent_prompt_for_job(&self, job_id: &str) -> Option<&str> {
+        self.stages
+            .iter()
+            .find(|stage| stage.job_id == job_id)
+            .map(|stage| stage.sent_prompt.as_str())
+            .filter(|text| !text.is_empty())
+    }
+
     pub fn job_ids_on(&self, base_url: &str) -> Vec<String> {
         let mut ids: Vec<String> = self
             .candidate_sets
@@ -1197,27 +1287,35 @@ impl Pipeline {
     /// identity anchor supplied on its request: `yoshi` can be elaborated,
     /// never replaced.
     fn prompt_for_stage(&self, stage: usize) -> Result<String, String> {
-        for earlier in self.stages[..stage].iter().rev() {
+        for (index, earlier) in self.stages[..stage].iter().enumerate().rev() {
             if earlier.domain == "text" {
+                // An expansion that came back with nothing usable is a
+                // missing improvement, not a missing input: the person's own
+                // prompt still says what they want. A CHARACTER chain is the
+                // exception — its later stages are gated on the brief, so
+                // there the refusal stands (see `expander_is_optional`).
+                let optional = self.expander_is_optional(index);
+                let unusable = |reason: &str| -> Result<String, String> {
+                    if optional {
+                        log!("pipeline: {EXPAND_FALLBACK_NOTE} ({reason})");
+                        Ok(self.prompt.clone())
+                    } else {
+                        Err(format!("LLM prompt expansion {reason}; refusing terse-prompt fallback"))
+                    }
+                };
                 let Some((_, bytes)) = earlier
                     .outputs
                     .iter()
                     .find(|(ct, _)| ct.starts_with("text/plain"))
                 else {
-                    return Err(
-                        "LLM prompt expansion produced no text/plain artifact; refusing terse-prompt fallback"
-                            .to_string(),
-                    );
+                    return unusable("produced no text/plain artifact");
                 };
-                let text = std::str::from_utf8(bytes).map_err(|_| {
-                    "LLM prompt expansion artifact is not UTF-8; refusing terse-prompt fallback"
-                        .to_string()
-                })?;
+                let Ok(text) = std::str::from_utf8(bytes) else {
+                    return unusable("artifact is not UTF-8");
+                };
                 let text = text.trim();
                 if text.is_empty() {
-                    return Err(
-                        "LLM prompt expansion was empty; refusing terse-prompt fallback".to_string(),
-                    );
+                    return unusable("was empty");
                 }
                 if self.is_character_pipeline() {
                     let words = text.split_whitespace().count();
@@ -2156,6 +2254,11 @@ impl Pipeline {
             Ok(request) => request,
             Err(error) => return self.fail_stage(stage, error, events),
         };
+        // Remember what is about to go on the wire, before it goes: this is
+        // what an opened run shows, and it is the only place the composed
+        // text still exists as one string.
+        self.stages[stage].sent_prompt = request_json.prompt.clone().unwrap_or_default();
+        self.stages[stage].sent_params = sent_params(&request_json);
         let url = format!("{}/generate", self.stages[stage].box_url);
         let mut request = crate::http::request(url, HttpMethod::POST);
         request.set_header("Content-Type".to_string(), "application/json".to_string());
@@ -2325,10 +2428,54 @@ impl Pipeline {
         if let Some(retry_stage) = self.prepare_character_mesh_retry(stage, &error) {
             events.push(PipelineEvent::Changed);
             events.extend(self.start_stage(cx, retry_stage, snapshots, avoid));
-            events
-        } else {
-            self.fail_stage(stage, error, events)
+            return events;
         }
+        self.fail_stage_or_skip_expander(cx, stage, error, snapshots, avoid, events)
+    }
+
+    /// Is `stage` an expansion the run can do WITHOUT?
+    ///
+    /// A `text` stage in front of other stages is a rewording courtesy: its
+    /// product is a better prompt, and the person already supplied a
+    /// perfectly usable one. Two cases are NOT optional and stay hard
+    /// failures: a chain whose only stage is the expansion (the text IS the
+    /// product), and a character chain, whose later stages are gated on the
+    /// brief keeping the named identity — see `prompt_for_stage`.
+    fn expander_is_optional(&self, stage: usize) -> bool {
+        self.stages[stage].domain == "text"
+            && stage + 1 < self.stages.len()
+            && !self.is_character_pipeline()
+    }
+
+    /// End the run — UNLESS the stage that failed was an optional expander,
+    /// in which case the run carries on from the prompt the person typed.
+    ///
+    /// A lost expansion used to lose the whole run: the text box hiccuped
+    /// (busy, evicted, timed out) and a queued video that had nothing to do
+    /// with the expander simply never happened, with the reason buried in a
+    /// failed stage nobody was looking at.
+    fn fail_stage_or_skip_expander(
+        &mut self,
+        cx: &mut Cx,
+        stage: usize,
+        error: String,
+        snapshots: &[BoxSnapshot],
+        avoid: &[String],
+        mut events: Vec<PipelineEvent>,
+    ) -> Vec<PipelineEvent> {
+        if !self.expander_is_optional(stage) {
+            return self.fail_stage(stage, error, events);
+        }
+        log!("pipeline: {EXPAND_FALLBACK_NOTE} ({error})");
+        self.stages[stage].state =
+            StageState::Failed(format!("{EXPAND_FALLBACK_NOTE} ({error})"));
+        self.stages[stage].detail = EXPAND_FALLBACK_NOTE.to_string();
+        self.stages[stage].finished = Some(std::time::Instant::now());
+        self.stages[stage].progress = 0.0;
+        events.push(PipelineEvent::StageFailed { stage });
+        events.push(PipelineEvent::Changed);
+        events.extend(self.start_stage(cx, stage + 1, snapshots, avoid));
+        events
     }
 
     /// Issue the next /job poll if the current stage is waiting on one.
@@ -3342,7 +3489,8 @@ impl Pipeline {
                         if Self::is_vram_admission_error(&message) {
                             return self.wait_after_vram_rejection(stage, &message, events);
                         }
-                        return self.fail_stage(stage, message, events);
+                        return self
+                            .fail_stage_or_skip_expander(cx, stage, message, snapshots, avoid, events);
                     }
                 }
             }
@@ -3352,9 +3500,12 @@ impl Pipeline {
                         .and_then(|r| r.get_string_body())
                         .is_some_and(|body| body.contains("no such job"))
                 {
-                    return self.fail_stage(
+                    return self.fail_stage_or_skip_expander(
+                        cx,
                         stage,
                         "box lost the job (service restarted or the job expired)".to_string(),
+                        snapshots,
+                        avoid,
                         events,
                     );
                 }
@@ -3415,9 +3566,12 @@ impl Pipeline {
                     .filter(|r| !failed && r.status_code == 200)
                     .and_then(|r| r.body.clone());
                 let Some(bytes) = bytes else {
-                    return self.fail_stage(
+                    return self.fail_stage_or_skip_expander(
+                        cx,
                         stage,
                         format!("artifact {} fetch failed", artifact.id),
+                        snapshots,
+                        avoid,
                         events,
                     );
                 };
@@ -3642,6 +3796,22 @@ impl Pipeline {
                 state,
                 elapsed
             ));
+            // WHAT THIS STAGE WAS HANDED, in full, indented under it. The
+            // music stage's prompt carries its lyrics and a video brief is a
+            // paragraph, so this is the one place the composed text can
+            // actually be read — the panel it lives in scrolls.
+            if !stage.sent_prompt.is_empty() {
+                out.push_str("    prompt sent:\n");
+                for line in stage.sent_prompt.lines() {
+                    out.push_str(&format!("      {line}\n"));
+                }
+            }
+            if !stage.sent_params.is_empty() {
+                out.push_str("    params:\n");
+                for line in stage.sent_params.lines() {
+                    out.push_str(&format!("      {line}\n"));
+                }
+            }
         }
         out
     }
@@ -4172,6 +4342,78 @@ mod tests {
                     .iter()
                     .any(|pin| *pin == ("paint", "pbr-testpattern"))
         }));
+    }
+
+    /// AN EXPANSION CAN NEVER LOSE A RUN. The expander is a rewording
+    /// courtesy; when it comes back with nothing the video still gets made,
+    /// from the words the person typed.
+    #[test]
+    fn a_useless_expansion_falls_back_to_the_prompt_the_person_typed() {
+        let mut pipeline = Pipeline::new(
+            "scanning electron microscope art",
+            &["text", "video"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(pipeline.expander_is_optional(0));
+
+        // Answered with nothing at all.
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+        // Answered with whitespace.
+        put_output(&mut pipeline, 0, "text/plain; charset=utf-8", b"   \n  ");
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+        // A real expansion is still what wins when there is one.
+        pipeline.stages[0].outputs.clear();
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            b"a false-colour scanning electron micrograph of a pollen grain",
+        );
+        assert_eq!(
+            pipeline.request_for_stage(1).unwrap().prompt.as_deref(),
+            Some("a false-colour scanning electron micrograph of a pollen grain")
+        );
+    }
+
+    /// The two chains where the expansion is NOT optional keep refusing: a
+    /// text-only run has no other product, and a character chain's later
+    /// stages are gated on the brief holding the named identity.
+    #[test]
+    fn an_expansion_that_is_the_product_still_refuses_to_be_skipped() {
+        let text_only = Pipeline::new(
+            "scanning electron microscope art",
+            &["text"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(!text_only.expander_is_optional(0));
+
+        let mut character = Pipeline::new(
+            "Boba Fett",
+            &["text", "image", "mesh", "rig", "motion"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(character.is_character_pipeline());
+        assert!(!character.expander_is_optional(0));
+        put_output(&mut character, 0, "text/plain; charset=utf-8", b"  ");
+        assert!(character.request_for_stage(1).is_err());
     }
 
     #[test]
@@ -4717,6 +4959,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("speech", "kokoro"),
             ("text", "qwen3.8-27b"),
             ("upscale", "realesrgan-x4plus"),
+            ("vision", "qwen3.8-27b-vision"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),

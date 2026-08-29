@@ -160,23 +160,49 @@ fn worker(
                     server_id,
                     token: page.cursor,
                 };
-                let notification = if page.gap {
-                    Some(CatalogSubscriptionEvent::ResyncRequired { cursor: next.clone() })
-                } else if !announced_ready {
-                    announced_ready = true;
-                    Some(CatalogSubscriptionEvent::Ready { cursor: next.clone() })
-                } else if page.events.is_empty() {
-                    None
-                } else {
-                    Some(CatalogSubscriptionEvent::Events {
-                        events: page.events,
-                        cursor: next.clone(),
-                    })
-                };
-                if let Some(event) = notification {
-                    if !send_lossless(&tx, event, &stopping) {
+                if page.gap {
+                    if !send_lossless(
+                        &tx,
+                        CatalogSubscriptionEvent::ResyncRequired { cursor: next.clone() },
+                        &stopping,
+                    ) {
                         return;
                     }
+                } else if !announced_ready {
+                    announced_ready = true;
+                    if !send_lossless(
+                        &tx,
+                        CatalogSubscriptionEvent::Ready { cursor: next.clone() },
+                        &stopping,
+                    ) {
+                        return;
+                    }
+                    // Cursor-less v4 pages may carry cumulative preview
+                    // announcements for a late joiner. Ready must precede
+                    // them, but they must not be discarded.
+                    if !page.events.is_empty()
+                        && !send_lossless(
+                            &tx,
+                            CatalogSubscriptionEvent::Events {
+                                events: page.events,
+                                cursor: next.clone(),
+                            },
+                            &stopping,
+                        )
+                    {
+                        return;
+                    }
+                } else if !page.events.is_empty()
+                    && !send_lossless(
+                        &tx,
+                        CatalogSubscriptionEvent::Events {
+                            events: page.events,
+                            cursor: next.clone(),
+                        },
+                        &stopping,
+                    )
+                {
+                        return;
                 }
                 // Advance only after the notification is durably queued.
                 cursor = Some(next);

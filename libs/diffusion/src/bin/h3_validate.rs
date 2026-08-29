@@ -220,7 +220,9 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
         latent_h,
         latent_w,
         n_audio_latents,
-        n_keyframes,
+        // The oracle dumps this lane validates against are first-anchored
+        // fl2va runs; a "last"-anchored dump would need its own flag.
+        &vec![makepad_diffusion::h3::H3KeyframeAnchor::First; n_keyframes],
     )
     .map_err(|err| err.to_string())?;
     if layout.sequence_length != seq {

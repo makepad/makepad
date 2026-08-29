@@ -1,6 +1,18 @@
 //! Asset annotation pass: turntable sheet -> vision model -> queryable store
 //! metadata.
 //!
+//! # Who runs it
+//!
+//! Nobody, here. This crate is the pass's KNOWLEDGE — the prompts, the
+//! closed vocabularies its replies are parsed into, and the record it plans
+//! from a reply. The work itself is an Asset Server job (`annotate.asset`,
+//! minted by `makepad_asset_store::host::annotate` on every publish) claimed
+//! by the same fleet coordinator that runs every other GPU kind
+//! (`makepad_asset_importer::coordinator`), on a box whose `/health`
+//! advertises the `vision` capability. There is no separate worker, no
+//! subprocess executor and no tunnel: one queue, one claim loop, one GPU at
+//! a time per box.
+//!
 //! # What the pass owns
 //!
 //! Exactly two things on an asset's annotation record:
@@ -30,6 +42,7 @@
 //! everything when the prompt or the model changes.
 
 pub mod parse;
+pub mod pass;
 pub mod plan;
 pub mod sheet;
 
@@ -78,7 +91,28 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 /// by a model that had been told it was looking at sixteen. Re-render the
 /// sheets before re-running this pass, or the rear views it asks for are
 /// not in the image.
-pub const ANNOTATOR_VERSION: u32 = 6;
+///
+/// v7: the pass runs ON IMPORT, not by hand. Every Kenney kit that
+/// finishes publishing queues its own annotate job (asset-ui's import
+/// queue, `ImportJob::Annotate`), so the 4023-asset backlog and every
+/// future kit are annotated without an operator typing a command — which
+/// makes the prompt, not the invocation, the whole product. It is
+/// rewritten to say what the metadata is FOR: the reader is told the lines
+/// land in a searchable catalog and that an AI level builder, not a human,
+/// retrieves pieces by those words and snaps them to a grid. The line
+/// labels and every closed vocabulary are unchanged (`parse.rs` is the
+/// contract, and a test now extracts the lists back out of the prompt text
+/// so the two cannot drift); `desc` asks for 12 words of concrete
+/// searchable facts instead of 10 of "visual detail", and PROMPT_PERSON
+/// gets the same framing paragraph without touching its 14-line shape.
+///
+/// v7 also became the version the FLEET answers. The pass stopped being a
+/// subprocess reached over a tunnel and became `annotate.asset`, a vision
+/// job claimed off the store's queue like every other GPU kind — same
+/// prompts, same parser, same planned record, so the version that describes
+/// the OUTPUT contract did not move and the 4531 assets already described
+/// at v7 are not re-run.
+pub const ANNOTATOR_VERSION: u32 = 7;
 
 /// The question put to the vision model about one turntable sheet.
 ///

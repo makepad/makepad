@@ -50,8 +50,8 @@
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
     CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest, GcRequest,
-    GcStatusDto, JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
-    SessionHandles, SessionMsg, SessionStatus,
+    GcStatusDto, JobProfileDto, PageCursor, PipelineId, RequestId, RetireDto, SessionConfig,
+    SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
 use makepad_asset_data::{AssetId, AssetRevisionId};
 pub use makepad_asset_data::AssetKind;
@@ -180,6 +180,8 @@ pub fn server_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -410,6 +412,12 @@ pub struct AssetStore {
     /// drains this to re-open what it is showing: a new revision means a new
     /// blob digest, so re-resolving is the whole of "stay current".
     changed_assets: Vec<AssetId>,
+    /// Declared runs the server announced as OVER since the app last looked
+    /// (`pipeline.finished`). This is the only honest end-of-run signal: a
+    /// publish is per-asset and coincidental, and a run that fails publishes
+    /// nothing at all. Drained by the RUNS chip, which re-reads on it
+    /// instead of waiting out its poll interval.
+    finished_pipelines: Vec<PipelineId>,
     /// In-flight `RetireAsset`/`RetireRevision` requests, tracked only to
     /// surface a failure (or a mismatched output) honestly — success is
     /// applied locally via [`AssetStore::on_retired`] the moment the
@@ -1006,6 +1014,11 @@ impl AssetStore {
     }
 
     /// Take the assets catalog events touched since the last call.
+    /// Runs the server announced as finished since the last call.
+    pub fn take_finished_pipelines(&mut self) -> Vec<PipelineId> {
+        std::mem::take(&mut self.finished_pipelines)
+    }
+
     pub fn take_changed_assets(&mut self) -> Vec<AssetId> {
         std::mem::take(&mut self.changed_assets)
     }
@@ -1376,6 +1389,11 @@ impl AssetStore {
                     self.changed_assets.push(asset_id);
                 }
             }
+            if let Some(pipeline) = event.pipeline {
+                if !self.finished_pipelines.contains(&pipeline) {
+                    self.finished_pipelines.push(pipeline);
+                }
+            }
             self.events.push_front(event);
         }
         self.events.truncate(EVENT_LOG_CAP);
@@ -1451,7 +1469,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn checkout_root() -> PathBuf {
+pub(crate) fn checkout_root() -> PathBuf {
     if let Ok(root) = std::env::var("MAKEPAD_ROOT") {
         return PathBuf::from(root);
     }
@@ -1642,6 +1660,10 @@ fn start_embedded_asset_server_at(
     // the only loopback caller that uses it is this app's own observer (see
     // `start_observe_loop`) cataloguing directories the user pointed it at.
     cfg.blob_refs = makepad_asset_store::BlobRefPolicy::local_host();
+    // The chat broker listens for the SAME fleet this app's panel shows
+    // (`MAKEPAD_AI_FLEET`, defaulted in `setup` before this runs). Left
+    // empty it followed its own default and heard none of the `gen` boxes.
+    cfg.chat.fleet = makepad_asset_ai::discovery::wanted_fleet();
     cfg.log = true;
     let server = makepad_asset_store::AssetServer::start(cfg)
         .map_err(|e| format!("embedded asset server: {e}"))?;
@@ -2090,6 +2112,9 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: Some(format!("game/asset-{seq}")),
+            model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: seq,
         };
@@ -2205,6 +2230,9 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: None,
+            model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: 1,
         }]);
@@ -2228,6 +2256,9 @@ mod tests {
             game_id: None,
             game_revision: None,
             alias: None,
+            model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: 2,
         }]);

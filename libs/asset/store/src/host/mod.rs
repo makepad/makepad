@@ -34,8 +34,11 @@ pub mod rooms;
 pub mod server;
 pub mod util;
 
+pub mod annotate;
+
 pub(crate) mod appdb;
 pub(crate) mod chat;
+pub(crate) mod chat_store;
 pub(crate) mod events;
 pub(crate) mod routes;
 pub(crate) mod routes_control;

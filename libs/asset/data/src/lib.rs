@@ -30,6 +30,7 @@ pub mod asset;
 pub mod codec;
 pub mod content_set;
 pub mod derived;
+pub mod dimensions;
 pub mod error;
 pub mod game;
 pub mod geom;
@@ -42,6 +43,7 @@ pub mod sha256;
 pub mod stateful_billboard;
 pub mod snapshot;
 pub mod value;
+pub mod view_weapon;
 pub mod world_place;
 
 pub use activation::{
@@ -65,6 +67,7 @@ pub use derived::{
     ResolvedEntry, ResolvedVariantMap, ToolClosure, VariantRole, VariantSetManifest,
     OUTPUT_SCHEMA_V1, RESOLUTION_POLICY_V1,
 };
+pub use dimensions::{Dimensions, ScalePreset, SizeClass, SizeHint};
 pub use error::AssetDataError;
 pub use game::{ContentLock, GameRevisionManifest, LockEntry, LockVariantSet};
 pub use geom::{Bounds, Quat, Transform, Vec3};
