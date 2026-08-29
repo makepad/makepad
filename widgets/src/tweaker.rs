@@ -28,7 +28,7 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     file_tree::{FileTree, FileTreeAction},
     label::Label,
@@ -193,6 +193,8 @@ struct TweakSession {
     /// A remote pulse request: a theme colour name (or #rrggbbaa) to pulse
     /// app-wide until an empty request clears it; consumed by the tweaker.
     pulse_req: Option<String>,
+    /// The open colour popover's window rect, for /tweak/state.
+    popup: Option<Rect>,
     /// A remote lock on the pulse mix (deterministic grabs): the pulse
     /// holds that tone instead of animating. None animates.
     pulse_lock: Option<f32>,
@@ -895,6 +897,13 @@ pub fn window_intercept(
 
     match kind {
         PointerKind::Move => {
+            // The colour popover overhangs the body: a move inside it is
+            // the panel's (its palette strip hovers), not a hover-pick.
+            let popup = session().lock().unwrap().popup;
+            if popup.is_some_and(|rect| rect.contains(abs)) {
+                tweaker.handle_event(cx, event, &mut Scope::empty());
+                return true;
+            }
             // The doc tooltip closes when the pointer leaves into the body
             // (the panel never sees these moves).
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
@@ -2140,7 +2149,9 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
         PulseSlot::Clear { pass } => {
             let p = &mut cx.passes[pass];
             p.clear_color = Vec4f { x: v[0], y: v[1], z: v[2], w: v[3] };
-            p.paint_dirty = true;
+            if p.main_draw_list_id.is_some() {
+                p.paint_dirty = true;
+            }
         }
     }
 }
@@ -2240,7 +2251,13 @@ fn pulse_sync(cx: &mut Cx, st: &mut PulseState) -> usize {
     }
     for pass in passes {
         let s = PulseSlot::Clear { pass };
-        let c = cx.passes[pass].clear_color;
+        let p = &cx.passes[pass];
+        // A pass without a draw list never paints: nothing to see, and
+        // marking it dirty only logs "Draw pass has no draw list!".
+        if p.main_draw_list_id.is_none() {
+            continue;
+        }
+        let c = p.clear_color;
         if !known.contains(&s) && pulse_close(&[c.x, c.y, c.z, c.w], target) {
             fresh.push(s);
         }
@@ -2259,7 +2276,8 @@ fn pulse_sync(cx: &mut Cx, st: &mut PulseState) -> usize {
 fn pulse_repaint(cx: &mut Cx, st: &PulseState) {
     let mut dirty: Vec<DrawPassId> = Vec::new();
     for pass in cx.passes.id_iter() {
-        if matches!(cx.passes[pass].parent, CxDrawPassParent::Window(_)) {
+        let p = &cx.passes[pass];
+        if matches!(p.parent, CxDrawPassParent::Window(_)) && p.main_draw_list_id.is_some() {
             dirty.push(pass);
         }
     }
@@ -3413,6 +3431,9 @@ pub fn tweak_callback(
                 )
             };
             let mut out = format!("{{\"on\":{}", if tweak_is_on() { 1 } else { 0 });
+            if let Some(r) = session().lock().unwrap().popup {
+                out.push_str(&format!(",\"popup\":[{},{},{},{}]", r.pos.x, r.pos.y, r.size.x, r.size.y));
+            }
             if let Some(pick) = &pinned {
                 out.push_str(",\"sel\":");
                 out.push_str(&pick_json(pick));
@@ -6187,6 +6208,7 @@ impl Tweaker {
         self.composite_align.clear();
         self.composite_clicks.clear();
         self.open_popup = None;
+        session().lock().unwrap().popup = None;
         let entries_all = self.build_visible();
         let shader_entries = self.shader_entries.clone();
         let mut visible_rects: Vec<VisRow> = Vec::with_capacity(entries_all.len());
@@ -6829,6 +6851,7 @@ impl Tweaker {
                                             let rect = pick.popover_rect();
                                             if rect.size.x > 0.0 {
                                                 self.open_popup = Some(rect);
+                                                session().lock().unwrap().popup = Some(rect);
                                             }
                                         }
                                     }
@@ -6840,6 +6863,15 @@ impl Tweaker {
                     }
                 }
                 item.draw_all(cx, &mut Scope::empty());
+                // The colour popover's rect is known once it has drawn:
+                // input priority for the popup, and /tweak/state's `popup`.
+                if let Some(pick) = item.child(live_id!(swatch)).borrow::<FabColorPick>() {
+                    let rect = pick.popover_rect();
+                    if rect.size.x > 0.0 {
+                        self.open_popup = Some(rect);
+                        session().lock().unwrap().popup = Some(rect);
+                    }
+                }
                 visible_rects.push(VisRow {
                     kind: entry,
                     item: item.clone(),
@@ -7026,6 +7058,33 @@ impl Tweaker {
             }
             (None, None) => {}
         }
+    }
+
+    /// The theme palette for a colour popover's strip: greys first (by
+    /// lightness), then by hue and lightness, so related colours sit
+    /// together and the name under the strip says which one is which.
+    fn palette_entries(&self) -> Vec<(String, [f32; 4])> {
+        let mut entries: Vec<(String, [f32; 4], (u8, u16, u16))> = self
+            .theme_colors
+            .iter()
+            .map(|(name, c, _)| {
+                let rgba = [
+                    ((c >> 24) & 0xff) as f32 / 255.0,
+                    ((c >> 16) & 0xff) as f32 / 255.0,
+                    ((c >> 8) & 0xff) as f32 / 255.0,
+                    (c & 0xff) as f32 / 255.0,
+                ];
+                let [h, s, v] = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+                let key = if s < 0.1 {
+                    (0u8, (v * 1000.0) as u16, (rgba[3] * 1000.0) as u16)
+                } else {
+                    (1u8, (h * 12.0) as u16, (v * 1000.0) as u16)
+                };
+                (name.clone(), rgba, key)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+        entries.into_iter().map(|(n, c, _)| (n, c)).collect()
     }
 
     /// Stop the pulse: true colours back into every slot it wrote, the
@@ -7589,6 +7648,10 @@ impl Tweaker {
             HoldOn(usize),
             HoldOff,
             Eyedrop(String),
+            /// Fill a just-opened colour popover's palette strip.
+            Palette(u64),
+            /// Pulse a theme colour by name (None: stop).
+            PulseName(Option<String>),
         }
         let mut edits: Vec<Edit> = Vec::new();
         let mut resets: Vec<String> = Vec::new();
@@ -7908,6 +7971,7 @@ impl Tweaker {
                     }
                     FabColorPickAction::Opened => {
                         edits.push(Edit::HoldOn(index));
+                        edits.push(Edit::Palette(binding.swatch_uid));
                     }
                     FabColorPickAction::Closed => {
                         edits.push(Edit::HoldOff);
@@ -7915,6 +7979,15 @@ impl Tweaker {
                     FabColorPickAction::Eyedropper => {
                         edits.push(Edit::HoldOff);
                         edits.push(Edit::Eyedrop(binding.prop.clone()));
+                    }
+                    FabColorPickAction::PaletteHover(name) => {
+                        edits.push(Edit::PulseName(name));
+                    }
+                    FabColorPickAction::PalettePick(name) => {
+                        // Bind by reference: the ledger says `theme.color_x`.
+                        edits.push(Edit::HoldOff);
+                        edits.push(Edit::PulseName(None));
+                        edits.push(Edit::Apply(format!("{}: theme.{name}", binding.prop)));
                     }
                     _ => {}
                 },
@@ -7944,6 +8017,20 @@ impl Tweaker {
                     log!("TWEAK eyedropper armed for {prop} — click a pixel in the app");
                     session().lock().unwrap().eyedrop = Some(prop);
                     cx.set_cursor(MouseCursor::Crosshair);
+                }
+                Edit::Palette(uid) => {
+                    let entries = self.palette_entries();
+                    let swatch = cx.widget_tree().widget(WidgetUid(uid));
+                    if let Some(mut pick) = swatch.borrow_mut::<FabColorPick>() {
+                        pick.set_palette(cx, entries);
+                    };
+                }
+                Edit::PulseName(name) => {
+                    let color = name.and_then(|n| {
+                        self.theme_colors.iter().find(|(k, _, _)| *k == n).map(|(_, c, _)| *c)
+                    });
+                    self.pulse_pinned = color.is_some();
+                    self.set_pulse(cx, color);
                 }
                 Edit::Revert(index, value) => {
                     // Push the origin value back through the same path, then
@@ -8705,6 +8792,33 @@ impl Widget for Tweaker {
         // the property list underneath it.
         let swallow_scroll = matches!(event, Event::Scroll(e)
             if self.open_popup.is_some_and(|rect| rect.contains(e.abs)));
+        // The popover draws above the list but its row is last in event
+        // order, so the rows underneath claimed hovers and presses first
+        // (first claimant wins). Pointer events inside the popover go to
+        // its row before the list; the list's pass then finds them handled.
+        let pointer = match event {
+            Event::MouseMove(e) => Some(e.abs),
+            Event::MouseDown(e) => Some(e.abs),
+            Event::MouseUp(e) => Some(e.abs),
+            _ => None,
+        };
+        if let Some(abs) = pointer {
+            if self.open_popup.is_some_and(|rect| rect.contains(abs)) {
+                let owner = self
+                    .visible
+                    .iter()
+                    .find(|v| {
+                        v.item
+                            .child(live_id!(swatch))
+                            .borrow::<FabColorPick>()
+                            .is_some_and(|p| p.is_open())
+                    })
+                    .map(|v| v.item.clone());
+                if let Some(item) = owner {
+                    item.handle_event(cx, event, scope);
+                }
+            }
+        }
         if let Some(sidebar) = self.sidebar.clone() {
             if !swallow_scroll {
                 sidebar.handle_event(cx, event, scope);
